@@ -201,6 +201,10 @@ pub trait WindowComponent: Send {
     #[allow(dead_code)]
     fn on_resize(&mut self, _area: Rect, _ctx: &mut EventCtx) {}
 
+    fn selection_projection(&self) -> Option<crate::selection::VisibleSelectionProjection> {
+        None
+    }
+
     /// Optional suffix appended to the title (e.g., Mermaid's "Tab: split").
     fn title_suffix(&self) -> Option<String> {
         None

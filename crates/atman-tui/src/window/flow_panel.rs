@@ -21,6 +21,7 @@ pub struct FlowPanelContent {
     pub scroll: u32,
     pub render_cache: Option<PanelRenderCache>,
     pub output_store: Option<atman_runtime::tools::tool_output::OutputStore>,
+    pub(crate) selection_projection: Option<crate::selection::VisibleSelectionProjection>,
 }
 
 impl WindowComponent for FlowPanelContent {
@@ -31,6 +32,7 @@ impl WindowComponent for FlowPanelContent {
             area.width.saturating_sub(2),
             area.height,
         );
+        self.selection_projection = None;
         let mut hitmap_out: Vec<HitRegion> = Vec::new();
 
         let found = ctx
@@ -82,6 +84,19 @@ impl WindowComponent for FlowPanelContent {
                 &mut self.render_cache,
                 self.output_store.as_ref(),
             );
+            if let (Some(cache), Some(revision)) = (
+                self.render_cache.as_ref(),
+                ctx.item_revisions.get(item_idx).copied(),
+            ) {
+                self.selection_projection = Some(crate::window::common::window_text_projection(
+                    ctx.window_id,
+                    "working-output",
+                    revision,
+                    &cache.lines,
+                    area,
+                    self.scroll,
+                ));
+            }
         } else if let Some(panel_idx) = ctx
             .workflow_run_to_panel
             .get(&self.handle)
@@ -191,6 +206,14 @@ impl WindowComponent for FlowPanelContent {
                 ctx.animation_frame,
                 start,
             );
+            self.selection_projection = Some(crate::window::common::window_text_projection(
+                ctx.window_id,
+                "workflow-output",
+                revision,
+                &cache.lines,
+                area,
+                self.scroll,
+            ));
             frame.render_widget(Paragraph::new(lines), area);
         } else if let Some(snap) = ctx
             .task_handle_index
@@ -209,6 +232,10 @@ impl WindowComponent for FlowPanelContent {
         }
 
         hitmap_out
+    }
+
+    fn selection_projection(&self) -> Option<crate::selection::VisibleSelectionProjection> {
+        self.selection_projection.clone()
     }
 
     fn handle_event(&mut self, _event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
@@ -722,6 +749,7 @@ mod tests {
             scroll: 0,
             render_cache: None,
             output_store: None,
+            selection_projection: None,
         };
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         let mut cached_lines = None;

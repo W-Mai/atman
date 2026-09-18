@@ -1271,6 +1271,9 @@ pub fn render(
             all_hitmap
                 .tool_header_rects
                 .append(&mut panel_hitmap.tool_header_rects);
+            all_hitmap
+                .selection_projections
+                .append(&mut panel_hitmap.selection_projections);
         }
 
         shadow::render_shadow(f, panel.rect, &t);

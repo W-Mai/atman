@@ -12,6 +12,7 @@ pub struct BashPanelContent {
     pub handle: String,
     pub scroll: u32,
     projection: BashPanelProjection,
+    selection_projection: Option<crate::selection::VisibleSelectionProjection>,
 }
 
 impl BashPanelContent {
@@ -20,6 +21,7 @@ impl BashPanelContent {
             handle,
             scroll: 0,
             projection: BashPanelProjection::default(),
+            selection_projection: None,
         }
     }
 }
@@ -38,7 +40,11 @@ impl WindowComponent for BashPanelContent {
             .and_then(|&index| ctx.snapshots.get(index));
         let detail = ctx.task_detail(&self.handle);
         let item = detail.as_ref().map(|(_, item, _)| *item);
-        let source_generation = detail.map_or(0, |(_, _, revision)| revision.source_generation);
+        let revision = detail.map_or(crate::app::OutputRevision::default(), |(_, _, revision)| {
+            revision
+        });
+        let source_generation = revision.source_generation;
+        self.selection_projection = None;
         use crate::app::OutputItem;
         if let Some(OutputItem::Bash {
             title,
@@ -56,16 +62,26 @@ impl WindowComponent for BashPanelContent {
                 generation: source_generation,
             };
             if let Some(snap) = snap {
-                render_bash_content(
+                if let Some((body_area, lines)) = render_bash_content(
                     frame,
                     area,
                     snap,
                     source,
                     &mut self.scroll,
                     &mut self.projection,
-                );
+                ) {
+                    self.selection_projection =
+                        Some(crate::window::common::window_text_projection(
+                            ctx.window_id,
+                            "bash-output",
+                            revision,
+                            &lines,
+                            body_area,
+                            0,
+                        ));
+                }
             } else {
-                render_bash_screen(
+                if let Some((body_area, lines)) = render_bash_screen(
                     frame,
                     area,
                     title.as_deref().unwrap_or(&self.handle),
@@ -73,7 +89,17 @@ impl WindowComponent for BashPanelContent {
                     *done,
                     &mut self.scroll,
                     &mut self.projection,
-                );
+                ) {
+                    self.selection_projection =
+                        Some(crate::window::common::window_text_projection(
+                            ctx.window_id,
+                            "bash-output",
+                            revision,
+                            &lines,
+                            body_area,
+                            0,
+                        ));
+                }
             }
         } else if let Some(snap) = snap {
             super::common::render_task_meta(
@@ -87,6 +113,10 @@ impl WindowComponent for BashPanelContent {
             render_bash_unavailable(frame, area, &self.handle);
         }
         Vec::new()
+    }
+
+    fn selection_projection(&self) -> Option<crate::selection::VisibleSelectionProjection> {
+        self.selection_projection.clone()
     }
 
     fn handle_event(&mut self, _event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
@@ -124,7 +154,7 @@ fn render_bash_content(
     source: BashPanelSource<'_>,
     scroll: &mut u32,
     projection: &mut BashPanelProjection,
-) {
+) -> Option<(Rect, Vec<Line<'static>>)> {
     let t = crate::theme::theme();
     let header = Line::from(vec![
         Span::styled(
@@ -151,7 +181,7 @@ fn render_bash_content(
         ..area
     };
     if body_area.height == 0 {
-        return;
+        return None;
     }
 
     let lines = projection.visible_lines(
@@ -162,7 +192,8 @@ fn render_bash_content(
         body_area.height as usize,
         scroll,
     );
-    f.render_widget(Paragraph::new(lines), body_area);
+    f.render_widget(Paragraph::new(lines.clone()), body_area);
+    Some((body_area, lines))
 }
 
 fn render_bash_unavailable(f: &mut Frame, area: Rect, title: &str) {
@@ -190,7 +221,7 @@ fn render_bash_screen(
     done: bool,
     scroll: &mut u32,
     projection: &mut BashPanelProjection,
-) {
+) -> Option<(Rect, Vec<Line<'static>>)> {
     let t = crate::theme::theme();
     let icon = if done { "✓" } else { "◐" };
     let icon_color = if done { t.success } else { t.accent };
@@ -207,7 +238,7 @@ fn render_bash_screen(
         ..area
     };
     if body_area.height == 0 {
-        return;
+        return None;
     }
 
     let lines = projection.visible_lines(
@@ -218,7 +249,8 @@ fn render_bash_screen(
         body_area.height as usize,
         scroll,
     );
-    f.render_widget(Paragraph::new(lines), body_area);
+    f.render_widget(Paragraph::new(lines.clone()), body_area);
+    Some((body_area, lines))
 }
 
 #[derive(Default)]

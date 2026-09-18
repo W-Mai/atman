@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::sync::Arc;
 
 use crossterm::event::MouseEventKind;
 use ratatui::Frame;
@@ -152,6 +153,7 @@ pub struct MermaidPanelContent {
     pub split: bool,
     secondary_scroll: u32,
     projection: MermaidPanelProjection,
+    selection_projection: Option<crate::selection::VisibleSelectionProjection>,
 }
 
 impl MermaidPanelContent {
@@ -163,6 +165,7 @@ impl MermaidPanelContent {
             split: false,
             secondary_scroll: 0,
             projection: MermaidPanelProjection::default(),
+            selection_projection: None,
         }
     }
 }
@@ -222,6 +225,75 @@ impl WindowComponent for MermaidPanelContent {
                 self.projection
                     .source_lines
                     .visible_lines(source, self.scroll, source_area.height);
+            self.selection_projection = Some(crate::selection::VisibleSelectionProjection {
+                structure_revision: revision.layout,
+                surfaces: vec![crate::selection::VisibleSurface {
+                    item_index: usize::MAX,
+                    revision,
+                    start_row: u32::from(source_area.y),
+                    end_row: u32::from(source_area.y.saturating_add(source_area.height)),
+                    source: Arc::new(crate::selection::ItemSemanticSource {
+                        owner_revision: revision,
+                        source: source.clone(),
+                        isolated: vec![crate::selection::IsolatedSource {
+                            domain: crate::selection::SelectionDomain::Window {
+                                window_id: ctx.window_id,
+                                surface: "mermaid-source".into(),
+                            },
+                            fragments: vec![crate::selection::CopyFragment::plain_text(
+                                source.clone(),
+                            )],
+                        }],
+                        ..Default::default()
+                    }),
+                    prose_atoms: Vec::new(),
+                    code_atoms: Vec::new(),
+                    isolated_atoms: source_lines
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(line_index, _)| {
+                            let source_index = usize::try_from(self.scroll)
+                                .unwrap_or(usize::MAX)
+                                .saturating_add(line_index);
+                            let source_range = self
+                                .projection
+                                .source_lines
+                                .ranges
+                                .get(source_index)?
+                                .clone();
+                            let source_line = source.get(source_range.clone())?;
+                            let row = u32::from(source_area.y)
+                                .saturating_add(u32::try_from(line_index).ok()?);
+                            let atoms = crate::selection::atom_runs(
+                                u16::try_from(row).ok()?,
+                                source_area.x.saturating_add(
+                                    u16::try_from(self.projection.source_lines.number_width)
+                                        .ok()?
+                                        .saturating_add(1),
+                                ),
+                                source_line,
+                                source_range.start,
+                            )
+                            .0;
+                            Some(atoms.into_iter().map(move |atom| {
+                                crate::selection::VisibleIsolatedAtom::Raw {
+                                    domain: crate::selection::SelectionDomain::Window {
+                                        window_id: ctx.window_id,
+                                        surface: "mermaid-source".into(),
+                                    },
+                                    atom: crate::selection::VisibleAtom {
+                                        screen_row: row,
+                                        cols: atom.cols,
+                                        cell_width: atom.cell_width,
+                                        source: atom.source,
+                                    },
+                                }
+                            }))
+                        })
+                        .flatten()
+                        .collect(),
+                }],
+            });
             frame.render_widget(Paragraph::new(source_lines), source_area);
 
             self.secondary_scroll = clamp_scroll(
@@ -249,6 +321,7 @@ impl WindowComponent for MermaidPanelContent {
                 }
             }
         } else {
+            self.selection_projection = None;
             self.projection.update(revision, source, inner_area.width);
             self.scroll = clamp_scroll(
                 self.scroll,
@@ -269,6 +342,10 @@ impl WindowComponent for MermaidPanelContent {
             frame.render_widget(Paragraph::new(lines), inner_area);
         }
         Vec::new()
+    }
+
+    fn selection_projection(&self) -> Option<crate::selection::VisibleSelectionProjection> {
+        self.selection_projection.clone()
     }
 
     fn handle_event(&mut self, event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {

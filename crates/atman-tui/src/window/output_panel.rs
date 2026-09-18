@@ -13,6 +13,7 @@ pub struct OutputPanelContent {
     item_index: usize,
     tool_use_id: String,
     scroll: u32,
+    selection_projection: Option<crate::selection::VisibleSelectionProjection>,
 }
 
 impl OutputPanelContent {
@@ -21,6 +22,7 @@ impl OutputPanelContent {
             item_index,
             tool_use_id,
             scroll: 0,
+            selection_projection: None,
         }
     }
 }
@@ -33,6 +35,7 @@ impl WindowComponent for OutputPanelContent {
             area.width.saturating_sub(2),
             area.height,
         );
+        self.selection_projection = None;
         let Some(OutputItem::ToolDispatch { calls }) = ctx.items.get(self.item_index) else {
             return Vec::new();
         };
@@ -56,11 +59,27 @@ impl WindowComponent for OutputPanelContent {
         let max_scroll = (lines.len() as u32).saturating_sub(area.height as u32);
         self.scroll = self.scroll.min(max_scroll);
         let visible = lines
-            .into_iter()
+            .iter()
             .skip(self.scroll as usize)
+            .cloned()
             .collect::<Vec<_>>();
+        self.selection_projection = Some(crate::window::common::window_text_projection(
+            ctx.window_id,
+            "tool-output",
+            ctx.item_revisions
+                .get(self.item_index)
+                .copied()
+                .unwrap_or_default(),
+            &lines,
+            area,
+            self.scroll,
+        ));
         frame.render_widget(Paragraph::new(visible), area);
         Vec::new()
+    }
+
+    fn selection_projection(&self) -> Option<crate::selection::VisibleSelectionProjection> {
+        self.selection_projection.clone()
     }
 
     fn handle_event(&mut self, _event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {

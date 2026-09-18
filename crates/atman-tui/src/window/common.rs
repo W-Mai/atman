@@ -35,6 +35,82 @@ pub(crate) fn detail_section_label(label: &str, width: usize) -> Line<'static> {
     ])
 }
 
+pub(crate) fn window_text_projection(
+    window_id: crate::wm::WindowId,
+    surface: &str,
+    revision: crate::app::OutputRevision,
+    lines: &[Line<'static>],
+    area: Rect,
+    scroll: u32,
+) -> crate::selection::VisibleSelectionProjection {
+    let text_lines = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let source = text_lines.join("\n");
+    let domain = crate::selection::SelectionDomain::Window {
+        window_id,
+        surface: surface.to_owned(),
+    };
+    let mut isolated_atoms = Vec::new();
+    let start = usize::try_from(scroll).unwrap_or(usize::MAX);
+    let end = start
+        .saturating_add(usize::from(area.height))
+        .min(text_lines.len());
+    let mut source_offset = text_lines[..start.min(text_lines.len())]
+        .iter()
+        .map(String::len)
+        .fold(0usize, |offset, len| {
+            offset.saturating_add(len).saturating_add(1)
+        });
+    for (offset, text) in text_lines[start..end].iter().enumerate() {
+        let row = u32::from(area.y).saturating_add(u32::try_from(offset).unwrap_or(u32::MAX));
+        let (atoms, _) = crate::selection::atom_runs(
+            u16::try_from(row).unwrap_or(u16::MAX),
+            area.x,
+            text,
+            source_offset,
+        );
+        isolated_atoms.extend(atoms.into_iter().map(|atom| {
+            crate::selection::VisibleIsolatedAtom::Raw {
+                domain: domain.clone(),
+                atom: crate::selection::VisibleAtom {
+                    screen_row: row,
+                    cols: atom.cols,
+                    cell_width: atom.cell_width,
+                    source: atom.source,
+                },
+            }
+        }));
+        source_offset = source_offset.saturating_add(text.len()).saturating_add(1);
+    }
+    crate::selection::VisibleSelectionProjection {
+        structure_revision: revision.layout,
+        surfaces: vec![crate::selection::VisibleSurface {
+            item_index: usize::MAX,
+            revision,
+            start_row: u32::from(area.y),
+            end_row: u32::from(area.y.saturating_add(area.height)),
+            source: std::sync::Arc::new(crate::selection::ItemSemanticSource {
+                owner_revision: revision,
+                source: source.clone(),
+                isolated: vec![crate::selection::IsolatedSource {
+                    domain,
+                    fragments: vec![crate::selection::CopyFragment::plain_text(source)],
+                }],
+                ..Default::default()
+            }),
+            prose_atoms: Vec::new(),
+            code_atoms: Vec::new(),
+            isolated_atoms,
+        }],
+    }
+}
 pub(crate) fn render_scrolled_lines(
     f: &mut Frame,
     area: Rect,

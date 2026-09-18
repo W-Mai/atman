@@ -71,6 +71,11 @@ pub fn render_panel_content(
                 hovered_history_row,
             },
         );
+        if let Some(projection) = content.selection_projection() {
+            hitmap_out
+                .selection_projections
+                .push((panel.id, projection));
+        }
         let (s, hs, sp) = content.extract_state();
         panel.scroll = s;
         panel.h_scroll = hs;

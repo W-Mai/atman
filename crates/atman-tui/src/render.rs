@@ -943,6 +943,25 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     );
 
     ui.wm.render(f, area, app);
+    app.last_window_selection_projection = crate::selection::VisibleSelectionProjection {
+        structure_revision: app.wm_visual_version,
+        surfaces: ui
+            .wm
+            .interaction
+            .last_hitmap
+            .selection_projections
+            .iter()
+            .flat_map(|(_, projection)| projection.surfaces.iter().cloned())
+            .collect(),
+    };
+    if let Some(selection) = app.selection.as_ref()
+        && matches!(
+            selection.anchor.domain,
+            crate::selection::SelectionDomain::Window { .. }
+        )
+    {
+        render_selection_highlight(f, area, 0, &app.last_window_selection_projection, selection);
+    }
     render_selection_menu(f, area, &mut ui.selection_menu);
     if intro_progress >= 1.0 && app.startup_intro.is_some() {
         app.startup_intro = None;

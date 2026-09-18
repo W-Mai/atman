@@ -429,6 +429,7 @@ pub(crate) async fn run_frames(
                                 if app.wm.interaction.resize_target.is_none()
                                     && app.wm.interaction.drag_target.is_none()
                                     && (handle_sidebar_selection_mouse(&mut app.app, &me)
+                                        || handle_window_selection_mouse(&mut app.app, &me)
                                         || handle_transcript_selection_mouse(&mut app.app, &me))
                                 {
                                     if matches!(me.kind, MouseEventKind::Up(MouseButton::Left))
@@ -2583,7 +2584,15 @@ fn apply_selection_action(
     action: crate::selection_menu::SelectionAction,
 ) {
     let payload = ui.app.selection.as_ref().and_then(|state| {
-        crate::selection::selection_copy_payload(&ui.app.last_selection_projection, state)
+        let projection = if matches!(
+            state.anchor.domain,
+            crate::selection::SelectionDomain::Window { .. }
+        ) {
+            &ui.app.last_window_selection_projection
+        } else {
+            &ui.app.last_selection_projection
+        };
+        crate::selection::selection_copy_payload(projection, state)
     });
     match action {
         crate::selection_menu::SelectionAction::Copy => {
@@ -2611,6 +2620,58 @@ fn apply_selection_action(
     }
     ui.app.selection = crate::selection::selection_clear();
     ui.selection_menu = None;
+}
+
+fn handle_window_selection_mouse(app: &mut AppState, event: &crossterm::event::MouseEvent) -> bool {
+    let projection = &app.last_window_selection_projection;
+    let row = u32::from(event.row);
+    let col = event.column;
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let Some(point) = projection.isolated_point_at(row, col) else {
+                return false;
+            };
+            let Some(surface) = projection.surface_at_row(row) else {
+                return false;
+            };
+            app.selection = Some(crate::selection::selection_begin(
+                point,
+                surface.revision,
+                projection.structure_revision,
+            ));
+            true
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let Some(state) = app.selection.as_ref() else {
+                return false;
+            };
+            if !matches!(
+                state.anchor.domain,
+                crate::selection::SelectionDomain::Window { .. }
+            ) {
+                return false;
+            }
+            let Some(point) = projection.isolated_point_at(row, col) else {
+                return true;
+            };
+            app.selection = crate::selection::selection_extend(
+                state,
+                point,
+                state.owner_revision,
+                projection.structure_revision,
+            );
+            app.selection
+                .as_ref()
+                .is_some_and(crate::selection::selection_is_non_empty)
+        }
+        MouseEventKind::Up(MouseButton::Left) => app.selection.as_ref().is_some_and(|state| {
+            matches!(
+                state.anchor.domain,
+                crate::selection::SelectionDomain::Window { .. }
+            ) && crate::selection::selection_is_non_empty(state)
+        }),
+        _ => false,
+    }
 }
 
 fn pending_thinking_click(state: &crate::selection::SelectionState) -> bool {
@@ -2777,6 +2838,85 @@ mod tests {
         assert_eq!(
             app.selection.as_ref().map(|state| state.phase),
             Some(crate::selection::SelectionPhase::Active)
+        );
+    }
+
+    #[test]
+    fn window_mouse_selection_reaches_copy_handler() {
+        let revision = crate::app::OutputRevision {
+            id: 42,
+            layout: 7,
+            ..Default::default()
+        };
+        let domain = crate::selection::SelectionDomain::Window {
+            window_id: crate::wm::WindowId(3),
+            surface: "mermaid-source".into(),
+        };
+        let source = "flowchart TD".to_string();
+        let atoms = crate::selection::atom_runs(6, 12, &source, 0).0;
+        let projection = crate::selection::VisibleSelectionProjection {
+            structure_revision: 7,
+            surfaces: vec![crate::selection::VisibleSurface {
+                item_index: usize::MAX,
+                revision,
+                start_row: 6,
+                end_row: 7,
+                source: std::sync::Arc::new(crate::selection::ItemSemanticSource {
+                    owner_revision: revision,
+                    source: source.clone(),
+                    isolated: vec![crate::selection::IsolatedSource {
+                        domain: domain.clone(),
+                        fragments: vec![crate::selection::CopyFragment::plain_text(source)],
+                    }],
+                    ..Default::default()
+                }),
+                prose_atoms: Vec::new(),
+                code_atoms: Vec::new(),
+                isolated_atoms: atoms
+                    .into_iter()
+                    .map(|atom| crate::selection::VisibleIsolatedAtom::Raw {
+                        domain: domain.clone(),
+                        atom: crate::selection::VisibleAtom {
+                            screen_row: 6,
+                            cols: atom.cols,
+                            cell_width: atom.cell_width,
+                            source: atom.source,
+                        },
+                    })
+                    .collect(),
+            }],
+        };
+        let (start_col, end_col) = match &projection.surfaces[0].isolated_atoms[0] {
+            crate::selection::VisibleIsolatedAtom::Raw { atom, .. } => {
+                (atom.cols.start, atom.cols.end.saturating_sub(1))
+            }
+            _ => unreachable!(),
+        };
+        let mut app = AppState::new("session".into(), None);
+        app.last_window_selection_projection = projection;
+        let mouse = |kind, column| crossterm::event::MouseEvent {
+            kind,
+            column,
+            row: 6,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        assert!(handle_window_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), start_col),
+        ));
+        assert!(handle_window_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Drag(MouseButton::Left), end_col),
+        ));
+        assert!(handle_window_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Up(MouseButton::Left), end_col),
+        ));
+        let state = app.selection.as_ref().expect("window selection");
+        assert!(
+            crate::selection::selection_copy_payload(&app.last_window_selection_projection, state)
+                .is_some()
         );
     }
 

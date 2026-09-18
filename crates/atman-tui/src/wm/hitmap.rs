@@ -14,6 +14,7 @@ pub struct WmHitmap {
     pub mcp_row_rects: Vec<(WindowId, String, Rect)>,
     pub mcp_action_rects: Vec<(WindowId, super::component::McpPanelAction, Rect)>,
     pub tool_header_rects: Vec<(WindowId, String, Rect)>,
+    pub selection_projections: Vec<(WindowId, crate::selection::VisibleSelectionProjection)>,
 }
 
 impl WindowManager {

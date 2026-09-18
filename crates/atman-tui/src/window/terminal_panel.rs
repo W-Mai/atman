@@ -13,6 +13,7 @@ use crate::wm::component::{
 pub struct TerminalPanelContent {
     pub handle: String,
     pub scroll: u32,
+    pub(crate) selection_projection: Option<crate::selection::VisibleSelectionProjection>,
 }
 
 impl WindowComponent for TerminalPanelContent {
@@ -27,7 +28,13 @@ impl WindowComponent for TerminalPanelContent {
             .task_handle_index
             .get(&self.handle)
             .and_then(|&index| ctx.snapshots.get(index));
-        let item = ctx.task_detail(&self.handle).map(|(_, item, _)| item);
+        let item_detail = ctx.task_detail(&self.handle);
+        let revision = item_detail
+            .map_or(crate::app::OutputRevision::default(), |(_, _, revision)| {
+                revision
+            });
+        self.selection_projection = None;
+        let item = item_detail.map(|(_, item, _)| item);
         use crate::app::OutputItem;
         if let Some(OutputItem::Terminal {
             title,
@@ -37,23 +44,43 @@ impl WindowComponent for TerminalPanelContent {
         }) = item
         {
             if let Some(snap) = snap {
-                render_terminal_content(
+                if let Some((body_area, lines)) = render_terminal_content(
                     frame,
                     area,
                     snap,
                     command.as_deref().or(snap.command.as_deref()),
                     screen,
                     &mut self.scroll,
-                );
+                ) {
+                    self.selection_projection =
+                        Some(crate::window::common::window_text_projection(
+                            ctx.window_id,
+                            "terminal-output",
+                            revision,
+                            &lines,
+                            body_area,
+                            0,
+                        ));
+                }
             } else {
-                render_terminal_screen(
+                if let Some((body_area, lines)) = render_terminal_screen(
                     frame,
                     area,
                     title.as_deref().unwrap_or(&self.handle),
                     command.as_deref(),
                     screen,
                     &mut self.scroll,
-                );
+                ) {
+                    self.selection_projection =
+                        Some(crate::window::common::window_text_projection(
+                            ctx.window_id,
+                            "terminal-output",
+                            revision,
+                            &lines,
+                            body_area,
+                            0,
+                        ));
+                }
             }
         } else if let Some(snap) = snap {
             super::common::render_task_meta(
@@ -67,6 +94,10 @@ impl WindowComponent for TerminalPanelContent {
             super::common::render_placeholder(frame, area, &self.handle);
         }
         Vec::new()
+    }
+
+    fn selection_projection(&self) -> Option<crate::selection::VisibleSelectionProjection> {
+        self.selection_projection.clone()
     }
 
     fn handle_event(&mut self, _event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
@@ -97,7 +128,7 @@ fn render_terminal_content(
     command: Option<&str>,
     screen: &atman_runtime::tools::term::TerminalScreen,
     scroll: &mut u32,
-) {
+) -> Option<(Rect, Vec<ratatui::text::Line<'static>>)> {
     let t = crate::theme::theme();
     let header = Line::from(vec![
         Span::styled(
@@ -124,10 +155,18 @@ fn render_terminal_content(
         ..area
     };
     if body_area.height == 0 {
-        return;
+        return None;
     }
     let lines = terminal_detail_lines(command, screen, body_area.width as usize);
-    super::common::render_scrolled_lines(f, body_area, lines, scroll);
+    let max_scroll = lines.len().saturating_sub(body_area.height as usize) as u32;
+    *scroll = (*scroll).min(max_scroll);
+    let start = *scroll as usize;
+    let end = start
+        .saturating_add(body_area.height as usize)
+        .min(lines.len());
+    let visible = lines[start.min(end)..end].to_vec();
+    f.render_widget(Paragraph::new(visible.clone()), body_area);
+    Some((body_area, visible))
 }
 
 fn render_terminal_screen(
@@ -137,7 +176,7 @@ fn render_terminal_screen(
     command: Option<&str>,
     screen: &atman_runtime::tools::term::TerminalScreen,
     scroll: &mut u32,
-) {
+) -> Option<(Rect, Vec<ratatui::text::Line<'static>>)> {
     let t = crate::theme::theme();
     let header = Line::from(vec![
         Span::styled(" ✓ ", Style::default().fg(t.success.into())),
@@ -152,11 +191,19 @@ fn render_terminal_screen(
         ..area
     };
     if body_area.height == 0 {
-        return;
+        return None;
     }
 
     let lines = terminal_detail_lines(command, screen, body_area.width as usize);
-    super::common::render_scrolled_lines(f, body_area, lines, scroll);
+    let max_scroll = lines.len().saturating_sub(body_area.height as usize) as u32;
+    *scroll = (*scroll).min(max_scroll);
+    let start = *scroll as usize;
+    let end = start
+        .saturating_add(body_area.height as usize)
+        .min(lines.len());
+    let visible = lines[start.min(end)..end].to_vec();
+    f.render_widget(Paragraph::new(visible.clone()), body_area);
+    Some((body_area, visible))
 }
 
 fn terminal_detail_lines(

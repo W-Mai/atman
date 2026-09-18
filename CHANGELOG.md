@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Semantic text selection** — Selection menus and copy/quote actions now cover transcript content, thinking blocks, Mermaid source, tool output, Workflow/Working panels, and Bash/Terminal panel bodies while excluding panel chrome.
 - **Revision-bound spec approval** — Main-agent and synchronous spec reviews share session-local, single-use confirmation receipts. Approval and rejection require a real bound form response, cancellation leaves the design pending, and stale or mismatched revisions require another confirmation.
 
 ## [1.12.2] — 2026-09-16

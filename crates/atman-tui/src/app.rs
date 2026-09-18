@@ -1003,6 +1003,7 @@ pub struct AppState {
     pub last_item_ranges: Vec<crate::output::ItemRange>,
     pub last_node_regions: Vec<crate::output::NodeRegion>,
     pub last_selection_projection: crate::selection::VisibleSelectionProjection,
+    pub last_window_selection_projection: crate::selection::VisibleSelectionProjection,
     pub selection: Option<crate::selection::SelectionState>,
     pub last_transcript_rect: Option<ratatui::layout::Rect>,
     pub last_full_rect: Option<ratatui::layout::Rect>,
@@ -1805,6 +1806,7 @@ impl AppState {
                 Box::new(crate::window::terminal_panel::TerminalPanelContent {
                     handle: handle.to_string(),
                     scroll: 0,
+                    selection_projection: None,
                 })
             }
             atman_runtime::TaskKind::Flow => {
@@ -1815,6 +1817,7 @@ impl AppState {
                     output_store: (!self.session_dir.is_empty()).then(|| {
                         atman_runtime::tools::tool_output::OutputStore::at(&self.session_dir)
                     }),
+                    selection_projection: None,
                 })
             }
         };
