@@ -999,20 +999,19 @@ fn render_selection_menu(
         .enumerate()
     {
         menu.item_rects.push(item_rect);
-        let style = if menu.hovered == Some(index) {
-            ratatui::style::Style::default()
-                .fg(t.tinted_fg.into())
-                .bg(t.work_hover_bg.into())
-        } else if menu.hovered.is_none() && menu.selected == index {
-            ratatui::style::Style::default()
-                .fg(ratatui::style::Color::Black)
-                .bg(t.accent.into())
-                .add_modifier(ratatui::style::Modifier::BOLD)
-        } else {
-            ratatui::style::Style::default()
-                .fg(t.tinted_fg.into())
-                .bg(t.modal_bg.into())
-        };
+        let cancel = crate::selection_menu::SelectionMenu::ACTIONS[index]
+            == crate::selection_menu::SelectionAction::Cancel;
+        let style =
+            if menu.hovered == Some(index) || (menu.hovered.is_none() && menu.selected == index) {
+                ratatui::style::Style::default()
+                    .fg(ratatui::style::Color::Black)
+                    .bg(t.accent.into())
+                    .add_modifier(ratatui::style::Modifier::BOLD)
+            } else {
+                ratatui::style::Style::default()
+                    .fg(if cancel { t.error } else { t.tinted_fg }.into())
+                    .bg(t.modal_bg.into())
+            };
         frame.render_widget(
             ratatui::widgets::Paragraph::new(format!(" {label} ")).style(style),
             item_rect,

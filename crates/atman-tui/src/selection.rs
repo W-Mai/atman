@@ -117,26 +117,39 @@ pub fn selection_extend(
 ) -> Option<SelectionState> {
     (state.owner_revision == owner_revision
         && state.structure_revision == structure_revision
-        && state.anchor.domain == focus.domain)
-        .then(|| {
-            let moved = state.anchor.position_cmp(&focus) != Ordering::Equal;
-            SelectionState {
-                phase: if moved {
-                    SelectionPhase::Active
-                } else {
-                    state.phase
-                },
-                anchor: state.anchor.clone(),
-                focus,
-                owner_revision,
-                structure_revision,
-                copied: false,
-            }
-        })
+        && transcript_domains_compatible(&state.anchor.domain, &focus.domain))
+    .then(|| {
+        let moved = state.anchor.position_cmp(&focus) != Ordering::Equal;
+        SelectionState {
+            phase: if moved {
+                SelectionPhase::Active
+            } else {
+                state.phase
+            },
+            anchor: state.anchor.clone(),
+            focus,
+            owner_revision,
+            structure_revision,
+            copied: false,
+        }
+    })
+}
+
+fn transcript_domains_compatible(left: &SelectionDomain, right: &SelectionDomain) -> bool {
+    matches!(
+        (left, right),
+        (
+            SelectionDomain::TranscriptProse,
+            SelectionDomain::MarkdownCode { .. }
+        ) | (
+            SelectionDomain::MarkdownCode { .. },
+            SelectionDomain::TranscriptProse
+        )
+    ) || left == right
 }
 
 pub fn selection_is_non_empty(state: &SelectionState) -> bool {
-    state.anchor.domain == state.focus.domain
+    transcript_domains_compatible(&state.anchor.domain, &state.focus.domain)
         && state.anchor.position_cmp(&state.focus) != Ordering::Equal
 }
 
@@ -147,7 +160,7 @@ pub fn selection_contains(state: &SelectionState, point: &SemanticPoint) -> bool
     let Some((start, end)) = normalize_endpoints(&state.anchor, &state.focus) else {
         return false;
     };
-    point.domain == start.domain
+    transcript_domains_compatible(&point.domain, &start.domain)
         && !point.position_cmp(&start).is_lt()
         && !point.position_cmp(&end).is_gt()
 }
@@ -470,7 +483,7 @@ pub fn normalize_endpoints(
     first: &SemanticPoint,
     second: &SemanticPoint,
 ) -> Option<(SemanticPoint, SemanticPoint)> {
-    if first.domain != second.domain {
+    if !transcript_domains_compatible(&first.domain, &second.domain) {
         return None;
     }
     if first.position_cmp(second).is_le() {
@@ -870,7 +883,11 @@ impl VisibleSelectionProjection {
             )?;
             Some(SemanticPoint {
                 domain: SelectionDomain::TranscriptProse,
-                ordinal: prose_ordinal(surface.source.owner_revision.id, point.fragment),
+                ordinal: fragment_ordinal(
+                    surface.source.owner_revision.id,
+                    point.fragment,
+                    &surface.source.prose[point.fragment],
+                ),
                 grapheme: point.grapheme,
                 affinity: Affinity::Before,
             })
@@ -890,9 +907,13 @@ impl VisibleSelectionProjection {
                 .find(|code| code.domain == visible.domain)?;
             let byte = visible.atom.source_at(&code.body, col)?;
             let grapheme = code.body[..byte].graphemes(true).count();
+            let item_id = match &code.domain {
+                SelectionDomain::MarkdownCode { item_id, .. } => *item_id,
+                _ => return None,
+            };
             Some(SemanticPoint {
                 domain: visible.domain.clone(),
-                ordinal: u64::from(code.block),
+                ordinal: code_ordinal(item_id, code),
                 grapheme,
                 affinity: Affinity::Before,
             })
@@ -979,7 +1000,7 @@ impl VisibleSelectionProjection {
                 .enumerate()
                 .map(move |(index, fragment)| {
                     (
-                        prose_ordinal(item_id, index),
+                        fragment_ordinal(item_id, index, fragment),
                         surface.source.source.as_str(),
                         fragment,
                     )
@@ -991,8 +1012,80 @@ impl VisibleSelectionProjection {
     ///
     /// The domain is taken from the normalized start point, so a selection can never mix body text
     /// with a code block, Thinking or tool output even if the pointer travelled across them.
+    fn copy_mixed_transcript(
+        &self,
+        start: &SemanticPoint,
+        end: &SemanticPoint,
+    ) -> Option<CopyPayload> {
+        let mut parts = Vec::new();
+        for surface in &self.surfaces {
+            let item_id = surface.source.owner_revision.id;
+            for (index, fragment) in surface.source.prose.iter().enumerate() {
+                let ordinal = fragment_ordinal(item_id, index, fragment);
+                if ordinal < start.ordinal || ordinal > end.ordinal {
+                    continue;
+                }
+                let count = fragment.semantic_text.graphemes(true).count();
+                let from = if ordinal == start.ordinal {
+                    start.grapheme
+                } else {
+                    0
+                };
+                let to = if ordinal == end.ordinal {
+                    end.grapheme
+                } else {
+                    count
+                };
+                if let Some(part) = select_part(surface.source.source.as_str(), fragment, from..to)
+                {
+                    parts.push(part);
+                }
+            }
+            for code in &surface.source.code_blocks {
+                let SelectionDomain::MarkdownCode { item_id, .. } = code.domain else {
+                    continue;
+                };
+                let ordinal = code_ordinal(item_id, code);
+                if ordinal < start.ordinal || ordinal > end.ordinal {
+                    continue;
+                }
+                let count = code.body.graphemes(true).count();
+                let from = if ordinal == start.ordinal {
+                    start.grapheme
+                } else {
+                    0
+                };
+                let to = if ordinal == end.ordinal {
+                    end.grapheme
+                } else {
+                    count
+                };
+                let text = grapheme_slice(&code.body, from..to)?.to_owned();
+                if !text.trim().is_empty() {
+                    parts.push(SelectedPart {
+                        plain: text.clone(),
+                        payload: CopyPayload::PlainText(text),
+                    });
+                }
+            }
+        }
+        join_parts(parts)
+    }
+
     pub fn copy_selection(&self, state: &SelectionState) -> Option<CopyPayload> {
         let (start, end) = normalize_endpoints(&state.anchor, &state.focus)?;
+        if matches!(
+            (&start.domain, &end.domain),
+            (
+                SelectionDomain::TranscriptProse,
+                SelectionDomain::MarkdownCode { .. }
+            ) | (
+                SelectionDomain::MarkdownCode { .. },
+                SelectionDomain::TranscriptProse
+            )
+        ) {
+            return self.copy_mixed_transcript(&start, &end);
+        }
         match &start.domain {
             SelectionDomain::TranscriptProse => {
                 serialize_fragment_range(self.prose_fragments(), &start, &end)
@@ -1029,6 +1122,26 @@ fn prose_ordinal(item_id: u64, fragment_index: usize) -> u64 {
     item_id
         .saturating_mul(PROSE_FRAGMENTS_PER_ITEM)
         .saturating_add((fragment_index as u64).min(PROSE_FRAGMENTS_PER_ITEM - 1))
+}
+
+fn source_ordinal(item_id: u64, source_offset: usize) -> u64 {
+    item_id
+        .saturating_mul(PROSE_FRAGMENTS_PER_ITEM)
+        .saturating_add((source_offset as u64).min(PROSE_FRAGMENTS_PER_ITEM - 1))
+}
+
+fn fragment_ordinal(item_id: u64, index: usize, fragment: &CopyFragment) -> u64 {
+    fragment.source_range.as_ref().map_or_else(
+        || prose_ordinal(item_id, index),
+        |range| source_ordinal(item_id, range.start),
+    )
+}
+
+fn code_ordinal(item_id: u64, code: &MarkdownCodeSource) -> u64 {
+    code.segments.first().map_or_else(
+        || prose_ordinal(item_id, code.block as usize),
+        |segment| source_ordinal(item_id, segment.source_range.start),
+    )
 }
 
 pub fn terminal_capture_text(screen: &atman_runtime::tools::term::TerminalScreen) -> String {
@@ -1275,7 +1388,17 @@ mod tests {
             item_id: 7,
             block: 0,
         };
-        assert!(normalize_endpoints(&point(prose.clone(), 1, 0), &point(code, 1, 0)).is_none());
+        let mixed = normalize_endpoints(&point(prose.clone(), 1, 0), &point(code, 2, 0))
+            .expect("transcript prose and code share one selection space");
+        assert_eq!(mixed.0.ordinal, 1);
+        assert_eq!(mixed.1.ordinal, 2);
+        assert!(
+            normalize_endpoints(
+                &point(prose.clone(), 1, 0),
+                &point(SelectionDomain::Thinking { item_id: 7 }, 2, 0),
+            )
+            .is_none()
+        );
 
         let (start, end) =
             normalize_endpoints(&point(prose.clone(), 4, 3), &point(prose.clone(), 2, 5)).unwrap();
@@ -1564,6 +1687,38 @@ mod tests {
                 Some(CopyPayload::PlainText(ref text)) if text.contains("secret")
             ),
             "isolated thinking text must never enter a prose selection"
+        );
+    }
+
+    #[test]
+    fn prose_to_code_selection_copies_both_document_segments() {
+        let projection = VisibleSelectionProjection {
+            structure_revision: 1,
+            surfaces: vec![surface(
+                0,
+                1,
+                assistant("Before\n\n```rust\nfn main() {}\n```\n\nAfter"),
+            )],
+        };
+        let source = &projection.surfaces[0].source;
+        let prose_before = source.prose.first().expect("leading prose fragment");
+        let code = source.code_blocks.first().expect("code block");
+        let start = SemanticPoint {
+            domain: SelectionDomain::TranscriptProse,
+            ordinal: fragment_ordinal(1, 0, prose_before),
+            grapheme: 0,
+            affinity: Affinity::Before,
+        };
+        let end = SemanticPoint {
+            domain: code.domain.clone(),
+            ordinal: code_ordinal(1, code),
+            grapheme: code.body.graphemes(true).count(),
+            affinity: Affinity::After,
+        };
+        let state = selection(start, end);
+        assert_eq!(
+            projection.copy_selection(&state),
+            Some(CopyPayload::PlainText("Before\n\nfn main() {}".into()))
         );
     }
 

@@ -2818,12 +2818,11 @@ fn handle_transcript_selection_mouse(
                 return false;
             };
             let point = match &state.anchor.domain {
-                crate::selection::SelectionDomain::TranscriptProse => {
-                    app.last_selection_projection.prose_point_at(row, col)
-                }
-                crate::selection::SelectionDomain::MarkdownCode { .. } => {
-                    app.last_selection_projection.code_point_at(row, col)
-                }
+                crate::selection::SelectionDomain::TranscriptProse
+                | crate::selection::SelectionDomain::MarkdownCode { .. } => app
+                    .last_selection_projection
+                    .prose_point_at(row, col)
+                    .or_else(|| app.last_selection_projection.code_point_at(row, col)),
                 _ => app.last_selection_projection.isolated_point_at(row, col),
             };
             let Some(point) = point else {
