@@ -721,10 +721,16 @@ struct Renderer {
     pending_separator: bool,
     in_table: bool,
     in_table_head: bool,
-    table_row: Vec<String>,
-    table_header: Vec<String>,
-    table_body: Vec<Vec<String>>,
+    table_row: Vec<TableCell>,
+    table_header: Vec<TableCell>,
+    table_body: Vec<Vec<TableCell>>,
     rule_width: u16,
+}
+
+#[derive(Clone, Default)]
+struct TableCell {
+    text: String,
+    event_segments: Vec<crate::selection::ProseEventSegment>,
 }
 
 impl Renderer {
@@ -973,7 +979,19 @@ impl Renderer {
                 }
                 if self.in_table {
                     if let Some(cell) = self.table_row.last_mut() {
-                        cell.push_str(&text);
+                        let start = crate::width::graphemes(&cell.text).count();
+                        let count = crate::width::graphemes(&text).count();
+                        cell.text.push_str(&text);
+                        if let Some(event) = event {
+                            if count > 0 {
+                                cell.event_segments
+                                    .push(crate::selection::ProseEventSegment {
+                                        event,
+                                        event_graphemes: 0..count,
+                                        fragment_grapheme_start: start,
+                                    });
+                            }
+                        }
                     }
                     return;
                 }
@@ -984,7 +1002,19 @@ impl Renderer {
             Event::Code(text) => {
                 if self.in_table {
                     if let Some(cell) = self.table_row.last_mut() {
-                        cell.push_str(&text);
+                        let start = crate::width::graphemes(&cell.text).count();
+                        let count = crate::width::graphemes(&text).count();
+                        cell.text.push_str(&text);
+                        if let Some(event) = event {
+                            if count > 0 {
+                                cell.event_segments
+                                    .push(crate::selection::ProseEventSegment {
+                                        event,
+                                        event_graphemes: 0..count,
+                                        fragment_grapheme_start: start,
+                                    });
+                            }
+                        }
                     }
                     return;
                 }
@@ -998,7 +1028,7 @@ impl Renderer {
             Event::SoftBreak | Event::HardBreak => {
                 if self.in_table {
                     if let Some(cell) = self.table_row.last_mut() {
-                        cell.push(' ');
+                        cell.text.push(' ');
                     }
                     return;
                 }
@@ -1145,7 +1175,7 @@ impl Renderer {
             }
             Tag::TableCell => {
                 if self.in_table {
-                    self.table_row.push(String::new());
+                    self.table_row.push(TableCell::default());
                 }
             }
             _ => {}
@@ -1215,6 +1245,80 @@ impl Renderer {
         }
     }
 
+    fn table_wrap_lines(&self, text: &str, width: usize) -> Vec<Vec<WrapPiece>> {
+        let mut lines = vec![Vec::new()];
+        for piece in self.wrap_text(text, width, 0) {
+            if piece.is_newline {
+                lines.push(Vec::new());
+            } else if let Some(line) = lines.last_mut() {
+                line.push(piece);
+            }
+        }
+        if lines.len() == 1 && lines[0].is_empty() {
+            lines.clear();
+        }
+        lines
+    }
+
+    fn add_table_atoms(
+        atoms: &mut Vec<crate::selection::RelativeProseAtom>,
+        row: u16,
+        cells: &[TableCell],
+        wrapped: &[Vec<Vec<WrapPiece>>],
+        line_idx: usize,
+        layout: (&[usize], usize, usize),
+    ) {
+        let (widths, inner_pad, sep) = layout;
+        let mut col = u16::try_from(inner_pad).unwrap_or(u16::MAX);
+        for (index, cell) in cells.iter().enumerate() {
+            let mut piece_col = col;
+            if let Some(pieces) = wrapped.get(index).and_then(|lines| lines.get(line_idx)) {
+                for piece in pieces {
+                    if let Some(source_range) = &piece.source_range {
+                        let cell_grapheme_start = crate::width::graphemes(
+                            cell.text.get(..source_range.start).unwrap_or_default(),
+                        )
+                        .count();
+                        for (local, grapheme, _) in crate::width::grapheme_indices(&piece.text) {
+                            let global = cell_grapheme_start.saturating_add(
+                                crate::width::graphemes(&piece.text[..local]).count(),
+                            );
+                            let Some(segment) = cell.event_segments.iter().find(|segment| {
+                                global >= segment.fragment_grapheme_start
+                                    && global
+                                        < segment
+                                            .fragment_grapheme_start
+                                            .saturating_add(segment.event_graphemes.len())
+                            }) else {
+                                continue;
+                            };
+                            atoms.extend(crate::selection::prose_atom_runs(
+                                row,
+                                piece_col.saturating_add(
+                                    u16::try_from(crate::width::width(&piece.text[..local]))
+                                        .unwrap_or(u16::MAX),
+                                ),
+                                grapheme,
+                                segment.event,
+                                segment.event_graphemes.start.saturating_add(
+                                    global.saturating_sub(segment.fragment_grapheme_start),
+                                ),
+                            ));
+                        }
+                    }
+                    piece_col = piece_col.saturating_add(
+                        u16::try_from(crate::width::width(&piece.text)).unwrap_or(u16::MAX),
+                    );
+                }
+            }
+            col = col
+                .saturating_add(
+                    u16::try_from(widths.get(index).copied().unwrap_or(0)).unwrap_or(u16::MAX),
+                )
+                .saturating_add(u16::try_from(sep).unwrap_or(u16::MAX));
+        }
+    }
+
     fn flush_table(&mut self) {
         let t = crate::theme::theme();
         if self.table_header.is_empty() & self.table_body.is_empty() {
@@ -1234,11 +1338,11 @@ impl Renderer {
         let sep = 3usize;
         let mut widths = vec![col_min; col_count];
         for (i, cell) in self.table_header.iter().enumerate() {
-            widths[i] = widths[i].max(crate::width::width(cell));
+            widths[i] = widths[i].max(crate::width::width(&cell.text));
         }
         for row in &self.table_body {
             for (i, cell) in row.iter().enumerate() {
-                widths[i] = widths[i].max(crate::width::width(cell));
+                widths[i] = widths[i].max(crate::width::width(&cell.text));
             }
         }
         let cells_total: usize = widths.iter().sum::<usize>() + sep * col_count.saturating_sub(1);
@@ -1290,18 +1394,36 @@ impl Renderer {
 
         self.lines.push(blank_bg_line(target, bg));
         if !self.table_header.is_empty() {
-            let wrapped: Vec<Vec<String>> = self
+            let wrapped: Vec<Vec<Vec<WrapPiece>>> = self
                 .table_header
                 .iter()
                 .enumerate()
-                .map(|(i, cell)| crate::width::word_wrap(cell, widths[i]))
+                .map(|(i, cell)| self.table_wrap_lines(&cell.text, widths[i]))
                 .collect();
             let height = wrapped.iter().map(|c| c.len()).max().unwrap_or(1);
             for line_idx in 0..height {
                 let cells: Vec<String> = wrapped
                     .iter()
-                    .map(|c| c.get(line_idx).cloned().unwrap_or_default())
+                    .map(|c| {
+                        c.get(line_idx)
+                            .map(|pieces| {
+                                pieces
+                                    .iter()
+                                    .map(|piece| piece.text.as_str())
+                                    .collect::<String>()
+                            })
+                            .unwrap_or_default()
+                    })
                     .collect();
+                let row = u16::try_from(self.lines.len()).unwrap_or(u16::MAX);
+                Self::add_table_atoms(
+                    &mut self.prose_atoms,
+                    row,
+                    &self.table_header,
+                    &wrapped,
+                    line_idx,
+                    (&widths, inner_pad, sep),
+                );
                 self.lines.push(table_row(
                     &cells, &widths, inner_pad, target, head_style, bg, sep,
                 ));
@@ -1326,17 +1448,35 @@ impl Renderer {
                 self.lines
                     .push(table_line(&sep_rule, inner_pad, target, sep_style, bg));
             }
-            let wrapped: Vec<Vec<String>> = row
+            let wrapped: Vec<Vec<Vec<WrapPiece>>> = row
                 .iter()
                 .enumerate()
-                .map(|(col_i, cell)| crate::width::word_wrap(cell, widths[col_i]))
+                .map(|(col_i, cell)| self.table_wrap_lines(&cell.text, widths[col_i]))
                 .collect();
             let height = wrapped.iter().map(|c| c.len()).max().unwrap_or(1);
             for line_idx in 0..height {
                 let cells: Vec<String> = wrapped
                     .iter()
-                    .map(|c| c.get(line_idx).cloned().unwrap_or_default())
+                    .map(|c| {
+                        c.get(line_idx)
+                            .map(|pieces| {
+                                pieces
+                                    .iter()
+                                    .map(|piece| piece.text.as_str())
+                                    .collect::<String>()
+                            })
+                            .unwrap_or_default()
+                    })
                     .collect();
+                let row = u16::try_from(self.lines.len()).unwrap_or(u16::MAX);
+                Self::add_table_atoms(
+                    &mut self.prose_atoms,
+                    row,
+                    &self.table_body[i],
+                    &wrapped,
+                    line_idx,
+                    (&widths, inner_pad, sep),
+                );
                 self.lines.push(table_row(
                     &cells, &widths, inner_pad, target, cell_style, bg, sep,
                 ));
@@ -1811,6 +1951,33 @@ mod tests {
             !joined.contains('`'),
             "backtick stripped in table cells: {joined:?}"
         );
+    }
+
+    #[test]
+    fn table_geometry_contains_cell_atoms_not_separator_atoms() {
+        let rendered =
+            render_markdown_with_geometry("| A | B |\n| - | - |\n| 你好🙂 | plain |\n", 32);
+        assert!(!rendered.prose_atoms.is_empty());
+        assert!(rendered.prose_atoms.iter().all(|atom| {
+            let text = rendered
+                .lines
+                .get(usize::from(atom.row))
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            !text.contains('─') && !text.contains('╌')
+        }));
+        assert!(
+            rendered
+                .prose_atoms
+                .iter()
+                .any(|atom| !atom.event_graphemes.is_empty() && atom.cols.start >= 2)
+        );
+        assert!(rendered.prose_atoms.iter().any(|atom| atom.cell_width == 2));
     }
 
     #[test]

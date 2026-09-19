@@ -9,6 +9,12 @@ pub fn write_text(payload: &str) -> std::io::Result<()> {
     stderr.flush()
 }
 
+pub fn write_html(html: &str, plain_text: &str) -> anyhow::Result<()> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    clipboard.set_html(html, Some(plain_text))?;
+    Ok(())
+}
+
 pub fn read_image_png() -> anyhow::Result<Vec<u8>> {
     use image::ImageEncoder;
 

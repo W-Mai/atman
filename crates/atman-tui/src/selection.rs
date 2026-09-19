@@ -68,7 +68,7 @@ pub struct SemanticPoint {
 }
 
 impl SemanticPoint {
-    fn position_cmp(&self, other: &Self) -> Ordering {
+    pub(crate) fn position_cmp(&self, other: &Self) -> Ordering {
         (self.ordinal, self.grapheme, self.affinity as u8).cmp(&(
             other.ordinal,
             other.grapheme,

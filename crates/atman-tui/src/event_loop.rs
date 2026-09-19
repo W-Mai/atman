@@ -118,7 +118,9 @@ pub(crate) async fn run_frames(
     // would blow past in one frame.
     intro_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut toast_tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    let mut selection_tick = tokio::time::interval(std::time::Duration::from_millis(50));
     toast_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    selection_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let _reader_guard = ReaderGuard(reader_shutdown);
     let mut update_check = tokio::spawn(check_latest_release());
@@ -194,6 +196,9 @@ pub(crate) async fn run_frames(
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
             }
             _ = toast_tick.tick(), if !app.app.toasts.is_empty() => {}
+            _ = selection_tick.tick(), if app.app.transcript_selection_pointer.is_some() => {
+                tick_transcript_selection_drag(&mut app.app);
+            }
             latest = poll_update_check(&mut update_check), if !update_check.is_finished() => {
                 app.app.latest_release = latest;
             }
@@ -2610,6 +2615,17 @@ fn apply_selection_action(
                 }
             }
         }
+        crate::selection_menu::SelectionAction::RichCopy => {
+            if let Some(payload) = payload {
+                let (html, plain) = crate::selection_menu::rich_copy_payload(&payload);
+                if let Err(error) = crate::clipboard::write_html(&html, &plain) {
+                    ui.app.push_note(
+                        format!("rich clipboard write failed: {error}"),
+                        crate::app::NoteLevel::Error,
+                    );
+                }
+            }
+        }
         crate::selection_menu::SelectionAction::Quote => {
             if let Some(payload) = payload {
                 editor.insert_str(&crate::selection_menu::quote_payload(&payload));
@@ -2682,6 +2698,87 @@ fn pending_thinking_click(state: &crate::selection::SelectionState) -> bool {
         )
 }
 
+const SELECTION_SCROLL_MAX_STEP: u32 = 6;
+
+fn selection_scroll_step(distance: u16) -> u32 {
+    u32::from(distance).clamp(1, SELECTION_SCROLL_MAX_STEP)
+}
+
+fn resolve_transcript_selection_edge(app: &mut AppState, focus_last: bool) {
+    let Some(state) = app.selection.as_ref() else {
+        return;
+    };
+    if state.anchor.domain != crate::selection::SelectionDomain::TranscriptProse {
+        return;
+    }
+    let points = app
+        .last_selection_projection
+        .visual_points()
+        .into_iter()
+        .filter(|visual| visual.point.domain == state.anchor.domain)
+        .map(|visual| visual.point);
+    let point = if focus_last {
+        points.max_by(|left, right| left.position_cmp(right))
+    } else {
+        points.min_by(|left, right| left.position_cmp(right))
+    };
+    if let Some(point) = point {
+        app.selection = crate::selection::selection_extend(
+            state,
+            point,
+            state.owner_revision,
+            app.last_selection_projection.structure_revision,
+        );
+    }
+}
+
+fn tick_transcript_selection_drag(app: &mut AppState) {
+    if !app
+        .selection
+        .as_ref()
+        .is_some_and(|state| state.phase == crate::selection::SelectionPhase::Active)
+    {
+        return;
+    }
+    let Some((_, pointer_row)) = app.transcript_selection_pointer else {
+        return;
+    };
+    let Some(rect) = app.last_transcript_rect else {
+        return;
+    };
+    let top = rect.y;
+    let bottom = rect.y.saturating_add(rect.height);
+    let (delta, focus_last) = if pointer_row < top {
+        (
+            -(selection_scroll_step(top.saturating_sub(pointer_row)) as i32),
+            false,
+        )
+    } else if pointer_row >= bottom {
+        (
+            selection_scroll_step(pointer_row.saturating_sub(bottom).saturating_add(1)) as i32,
+            true,
+        )
+    } else {
+        return;
+    };
+
+    let max = app.max_scroll_offset();
+    let next = if delta.is_negative() {
+        app.scroll_offset
+            .saturating_sub(delta.unsigned_abs())
+            .min(max)
+    } else {
+        app.scroll_offset.saturating_add(delta as u32).min(max)
+    };
+    if next == app.scroll_offset {
+        return;
+    }
+    app.scroll_offset = next;
+    app.follow_tail = false;
+
+    resolve_transcript_selection_edge(app, focus_last);
+}
+
 fn handle_transcript_selection_mouse(
     app: &mut AppState,
     event: &crossterm::event::MouseEvent,
@@ -2712,9 +2809,11 @@ fn handle_transcript_selection_mouse(
                 surface.revision,
                 app.last_selection_projection.structure_revision,
             ));
+            app.transcript_selection_pointer = Some((event.column, event.row));
             false
         }
         MouseEventKind::Drag(MouseButton::Left) => {
+            app.transcript_selection_pointer = Some((event.column, event.row));
             let Some(state) = app.selection.as_ref() else {
                 return false;
             };
@@ -2741,6 +2840,30 @@ fn handle_transcript_selection_mouse(
                 .is_some_and(crate::selection::selection_is_non_empty)
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            if event.row < rect.y {
+                resolve_transcript_selection_edge(app, false);
+            } else if event.row >= rect.y.saturating_add(rect.height) {
+                resolve_transcript_selection_edge(app, true);
+            } else if let Some(state) = app.selection.as_ref() {
+                let point = match &state.anchor.domain {
+                    crate::selection::SelectionDomain::TranscriptProse => {
+                        app.last_selection_projection.prose_point_at(row, col)
+                    }
+                    crate::selection::SelectionDomain::MarkdownCode { .. } => {
+                        app.last_selection_projection.code_point_at(row, col)
+                    }
+                    _ => app.last_selection_projection.isolated_point_at(row, col),
+                };
+                if let Some(point) = point {
+                    app.selection = crate::selection::selection_extend(
+                        state,
+                        point,
+                        state.owner_revision,
+                        app.last_selection_projection.structure_revision,
+                    );
+                }
+            }
+            app.transcript_selection_pointer = None;
             let Some(state) = app.selection.take() else {
                 return false;
             };
