@@ -3144,6 +3144,80 @@ mod tests {
     }
 
     #[test]
+    fn transcript_mouse_selection_keeps_middle_code_between_prose_endpoints() {
+        let markdown = "Before text\n\n```rust\nfn main() {}\n```\n\nAfter text\n";
+        let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {
+            md: markdown.into(),
+            streaming: false,
+            retried: false,
+        }]);
+        let mut cache = crate::output::LayoutCache::default();
+        let metrics = cache.update_dirty(
+            crate::output::LayoutKey {
+                width: 80,
+                theme: crate::theme::ThemeMode::Dark,
+            },
+            &items,
+            &crate::output::RenderCtx::empty(),
+            crate::output::LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 40,
+                follow_tail_rows: None,
+            },
+        );
+        let visible = cache.visible_slice(metrics.scroll_offset, metrics.total_rows, 0);
+        let points = visible.selection.visual_points();
+        let prose_points = points
+            .iter()
+            .filter(|point| {
+                matches!(
+                    point.point.domain,
+                    crate::selection::SelectionDomain::TranscriptProse
+                )
+            })
+            .collect::<Vec<_>>();
+        let first = prose_points.first().expect("leading prose point");
+        let last = prose_points.last().expect("trailing prose point");
+        let mut app = AppState::new("session".into(), None);
+        app.items = items;
+        app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 40));
+        app.last_selection_projection = visible.selection;
+        let mouse =
+            |kind, point: &crate::selection::VisualSelectionPoint| crossterm::event::MouseEvent {
+                kind,
+                column: point.col,
+                row: point.row as u16,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            };
+        assert!(!handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), first),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Drag(MouseButton::Left), last),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Up(MouseButton::Left), last),
+        ));
+        let ui = UiState {
+            app,
+            ..UiState::new(AppState::new("unused".into(), None))
+        };
+        let payload = selection_action_payload(&ui).expect("middle code payload");
+        let copied = match payload {
+            crate::selection::CopyPayload::Markdown(text)
+            | crate::selection::CopyPayload::PlainText(text)
+            | crate::selection::CopyPayload::Preview(text) => text,
+        };
+        assert_eq!(
+            copied,
+            "Before text\n\n```rust\nfn main() {}\n```\n\nAfter text"
+        );
+    }
+
+    #[test]
     fn transcript_mouse_selection_keeps_code_when_prose_starts_mid_fragment() {
         let markdown = "Before text\n\n```rust\nfn main() {}\n```\n";
         let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {

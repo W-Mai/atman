@@ -1048,7 +1048,7 @@ impl VisibleSelectionProjection {
                 };
                 if let Some(part) = select_part(surface.source.source.as_str(), fragment, from..to)
                 {
-                    parts.push(part);
+                    parts.push((ordinal, part));
                 }
             }
             for code in &surface.source.code_blocks {
@@ -1072,28 +1072,34 @@ impl VisibleSelectionProjection {
                 };
                 let text = grapheme_slice(&code.body, from..to)?.to_owned();
                 if !text.trim().is_empty() {
-                    parts.push(SelectedPart {
-                        plain: text.clone(),
-                        payload: CopyPayload::Markdown(fenced_markdown(&code.language, &text)),
-                    });
+                    parts.push((
+                        ordinal,
+                        SelectedPart {
+                            plain: text.clone(),
+                            payload: CopyPayload::Markdown(fenced_markdown(&code.language, &text)),
+                        },
+                    ));
                 }
             }
         }
-        join_parts(parts)
+        parts.sort_by_key(|(ordinal, _)| *ordinal);
+        join_parts(parts.into_iter().map(|(_, part)| part).collect())
     }
 
     pub fn copy_selection(&self, state: &SelectionState) -> Option<CopyPayload> {
         let (start, end) = normalize_endpoints(&state.anchor, &state.focus)?;
-        if matches!(
-            (&start.domain, &end.domain),
-            (
-                SelectionDomain::TranscriptProse,
-                SelectionDomain::MarkdownCode { .. }
-            ) | (
-                SelectionDomain::MarkdownCode { .. },
-                SelectionDomain::TranscriptProse
-            )
-        ) {
+        let crosses_code = self.surfaces.iter().any(|surface| {
+            surface.source.code_blocks.iter().any(|code| {
+                let SelectionDomain::MarkdownCode { item_id, .. } = code.domain else {
+                    return false;
+                };
+                let ordinal = code_ordinal(item_id, code);
+                ordinal > start.ordinal && ordinal < end.ordinal
+            })
+        });
+        if start.domain != end.domain
+            || (matches!(start.domain, SelectionDomain::TranscriptProse) && crosses_code)
+        {
             return self.copy_mixed_transcript(&start, &end);
         }
         match &start.domain {
