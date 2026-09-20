@@ -468,6 +468,7 @@ pub struct CodeBodySegment {
 pub struct MarkdownCodeSource {
     pub domain: SelectionDomain,
     pub block: u32,
+    pub language: String,
     pub body: String,
     pub segments: Vec<CodeBodySegment>,
 }
@@ -526,6 +527,15 @@ pub fn grapheme_slice(text: &str, range: Range<usize>) -> Option<&str> {
     text.get(boundaries[start]..boundaries[end])
 }
 
+fn fenced_markdown(language: &str, text: &str) -> String {
+    let body = text.trim_end_matches('\n');
+    if language.is_empty() {
+        format!("```\n{body}\n```")
+    } else {
+        format!("```{language}\n{body}\n```")
+    }
+}
+
 pub fn serialize_code_body(
     code: &MarkdownCodeSource,
     graphemes: Range<usize>,
@@ -534,7 +544,7 @@ pub fn serialize_code_body(
     if text.trim().is_empty() {
         return None;
     }
-    Some(CopyPayload::PlainText(text.to_owned()))
+    Some(CopyPayload::Markdown(fenced_markdown(&code.language, text)))
 }
 
 /// One selected slice of a fragment: its Markdown-or-plain payload plus the plain fallback.
@@ -1064,7 +1074,7 @@ impl VisibleSelectionProjection {
                 if !text.trim().is_empty() {
                     parts.push(SelectedPart {
                         plain: text.clone(),
-                        payload: CopyPayload::PlainText(text),
+                        payload: CopyPayload::Markdown(fenced_markdown(&code.language, &text)),
                     });
                 }
             }
@@ -1542,7 +1552,9 @@ mod tests {
         assert_eq!(mapped_source, "let x = 1;\nlet y = 2;\n");
         assert_eq!(
             serialize_code_body(indented, 0..indented.body.graphemes(true).count()),
-            Some(CopyPayload::PlainText("let x = 1;\nlet y = 2;\n".into()))
+            Some(CopyPayload::Markdown(
+                "```\nlet x = 1;\nlet y = 2;\n```".into()
+            ))
         );
         let copied = projection
             .prose
@@ -1580,6 +1592,52 @@ mod tests {
         assert_eq!(
             serialize_fragment(source, &projection.prose[1], 0..5),
             Some(CopyPayload::Markdown("after".into()))
+        );
+    }
+
+    #[test]
+    fn complete_list_fragment_preserves_markdown_markers() {
+        let source = "- one\n- **two**\n- [ ] three\n";
+        let projection = crate::markdown::semantic_markdown_source(
+            source,
+            OutputRevision {
+                id: 9,
+                ..Default::default()
+            },
+        );
+        let copied = serialize_prose_fragments(source, &projection.prose);
+        assert_eq!(
+            copied,
+            Some(CopyPayload::Markdown(source.trim_end().into()))
+        );
+    }
+
+    #[test]
+    fn list_selection_payload_preserves_markdown_markers() {
+        let source = "- one\n- **two**\n- [ ] three\n";
+        let projection = VisibleSelectionProjection {
+            structure_revision: 1,
+            surfaces: vec![surface(0, 9, assistant(source))],
+        };
+        let semantic = &projection.surfaces[0].source;
+        let fragment = semantic.prose.first().expect("list fragment");
+        let state = selection(
+            SemanticPoint {
+                domain: SelectionDomain::TranscriptProse,
+                ordinal: fragment_ordinal(9, 0, fragment),
+                grapheme: 0,
+                affinity: Affinity::Before,
+            },
+            SemanticPoint {
+                domain: SelectionDomain::TranscriptProse,
+                ordinal: fragment_ordinal(9, 0, fragment),
+                grapheme: fragment.semantic_text.graphemes(true).count(),
+                affinity: Affinity::After,
+            },
+        );
+        assert_eq!(
+            projection.copy_selection(&state),
+            Some(CopyPayload::Markdown(source.trim_end().into()))
         );
     }
 
@@ -1718,7 +1776,9 @@ mod tests {
         let state = selection(start, end);
         assert_eq!(
             projection.copy_selection(&state),
-            Some(CopyPayload::PlainText("Before\n\nfn main() {}".into()))
+            Some(CopyPayload::Markdown(
+                "Before\n\n```rust\nfn main() {}\n```".into()
+            ))
         );
     }
 
@@ -1773,7 +1833,7 @@ mod tests {
     }
 
     #[test]
-    fn code_selection_copies_body_without_gutter() {
+    fn code_selection_copies_markdown_body_without_gutter() {
         let projection = VisibleSelectionProjection {
             structure_revision: 1,
             surfaces: vec![surface(
@@ -1804,7 +1864,9 @@ mod tests {
 
         assert_eq!(
             projection.copy_selection(&state),
-            Some(CopyPayload::PlainText("fn a() {}\nfn b() {}\n".into()))
+            Some(CopyPayload::Markdown(
+                "```rust\nfn a() {}\nfn b() {}\n```".into()
+            ))
         );
     }
 

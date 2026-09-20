@@ -246,6 +246,7 @@ pub fn semantic_markdown_source(
 
     struct CodeNode {
         block: u32,
+        language: String,
         body: String,
         segments: Vec<CodeBodySegment>,
     }
@@ -309,8 +310,15 @@ pub fn semantic_markdown_source(
                     } else if let Some(node) = prose_node.as_mut() {
                         node.contains_code = true;
                     }
+                    let language = match &event {
+                        Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(language))) => {
+                            language.to_string()
+                        }
+                        _ => String::new(),
+                    };
                     code_node = Some(CodeNode {
                         block: next_block,
+                        language,
                         body: String::new(),
                         segments: Vec::new(),
                     });
@@ -325,6 +333,7 @@ pub fn semantic_markdown_source(
                                 block: code.block,
                             },
                             block: code.block,
+                            language: code.language,
                             body: code.body,
                             segments: code.segments,
                         });
