@@ -573,14 +573,14 @@ fn join_parts(parts: Vec<SelectedPart>) -> Option<CopyPayload> {
     }
     let markdown = parts
         .iter()
-        .all(|part| matches!(part.payload, CopyPayload::Markdown(_)));
+        .any(|part| matches!(part.payload, CopyPayload::Markdown(_)));
     let texts = parts
         .into_iter()
         .filter_map(|part| {
             let text = if markdown {
                 match part.payload {
                     CopyPayload::Markdown(text) => text,
-                    CopyPayload::PlainText(_) | CopyPayload::Preview(_) => unreachable!(),
+                    CopyPayload::PlainText(_) | CopyPayload::Preview(_) => part.plain,
                 }
             } else {
                 part.plain
@@ -1737,7 +1737,7 @@ mod tests {
         let state = selection(prose_point(1, 0, 6), prose_point(3, 0, 4));
         assert_eq!(
             projection.copy_selection(&state),
-            Some(CopyPayload::PlainText("世界🙂\n\ntail".into()))
+            Some(CopyPayload::Markdown("世界🙂\n\ntail".into()))
         );
         assert!(
             !matches!(

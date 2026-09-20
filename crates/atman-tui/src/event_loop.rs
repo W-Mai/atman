@@ -2583,12 +2583,8 @@ fn handle_selection_menu_key(
     true
 }
 
-fn apply_selection_action(
-    ui: &mut UiState,
-    editor: &mut InputEditor,
-    action: crate::selection_menu::SelectionAction,
-) {
-    let payload = ui.app.selection.as_ref().and_then(|state| {
+fn selection_action_payload(ui: &UiState) -> Option<crate::selection::CopyPayload> {
+    ui.app.selection.as_ref().and_then(|state| {
         let projection = if matches!(
             state.anchor.domain,
             crate::selection::SelectionDomain::Window { .. }
@@ -2598,7 +2594,15 @@ fn apply_selection_action(
             &ui.app.last_selection_projection
         };
         crate::selection::selection_copy_payload(projection, state)
-    });
+    })
+}
+
+fn apply_selection_action(
+    ui: &mut UiState,
+    editor: &mut InputEditor,
+    action: crate::selection_menu::SelectionAction,
+) {
+    let payload = selection_action_payload(ui);
     match action {
         crate::selection_menu::SelectionAction::Copy => {
             if let Some(payload) = payload {
@@ -2779,6 +2783,26 @@ fn tick_transcript_selection_drag(app: &mut AppState) {
     resolve_transcript_selection_edge(app, focus_last);
 }
 
+fn extend_mouse_selection(
+    state: &crate::selection::SelectionState,
+    point: crate::selection::SemanticPoint,
+    owner_revision: crate::app::OutputRevision,
+    structure_revision: u64,
+) -> Option<crate::selection::SelectionState> {
+    let mut state = state.clone();
+    let mut point = point;
+    if point.position_cmp(&state.anchor).is_lt() {
+        if state.anchor.affinity == crate::selection::Affinity::Before {
+            state.anchor.grapheme = state.anchor.grapheme.saturating_add(1);
+            state.anchor.affinity = crate::selection::Affinity::After;
+        }
+    } else if point.position_cmp(&state.anchor).is_gt() {
+        point.grapheme = point.grapheme.saturating_add(1);
+        point.affinity = crate::selection::Affinity::After;
+    }
+    crate::selection::selection_extend(&state, point, owner_revision, structure_revision)
+}
+
 fn handle_transcript_selection_mouse(
     app: &mut AppState,
     event: &crossterm::event::MouseEvent,
@@ -2828,7 +2852,7 @@ fn handle_transcript_selection_mouse(
             let Some(point) = point else {
                 return true;
             };
-            app.selection = crate::selection::selection_extend(
+            app.selection = extend_mouse_selection(
                 state,
                 point,
                 state.owner_revision,
@@ -2845,16 +2869,15 @@ fn handle_transcript_selection_mouse(
                 resolve_transcript_selection_edge(app, true);
             } else if let Some(state) = app.selection.as_ref() {
                 let point = match &state.anchor.domain {
-                    crate::selection::SelectionDomain::TranscriptProse => {
-                        app.last_selection_projection.prose_point_at(row, col)
-                    }
-                    crate::selection::SelectionDomain::MarkdownCode { .. } => {
-                        app.last_selection_projection.code_point_at(row, col)
-                    }
+                    crate::selection::SelectionDomain::TranscriptProse
+                    | crate::selection::SelectionDomain::MarkdownCode { .. } => app
+                        .last_selection_projection
+                        .prose_point_at(row, col)
+                        .or_else(|| app.last_selection_projection.code_point_at(row, col)),
                     _ => app.last_selection_projection.isolated_point_at(row, col),
                 };
                 if let Some(point) = point {
-                    app.selection = crate::selection::selection_extend(
+                    app.selection = extend_mouse_selection(
                         state,
                         point,
                         state.owner_revision,
@@ -2961,6 +2984,331 @@ mod tests {
             app.selection.as_ref().map(|state| state.phase),
             Some(crate::selection::SelectionPhase::Active)
         );
+    }
+
+    #[test]
+    fn transcript_mouse_selection_preserves_markdown_for_rendered_blocks() {
+        let cases = [
+            (
+                "- one\n- **two**\n- [ ] three\n",
+                "- one\n- **two**\n- [ ] three",
+            ),
+            (
+                "| A | B |\n|---|---|\n| 1 | 2 |\n",
+                "| A | B |\n|---|---|\n| 1 | 2 |",
+            ),
+            ("```rust\nfn main() {}\n```\n", "```rust\nfn main() {}\n```"),
+        ];
+        for (markdown, expected) in cases {
+            let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {
+                md: markdown.into(),
+                streaming: false,
+                retried: false,
+            }]);
+            let mut cache = crate::output::LayoutCache::default();
+            let metrics = cache.update_dirty(
+                crate::output::LayoutKey {
+                    width: 80,
+                    theme: crate::theme::ThemeMode::Dark,
+                },
+                &items,
+                &crate::output::RenderCtx::empty(),
+                crate::output::LayoutRequest {
+                    scroll_offset: 0,
+                    viewport_rows: 40,
+                    follow_tail_rows: None,
+                },
+            );
+            let visible = cache.visible_slice(metrics.scroll_offset, metrics.total_rows, 0);
+            let points = visible.selection.visual_points();
+            let first = points.first().expect("rendered selection start");
+            let last = points.last().expect("rendered selection end");
+            let mut app = AppState::new("session".into(), None);
+            app.items = items;
+            app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 40));
+            app.last_selection_projection = visible.selection;
+            let mouse = |kind, point: &crate::selection::VisualSelectionPoint| {
+                crossterm::event::MouseEvent {
+                    kind,
+                    column: point.col,
+                    row: point.row as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                }
+            };
+            assert!(!handle_transcript_selection_mouse(
+                &mut app,
+                &mouse(MouseEventKind::Down(MouseButton::Left), first),
+            ));
+            assert!(handle_transcript_selection_mouse(
+                &mut app,
+                &mouse(MouseEventKind::Drag(MouseButton::Left), last),
+            ));
+            assert!(handle_transcript_selection_mouse(
+                &mut app,
+                &mouse(MouseEventKind::Up(MouseButton::Left), last),
+            ));
+            let ui = UiState {
+                app,
+                ..UiState::new(AppState::new("unused".into(), None))
+            };
+            let payload = selection_action_payload(&ui).expect("copy payload");
+            let copied = match payload {
+                crate::selection::CopyPayload::Markdown(text)
+                | crate::selection::CopyPayload::PlainText(text)
+                | crate::selection::CopyPayload::Preview(text) => text,
+            };
+            assert_eq!(copied, expected, "markdown input: {markdown:?}");
+        }
+    }
+
+    #[test]
+    fn transcript_mouse_selection_copies_code_when_dragged_from_prose() {
+        let markdown = "Before text\n\n```rust\nfn main() {}\n```\n\nAfter text\n";
+        let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {
+            md: markdown.into(),
+            streaming: false,
+            retried: false,
+        }]);
+        let mut cache = crate::output::LayoutCache::default();
+        let metrics = cache.update_dirty(
+            crate::output::LayoutKey {
+                width: 80,
+                theme: crate::theme::ThemeMode::Dark,
+            },
+            &items,
+            &crate::output::RenderCtx::empty(),
+            crate::output::LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 40,
+                follow_tail_rows: None,
+            },
+        );
+        let visible = cache.visible_slice(metrics.scroll_offset, metrics.total_rows, 0);
+        let prose = visible
+            .selection
+            .visual_points()
+            .into_iter()
+            .find(|point| {
+                matches!(
+                    point.point.domain,
+                    crate::selection::SelectionDomain::TranscriptProse
+                )
+            })
+            .expect("prose point");
+        let code = visible
+            .selection
+            .visual_points()
+            .into_iter()
+            .filter(|point| {
+                matches!(
+                    point.point.domain,
+                    crate::selection::SelectionDomain::MarkdownCode { .. }
+                )
+            })
+            .max_by_key(|point| (point.row, point.col))
+            .expect("code point");
+        let mut app = AppState::new("session".into(), None);
+        app.items = items;
+        app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 40));
+        app.last_selection_projection = visible.selection;
+        let mouse =
+            |kind, point: &crate::selection::VisualSelectionPoint| crossterm::event::MouseEvent {
+                kind,
+                column: point.col,
+                row: point.row as u16,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            };
+        assert!(!handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), &prose),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Drag(MouseButton::Left), &code),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Up(MouseButton::Left), &code),
+        ));
+        let ui = UiState {
+            app,
+            ..UiState::new(AppState::new("unused".into(), None))
+        };
+        let payload = selection_action_payload(&ui).expect("cross-block copy payload");
+        let copied = match payload {
+            crate::selection::CopyPayload::Markdown(text)
+            | crate::selection::CopyPayload::PlainText(text)
+            | crate::selection::CopyPayload::Preview(text) => text,
+        };
+        assert_eq!(copied, "Before text\n\n```rust\nfn main() {}\n```");
+    }
+
+    #[test]
+    fn transcript_mouse_selection_keeps_code_when_prose_starts_mid_fragment() {
+        let markdown = "Before text\n\n```rust\nfn main() {}\n```\n";
+        let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {
+            md: markdown.into(),
+            streaming: false,
+            retried: false,
+        }]);
+        let mut cache = crate::output::LayoutCache::default();
+        let metrics = cache.update_dirty(
+            crate::output::LayoutKey {
+                width: 80,
+                theme: crate::theme::ThemeMode::Dark,
+            },
+            &items,
+            &crate::output::RenderCtx::empty(),
+            crate::output::LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 40,
+                follow_tail_rows: None,
+            },
+        );
+        let visible = cache.visible_slice(metrics.scroll_offset, metrics.total_rows, 0);
+        let points = visible.selection.visual_points();
+        let prose = points
+            .iter()
+            .find(|point| {
+                matches!(
+                    point.point.domain,
+                    crate::selection::SelectionDomain::TranscriptProse
+                ) && point.point.grapheme > 2
+            })
+            .expect("mid-fragment prose point");
+        let code = points
+            .iter()
+            .filter(|point| {
+                matches!(
+                    point.point.domain,
+                    crate::selection::SelectionDomain::MarkdownCode { .. }
+                )
+            })
+            .max_by_key(|point| (point.row, point.col))
+            .expect("code point");
+        let mut app = AppState::new("session".into(), None);
+        app.items = items;
+        app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 40));
+        app.last_selection_projection = visible.selection;
+        let mouse =
+            |kind, point: &crate::selection::VisualSelectionPoint| crossterm::event::MouseEvent {
+                kind,
+                column: point.col,
+                row: point.row as u16,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            };
+        assert!(!handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), prose),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Drag(MouseButton::Left), code),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Up(MouseButton::Left), code),
+        ));
+        let ui = UiState {
+            app,
+            ..UiState::new(AppState::new("unused".into(), None))
+        };
+        let payload = selection_action_payload(&ui).expect("mid-fragment cross-block payload");
+        let copied = match payload {
+            crate::selection::CopyPayload::Markdown(text)
+            | crate::selection::CopyPayload::PlainText(text)
+            | crate::selection::CopyPayload::Preview(text) => text,
+        };
+        assert!(copied.contains("```rust\nfn main() {}\n```"));
+        assert!(!matches!(
+            selection_action_payload(&ui),
+            Some(crate::selection::CopyPayload::PlainText(_))
+        ));
+    }
+
+    #[test]
+    fn transcript_mouse_selection_copies_code_across_items() {
+        let items = app::OutputStore::from(vec![
+            app::OutputItem::AssistantMd {
+                md: "Before text".into(),
+                streaming: false,
+                retried: false,
+            },
+            app::OutputItem::AssistantMd {
+                md: "```rust\nfn main() {}\n```".into(),
+                streaming: false,
+                retried: false,
+            },
+        ]);
+        let mut cache = crate::output::LayoutCache::default();
+        let metrics = cache.update_dirty(
+            crate::output::LayoutKey {
+                width: 80,
+                theme: crate::theme::ThemeMode::Dark,
+            },
+            &items,
+            &crate::output::RenderCtx::empty(),
+            crate::output::LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 40,
+                follow_tail_rows: None,
+            },
+        );
+        let visible = cache.visible_slice(metrics.scroll_offset, metrics.total_rows, 0);
+        let points = visible.selection.visual_points();
+        let prose = points
+            .iter()
+            .find(|point| {
+                matches!(
+                    point.point.domain,
+                    crate::selection::SelectionDomain::TranscriptProse
+                )
+            })
+            .expect("prose point");
+        let code = points
+            .iter()
+            .filter(|point| {
+                matches!(
+                    point.point.domain,
+                    crate::selection::SelectionDomain::MarkdownCode { .. }
+                )
+            })
+            .max_by_key(|point| (point.row, point.col))
+            .expect("code point");
+        let mut app = AppState::new("session".into(), None);
+        app.items = items;
+        app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 40));
+        app.last_selection_projection = visible.selection;
+        let mouse =
+            |kind, point: &crate::selection::VisualSelectionPoint| crossterm::event::MouseEvent {
+                kind,
+                column: point.col,
+                row: point.row as u16,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            };
+        assert!(!handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), prose),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Drag(MouseButton::Left), code),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Up(MouseButton::Left), code),
+        ));
+        let ui = UiState {
+            app,
+            ..UiState::new(AppState::new("unused".into(), None))
+        };
+        let payload = selection_action_payload(&ui).expect("cross-item copy payload");
+        let copied = match payload {
+            crate::selection::CopyPayload::Markdown(text)
+            | crate::selection::CopyPayload::PlainText(text)
+            | crate::selection::CopyPayload::Preview(text) => text,
+        };
+        assert_eq!(copied, "Before text\n\n```rust\nfn main() {}\n```");
     }
 
     #[test]
