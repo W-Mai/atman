@@ -249,7 +249,7 @@ See [`examples/`](examples/) for the canonical flows covering agent loops, code 
 
 ## Tools
 
-55+ built-in tools across 15 categories. Plus any MCP server configured in `mcp_servers.json` is auto-connected at boot and exposed through the same tool interface. Each `llm.call` waits for only the MCP servers referenced by its resolved `tools` argument; `"mcp.*"` waits for all enabled servers.
+55+ built-in tools across 15 categories. Plus any MCP server configured in `mcp_servers.json` is auto-connected at boot and exposed through the same tool interface. An `llm.call` with a named MCP selector waits for that server and reports an unavailable dependency. The broad `"mcp.*"` selector briefly discovers available servers and continues if another server fails or remains unavailable; use `mcp.await` when a server is required.
 
 | Category | Tools | Tier |
 |---|---|---|

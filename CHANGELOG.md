@@ -11,6 +11,7 @@ All notable changes to atman are documented in this file.
 - **Semantic text selection** — Selection menus and copy/quote actions now cover transcript content, thinking blocks, Mermaid source, tool output, Workflow/Working panels, and Bash/Terminal panel bodies while excluding panel chrome.
 - **Quote draft and selection scrolling** — Quoted selections remain visible above the input or as a compact input hint, with aligned mouse and keyboard removal. Floating controls no longer cover the latest transcript lines. Drag input coalesces queued pointer positions, selection highlighting avoids repeated projection scans, and edge scrolling tracks the visible document boundary without idle redraws.
 - **Revision-bound spec approval** — Main-agent and synchronous spec reviews share session-local, single-use confirmation receipts. Approval and rejection require a real bound form response, cancellation leaves the design pending, and stale or mismatched revisions require another confirmation.
+- **MCP wildcard isolation** — A failed or stalled server no longer fails an `llm.call` that exposes optional `"mcp.*"` tools. Named MCP selectors and direct calls still report unavailable dependencies.
 
 ## [1.12.2] — 2026-09-16
 

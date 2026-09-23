@@ -130,6 +130,12 @@ pub fn spawn_mcp_boot(
             state,
         });
     }
+    for cfg in configs.iter().filter(|cfg| !cfg.disabled) {
+        executor.tools.replace_namespace(
+            &atman_runtime::mcp::mcp_tool_namespace(&cfg.name),
+            Vec::new(),
+        );
+    }
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()

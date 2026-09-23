@@ -238,7 +238,7 @@ First run writes `hello.at.snap.json`. Subsequent runs compare the current outpu
 
 ### MCP readiness and direct calls
 
-An `llm.call` that includes `"mcp.jira.search"`, `"mcp.jira.*"`, or `"mcp.*"` waits for the referenced server set before building the provider request. At code can inspect or invoke a server without an LLM:
+An `llm.call` with a named selector such as `"mcp.jira.search"` or `"mcp.jira.*"` waits for that server and fails if it is unavailable. The broad `"mcp.*"` selector gives connecting servers a short discovery window, then exposes whichever tools are available without failing the flow because another server failed. Use `mcp.await` or `mcp.call` when a specific server is required. At code can inspect or invoke a server without an LLM:
 
 ```at
 ready = mcp.await(server: "jira")

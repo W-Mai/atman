@@ -13,6 +13,14 @@ pub struct McpTools;
 pub struct McpAwait;
 pub struct McpCall;
 
+const OPTIONAL_DISCOVERY_GRACE: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadinessMode {
+    Required,
+    Optional,
+}
+
 pub async fn await_requested_tools(args: &ToolArgs, ctx: &ToolCtx) -> Result<(), RuntimeError> {
     let Some(Value::List(items)) = args.named("tools") else {
         return Ok(());
@@ -24,13 +32,35 @@ pub async fn await_requested_tools(args: &ToolArgs, ctx: &ToolCtx) -> Result<(),
             _ => None,
         })
         .collect::<Vec<_>>();
-    await_selectors(&selectors, ctx, Duration::from_secs(120)).await
+    let required = selectors
+        .iter()
+        .filter(|selector| selector.as_str() != "mcp.*")
+        .cloned()
+        .collect::<Vec<_>>();
+    await_selectors(
+        &required,
+        ctx,
+        Duration::from_secs(120),
+        ReadinessMode::Required,
+    )
+    .await?;
+    if selectors.iter().any(|selector| selector == "mcp.*") {
+        await_selectors(
+            &["mcp.*".into()],
+            ctx,
+            OPTIONAL_DISCOVERY_GRACE,
+            ReadinessMode::Optional,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn await_selectors(
     selectors: &[String],
     ctx: &ToolCtx,
     timeout: Duration,
+    mode: ReadinessMode,
 ) -> Result<(), RuntimeError> {
     if selectors.is_empty() {
         return Ok(());
@@ -55,16 +85,20 @@ async fn await_selectors(
                     pending.push(server);
                 }
                 Some(McpServerState::Disabled) => {
-                    return Err(RuntimeError::ToolFailed(format!(
-                        "MCP server `{server}` is disabled"
-                    )));
+                    if mode == ReadinessMode::Required {
+                        return Err(RuntimeError::ToolFailed(format!(
+                            "MCP server `{server}` is disabled"
+                        )));
+                    }
                 }
                 Some(McpServerState::Error { message })
                 | Some(McpServerState::Disconnected { message })
                 | Some(McpServerState::Timeout { message }) => {
-                    return Err(RuntimeError::ToolFailed(format!(
-                        "MCP server `{server}` is unavailable: {message}"
-                    )));
+                    if mode == ReadinessMode::Required {
+                        return Err(RuntimeError::ToolFailed(format!(
+                            "MCP server `{server}` is unavailable: {message}"
+                        )));
+                    }
                 }
                 None => {}
             }
@@ -77,16 +111,24 @@ async fn await_selectors(
                 return Err(RuntimeError::Cancelled("MCP readiness wait cancelled".into()));
             }
             _ = tokio::time::sleep_until(deadline) => {
-                return Err(RuntimeError::ToolFailed(format!(
-                    "timed out waiting for MCP server(s): {}",
-                    pending.join(", ")
-                )));
+                return if mode == ReadinessMode::Optional {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::ToolFailed(format!(
+                        "timed out waiting for MCP server(s): {}",
+                        pending.join(", ")
+                    )))
+                };
             }
             changed = context.changed() => {
                 if changed.is_err() {
-                    return Err(RuntimeError::ToolFailed(
-                        "MCP readiness channel closed before connection completed".into(),
-                    ));
+                    return if mode == ReadinessMode::Optional {
+                        Ok(())
+                    } else {
+                        Err(RuntimeError::ToolFailed(
+                            "MCP readiness channel closed before connection completed".into(),
+                        ))
+                    };
                 }
             }
         }
@@ -295,6 +337,7 @@ impl Tool for McpAwait {
                 &[format!("mcp.{server}.*")],
                 ctx,
                 Duration::from_secs(timeout),
+                ReadinessMode::Required,
             )
             .await?;
             Ok(Value::Bool(true))
@@ -332,7 +375,13 @@ impl Tool for McpCall {
         Box::pin(async move {
             let (target, target_args) = call_target(&args)?;
             let server = string_arg(&args, "server")?;
-            await_selectors(&[format!("mcp.{server}.*")], ctx, Duration::from_secs(120)).await?;
+            await_selectors(
+                &[format!("mcp.{server}.*")],
+                ctx,
+                Duration::from_secs(120),
+                ReadinessMode::Required,
+            )
+            .await?;
             let tool = ctx
                 .registry
                 .as_ref()
@@ -347,8 +396,102 @@ impl Tool for McpCall {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn wildcard_skips_failed_server() {
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        session.update_mcp_server(McpServerStatus {
+            name: "broken".into(),
+            transport: crate::mcp::TransportKind::Stdio,
+            state: McpServerState::Error {
+                message: "startup failed".into(),
+            },
+        });
+        session.update_mcp_server(McpServerStatus {
+            name: "healthy".into(),
+            transport: crate::mcp::TransportKind::Http,
+            state: McpServerState::Connected {
+                tool_count: 1,
+                tools: Vec::new(),
+            },
+        });
+        let ctx = ToolCtx::new().with_session_runtime(session);
+        let args = ToolArgs {
+            positional: Vec::new(),
+            named: vec![(
+                "tools".into(),
+                Value::List(vec![Value::Str("mcp.*".into())]),
+            )],
+        };
+        await_requested_tools(&args, &ctx).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wildcard_discovery_timeout_does_not_fail_a_flow() {
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        session.update_mcp_server(McpServerStatus {
+            name: "slow".into(),
+            transport: crate::mcp::TransportKind::Stdio,
+            state: McpServerState::Connecting,
+        });
+        let ctx = ToolCtx::new().with_session_runtime(session);
+        await_selectors(
+            &["mcp.*".into()],
+            &ctx,
+            Duration::from_millis(1),
+            ReadinessMode::Optional,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn wildcard_discovery_still_honors_cancellation() {
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        session.update_mcp_server(McpServerStatus {
+            name: "slow".into(),
+            transport: crate::mcp::TransportKind::Stdio,
+            state: McpServerState::Connecting,
+        });
+        let ctx = ToolCtx::new().with_session_runtime(session);
+        ctx.cancel.cancel();
+        assert!(matches!(
+            await_selectors(
+                &["mcp.*".into()],
+                &ctx,
+                Duration::from_secs(1),
+                ReadinessMode::Optional,
+            )
+            .await,
+            Err(RuntimeError::Cancelled(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn named_selector_still_fails_for_an_unavailable_server() {
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        session.update_mcp_server(McpServerStatus {
+            name: "broken".into(),
+            transport: crate::mcp::TransportKind::Stdio,
+            state: McpServerState::Error {
+                message: "startup failed".into(),
+            },
+        });
+        let ctx = ToolCtx::new().with_session_runtime(session);
+        let args = ToolArgs {
+            positional: Vec::new(),
+            named: vec![(
+                "tools".into(),
+                Value::List(vec![Value::Str("mcp.broken.search".into())]),
+            )],
+        };
+        assert!(matches!(
+            await_requested_tools(&args, &ctx).await,
+            Err(RuntimeError::ToolFailed(message)) if message.contains("broken")
+        ));
+    }
+
     #[test]
-    fn wildcard_waits_for_all_enabled_servers() {
+    fn wildcard_discovers_all_enabled_servers() {
         let statuses = vec![
             McpServerStatus {
                 name: "alpha".into(),
@@ -429,9 +572,14 @@ mod tests {
             });
         });
 
-        await_selectors(&["mcp.alpha.search".into()], &ctx, Duration::from_secs(1))
-            .await
-            .unwrap();
+        await_selectors(
+            &["mcp.alpha.search".into()],
+            &ctx,
+            Duration::from_secs(1),
+            ReadinessMode::Required,
+        )
+        .await
+        .unwrap();
         task.await.unwrap();
     }
 
