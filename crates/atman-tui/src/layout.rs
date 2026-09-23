@@ -220,8 +220,7 @@ pub fn compute_stacked_rect(
     if rows == 0 {
         return None;
     }
-    let inset: u16 = 4;
-    let width = input_rect.width.saturating_sub(inset * 2).max(20);
+    let width = stacked_rect_width(input_rect.width);
     let x = input_rect.x + (input_rect.width.saturating_sub(width)) / 2;
     let base_y = below.map(|rect| rect.y).unwrap_or(input_rect.y);
     let above_input = base_y.saturating_sub(rows);
@@ -234,6 +233,10 @@ pub fn compute_stacked_rect(
         width,
         height: rows,
     })
+}
+
+pub(crate) fn stacked_rect_width(input_width: u16) -> u16 {
+    input_width.saturating_sub(8).max(20)
 }
 
 /// Compute a rect for the injection queue, stacked above the approvals bar

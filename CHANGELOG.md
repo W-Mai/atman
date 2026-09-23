@@ -12,6 +12,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Queued task insertion settings** — Inserting queued text into an active flow uses that flow's invocation settings. The queued task retains its own settings if it returns to the queue or runs as a separate turn.
+- **Quote and queue layout** — User messages leave space between quoted text and the prompt. Quote previews count wrapped screen rows when expanding or scrolling, and unavailable queue insertions show their reason inside the panel.
 - **Quote removal** — The quote card close button handles clicks in the normal mouse path, and Ctrl+U removes a pending quote or the latest image attachment.
 - **Semantic text selection** — Selection menus and copy/quote actions now cover transcript content, thinking blocks, Mermaid source, tool output, Workflow/Working panels, and Bash/Terminal panel bodies while excluding panel chrome.
 - **Quote draft and selection scrolling** — Quoted selections remain visible above the input or as a compact input hint, with aligned mouse and keyboard removal. Floating controls no longer cover the latest transcript lines. Drag input coalesces queued pointer positions, selection highlighting avoids repeated projection scans, and edge scrolling tracks the visible document boundary without idle redraws.

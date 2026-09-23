@@ -7,6 +7,36 @@ use ratatui::widgets::Paragraph;
 use crate::input::{InputEditor, InputFooter, input_paragraph};
 use crate::{approval_bar, completion, layout, output, sidebar, status, submission_queue};
 
+pub(crate) fn quote_visual_lines(text: &str, card_width: u16) -> Vec<String> {
+    let max_width = card_width.saturating_sub(5).max(1) as usize;
+    let mut lines = Vec::new();
+    for hard_line in text.split('\n') {
+        let mut line = String::new();
+        let mut width = 0;
+        for (grapheme, grapheme_width) in crate::width::graphemes(hard_line) {
+            if width > 0 && width + grapheme_width > max_width {
+                lines.push(std::mem::take(&mut line));
+                width = 0;
+            }
+            line.push_str(grapheme);
+            width += grapheme_width;
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+fn quote_card_text_rows(total: usize, height: u16, expanded: bool) -> usize {
+    total
+        .min(if expanded { 8 } else { 3 })
+        .min(height.saturating_sub(2) as usize)
+}
+
+pub(crate) fn quote_card_max_scroll(text: &str, area: ratatui::layout::Rect) -> usize {
+    let total = quote_visual_lines(text, area.width).len();
+    total.saturating_sub(quote_card_text_rows(total, area.height, true))
+}
+
 fn render_selection_highlight(
     frame: &mut ratatui::Frame,
     area: ratatui::layout::Rect,
@@ -264,7 +294,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         // title + N items + 2 for block borders
         (app.pending_injections.len() as u16).min(5) + 3
     };
-    let submission_rows: u16 = if app.queued_submissions.is_empty() {
+    let submission_base_rows: u16 = if app.queued_submissions.is_empty() {
         0
     } else {
         (app.queued_submissions.len() as u16).min(5) + 2
@@ -276,15 +306,6 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         let overflow = u16::from(editor.pending_images().len() > 4);
         visible + overflow + 2
     };
-    let quote_rows: u16 = app.pending_quote.as_deref().map_or(0, |text| {
-        let total = text.lines().count();
-        let visible = if app.quote_expanded {
-            total.min(8)
-        } else {
-            total.min(3)
-        };
-        visible as u16 + 2 + u16::from(total > visible)
-    });
     let l = layout::compute_ex(area, status_height);
     let sidebar_rect =
         layout::compute_sidebar_rect(l.transcript, show_sidebar, sidebar_effective_collapsed);
@@ -331,6 +352,15 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     } else {
         bottom_rect
     };
+    let quote_lines = app
+        .pending_quote
+        .as_deref()
+        .map(|text| quote_visual_lines(text, layout::stacked_rect_width(input_rect.width)));
+    let quote_rows: u16 = quote_lines.as_ref().map_or(0, |lines| {
+        let total = lines.len();
+        let visible = total.min(if app.quote_expanded { 8 } else { 3 });
+        visible as u16 + 2 + u16::from(total > visible)
+    });
     let content_w = (input_rect.width.saturating_sub(layout::INPUT_H_OVERHEAD)) as usize;
     let cursor_row =
         crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u32;
@@ -346,6 +376,32 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         quote_rect.or(attachments_rect),
         approvals_rows,
     );
+    let submission_rows = if submission_base_rows == 0 {
+        0
+    } else {
+        let reason_rows = submission_queue::unavailable_lines(
+            &app.queued_submissions,
+            app.selected_submission
+                .min(app.queued_submissions.len().saturating_sub(1)),
+            app.submission_focus,
+            app.session
+                .as_ref()
+                .and_then(|session| session.current_turn())
+                .is_some(),
+            layout::stacked_rect_width(input_rect.width),
+        )
+        .len() as u16;
+        let expanded = submission_base_rows.saturating_add(reason_rows);
+        let base_y = approvals_rect
+            .or(quote_rect)
+            .or(attachments_rect)
+            .map_or(input_rect.y, |rect| rect.y);
+        if expanded < base_y.saturating_sub(l.transcript.y) {
+            expanded
+        } else {
+            submission_base_rows
+        }
+    };
     let submission_queue_rect = layout::compute_stacked_rect(
         l.transcript,
         input_rect,
@@ -751,15 +807,13 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             .title(format!(" images · {} ", editor.pending_images().len()));
         f.render_widget(ratatui::widgets::Paragraph::new(lines).block(block), area);
     }
-    if let (Some(area), Some(quote)) = (quote_rect, app.pending_quote.as_deref()) {
+    if let (Some(area), Some(wrapped)) = (quote_rect, quote_lines.as_ref()) {
         sanitize_widget_edges(f, area);
         f.render_widget(ratatui::widgets::Clear, area);
         let theme = crate::theme::theme();
-        let total = quote.lines().count();
+        let total = wrapped.len();
         let content_rows = area.height.saturating_sub(2) as usize;
-        let visible = total
-            .min(if app.quote_expanded { 8 } else { 3 })
-            .min(content_rows);
+        let visible = quote_card_text_rows(total, area.height, app.quote_expanded);
         let disclosure = usize::from(total > visible && content_rows > visible);
         let text_rows = visible;
         let max_scroll = total.saturating_sub(text_rows);
@@ -769,16 +823,13 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         } else {
             0
         };
-        let mut lines = quote
-            .lines()
+        let mut lines = wrapped
+            .iter()
             .skip(start)
             .take(text_rows)
             .map(|line| {
                 ratatui::text::Line::from(ratatui::text::Span::styled(
-                    format!(
-                        "│ {}",
-                        crate::width::truncate(line, area.width.saturating_sub(5) as usize)
-                    ),
+                    format!("│ {line}"),
                     ratatui::style::Style::default().fg(theme.subtle_fg.into()),
                 ))
             })
@@ -798,7 +849,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             .border_type(ratatui::widgets::BorderType::Plain)
             .border_style(ratatui::style::Style::default().fg(theme.subtle_fg.into()))
             .title(format!(
-                " QUOTE · {total} lines · F4 {}{} · Ctrl+U remove ",
+                " QUOTE · {total} rows · F4 {}{} · Ctrl+U remove ",
                 if app.quote_expanded {
                     "collapse"
                 } else {
@@ -1391,5 +1442,29 @@ mod quote_tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(expanded.contains("│ six"));
+    }
+
+    #[test]
+    fn quote_disclosure_counts_wrapped_screen_rows() {
+        let quote = "one two three four five six seven eight nine ten eleven twelve";
+        let wrapped = quote_visual_lines(quote, 20);
+        assert!(wrapped.len() > quote.lines().count());
+        assert!(wrapped.iter().all(|line| crate::width::width(line) <= 15));
+        let area = ratatui::layout::Rect::new(0, 0, 20, 6);
+        assert_eq!(
+            quote_card_max_scroll(quote, area),
+            wrapped.len().saturating_sub(4)
+        );
+    }
+
+    #[test]
+    fn quote_wrap_preserves_source_spacing() {
+        let quote = "  indented  code and words\n\n你好世界你好世界";
+        let wrapped = quote_visual_lines(quote, 20);
+        assert_eq!(wrapped[0].as_str(), "  indented  cod");
+        assert_eq!(wrapped[1].as_str(), "e and words");
+        assert_eq!(wrapped[2].as_str(), "");
+        assert!(wrapped.iter().all(|line| crate::width::width(line) <= 15));
+        assert_eq!(wrapped[3..].concat(), "你好世界你好世界");
     }
 }

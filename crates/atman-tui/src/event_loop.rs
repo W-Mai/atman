@@ -2626,14 +2626,10 @@ fn handle_quote_mouse(app: &mut AppState, event: &crossterm::event::MouseEvent) 
         .quote_rect
         .is_some_and(|rect| rect_contains(rect, event.column, event.row));
     if over_card && app.quote_expanded {
-        let visible = app
-            .quote_rect
-            .map_or(8, |rect| rect.height.saturating_sub(3) as usize)
-            .max(1);
-        let max_scroll = app
-            .pending_quote
-            .as_deref()
-            .map_or(0, |quote| quote.lines().count().saturating_sub(visible));
+        let max_scroll = crate::render::quote_card_max_scroll(
+            app.pending_quote.as_deref().unwrap_or_default(),
+            app.quote_rect.expect("quote card is visible"),
+        );
         match event.kind {
             MouseEventKind::ScrollDown => {
                 app.quote_scroll = app.quote_scroll.saturating_add(2).min(max_scroll);

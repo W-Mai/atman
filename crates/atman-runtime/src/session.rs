@@ -2705,7 +2705,7 @@ impl Session {
         if selected.revision != expected_revision {
             return Err(SubmissionQueueError::RevisionConflict);
         }
-        if let Some(reason) = selected.next_call_block_reason(false) {
+        if let Some(reason) = selected.direct_insert_block_reason(false) {
             return Err(SubmissionQueueError::NotInjectable(reason));
         }
         if selected.origin != crate::message::MessageOrigin::User {
@@ -4799,16 +4799,22 @@ mod tests {
             .enqueue_submission(
                 "check the result",
                 Vec::new(),
-                crate::InvocationEnv::default(),
+                crate::InvocationEnv::single("effort", crate::Value::Str("medium".into())),
                 crate::message::MessageOrigin::User,
             )
             .unwrap();
+        assert_eq!(selected.insert_block_reason, None);
         assert_eq!(
             session.insert_queued_submission_l1(&selected.id, selected.revision),
             Err(crate::submission_queue::SubmissionQueueError::NoActiveTurn)
         );
         let turn_id = TurnId::now();
         session.begin_turn(Message::user_text(turn_id.clone(), "initial"));
+        assert!(
+            session
+                .claim_queued_submissions_for_llm(&turn_id, false)
+                .is_empty()
+        );
         session
             .insert_queued_submission_l1(&selected.id, selected.revision)
             .unwrap();
@@ -4823,6 +4829,11 @@ mod tests {
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].id, selected.id);
         assert_eq!(restored[0].text, selected.text);
+        let restored_submission = session.pop_queued_submission().unwrap();
+        assert!(matches!(
+            restored_submission.invocation_env.get("effort"),
+            Some(crate::Value::Str(value)) if value == "medium"
+        ));
         assert!(restored[0].revision > selected.revision);
         assert!(session.list_pending_injections().is_empty());
         assert!(

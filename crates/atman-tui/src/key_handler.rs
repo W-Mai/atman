@@ -1142,19 +1142,19 @@ pub(crate) fn handle_key(
             }
             return;
         }
-        KeyAction::PageUp if app.pending_quote.is_some() && app.quote_expanded => {
+        KeyAction::PageUp
+            if app.pending_quote.is_some() && app.quote_expanded && app.quote_rect.is_some() =>
+        {
             app.quote_scroll = app.quote_scroll.saturating_sub(4);
             return;
         }
-        KeyAction::PageDown if app.pending_quote.is_some() && app.quote_expanded => {
-            let visible = app
-                .quote_rect
-                .map_or(8, |rect| rect.height.saturating_sub(3) as usize)
-                .max(1);
-            let max_scroll = app
-                .pending_quote
-                .as_deref()
-                .map_or(0, |quote| quote.lines().count().saturating_sub(visible));
+        KeyAction::PageDown
+            if app.pending_quote.is_some() && app.quote_expanded && app.quote_rect.is_some() =>
+        {
+            let max_scroll = crate::render::quote_card_max_scroll(
+                app.pending_quote.as_deref().unwrap_or_default(),
+                app.quote_rect.expect("quote card is visible"),
+            );
             app.quote_scroll = app.quote_scroll.saturating_add(4).min(max_scroll);
             return;
         }

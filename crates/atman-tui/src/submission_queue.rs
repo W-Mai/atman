@@ -27,6 +27,30 @@ pub struct QueueRenderState<'a> {
     pub active_turn: bool,
 }
 
+pub(crate) fn unavailable_lines(
+    submissions: &[atman_runtime::QueuedSubmissionView],
+    selected: usize,
+    focused: bool,
+    active_turn: bool,
+    width: u16,
+) -> Vec<String> {
+    let reason = focused
+        .then(|| submissions.get(selected))
+        .flatten()
+        .and_then(|submission| {
+            submission
+                .insert_block_reason
+                .as_deref()
+                .or((!active_turn).then_some("no active flow"))
+        });
+    reason.map_or_else(Vec::new, |reason| {
+        crate::width::word_wrap(
+            &format!("i insert unavailable · {reason}"),
+            width.saturating_sub(6).max(1) as usize,
+        )
+    })
+}
+
 impl QueueHitMap {
     pub fn row_at(&self, x: u16, y: u16) -> Option<usize> {
         self.rows
@@ -60,20 +84,17 @@ pub fn render(
     let t = crate::theme::theme();
     let border = if focused { t.accent } else { t.subtle_fg };
     let selected = selected.min(submissions.len().saturating_sub(1));
-    let block_reason = focused
-        .then_some(&submissions[selected])
-        .and_then(|submission| {
-            submission
-                .insert_block_reason
-                .as_deref()
-                .or((!active_turn).then_some("no active flow"))
-        });
-    let hint = if let Some(reason) = block_reason {
-        format!(" insert unavailable: {reason} · Enter/e edit · Del remove ")
+    let reason_lines = unavailable_lines(submissions, selected, focused, active_turn, area.width);
+    let show_reason =
+        !reason_lines.is_empty() && area.height.saturating_sub(2) as usize > reason_lines.len();
+    let hint = if focused && show_reason {
+        " Enter/e edit · ↑/↓ select · Del remove · Tab input "
+    } else if focused && !reason_lines.is_empty() {
+        " i unavailable · click insert for reason "
     } else if focused {
-        " i insert · Enter/e edit · ↑/↓ select · Del remove · Tab input ".to_owned()
+        " i insert (flow settings) · Enter/e edit · ↑/↓ select · Del remove · Tab input "
     } else {
-        " Shift+Tab focus ".to_owned()
+        " Shift+Tab focus "
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -90,7 +111,8 @@ pub fn render(
         )
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
-    let visible = inner.height as usize;
+    let reason_rows = if show_reason { reason_lines.len() } else { 0 };
+    let visible = inner.height as usize - reason_rows;
     let start = selected
         .saturating_sub(visible.saturating_sub(1))
         .min(submissions.len().saturating_sub(visible));
@@ -206,6 +228,14 @@ pub fn render(
             ));
         }
     }
+    if reason_rows > 0 {
+        lines.extend(reason_lines.into_iter().map(|line| {
+            Line::from(Span::styled(
+                format!("│ {line}"),
+                Style::default().fg(t.subtle_fg.into()),
+            ))
+        }));
+    }
     f.render_widget(Paragraph::new(lines).block(block), area);
     hitmap
 }
@@ -269,5 +299,48 @@ mod tests {
                 .any(|(index, action, _)| { *index == 0 && *action == QueueAction::Edit })
         );
         assert!(hitmap.actions.iter().all(|(index, _, _)| *index == 0));
+    }
+
+    #[test]
+    fn unavailable_reason_uses_content_row_without_clipping_its_start() {
+        let session = atman_runtime::Session::open_ephemeral();
+        session
+            .enqueue_submission(
+                "@./image.png inspect",
+                Vec::new(),
+                atman_runtime::InvocationEnv::single(
+                    "effort",
+                    atman_runtime::Value::Str("medium".into()),
+                ),
+                atman_runtime::message::MessageOrigin::User,
+            )
+            .unwrap();
+        let submissions = session.queued_submissions();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 5)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    Rect::new(0, 0, 80, 5),
+                    &submissions,
+                    QueueRenderState {
+                        selected: 0,
+                        focused: true,
+                        hovered: None,
+                        edit: None,
+                        active_turn: true,
+                    },
+                );
+            })
+            .unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("i insert unavailable · path attachments need a separate turn"));
     }
 }

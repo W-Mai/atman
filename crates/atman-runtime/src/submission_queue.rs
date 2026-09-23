@@ -53,6 +53,14 @@ impl QueuedSubmission {
     }
 
     pub fn next_call_block_reason(&self, allow_images: bool) -> Option<&'static str> {
+        self.block_reason(allow_images, true)
+    }
+
+    pub fn direct_insert_block_reason(&self, allow_images: bool) -> Option<&'static str> {
+        self.block_reason(allow_images, false)
+    }
+
+    fn block_reason(&self, allow_images: bool, require_empty_env: bool) -> Option<&'static str> {
         let routed_text = self
             .presentation
             .as_ref()
@@ -66,7 +74,7 @@ impl QueuedSubmission {
         }) {
             return Some("path attachments need a separate turn");
         }
-        if !self.invocation_env.is_empty() {
+        if require_empty_env && !self.invocation_env.is_empty() {
             return Some("invocation settings need a separate turn");
         }
         if !allow_images && !self.images.is_empty() {
@@ -100,7 +108,7 @@ impl From<&QueuedSubmission> for QueuedSubmissionView {
             created_at: submission.created_at,
             presentation: submission.presentation.clone(),
             insert_block_reason: submission
-                .next_call_block_reason(false)
+                .direct_insert_block_reason(false)
                 .map(str::to_owned)
                 .or_else(|| {
                     (submission.origin != MessageOrigin::User)

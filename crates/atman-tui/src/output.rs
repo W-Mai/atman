@@ -1881,6 +1881,9 @@ fn presented_user_prose_atoms(
         }
     }
     if !presentation.prompt.is_empty() {
+        if presentation.quote.is_some() {
+            row += 1;
+        }
         let first = format!("{DOCUMENT_PAD}❯{DOCUMENT_PAD}");
         let continuation = " ".repeat(crate::width::width(&first));
         append_rows(&presentation.prompt, &first, &continuation, &mut row);
@@ -2929,6 +2932,7 @@ fn render_user_turn(
             }
         }
         if !presentation.prompt.is_empty() {
+            lines.push(blank.clone());
             for row in wrap_with_prefix(&presentation.prompt, target, &first, &continuation) {
                 lines.push(line_with_right_pad(
                     &row.prefix,
@@ -10294,13 +10298,14 @@ mod tests {
         let atoms = presented_user_prose_atoms(&presentation, 40, false);
         assert!(plain_line(&rows[1]).contains("QUOTED · 2 lines"));
         assert!(plain_line(&rows[2]).contains("汉字"));
-        assert!(plain_line(&rows[4]).contains("check"));
+        assert!(plain_line(&rows[4]).trim().is_empty());
+        assert!(plain_line(&rows[5]).contains("check"));
         let prompt_start = source.find("check").unwrap();
         let prompt_grapheme = crate::width::graphemes(&source[..prompt_start]).count();
         assert!(
             atoms
                 .iter()
-                .any(|atom| { atom.row == 4 && atom.event_graphemes.start == prompt_grapheme })
+                .any(|atom| { atom.row == 5 && atom.event_graphemes.start == prompt_grapheme })
         );
     }
 
