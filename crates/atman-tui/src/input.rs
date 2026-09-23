@@ -7,6 +7,12 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::ModeColorExt;
 
+#[derive(Default)]
+pub struct InputFooter {
+    pub queued_count: usize,
+    pub pending_quote_lines: Option<usize>,
+}
+
 pub fn input_paragraph<'a>(
     input: &'a str,
     border_color: ratatui::style::Color,
@@ -14,7 +20,7 @@ pub fn input_paragraph<'a>(
     scroll_row: u16,
     trust: &'a atman_runtime::trust::TrustConfig,
     reasoning: Option<&'a str>,
-    queued_count: usize,
+    footer: InputFooter,
 ) -> Paragraph<'a> {
     let display = trust.display();
     let mode_color = display.color.ratatui();
@@ -31,8 +37,13 @@ pub fn input_paragraph<'a>(
         title,
         Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
     );
-    let hint_right = if queued_count > 0 {
-        format!(" shift+tab · next · {queued_count} · enter · send ")
+    let hint_right = if let Some(lines) = footer.pending_quote_lines {
+        format!(" quote · {lines} lines · Alt+Del remove · Enter send ")
+    } else if footer.queued_count > 0 {
+        format!(
+            " shift+tab · next · {} · enter · send ",
+            footer.queued_count
+        )
     } else if trust.mode == atman_runtime::trust::TrustMode::Eager {
         let display = trust.theme.escalation_display(trust.escalation);
         format!(

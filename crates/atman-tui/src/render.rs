@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
-use crate::input::{InputEditor, input_paragraph};
+use crate::input::{InputEditor, InputFooter, input_paragraph};
 use crate::{approval_bar, completion, layout, output, sidebar, status, submission_queue};
 
 fn render_selection_highlight(
@@ -16,73 +16,20 @@ fn render_selection_highlight(
 ) {
     let bg = crate::theme::theme().accent.into_inner();
     let cells = frame.buffer_mut();
-    for surface in &projection.surfaces {
-        for atom in &surface.prose_atoms {
-            let row = atom.screen_row.saturating_sub(scroll_offset);
-            if row >= u32::from(area.height) {
-                continue;
-            }
-            for col in atom.atom.cols.clone() {
-                let point = projection.prose_point_at(atom.screen_row, col);
-                if col < area.width
-                    && point.is_some_and(|point| {
-                        crate::selection::selection_contains(selection, &point)
-                    })
-                {
-                    cells[(
-                        area.x.saturating_add(col),
-                        area.y.saturating_add(row as u16),
-                    )]
-                        .set_bg(bg);
-                }
-            }
+    for visual in projection.visual_points() {
+        let row = visual.row.saturating_sub(scroll_offset);
+        if row >= u32::from(area.height)
+            || !crate::selection::selection_contains(selection, &visual.point)
+        {
+            continue;
         }
-        for atom in &surface.code_atoms {
-            let row = atom.atom.screen_row.saturating_sub(scroll_offset);
-            if row >= u32::from(area.height) {
-                continue;
-            }
-            for col in atom.atom.cols.clone() {
-                let point = projection.code_point_at(atom.atom.screen_row, col);
-                if col < area.width
-                    && point.is_some_and(|point| {
-                        crate::selection::selection_contains(selection, &point)
-                    })
-                {
-                    cells[(
-                        area.x.saturating_add(col),
-                        area.y.saturating_add(row as u16),
-                    )]
-                        .set_bg(bg);
-                }
-            }
-        }
-        for atom in &surface.isolated_atoms {
-            let (screen_row, cols) = match atom {
-                crate::selection::VisibleIsolatedAtom::Markdown {
-                    atom, screen_row, ..
-                } => (*screen_row, atom.cols.clone()),
-                crate::selection::VisibleIsolatedAtom::Raw { atom, .. } => {
-                    (atom.screen_row, atom.cols.clone())
-                }
-            };
-            let row = screen_row.saturating_sub(scroll_offset);
-            if row >= u32::from(area.height) {
-                continue;
-            }
-            for col in cols {
-                let point = projection.isolated_point_at(screen_row, col);
-                if col < area.width
-                    && point.is_some_and(|point| {
-                        crate::selection::selection_contains(selection, &point)
-                    })
-                {
-                    cells[(
-                        area.x.saturating_add(col),
-                        area.y.saturating_add(row as u16),
-                    )]
-                        .set_bg(bg);
-                }
+        for col in visual.col..visual.col.saturating_add(visual.cell_width) {
+            if col < area.width {
+                cells[(
+                    area.x.saturating_add(col),
+                    area.y.saturating_add(row as u16),
+                )]
+                    .set_bg(bg);
             }
         }
     }
@@ -329,6 +276,9 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         let overflow = u16::from(editor.pending_images().len() > 4);
         visible + overflow + 2
     };
+    let quote_rows: u16 = app.pending_quote.as_deref().map_or(0, |text| {
+        text.lines().count().min(6) as u16 + 2 + u16::from(text.lines().count() > 6)
+    });
     let l = layout::compute_ex(area, status_height);
     let sidebar_rect =
         layout::compute_sidebar_rect(l.transcript, show_sidebar, sidebar_effective_collapsed);
@@ -382,14 +332,37 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     let scroll_row = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
     let attachments_rect =
         layout::compute_stacked_rect(l.transcript, input_rect, None, attachment_rows);
-    let approvals_rect =
-        layout::compute_stacked_rect(l.transcript, input_rect, attachments_rect, approvals_rows);
+    let quote_rect =
+        layout::compute_stacked_rect(l.transcript, input_rect, attachments_rect, quote_rows);
+    let approvals_rect = layout::compute_stacked_rect(
+        l.transcript,
+        input_rect,
+        quote_rect.or(attachments_rect),
+        approvals_rows,
+    );
     let submission_queue_rect = layout::compute_stacked_rect(
         l.transcript,
         input_rect,
-        approvals_rect.or(attachments_rect),
+        approvals_rect.or(quote_rect).or(attachments_rect),
         submission_rows,
     );
+    let injections_rect = (injection_rows > 0)
+        .then(|| {
+            layout::compute_injection_rect(
+                l.transcript,
+                input_rect,
+                submission_queue_rect
+                    .or(approvals_rect)
+                    .or(quote_rect)
+                    .or(attachments_rect),
+                injection_rows,
+            )
+        })
+        .flatten();
+    app.quote_rect = quote_rect;
+    if app.pending_quote.is_none() {
+        app.quote_close_hovered = false;
+    }
     app.submission_queue_rect = submission_queue_rect;
     app.input_rect = Some(input_rect);
     f.render_widget(
@@ -408,7 +381,17 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     let transcript_area = transcript_content;
     app.last_transcript_rect = Some(transcript_area);
     let document_visible_rows = layout::document_visible_rows(transcript_area.height);
-    let input_overlay_rows = layout::input_overlay_rows(input_rect, transcript_area);
+    let input_overlay_rows = layout::floating_overlay_rows(
+        transcript_area,
+        input_rect,
+        &[
+            attachments_rect,
+            quote_rect,
+            approvals_rect,
+            submission_queue_rect,
+            injections_rect,
+        ],
+    );
     let effective_viewport = document_visible_rows.max(1);
     if startup_active {
         if let Some(crate::app::OutputItem::StartupCard { version, recent }) = app.items.first() {
@@ -587,6 +570,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                     app.items.len(),
                 );
             }
+            crate::event_loop::resolve_transcript_selection_after_render(app);
             let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
             f.render_widget(paragraph, transcript_area);
             if let Some(selection) = app.selection.as_ref() {
@@ -761,6 +745,35 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             .title(format!(" images · {} ", editor.pending_images().len()));
         f.render_widget(ratatui::widgets::Paragraph::new(lines).block(block), area);
     }
+    if let (Some(area), Some(quote)) = (quote_rect, app.pending_quote.as_deref()) {
+        sanitize_widget_edges(f, area);
+        f.render_widget(ratatui::widgets::Clear, area);
+        let theme = crate::theme::theme();
+        let visible = area.height.saturating_sub(2) as usize;
+        let mut lines = quote
+            .lines()
+            .take(visible.min(6))
+            .map(|line| {
+                ratatui::text::Line::from(ratatui::text::Span::styled(
+                    crate::width::truncate(line, area.width.saturating_sub(4) as usize),
+                    ratatui::style::Style::default().fg(theme.subtle_fg.into()),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let total = quote.lines().count();
+        if total > lines.len() {
+            lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
+                format!(" +{} more", total - lines.len()),
+                ratatui::style::Style::default().fg(theme.subtle_fg.into()),
+            )));
+        }
+        let block = ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(ratatui::style::Style::default().fg(theme.accent.into()))
+            .title(format!(" quote · {total} lines · Alt+Del "));
+        f.render_widget(ratatui::widgets::Paragraph::new(lines).block(block), area);
+    }
     if let Some(area) = approvals_rect {
         sanitize_widget_edges(f, area);
         f.render_widget(ratatui::widgets::Clear, area);
@@ -791,18 +804,6 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         app.submission_queue_hitmap = submission_queue::QueueHitMap::default();
     }
     // Render injection queue above approvals bar / input box.
-    let injections_rect = if injection_rows > 0 {
-        layout::compute_injection_rect(
-            l.transcript,
-            input_rect,
-            submission_queue_rect
-                .or(approvals_rect)
-                .or(attachments_rect),
-            injection_rows,
-        )
-    } else {
-        None
-    };
     if let Some(area) = injections_rect {
         sanitize_widget_edges(f, area);
         f.render_widget(ratatui::widgets::Clear, area);
@@ -862,10 +863,34 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             scroll_row.min(u16::MAX as u32) as u16,
             &app.trust,
             reasoning_badge.as_deref(),
-            app.queued_submissions.len(),
+            InputFooter {
+                queued_count: app.queued_submissions.len(),
+                pending_quote_lines: app
+                    .pending_quote
+                    .as_ref()
+                    .filter(|_| quote_rect.is_none())
+                    .map(|quote| quote.lines().count()),
+            },
         ),
         input_rect,
     );
+    if app.pending_quote.is_some()
+        && let Some(close) =
+            crate::selection_menu::quote_close_rect(quote_rect.unwrap_or(input_rect))
+    {
+        f.render_widget(
+            ratatui::widgets::Paragraph::new("[x]").style(
+                ratatui::style::Style::default()
+                    .fg(crate::theme::theme().subtle_fg.into())
+                    .bg(if app.quote_close_hovered {
+                        crate::theme::theme().work_hover_bg.into()
+                    } else {
+                        ratatui::style::Color::Reset
+                    }),
+            ),
+            close,
+        );
+    }
     f.render_widget(
         ratatui::widgets::Paragraph::new(ratatui::text::Line::from(ratatui::text::Span::styled(
             "❯",
@@ -1257,5 +1282,34 @@ pub(crate) fn render_pulse_bar(
                 cell.fg = lerp_rgb(border_color, peak, wave);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod quote_tests {
+    use super::*;
+
+    #[test]
+    fn pending_quote_remains_visible_when_the_card_does_not_fit() {
+        let backend = ratatui::backend::TestBackend::new(80, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut ui = UiState::new(crate::app::AppState::new("session".into(), None));
+        ui.app.pending_quote = Some("selected text".into());
+        let editor = InputEditor::default();
+
+        terminal
+            .draw(|frame| render_frame(frame, &mut ui, &editor))
+            .unwrap();
+
+        assert!(ui.app.quote_rect.is_none());
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("quote · 1 lines"));
+        assert!(rendered.contains("[x]"));
     }
 }

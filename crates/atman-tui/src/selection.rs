@@ -135,7 +135,10 @@ pub fn selection_extend(
     })
 }
 
-fn transcript_domains_compatible(left: &SelectionDomain, right: &SelectionDomain) -> bool {
+pub(crate) fn transcript_domains_compatible(
+    left: &SelectionDomain,
+    right: &SelectionDomain,
+) -> bool {
     matches!(
         (left, right),
         (
@@ -337,6 +340,47 @@ pub fn local_prose_point_at(
                             .saturating_add(event_grapheme - segment.event_graphemes.start),
                     })
             })
+        })
+}
+
+fn prose_event_lookup(
+    fragments: &[CopyFragment],
+) -> std::collections::HashMap<u32, Vec<(usize, &ProseEventSegment)>> {
+    let mut lookup = std::collections::HashMap::new();
+    for (index, fragment) in fragments.iter().enumerate() {
+        for segment in &fragment.event_segments {
+            lookup
+                .entry(segment.event)
+                .or_insert_with(Vec::new)
+                .push((index, segment));
+        }
+    }
+    lookup
+}
+
+fn indexed_prose_point_at(
+    atom: &RelativeProseAtom,
+    col: u16,
+    lookup: &std::collections::HashMap<u32, Vec<(usize, &ProseEventSegment)>>,
+) -> Option<LocalProsePoint> {
+    if atom.cell_width == 0 || col < atom.cols.start || col >= atom.cols.end {
+        return None;
+    }
+    let step = usize::from((col - atom.cols.start) / atom.cell_width);
+    let event_grapheme = atom.event_graphemes.start.saturating_add(step);
+    lookup
+        .get(&atom.event)?
+        .iter()
+        .find_map(|(fragment, segment)| {
+            segment
+                .event_graphemes
+                .contains(&event_grapheme)
+                .then(|| LocalProsePoint {
+                    fragment: *fragment,
+                    grapheme: segment
+                        .fragment_grapheme_start
+                        .saturating_add(event_grapheme - segment.event_graphemes.start),
+                })
         })
 }
 
@@ -699,12 +743,14 @@ pub struct IsolatedSource {
 pub struct RelativeCodeAtom {
     pub domain: SelectionDomain,
     pub atom: RelativeSelectionAtom,
+    pub grapheme_start: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VisibleCodeAtom {
     pub domain: SelectionDomain,
     pub atom: VisibleAtom,
+    pub grapheme_start: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -754,6 +800,7 @@ pub fn code_atoms(
             continue;
         };
         let mut body_offset = 0usize;
+        let mut body_grapheme = 0usize;
         for (line_index, raw) in code
             .body
             .split_inclusive('\n')
@@ -765,11 +812,21 @@ pub fn code_atoms(
                 .first_body_row
                 .saturating_add(u16::try_from(line_index).unwrap_or(u16::MAX));
             let (line_atoms, _) = atom_runs(row, span.body_start_col, text, body_offset);
-            atoms.extend(line_atoms.into_iter().map(|atom| RelativeCodeAtom {
-                domain: code.domain.clone(),
-                atom,
-            }));
+            let mut run_grapheme = body_grapheme;
+            for atom in line_atoms {
+                let count = code
+                    .body
+                    .get(atom.source.clone())
+                    .map_or(0, |run| run.graphemes(true).count());
+                atoms.push(RelativeCodeAtom {
+                    domain: code.domain.clone(),
+                    atom,
+                    grapheme_start: run_grapheme,
+                });
+                run_grapheme = run_grapheme.saturating_add(count);
+            }
             body_offset = body_offset.saturating_add(raw.len());
+            body_grapheme = body_grapheme.saturating_add(raw.graphemes(true).count());
         }
     }
     atoms
@@ -803,6 +860,7 @@ pub struct VisualSelectionPoint {
     pub point: SemanticPoint,
     pub row: u32,
     pub col: u16,
+    pub cell_width: u16,
     pub surface: usize,
     pub owner_revision: OutputRevision,
 }
@@ -814,17 +872,50 @@ pub struct VisibleSelectionProjection {
 }
 
 impl VisibleSelectionProjection {
+    pub fn nearest_point_at(
+        &self,
+        row: u32,
+        col: u16,
+        domain: Option<&SelectionDomain>,
+        visible_rows: Range<u32>,
+    ) -> Option<SemanticPoint> {
+        self.visual_points()
+            .into_iter()
+            .filter(|visual| {
+                visible_rows.contains(&visual.row)
+                    && visual.row.abs_diff(row) <= 1
+                    && domain.is_none_or(|domain| {
+                        transcript_domains_compatible(domain, &visual.point.domain)
+                    })
+            })
+            .min_by_key(|visual| (visual.row.abs_diff(row), visual.col.abs_diff(col)))
+            .map(|visual| visual.point)
+    }
+
     pub fn visual_points(&self) -> Vec<VisualSelectionPoint> {
         let mut points = Vec::new();
         for (surface_index, surface) in self.surfaces.iter().enumerate() {
+            let prose_lookup = prose_event_lookup(&surface.source.prose);
             for visible in &surface.prose_atoms {
-                let step = visible.atom.cell_width.max(1) as usize;
+                let atom = &visible.atom;
+                let step = atom.cell_width.max(1) as usize;
                 for col in (visible.atom.cols.start..visible.atom.cols.end).step_by(step) {
-                    if let Some(point) = self.prose_point_at(visible.screen_row, col) {
+                    if let Some(local) = indexed_prose_point_at(atom, col, &prose_lookup) {
+                        let point = SemanticPoint {
+                            domain: SelectionDomain::TranscriptProse,
+                            ordinal: fragment_ordinal(
+                                surface.source.owner_revision.id,
+                                local.fragment,
+                                &surface.source.prose[local.fragment],
+                            ),
+                            grapheme: local.grapheme,
+                            affinity: Affinity::Before,
+                        };
                         points.push(VisualSelectionPoint {
                             point,
                             row: visible.screen_row,
                             col,
+                            cell_width: atom.cell_width,
                             surface: surface_index,
                             owner_revision: surface.revision,
                         });
@@ -832,19 +923,48 @@ impl VisibleSelectionProjection {
                 }
             }
             for visible in &surface.code_atoms {
-                let step = visible.atom.cell_width.max(1) as usize;
-                for col in (visible.atom.cols.start..visible.atom.cols.end).step_by(step) {
-                    if let Some(point) = self.code_point_at(visible.atom.screen_row, col) {
-                        points.push(VisualSelectionPoint {
-                            point,
-                            row: visible.atom.screen_row,
-                            col,
-                            surface: surface_index,
-                            owner_revision: surface.revision,
-                        });
-                    }
+                let atom = &visible.atom;
+                let Some(code) = surface
+                    .source
+                    .code_blocks
+                    .iter()
+                    .find(|code| code.domain == visible.domain)
+                else {
+                    continue;
+                };
+                let Some(text) = code.body.get(atom.source.clone()) else {
+                    continue;
+                };
+                let SelectionDomain::MarkdownCode { item_id, .. } = &visible.domain else {
+                    continue;
+                };
+                let step = atom.cell_width.max(1) as usize;
+                for (index, col) in (atom.cols.start..atom.cols.end)
+                    .step_by(step)
+                    .take(text.graphemes(true).count())
+                    .enumerate()
+                {
+                    points.push(VisualSelectionPoint {
+                        point: SemanticPoint {
+                            domain: visible.domain.clone(),
+                            ordinal: code_ordinal(*item_id, code),
+                            grapheme: visible.grapheme_start + index,
+                            affinity: Affinity::Before,
+                        },
+                        row: atom.screen_row,
+                        col,
+                        cell_width: atom.cell_width,
+                        surface: surface_index,
+                        owner_revision: surface.revision,
+                    });
                 }
             }
+            let isolated_lookups = surface
+                .source
+                .isolated
+                .iter()
+                .map(|source| prose_event_lookup(&source.fragments))
+                .collect::<Vec<_>>();
             for visible in &surface.isolated_atoms {
                 let (row, cols, width) = match visible {
                     VisibleIsolatedAtom::Markdown {
@@ -855,11 +975,40 @@ impl VisibleSelectionProjection {
                     }
                 };
                 for col in (cols.start..cols.end).step_by(width.max(1) as usize) {
-                    if let Some(point) = self.isolated_point_at(row, col) {
+                    let point = match visible {
+                        VisibleIsolatedAtom::Markdown { domain, atom, .. } => surface
+                            .source
+                            .isolated
+                            .iter()
+                            .enumerate()
+                            .find_map(|(index, isolated)| {
+                                (&isolated.domain == domain).then(|| {
+                                    indexed_prose_point_at(atom, col, &isolated_lookups[index]).map(
+                                        |local| SemanticPoint {
+                                            domain: domain.clone(),
+                                            ordinal: local.fragment as u64,
+                                            grapheme: local.grapheme,
+                                            affinity: Affinity::Before,
+                                        },
+                                    )
+                                })
+                            })
+                            .flatten(),
+                        VisibleIsolatedAtom::Raw { domain, atom } => atom
+                            .source_at(&surface.source.source, col)
+                            .map(|byte| SemanticPoint {
+                                domain: domain.clone(),
+                                ordinal: 0,
+                                grapheme: surface.source.source[..byte].graphemes(true).count(),
+                                affinity: Affinity::Before,
+                            }),
+                    };
+                    if let Some(point) = point {
                         points.push(VisualSelectionPoint {
                             point,
                             row,
                             col,
+                            cell_width: width,
                             surface: surface_index,
                             owner_revision: surface.revision,
                         });
@@ -915,8 +1064,8 @@ impl VisibleSelectionProjection {
                 .code_blocks
                 .iter()
                 .find(|code| code.domain == visible.domain)?;
-            let byte = visible.atom.source_at(&code.body, col)?;
-            let grapheme = code.body[..byte].graphemes(true).count();
+            let grapheme = visible.grapheme_start
+                + usize::from((col - visible.atom.cols.start) / visible.atom.cell_width.max(1));
             let item_id = match &code.domain {
                 SelectionDomain::MarkdownCode { item_id, .. } => *item_id,
                 _ => return None,

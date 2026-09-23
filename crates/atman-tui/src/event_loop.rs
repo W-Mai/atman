@@ -23,6 +23,34 @@ use crate::{
 };
 use atman_runtime::stream::StreamFrame;
 
+async fn recv_input_event(
+    rx: &mut mpsc::UnboundedReceiver<std::io::Result<CtEvent>>,
+    pending: &mut Option<std::io::Result<CtEvent>>,
+) -> Option<std::io::Result<CtEvent>> {
+    let mut event = match pending.take() {
+        Some(event) => event,
+        None => rx.recv().await?,
+    };
+    if let Ok(CtEvent::Mouse(mouse)) = &event
+        && matches!(mouse.kind, MouseEventKind::Drag(_))
+    {
+        let kind = mouse.kind;
+        loop {
+            match rx.try_recv() {
+                Ok(next) if matches!(&next, Ok(CtEvent::Mouse(mouse)) if mouse.kind == kind) => {
+                    event = next;
+                }
+                Ok(next) => {
+                    *pending = Some(next);
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    Some(event)
+}
+
 pub(crate) async fn run_frames(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     mut handle: TuiHandle,
@@ -121,6 +149,7 @@ pub(crate) async fn run_frames(
     let mut selection_tick = tokio::time::interval(std::time::Duration::from_millis(50));
     toast_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     selection_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut pending_input_event = None;
 
     let _reader_guard = ReaderGuard(reader_shutdown);
     let mut update_check = tokio::spawn(check_latest_release());
@@ -196,14 +225,14 @@ pub(crate) async fn run_frames(
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
             }
             _ = toast_tick.tick(), if !app.app.toasts.is_empty() => {}
-            _ = selection_tick.tick(), if app.app.transcript_selection_pointer.is_some() => {
+            _ = selection_tick.tick(), if transcript_selection_needs_tick(&app.app) => {
                 tick_transcript_selection_drag(&mut app.app);
             }
             latest = poll_update_check(&mut update_check), if !update_check.is_finished() => {
                 app.app.latest_release = latest;
             }
 
-            key = key_events.recv() => {
+            key = recv_input_event(&mut key_events, &mut pending_input_event) => {
                 if std::env::var_os("ATMAN_TRACE_EVENTS").is_some() {
                     atman_runtime::notify!(debug, "event: {key:?}");
                 }
@@ -298,6 +327,10 @@ pub(crate) async fn run_frames(
                                 interrupt_prompt = None;
                                 break;
                             }
+                            if !consumed && handle_quote_mouse(&mut app.app, &me) {
+                                interrupt_prompt = None;
+                                break;
+                            }
                             if !consumed {
                             let over_input = app
                                 .input_rect
@@ -369,6 +402,7 @@ pub(crate) async fn run_frames(
                                     && app.app.selection.is_some()
                                 {
                                     app.app.selection = crate::selection::selection_clear();
+                                    app.app.transcript_selection_pointer = None;
                                     continue;
                                 }
                                 key_handler::handle_key(
@@ -1450,6 +1484,7 @@ pub(crate) async fn run_frames(
                             interrupt_prompt = None;
                         }
                         Some(Ok(CtEvent::Resize(cols, rows))) => {
+                            app.app.transcript_selection_pointer = None;
                             let canvas = ratatui::layout::Rect::new(0, 0, cols, rows);
                             app.wm.clamp_to_canvas(canvas);
                             // Keep the focused terminal panel's PTY in sync with its
@@ -1490,9 +1525,9 @@ pub(crate) async fn run_frames(
                     if drained >= 100 {
                         break;
                     }
-                    match key_events.try_recv() {
-                        Ok(next) => current = Some(next),
-                        Err(_) => break,
+                    match pending_input_event.take().or_else(|| key_events.try_recv().ok()) {
+                        Some(next) => current = Some(next),
+                        None => break,
                     }
                 }
                 if scroll_delta < 0 {
@@ -2550,6 +2585,30 @@ fn handle_selection_menu_mouse(
     }
 }
 
+fn handle_quote_mouse(app: &mut AppState, event: &crossterm::event::MouseEvent) -> bool {
+    let Some(surface) = app
+        .pending_quote
+        .as_ref()
+        .and_then(|_| app.quote_rect.or(app.input_rect))
+    else {
+        app.quote_close_hovered = false;
+        return false;
+    };
+    let close = crate::selection_menu::quote_close_rect(surface)
+        .is_some_and(|rect| rect_contains(rect, event.column, event.row));
+    app.quote_close_hovered = close;
+    if !matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return false;
+    }
+    if close {
+        app.pending_quote = None;
+        app.quote_close_hovered = false;
+        return true;
+    }
+    app.quote_rect
+        .is_some_and(|rect| rect_contains(rect, event.column, event.row))
+}
+
 fn handle_selection_menu_key(
     ui: &mut UiState,
     editor: &mut InputEditor,
@@ -2599,7 +2658,7 @@ fn selection_action_payload(ui: &UiState) -> Option<crate::selection::CopyPayloa
 
 fn apply_selection_action(
     ui: &mut UiState,
-    editor: &mut InputEditor,
+    _editor: &mut InputEditor,
     action: crate::selection_menu::SelectionAction,
 ) {
     let payload = selection_action_payload(ui);
@@ -2632,7 +2691,13 @@ fn apply_selection_action(
         }
         crate::selection_menu::SelectionAction::Quote => {
             if let Some(payload) = payload {
-                editor.insert_str(&crate::selection_menu::quote_payload(&payload));
+                let text = match payload {
+                    crate::selection::CopyPayload::Markdown(text)
+                    | crate::selection::CopyPayload::PlainText(text)
+                    | crate::selection::CopyPayload::Preview(text) => text,
+                };
+                ui.app.pending_quote = Some(text);
+                ui.app.quote_close_hovered = false;
                 ui.app.submission_focus = false;
             }
         }
@@ -2702,24 +2767,56 @@ fn pending_thinking_click(state: &crate::selection::SelectionState) -> bool {
         )
 }
 
-const SELECTION_SCROLL_MAX_STEP: u32 = 6;
+const SELECTION_SCROLL_MAX_STEP: u32 = 4;
 
 fn selection_scroll_step(distance: u16) -> u32 {
-    u32::from(distance).clamp(1, SELECTION_SCROLL_MAX_STEP)
+    if distance == 0 {
+        0
+    } else {
+        (1 + u32::from(distance - 1) / 3).min(SELECTION_SCROLL_MAX_STEP)
+    }
+}
+
+fn transcript_selection_viewport(app: &AppState) -> Option<ratatui::layout::Rect> {
+    let mut rect = app.last_transcript_rect?;
+    rect.height = rect
+        .height
+        .saturating_sub(app.last_input_overlay_rows.min(u32::from(u16::MAX)) as u16)
+        .saturating_sub(layout::INPUT_TOP_GAP);
+    (rect.height > 0).then_some(rect)
+}
+
+fn transcript_selection_needs_tick(app: &AppState) -> bool {
+    let (Some((_, row)), Some(rect)) = (
+        app.transcript_selection_pointer,
+        transcript_selection_viewport(app),
+    ) else {
+        return false;
+    };
+    app.selection.is_some()
+        && ((row < rect.y && app.scroll_offset > 0)
+            || (row >= rect.bottom() && app.scroll_offset < app.max_scroll_offset()))
 }
 
 fn resolve_transcript_selection_edge(app: &mut AppState, focus_last: bool) {
     let Some(state) = app.selection.as_ref() else {
         return;
     };
-    if state.anchor.domain != crate::selection::SelectionDomain::TranscriptProse {
+    let Some(viewport) = transcript_selection_viewport(app) else {
         return;
-    }
+    };
+    let visible_end = app.scroll_offset.saturating_add(u32::from(viewport.height));
     let points = app
         .last_selection_projection
         .visual_points()
         .into_iter()
-        .filter(|visual| visual.point.domain == state.anchor.domain)
+        .filter(|visual| {
+            crate::selection::transcript_domains_compatible(
+                &state.anchor.domain,
+                &visual.point.domain,
+            ) && visual.row >= app.scroll_offset
+                && visual.row < visible_end
+        })
         .map(|visual| visual.point);
     let point = if focus_last {
         points.max_by(|left, right| left.position_cmp(right))
@@ -2727,41 +2824,48 @@ fn resolve_transcript_selection_edge(app: &mut AppState, focus_last: bool) {
         points.min_by(|left, right| left.position_cmp(right))
     };
     if let Some(point) = point {
-        app.selection = crate::selection::selection_extend(
+        app.selection = extend_mouse_selection(
             state,
             point,
             state.owner_revision,
             app.last_selection_projection.structure_revision,
         );
+        if app.selection.is_none() {
+            app.transcript_selection_pointer = None;
+        }
+    }
+}
+
+pub(crate) fn resolve_transcript_selection_after_render(app: &mut AppState) {
+    let (Some((_, pointer_row)), Some(rect)) = (
+        app.transcript_selection_pointer,
+        transcript_selection_viewport(app),
+    ) else {
+        return;
+    };
+    if pointer_row < rect.y {
+        resolve_transcript_selection_edge(app, false);
+    } else if pointer_row >= rect.bottom() {
+        resolve_transcript_selection_edge(app, true);
     }
 }
 
 fn tick_transcript_selection_drag(app: &mut AppState) {
-    if !app
-        .selection
-        .as_ref()
-        .is_some_and(|state| state.phase == crate::selection::SelectionPhase::Active)
-    {
+    if app.selection.is_none() {
         return;
     }
     let Some((_, pointer_row)) = app.transcript_selection_pointer else {
         return;
     };
-    let Some(rect) = app.last_transcript_rect else {
+    let Some(rect) = transcript_selection_viewport(app) else {
         return;
     };
     let top = rect.y;
-    let bottom = rect.y.saturating_add(rect.height);
-    let (delta, focus_last) = if pointer_row < top {
-        (
-            -(selection_scroll_step(top.saturating_sub(pointer_row)) as i32),
-            false,
-        )
+    let bottom = rect.bottom();
+    let delta = if pointer_row < top {
+        -(selection_scroll_step(top.saturating_sub(pointer_row)) as i32)
     } else if pointer_row >= bottom {
-        (
-            selection_scroll_step(pointer_row.saturating_sub(bottom).saturating_add(1)) as i32,
-            true,
-        )
+        selection_scroll_step(pointer_row.saturating_sub(bottom).saturating_add(1)) as i32
     } else {
         return;
     };
@@ -2779,8 +2883,6 @@ fn tick_transcript_selection_drag(app: &mut AppState) {
     }
     app.scroll_offset = next;
     app.follow_tail = false;
-
-    resolve_transcript_selection_edge(app, focus_last);
 }
 
 fn extend_mouse_selection(
@@ -2807,7 +2909,10 @@ fn handle_transcript_selection_mouse(
     app: &mut AppState,
     event: &crossterm::event::MouseEvent,
 ) -> bool {
-    let Some(rect) = app.last_transcript_rect else {
+    let Some(rect) = transcript_selection_viewport(app) else {
+        if matches!(event.kind, MouseEventKind::Up(MouseButton::Left)) {
+            app.transcript_selection_pointer = None;
+        }
         return matches!(
             event.kind,
             MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
@@ -2815,13 +2920,25 @@ fn handle_transcript_selection_mouse(
     };
     let row = u32::from(event.row.saturating_sub(rect.y)).saturating_add(app.scroll_offset);
     let col = event.column.saturating_sub(rect.x);
+    let visible_rows = app.scroll_offset..app.scroll_offset.saturating_add(u32::from(rect.height));
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            if event.row < rect.y || event.row >= rect.bottom() {
+                return false;
+            }
             let point = app
                 .last_selection_projection
                 .prose_point_at(row, col)
                 .or_else(|| app.last_selection_projection.code_point_at(row, col))
-                .or_else(|| app.last_selection_projection.isolated_point_at(row, col));
+                .or_else(|| app.last_selection_projection.isolated_point_at(row, col))
+                .or_else(|| {
+                    app.last_selection_projection.nearest_point_at(
+                        row,
+                        col,
+                        None,
+                        visible_rows.clone(),
+                    )
+                });
             let Some(point) = point else {
                 return false;
             };
@@ -2834,13 +2951,17 @@ fn handle_transcript_selection_mouse(
                 app.last_selection_projection.structure_revision,
             ));
             app.transcript_selection_pointer = Some((event.column, event.row));
+            app.follow_tail = false;
             false
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            app.transcript_selection_pointer = Some((event.column, event.row));
             let Some(state) = app.selection.as_ref() else {
                 return false;
             };
+            app.transcript_selection_pointer = Some((event.column, event.row));
+            if event.row < rect.y || event.row >= rect.bottom() {
+                return true;
+            }
             let point = match &state.anchor.domain {
                 crate::selection::SelectionDomain::TranscriptProse
                 | crate::selection::SelectionDomain::MarkdownCode { .. } => app
@@ -2848,7 +2969,18 @@ fn handle_transcript_selection_mouse(
                     .prose_point_at(row, col)
                     .or_else(|| app.last_selection_projection.code_point_at(row, col)),
                 _ => app.last_selection_projection.isolated_point_at(row, col),
-            };
+            }
+            .filter(|point| {
+                crate::selection::transcript_domains_compatible(&state.anchor.domain, &point.domain)
+            })
+            .or_else(|| {
+                app.last_selection_projection.nearest_point_at(
+                    row,
+                    col,
+                    Some(&state.anchor.domain),
+                    visible_rows.clone(),
+                )
+            });
             let Some(point) = point else {
                 return true;
             };
@@ -2858,6 +2990,9 @@ fn handle_transcript_selection_mouse(
                 state.owner_revision,
                 app.last_selection_projection.structure_revision,
             );
+            if app.selection.is_none() {
+                app.transcript_selection_pointer = None;
+            }
             app.selection
                 .as_ref()
                 .is_some_and(crate::selection::selection_is_non_empty)
@@ -2865,7 +3000,7 @@ fn handle_transcript_selection_mouse(
         MouseEventKind::Up(MouseButton::Left) => {
             if event.row < rect.y {
                 resolve_transcript_selection_edge(app, false);
-            } else if event.row >= rect.y.saturating_add(rect.height) {
+            } else if event.row >= rect.bottom() {
                 resolve_transcript_selection_edge(app, true);
             } else if let Some(state) = app.selection.as_ref() {
                 let point = match &state.anchor.domain {
@@ -2875,7 +3010,21 @@ fn handle_transcript_selection_mouse(
                         .prose_point_at(row, col)
                         .or_else(|| app.last_selection_projection.code_point_at(row, col)),
                     _ => app.last_selection_projection.isolated_point_at(row, col),
-                };
+                }
+                .filter(|point| {
+                    crate::selection::transcript_domains_compatible(
+                        &state.anchor.domain,
+                        &point.domain,
+                    )
+                })
+                .or_else(|| {
+                    app.last_selection_projection.nearest_point_at(
+                        row,
+                        col,
+                        Some(&state.anchor.domain),
+                        visible_rows.clone(),
+                    )
+                });
                 if let Some(point) = point {
                     app.selection = extend_mouse_selection(
                         state,
@@ -2890,7 +3039,7 @@ fn handle_transcript_selection_mouse(
                 return false;
             };
             let consumed = crate::selection::selection_is_non_empty(&state);
-            app.selection = Some(state);
+            app.selection = consumed.then_some(state);
             consumed
         }
         _ => false,
@@ -2900,6 +3049,224 @@ fn handle_transcript_selection_mouse(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn drag_events_coalesce_without_losing_mouse_up() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mouse = |kind, column| {
+            Ok(CtEvent::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            }))
+        };
+        tx.send(mouse(MouseEventKind::Drag(MouseButton::Left), 3))
+            .unwrap();
+        tx.send(mouse(MouseEventKind::Drag(MouseButton::Left), 5))
+            .unwrap();
+        tx.send(mouse(MouseEventKind::Drag(MouseButton::Left), 8))
+            .unwrap();
+        tx.send(mouse(MouseEventKind::Up(MouseButton::Left), 8))
+            .unwrap();
+        let mut pending = None;
+        let latest = recv_input_event(&mut rx, &mut pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(latest, CtEvent::Mouse(mouse) if mouse.column == 8 && matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left)))
+        );
+        let release = recv_input_event(&mut rx, &mut pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(release, CtEvent::Mouse(mouse) if mouse.column == 8 && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)))
+        );
+    }
+
+    #[test]
+    fn selection_scroll_only_ticks_outside_the_viewport() {
+        assert_eq!(selection_scroll_step(0), 0);
+        for distance in 1..30 {
+            assert!(selection_scroll_step(distance) >= selection_scroll_step(distance - 1));
+            assert!(selection_scroll_step(distance) <= SELECTION_SCROLL_MAX_STEP);
+        }
+        let mut app = AppState::new("session".into(), None);
+        app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 30));
+        app.last_total_rows = 100;
+        app.last_document_visible_rows = 30;
+        app.last_input_overlay_rows = 5;
+        app.selection = Some(crate::selection::selection_begin(
+            crate::selection::SemanticPoint {
+                domain: crate::selection::SelectionDomain::TranscriptProse,
+                ordinal: 0,
+                grapheme: 0,
+                affinity: crate::selection::Affinity::Before,
+            },
+            crate::app::OutputRevision::default(),
+            0,
+        ));
+        app.transcript_selection_pointer = Some((4, 10));
+        assert!(!transcript_selection_needs_tick(&app));
+        app.transcript_selection_pointer = Some((4, 26));
+        assert!(transcript_selection_needs_tick(&app));
+        app.scroll_offset = app.max_scroll_offset();
+        assert!(!transcript_selection_needs_tick(&app));
+    }
+
+    #[test]
+    fn visual_points_match_direct_hits_for_wide_prose_and_code() {
+        let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {
+            md: "汉🙂 **bold**\n\n```rust\nlet name = \"汉🙂\";\n```".into(),
+            streaming: false,
+            retried: false,
+        }]);
+        let mut cache = crate::output::LayoutCache::default();
+        let metrics = cache.update_dirty(
+            crate::output::LayoutKey {
+                width: 80,
+                theme: crate::theme::ThemeMode::Dark,
+            },
+            &items,
+            &crate::output::RenderCtx::empty(),
+            crate::output::LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 40,
+                follow_tail_rows: None,
+            },
+        );
+        let projection = cache.visible_slice(metrics.scroll_offset, 40, 0).selection;
+        let points = projection.visual_points();
+        assert!(points.iter().any(|point| point.cell_width == 2));
+        assert!(points.iter().any(|point| matches!(
+            point.point.domain,
+            crate::selection::SelectionDomain::MarkdownCode { .. }
+        )));
+        for visual in points {
+            let direct = projection
+                .prose_point_at(visual.row, visual.col)
+                .or_else(|| projection.code_point_at(visual.row, visual.col))
+                .or_else(|| projection.isolated_point_at(visual.row, visual.col));
+            assert_eq!(Some(visual.point), direct);
+        }
+    }
+
+    #[test]
+    fn quote_close_uses_the_rendered_hitbox_and_card_blocks_selection() {
+        let mut app = AppState::new("session".into(), None);
+        app.pending_quote = Some("selected text".into());
+        app.quote_rect = Some(ratatui::layout::Rect::new(10, 5, 20, 3));
+        app.input_rect = Some(ratatui::layout::Rect::new(10, 18, 20, 5));
+        let click = |column, row| crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        assert!(handle_quote_mouse(&mut app, &click(12, 6)));
+        assert!(app.pending_quote.is_some());
+        assert!(!handle_quote_mouse(&mut app, &click(31, 5)));
+        assert!(app.pending_quote.is_some());
+        assert!(handle_quote_mouse(&mut app, &click(27, 5)));
+        assert!(app.pending_quote.is_none());
+
+        app.pending_quote = Some("selected text".into());
+        app.quote_rect = None;
+        assert!(handle_quote_mouse(&mut app, &click(27, 18)));
+        assert!(app.pending_quote.is_none());
+    }
+
+    #[test]
+    fn pending_drag_scrolls_from_the_visible_edge_then_uses_the_new_projection() {
+        let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {
+            md: (0..80)
+                .map(|line| format!("paragraph {line}"))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            streaming: false,
+            retried: false,
+        }]);
+        let mut cache = crate::output::LayoutCache::default();
+        let key = crate::output::LayoutKey {
+            width: 80,
+            theme: crate::theme::ThemeMode::Dark,
+        };
+        let metrics = cache.update_dirty(
+            key,
+            &items,
+            &crate::output::RenderCtx::empty(),
+            crate::output::LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 20,
+                follow_tail_rows: None,
+            },
+        );
+        let initial = cache.visible_slice(0, 20, 0);
+        let surface = initial.selection.surfaces.first().expect("surface");
+        let owner_revision = surface.revision;
+        let anchor = initial
+            .selection
+            .visual_points()
+            .into_iter()
+            .find(|visual| {
+                visual.point.domain == crate::selection::SelectionDomain::TranscriptProse
+            })
+            .expect("prose point")
+            .point;
+        let mut app = AppState::new("session".into(), None);
+        app.items = items;
+        app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 20));
+        app.last_document_visible_rows = 20;
+        app.last_input_overlay_rows = 7;
+        app.last_total_rows = metrics.total_rows;
+        app.last_selection_projection = initial.selection;
+
+        let below = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 12,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert!(!handle_transcript_selection_mouse(&mut app, &below));
+        assert!(app.selection.is_none());
+
+        app.selection = Some(crate::selection::selection_begin(
+            anchor,
+            owner_revision,
+            app.last_selection_projection.structure_revision,
+        ));
+        app.transcript_selection_pointer = Some((5, 12));
+        tick_transcript_selection_drag(&mut app);
+        assert!(app.scroll_offset > 0);
+        assert_eq!(
+            app.selection.as_ref().map(|state| state.phase),
+            Some(crate::selection::SelectionPhase::Pending)
+        );
+
+        let next = cache.visible_slice(app.scroll_offset, 20, 0);
+        let new_last = next
+            .selection
+            .visual_points()
+            .into_iter()
+            .filter(|visual| {
+                visual.point.domain == crate::selection::SelectionDomain::TranscriptProse
+                    && visual.row >= app.scroll_offset
+                    && visual.row < app.scroll_offset + 11
+            })
+            .map(|visual| visual.point)
+            .max_by(|left, right| left.position_cmp(right))
+            .expect("new edge point");
+        app.last_selection_projection = next.selection;
+        resolve_transcript_selection_after_render(&mut app);
+        let selection = app.selection.as_ref().expect("selection");
+        assert_eq!(selection.phase, crate::selection::SelectionPhase::Active);
+        assert_eq!(selection.focus.ordinal, new_last.ordinal);
+        assert_eq!(selection.focus.grapheme, new_last.grapheme + 1);
+        assert_eq!(selection.focus.affinity, crate::selection::Affinity::After);
+    }
 
     fn startup_app() -> AppState {
         let mut app = AppState::new("current".into(), None).with_initial_items(vec![
@@ -2954,7 +3321,6 @@ mod tests {
         let surface = visible.selection.surfaces.first().expect("surface");
         let atom = surface.prose_atoms.first().expect("prose atom");
         let start_col = atom.atom.cols.start;
-        let end_col = atom.atom.cols.end.saturating_sub(1);
         let row = atom.screen_row as u16;
         let mut app = AppState::new("session".into(), None);
         app.items = items;
@@ -2974,15 +3340,19 @@ mod tests {
         ));
         assert!(handle_transcript_selection_mouse(
             &mut app,
-            &mouse(MouseEventKind::Drag(MouseButton::Left), end_col),
+            &mouse(MouseEventKind::Drag(MouseButton::Left), 79),
         ));
         assert!(handle_transcript_selection_mouse(
             &mut app,
-            &mouse(MouseEventKind::Up(MouseButton::Left), end_col),
+            &mouse(MouseEventKind::Up(MouseButton::Left), 79),
         ));
         assert_eq!(
             app.selection.as_ref().map(|state| state.phase),
             Some(crate::selection::SelectionPhase::Active)
+        );
+        assert_eq!(
+            app.selection.as_ref().map(|state| state.focus.grapheme),
+            Some("ordinary assistant prose".len())
         );
     }
 

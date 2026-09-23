@@ -290,7 +290,7 @@ fn render(
             0,
             &atman_runtime::trust::TrustConfig::default(),
             None,
-            0,
+            crate::input::InputFooter::default(),
         ),
         splash.input_slot,
     );

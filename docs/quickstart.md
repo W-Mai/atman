@@ -105,16 +105,9 @@ input_modalities = ["text", "image"]
 image_detail = "auto"
 ```
 
-Reasoning can also be selected for one run with `--reasoning high`; repeat
-`--image path/to/image.png` to attach images. In the TUI, Cmd+V, Ctrl+V, or Alt+V
-attaches the clipboard image. Its `[image N]` reference and attachment bar remain
-visible until submit; deleting the reference removes that image. Alt+Delete
-removes the latest pending image. The input border shows the effective reasoning
-depth for the next submission, and Ctrl+T cycles that input value. It is exposed
-to the flow as invocation-local `env("effort")` data. `llm.call`, `llm.extract`,
-`llm.classify`, and `llm.generate_branches` consume it only when their own call
-explicitly passes `effort: env("effort")`; inheriting the invocation environment
-alone does not change a request.
+Reasoning can also be selected for one run with `--reasoning high`; repeat `--image path/to/image.png` to attach images. In the TUI, Cmd+V, Ctrl+V, or Alt+V attaches the clipboard image. Its `[image N]` reference and attachment bar remain visible until submit; deleting the reference removes that image. Alt+Delete removes the pending quote first, then the latest pending image. The input border shows the effective reasoning depth for the next submission, and Ctrl+T cycles that input value. It is exposed to the flow as invocation-local `env("effort")` data. `llm.call`, `llm.extract`, `llm.classify`, and `llm.generate_branches` consume it only when their own call explicitly passes `effort: env("effort")`; inheriting the invocation environment alone does not change a request.
+
+Drag across transcript text, line-end space, or short Markdown gaps to open Copy, Rich Copy, Quote, and Cancel actions; holding the pointer past the visible document edge scrolls the selection. Quote appears above the input until submission; click `[x]` or press Alt+Delete to remove it. A short terminal shows the pending quote count in the input border.
 
 Models with image input enabled can also call `image.read(path: "...")` to inspect a local PNG, JPEG, GIF, or WebP file during an agent run. The tool imports at most 20 MiB through the session attachment store and supplies the image to the next model call without placing base64 in the textual tool result.
 

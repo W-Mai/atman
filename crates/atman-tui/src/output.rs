@@ -1099,6 +1099,7 @@ impl LayoutCache {
                             (screen_row >= scroll_offset && screen_row < vis_bottom).then(|| {
                                 crate::selection::VisibleCodeAtom {
                                     domain: code.domain.clone(),
+                                    grapheme_start: code.grapheme_start,
                                     atom: crate::selection::VisibleAtom {
                                         screen_row,
                                         cols: code.atom.cols.start.saturating_add(col_offset)

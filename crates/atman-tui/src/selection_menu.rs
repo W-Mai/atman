@@ -169,12 +169,7 @@ fn html_escape(text: &str) -> String {
         .replace('"', "&quot;")
 }
 
-pub fn quote_payload(payload: &CopyPayload) -> String {
-    let text = match payload {
-        CopyPayload::Markdown(text) | CopyPayload::PlainText(text) | CopyPayload::Preview(text) => {
-            text
-        }
-    };
+pub fn quote_text(text: &str) -> String {
     let quoted = text
         .lines()
         .map(|line| {
@@ -187,6 +182,15 @@ pub fn quote_payload(payload: &CopyPayload) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!("{quoted}\n\n")
+}
+
+pub fn quote_close_rect(area: Rect) -> Option<Rect> {
+    (area.width >= 6 && area.height > 0).then(|| Rect {
+        x: area.right() - 4,
+        y: area.y,
+        width: 3,
+        height: 1,
+    })
 }
 
 fn contains(rect: Rect, column: u16, row: u16) -> bool {
@@ -202,10 +206,16 @@ mod tests {
 
     #[test]
     fn quote_payload_prefixes_every_line() {
+        assert_eq!(quote_text("one\n\ntwo"), "> one\n>\n> two\n\n");
+    }
+
+    #[test]
+    fn quote_close_hitbox_stays_inside_the_displayed_card() {
         assert_eq!(
-            quote_payload(&CopyPayload::PlainText("one\n\ntwo".into())),
-            "> one\n>\n> two\n\n"
+            quote_close_rect(Rect::new(10, 5, 20, 3)),
+            Some(Rect::new(26, 5, 3, 1))
         );
+        assert_eq!(quote_close_rect(Rect::new(10, 5, 5, 3)), None);
     }
 
     #[test]

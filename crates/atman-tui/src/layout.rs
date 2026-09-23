@@ -78,6 +78,18 @@ pub fn input_overlay_rows(input_rect: Rect, transcript_area: Rect) -> u32 {
     u32::from(input_rect.height).min(u32::from(transcript_area.height))
 }
 
+pub fn floating_overlay_rows(
+    transcript_area: Rect,
+    input_rect: Rect,
+    stacked: &[Option<Rect>],
+) -> u32 {
+    let top = stacked
+        .iter()
+        .flatten()
+        .fold(input_rect.y, |top, rect| top.min(rect.y));
+    u32::from(transcript_area.bottom().saturating_sub(top)).min(u32::from(transcript_area.height))
+}
+
 /// Per-side border width (Borders::ALL → 1 on each side).
 pub const INPUT_BORDER: u16 = 1;
 /// Per-side horizontal padding (Padding::horizontal(1) → 1 on each side).
@@ -238,6 +250,20 @@ pub fn compute_injection_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn floating_stack_reserves_its_topmost_visible_row() {
+        let transcript = Rect::new(0, 1, 80, 23);
+        let input = Rect::new(10, 17, 60, 5);
+        let quote = Rect::new(14, 12, 52, 5);
+        let approval = Rect::new(14, 9, 52, 3);
+        assert_eq!(floating_overlay_rows(transcript, input, &[]), 7);
+        assert_eq!(floating_overlay_rows(transcript, input, &[Some(quote)]), 12);
+        assert_eq!(
+            floating_overlay_rows(transcript, input, &[Some(quote), Some(approval)]),
+            15
+        );
+    }
 
     #[test]
     fn transcript_extends_full_height_below_status() {

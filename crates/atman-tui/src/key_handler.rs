@@ -1165,6 +1165,11 @@ pub(crate) fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::RemoveAttachment => {
+            if app.pending_quote.take().is_some() {
+                app.push_note("removed quoted selection", app::NoteLevel::Info);
+                *interrupt_prompt = None;
+                return;
+            }
             let Some(session) = app.session.clone() else {
                 return;
             };
@@ -1243,11 +1248,23 @@ pub(crate) fn handle_key(
             if let Some(session) = app.session.as_ref() {
                 editor.reconcile_images(&session.pending_images());
             }
-            if let Some(editor_submission) = editor.submit_with_images() {
+            let editor_submission = editor.submit_with_images().or_else(|| {
+                app.pending_quote
+                    .as_ref()
+                    .map(|_| crate::input::EditorSubmission {
+                        text: String::new(),
+                        images: Vec::new(),
+                    })
+            });
+            if let Some(editor_submission) = editor_submission {
                 if app.reconcile_input_reasoning() {
                     app.save_ui_state();
                 }
-                let line = editor_submission.text;
+                let quote = app.pending_quote.take();
+                let mut line = editor_submission.text;
+                if let Some(quote) = quote.as_deref() {
+                    line = format!("{}{}", crate::selection_menu::quote_text(quote), line);
+                }
                 if !app.has_running_workflow() {
                     app.push_user_turn(line.clone());
                 }
@@ -1278,6 +1295,7 @@ pub(crate) fn handle_key(
                             .map(|error| error.0)
                     };
                     if let Some(failed) = failed {
+                        app.pending_quote = quote;
                         if let Some(session) = app.session.clone() {
                             app.attach_count = session.restore_pending_images(failed.images);
                             editor.reconcile_images(&session.pending_images());
@@ -2073,6 +2091,54 @@ mod tests {
             panic!("submission must share the ordered control channel");
         };
         assert_eq!(submission.text, "run after mode update");
+    }
+
+    #[test]
+    fn submission_restores_pending_quote_as_markdown() {
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        state.app.pending_quote = Some("quoted line".into());
+        let mut editor = InputEditor::default();
+        editor.insert_str("follow up");
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let mut interrupt_prompt = None;
+
+        handle_key(
+            KeyAction::Submit,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            None,
+            Some(&control_tx),
+        );
+
+        let TuiControl::Submit(submission) = control_rx.try_recv().unwrap() else {
+            panic!("quote submission must be sent");
+        };
+        assert_eq!(submission.text, "> quoted line\n\nfollow up");
+        assert!(state.app.pending_quote.is_none());
+    }
+
+    #[test]
+    fn quote_only_submission_is_not_dropped() {
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        state.app.pending_quote = Some("quoted line".into());
+        let mut editor = InputEditor::default();
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let mut interrupt_prompt = None;
+
+        handle_key(
+            KeyAction::Submit,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            None,
+            Some(&control_tx),
+        );
+
+        let TuiControl::Submit(submission) = control_rx.try_recv().unwrap() else {
+            panic!("quote-only submission must be sent");
+        };
+        assert_eq!(submission.text, "> quoted line\n\n");
     }
 
     #[test]
