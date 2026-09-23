@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-09-23
+
 ### ✨ Features
 
 - **Quoted messages and pending insertion** — Quoted selections remain separate from editable prompts in the composer, pending queue, and transcript. A pending text task can enter the current flow at the next LLM call; if the turn ends first, it returns to Next.
