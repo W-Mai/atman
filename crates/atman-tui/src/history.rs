@@ -257,6 +257,7 @@ fn flatten_transcript_impl(
             TranscriptEntry::Message {
                 message: msg,
                 flow_run_id,
+                presentation,
             } => {
                 if matches!(msg.role, MessageRole::System)
                     && matches!(msg.parts.as_slice(), [MessagePart::CompactSummary { .. }])
@@ -351,7 +352,13 @@ fn flatten_transcript_impl(
                     let finishes_root_turn = msg.role == MessageRole::Assistant
                         && msg.origin == atman_runtime::message::MessageOrigin::FinalAnswer;
                     let first_new_item = out.len();
-                    flatten_message_with_output_store(msg, &mut out, &tool_map, output_store);
+                    flatten_message_with_output_store(
+                        msg,
+                        &mut out,
+                        &tool_map,
+                        output_store,
+                        presentation.clone(),
+                    );
                     if starts_root_turn {
                         work_start_by_turn
                             .entry(msg.turn_id.clone())
@@ -887,6 +894,7 @@ fn flatten_transcript_impl(
                     TranscriptEntry::Message {
                         message,
                         flow_run_id: Some(frid),
+                        ..
                     } => {
                         let frame = match message.role {
                             MessageRole::Assistant => StreamFrame::AssistantMsg {
@@ -1034,7 +1042,7 @@ pub(crate) fn flatten_message(
     out: &mut Vec<OutputItem>,
     tool_map: &HashMap<String, ToolDisplayMeta>,
 ) {
-    flatten_message_with_output_store(msg, out, tool_map, None);
+    flatten_message_with_output_store(msg, out, tool_map, None, None);
 }
 
 pub(crate) fn flatten_message_with_output_store(
@@ -1042,12 +1050,17 @@ pub(crate) fn flatten_message_with_output_store(
     out: &mut Vec<OutputItem>,
     tool_map: &HashMap<String, ToolDisplayMeta>,
     output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
+    presentation: Option<atman_runtime::user_input::UserInputPresentation>,
 ) {
     match msg.role {
         MessageRole::User => {
             let text = msg.text_concat();
             if !text.trim().is_empty() {
-                out.push(OutputItem::UserTurn { text });
+                if msg.origin == atman_runtime::message::MessageOrigin::Interjection {
+                    out.push(OutputItem::Interjection { text, presentation });
+                } else {
+                    out.push(OutputItem::UserTurn { text, presentation });
+                }
             }
         }
         MessageRole::Assistant => {
@@ -1669,6 +1682,7 @@ mod tests {
             TranscriptEntry::Message {
                 message: external,
                 flow_run_id: None,
+                presentation: None,
             },
             TranscriptEntry::Message {
                 message: assistant(vec![MessagePart::Thinking {
@@ -1676,14 +1690,17 @@ mod tests {
                     signature: None,
                 }]),
                 flow_run_id: None,
+                presentation: None,
             },
             TranscriptEntry::Message {
                 message: internal,
                 flow_run_id: None,
+                presentation: None,
             },
             TranscriptEntry::Message {
                 message: final_answer,
                 flow_run_id: None,
+                presentation: None,
             },
         ];
 
@@ -2050,6 +2067,7 @@ mod tests {
                     intent: None,
                 }]),
                 flow_run_id: None,
+                presentation: None,
             },
             TranscriptEntry::Message {
                 message: Message {
@@ -2063,6 +2081,7 @@ mod tests {
                     origin: atman_runtime::message::MessageOrigin::User,
                 },
                 flow_run_id: None,
+                presentation: None,
             },
             TranscriptEntry::ToolTiming {
                 tool_use_id: tool_use_id.into(),
@@ -2159,6 +2178,7 @@ mod tests {
                         origin: atman_runtime::message::MessageOrigin::User,
                     },
                     flow_run_id: None,
+                    presentation: None,
                 },
                 TranscriptEntry::Message {
                     message: Message {
@@ -2174,6 +2194,7 @@ mod tests {
                         origin: atman_runtime::message::MessageOrigin::User,
                     },
                     flow_run_id: None,
+                    presentation: None,
                 },
             ]
         };
@@ -2269,6 +2290,7 @@ mod tests {
                     "hello".to_string(),
                 ),
                 flow_run_id: None,
+                presentation: None,
             },
             // Agent flow starts
             TranscriptEntry::FlowStart {
@@ -2306,6 +2328,7 @@ mod tests {
                     "hello".to_string(),
                 ),
                 flow_run_id: None, // None! — same as genuine user message
+                presentation: None,
             },
             // Flow node 0 ends
             TranscriptEntry::FlowNodeEnd {
@@ -2419,6 +2442,7 @@ mod tests {
             TranscriptEntry::Message {
                 message: Message::user_text(TurnId::now(), "do research"),
                 flow_run_id: Some(sub_run.clone()),
+                presentation: None,
             },
             // No FlowDone for sub_run — simulates crash/restart mid-subflow
         ];
@@ -2455,6 +2479,7 @@ mod tests {
                     origin: atman_runtime::message::MessageOrigin::User,
                 },
                 flow_run_id: None,
+                presentation: None,
             },
             TranscriptEntry::Message {
                 message: Message {
@@ -2468,6 +2493,7 @@ mod tests {
                     origin: atman_runtime::message::MessageOrigin::User,
                 },
                 flow_run_id: None,
+                presentation: None,
             },
         ];
         let out = flatten_transcript(&entries);
@@ -2583,6 +2609,7 @@ mod tests {
                     origin: atman_runtime::message::MessageOrigin::User,
                 },
                 flow_run_id: None,
+                presentation: None,
             },
             TranscriptEntry::Message {
                 message: Message {
@@ -2596,6 +2623,7 @@ mod tests {
                     origin: atman_runtime::message::MessageOrigin::User,
                 },
                 flow_run_id: None,
+                presentation: None,
             },
         ];
         let out = flatten_transcript(&entries);
@@ -2629,6 +2657,7 @@ mod tests {
                     origin: atman_runtime::message::MessageOrigin::User,
                 },
                 flow_run_id: None,
+                presentation: None,
             },
             TranscriptEntry::Message {
                 message: Message {
@@ -2642,6 +2671,7 @@ mod tests {
                     origin: atman_runtime::message::MessageOrigin::User,
                 },
                 flow_run_id: None,
+                presentation: None,
             },
         ];
         let out = flatten_transcript(&entries);
@@ -2678,6 +2708,7 @@ mod tests {
                     origin: atman_runtime::message::MessageOrigin::User,
                 },
                 flow_run_id: None,
+                presentation: None,
             },
             TranscriptEntry::DiffPreview {
                 tool_use_id: Some(tool_use_id.into()),
@@ -2698,6 +2729,7 @@ mod tests {
                     origin: atman_runtime::message::MessageOrigin::User,
                 },
                 flow_run_id: None,
+                presentation: None,
             },
         ];
         let out = flatten_transcript(&entries);
@@ -2759,6 +2791,7 @@ mod tests {
                     origin: atman_runtime::message::MessageOrigin::User,
                 },
                 flow_run_id: None,
+                presentation: None,
             },
         ];
 
@@ -2796,6 +2829,7 @@ mod tests {
                 origin: atman_runtime::message::MessageOrigin::User,
             },
             flow_run_id: None,
+            presentation: None,
         }];
         let out = flatten_transcript(&entries);
         assert!(
@@ -2835,6 +2869,7 @@ mod tests {
             TranscriptEntry::Message {
                 message: Message::assistant_text(TurnId::now(), "I will spawn a sub-agent."),
                 flow_run_id: Some(loop_run.clone()),
+                presentation: None,
             },
             // Sub-agent spawned via flow.spawn (spawned=true, parent=loop_run)
             TranscriptEntry::FlowStart {
@@ -2871,6 +2906,7 @@ mod tests {
             TranscriptEntry::Message {
                 message: Message::user_text(TurnId::now(), "read Cargo.toml"),
                 flow_run_id: Some(research_run.clone()),
+                presentation: None,
             },
             // Sub-agent flow node (tool call)
             TranscriptEntry::FlowNodeStart {
@@ -2897,6 +2933,7 @@ mod tests {
             TranscriptEntry::Message {
                 message: Message::assistant_text(TurnId::now(), "Here are the findings..."),
                 flow_run_id: Some(research_run.clone()),
+                presentation: None,
             },
             TranscriptEntry::FlowNodeEnd {
                 run_id: research_run.clone(),
@@ -2932,7 +2969,7 @@ mod tests {
         // Sub-agent messages should NOT be in the main document flow
         let has_sub_text = out.iter().any(|it| match it {
             OutputItem::AssistantMd { md, .. } => md.contains("findings"),
-            OutputItem::UserTurn { text } => text.contains("Cargo.toml"),
+            OutputItem::UserTurn { text, .. } => text.contains("Cargo.toml"),
             _ => false,
         });
         assert!(
@@ -3005,6 +3042,7 @@ mod tests {
             TranscriptEntry::Message {
                 message: Message::assistant_text(TurnId::now(), "working on it"),
                 flow_run_id: Some(loop_run.clone()),
+                presentation: None,
             },
         ];
 
@@ -3116,10 +3154,12 @@ mod tests {
             TranscriptEntry::Message {
                 message: Message::user_text(TurnId::now(), "read Cargo.toml"),
                 flow_run_id: Some(research_run.clone()),
+                presentation: None,
             },
             TranscriptEntry::Message {
                 message: Message::assistant_text(TurnId::now(), "found it"),
                 flow_run_id: Some(research_run.clone()),
+                presentation: None,
             },
             TranscriptEntry::FlowDone {
                 run_id: research_run.clone(),

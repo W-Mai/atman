@@ -156,6 +156,10 @@ pub enum Event {
         #[serde(default)]
         flow_run_id: Option<FlowRunId>,
         message: crate::message::Message,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presentation: Option<crate::user_input::UserInputPresentation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        injection_id: Option<crate::injection::InjectionId>,
     },
     AssistantMsg {
         turn_id: TurnId,
@@ -813,6 +817,8 @@ mod tests {
                 turn_id: TurnId::now(),
                 flow_run_id: None,
                 message: crate::message::Message::user_text(TurnId::now(), "hello"),
+                presentation: None,
+                injection_id: None,
             },
         );
         let json = serde_json::to_string(&env).unwrap();

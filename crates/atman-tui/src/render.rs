@@ -277,7 +277,13 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         visible + overflow + 2
     };
     let quote_rows: u16 = app.pending_quote.as_deref().map_or(0, |text| {
-        text.lines().count().min(6) as u16 + 2 + u16::from(text.lines().count() > 6)
+        let total = text.lines().count();
+        let visible = if app.quote_expanded {
+            total.min(8)
+        } else {
+            total.min(3)
+        };
+        visible as u16 + 2 + u16::from(total > visible)
     });
     let l = layout::compute_ex(area, status_height);
     let sidebar_rect =
@@ -749,29 +755,61 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         sanitize_widget_edges(f, area);
         f.render_widget(ratatui::widgets::Clear, area);
         let theme = crate::theme::theme();
-        let visible = area.height.saturating_sub(2) as usize;
+        let total = quote.lines().count();
+        let content_rows = area.height.saturating_sub(2) as usize;
+        let visible = total
+            .min(if app.quote_expanded { 8 } else { 3 })
+            .min(content_rows);
+        let disclosure = usize::from(total > visible && content_rows > visible);
+        let text_rows = visible;
+        let max_scroll = total.saturating_sub(text_rows);
+        app.quote_scroll = app.quote_scroll.min(max_scroll);
+        let start = if app.quote_expanded {
+            app.quote_scroll
+        } else {
+            0
+        };
         let mut lines = quote
             .lines()
-            .take(visible.min(6))
+            .skip(start)
+            .take(text_rows)
             .map(|line| {
                 ratatui::text::Line::from(ratatui::text::Span::styled(
-                    crate::width::truncate(line, area.width.saturating_sub(4) as usize),
+                    format!(
+                        "│ {}",
+                        crate::width::truncate(line, area.width.saturating_sub(5) as usize)
+                    ),
                     ratatui::style::Style::default().fg(theme.subtle_fg.into()),
                 ))
             })
             .collect::<Vec<_>>();
-        let total = quote.lines().count();
-        if total > lines.len() {
+        if disclosure > 0 {
             lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
-                format!(" +{} more", total - lines.len()),
+                if app.quote_expanded {
+                    format!("│ {}–{} / {total} · scroll", start + 1, start + text_rows)
+                } else {
+                    format!("│ +{} more · click or F4 to expand", total - text_rows)
+                },
                 ratatui::style::Style::default().fg(theme.subtle_fg.into()),
             )));
         }
         let block = ratatui::widgets::Block::default()
             .borders(ratatui::widgets::Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(ratatui::style::Style::default().fg(theme.accent.into()))
-            .title(format!(" quote · {total} lines · Alt+Del "));
+            .border_type(ratatui::widgets::BorderType::Plain)
+            .border_style(ratatui::style::Style::default().fg(theme.subtle_fg.into()))
+            .title(format!(
+                " QUOTE · {total} lines · F4 {}{} · Ctrl+U remove ",
+                if app.quote_expanded {
+                    "collapse"
+                } else {
+                    "expand"
+                },
+                if app.quote_expanded {
+                    " · PgUp/PgDn scroll"
+                } else {
+                    ""
+                }
+            ));
         f.render_widget(ratatui::widgets::Paragraph::new(lines).block(block), area);
     }
     if let Some(area) = approvals_rect {
@@ -795,10 +833,17 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             f,
             area,
             &app.queued_submissions,
-            app.selected_submission,
-            app.submission_focus,
-            app.hovered_submission,
-            app.queued_submission_edit.as_ref(),
+            submission_queue::QueueRenderState {
+                selected: app.selected_submission,
+                focused: app.submission_focus,
+                hovered: app.hovered_submission,
+                edit: app.queued_submission_edit.as_ref(),
+                active_turn: app
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.current_turn())
+                    .is_some(),
+            },
         );
     } else {
         app.submission_queue_hitmap = submission_queue::QueueHitMap::default();
@@ -1311,5 +1356,40 @@ mod quote_tests {
             .collect::<String>();
         assert!(rendered.contains("quote · 1 lines"));
         assert!(rendered.contains("[x]"));
+    }
+
+    #[test]
+    fn quote_card_previews_three_lines_and_expands() {
+        let backend = ratatui::backend::TestBackend::new(90, 28);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut ui = UiState::new(crate::app::AppState::new("session".into(), None));
+        ui.app.pending_quote = Some("one\ntwo\nthree\nfour\nfive\nsix".into());
+        let editor = InputEditor::default();
+
+        terminal
+            .draw(|frame| render_frame(frame, &mut ui, &editor))
+            .unwrap();
+        let collapsed = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(ui.app.quote_rect.is_some());
+        assert!(collapsed.contains("+3 more"));
+        assert!(!collapsed.contains("│ six"));
+        ui.app.quote_expanded = true;
+        terminal
+            .draw(|frame| render_frame(frame, &mut ui, &editor))
+            .unwrap();
+        let expanded = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(expanded.contains("│ six"));
     }
 }

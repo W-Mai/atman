@@ -120,6 +120,10 @@ pub enum TuiControl {
         id: atman_runtime::SubmissionId,
         expected_revision: u64,
     },
+    InsertQueuedSubmission {
+        id: atman_runtime::SubmissionId,
+        expected_revision: u64,
+    },
     InterveneQueuedSubmission {
         id: atman_runtime::SubmissionId,
         expected_revision: u64,
@@ -463,6 +467,7 @@ pub struct TuiSubmission {
     pub text: String,
     pub images: Vec<atman_runtime::message::ImageSource>,
     pub reasoning: Option<atman_runtime::provider::ReasoningSelection>,
+    pub presentation: Option<atman_runtime::user_input::UserInputPresentation>,
 }
 
 pub struct TuiHandle {

@@ -11,6 +11,20 @@ use super::{
 };
 use super::{append_system_context, call_and_maybe_stream};
 
+struct ReservedInjections {
+    session: std::sync::Arc<crate::session::Session>,
+    ids: Vec<crate::injection::InjectionId>,
+    committed: bool,
+}
+
+impl Drop for ReservedInjections {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.session.release_reserved_injections(&self.ids);
+        }
+    }
+}
+
 /// Core LLM dispatch with all side effects.
 /// Used as the single implementation behind `llm.call` and higher-level LLM tools.
 pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
@@ -204,26 +218,35 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         session.mark_injection_consumed(&l3_or_l2.id);
         return Value::Err(RuntimeError::Redirect(target.clone()));
     }
-    if let Some(session) = ctx.session_runtime.as_ref() {
-        let injections = session.drain_injections(&turn_id);
-        let renderable: Vec<crate::injection::Injection> = injections
-            .into_iter()
-            .filter(|i| {
-                matches!(
-                    i.level,
-                    crate::injection::InjectionLevel::L1Nudge
-                        | crate::injection::InjectionLevel::L2CourseCorrect
-                )
-            })
-            .collect();
-        if !renderable.is_empty() {
-            let rendered = render_injections(&renderable);
-            final_messages.push(crate::message::Message::user_text(
-                turn_id.clone(),
-                rendered,
-            ));
+    let mut reserved_messages = Vec::new();
+    let mut reserved_guard = ctx.session_runtime.as_ref().and_then(|session| {
+        let injections = session.reserve_injections_for_call(
+            &turn_id,
+            args.call_purpose == crate::context_plan::ContextCallPurpose::General,
+        );
+        if injections.is_empty() {
+            return None;
         }
-    }
+        let ids = injections
+            .iter()
+            .map(|injection| injection.id.clone())
+            .collect();
+        for injection in injections {
+            let mut message = crate::message::Message::user_text(
+                turn_id.clone(),
+                render_injections(std::slice::from_ref(&injection)),
+            );
+            message.origin = crate::message::MessageOrigin::Interjection;
+            final_messages.push(message.clone());
+            reserved_messages.push((injection, message));
+        }
+        Some(ReservedInjections {
+            session: session.clone(),
+            ids,
+            committed: false,
+        })
+    });
+    let reserved_suffix_len = reserved_messages.len();
     let prompt = prompt_for_budget;
     let mut rewrite_used = false;
     if let Some(safety) = ctx.safety.as_ref()
@@ -408,6 +431,16 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             };
             let estimated_input = context_plan.estimated_input_tokens();
             let start = std::time::Instant::now();
+            if let Some(guard) = reserved_guard.as_mut()
+                && !guard.committed
+            {
+                if !guard.session.commit_reserved_injections(&reserved_messages) {
+                    return Value::Err(RuntimeError::Cancelled(
+                        "turn ended before injection pickup".into(),
+                    ));
+                }
+                guard.committed = true;
+            }
             let mut outcome = call_and_maybe_stream(
                 provider.as_ref(),
                 context_plan.into_request(),
@@ -632,7 +665,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                                 context_mode,
                                 &turn_id,
                                 Some(prompt.as_str()),
-                                &retry_base_messages[session_messages_len..],
+                                &retry_base_messages[session_messages_len
+                                    ..retry_base_messages.len() - reserved_suffix_len],
                             );
                             last_err = Some(e);
                             continue 'llm_attempts;

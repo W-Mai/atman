@@ -295,6 +295,8 @@ mod tests {
                 turn_id: msg.turn_id.clone(),
                 flow_run_id: None,
                 message: msg.clone(),
+                presentation: None,
+                injection_id: None,
             },
             "assistant_msg" => Event::AssistantMsg {
                 turn_id: msg.turn_id.clone(),
@@ -768,6 +770,8 @@ mod tests {
                 turn_id: TurnId::now(),
                 flow_run_id: None,
                 message: user("latest user"),
+                presentation: None,
+                injection_id: None,
             },
         ));
 
@@ -801,6 +805,8 @@ mod tests {
                 turn_id: TurnId::now(),
                 flow_run_id: None,
                 message: user("new user before compact"),
+                presentation: None,
+                injection_id: None,
             },
         ));
         events.lock().unwrap().push(EventEnvelope::new(
@@ -843,6 +849,8 @@ mod tests {
                 turn_id: TurnId::now(),
                 flow_run_id: None,
                 message: user("after compact user"),
+                presentation: None,
+                injection_id: None,
             },
         ));
 

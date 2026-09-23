@@ -699,6 +699,8 @@ mod tests {
                 turn_id: turn_id.clone(),
                 flow_run_id: Some(flow_run_id.clone()),
                 message: user,
+                presentation: None,
+                injection_id: None,
             },
             Event::SystemMsg {
                 turn_id: turn_id.clone(),
@@ -968,6 +970,8 @@ mod tests {
                     turn_id: tid.clone(),
                     flow_run_id: None,
                     message: Message::user_text(tid, "sqlite fts full text search"),
+                    presentation: None,
+                    injection_id: None,
                 },
             ))
             .unwrap();

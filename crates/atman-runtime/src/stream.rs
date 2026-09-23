@@ -32,6 +32,13 @@ pub enum CompactionPhase {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StreamFrame {
+    UserInputApplied {
+        message: crate::message::Message,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presentation: Option<crate::user_input::UserInputPresentation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        injection_id: Option<crate::injection::InjectionId>,
+    },
     TurnStarted {
         turn_id: String,
     },

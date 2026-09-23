@@ -1372,10 +1372,31 @@ impl LayoutCache {
             let mut lines = rendered.lines;
             lines.push(Line::from(Span::styled(String::new(), RESET)));
             (lines, Vec::new(), semantic)
-        } else if let OutputItem::UserTurn { text } = item {
-            let lines = render_user_turn(text, content_width);
+        } else if let OutputItem::UserTurn { text, presentation }
+        | OutputItem::Interjection { text, presentation } = item
+        {
+            let lines = render_user_turn(
+                text,
+                presentation.as_ref(),
+                content_width,
+                matches!(item, OutputItem::Interjection { .. }),
+            );
             let mut semantic = crate::selection::item_semantic_source(item, revision);
-            semantic.prose_atoms = user_turn_prose_atoms(text, usize::from(content_width));
+            semantic.prose_atoms = if let Some(presentation) = presentation.as_ref() {
+                presented_user_prose_atoms(
+                    presentation,
+                    usize::from(content_width),
+                    matches!(item, OutputItem::Interjection { .. }),
+                )
+            } else {
+                let mut atoms = user_turn_prose_atoms(text, usize::from(content_width));
+                if matches!(item, OutputItem::Interjection { .. }) {
+                    for atom in &mut atoms {
+                        atom.row = atom.row.saturating_add(1);
+                    }
+                }
+                atoms
+            };
             (lines, Vec::new(), semantic)
         } else {
             let (lines, regions) = render_item_with_regions_min_workflow_rows(
@@ -1820,6 +1841,49 @@ pub(crate) fn user_turn_prose_atoms(
         source_cursor = body_start.saturating_add(padded.body.len());
         source_grapheme =
             grapheme_start.saturating_add(crate::width::graphemes(&padded.body).count());
+    }
+    atoms
+}
+
+fn presented_user_prose_atoms(
+    presentation: &atman_runtime::user_input::UserInputPresentation,
+    target: usize,
+    inserted: bool,
+) -> Vec<crate::selection::RelativeProseAtom> {
+    let source = presentation.model_text();
+    let mut source_cursor = 0usize;
+    let mut row = 1usize + usize::from(inserted);
+    let mut atoms = Vec::new();
+    let mut append_rows = |text: &str, prefix: &str, continuation: &str, row: &mut usize| {
+        for padded in wrap_with_prefix(text, target, prefix, continuation) {
+            if !padded.body.is_empty()
+                && let Some(relative) = source[source_cursor..].find(&padded.body)
+            {
+                let start = source_cursor + relative;
+                let grapheme_start = crate::width::graphemes(&source[..start]).count();
+                atoms.extend(crate::selection::prose_atom_runs(
+                    u16::try_from(*row).unwrap_or(u16::MAX),
+                    u16::try_from(crate::width::width(&padded.prefix)).unwrap_or(u16::MAX),
+                    &padded.body,
+                    0,
+                    grapheme_start,
+                ));
+                source_cursor = start + padded.body.len();
+            }
+            *row += 1;
+        }
+    };
+    if let Some(quote) = &presentation.quote {
+        row += 1;
+        let prefix = format!("{DOCUMENT_PAD}│ ");
+        for line in quote.text.lines() {
+            append_rows(line, &prefix, &prefix, &mut row);
+        }
+    }
+    if !presentation.prompt.is_empty() {
+        let first = format!("{DOCUMENT_PAD}❯{DOCUMENT_PAD}");
+        let continuation = " ".repeat(crate::width::width(&first));
+        append_rows(&presentation.prompt, &first, &continuation, &mut row);
     }
     atoms
 }
@@ -2815,7 +2879,12 @@ fn render_system_note(text: &str, level: NoteLevel, panel_width: u16) -> Vec<Lin
     lines
 }
 
-fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
+fn render_user_turn(
+    text: &str,
+    presentation: Option<&atman_runtime::user_input::UserInputPresentation>,
+    panel_width: u16,
+    inserted: bool,
+) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
     let bg = user_message_bg();
     let prompt_style = Style::default()
@@ -2827,17 +2896,60 @@ fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
+    if inserted {
+        lines.push(Line::from(Span::styled(
+            crate::width::pad_right(&format!("{DOCUMENT_PAD}inserted into current flow"), target),
+            Style::default().fg(t.subtle_fg.into()).bg(bg),
+        )));
+    }
     let first = format!("{DOCUMENT_PAD}❯{DOCUMENT_PAD}");
     let continuation = " ".repeat(crate::width::width(&first));
-    let rows = wrap_with_prefix(text, target, &first, &continuation);
-    for row in rows {
-        lines.push(line_with_right_pad(
-            &row.prefix,
-            &row.body,
-            target,
-            prompt_style,
-            body_style,
-        ));
+    if let Some(presentation) = presentation
+        && let Some(quote) = presentation.quote.as_ref()
+    {
+        let quote_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
+        let quote_header = format!(
+            "{DOCUMENT_PAD}│ QUOTED · {} lines",
+            quote.text.lines().count()
+        );
+        lines.push(Line::from(Span::styled(
+            crate::width::pad_right(&quote_header, target),
+            quote_style,
+        )));
+        for quote_line in quote.text.lines() {
+            let prefix = format!("{DOCUMENT_PAD}│ ");
+            for row in wrap_with_prefix(quote_line, target, &prefix, &prefix) {
+                lines.push(line_with_right_pad(
+                    &row.prefix,
+                    &row.body,
+                    target,
+                    quote_style,
+                    quote_style,
+                ));
+            }
+        }
+        if !presentation.prompt.is_empty() {
+            for row in wrap_with_prefix(&presentation.prompt, target, &first, &continuation) {
+                lines.push(line_with_right_pad(
+                    &row.prefix,
+                    &row.body,
+                    target,
+                    prompt_style,
+                    body_style,
+                ));
+            }
+        }
+    } else {
+        let body = presentation.map_or(text, |value| value.prompt.as_str());
+        for row in wrap_with_prefix(body, target, &first, &continuation) {
+            lines.push(line_with_right_pad(
+                &row.prefix,
+                &row.body,
+                target,
+                prompt_style,
+                body_style,
+            ));
+        }
     }
     lines.push(blank);
     lines
@@ -2845,7 +2957,13 @@ fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
 
 pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
     let mut lines = match item {
-        OutputItem::UserTurn { text } => render_user_turn(text, ctx.panel_width),
+        OutputItem::UserTurn { text, presentation }
+        | OutputItem::Interjection { text, presentation } => render_user_turn(
+            text,
+            presentation.as_ref(),
+            ctx.panel_width,
+            matches!(item, OutputItem::Interjection { .. }),
+        ),
         OutputItem::Thinking {
             text,
             done,
@@ -8642,6 +8760,7 @@ mod tests {
         let items = OutputStore::from(vec![
             OutputItem::UserTurn {
                 text: "build it".into(),
+                presentation: None,
             },
             OutputItem::Thinking {
                 text: "hidden reasoning".into(),
@@ -10163,6 +10282,29 @@ mod tests {
     }
 
     #[test]
+    fn quoted_user_geometry_tracks_quote_and_prompt_source() {
+        let presentation = atman_runtime::user_input::UserInputPresentation {
+            prompt: "check".into(),
+            quote: Some(atman_runtime::user_input::QuoteSnapshot {
+                text: "汉字\nsecond".into(),
+            }),
+        };
+        let source = presentation.model_text();
+        let rows = render_user_turn(&source, Some(&presentation), 40, false);
+        let atoms = presented_user_prose_atoms(&presentation, 40, false);
+        assert!(plain_line(&rows[1]).contains("QUOTED · 2 lines"));
+        assert!(plain_line(&rows[2]).contains("汉字"));
+        assert!(plain_line(&rows[4]).contains("check"));
+        let prompt_start = source.find("check").unwrap();
+        let prompt_grapheme = crate::width::graphemes(&source[..prompt_start]).count();
+        assert!(
+            atoms
+                .iter()
+                .any(|atom| { atom.row == 4 && atom.event_graphemes.start == prompt_grapheme })
+        );
+    }
+
+    #[test]
     fn visible_assistant_prose_projection_hits_and_copies() {
         let items = OutputStore::from(vec![OutputItem::AssistantMd {
             md: "ordinary assistant prose".into(),
@@ -10229,7 +10371,7 @@ mod tests {
     #[test]
     fn user_turn_wraps_long_line_to_panel_width() {
         let text = "aaaaa bbbbb ccccc ddddd eeeee fffff ggggg hhhhh iiiii jjjjj kkkkk";
-        let lines = render_user_turn(text, 30);
+        let lines = render_user_turn(text, None, 30, false);
         assert!(lines.len() > 3, "should wrap into multiple rows");
         for (i, line) in lines.iter().enumerate() {
             let w = crate::width::width(plain_line(line).as_str());
@@ -10493,7 +10635,7 @@ mod tests {
     fn user_turn_wraps_cjk_long_line() {
         let text =
             "读取文件内容并做分析的一个非常长的中文标题名称这样会超过宽度必须换行才行测试一下";
-        let lines = render_user_turn(text, 30);
+        let lines = render_user_turn(text, None, 30, false);
         assert!(lines.len() > 3, "CJK long line should wrap");
         for (i, line) in lines.iter().enumerate() {
             let w = crate::width::width(plain_line(line).as_str());
@@ -10504,7 +10646,7 @@ mod tests {
     #[test]
     fn user_turn_preserves_explicit_newlines() {
         let text = "line one\nline two\nline three";
-        let lines = render_user_turn(text, 60);
+        let lines = render_user_turn(text, None, 60, false);
         let count = lines
             .iter()
             .map(plain_line)
@@ -10745,7 +10887,10 @@ mod tests {
     #[test]
     fn every_variant_ends_with_reset_empty_line() {
         for item in [
-            OutputItem::UserTurn { text: "hi".into() },
+            OutputItem::UserTurn {
+                text: "hi".into(),
+                presentation: None,
+            },
             OutputItem::AssistantMd {
                 md: "one line".into(),
                 streaming: false,
@@ -10958,7 +11103,7 @@ mod tests {
     #[test]
     fn user_turn_leaves_right_padding() {
         let text = "short";
-        let lines = render_user_turn(text, 40);
+        let lines = render_user_turn(text, None, 40, false);
         let body_line = lines
             .iter()
             .find(|l| l.spans.iter().any(|s| s.content.as_ref().contains("short")))
@@ -11054,7 +11199,10 @@ mod tests {
     #[test]
     fn build_lines_concats_all_items() {
         let items = vec![
-            OutputItem::UserTurn { text: "hi".into() },
+            OutputItem::UserTurn {
+                text: "hi".into(),
+                presentation: None,
+            },
             OutputItem::Divider,
         ];
         let out = build_lines(&items, &RenderCtx::empty());
@@ -11064,7 +11212,10 @@ mod tests {
     #[test]
     fn build_lines_with_ranges_gives_one_range_per_item() {
         let items = vec![
-            OutputItem::UserTurn { text: "hi".into() },
+            OutputItem::UserTurn {
+                text: "hi".into(),
+                presentation: None,
+            },
             OutputItem::Divider,
         ];
         let (_lines, ranges, _regions, total) =
@@ -13032,7 +13183,7 @@ pub fn render_injection_queue(
     let max_w = width.saturating_sub(6) as usize;
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let title = format!(" ⚡ interjections · {} pending ", pending.len());
+    let title = format!(" ⚡ next LLM call · {} waiting ", pending.len());
     lines.push(Line::from(Span::styled(
         title,
         Style::default()
@@ -13061,7 +13212,29 @@ pub fn render_injection_queue(
             InjectionLevel::L3Redirect => "L3",
             InjectionLevel::L4HardStop => "L4",
         };
-        let text = crate::width::truncate_plain(&inj.text, max_w.saturating_sub(6));
+        let text = if inj.queued_submission_id.is_some() {
+            let summary = if let Some(presentation) = &inj.presentation {
+                let prompt = presentation.prompt.replace(['\n', '\r'], " ");
+                if prompt.trim().is_empty() {
+                    presentation
+                        .quote
+                        .as_ref()
+                        .and_then(|quote| quote.text.lines().next())
+                        .map_or_else(
+                            || "quoted selection".to_owned(),
+                            |line| format!("quote: {line}"),
+                        )
+                } else {
+                    prompt
+                }
+            } else {
+                inj.text.replace(['\n', '\r'], " ")
+            };
+            format!("{summary} · waiting for next LLM call")
+        } else {
+            inj.text.clone()
+        };
+        let text = crate::width::truncate_plain(&text, max_w.saturating_sub(6));
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(format!("[{level_label}]"), level_style),

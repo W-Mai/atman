@@ -170,18 +170,13 @@ fn html_escape(text: &str) -> String {
 }
 
 pub fn quote_text(text: &str) -> String {
-    let quoted = text
-        .lines()
-        .map(|line| {
-            if line.is_empty() {
-                ">".to_string()
-            } else {
-                format!("> {line}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("{quoted}\n\n")
+    atman_runtime::user_input::UserInputPresentation {
+        prompt: String::new(),
+        quote: Some(atman_runtime::user_input::QuoteSnapshot {
+            text: text.to_owned(),
+        }),
+    }
+    .model_text()
 }
 
 pub fn quote_close_rect(area: Rect) -> Option<Rect> {

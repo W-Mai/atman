@@ -22,6 +22,8 @@ async fn events_jsonl_contains_redacted_marker_for_openai_key_in_user_msg() {
             turn_id.clone(),
             "please try token sk-abcdefghijklmnop1234567890 now",
         ),
+        presentation: None,
+        injection_id: None,
     });
     writer.shutdown().await;
 
@@ -52,6 +54,8 @@ async fn events_jsonl_partial_mode_keeps_prefix_and_suffix() {
         turn_id: turn_id.clone(),
         flow_run_id: None,
         message: Message::user_text(turn_id, "call github with ghp_abcdefghij1234567890xyzXYZ11"),
+        presentation: None,
+        injection_id: None,
     });
     writer.shutdown().await;
 
@@ -126,6 +130,8 @@ async fn events_jsonl_without_redactor_keeps_secret_verbatim() {
         turn_id: turn_id.clone(),
         flow_run_id: None,
         message: Message::user_text(turn_id, "leak sk-abcdefghijklmnop1234567890 baseline"),
+        presentation: None,
+        injection_id: None,
     });
     writer.shutdown().await;
 

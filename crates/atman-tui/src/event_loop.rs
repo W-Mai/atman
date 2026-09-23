@@ -464,6 +464,10 @@ pub(crate) async fn run_frames(
                                 interrupt_prompt = None;
                                 break;
                             }
+                            if !consumed && handle_quote_mouse(&mut app.app, &me) {
+                                interrupt_prompt = None;
+                                break;
+                            }
                             if !consumed {
                                 if app.wm.interaction.resize_target.is_none()
                                     && app.wm.interaction.drag_target.is_none()
@@ -1692,12 +1696,33 @@ pub(crate) async fn run_frames(
             inj = recv_injection(handle.injection_rx.as_mut()) => {
                 if let Some(inj) = inj {
                     // Keep only pending injections, drop consumed/cancelled ones.
-                    if matches!(inj.state, atman_runtime::injection::InjectionState::Pending) {
+                    if matches!(
+                        inj.state,
+                        atman_runtime::injection::InjectionState::Pending
+                            | atman_runtime::injection::InjectionState::Reserved
+                    ) {
                         if !app.app.pending_injections.iter().any(|i| i.id == inj.id) {
                             app.app.pending_injections.push(inj);
+                        } else if let Some(existing) = app
+                            .app
+                            .pending_injections
+                            .iter_mut()
+                            .find(|existing| existing.id == inj.id)
+                        {
+                            *existing = inj;
                         }
                     } else {
                         app.app.pending_injections.retain(|i| i.id != inj.id);
+                        if inj.state == atman_runtime::injection::InjectionState::Cancelled
+                            && inj.queued_submission_id.is_some()
+                        {
+                            app.app.push_toast(
+                                "Not inserted; returned to Next",
+                                crate::app::NoteLevel::Info,
+                                std::time::Duration::from_secs(4),
+                                crate::app::ToastPosition::TopRight,
+                            );
+                        }
                     }
                     app.app.mark_visual_dirty();
                 }
@@ -2597,16 +2622,45 @@ fn handle_quote_mouse(app: &mut AppState, event: &crossterm::event::MouseEvent) 
     let close = crate::selection_menu::quote_close_rect(surface)
         .is_some_and(|rect| rect_contains(rect, event.column, event.row));
     app.quote_close_hovered = close;
+    let over_card = app
+        .quote_rect
+        .is_some_and(|rect| rect_contains(rect, event.column, event.row));
+    if over_card && app.quote_expanded {
+        let visible = app
+            .quote_rect
+            .map_or(8, |rect| rect.height.saturating_sub(3) as usize)
+            .max(1);
+        let max_scroll = app
+            .pending_quote
+            .as_deref()
+            .map_or(0, |quote| quote.lines().count().saturating_sub(visible));
+        match event.kind {
+            MouseEventKind::ScrollDown => {
+                app.quote_scroll = app.quote_scroll.saturating_add(2).min(max_scroll);
+                return true;
+            }
+            MouseEventKind::ScrollUp => {
+                app.quote_scroll = app.quote_scroll.saturating_sub(2);
+                return true;
+            }
+            _ => {}
+        }
+    }
     if !matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
         return false;
     }
     if close {
         app.pending_quote = None;
         app.quote_close_hovered = false;
+        app.quote_expanded = false;
+        app.quote_scroll = 0;
         return true;
     }
-    app.quote_rect
-        .is_some_and(|rect| rect_contains(rect, event.column, event.row))
+    if over_card {
+        app.quote_expanded = !app.quote_expanded;
+        app.quote_scroll = 0;
+    }
+    over_card
 }
 
 fn handle_selection_menu_key(
@@ -2698,6 +2752,8 @@ fn apply_selection_action(
                 };
                 ui.app.pending_quote = Some(text);
                 ui.app.quote_close_hovered = false;
+                ui.app.quote_expanded = false;
+                ui.app.quote_scroll = 0;
                 ui.app.submission_focus = false;
             }
         }
@@ -3984,6 +4040,7 @@ mod tests {
     fn user_turn_mouse_selection_reaches_copy_handler() {
         let items = app::OutputStore::from(vec![app::OutputItem::UserTurn {
             text: "你好呀".into(),
+            presentation: None,
         }]);
         let mut cache = crate::output::LayoutCache::default();
         let metrics = cache.update_dirty(

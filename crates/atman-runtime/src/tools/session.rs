@@ -144,6 +144,8 @@ fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
             turn_id,
             flow_run_id,
             message: msg.clone(),
+            presentation: None,
+            injection_id: None,
         },
         MessageRole::Assistant => Event::AssistantMsg {
             turn_id,

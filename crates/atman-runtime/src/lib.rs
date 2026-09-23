@@ -83,6 +83,7 @@ pub mod tool;
 pub mod tool_naming;
 pub mod tools;
 pub mod trust;
+pub mod user_input;
 pub mod validate;
 pub mod value;
 pub use watch::WatchHub;

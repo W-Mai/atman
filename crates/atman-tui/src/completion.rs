@@ -284,7 +284,7 @@ pub fn cheatsheet_lines() -> Vec<Line<'static>> {
         kv("Ctrl+W / Alt+Backspace", "delete word"),
         kv("Ctrl+J / Shift+Enter", "insert newline"),
         kv("Cmd/Ctrl/Alt+V", "attach clipboard image"),
-        kv("Alt+Delete", "remove last pending image"),
+        kv("Ctrl+U", "remove pending quote or last image"),
         kv("Ctrl+T", "cycle input reasoning depth"),
         kv("Tab", "expand [Pasted Text …] chip"),
         kv("Enter", "submit"),

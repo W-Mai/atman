@@ -1383,20 +1383,22 @@ pub fn item_semantic_source(
     use crate::app::OutputItem;
 
     match item {
-        OutputItem::UserTurn { text } => {
-            let graphemes = crate::width::graphemes(text).count();
+        OutputItem::UserTurn { text, presentation }
+        | OutputItem::Interjection { text, presentation } => {
+            let source = presentation
+                .as_ref()
+                .map_or_else(|| text.clone(), |value| value.model_text());
+            let graphemes = crate::width::graphemes(&source).count();
             ItemSemanticSource {
                 owner_revision: revision,
-                source: text.clone(),
-                prose: vec![
-                    CopyFragment::plain_text(text.clone()).with_event_segments(vec![
-                        ProseEventSegment {
-                            event: 0,
-                            event_graphemes: 0..graphemes,
-                            fragment_grapheme_start: 0,
-                        },
-                    ]),
-                ],
+                source: source.clone(),
+                prose: vec![CopyFragment::plain_text(source).with_event_segments(vec![
+                    ProseEventSegment {
+                        event: 0,
+                        event_graphemes: 0..graphemes,
+                        fragment_grapheme_start: 0,
+                    },
+                ])],
                 ..Default::default()
             }
         }
@@ -1621,6 +1623,7 @@ mod tests {
                 1,
                 crate::app::OutputItem::UserTurn {
                     text: "hello".into(),
+                    presentation: None,
                 },
             )],
         };
@@ -1854,6 +1857,7 @@ mod tests {
     fn user(text: &str) -> crate::app::OutputItem {
         crate::app::OutputItem::UserTurn {
             text: text.to_owned(),
+            presentation: None,
         }
     }
 

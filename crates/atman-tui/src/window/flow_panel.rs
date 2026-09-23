@@ -438,7 +438,13 @@ pub(crate) fn render_sub_agent_panel(
     }
     let mut items: Vec<OutputItem> = Vec::new();
     for msg in messages {
-        crate::history::flatten_message_with_output_store(msg, &mut items, &tool_map, output_store);
+        crate::history::flatten_message_with_output_store(
+            msg,
+            &mut items,
+            &tool_map,
+            output_store,
+            None,
+        );
     }
     crate::history::dedup_by_handle(&mut items);
 

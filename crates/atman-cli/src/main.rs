@@ -2273,6 +2273,18 @@ async fn cmd_repl_once(
                             );
                         }
                     }
+                    atman_tui::TuiControl::InsertQueuedSubmission {
+                        id,
+                        expected_revision,
+                    } => {
+                        if let Err(error) =
+                            session_for_ctrl.insert_queued_submission_l1(&id, expected_revision)
+                        {
+                            let _ = cmd_tx_for_models.send(
+                                atman_tui::TuiCommand::QueueMutationRejected(error.to_string()),
+                            );
+                        }
+                    }
                     atman_tui::TuiControl::InterveneQueuedSubmission {
                         id,
                         expected_revision,
@@ -3207,6 +3219,7 @@ async fn cmd_repl_once(
             line.images.take(),
             line.invocation_env.clone(),
             line.origin,
+            line.presentation.clone(),
             kind,
             &mut input_rx,
             &reporter,
@@ -3238,6 +3251,7 @@ async fn cmd_repl_once(
                                     None,
                                     atman_runtime::InvocationEnv::default(),
                                     atman_runtime::message::MessageOrigin::Watcher,
+                                    None,
                                     TurnKind::Bare(route),
                                     &mut input_rx,
                                     &reporter,
@@ -4416,6 +4430,7 @@ struct ReplInput {
     images: Option<Vec<atman_runtime::message::ImageSource>>,
     invocation_env: atman_runtime::InvocationEnv,
     origin: atman_runtime::message::MessageOrigin,
+    presentation: Option<atman_runtime::user_input::UserInputPresentation>,
 }
 
 impl ReplInput {
@@ -4425,6 +4440,7 @@ impl ReplInput {
             images: None,
             invocation_env: atman_runtime::InvocationEnv::default(),
             origin: atman_runtime::message::MessageOrigin::User,
+            presentation: None,
         }
     }
 
@@ -4440,6 +4456,7 @@ impl ReplInput {
             images: Some(submission.images),
             invocation_env,
             origin: atman_runtime::message::MessageOrigin::User,
+            presentation: submission.presentation,
         }
     }
 
@@ -4449,6 +4466,7 @@ impl ReplInput {
             images: Some(submission.images),
             invocation_env: submission.invocation_env,
             origin: submission.origin,
+            presentation: submission.presentation,
         }
     }
 
@@ -4456,11 +4474,12 @@ impl ReplInput {
         &mut self,
         session: &Session,
     ) -> Result<atman_runtime::QueuedSubmissionView, atman_runtime::SubmissionQueueError> {
-        let result = session.enqueue_submission(
+        let result = session.enqueue_submission_with_presentation(
             self.text.clone(),
             self.images.clone().unwrap_or_default(),
             self.invocation_env.clone(),
             self.origin,
+            self.presentation.clone(),
         );
         if result.is_ok() {
             self.images = None;
@@ -4658,6 +4677,7 @@ fn render_stream_frame(
         | StreamFrame::MermaidDiagram { .. }
         | StreamFrame::SubAgentStarted { .. }
         | StreamFrame::SubAgentDone { .. }
+        | StreamFrame::UserInputApplied { .. }
         | StreamFrame::LlmRetry
         | StreamFrame::Unknown => {}
     }
@@ -4694,6 +4714,7 @@ async fn run_turn_with_interjection(
     submitted_images: Option<Vec<atman_runtime::message::ImageSource>>,
     invocation_env: atman_runtime::InvocationEnv,
     origin: atman_runtime::message::MessageOrigin,
+    presentation: Option<atman_runtime::user_input::UserInputPresentation>,
     kind: TurnKind,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ReplInput>,
     reporter: &Reporter,
@@ -4719,7 +4740,7 @@ async fn run_turn_with_interjection(
     };
     {
         let _compact_guard = session.acquire_compact_lock().await;
-        session.begin_turn(user_msg);
+        session.begin_turn_with_presentation(user_msg, presentation);
     }
     lifecycles
         .fire(executor, atman_dsl::ast::LifecycleEvent::TurnStart)
@@ -6209,6 +6230,12 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                     expected_revision,
                 } => {
                     let _ = ctrl_session.delete_queued_submission(&id, expected_revision);
+                }
+                atman_tui::TuiControl::InsertQueuedSubmission {
+                    id,
+                    expected_revision,
+                } => {
+                    let _ = ctrl_session.insert_queued_submission_l1(&id, expected_revision);
                 }
                 atman_tui::TuiControl::InterveneQueuedSubmission {
                     id,
@@ -8868,11 +8895,13 @@ mod tests {
                 effort: atman_runtime::provider::ReasoningEffort::High,
                 execution_mode: None,
             }),
+            presentation: None,
         });
         tui_input_sink.send(atman_tui::TuiSubmission {
             text: "second".into(),
             images: Vec::new(),
             reasoning: None,
+            presentation: None,
         });
 
         let first = input_rx.recv().await.unwrap();
@@ -9205,6 +9234,7 @@ mod tests {
             images: Some(vec![first.clone()]),
             invocation_env: atman_runtime::InvocationEnv::default(),
             origin: atman_runtime::message::MessageOrigin::User,
+            presentation: None,
         };
         session
             .queue_image_bytes(&[PNG_BYTES, &[0x01]].concat(), Some("second.png"))

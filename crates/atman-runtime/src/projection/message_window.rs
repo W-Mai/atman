@@ -15,6 +15,7 @@ pub enum TranscriptEntry {
     Message {
         message: Message,
         flow_run_id: Option<String>,
+        presentation: Option<crate::user_input::UserInputPresentation>,
     },
     ToolTiming {
         tool_use_id: String,
@@ -585,6 +586,9 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     let entry = TranscriptEntry::Message {
                         message: msg,
                         flow_run_id,
+                        presentation: v
+                            .get("presentation")
+                            .and_then(|value| serde_json::from_value(value.clone()).ok()),
                     };
                     if belongs_to_root {
                         push_transcript_message(
@@ -1105,6 +1109,10 @@ pub(crate) fn project_transcript_records(
                 let entry = TranscriptEntry::Message {
                     message,
                     flow_run_id,
+                    presentation: match &record.envelope.event {
+                        crate::event::Event::UserMsg { presentation, .. } => presentation.clone(),
+                        _ => None,
+                    },
                 };
                 if belongs_to_root {
                     push_transcript_message(
@@ -1859,6 +1867,8 @@ mod tests {
                     turn_id: TurnId::now(),
                     flow_run_id: None,
                     message: message(MessageRole::User, "root user"),
+                    presentation: None,
+                    injection_id: None,
                 },
             ),
             EventEnvelope::new(2, flow_start(child.clone(), None, true)),
@@ -1916,7 +1926,7 @@ mod tests {
         assert_eq!(format!("{raw_entries:#?}"), format!("{entries:#?}"));
         assert!(entries.iter().any(|entry| matches!(
             entry,
-            super::TranscriptEntry::Message { message, flow_run_id: None }
+            super::TranscriptEntry::Message { message, flow_run_id: None, .. }
                 if message.text_concat() == "root user"
         )));
         assert!(entries.iter().any(|entry| matches!(
@@ -1940,6 +1950,8 @@ mod tests {
                     turn_id: TurnId::now(),
                     flow_run_id: None,
                     message: message(MessageRole::User, "old user"),
+                    presentation: None,
+                    injection_id: None,
                 },
             ),
             EventEnvelope::new(2, flow_start(spawned.clone(), None, true)),
@@ -2009,7 +2021,7 @@ mod tests {
         ));
         assert!(matches!(
             &entries[2],
-            super::TranscriptEntry::Message { message, flow_run_id: Some(run_id) }
+            super::TranscriptEntry::Message { message, flow_run_id: Some(run_id), .. }
                 if message.text_concat() == "spawned assistant"
                     && run_id == &spawned.0.to_string()
         ));
@@ -2041,6 +2053,8 @@ mod tests {
                     turn_id: image.turn_id.clone(),
                     flow_run_id: None,
                     message: image,
+                    presentation: None,
+                    injection_id: None,
                 },
             ),
             EventEnvelope::new(

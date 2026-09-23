@@ -692,6 +692,8 @@ mod tests {
                 turn_id: u1.turn_id.clone(),
                 flow_run_id: None,
                 message: u1,
+                presentation: None,
+                injection_id: None,
             },
         );
         let env2 = crate::event::EventEnvelope::new(
@@ -742,6 +744,8 @@ mod tests {
                     turn_id: m.turn_id.clone(),
                     flow_run_id: None,
                     message: m,
+                    presentation: None,
+                    injection_id: None,
                 },
             );
             lines.push(serde_json::to_string(&env).unwrap());

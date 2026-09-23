@@ -1135,6 +1135,29 @@ pub(crate) fn handle_key(
     }
     let mut edited = false;
     match action {
+        KeyAction::ToggleQuote => {
+            if app.pending_quote.is_some() {
+                app.quote_expanded = !app.quote_expanded;
+                app.quote_scroll = 0;
+            }
+            return;
+        }
+        KeyAction::PageUp if app.pending_quote.is_some() && app.quote_expanded => {
+            app.quote_scroll = app.quote_scroll.saturating_sub(4);
+            return;
+        }
+        KeyAction::PageDown if app.pending_quote.is_some() && app.quote_expanded => {
+            let visible = app
+                .quote_rect
+                .map_or(8, |rect| rect.height.saturating_sub(3) as usize)
+                .max(1);
+            let max_scroll = app
+                .pending_quote
+                .as_deref()
+                .map_or(0, |quote| quote.lines().count().saturating_sub(visible));
+            app.quote_scroll = app.quote_scroll.saturating_add(4).min(max_scroll);
+            return;
+        }
         KeyAction::PasteImage => {
             let Some(session) = app.session.clone() else {
                 app.push_note(
@@ -1166,6 +1189,8 @@ pub(crate) fn handle_key(
         }
         KeyAction::RemoveAttachment => {
             if app.pending_quote.take().is_some() {
+                app.quote_expanded = false;
+                app.quote_scroll = 0;
                 app.push_note("removed quoted selection", app::NoteLevel::Info);
                 *interrupt_prompt = None;
                 return;
@@ -1261,12 +1286,21 @@ pub(crate) fn handle_key(
                     app.save_ui_state();
                 }
                 let quote = app.pending_quote.take();
-                let mut line = editor_submission.text;
-                if let Some(quote) = quote.as_deref() {
-                    line = format!("{}{}", crate::selection_menu::quote_text(quote), line);
-                }
+                let presentation =
+                    quote
+                        .as_ref()
+                        .map(|quote| atman_runtime::user_input::UserInputPresentation {
+                            prompt: editor_submission.text.clone(),
+                            quote: Some(atman_runtime::user_input::QuoteSnapshot {
+                                text: quote.clone(),
+                            }),
+                        });
+                let line = presentation.as_ref().map_or_else(
+                    || editor_submission.text.clone(),
+                    |value| value.model_text(),
+                );
                 if !app.has_running_workflow() {
-                    app.push_user_turn(line.clone());
+                    app.push_user_turn_with_presentation(line.clone(), presentation.clone());
                 }
                 if control_tx.is_some() || submit_tx.is_some() {
                     let images = if line.trim_start().starts_with(':') {
@@ -1281,6 +1315,7 @@ pub(crate) fn handle_key(
                         text: line,
                         images,
                         reasoning: app.input_reasoning_for_submission(),
+                        presentation,
                     };
                     let failed = if let Some(tx) = control_tx {
                         tx.send(TuiControl::Submit(submission)).err().and_then(
@@ -1570,6 +1605,30 @@ pub(crate) fn dispatch_submission_queue_action(
     app.selected_submission = index;
     app.submission_focus = true;
     match action {
+        crate::submission_queue::QueueAction::Insert => {
+            let reason = submission.insert_block_reason.clone().or_else(|| {
+                app.session
+                    .as_ref()
+                    .and_then(|session| session.current_turn())
+                    .is_none()
+                    .then(|| "no active flow".to_owned())
+            });
+            if let Some(reason) = reason {
+                app.push_toast(
+                    reason,
+                    app::NoteLevel::Warn,
+                    std::time::Duration::from_secs(3),
+                    app::ToastPosition::TopRight,
+                );
+                return;
+            }
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::InsertQueuedSubmission {
+                    id: submission.id,
+                    expected_revision: submission.revision,
+                });
+            }
+        }
         crate::submission_queue::QueueAction::Edit => {
             let mut editor = InputEditor::default();
             editor.replace_with(&submission.text);
@@ -1614,7 +1673,16 @@ fn handle_submission_queue_key(
         match action {
             KeyAction::Submit => {
                 let text = edit.editor.buf().trim().to_owned();
-                if text.is_empty() {
+                if text.is_empty()
+                    && !app.queued_submissions.iter().any(|submission| {
+                        submission.id == edit.id
+                            && submission
+                                .presentation
+                                .as_ref()
+                                .and_then(|value| value.quote.as_ref())
+                                .is_some()
+                    })
+                {
                     app.push_toast(
                         "queued message cannot be empty",
                         app::NoteLevel::Warn,
@@ -1674,6 +1742,12 @@ fn handle_submission_queue_key(
             app,
             app.selected_submission,
             crate::submission_queue::QueueAction::Edit,
+            control_tx,
+        ),
+        KeyAction::Char('i') => dispatch_submission_queue_action(
+            app,
+            app.selected_submission,
+            crate::submission_queue::QueueAction::Insert,
             control_tx,
         ),
         KeyAction::Delete | KeyAction::Backspace => dispatch_submission_queue_action(

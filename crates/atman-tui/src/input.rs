@@ -38,7 +38,7 @@ pub fn input_paragraph<'a>(
         Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
     );
     let hint_right = if let Some(lines) = footer.pending_quote_lines {
-        format!(" quote · {lines} lines · Alt+Del remove · Enter send ")
+        format!(" quote · {lines} lines · Ctrl+U remove · Enter send ")
     } else if footer.queued_count > 0 {
         format!(
             " shift+tab · next · {} · enter · send ",

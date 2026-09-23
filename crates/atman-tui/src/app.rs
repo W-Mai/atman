@@ -425,6 +425,11 @@ impl FsDetail {
 pub enum OutputItem {
     UserTurn {
         text: String,
+        presentation: Option<atman_runtime::user_input::UserInputPresentation>,
+    },
+    Interjection {
+        text: String,
+        presentation: Option<atman_runtime::user_input::UserInputPresentation>,
     },
     Thinking {
         text: String,
@@ -980,6 +985,8 @@ pub struct AppState {
     pub pending_quote: Option<String>,
     pub quote_rect: Option<ratatui::layout::Rect>,
     pub quote_close_hovered: bool,
+    pub quote_expanded: bool,
+    pub quote_scroll: usize,
     pub submission_focus: bool,
     pub selected_submission: usize,
     pub hovered_submission: Option<usize>,
@@ -3689,6 +3696,16 @@ impl AppState {
                     });
                 }
             }
+            StreamFrame::UserInputApplied {
+                message,
+                presentation,
+                ..
+            } => {
+                self.push_item(OutputItem::Interjection {
+                    text: message.text_concat(),
+                    presentation,
+                });
+            }
             StreamFrame::ThinkingChunk { text, run_id, .. } => {
                 self.discard_completed_final_answer_draft();
                 let disclosure_key = llm_disclosure_key(run_id.as_deref());
@@ -5050,8 +5067,16 @@ impl AppState {
     }
 
     pub fn push_user_turn(&mut self, text: String) {
+        self.push_user_turn_with_presentation(text, None);
+    }
+
+    pub fn push_user_turn_with_presentation(
+        &mut self,
+        text: String,
+        presentation: Option<atman_runtime::user_input::UserInputPresentation>,
+    ) {
         self.close_current_workflow_panel(false, None);
-        self.push_item(OutputItem::UserTurn { text });
+        self.push_item(OutputItem::UserTurn { text, presentation });
         self.waiting_for_llm = true;
     }
 }
@@ -5083,6 +5108,7 @@ mod tests {
         let mut app = AppState::new("session".into(), None);
         app.push_item(OutputItem::UserTurn {
             text: "build it".into(),
+            presentation: None,
         });
         app.push_item(OutputItem::Thinking {
             text: "checking the renderer".into(),
@@ -5139,6 +5165,7 @@ mod tests {
         let app = AppState::new("session".into(), None).with_initial_items(vec![
             OutputItem::UserTurn {
                 text: "build it".into(),
+                presentation: None,
             },
             OutputItem::Thinking {
                 text: "restored reasoning".into(),
@@ -5169,6 +5196,7 @@ mod tests {
         let mut live = AppState::new("live".into(), None);
         live.push_item(OutputItem::UserTurn {
             text: "build it".into(),
+            presentation: None,
         });
         live.push_item(OutputItem::Thinking {
             text: "working".into(),
@@ -5197,6 +5225,7 @@ mod tests {
 
         let mut restored_items = vec![OutputItem::UserTurn {
             text: "build it".into(),
+            presentation: None,
         }];
         restored_items.push(OutputItem::ToolDispatch {
             calls: (0..4)
@@ -5227,6 +5256,7 @@ mod tests {
         let mut app = AppState::new("session".into(), None).with_initial_items(vec![
             OutputItem::UserTurn {
                 text: "older turn".into(),
+                presentation: None,
             },
             OutputItem::Thinking {
                 text: "older work".into(),
@@ -5246,6 +5276,7 @@ mod tests {
         ]);
         app.push_item(OutputItem::UserTurn {
             text: "new turn".into(),
+            presentation: None,
         });
         app.push_item(OutputItem::Thinking {
             text: "new work".into(),
@@ -5281,6 +5312,7 @@ mod tests {
         let mut app = AppState::new("session".into(), None);
         app.push_item(OutputItem::UserTurn {
             text: "finish it".into(),
+            presentation: None,
         });
         app.push_item(OutputItem::Thinking {
             text: "work".into(),
@@ -5326,6 +5358,7 @@ mod tests {
         let mut app = AppState::new("session".into(), None);
         app.push_item(OutputItem::UserTurn {
             text: "finish it".into(),
+            presentation: None,
         });
         app.push_item(OutputItem::Thinking {
             text: "work".into(),
@@ -5377,6 +5410,7 @@ mod tests {
         let mut app = AppState::new("session".into(), None);
         app.push_item(OutputItem::UserTurn {
             text: "finish it".into(),
+            presentation: None,
         });
         app.push_item(OutputItem::Thinking {
             text: "work".into(),

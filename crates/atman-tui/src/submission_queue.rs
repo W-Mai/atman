@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueAction {
+    Insert,
     Edit,
     MoveUp,
     MoveDown,
@@ -16,6 +17,14 @@ pub struct QueueHitMap {
     pub rows: Vec<(usize, Rect)>,
     pub actions: Vec<(usize, QueueAction, Rect)>,
     pub edit_origin: Option<(u16, u16)>,
+}
+
+pub struct QueueRenderState<'a> {
+    pub selected: usize,
+    pub focused: bool,
+    pub hovered: Option<usize>,
+    pub edit: Option<&'a crate::app::QueuedSubmissionEdit>,
+    pub active_turn: bool,
 }
 
 impl QueueHitMap {
@@ -36,24 +45,39 @@ pub fn render(
     f: &mut ratatui::Frame,
     area: Rect,
     submissions: &[atman_runtime::QueuedSubmissionView],
-    selected: usize,
-    focused: bool,
-    hovered: Option<usize>,
-    edit: Option<&crate::app::QueuedSubmissionEdit>,
+    state: QueueRenderState<'_>,
 ) -> QueueHitMap {
+    let QueueRenderState {
+        selected,
+        focused,
+        hovered,
+        edit,
+        active_turn,
+    } = state;
     if submissions.is_empty() || area.height < 3 {
         return QueueHitMap::default();
     }
     let t = crate::theme::theme();
     let border = if focused { t.accent } else { t.subtle_fg };
-    let hint = if focused {
-        " Enter/e edit · alt+↑/↓ move · Del/⌫ remove · Tab input "
+    let selected = selected.min(submissions.len().saturating_sub(1));
+    let block_reason = focused
+        .then_some(&submissions[selected])
+        .and_then(|submission| {
+            submission
+                .insert_block_reason
+                .as_deref()
+                .or((!active_turn).then_some("no active flow"))
+        });
+    let hint = if let Some(reason) = block_reason {
+        format!(" insert unavailable: {reason} · Enter/e edit · Del remove ")
+    } else if focused {
+        " i insert · Enter/e edit · ↑/↓ select · Del remove · Tab input ".to_owned()
     } else {
-        " Shift+Tab focus "
+        " Shift+Tab focus ".to_owned()
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Plain)
         .border_style(Style::default().fg(border.into()))
         .title(Span::styled(
             format!(" next · {} ", submissions.len()),
@@ -67,7 +91,6 @@ pub fn render(
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     let visible = inner.height as usize;
-    let selected = selected.min(submissions.len().saturating_sub(1));
     let start = selected
         .saturating_sub(visible.saturating_sub(1))
         .min(submissions.len().saturating_sub(visible));
@@ -78,16 +101,33 @@ pub fn render(
     for (row, index) in (start..end).enumerate() {
         let submission = &submissions[index];
         let active = focused && index == selected;
-        let highlighted = active || hovered == Some(index);
+        let hovered = hovered == Some(index);
+        let row_bg = if active || hovered {
+            t.work_hover_bg.into()
+        } else {
+            ratatui::style::Color::Reset
+        };
         let marker = if active { "●" } else { "○" };
         let editing = edit.filter(|editing| editing.id == submission.id);
-        let text = editing
+        let mut text = editing
             .map(|editing| editing.editor.buf())
             .unwrap_or(&submission.text)
             .replace(['\n', '\r'], " ");
+        if let Some(quote) = submission
+            .presentation
+            .as_ref()
+            .and_then(|value| value.quote.as_ref())
+        {
+            let preview = quote.text.lines().next().unwrap_or_default();
+            if text.trim().is_empty() {
+                text = format!("quote: {preview}");
+            } else {
+                text = format!("{text}  · quote: {preview}");
+            }
+        }
         let prefix = format!(" {marker} {}. ", index + 1);
         let actions = if active && edit.is_none() {
-            "  edit  ↑  ↓  delete "
+            "  insert  edit  ↑  ↓  delete "
         } else if active {
             "  Enter save · Esc cancel "
         } else {
@@ -110,12 +150,15 @@ pub fn render(
         let mut spans = vec![
             Span::styled(
                 prefix,
-                Style::default().fg(if highlighted { t.accent } else { t.subtle_fg }.into()),
+                Style::default()
+                    .fg(if active { t.accent } else { t.subtle_fg }.into())
+                    .bg(row_bg),
             ),
             Span::styled(
                 crate::width::pad_right(&display_text, text_width),
                 Style::default()
-                    .fg(if highlighted { t.heading } else { t.tinted_fg }.into())
+                    .fg(if active { t.heading } else { t.tinted_fg }.into())
+                    .bg(row_bg)
                     .add_modifier(if active {
                         Modifier::BOLD
                     } else {
@@ -126,7 +169,7 @@ pub fn render(
         if !actions.is_empty() {
             spans.push(Span::styled(
                 actions,
-                Style::default().fg(t.subtle_fg.into()),
+                Style::default().fg(t.subtle_fg.into()).bg(row_bg),
             ));
         }
         lines.push(Line::from(spans));
@@ -135,6 +178,7 @@ pub fn render(
         hitmap.rows.push((index, row_rect));
         if active && edit.is_none() {
             let labels = [
+                (QueueAction::Insert, "insert"),
                 (QueueAction::Edit, "edit"),
                 (QueueAction::MoveUp, "↑"),
                 (QueueAction::MoveDown, "↓"),
@@ -206,10 +250,13 @@ mod tests {
                     frame,
                     Rect::new(0, 0, 80, 6),
                     &submissions,
-                    0,
-                    true,
-                    None,
-                    None,
+                    QueueRenderState {
+                        selected: 0,
+                        focused: true,
+                        hovered: None,
+                        edit: None,
+                        active_turn: true,
+                    },
                 );
             })
             .unwrap();

@@ -43,6 +43,7 @@ pub enum KeyAction {
     HardStop,
     PasteImage,
     RemoveAttachment,
+    ToggleQuote,
     CycleReasoning,
     Ignore,
 }
@@ -69,10 +70,11 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (Char('l'), true, _, _) => KeyAction::OpenProjectHub,
         (Char('k'), true, _, _) => KeyAction::SearchHistory,
         (Char('w'), true, _, _) => KeyAction::DeleteWordBackward,
+        (Char('u'), true, _, _) => KeyAction::RemoveAttachment,
+        (Char('\u{15}'), _, _, _) => KeyAction::RemoveAttachment,
         (Char('h' | 'H'), true, _, _) => KeyAction::Backspace,
         (Char('v'), true, _, _) | (Char('v'), false, _, true) => KeyAction::PasteImage,
         (Char('t'), true, _, _) => KeyAction::CycleReasoning,
-        (Delete, false, _, true) => KeyAction::RemoveAttachment,
         (Backspace, _, _, true) => KeyAction::DeleteWordBackward,
         (Char('a'), true, _, _) => KeyAction::CursorHome,
         (Char('e'), true, _, _) => KeyAction::CursorEnd,
@@ -80,6 +82,7 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (F(1), _, _, _) => KeyAction::HelpModal,
         (F(2), _, _, _) => KeyAction::ToggleSidebar,
         (F(3), _, _, _) => KeyAction::ToggleMouseCapture,
+        (F(4), _, _, _) => KeyAction::ToggleQuote,
         (Tab, _, _, _) => KeyAction::Tab,
         (BackTab, _, _, _) => KeyAction::BackTab,
         (Enter, _, true, _) => KeyAction::Newline,
@@ -236,8 +239,16 @@ mod tests {
             KeyAction::PasteImage
         );
         assert_eq!(
-            map(ke(KeyCode::Delete, KeyModifiers::ALT)),
+            map(ke(KeyCode::Char('u'), KeyModifiers::CONTROL)),
             KeyAction::RemoveAttachment
+        );
+        assert_eq!(
+            map(ke(KeyCode::Char('\u{15}'), KeyModifiers::NONE)),
+            KeyAction::RemoveAttachment
+        );
+        assert_eq!(
+            map(ke(KeyCode::Delete, KeyModifiers::ALT)),
+            KeyAction::Delete
         );
         assert_eq!(
             map(ke(KeyCode::Char('t'), KeyModifiers::CONTROL)),

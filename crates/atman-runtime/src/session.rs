@@ -288,6 +288,7 @@ pub struct Session {
     pub compaction: CompactionState,
     pub interactions: InteractionServices,
     injection_queue: Mutex<Vec<Injection>>,
+    injected_submissions: Mutex<HashMap<InjectionId, crate::submission_queue::QueuedSubmission>>,
     injection_tx: broadcast::Sender<Injection>,
     submission_queue: Mutex<VecDeque<crate::submission_queue::QueuedSubmission>>,
     submission_watch: watch::Sender<Vec<crate::submission_queue::QueuedSubmissionView>>,
@@ -1153,6 +1154,7 @@ impl Session {
             compaction: CompactionState::new(),
             interactions: InteractionServices::new(deferred_form_inbox.clone()),
             injection_queue: Mutex::new(Vec::new()),
+            injected_submissions: Mutex::new(HashMap::new()),
             injection_tx,
             submission_queue: Mutex::new(VecDeque::new()),
             submission_watch: watch::channel(Vec::new()).0,
@@ -1390,6 +1392,7 @@ impl Session {
             },
             interactions: InteractionServices::new(deferred_form_inbox.clone()),
             injection_queue: Mutex::new(Vec::new()),
+            injected_submissions: Mutex::new(HashMap::new()),
             injection_tx,
             submission_queue: Mutex::new(VecDeque::new()),
             submission_watch: watch::channel(Vec::new()).0,
@@ -1447,6 +1450,7 @@ impl Session {
             compaction: CompactionState::new(),
             interactions: InteractionServices::new(deferred_form_inbox.clone()),
             injection_queue: Mutex::new(Vec::new()),
+            injected_submissions: Mutex::new(HashMap::new()),
             injection_tx,
             submission_queue: Mutex::new(VecDeque::new()),
             submission_watch: watch::channel(Vec::new()).0,
@@ -2170,7 +2174,28 @@ impl Session {
     /// Single-writer append. Emits the matching event before the in-memory push
     /// so events.jsonl remains the authority (§I5).
     pub fn append_message(&self, msg: Message, flow_run_id: Option<FlowRunId>) {
-        AppendMessageCommand { msg, flow_run_id }.execute(self);
+        AppendMessageCommand {
+            msg,
+            flow_run_id,
+            presentation: None,
+            injection_id: None,
+        }
+        .execute(self);
+    }
+
+    pub fn append_user_input(
+        &self,
+        msg: Message,
+        presentation: Option<crate::user_input::UserInputPresentation>,
+        injection_id: Option<InjectionId>,
+    ) {
+        AppendMessageCommand {
+            msg,
+            flow_run_id: None,
+            presentation,
+            injection_id,
+        }
+        .execute(self);
     }
 
     pub(crate) fn append_message_with_stream_scope(
@@ -2179,8 +2204,13 @@ impl Session {
         flow_run_id: Option<FlowRunId>,
         stream_flow_run_id: Option<FlowRunId>,
     ) {
-        AppendMessageCommand { msg, flow_run_id }
-            .execute_with_stream_scope(self, stream_flow_run_id.as_ref());
+        AppendMessageCommand {
+            msg,
+            flow_run_id,
+            presentation: None,
+            injection_id: None,
+        }
+        .execute_with_stream_scope(self, stream_flow_run_id.as_ref());
     }
 
     pub fn append_context_records(
@@ -2194,6 +2224,8 @@ impl Session {
             AppendMessageCommand {
                 msg: Message::context_record(turn_id.clone(), record.clone()),
                 flow_run_id: None,
+                presentation: None,
+                injection_id: None,
             }
             .execute_with_messages(self, &mut messages);
         }
@@ -2554,7 +2586,19 @@ impl Session {
     }
 
     pub fn begin_turn(&self, user_msg: Message) -> TurnId {
-        BeginTurnCommand { user_msg }.execute(self)
+        self.begin_turn_with_presentation(user_msg, None)
+    }
+
+    pub fn begin_turn_with_presentation(
+        &self,
+        user_msg: Message,
+        presentation: Option<crate::user_input::UserInputPresentation>,
+    ) -> TurnId {
+        BeginTurnCommand {
+            user_msg,
+            presentation,
+        }
+        .execute(self)
     }
 
     pub fn mark_streamed(&self) {
@@ -2575,14 +2619,35 @@ impl Session {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         let turn_id = self.turn.current_turn.lock().unwrap().take();
         if let Some(turn_id) = turn_id {
+            let mut submissions = self.submission_queue.lock().unwrap();
             let mut q = self.injection_queue.lock().unwrap();
+            let mut returned = Vec::new();
+            let mut injected_submissions = self.injected_submissions.lock().unwrap();
             for inj in q.iter_mut() {
-                if inj.state == InjectionState::Pending && inj.turn_id == turn_id {
+                if matches!(
+                    inj.state,
+                    InjectionState::Pending | InjectionState::Reserved
+                ) && inj.turn_id == turn_id
+                {
                     inj.state = InjectionState::Cancelled;
+                    if let Some(submission) = injected_submissions.remove(&inj.id) {
+                        returned.push(submission);
+                    }
                     let _ = self.injection_tx.send(inj.clone());
                 }
             }
+            if !returned.is_empty() {
+                for submission in returned.into_iter().rev() {
+                    submissions.push_front(submission);
+                }
+                for submission in submissions.iter_mut() {
+                    submission.revision = submission.revision.saturating_add(1);
+                }
+                self.publish_submission_queue(&submissions);
+            }
+            drop(injected_submissions);
             drop(q);
+            drop(submissions);
             self.sink.emit(Event::TurnEnd {
                 turn_id: turn_id.clone(),
             });
@@ -2608,13 +2673,8 @@ impl Session {
         level: crate::injection::InjectionLevel,
         redirect_target: Option<String>,
     ) -> Result<InjectionId, EnqueueError> {
-        let turn_id = self
-            .turn
-            .current_turn
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or(EnqueueError::NoActiveTurn)?;
+        let current_turn = self.turn.current_turn.lock().unwrap();
+        let turn_id = current_turn.clone().ok_or(EnqueueError::NoActiveTurn)?;
         let inj = Injection::with_level(turn_id.clone(), text, level, redirect_target);
         let id = inj.id.clone();
         self.sink.emit(Event::UserInject {
@@ -2624,6 +2684,56 @@ impl Session {
         self.injection_queue.lock().unwrap().push(inj.clone());
         let _ = self.injection_tx.send(inj);
         Ok(id)
+    }
+
+    pub fn insert_queued_submission_l1(
+        &self,
+        id: &crate::submission_queue::SubmissionId,
+        expected_revision: u64,
+    ) -> Result<InjectionId, crate::submission_queue::SubmissionQueueError> {
+        use crate::submission_queue::SubmissionQueueError;
+        let current_turn = self.turn.current_turn.lock().unwrap();
+        let turn_id = current_turn
+            .clone()
+            .ok_or(SubmissionQueueError::NoActiveTurn)?;
+        let mut queue = self.submission_queue.lock().unwrap();
+        let index = queue
+            .iter()
+            .position(|submission| submission.id == *id)
+            .ok_or(SubmissionQueueError::NotFound)?;
+        let selected = &queue[index];
+        if selected.revision != expected_revision {
+            return Err(SubmissionQueueError::RevisionConflict);
+        }
+        if let Some(reason) = selected.next_call_block_reason(false) {
+            return Err(SubmissionQueueError::NotInjectable(reason));
+        }
+        if selected.origin != crate::message::MessageOrigin::User {
+            return Err(SubmissionQueueError::NotInjectable(
+                "only user tasks can be inserted",
+            ));
+        }
+        let submission = queue
+            .remove(index)
+            .expect("queued submission index came from the same queue");
+        let mut injection = Injection::new_pending(turn_id.clone(), submission.text.clone());
+        injection.queued_submission_id = Some(submission.id.clone());
+        injection.presentation = submission.presentation.clone();
+        let injection_id = injection.id.clone();
+        let mut injections = self.injection_queue.lock().unwrap();
+        let mut transferred = self.injected_submissions.lock().unwrap();
+        self.sink.emit(Event::UserInject {
+            turn_id,
+            injection: injection.clone(),
+        });
+        transferred.insert(injection_id.clone(), submission);
+        injections.push(injection.clone());
+        for remaining in queue.iter_mut().skip(index) {
+            remaining.revision = remaining.revision.saturating_add(1);
+        }
+        self.publish_submission_queue(&queue);
+        let _ = self.injection_tx.send(injection);
+        Ok(injection_id)
     }
 
     pub fn subscribe_injections(&self) -> broadcast::Receiver<Injection> {
@@ -2652,14 +2762,29 @@ impl Session {
             .cloned()
     }
 
-    /// Drain all Pending injections for `turn_id`. Marks them Injected.
-    /// Returns them in creation order.
-    pub fn drain_injections(&self, turn_id: &TurnId) -> Vec<Injection> {
+    /// Reserve pending injections for one LLM request without acknowledging pickup.
+    pub fn reserve_injections(&self, turn_id: &TurnId) -> Vec<Injection> {
+        self.reserve_injections_for_call(turn_id, true)
+    }
+
+    pub fn reserve_injections_for_call(
+        &self,
+        turn_id: &TurnId,
+        task_facing: bool,
+    ) -> Vec<Injection> {
         let mut q = self.injection_queue.lock().unwrap();
         let mut out = Vec::new();
         for inj in q.iter_mut() {
-            if inj.state == InjectionState::Pending && inj.turn_id == *turn_id {
-                inj.state = InjectionState::Injected;
+            if inj.state == InjectionState::Pending
+                && inj.turn_id == *turn_id
+                && (task_facing || inj.queued_submission_id.is_none())
+                && matches!(
+                    inj.level,
+                    crate::injection::InjectionLevel::L1Nudge
+                        | crate::injection::InjectionLevel::L2CourseCorrect
+                )
+            {
+                inj.state = InjectionState::Reserved;
                 let _ = self.injection_tx.send(inj.clone());
                 out.push(inj.clone());
             }
@@ -2667,12 +2792,71 @@ impl Session {
         out
     }
 
+    pub fn release_reserved_injections(&self, ids: &[InjectionId]) {
+        let mut q = self.injection_queue.lock().unwrap();
+        for inj in q.iter_mut() {
+            if ids.contains(&inj.id) && inj.state == InjectionState::Reserved {
+                inj.state = InjectionState::Pending;
+                let _ = self.injection_tx.send(inj.clone());
+            }
+        }
+    }
+
+    pub fn drain_injections(&self, turn_id: &TurnId) -> Vec<Injection> {
+        let mut q = self.injection_queue.lock().unwrap();
+        let mut out = Vec::new();
+        for injection in q.iter_mut() {
+            if injection.state == InjectionState::Pending
+                && injection.turn_id == *turn_id
+                && injection.queued_submission_id.is_none()
+            {
+                injection.state = InjectionState::Injected;
+                let _ = self.injection_tx.send(injection.clone());
+                out.push(injection.clone());
+            }
+        }
+        out
+    }
+
+    pub fn commit_reserved_injections(&self, messages: &[(Injection, Message)]) -> bool {
+        let current_turn = self.turn.current_turn.lock().unwrap();
+        let mut q = self.injection_queue.lock().unwrap();
+        if messages.iter().any(|(injection, _)| {
+            current_turn.as_ref() != Some(&injection.turn_id)
+                || !q.iter().any(|candidate| {
+                    candidate.id == injection.id && candidate.state == InjectionState::Reserved
+                })
+        }) {
+            return false;
+        }
+        let mut transferred = self.injected_submissions.lock().unwrap();
+        for (injection, message) in messages {
+            let candidate = q
+                .iter_mut()
+                .find(|candidate| candidate.id == injection.id)
+                .expect("reserved injection was validated under the same lock");
+            candidate.state = InjectionState::Injected;
+            let _ = self.injection_tx.send(candidate.clone());
+            if let Some(submission) = transferred.remove(&injection.id) {
+                let presentation =
+                    submission
+                        .presentation
+                        .or(Some(crate::user_input::UserInputPresentation {
+                            prompt: submission.text,
+                            quote: None,
+                        }));
+                self.append_user_input(message.clone(), presentation, Some(injection.id.clone()));
+            }
+        }
+        true
+    }
+
     pub fn list_pending_injections(&self) -> Vec<Injection> {
         self.injection_queue
             .lock()
             .unwrap()
             .iter()
-            .filter(|i| i.state == InjectionState::Pending)
+            .filter(|i| matches!(i.state, InjectionState::Pending | InjectionState::Reserved))
             .cloned()
             .collect()
     }
@@ -2699,12 +2883,29 @@ impl Session {
         crate::submission_queue::QueuedSubmissionView,
         crate::submission_queue::SubmissionQueueError,
     > {
-        let text = text.into();
+        self.enqueue_submission_with_presentation(text, images, invocation_env, origin, None)
+    }
+
+    pub fn enqueue_submission_with_presentation(
+        &self,
+        text: impl Into<String>,
+        images: Vec<crate::message::ImageSource>,
+        invocation_env: crate::InvocationEnv,
+        origin: crate::message::MessageOrigin,
+        presentation: Option<crate::user_input::UserInputPresentation>,
+    ) -> Result<
+        crate::submission_queue::QueuedSubmissionView,
+        crate::submission_queue::SubmissionQueueError,
+    > {
+        let text = presentation
+            .as_ref()
+            .map_or_else(|| text.into(), |value| value.model_text());
         if text.trim().is_empty() {
             return Err(crate::submission_queue::SubmissionQueueError::EmptyText);
         }
-        let submission =
+        let mut submission =
             crate::submission_queue::QueuedSubmission::new(text, images, invocation_env, origin);
+        submission.presentation = presentation;
         let view = crate::submission_queue::QueuedSubmissionView::from(&submission);
         let mut queue = self.submission_queue.lock().unwrap();
         queue.push_back(submission);
@@ -2734,9 +2935,6 @@ impl Session {
         text: impl Into<String>,
     ) -> Result<(), crate::submission_queue::SubmissionQueueError> {
         let text = text.into();
-        if text.trim().is_empty() {
-            return Err(crate::submission_queue::SubmissionQueueError::EmptyText);
-        }
         let mut queue = self.submission_queue.lock().unwrap();
         let submission = queue
             .iter_mut()
@@ -2745,7 +2943,15 @@ impl Session {
         if submission.revision != expected_revision {
             return Err(crate::submission_queue::SubmissionQueueError::RevisionConflict);
         }
-        submission.text = text;
+        if text.trim().is_empty() && submission.presentation.is_none() {
+            return Err(crate::submission_queue::SubmissionQueueError::EmptyText);
+        }
+        submission.text = if let Some(presentation) = submission.presentation.as_mut() {
+            presentation.prompt = text;
+            presentation.model_text()
+        } else {
+            text
+        };
         submission.revision = submission.revision.saturating_add(1);
         self.publish_submission_queue(&queue);
         Ok(())
@@ -2858,22 +3064,15 @@ impl Session {
         }
         let mut queue = self.submission_queue.lock().unwrap();
         let mut claimed = Vec::new();
+        let mut presentations = Vec::new();
         while let Some(front) = queue.front() {
-            let text = front.text.trim_start();
-            let has_path_attachment = text.split_whitespace().any(|word| {
-                word.starts_with("@./") || word.starts_with("@../") || word.starts_with("@/")
-            });
-            if text.starts_with(':')
-                || text.starts_with('/')
-                || has_path_attachment
-                || !front.invocation_env.is_empty()
-                || (!allow_images && !front.images.is_empty())
-            {
+            if front.next_call_block_reason(allow_images).is_some() {
                 break;
             }
             let submission = queue
                 .pop_front()
                 .expect("queued submission was checked under the same lock");
+            let presentation = submission.presentation.clone();
             let mut message = Message::user_text(turn_id.clone(), submission.text);
             message.origin = crate::message::MessageOrigin::Interjection;
             message.parts.extend(
@@ -2882,7 +3081,7 @@ impl Session {
                     .into_iter()
                     .map(|source| crate::message::MessagePart::Image { source }),
             );
-            self.append_message(message.clone(), None);
+            presentations.push(presentation);
             claimed.push(message);
         }
         if !claimed.is_empty() {
@@ -2890,6 +3089,10 @@ impl Session {
                 remaining.revision = remaining.revision.saturating_add(claimed.len() as u64);
             }
             self.publish_submission_queue(&queue);
+        }
+        drop(queue);
+        for (message, presentation) in claimed.iter().zip(presentations) {
+            self.append_user_input(message.clone(), presentation, None);
         }
         claimed
     }
@@ -2947,6 +3150,8 @@ pub enum EnqueueError {
 pub struct AppendMessageCommand {
     pub msg: Message,
     pub flow_run_id: Option<FlowRunId>,
+    pub presentation: Option<crate::user_input::UserInputPresentation>,
+    pub injection_id: Option<InjectionId>,
 }
 
 impl AppendMessageCommand {
@@ -2989,6 +3194,8 @@ impl AppendMessageCommand {
                     turn_id: msg.turn_id.clone(),
                     flow_run_id: self.flow_run_id.clone(),
                     message: msg.clone(),
+                    presentation: self.presentation.clone(),
+                    injection_id: self.injection_id.clone(),
                 },
                 MessageRole::Assistant => {
                     if !is_internal {
@@ -3037,6 +3244,15 @@ impl AppendMessageCommand {
                 },
             };
         let seq = session.sink.emit_returning_seq(event);
+        if matches!(msg.role, MessageRole::User)
+            && msg.origin == crate::message::MessageOrigin::Interjection
+        {
+            let _ = session.stream_tx().send(StreamFrame::UserInputApplied {
+                message: msg.clone(),
+                presentation: self.presentation.clone(),
+                injection_id: self.injection_id.clone(),
+            });
+        }
         if matches!(msg.role, MessageRole::User) {
             let images: Vec<(usize, String)> = msg
                 .parts
@@ -3075,6 +3291,7 @@ impl AppendMessageCommand {
 
 pub struct BeginTurnCommand {
     pub user_msg: Message,
+    pub presentation: Option<crate::user_input::UserInputPresentation>,
 }
 
 impl BeginTurnCommand {
@@ -3093,6 +3310,8 @@ impl BeginTurnCommand {
         AppendMessageCommand {
             msg: self.user_msg.clone(),
             flow_run_id: None,
+            presentation: self.presentation.clone(),
+            injection_id: None,
         }
         .execute(session);
         turn_id
@@ -3295,6 +3514,8 @@ mod tests {
             turn_id: turn_id.clone(),
             flow_run_id: None,
             message: crate::message::Message::user_text(turn_id, "once"),
+            presentation: None,
+            injection_id: None,
         });
         created.flush_writer().await;
         created.shutdown().await;
@@ -4512,6 +4733,105 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(session.queued_submissions().len(), 2);
+    }
+
+    #[test]
+    fn direct_insert_bypasses_blocked_prefix_and_only_appears_after_pickup() {
+        let session = Session::open_ephemeral();
+        let turn_id = TurnId::now();
+        session.begin_turn(Message::user_text(turn_id.clone(), "initial"));
+        session
+            .enqueue_submission(
+                ":goal inspect",
+                Vec::new(),
+                crate::InvocationEnv::default(),
+                crate::message::MessageOrigin::User,
+            )
+            .unwrap();
+        let presentation = crate::user_input::UserInputPresentation {
+            prompt: "check this".into(),
+            quote: Some(crate::user_input::QuoteSnapshot {
+                text: "selected line".into(),
+            }),
+        };
+        let selected = session
+            .enqueue_submission_with_presentation(
+                presentation.model_text(),
+                Vec::new(),
+                crate::InvocationEnv::default(),
+                crate::message::MessageOrigin::User,
+                Some(presentation.clone()),
+            )
+            .unwrap();
+        let before = session.transcript_since_open().len();
+        let id = session
+            .insert_queued_submission_l1(&selected.id, selected.revision)
+            .unwrap();
+        assert_eq!(session.transcript_since_open().len(), before);
+        assert_eq!(session.queued_submissions().len(), 1);
+        let reserved = session.reserve_injections(&turn_id);
+        assert_eq!(reserved.len(), 1);
+        assert_eq!(reserved[0].id, id);
+        let mut message = Message::user_text(turn_id.clone(), "model-facing insertion");
+        message.origin = crate::message::MessageOrigin::Interjection;
+        assert!(session.commit_reserved_injections(&[(reserved[0].clone(), message.clone())]));
+        assert!(!session.commit_reserved_injections(&[(reserved[0].clone(), message.clone())]));
+        assert!(session.reserve_injections(&turn_id).is_empty());
+        assert_eq!(session.messages().last(), Some(&message));
+        let transcript = session.transcript_since_open();
+        assert_eq!(transcript.len(), before + 1);
+        assert!(matches!(
+            transcript.last(),
+            Some(crate::projection::message_window::TranscriptEntry::Message {
+                presentation: Some(actual),
+                ..
+            }) if actual == &presentation
+        ));
+        session.end_turn();
+        assert_eq!(session.queued_submissions().len(), 1);
+        assert_eq!(session.queued_submissions()[0].text, ":goal inspect");
+    }
+
+    #[test]
+    fn direct_insert_returns_to_next_when_turn_ends_before_pickup() {
+        let session = Session::open_ephemeral();
+        let selected = session
+            .enqueue_submission(
+                "check the result",
+                Vec::new(),
+                crate::InvocationEnv::default(),
+                crate::message::MessageOrigin::User,
+            )
+            .unwrap();
+        assert_eq!(
+            session.insert_queued_submission_l1(&selected.id, selected.revision),
+            Err(crate::submission_queue::SubmissionQueueError::NoActiveTurn)
+        );
+        let turn_id = TurnId::now();
+        session.begin_turn(Message::user_text(turn_id.clone(), "initial"));
+        session
+            .insert_queued_submission_l1(&selected.id, selected.revision)
+            .unwrap();
+        assert!(
+            session
+                .reserve_injections_for_call(&turn_id, false)
+                .is_empty()
+        );
+        assert_eq!(session.reserve_injections(&turn_id).len(), 1);
+        session.end_turn();
+        let restored = session.queued_submissions();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].id, selected.id);
+        assert_eq!(restored[0].text, selected.text);
+        assert!(restored[0].revision > selected.revision);
+        assert!(session.list_pending_injections().is_empty());
+        assert!(
+            !session.transcript_since_open().iter().any(|entry| matches!(
+                entry,
+                crate::projection::message_window::TranscriptEntry::Message { message, .. }
+                    if message.origin == crate::message::MessageOrigin::Interjection
+            ))
+        );
     }
 
     #[tokio::test]

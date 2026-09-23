@@ -30,6 +30,7 @@ pub struct QueuedSubmission {
     pub invocation_env: InvocationEnv,
     pub created_at: DateTime<Utc>,
     pub origin: MessageOrigin,
+    pub presentation: Option<crate::user_input::UserInputPresentation>,
 }
 
 impl QueuedSubmission {
@@ -47,7 +48,31 @@ impl QueuedSubmission {
             invocation_env,
             created_at: Utc::now(),
             origin,
+            presentation: None,
         }
+    }
+
+    pub fn next_call_block_reason(&self, allow_images: bool) -> Option<&'static str> {
+        let routed_text = self
+            .presentation
+            .as_ref()
+            .map_or(self.text.as_str(), |value| value.prompt.as_str())
+            .trim_start();
+        if routed_text.starts_with(':') || routed_text.starts_with('/') {
+            return Some("commands run as a separate turn");
+        }
+        if routed_text.split_whitespace().any(|word| {
+            word.starts_with("@./") || word.starts_with("@../") || word.starts_with("@/")
+        }) {
+            return Some("path attachments need a separate turn");
+        }
+        if !self.invocation_env.is_empty() {
+            return Some("invocation settings need a separate turn");
+        }
+        if !allow_images && !self.images.is_empty() {
+            return Some("images cannot enter an L1 insertion");
+        }
+        None
     }
 }
 
@@ -57,6 +82,10 @@ pub struct QueuedSubmissionView {
     pub revision: u64,
     pub text: String,
     pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<crate::user_input::UserInputPresentation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert_block_reason: Option<String>,
 }
 
 impl From<&QueuedSubmission> for QueuedSubmissionView {
@@ -64,8 +93,19 @@ impl From<&QueuedSubmission> for QueuedSubmissionView {
         Self {
             id: submission.id.clone(),
             revision: submission.revision,
-            text: submission.text.clone(),
+            text: submission
+                .presentation
+                .as_ref()
+                .map_or_else(|| submission.text.clone(), |value| value.prompt.clone()),
             created_at: submission.created_at,
+            presentation: submission.presentation.clone(),
+            insert_block_reason: submission
+                .next_call_block_reason(false)
+                .map(str::to_owned)
+                .or_else(|| {
+                    (submission.origin != MessageOrigin::User)
+                        .then(|| "only user tasks can be inserted".to_owned())
+                }),
         }
     }
 }
@@ -84,4 +124,8 @@ pub enum SubmissionQueueError {
     NotFound,
     #[error("queued submission changed; refresh and try again")]
     RevisionConflict,
+    #[error("no active turn can receive an insertion")]
+    NoActiveTurn,
+    #[error("queued submission cannot be inserted: {0}")]
+    NotInjectable(&'static str),
 }

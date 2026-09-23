@@ -22,6 +22,7 @@ impl std::fmt::Display for InjectionId {
 #[serde(rename_all = "snake_case")]
 pub enum InjectionState {
     Pending,
+    Reserved,
     Injected,
     Cancelled,
 }
@@ -71,6 +72,10 @@ pub struct Injection {
     pub redirect_target: Option<String>,
     #[serde(default)]
     pub source: InjectionSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_submission_id: Option<crate::submission_queue::SubmissionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<crate::user_input::UserInputPresentation>,
 }
 
 fn default_level() -> InjectionLevel {
@@ -97,6 +102,8 @@ impl Injection {
             level,
             redirect_target,
             source: InjectionSource::User,
+            queued_submission_id: None,
+            presentation: None,
         }
     }
 }
@@ -173,6 +180,8 @@ mod tests {
                 kind: "terminal".into(),
                 handle: "term_x".into(),
             },
+            queued_submission_id: None,
+            presentation: None,
         };
         let s = serde_json::to_string(&inj).unwrap();
         let back: Injection = serde_json::from_str(&s).unwrap();

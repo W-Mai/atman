@@ -6,8 +6,13 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ✨ Features
+
+- **Quoted messages and pending insertion** — Quoted selections remain separate from editable prompts in the composer, pending queue, and transcript. A pending text task can enter the current flow at the next LLM call; if the turn ends first, it returns to Next.
+
 ### 🐛 Bug Fixes
 
+- **Quote removal** — The quote card close button handles clicks in the normal mouse path, and Ctrl+U removes a pending quote or the latest image attachment.
 - **Semantic text selection** — Selection menus and copy/quote actions now cover transcript content, thinking blocks, Mermaid source, tool output, Workflow/Working panels, and Bash/Terminal panel bodies while excluding panel chrome.
 - **Quote draft and selection scrolling** — Quoted selections remain visible above the input or as a compact input hint, with aligned mouse and keyboard removal. Floating controls no longer cover the latest transcript lines. Drag input coalesces queued pointer positions, selection highlighting avoids repeated projection scans, and edge scrolling tracks the visible document boundary without idle redraws.
 - **Revision-bound spec approval** — Main-agent and synchronous spec reviews share session-local, single-use confirmation receipts. Approval and rejection require a real bound form response, cancellation leaves the design pending, and stale or mismatched revisions require another confirmation.
