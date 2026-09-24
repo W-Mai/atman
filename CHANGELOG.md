@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### 🐛 Bug Fixes
+
+- **Math rendering** — Malformed formulas fall back to their source text without terminating the TUI render task.
+
 ## [1.13.1] — 2026-09-24
 
 ### 🐛 Bug Fixes

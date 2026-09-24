@@ -121,8 +121,13 @@ fn normalize_tex_compat(tex: &str) -> String {
 
 pub fn render_math(tex: &str) -> Vec<Line<'static>> {
     let normalized = normalize_tex_compat(tex);
-    match txm::render(&normalized).or_else(|_| txm::render(tex)) {
-        Ok(ansi_string) => {
+    let render = |source: &str| {
+        atman_runtime::capture_blocking_panic(|| txm::render(source)).and_then(Result::ok)
+    };
+    let rendered =
+        render(&normalized).or_else(|| if normalized == tex { None } else { render(tex) });
+    match rendered {
+        Some(ansi_string) => {
             let lines = highlight_ansi(&ansi_string);
             if lines.is_empty() {
                 vec![Line::raw(tex.to_string())]
@@ -130,7 +135,7 @@ pub fn render_math(tex: &str) -> Vec<Line<'static>> {
                 lines
             }
         }
-        Err(_) => vec![Line::raw(tex.to_string())],
+        None => vec![Line::raw(tex.to_string())],
     }
 }
 
@@ -166,6 +171,15 @@ mod tests {
                 .collect();
             assert!(!text.contains(r"\begin"), "raw TeX leaked for {source:?}");
             assert!(text.contains('a') || text.contains('x'));
+        }
+    }
+
+    #[test]
+    fn incomplete_math_falls_back_without_unwinding() {
+        for source in [r"\frac{1}", "x^", r"\sqrt"] {
+            let lines = render_math(source);
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].spans[0].content, source);
         }
     }
 

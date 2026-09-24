@@ -57,6 +57,14 @@ pub fn is_panic_capture_active() -> bool {
     panic_capture::is_active()
 }
 
+/// Contains a synchronous panic at a fallible external boundary.
+///
+/// The TUI panic hook leaves the terminal active while this scope catches the panic.
+#[doc(hidden)]
+pub fn capture_blocking_panic<T>(operation: impl FnOnce() -> T) -> Option<T> {
+    panic_capture::blocking(operation).ok()
+}
+
 pub mod permission;
 pub mod permission_audit;
 pub mod project_catalog;
