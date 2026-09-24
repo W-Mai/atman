@@ -1016,6 +1016,7 @@ pub struct AppState {
     pub last_window_selection_projection: crate::selection::VisibleSelectionProjection,
     pub selection: Option<crate::selection::SelectionState>,
     pub transcript_selection_pointer: Option<(u16, u16)>,
+    pub thinking_click_origin: Option<(usize, u16, u16)>,
     pub last_transcript_rect: Option<ratatui::layout::Rect>,
     pub last_full_rect: Option<ratatui::layout::Rect>,
     pub last_sidebar_rect: Option<ratatui::layout::Rect>,

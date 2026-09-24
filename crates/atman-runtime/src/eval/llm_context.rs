@@ -86,11 +86,17 @@ pub(super) fn move_current_turn_interjections_to_tail(
     messages: &mut Vec<crate::message::Message>,
     turn_id: &crate::event::TurnId,
 ) {
+    let last_reply = messages.iter().rposition(|message| {
+        message.role == crate::message::MessageRole::Assistant && message.turn_id == *turn_id
+    });
     let mut interjections = Vec::new();
+    let mut index = 0;
     messages.retain(|message| {
-        if message.origin == crate::message::MessageOrigin::Interjection
-            && message.turn_id == *turn_id
-        {
+        let move_to_tail = last_reply.is_none_or(|reply| index > reply)
+            && message.origin == crate::message::MessageOrigin::Interjection
+            && message.turn_id == *turn_id;
+        index += 1;
+        if move_to_tail {
             interjections.push(message.clone());
             false
         } else {
@@ -114,29 +120,32 @@ pub(super) fn project_session_messages(
         ContextMode::Session => messages.iter().filter(visible).cloned().collect(),
         ContextMode::SessionRecent(n) => {
             let mut projected = crate::context_plan::latest_live_context_record_messages(messages);
+            let last_reply = messages.iter().rposition(|message| {
+                message.role == crate::message::MessageRole::Assistant
+                    && message.turn_id == *current_turn_id
+            });
             let ordinary: Vec<_> = messages
                 .iter()
-                .filter(visible)
-                .filter_map(|message| {
+                .enumerate()
+                .filter(|(_, message)| visible(message))
+                .filter_map(|(source_index, message)| {
                     let mut message = message.clone();
                     message.parts.retain(|part| {
                         !matches!(part, crate::message::MessagePart::ContextRecord(_))
                     });
-                    (!message.parts.is_empty()).then_some(message)
+                    (!message.parts.is_empty()).then_some((source_index, message))
                 })
                 .collect();
             let start = ordinary.len().saturating_sub(n);
-            projected.extend(
-                ordinary
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(index, message)| {
-                        (index >= start
-                            || (message.origin == crate::message::MessageOrigin::Interjection
-                                && message.turn_id == *current_turn_id))
-                            .then_some(message)
-                    }),
-            );
+            projected.extend(ordinary.into_iter().enumerate().filter_map(
+                |(index, (source_index, message))| {
+                    (index >= start
+                        || (message.origin == crate::message::MessageOrigin::Interjection
+                            && message.turn_id == *current_turn_id
+                            && last_reply.is_none_or(|reply| source_index > reply)))
+                    .then_some(message)
+                },
+            ));
             projected
         }
         ContextMode::None => crate::context_plan::latest_live_context_record_messages(messages),
@@ -240,6 +249,23 @@ mod tests {
 
         assert_eq!(projected.len(), 2);
         assert_eq!(projected[0].text_concat(), "new direction");
+    }
+
+    #[test]
+    fn answered_nudge_stays_in_history_instead_of_becoming_the_latest_prompt() {
+        let turn_id = TurnId::now();
+        let mut nudge = Message::user_text(turn_id.clone(), "old reminder");
+        nudge.origin = MessageOrigin::Interjection;
+        let reply = Message::assistant_text(turn_id.clone(), "handled reminder");
+        let prompt = Message::user_text(turn_id.clone(), "continue work");
+        let mut messages = vec![nudge, reply, prompt];
+
+        move_current_turn_interjections_to_tail(&mut messages, &turn_id);
+
+        assert_eq!(messages.last().unwrap().text_concat(), "continue work");
+        let recent = project_session_messages(&messages, ContextMode::SessionRecent(1), &turn_id);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].text_concat(), "continue work");
     }
 
     #[test]

@@ -403,6 +403,7 @@ pub(crate) async fn run_frames(
                                 {
                                     app.app.selection = crate::selection::selection_clear();
                                     app.app.transcript_selection_pointer = None;
+                                    app.app.thinking_click_origin = None;
                                     continue;
                                 }
                                 key_handler::handle_key(
@@ -432,6 +433,13 @@ pub(crate) async fn run_frames(
                             }
                         }
                         Some(Ok(CtEvent::Mouse(me))) => {
+                            if matches!(
+                                me.kind,
+                                MouseEventKind::Down(MouseButton::Left)
+                                    | MouseEventKind::Drag(MouseButton::Left)
+                            ) {
+                                app.app.thinking_click_origin = None;
+                            }
                             let (consumed, commands) = app.wm.dispatch_mouse(
                                 &me,
                                 &mut app.app,
@@ -1250,22 +1258,6 @@ pub(crate) async fn run_frames(
                                     }
                                 }
                             } else if let MouseEventKind::Up(MouseButton::Left) = me.kind {
-                                if app
-                                    .app
-                                    .selection
-                                    .as_ref()
-                                    .is_some_and(pending_thinking_click)
-                                {
-                                    if let Some(idx) = app.app.hit_test(me.column, me.row)
-                                        && matches!(
-                                            app.app.items.get(idx),
-                                            Some(crate::app::OutputItem::Thinking { .. })
-                                        )
-                                    {
-                                        app.app.cycle_thinking_disclosure(idx);
-                                    }
-                                    app.app.selection = crate::selection::selection_clear();
-                                }
                                 if app.wm.interaction.resize_target.is_some() {
                                     let id = app.wm.interaction.resize_target;
                                     if let Some(id) = id {
@@ -1489,6 +1481,7 @@ pub(crate) async fn run_frames(
                         }
                         Some(Ok(CtEvent::Resize(cols, rows))) => {
                             app.app.transcript_selection_pointer = None;
+                            app.app.thinking_click_origin = None;
                             let canvas = ratatui::layout::Rect::new(0, 0, cols, rows);
                             app.wm.clamp_to_canvas(canvas);
                             // Keep the focused terminal panel's PTY in sync with its
@@ -2811,14 +2804,6 @@ fn handle_window_selection_mouse(app: &mut AppState, event: &crossterm::event::M
     }
 }
 
-fn pending_thinking_click(state: &crate::selection::SelectionState) -> bool {
-    state.phase == crate::selection::SelectionPhase::Pending
-        && matches!(
-            state.anchor.domain,
-            crate::selection::SelectionDomain::Thinking { .. }
-        )
-}
-
 const SELECTION_SCROLL_MAX_STEP: u32 = 4;
 
 fn selection_scroll_step(distance: u16) -> u32 {
@@ -2964,6 +2949,7 @@ fn handle_transcript_selection_mouse(
     let Some(rect) = transcript_selection_viewport(app) else {
         if matches!(event.kind, MouseEventKind::Up(MouseButton::Left)) {
             app.transcript_selection_pointer = None;
+            app.thinking_click_origin = None;
         }
         return matches!(
             event.kind,
@@ -2978,6 +2964,13 @@ fn handle_transcript_selection_mouse(
             if event.row < rect.y || event.row >= rect.bottom() {
                 return false;
             }
+            app.thinking_click_origin = app.hit_test(event.column, event.row).and_then(|index| {
+                matches!(
+                    app.items.get(index),
+                    Some(crate::app::OutputItem::Thinking { .. })
+                )
+                .then_some((index, event.column, event.row))
+            });
             let point = app
                 .last_selection_projection
                 .prose_point_at(row, col)
@@ -3007,6 +3000,7 @@ fn handle_transcript_selection_mouse(
             false
         }
         MouseEventKind::Drag(MouseButton::Left) => {
+            app.thinking_click_origin = None;
             let Some(state) = app.selection.as_ref() else {
                 return false;
             };
@@ -3050,6 +3044,15 @@ fn handle_transcript_selection_mouse(
                 .is_some_and(crate::selection::selection_is_non_empty)
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            if let Some((index, column, row)) = app.thinking_click_origin.take()
+                && (event.column, event.row) == (column, row)
+                && app.hit_test(event.column, event.row) == Some(index)
+            {
+                app.selection = crate::selection::selection_clear();
+                app.transcript_selection_pointer = None;
+                app.cycle_thinking_disclosure(index);
+                return true;
+            }
             if event.row < rect.y {
                 resolve_transcript_selection_edge(app, false);
             } else if event.row >= rect.bottom() {
@@ -4030,6 +4033,68 @@ mod tests {
             crate::selection::selection_copy_payload(&app.last_selection_projection, state)
                 .is_some()
         );
+        assert!(matches!(
+            app.items.first(),
+            Some(app::OutputItem::Thinking {
+                disclosure: app::Disclosure::Full,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn collapsed_thinking_click_expands_without_selection_atoms() {
+        let items = app::OutputStore::from(vec![app::OutputItem::Thinking {
+            text: "reasoning details".into(),
+            done: true,
+            disclosure: app::Disclosure::Summary,
+            retried: false,
+        }]);
+        let mut cache = crate::output::LayoutCache::default();
+        let metrics = cache.update_dirty(
+            crate::output::LayoutKey {
+                width: 80,
+                theme: crate::theme::ThemeMode::Dark,
+            },
+            &items,
+            &crate::output::RenderCtx::empty(),
+            crate::output::LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 40,
+                follow_tail_rows: None,
+            },
+        );
+        let visible = cache.visible_slice(metrics.scroll_offset, metrics.total_rows, 0);
+        assert!(visible.selection.surfaces[0].isolated_atoms.is_empty());
+        let row = visible.ranges[0].start_row as u16 + 1;
+        let mut app = AppState::new("session".into(), None);
+        app.items = items;
+        app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 40));
+        app.last_item_ranges = visible.ranges;
+        app.last_selection_projection = visible.selection;
+        let mouse = |kind| crossterm::event::MouseEvent {
+            kind,
+            column: 4,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        assert!(!handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left)),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Up(MouseButton::Left)),
+        ));
+        assert!(matches!(
+            app.items.first(),
+            Some(app::OutputItem::Thinking {
+                disclosure: app::Disclosure::Full,
+                ..
+            })
+        ));
+        assert!(app.selection.is_none());
     }
 
     #[test]
