@@ -6,6 +6,13 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.13.1] — 2026-09-24
+
+### 🐛 Bug Fixes
+
+- **Answered nudges** — Interjections that received an assistant response stay in historical order instead of being promoted to the latest prompt on later model calls.
+- **Thinking disclosure** — Clicking a collapsed thinking block expands it while dragging across thinking text still selects content for copying.
+
 ## [1.13.0] — 2026-09-23
 
 ### ✨ Features
