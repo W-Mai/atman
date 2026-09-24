@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Formula setting in TUI** — Ctrl+P opens a formula display picker that saves rendered or raw Markdown mode.
 - **Formula display setting** — `render.math = false` keeps inline and display formulas as Markdown text in the TUI.
 
 ### 🐛 Bug Fixes

@@ -335,6 +335,7 @@ pub enum TuiCommand {
 }
 
 pub const PROJECT_STORAGE_SCOPE_FORM_ID: &str = "project_storage_scope";
+pub const FORMULA_RENDERING_FORM_ID: &str = "formula_rendering";
 
 /// Correlates a provider mutation with its eventual host result.
 #[derive(Debug, Clone, PartialEq, Eq)]

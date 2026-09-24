@@ -122,6 +122,44 @@ pub(crate) fn open_project_storage_scope_picker(app: &mut AppState) {
     session.forms().request(form);
 }
 
+pub(crate) fn open_formula_rendering_picker(app: &mut AppState) {
+    let Some(session) = app.session.as_ref() else {
+        app.push_note("formula setting is unavailable", app::NoteLevel::Warn);
+        return;
+    };
+    let current = match atman_runtime::config_hub::ConfigHub::global()
+        .and_then(|hub| hub.math_rendering_enabled())
+    {
+        Ok(true) => "Rendered",
+        Ok(false) => "Raw Markdown",
+        Err(error) => {
+            app.push_note(
+                format!("formula setting unavailable: {error}"),
+                app::NoteLevel::Error,
+            );
+            return;
+        }
+    };
+    let kind = atman_runtime::form::FormKind::SingleSelect {
+        prompt: format!("Formula display (current: {current}). Restart Atman to apply changes."),
+        options: vec!["Rendered".into(), "Raw Markdown".into()],
+    };
+    let form = atman_runtime::form::PendingForm {
+        form_id: crate::FORMULA_RENDERING_FORM_ID.to_string(),
+        run_id: atman_runtime::event::FlowRunId::now(),
+        tool_use_id: crate::FORMULA_RENDERING_FORM_ID.to_string(),
+        kind: kind.clone(),
+        form: atman_runtime::form::CompositeForm {
+            questions: vec![atman_runtime::form::FormQuestion {
+                id: "math".into(),
+                kind,
+            }],
+        },
+        emitted_at: chrono::Utc::now(),
+    };
+    session.forms().request(form);
+}
+
 pub(crate) fn enumerate_session_rows(
     app: &AppState,
     scope: crate::session_switcher::SessionScope,

@@ -1,3 +1,4 @@
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -17,6 +18,7 @@ pub enum PaletteEntryId {
     DeleteSession,
     OpenProjectHub,
     SetProjectStorageScope,
+    SetFormulaRendering,
     YankMode,
     CopyLastMessage,
     CopyLastTool,
@@ -138,6 +140,13 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         hint: "Same as F2",
         keyword: "sidebar toggle panel",
     },
+    PaletteEntry {
+        id: PaletteEntryId::SetFormulaRendering,
+        group: "UI",
+        label: "Formula Rendering",
+        hint: "Choose rendered formulas or raw Markdown (restart required)",
+        keyword: "math formula latex tex render raw setting",
+    },
     // ── Providers ──
     PaletteEntry {
         id: PaletteEntryId::ManageProviders,
@@ -234,6 +243,9 @@ pub struct CommandPalette {
     /// Display items include group headers. Only Entry variants are selectable.
     display: Vec<PaletteItem>,
     pub last_input_rect: Option<Rect>,
+    last_list_rect: Option<Rect>,
+    last_list_offset: usize,
+    hovered: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +274,8 @@ impl CommandPalette {
         self.input.clear();
         self.filtered.clear();
         self.display.clear();
+        self.last_list_rect = None;
+        self.hovered = None;
     }
 
     pub fn push_char(&mut self, c: char) {
@@ -313,6 +327,37 @@ impl CommandPalette {
         }
     }
 
+    pub fn handle_mouse(&mut self, event: &MouseEvent) -> Option<PaletteEntryId> {
+        match event.kind {
+            MouseEventKind::ScrollUp => self.move_up(),
+            MouseEventKind::ScrollDown => self.move_down(),
+            MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left) => {
+                let hovered = self.last_list_rect.and_then(|rect| {
+                    let inside = event.column >= rect.x
+                        && event.column < rect.x.saturating_add(rect.width)
+                        && event.row >= rect.y
+                        && event.row < rect.y.saturating_add(rect.height);
+                    inside.then(|| {
+                        self.last_list_offset + usize::from(event.row.saturating_sub(rect.y))
+                    })
+                });
+                self.hovered = hovered.filter(|index| {
+                    matches!(self.display.get(*index), Some(PaletteItem::Entry { .. }))
+                });
+                if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+                    && let Some(index) = self.hovered
+                    && let Some(PaletteItem::Entry { id }) = self.display.get(index)
+                {
+                    let id = *id;
+                    self.close();
+                    return Some(id);
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
     fn refresh(&mut self) {
         let query = self.input.buf().to_lowercase();
         let query = query.trim();
@@ -329,6 +374,8 @@ impl CommandPalette {
                 .collect()
         };
         self.build_display();
+        self.last_list_rect = None;
+        self.hovered = None;
         self.selected = self
             .display
             .iter()
@@ -399,10 +446,12 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
             width: area.width,
             height: area.height.saturating_sub(1),
         };
+        self.last_list_rect = Some(list_rect);
         let items: Vec<ListItem<'static>> = self
             .display
             .iter()
-            .map(|item| match item {
+            .enumerate()
+            .map(|(index, item)| match item {
                 PaletteItem::GroupHeader { name } => ListItem::new(Line::from(Span::styled(
                     format!("  {name}"),
                     Style::default()
@@ -420,7 +469,11 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
                             Style::default().fg(t.subtle_fg.into()),
                         ),
                     ]);
-                    ListItem::new(line)
+                    let mut item = ListItem::new(line);
+                    if self.hovered == Some(index) {
+                        item = item.style(Style::default().bg(t.work_hover_bg.into()));
+                    }
+                    item
                 }
             })
             .collect();
@@ -436,6 +489,7 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
             state.select(Some(self.selected));
         }
         f.render_stateful_widget(list, list_rect, &mut state);
+        self.last_list_offset = state.offset();
     }
 
     fn handle_key(
@@ -532,6 +586,25 @@ mod tests {
         let ids = PaletteEntryId::all();
         assert!(ids.contains(&PaletteEntryId::OpenProjectHub));
         assert!(ids.contains(&PaletteEntryId::SetProjectStorageScope));
+        assert!(ids.contains(&PaletteEntryId::SetFormulaRendering));
+    }
+
+    #[test]
+    fn clicking_a_visible_entry_dispatches_it() {
+        let mut palette = CommandPalette::new();
+        palette.open();
+        palette.last_list_rect = Some(Rect::new(5, 10, 40, 4));
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 8,
+            row: 11,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert_eq!(
+            palette.handle_mouse(&event),
+            Some(PaletteEntryId::SwitchSession)
+        );
+        assert!(!palette.open);
     }
 
     #[test]

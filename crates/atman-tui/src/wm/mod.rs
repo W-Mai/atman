@@ -809,6 +809,9 @@ impl WindowManager {
             PaletteEntryId::SetProjectStorageScope => {
                 crate::key_handler::open_project_storage_scope_picker(app);
             }
+            PaletteEntryId::SetFormulaRendering => {
+                crate::key_handler::open_formula_rendering_picker(app);
+            }
             PaletteEntryId::SearchHistory => {
                 self.modals.history_search.open();
             }
@@ -914,6 +917,12 @@ impl WindowManager {
         control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> (bool, Vec<WmCommand>) {
         self.sync_modals();
+        if self.top_kind() == Some(ModalKind::Palette) {
+            if let Some(id) = self.modals.palette.handle_mouse(event) {
+                return (true, self.apply_palette_action(id, app, control_tx));
+            }
+            return (true, Vec::new());
+        }
         if self.top_kind() == Some(ModalKind::Form) {
             self.modals.form_modal.handle_mouse(event, control_tx);
             return (true, Vec::new());

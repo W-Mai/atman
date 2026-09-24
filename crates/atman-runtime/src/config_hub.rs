@@ -1031,6 +1031,19 @@ impl ConfigHub {
             .ok_or_else(|| ConfigError::Invalid("render.math is not a boolean".into()))
     }
 
+    pub fn set_math_rendering_enabled(&self, enabled: bool) -> Result<(), ConfigError> {
+        self.update_config_toml(|document| {
+            if document.get("render").is_none() {
+                document["render"] = toml_edit::table();
+            }
+            let render = document["render"]
+                .as_table_mut()
+                .ok_or_else(|| ConfigError::Invalid("render is not a table".into()))?;
+            render["math"] = toml_edit::value(enabled);
+            Ok(())
+        })
+    }
+
     pub fn fs_access_mode(&self) -> Result<Option<crate::fs_access::FsAccessMode>, ConfigError> {
         let text = self.read_config_toml()?;
         if text.trim().is_empty() {
@@ -2746,6 +2759,18 @@ mod tests {
 
         write_config(&hub, "[render]\nmath = \"false\"\n");
         assert!(hub.math_rendering_enabled().is_err());
+    }
+
+    #[test]
+    fn math_rendering_update_preserves_other_config() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "# keep this comment\n[theme]\nmode = \"dark\"\n");
+        hub.set_math_rendering_enabled(false).unwrap();
+        assert!(!hub.math_rendering_enabled().unwrap());
+        let updated = hub.read_config_toml().unwrap();
+        assert!(updated.contains("# keep this comment"));
+        assert!(updated.contains("mode = \"dark\""));
+        assert!(updated.contains("math = false"));
     }
 
     #[test]

@@ -2535,6 +2535,13 @@ async fn cmd_repl_once(
                                 let _ = cmd_tx_for_models.send(command);
                             }
                         }
+                        if form_id == atman_tui::FORMULA_RENDERING_FORM_ID {
+                            if let Some(command) = formula_rendering_result_command(
+                                apply_formula_rendering_submission(&submission),
+                            ) {
+                                let _ = cmd_tx_for_models.send(command);
+                            }
+                        }
                         let _ = session_for_ctrl.forms().submit(&form_id, submission);
                     }
                     atman_tui::TuiControl::MutateProvider(request) => {
@@ -4247,6 +4254,43 @@ fn project_storage_scope_result_command(
         Ok(None) => return None,
         Err(error) => (
             format!("Project storage update failed: {error}"),
+            atman_tui::app::NoteLevel::Error,
+        ),
+    };
+    Some(atman_tui::TuiCommand::Toast { message, level })
+}
+
+fn apply_formula_rendering_submission(
+    submission: &atman_runtime::form::FormSubmission,
+) -> Result<Option<bool>> {
+    let atman_runtime::form::FormSubmission::Submitted { answers } = submission else {
+        return Ok(None);
+    };
+    let Some(atman_runtime::form::FormAnswer::Selected { index, label }) = answers.first() else {
+        anyhow::bail!("formula display selection is missing");
+    };
+    let enabled = match (*index, label.as_str()) {
+        (0, "Rendered") => true,
+        (1, "Raw Markdown") => false,
+        _ => anyhow::bail!("invalid formula display selection"),
+    };
+    atman_runtime::config_hub::ConfigHub::global()?.set_math_rendering_enabled(enabled)?;
+    Ok(Some(enabled))
+}
+
+fn formula_rendering_result_command(result: Result<Option<bool>>) -> Option<atman_tui::TuiCommand> {
+    let (message, level) = match result {
+        Ok(Some(true)) => (
+            "Formula rendering enabled; restart Atman to apply".to_string(),
+            atman_tui::app::NoteLevel::Success,
+        ),
+        Ok(Some(false)) => (
+            "Formula rendering disabled; restart Atman to apply".to_string(),
+            atman_tui::app::NoteLevel::Success,
+        ),
+        Ok(None) => return None,
+        Err(error) => (
+            format!("Formula display update failed: {error}"),
             atman_tui::app::NoteLevel::Error,
         ),
     };
@@ -6293,6 +6337,13 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                     if form_id == atman_tui::PROJECT_STORAGE_SCOPE_FORM_ID {
                         if let Some(command) = project_storage_scope_result_command(
                             apply_project_storage_scope_submission(&ctrl_session, &submission),
+                        ) {
+                            let _ = cmd_tx.send(command);
+                        }
+                    }
+                    if form_id == atman_tui::FORMULA_RENDERING_FORM_ID {
+                        if let Some(command) = formula_rendering_result_command(
+                            apply_formula_rendering_submission(&submission),
                         ) {
                             let _ = cmd_tx.send(command);
                         }
