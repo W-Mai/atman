@@ -1012,6 +1012,25 @@ impl ConfigHub {
         }
     }
 
+    pub fn math_rendering_enabled(&self) -> Result<bool, ConfigError> {
+        let text = self.read_config_toml()?;
+        if text.trim().is_empty() {
+            return Ok(true);
+        }
+        let document = text.parse::<toml_edit::DocumentMut>()?;
+        let Some(render) = document.get("render") else {
+            return Ok(true);
+        };
+        let Some(render) = render.as_table() else {
+            return Err(ConfigError::Invalid("render is not a table".into()));
+        };
+        let Some(math) = render.get("math") else {
+            return Ok(true);
+        };
+        math.as_bool()
+            .ok_or_else(|| ConfigError::Invalid("render.math is not a boolean".into()))
+    }
+
     pub fn fs_access_mode(&self) -> Result<Option<crate::fs_access::FsAccessMode>, ConfigError> {
         let text = self.read_config_toml()?;
         if text.trim().is_empty() {
@@ -2715,6 +2734,18 @@ mod tests {
         let (_dir, hub) = temp_hub();
 
         assert_eq!(hub.theme_preference().unwrap(), ThemePreference::Auto);
+    }
+
+    #[test]
+    fn math_rendering_defaults_on_and_accepts_boolean_override() {
+        let (_dir, hub) = temp_hub();
+        assert!(hub.math_rendering_enabled().unwrap());
+
+        write_config(&hub, "[render]\nmath = false\n");
+        assert!(!hub.math_rendering_enabled().unwrap());
+
+        write_config(&hub, "[render]\nmath = \"false\"\n");
+        assert!(hub.math_rendering_enabled().is_err());
     }
 
     #[test]

@@ -149,6 +149,9 @@ model = "smart"
 # [theme]
 # mode = "auto"
 
+# [render]
+# math = false  # Show raw $...$ and $$...$$ text instead of rendered formulas.
+
 # [fs_access]
 # mode = "workspace-write"
 

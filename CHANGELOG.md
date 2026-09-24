@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ✨ Features
+
+- **Formula display setting** — `render.math = false` keeps inline and display formulas as Markdown text in the TUI.
+
 ### 🐛 Bug Fixes
 
 - **Math rendering** — Malformed formulas fall back to their source text without terminating the TUI render task.

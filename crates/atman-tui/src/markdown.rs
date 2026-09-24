@@ -1,5 +1,7 @@
 use std::ops::Range;
 use std::sync::Arc;
+#[cfg(not(test))]
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -40,8 +42,16 @@ pub(crate) struct MarkdownRender {
 }
 
 pub(crate) fn render_markdown_with_geometry(md: &str, rule_width: u16) -> MarkdownRender {
+    render_markdown_with_geometry_and_math(md, rule_width, math_rendering_enabled())
+}
+
+fn render_markdown_with_geometry_and_math(
+    md: &str,
+    rule_width: u16,
+    math_enabled: bool,
+) -> MarkdownRender {
     let mut renderer = Renderer::with_rule_width(rule_width);
-    for (event_index, event) in parse_markdown_for_projection(md)
+    for (event_index, event) in parse_markdown_for_projection_with_math(md, math_enabled)
         .events
         .into_iter()
         .enumerate()
@@ -56,12 +66,30 @@ pub(crate) fn render_markdown_with_geometry(md: &str, rule_width: u16) -> Markdo
     renderer.finish_render()
 }
 
-fn markdown_options() -> Options {
+fn math_rendering_enabled() -> bool {
+    #[cfg(test)]
+    {
+        true
+    }
+    #[cfg(not(test))]
+    {
+        static ENABLED: LazyLock<bool> = LazyLock::new(|| {
+            atman_runtime::config_hub::ConfigHub::global()
+                .and_then(|hub| hub.math_rendering_enabled())
+                .unwrap_or(true)
+        });
+        *ENABLED
+    }
+}
+
+fn markdown_options(math_enabled: bool) -> Options {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
-    options.insert(Options::ENABLE_MATH);
+    if math_enabled {
+        options.insert(Options::ENABLE_MATH);
+    }
     options
 }
 
@@ -75,7 +103,16 @@ struct MarkdownSegments<'a> {
     unclosed_display_math_start: Option<usize>,
 }
 
-fn split_display_math_segments(md: &str) -> MarkdownSegments<'_> {
+fn split_display_math_segments(md: &str, math_enabled: bool) -> MarkdownSegments<'_> {
+    if !math_enabled {
+        return MarkdownSegments {
+            segments: vec![MarkdownSegment::Text {
+                text: md,
+                offset: 0,
+            }],
+            unclosed_display_math_start: None,
+        };
+    }
     let mut offset = 0usize;
     let lines = md
         .split_inclusive('\n')
@@ -176,15 +213,19 @@ fn source_line_start(source: &str, offset: usize) -> usize {
 }
 
 fn parse_markdown_for_projection(source: &str) -> ParsedMarkdown<'_> {
+    parse_markdown_for_projection_with_math(source, math_rendering_enabled())
+}
+
+fn parse_markdown_for_projection_with_math(source: &str, math_enabled: bool) -> ParsedMarkdown<'_> {
     let mut events = Vec::new();
     let mut top_level_starts = Vec::new();
     let mut has_reference_definitions = false;
-    let split = split_display_math_segments(source);
+    let split = split_display_math_segments(source, math_enabled);
 
     for segment in split.segments {
         match segment {
             MarkdownSegment::Text { text, offset } => {
-                let parser = Parser::new_ext(text, markdown_options());
+                let parser = Parser::new_ext(text, markdown_options(math_enabled));
                 has_reference_definitions |= parser.reference_definitions().iter().next().is_some();
                 let mut depth = 0usize;
                 for (event, local_range) in parser.into_offset_iter() {
@@ -2030,7 +2071,7 @@ mod tests {
 
     #[test]
     fn multiline_display_math_is_split_before_markdown_parsing() {
-        let split = split_display_math_segments("before\n$$\nx = y\n=\nz\n$$\nafter\n");
+        let split = split_display_math_segments("before\n$$\nx = y\n=\nz\n$$\nafter\n", true);
         let segments = split.segments;
         assert_eq!(split.unclosed_display_math_start, None);
         assert!(
@@ -2046,7 +2087,7 @@ mod tests {
 
     #[test]
     fn multiline_display_math_keeps_code_fence_text_in_markdown_segment() {
-        let split = split_display_math_segments("```text\n$$\nx = y\n$$\n```\n");
+        let split = split_display_math_segments("```text\n$$\nx = y\n$$\n```\n", true);
         let segments = split.segments;
         assert_eq!(split.unclosed_display_math_start, None);
         assert!(
@@ -2063,6 +2104,16 @@ mod tests {
         assert!(!text.contains("$$"));
         assert!(!text.contains('╌'));
         assert!(!text.contains("\\frac"));
+    }
+
+    #[test]
+    fn disabled_math_preserves_inline_and_display_delimiters() {
+        let source = "inline $x^2$\n\n$$\n\\frac{1}\n$$";
+        let rendered = render_markdown_with_geometry_and_math(source, 80, false);
+        let text = plain(&rendered.lines).join("\n");
+        assert!(text.contains("$x^2$"));
+        assert!(text.contains("$$"));
+        assert!(text.contains("\\frac{1}"));
     }
 
     #[test]

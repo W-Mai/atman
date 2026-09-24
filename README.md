@@ -351,7 +351,12 @@ mode = "auto"             # auto | dark | light | wuxia
 
 [diff]
 layout = "split"           # split | unified
+
+[render]
+# math = false             # Show formulas as raw Markdown text.
 ```
+
+Formula rendering is enabled by default. Set `render.math = false` and restart Atman to display `$...$` and `$$...$$` as plain text.
 
 Tool calls from one assistant dispatch are grouped into an ordered `working · N` block. Each intent opens from a one-line summary to a bounded preview and then the complete auditable output. When a managed agent starts its final response, preceding thinking, tools, and workflow activity fold into a five-row `work` summary containing completed progress, edit metrics, and an activity description; click anywhere in the summary or press `Alt+O` to expand it with the same animation. Diff output uses a two-column layout by default, falls back to unified rendering in narrow inline views, and keeps the configured layout in larger views.
 
