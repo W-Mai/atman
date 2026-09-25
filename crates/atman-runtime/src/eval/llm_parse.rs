@@ -1,17 +1,19 @@
 //! Shared parsing utilities for LLM high-level tools (classify / extract / generate_branches).
 
+use crate::value::AtmanPayload;
+
 use crate::value::Value;
 
 /// Normalize a `dispatch_llm` return value into text.
 ///
 /// - `Value::Err` → `None` (caller must propagate before calling this)
 /// - `Value::Str(s)` → `Some(s)` if non-empty
-/// - `Value::Message(m)` → `Some(text_concat)` if non-empty
+/// - `Value::Host(AtmanPayload::Message(m))` → `Some(text_concat)` if non-empty
 /// - Other pre-parsed types (Bool/Int/Float/Struct/List) → `None`
 pub fn llm_result_to_text(result: &Value) -> Option<String> {
     match result {
         Value::Str(s) if !s.is_empty() => Some(s.clone()),
-        Value::Message(m) => {
+        Value::Host(AtmanPayload::Message(m)) => {
             let text = m.text_concat();
             if text.is_empty() { None } else { Some(text) }
         }

@@ -1152,7 +1152,7 @@ mod tests {
             model: "test-model".into(),
             messages: Vec::new(),
             system: Some("stable".into()),
-            input: crate::Value::Unit,
+            input: crate::value::Value::Unit,
             schema: None,
             cache_prompt: true,
             prompt_cache_key: None,
@@ -1503,7 +1503,7 @@ mod tests {
             description: Some("Read a file".into()),
             input_schema: serde_json::json!({"type": "object"}),
         });
-        request.input = crate::Value::Str("not serialized".into());
+        request.input = crate::value::Value::Str("not serialized".into());
 
         let plan = ModelContextPlan::new(request);
         assert!(plan.token_lanes().stable > 0);

@@ -1096,7 +1096,7 @@ mod tests {
             _args: crate::tool::ToolArgs,
             _ctx: &'a crate::tool::ToolCtx,
         ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
-            Box::pin(async { Ok(crate::Value::Unit) })
+            Box::pin(async { Ok(crate::value::Value::Unit) })
         }
     }
 
@@ -1155,7 +1155,7 @@ mod tests {
             model: "gpt-test".into(),
             messages: Vec::new(),
             system: None,
-            input: crate::Value::Unit,
+            input: crate::value::Value::Unit,
             schema: None,
             cache_prompt: false,
             prompt_cache_key: None,
@@ -1217,7 +1217,7 @@ mod tests {
             model: "gpt-test".into(),
             messages: vec![Message::user_text(crate::event::TurnId::now(), "first")],
             system: Some("stable".into()),
-            input: crate::Value::Unit,
+            input: crate::value::Value::Unit,
             schema: None,
             cache_prompt: true,
             prompt_cache_key: None,
@@ -1249,7 +1249,7 @@ mod tests {
             model: "gpt-test".into(),
             messages: vec![Message::user_text(crate::event::TurnId::now(), "first")],
             system: Some("stable".into()),
-            input: crate::Value::Unit,
+            input: crate::value::Value::Unit,
             schema: None,
             cache_prompt: true,
             prompt_cache_key: Some("atman-route".into()),
@@ -1269,7 +1269,7 @@ mod tests {
             model: "gpt-test".into(),
             messages: vec![Message::user_text(crate::event::TurnId::now(), "before")],
             system: Some("stable".into()),
-            input: crate::Value::Unit,
+            input: crate::value::Value::Unit,
             schema: None,
             cache_prompt: true,
             prompt_cache_key: None,

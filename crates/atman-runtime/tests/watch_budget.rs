@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::{RuntimeError, Value};
+use atman_runtime::{AtmanValue as Value, RuntimeError};
 
 #[tokio::test]
 async fn watch_tokens_consumed_aborts_when_exceeded() {

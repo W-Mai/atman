@@ -1232,7 +1232,10 @@ mod tests {
         let target = dir.path().join("approved.txt");
         let args = ToolArgs {
             named: vec![
-                ("path".into(), crate::value::Value::Path(target.clone())),
+                (
+                    "path".into(),
+                    crate::value::Value::Host(crate::value::AtmanPayload::Path(target.clone())),
+                ),
                 ("content".into(), crate::value::Value::Str("ok".into())),
             ],
             ..ToolArgs::default()

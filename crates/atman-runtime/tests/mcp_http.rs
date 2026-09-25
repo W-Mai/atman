@@ -1,6 +1,6 @@
+use atman_runtime::AtmanValue as Value;
 use atman_runtime::mcp::{McpServerConfig, TransportKind, register_from_configs};
 use atman_runtime::tool::{Tier, ToolArgs, ToolCtx, ToolRegistry};
-use atman_runtime::value::Value;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 

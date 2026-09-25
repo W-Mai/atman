@@ -3,18 +3,21 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use atman_proto::{FlowRunId as ProtoRunId, SessionId as ProtoSessionId};
+use atman_rt::Value as CoreValue;
 
 use atman_runtime::event::FlowRunId as RuntimeRunId;
 
 use crate::state::{DaemonState, LiveSession};
 
-fn render_value(v: &atman_runtime::Value) -> String {
+type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
+
+fn render_value(v: &Value) -> String {
     match v {
-        atman_runtime::Value::Str(s) => s.clone(),
-        atman_runtime::Value::Int(n) => n.to_string(),
-        atman_runtime::Value::Float(n) => n.to_string(),
-        atman_runtime::Value::Bool(b) => b.to_string(),
-        atman_runtime::Value::Unit => String::new(),
+        Value::Str(s) => s.clone(),
+        Value::Int(n) => n.to_string(),
+        Value::Float(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Unit => String::new(),
         other => format!("{other:?}"),
     }
 }
@@ -94,7 +97,7 @@ fn invocation_env_from_reasoning(
                 .map_err(|error: String| anyhow::anyhow!("invalid reasoning: {error}"))?;
             Ok(atman_runtime::InvocationEnv::single(
                 "effort",
-                atman_runtime::Value::Str(selection.to_string()),
+                Value::Str(selection.to_string()),
             ))
         }
         None => Ok(atman_runtime::InvocationEnv::default()),
@@ -185,7 +188,7 @@ impl RunLauncher {
         &self,
         state: Arc<DaemonState>,
         flow_path: &str,
-        args: Vec<(String, atman_runtime::Value)>,
+        args: Vec<(String, Value)>,
     ) -> Result<SpawnedRun> {
         self.spawn_as(state, flow_path, args, "local-daemon").await
     }
@@ -194,7 +197,7 @@ impl RunLauncher {
         &self,
         state: Arc<DaemonState>,
         flow_path: &str,
-        args: Vec<(String, atman_runtime::Value)>,
+        args: Vec<(String, Value)>,
         owner_principal: &str,
     ) -> Result<SpawnedRun> {
         self.spawn_as_with_options(
@@ -211,7 +214,7 @@ impl RunLauncher {
         &self,
         state: Arc<DaemonState>,
         flow_path: &str,
-        args: Vec<(String, atman_runtime::Value)>,
+        args: Vec<(String, Value)>,
         owner_principal: &str,
         options: RunOptions,
     ) -> Result<SpawnedRun> {
@@ -352,7 +355,7 @@ impl RunLauncher {
 async fn run_flow_inner(
     session: std::sync::Arc<atman_runtime::Session>,
     path: &std::path::Path,
-    args: Vec<(String, atman_runtime::Value)>,
+    args: Vec<(String, Value)>,
     run_id: RuntimeRunId,
     project_root: PathBuf,
     scope_root: PathBuf,
@@ -916,7 +919,7 @@ mod tests {
 
         assert!(matches!(
             invocation_env.get("effort"),
-            Some(atman_runtime::Value::Str(value)) if value == "high@pro"
+            Some(Value::Str(value)) if value == "high@pro"
         ));
         assert_eq!(session.pending_image_count(), 1);
 

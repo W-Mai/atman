@@ -1,3 +1,4 @@
+use atman_runtime::AtmanPayload;
 use atman_runtime::compaction::{CompactRange, find_compact_summaries, replace_range_with_summary};
 use atman_runtime::event::TurnId;
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
@@ -82,19 +83,19 @@ fn find_compact_summaries_ignores_plain_system_messages() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn replace_messages_range_emits_context_compact_event_and_marks_sink() {
+    use atman_runtime::AtmanValue as Value;
     use atman_runtime::event::{Event, EventSink};
     use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
     use atman_runtime::tools::stdlib::ReplaceMessagesRange;
-    use atman_runtime::value::Value;
 
     let sink = EventSink::new();
     let mut ctx = ToolCtx::new();
     ctx.events = Some(sink.clone());
     let msgs = vec![
-        Value::Message(user(&"a".repeat(400))),
-        Value::Message(assistant(&"b".repeat(400))),
-        Value::Message(user(&"c".repeat(400))),
-        Value::Message(user("tail")),
+        Value::Host(AtmanPayload::Message(user(&"a".repeat(400)))),
+        Value::Host(AtmanPayload::Message(assistant(&"b".repeat(400)))),
+        Value::Host(AtmanPayload::Message(user(&"c".repeat(400)))),
+        Value::Host(AtmanPayload::Message(user("tail"))),
     ];
     let args = ToolArgs {
         positional: vec![
@@ -144,20 +145,20 @@ async fn replace_messages_range_emits_context_compact_event_and_marks_sink() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn replace_messages_range_sends_lifecycle_fire_signal() {
+    use atman_runtime::AtmanValue as Value;
     use atman_runtime::event::EventSink;
     use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
     use atman_runtime::tools::stdlib::ReplaceMessagesRange;
-    use atman_runtime::value::Value;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut ctx = ToolCtx::new();
     ctx.events = Some(EventSink::new());
     ctx.lifecycle_fire_tx = Some(tx);
     let msgs = vec![
-        Value::Message(user(&"a".repeat(400))),
-        Value::Message(assistant(&"b".repeat(400))),
-        Value::Message(user(&"c".repeat(400))),
-        Value::Message(user("tail")),
+        Value::Host(AtmanPayload::Message(user(&"a".repeat(400)))),
+        Value::Host(AtmanPayload::Message(assistant(&"b".repeat(400)))),
+        Value::Host(AtmanPayload::Message(user(&"c".repeat(400)))),
+        Value::Host(AtmanPayload::Message(user("tail"))),
     ];
     let args = ToolArgs {
         positional: vec![

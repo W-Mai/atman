@@ -135,5 +135,5 @@ pub use task_registry::{
 pub use tool::{CancelBehavior, Tier, Tool, ToolArgs, ToolCtx, ToolRegistry, ToolResult};
 pub use tool_naming::{ToolNaming, from_wire, to_wire};
 pub use validate::{ValidationError, validate};
-pub use value::Value;
+pub use value::{AtmanPayload, AtmanValue, ValueJson};
 pub use workflow::{NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind};

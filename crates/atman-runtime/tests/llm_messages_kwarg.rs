@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::{Executor, Value};
+use atman_runtime::{AtmanValue as Value, Executor};
 
 #[tokio::test]
 async fn llm_accepts_messages_kwarg_from_message_nodes() {

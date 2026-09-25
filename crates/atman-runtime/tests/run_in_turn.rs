@@ -1,3 +1,4 @@
+use atman_runtime::AtmanPayload;
 mod common;
 
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use atman_runtime::provider::{
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::session::Session;
 use atman_runtime::tool::BoxFut;
-use atman_runtime::{Executor, Value};
+use atman_runtime::{AtmanValue as Value, Executor};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -235,7 +236,9 @@ async fn run_in_turn_appends_assistant_message_to_session() {
         .unwrap();
     session.end_turn();
 
-    assert!(matches!(&out, Value::Message(message) if message.text_concat() == "hello world"));
+    assert!(
+        matches!(&out, Value::Host(AtmanPayload::Message(message)) if message.text_concat() == "hello world")
+    );
 
     let msgs = session.messages();
     let ordinary: Vec<_> = msgs
@@ -409,7 +412,9 @@ async fn empty_assistant_message_retries_without_entering_session_history() {
         .unwrap();
     session.end_turn();
 
-    assert!(matches!(&output, Value::Message(message) if message.text_concat() == "ok"));
+    assert!(
+        matches!(&output, Value::Host(AtmanPayload::Message(message)) if message.text_concat() == "ok")
+    );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     let messages = session.messages();
     let assistant_messages = messages
@@ -478,7 +483,7 @@ async fn missing_tool_intent_returns_a_visible_tool_failure_without_llm_retry() 
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     assert!(matches!(
         output,
-        Value::Message(message) if message.text_concat() == "observed tool failure"
+        Value::Host(AtmanPayload::Message(message)) if message.text_concat() == "observed tool failure"
     ));
     assert_eq!(
         session

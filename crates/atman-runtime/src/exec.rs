@@ -1,3 +1,4 @@
+use crate::value::AtmanPayload;
 use std::{collections::HashMap, path::PathBuf};
 
 use atman_rt::ast::{Arg, CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
@@ -149,7 +150,7 @@ fn emit_flow_node_start_raw(
 fn value_preview(v: &Value) -> Option<String> {
     let raw = match v {
         Value::Str(s) => s.clone(),
-        Value::Message(m) => {
+        Value::Host(AtmanPayload::Message(m)) => {
             let text = m.text_concat();
             let tool_uses: Vec<String> = m
                 .parts
@@ -166,7 +167,7 @@ fn value_preview(v: &Value) -> Option<String> {
                 (true, true) => return None,
             }
         }
-        Value::Path(p) => p.display().to_string(),
+        Value::Host(AtmanPayload::Path(p)) => p.display().to_string(),
         Value::Int(n) => n.to_string(),
         Value::Float(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
@@ -181,7 +182,7 @@ fn value_preview(v: &Value) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        Value::EditProposal(_) => "<edit proposal>".into(),
+        Value::Host(AtmanPayload::EditProposal(_)) => "<edit proposal>".into(),
         Value::Lambda { .. } => "<lambda>".into(),
     };
     let trimmed = raw.trim();

@@ -1227,7 +1227,7 @@ mod tests {
             _args: crate::tool::ToolArgs,
             _ctx: &'a crate::tool::ToolCtx,
         ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
-            Box::pin(async { Ok(crate::Value::Unit) })
+            Box::pin(async { Ok(crate::value::Value::Unit) })
         }
     }
 
@@ -1325,7 +1325,7 @@ mod tests {
             model: "codex/gpt-test".into(),
             messages: Vec::new(),
             system: None,
-            input: crate::Value::Unit,
+            input: crate::value::Value::Unit,
             schema: None,
             cache_prompt: false,
             prompt_cache_key: None,
@@ -1526,7 +1526,7 @@ mod tests {
             model: "codex/gpt-test".into(),
             messages: Vec::new(),
             system: None,
-            input: crate::Value::Unit,
+            input: crate::value::Value::Unit,
             schema: None,
             cache_prompt: false,
             prompt_cache_key: None,
@@ -1577,7 +1577,7 @@ mod tests {
                 origin: crate::message::MessageOrigin::User,
             }],
             system: None,
-            input: crate::Value::Unit,
+            input: crate::value::Value::Unit,
             schema: None,
             cache_prompt: false,
             prompt_cache_key: None,
@@ -1606,7 +1606,7 @@ mod tests {
                 9,
             )],
             system: Some("stable instructions".into()),
-            input: crate::Value::Unit,
+            input: crate::value::Value::Unit,
             schema: None,
             cache_prompt: true,
             prompt_cache_key: None,
@@ -1631,7 +1631,7 @@ mod tests {
                 "before",
             )],
             system: Some("stable instructions".into()),
-            input: crate::Value::Unit,
+            input: crate::value::Value::Unit,
             schema: None,
             cache_prompt: true,
             prompt_cache_key: None,
@@ -1705,7 +1705,7 @@ mod tests {
                 },
             ],
             system: Some("stable instructions".into()),
-            input: crate::Value::Unit,
+            input: crate::value::Value::Unit,
             schema: None,
             cache_prompt: true,
             prompt_cache_key: None,

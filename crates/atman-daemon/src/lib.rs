@@ -1,4 +1,8 @@
+use atman_rt::Value as CoreValue;
+use atman_runtime::ValueJson;
 use std::sync::Arc;
+
+type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 use atman_proto::{
     CancelRunRequest, CreatePermissionGroupRequest, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
@@ -328,10 +332,10 @@ pub async fn dispatch_as(
             let parsed: Result<RunFlowRequest, _> = serde_json::from_value(params);
             match parsed {
                 Ok(p) => {
-                    let args: Vec<(String, atman_runtime::Value)> = p
+                    let args: Vec<(String, Value)> = p
                         .args
                         .into_iter()
-                        .map(|(k, v)| (k, atman_runtime::Value::from_json(v)))
+                        .map(|(k, v)| (k, Value::from_json(v)))
                         .collect();
                     match launcher
                         .spawn_as_with_options(

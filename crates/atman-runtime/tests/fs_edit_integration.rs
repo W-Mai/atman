@@ -1,6 +1,7 @@
+use atman_runtime::AtmanPayload;
+use atman_runtime::AtmanValue as Value;
 use atman_runtime::tool::{ToolArgs, ToolCtx};
 use atman_runtime::tools::register_tier_zero;
-use atman_runtime::value::Value;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
@@ -29,7 +30,7 @@ async fn fs_edit_end_to_end_read_then_edit_flow() {
             ToolArgs {
                 positional: vec![],
                 named: vec![
-                    ("path".into(), Value::Path(path.clone())),
+                    ("path".into(), Value::Host(AtmanPayload::Path(path.clone()))),
                     ("old_string".into(), Value::Str("print(\"hi\")".into())),
                     ("new_string".into(), Value::Str("print(\"hello\")".into())),
                 ],
@@ -45,7 +46,7 @@ async fn fs_edit_end_to_end_read_then_edit_flow() {
     read_tool
         .call(
             ToolArgs {
-                positional: vec![Value::Path(path.clone())],
+                positional: vec![Value::Host(AtmanPayload::Path(path.clone()))],
                 named: vec![],
             },
             &ctx,
@@ -58,7 +59,7 @@ async fn fs_edit_end_to_end_read_then_edit_flow() {
             ToolArgs {
                 positional: vec![],
                 named: vec![
-                    ("path".into(), Value::Path(path.clone())),
+                    ("path".into(), Value::Host(AtmanPayload::Path(path.clone()))),
                     ("old_string".into(), Value::Str("print(\"hi\")".into())),
                     (
                         "new_string".into(),
@@ -97,7 +98,7 @@ async fn fs_edit_ambiguous_match_returns_actionable_error_through_registry() {
         .unwrap()
         .call(
             ToolArgs {
-                positional: vec![Value::Path(path.clone())],
+                positional: vec![Value::Host(AtmanPayload::Path(path.clone()))],
                 named: vec![],
             },
             &ctx,
@@ -112,7 +113,7 @@ async fn fs_edit_ambiguous_match_returns_actionable_error_through_registry() {
             ToolArgs {
                 positional: vec![],
                 named: vec![
-                    ("path".into(), Value::Path(path)),
+                    ("path".into(), Value::Host(AtmanPayload::Path(path))),
                     ("old_string".into(), Value::Str("TODO".into())),
                     ("new_string".into(), Value::Str("DONE".into())),
                 ],
@@ -143,7 +144,7 @@ async fn fs_edit_start_line_selects_the_matching_occurrence() {
         .unwrap()
         .call(
             ToolArgs {
-                positional: vec![Value::Path(path.clone())],
+                positional: vec![Value::Host(AtmanPayload::Path(path.clone()))],
                 named: vec![],
             },
             &ctx,
@@ -157,7 +158,7 @@ async fn fs_edit_start_line_selects_the_matching_occurrence() {
             ToolArgs {
                 positional: vec![],
                 named: vec![
-                    ("path".into(), Value::Path(path.clone())),
+                    ("path".into(), Value::Host(AtmanPayload::Path(path.clone()))),
                     ("old_string".into(), Value::Str("same".into())),
                     ("new_string".into(), Value::Str("changed".into())),
                     ("start_line".into(), Value::Int(3)),

@@ -6,7 +6,9 @@ use crate::eval::llm_parse::{
     parse_field_definitions, validate_struct_fields,
 };
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::value::AtmanPayload;
 use crate::value::Value;
+use crate::value::ValueJson;
 
 pub struct LlmExtractTool;
 
@@ -147,7 +149,7 @@ fn parse_extract_result(result: &Value, field_defs: &[FieldDef]) -> Result<Value
                 other => return Err(format!("expected JSON object, got {}", other.kind_name())),
             }
         }
-        Value::Message(m) => {
+        Value::Host(AtmanPayload::Message(m)) => {
             let text = m.text_concat();
             if text.is_empty() {
                 return Err("empty response from LLM".into());

@@ -386,9 +386,9 @@ Drag across transcript text, including line-end space and short gaps between Mar
 ```
 atman/
   crates/
-    atman-rt/        # Portable flow program types and statement execution control
+    atman-rt/        # Portable AST, values, environments, and statement control
     atman-dsl/       # Parser + pretty-printer (.at files)
-    atman-runtime/   # Executor, tools, providers, memory, MCP, hunk, compaction
+    atman-runtime/   # Atman executor, host payloads, tools, providers, memory, MCP
     atman-cli/       # Binary, REPL, slash commands, monitor, daemon client
     atman-proto/     # JSON-RPC 2.0 envelope + daemon request/response types
     atman-daemon/    # Daemon binary, Unix socket, HTTP+SSE, session pool

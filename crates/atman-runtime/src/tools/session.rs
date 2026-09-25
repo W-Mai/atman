@@ -1,6 +1,7 @@
 use crate::error::RuntimeError;
 use crate::message::{Message, MessageRole};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::value::AtmanPayload;
 use crate::value::Value;
 
 pub struct SessionPush;
@@ -45,11 +46,11 @@ impl Tool for SessionPush {
                 }
             };
             let msgs = match val {
-                Value::Message(m) => vec![m],
+                Value::Host(AtmanPayload::Message(m)) => vec![m],
                 Value::List(items) => items
                     .into_iter()
                     .filter_map(|v| match v {
-                        Value::Message(m) => Some(m),
+                        Value::Host(AtmanPayload::Message(m)) => Some(m),
                         _ => None,
                     })
                     .collect(),
@@ -230,7 +231,7 @@ mod tests {
         SessionPush
             .call(
                 ToolArgs {
-                    positional: vec![Value::Message(message)],
+                    positional: vec![Value::Host(AtmanPayload::Message(message))],
                     named: Vec::new(),
                 },
                 &ctx,

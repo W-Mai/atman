@@ -1,6 +1,7 @@
 use crate::error::RuntimeError;
 use crate::message::{Message, MessagePart};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::value::AtmanPayload;
 use crate::value::Value;
 
 pub const FINAL_ANSWER_TOOL: &str = "final.answer";
@@ -216,7 +217,7 @@ impl Tool for ExtractFinalAnswer {
         Box::pin(async move {
             let value = args.named("message").or_else(|| args.positional.first());
             match value {
-                Some(Value::Message(message)) => {
+                Some(Value::Host(AtmanPayload::Message(message))) => {
                     Ok(extract(message).map(Value::Str).unwrap_or(Value::Unit))
                 }
                 Some(Value::Str(_)) | None => Ok(Value::Unit),
@@ -247,7 +248,7 @@ impl Tool for FinalizeResponse {
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let message = match args.named("message").or_else(|| args.positional.first()) {
-                Some(Value::Message(message)) => message,
+                Some(Value::Host(AtmanPayload::Message(message))) => message,
                 Some(other) => {
                     return Err(RuntimeError::TypeMismatch {
                         expected: "message".into(),
@@ -261,7 +262,7 @@ impl Tool for FinalizeResponse {
                 }
             };
             normalized_for_history(message)
-                .map(Value::Message)
+                .map(|message| Value::Host(AtmanPayload::Message(message)))
                 .ok_or_else(|| {
                     RuntimeError::ToolFailed(
                         validation_error(message)

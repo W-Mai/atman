@@ -1,7 +1,9 @@
 use crate::approval::authorize_tool_invocation;
 use crate::error::RuntimeError;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::value::AtmanPayload;
 use crate::value::Value;
+use crate::value::ValueJson;
 
 pub struct ShellQuote;
 
@@ -158,7 +160,7 @@ impl Tool for EstimateTokens {
                     let mut msgs = Vec::with_capacity(items.len());
                     for it in items {
                         match it {
-                            Value::Message(m) => msgs.push(m.clone()),
+                            Value::Host(AtmanPayload::Message(m)) => msgs.push(m.clone()),
                             other => {
                                 return Err(RuntimeError::TypeMismatch {
                                     expected: "list of message".into(),
@@ -170,7 +172,7 @@ impl Tool for EstimateTokens {
                     let n = crate::compaction::estimate_tokens_for_messages(&msgs);
                     Ok(Value::Int(n as i64))
                 }
-                Value::Message(m) => Ok(Value::Int(
+                Value::Host(AtmanPayload::Message(m)) => Ok(Value::Int(
                     crate::compaction::estimate_tokens_for_message(m) as i64,
                 )),
                 Value::Str(s) => {
@@ -283,7 +285,10 @@ impl Tool for ReplaceMessagesRange {
             if let Some(tx) = &ctx.lifecycle_fire_tx {
                 let _ = tx.send(atman_rt::ast::LifecycleEvent::ContextCompact);
             }
-            let list: Vec<Value> = out.into_iter().map(Value::Message).collect();
+            let list: Vec<Value> = out
+                .into_iter()
+                .map(|message| Value::Host(AtmanPayload::Message(message)))
+                .collect();
             Ok(Value::List(list))
         })
     }
@@ -303,7 +308,7 @@ fn extract_message_list(
             let mut out = Vec::with_capacity(items.len());
             for it in items {
                 match it {
-                    Value::Message(m) => out.push(m.clone()),
+                    Value::Host(AtmanPayload::Message(m)) => out.push(m.clone()),
                     other => {
                         return Err(RuntimeError::TypeMismatch {
                             expected: "list of message".into(),
@@ -585,7 +590,7 @@ impl Tool for TextConcat {
                 None => args.positional(0)?,
             };
             match v {
-                Value::Message(m) => Ok(Value::Str(m.text_concat())),
+                Value::Host(AtmanPayload::Message(m)) => Ok(Value::Str(m.text_concat())),
                 Value::Str(s) => Ok(Value::Str(s.clone())),
                 other => Err(RuntimeError::TypeMismatch {
                     expected: "message or string".into(),
@@ -664,7 +669,7 @@ impl Tool for MessageUser {
                 .unwrap_or_else(crate::event::TurnId::now);
             let mut message = crate::message::Message::user_text(turn_id, text);
             message.origin = crate::message::MessageOrigin::Internal;
-            Ok(Value::Message(message))
+            Ok(Value::Host(AtmanPayload::Message(message)))
         })
     }
 }
@@ -695,8 +700,8 @@ impl Tool for MessageAssistant {
                 .turn_id
                 .clone()
                 .unwrap_or_else(crate::event::TurnId::now);
-            Ok(Value::Message(crate::message::Message::assistant_text(
-                turn_id, text,
+            Ok(Value::Host(AtmanPayload::Message(
+                crate::message::Message::assistant_text(turn_id, text),
             )))
         })
     }
@@ -728,8 +733,8 @@ impl Tool for MessageSystem {
                 .turn_id
                 .clone()
                 .unwrap_or_else(crate::event::TurnId::now);
-            Ok(Value::Message(crate::message::Message::system_text(
-                turn_id, text,
+            Ok(Value::Host(AtmanPayload::Message(
+                crate::message::Message::system_text(turn_id, text),
             )))
         })
     }
@@ -763,12 +768,14 @@ impl Tool for MessageTool {
                 .turn_id
                 .clone()
                 .unwrap_or_else(crate::event::TurnId::now);
-            Ok(Value::Message(crate::message::Message {
-                turn_id,
-                role: crate::message::MessageRole::Tool,
-                parts: vec![crate::message::MessagePart::Text { text }],
-                origin: crate::message::MessageOrigin::User,
-            }))
+            Ok(Value::Host(AtmanPayload::Message(
+                crate::message::Message {
+                    turn_id,
+                    role: crate::message::MessageRole::Tool,
+                    parts: vec![crate::message::MessagePart::Text { text }],
+                    origin: crate::message::MessageOrigin::User,
+                },
+            )))
         })
     }
 }
@@ -806,7 +813,7 @@ impl Tool for ExtractToolUses {
                 None => args.positional(0)?,
             };
             let m = match v {
-                Value::Message(m) => m,
+                Value::Host(AtmanPayload::Message(m)) => m,
                 Value::Str(_) => return Ok(Value::List(Vec::new())),
                 other => {
                     return Err(RuntimeError::TypeMismatch {
@@ -1120,7 +1127,7 @@ struct DispatchOutcome {
 impl DispatchOutcome {
     fn tool_result(message: crate::message::Message) -> Self {
         Self {
-            tool_result: Value::Message(message),
+            tool_result: Value::Host(AtmanPayload::Message(message)),
             followups: Vec::new(),
         }
     }
@@ -1292,7 +1299,7 @@ fn finish_dispatch_outcome(
         .map(|value| {
             tool.model_followups(value, ctx)
                 .into_iter()
-                .map(Value::Message)
+                .map(|message| Value::Host(AtmanPayload::Message(message)))
                 .collect()
         })
         .unwrap_or_default();
@@ -1323,7 +1330,7 @@ fn finish_dispatch(ctx: &ToolCtx, id: &str, name: &str, result: ToolResult) -> V
             .unwrap_or_else(crate::event::TurnId::now),
         origin: crate::message::MessageOrigin::User,
     };
-    Value::Message(emit_tool_result(ctx, &msg))
+    Value::Host(AtmanPayload::Message(emit_tool_result(ctx, &msg)))
 }
 
 type DiffPreviewData = (String, Option<String>, Option<String>, Option<String>);
@@ -1521,7 +1528,7 @@ fn emit_tool_result_metrics(
 fn render_tool_result_text(v: &Value) -> String {
     match v {
         Value::Str(s) => s.clone(),
-        Value::Message(m) => m.text_concat(),
+        Value::Host(AtmanPayload::Message(m)) => m.text_concat(),
         other => other.to_json().to_string(),
     }
 }
@@ -1630,7 +1637,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let Value::Message(message) = value else {
+        let Value::Host(AtmanPayload::Message(message)) = value else {
             panic!("message.user must return a message");
         };
 
@@ -1668,7 +1675,7 @@ mod tests {
         let registry = std::sync::Arc::new(crate::tool::ToolRegistry::new());
         registry.register(std::sync::Arc::new(crate::tools::final_answer::FinalAnswer));
         let ctx = authorized_ctx(registry);
-        let reply = Value::Message(crate::message::Message {
+        let reply = Value::Host(AtmanPayload::Message(crate::message::Message {
             role: crate::message::MessageRole::Assistant,
             parts: vec![crate::message::MessagePart::ToolUse {
                 id: "answer-1".into(),
@@ -1678,7 +1685,7 @@ mod tests {
             }],
             turn_id: crate::event::TurnId::now(),
             origin: crate::message::MessageOrigin::User,
-        });
+        }));
         let uses = ExtractToolUses
             .call(
                 ToolArgs {
@@ -1697,7 +1704,7 @@ mod tests {
 
     #[tokio::test]
     async fn mixed_final_answer_stays_in_dispatch_as_an_explicit_failure() {
-        let message = Value::Message(crate::message::Message {
+        let message = Value::Host(AtmanPayload::Message(crate::message::Message {
             role: crate::message::MessageRole::Assistant,
             parts: vec![
                 crate::message::MessagePart::ToolUse {
@@ -1715,7 +1722,7 @@ mod tests {
             ],
             turn_id: crate::event::TurnId::now(),
             origin: crate::message::MessageOrigin::User,
-        });
+        }));
 
         let Value::List(uses) = ExtractToolUses
             .call(
@@ -1871,13 +1878,13 @@ mod tests {
 
         assert_eq!(messages.len(), 4);
         assert!(messages[..2].iter().all(
-            |value| matches!(value, Value::Message(message) if message.role == crate::message::MessageRole::Tool)
+            |value| matches!(value, Value::Host(AtmanPayload::Message(message)) if message.role == crate::message::MessageRole::Tool)
         ));
         assert_eq!(
             messages[2..]
                 .iter()
                 .map(|value| match value {
-                    Value::Message(message) => message.text_concat(),
+                    Value::Host(AtmanPayload::Message(message)) => message.text_concat(),
                     _ => panic!("expected message"),
                 })
                 .collect::<Vec<_>>(),
@@ -1925,7 +1932,7 @@ mod tests {
         };
         assert!(matches!(
             &results[0],
-            Value::Message(crate::message::Message { parts, .. })
+            Value::Host(AtmanPayload::Message(crate::message::Message { parts, .. }))
                 if matches!(
                     &parts[..],
                     [crate::message::MessagePart::ToolResult { content, is_error: true, .. }]
@@ -1993,7 +2000,7 @@ mod tests {
         else {
             panic!("dispatch result list");
         };
-        let Value::Message(message) = &results[0] else {
+        let Value::Host(AtmanPayload::Message(message)) = &results[0] else {
             panic!("tool result message");
         };
         assert!(message.parts.iter().any(|part| matches!(
@@ -2159,7 +2166,7 @@ mod tests {
         let ids: Vec<&str> = results
             .iter()
             .map(|value| match value {
-                Value::Message(message) => match &message.parts[0] {
+                Value::Host(AtmanPayload::Message(message)) => match &message.parts[0] {
                     crate::message::MessagePart::ToolResult { tool_use_id, .. } => {
                         tool_use_id.as_str()
                     }
@@ -2218,7 +2225,7 @@ mod tests {
             ),
             (
                 "input".into(),
-                Value::Struct(vec![("path".into(), Value::Path(path))]),
+                Value::Struct(vec![("path".into(), Value::Host(AtmanPayload::Path(path)))]),
             ),
         ])]);
         let Value::List(results) = DispatchAll
@@ -2234,7 +2241,7 @@ mod tests {
         else {
             panic!("dispatch result list");
         };
-        let Value::Message(message) = &results[0] else {
+        let Value::Host(AtmanPayload::Message(message)) = &results[0] else {
             panic!("tool result message");
         };
         let crate::message::MessagePart::ToolResult { content, .. } = &message.parts[0] else {
@@ -2298,7 +2305,7 @@ mod tests {
         else {
             panic!("dispatch result list");
         };
-        let Value::Message(returned) = &results[0] else {
+        let Value::Host(AtmanPayload::Message(returned)) = &results[0] else {
             panic!("tool result message");
         };
         let crate::stream::StreamFrame::ToolResultMsg {
@@ -2347,7 +2354,7 @@ mod tests {
             max_bytes: 24,
             max_line_bytes: 24,
         };
-        let Value::Message(returned) = finish_dispatch(
+        let Value::Host(AtmanPayload::Message(returned)) = finish_dispatch(
             &ctx,
             "text_id",
             "text",
@@ -2388,7 +2395,7 @@ mod tests {
     fn finish_dispatch_preserves_error_flag_and_message_consistency() {
         let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(8);
         let ctx = ToolCtx::new().with_stream_tx(stream_tx);
-        let Value::Message(returned) = finish_dispatch(
+        let Value::Host(AtmanPayload::Message(returned)) = finish_dispatch(
             &ctx,
             "error_id",
             "failing",
@@ -2424,7 +2431,7 @@ mod tests {
             max_line_bytes: 16,
         };
         let diff = "-old\n+new\n".repeat(20);
-        let Value::Message(returned) = finish_dispatch(
+        let Value::Host(AtmanPayload::Message(returned)) = finish_dispatch(
             &ctx,
             "edit_id",
             "fs.edit",
@@ -2485,7 +2492,7 @@ mod tests {
         else {
             panic!("dispatch result list");
         };
-        let Value::Message(returned) = &results[0] else {
+        let Value::Host(AtmanPayload::Message(returned)) = &results[0] else {
             panic!("tool result message");
         };
         let crate::stream::StreamFrame::ToolResultMsg {

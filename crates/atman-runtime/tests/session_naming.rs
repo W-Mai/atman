@@ -5,7 +5,7 @@ use std::sync::Arc;
 use atman_runtime::event::EventSink;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::session_meta::{NameSource, SessionMeta};
-use atman_runtime::{Executor, Session, Value};
+use atman_runtime::{AtmanValue as Value, Executor, Session};
 
 #[tokio::test]
 async fn built_in_flow_generates_and_persists_session_name() {

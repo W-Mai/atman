@@ -1,3 +1,4 @@
+use crate::value::AtmanPayload;
 use std::sync::Arc;
 
 use crate::error::RuntimeError;
@@ -676,7 +677,7 @@ fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, Run
     };
     match value {
         Value::Str(s) => Ok(s.clone()),
-        Value::Path(p) => Ok(p.display().to_string()),
+        Value::Host(AtmanPayload::Path(p)) => Ok(p.display().to_string()),
         other => Err(RuntimeError::TypeMismatch {
             expected: "string".into(),
             actual: other.kind_name().into(),

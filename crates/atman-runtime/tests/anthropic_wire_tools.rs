@@ -1,8 +1,8 @@
+use atman_runtime::AtmanValue as Value;
 use atman_runtime::event::TurnId;
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::LlmRequest;
 use atman_runtime::providers::anthropic::AnthropicProvider;
-use atman_runtime::value::Value;
 use uuid::Uuid;
 
 fn provider() -> AnthropicProvider {

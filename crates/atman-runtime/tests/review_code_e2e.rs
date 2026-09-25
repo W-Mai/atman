@@ -1,3 +1,4 @@
+use atman_runtime::AtmanPayload;
 mod common;
 
 use std::sync::Arc;
@@ -5,7 +6,7 @@ use std::sync::Arc;
 use atman_dsl::parse::parse_file;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::tools::memory_stubs::RuleFetch;
-use atman_runtime::{Executor, Value};
+use atman_runtime::{AtmanValue as Value, Executor};
 
 const REVIEW_FLOW: &str = r#"flow review_code(file: path) -> Review {
     gather = fanout [
@@ -87,7 +88,10 @@ async fn end_to_end_review_flow_produces_structured_output() {
         .run(
             &file,
             "review_code",
-            vec![("file".into(), Value::Path("src/main.rs".into()))],
+            vec![(
+                "file".into(),
+                Value::Host(AtmanPayload::Path("src/main.rs".into())),
+            )],
         )
         .await
         .unwrap();
@@ -137,7 +141,10 @@ async fn retry_branch_fires_when_verify_reports_invalid() {
         .run(
             &file,
             "review_code",
-            vec![("file".into(), Value::Path("src/main.rs".into()))],
+            vec![(
+                "file".into(),
+                Value::Host(AtmanPayload::Path("src/main.rs".into())),
+            )],
         )
         .await
         .unwrap();

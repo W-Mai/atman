@@ -10,7 +10,7 @@ use atman_runtime::safety::{
     NoopClassifier, SafetyClassifier, SafetyConfig, SafetyMode, ScanVerdict,
 };
 use atman_runtime::tool::BoxFut;
-use atman_runtime::{Executor, Value};
+use atman_runtime::{AtmanValue as Value, Executor};
 
 struct StaticClassifier {
     verdict: ScanVerdict,

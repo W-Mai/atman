@@ -1,3 +1,4 @@
+use crate::value::AtmanPayload;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -629,12 +630,12 @@ impl Tool for WaitForWatcher {
                 RuntimeError::ToolFailed("wait_for_watcher: watch hub not available".into())
             })?;
             match hub.wait_for_event(Duration::from_millis(timeout_ms)).await {
-                Some(evt) => Ok(Value::Message(Message::system_text(
+                Some(evt) => Ok(Value::Host(AtmanPayload::Message(Message::system_text(
                     ctx.turn_id
                         .clone()
                         .unwrap_or_else(crate::event::TurnId::now),
                     format_watch_event_text(&evt),
-                ))),
+                )))),
                 None => Ok(Value::Unit),
             }
         })

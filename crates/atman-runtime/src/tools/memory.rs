@@ -7,7 +7,7 @@ use crate::memory::goal::GoalStore;
 use crate::memory::spec::SpecStore;
 use crate::memory::todo::{Todo, TodoStatus, TodoStore};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
-use crate::value::Value;
+use crate::value::{AtmanPayload, Value};
 
 pub struct MemoryGoalGet {
     pub store: Arc<GoalStore>,
@@ -108,7 +108,10 @@ fn recent_turns_value(
         RecentExcerpt::LegacyRecent(limit) => bounded_recent_excerpt(&messages, limit),
         RecentExcerpt::HeadTail { head, tail } => bounded_head_tail_excerpt(&messages, head, tail),
     });
-    let items = messages.into_iter().map(Value::Message).collect();
+    let items = messages
+        .into_iter()
+        .map(|message| Value::Host(AtmanPayload::Message(message)))
+        .collect();
     let mut fields = vec![
         (
             "total_message_count".into(),
@@ -1410,7 +1413,11 @@ impl Tool for MemoryHistoryRead {
                 .await
                 .map_err(|e| RuntimeError::ToolFailed(format!("history.read: {e}")))??;
             let item_count = page.items.len();
-            let items: Vec<Value> = page.items.into_iter().map(Value::Message).collect();
+            let items: Vec<Value> = page
+                .items
+                .into_iter()
+                .map(|message| Value::Host(AtmanPayload::Message(message)))
+                .collect();
             let start = offset;
             let end = if item_count == 0 {
                 start

@@ -1,11 +1,11 @@
 mod common;
 
+use atman_runtime::AtmanValue as Value;
 use atman_runtime::Session;
 use atman_runtime::event::TurnId;
 use atman_runtime::message::Message;
 use atman_runtime::provider::ProviderRegistry;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::value::Value;
 use std::sync::Arc;
 
 fn build_long_history(session: &Session, msg_count: usize) {

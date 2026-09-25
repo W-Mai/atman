@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use atman_daemon::{DaemonState, prompt_bridge::DaemonPromptResolver};
 use atman_dsl::parse::parse_file;
-use atman_runtime::{Executor, Value, tools};
+use atman_runtime::{AtmanValue as Value, Executor, tools};
 use tempfile::TempDir;
 
 #[tokio::test(flavor = "multi_thread")]

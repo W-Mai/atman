@@ -1,3 +1,4 @@
+use crate::value::AtmanPayload;
 use std::path::PathBuf;
 
 use crate::error::RuntimeError;
@@ -43,7 +44,7 @@ impl Tool for FsEdit {
                 RuntimeError::ToolFailed(format!("fs.edit({}): {e}", path.display()))
             })?;
             let proposal = EditProposal::compute(path, original, new_content);
-            Ok(Value::EditProposal(Box::new(proposal)))
+            Ok(Value::Host(AtmanPayload::EditProposal(Box::new(proposal))))
         })
     }
 }
@@ -291,7 +292,10 @@ impl Tool for HunkApply {
                 selection.iter().map(|id| Value::Int(*id as i64)).collect();
             Ok(Value::Struct(vec![
                 ("status".into(), Value::Str("applied".into())),
-                ("path".into(), Value::Path(proposal.path.clone())),
+                (
+                    "path".into(),
+                    Value::Host(AtmanPayload::Path(proposal.path.clone())),
+                ),
                 ("applied_hunks".into(), Value::List(applied_ids)),
                 ("skipped_hunks".into(), Value::List(skipped)),
                 ("total_hunks".into(), Value::Int(all_ids.len() as i64)),
@@ -342,7 +346,7 @@ fn extract_proposal(args: &ToolArgs) -> Result<EditProposal, RuntimeError> {
         None => args.positional(0)?,
     };
     match value {
-        Value::EditProposal(p) => Ok((**p).clone()),
+        Value::Host(AtmanPayload::EditProposal(p)) => Ok((**p).clone()),
         other => Err(RuntimeError::TypeMismatch {
             expected: "edit_proposal".into(),
             actual: other.kind_name().into(),
@@ -370,7 +374,7 @@ fn extract_path(args: &ToolArgs, name: &str, pos: usize) -> Result<PathBuf, Runt
         None => args.positional(pos)?,
     };
     match value {
-        Value::Path(p) => Ok(p.clone()),
+        Value::Host(AtmanPayload::Path(p)) => Ok(p.clone()),
         Value::Str(s) => Ok(PathBuf::from(s)),
         other => Err(RuntimeError::TypeMismatch {
             expected: "path".into(),
@@ -390,11 +394,14 @@ mod tests {
         std::fs::write(&path, "a\nb\nc\n").unwrap();
         let ctx = ToolCtx::new();
         let args = ToolArgs {
-            positional: vec![Value::Path(path.clone()), Value::Str("a\nB\nc\n".into())],
+            positional: vec![
+                Value::Host(AtmanPayload::Path(path.clone())),
+                Value::Str("a\nB\nc\n".into()),
+            ],
             named: vec![],
         };
         let v = FsEdit.call(args, &ctx).await.unwrap();
-        let Value::EditProposal(p) = v else {
+        let Value::Host(AtmanPayload::EditProposal(p)) = v else {
             panic!("expected EditProposal");
         };
         assert_eq!(p.hunks.len(), 1);
@@ -411,7 +418,10 @@ mod tests {
         let proposal = FsEdit
             .call(
                 ToolArgs {
-                    positional: vec![Value::Path(path.clone()), Value::Str("a\nB\nc\n".into())],
+                    positional: vec![
+                        Value::Host(AtmanPayload::Path(path.clone())),
+                        Value::Str("a\nB\nc\n".into()),
+                    ],
                     named: vec![],
                 },
                 &ctx,
@@ -443,7 +453,10 @@ mod tests {
         let proposal = FsEdit
             .call(
                 ToolArgs {
-                    positional: vec![Value::Path(path.clone()), Value::Str("a\nB\nc\n".into())],
+                    positional: vec![
+                        Value::Host(AtmanPayload::Path(path.clone())),
+                        Value::Str("a\nB\nc\n".into()),
+                    ],
                     named: vec![],
                 },
                 &ctx,
@@ -472,7 +485,10 @@ mod tests {
         let proposal_v = FsEdit
             .call(
                 ToolArgs {
-                    positional: vec![Value::Path(path.clone()), Value::Str(proposed.clone())],
+                    positional: vec![
+                        Value::Host(AtmanPayload::Path(path.clone())),
+                        Value::Str(proposed.clone()),
+                    ],
                     named: vec![],
                 },
                 &ctx,
@@ -503,11 +519,11 @@ mod tests {
             .join(format!("r4-hunk-{}.txt", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
         std::fs::write(&fixture, "original\n").unwrap();
-        let proposal = Value::EditProposal(Box::new(EditProposal::compute(
+        let proposal = Value::Host(AtmanPayload::EditProposal(Box::new(EditProposal::compute(
             fixture.clone(),
             "original\n".into(),
             "changed\n".into(),
-        )));
+        ))));
         let ctx = ToolCtx::new()
             .with_fs_access(crate::fs_access::FsAccessPolicy::workspace_write(
                 workspace.path().into(),
@@ -542,7 +558,10 @@ mod tests {
         let proposal = FsEdit
             .call(
                 ToolArgs {
-                    positional: vec![Value::Path(path), Value::Str("b\n".into())],
+                    positional: vec![
+                        Value::Host(AtmanPayload::Path(path)),
+                        Value::Str("b\n".into()),
+                    ],
                     named: vec![],
                 },
                 &ctx,

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{Executor, Session, Value};
+use crate::{Executor, Session, value::Value};
 
 const MAX_MESSAGES: usize = 24;
 const MAX_MESSAGE_CHARS: usize = 600;

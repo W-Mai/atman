@@ -3,8 +3,10 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use atman_dsl::parse::parse_file;
+use atman_rt::Value as CoreValue;
 use atman_runtime::provider::{LlmRequest, Provider, user_text_message};
-use atman_runtime::value::Value;
+
+type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 const DEFAULT_RECENT_TURNS: usize = 30;
 const META_PROMPT_HEADER: &str = "\

@@ -2,6 +2,7 @@ use crate::error::RuntimeError;
 use crate::eval::llm_args::LlmNodeArgs;
 use crate::eval::llm_context;
 use crate::tool::ToolCtx;
+use crate::value::AtmanPayload;
 use crate::value::Value;
 
 use super::ContextMode;
@@ -621,7 +622,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         drop(compact_guard.take());
                     }
                     if !matches!(context_mode, ContextMode::None) {
-                        return Value::Message(am.message.clone());
+                        return Value::Host(AtmanPayload::Message(am.message.clone()));
                     }
                     return crate::provider::assistant_message_to_value(&am);
                 }

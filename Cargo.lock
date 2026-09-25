@@ -320,6 +320,7 @@ version = "1.13.2"
 dependencies = [
  "anyhow",
  "arboard",
+ "atman-rt",
  "atman-runtime",
  "base64",
  "chrono",

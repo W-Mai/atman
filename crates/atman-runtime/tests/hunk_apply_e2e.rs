@@ -1,5 +1,6 @@
 use atman_dsl::parse::parse_file;
-use atman_runtime::{Executor, Value, tools};
+use atman_runtime::AtmanPayload;
+use atman_runtime::{AtmanValue as Value, Executor, tools};
 
 fn apply_executor() -> Executor {
     let mut executor = Executor::new();
@@ -48,7 +49,7 @@ async fn hunk_all_writes_full_proposed() {
             &file,
             "apply_all",
             vec![
-                ("file".into(), Value::Path(path.clone())),
+                ("file".into(), Value::Host(AtmanPayload::Path(path.clone()))),
                 ("new_content".into(), Value::Str("a\nB\nc\n".into())),
             ],
         )
@@ -74,7 +75,7 @@ async fn hunk_none_leaves_file_original() {
         &file,
         "apply_none",
         vec![
-            ("file".into(), Value::Path(path.clone())),
+            ("file".into(), Value::Host(AtmanPayload::Path(path.clone()))),
             ("new_content".into(), Value::Str("a\nB\nc\n".into())),
         ],
     )
@@ -99,7 +100,7 @@ async fn hunk_list_selection_applies_only_id_1() {
         &file,
         "apply_first_only",
         vec![
-            ("file".into(), Value::Path(path.clone())),
+            ("file".into(), Value::Host(AtmanPayload::Path(path.clone()))),
             ("new_content".into(), Value::Str(proposed)),
         ],
     )

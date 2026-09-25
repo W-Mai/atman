@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ⚠️ Breaking Changes
+
+- **Portable flow types** — Flow AST, lexical environments, and `Value<P, E>` are owned by `atman-rt`. Import core types from `atman-rt`; `atman-runtime::Value` and the old DSL AST paths are removed. Atman-specific path, message, and edit values use `AtmanPayload`.
+
 ## [1.13.2] — 2026-09-25
 
 ### ✨ Features

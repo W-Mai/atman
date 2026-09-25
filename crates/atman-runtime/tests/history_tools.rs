@@ -1,10 +1,11 @@
+use atman_runtime::AtmanPayload;
+use atman_runtime::AtmanValue as Value;
 use atman_runtime::Session;
 use atman_runtime::event::TurnId;
 use atman_runtime::history_store::{HistoryStore, HistoryStoreImpl};
 use atman_runtime::message::Message;
 use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
 use atman_runtime::tools::memory::{MemoryHistoryCount, MemoryHistoryRead, MemoryHistorySearch};
-use atman_runtime::value::Value;
 use std::sync::Arc;
 
 async fn build_session_with_messages(tmp: &tempfile::TempDir) -> Arc<Session> {
@@ -168,7 +169,7 @@ async fn history_read_role_filter_returns_only_matching_role() {
         .unwrap();
     assert_eq!(items.len(), 2, "should have 2 assistant messages");
     for t in items {
-        if let Value::Message(m) = t {
+        if let Value::Host(AtmanPayload::Message(m)) = t {
             assert_eq!(m.role.as_str(), "assistant");
         } else {
             panic!("expected message");

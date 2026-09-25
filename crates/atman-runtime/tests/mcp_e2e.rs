@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use atman_runtime::AtmanValue as Value;
 use atman_runtime::mcp::{McpServerConfig, register_from_configs};
 use atman_runtime::tool::{Tier, ToolArgs, ToolCtx, ToolRegistry};
-use atman_runtime::value::Value;
 
 fn write_script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
     let path = dir.join(name);

@@ -1,10 +1,11 @@
+use atman_runtime::AtmanPayload;
 mod common;
 
 use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::{Executor, Value, tools};
+use atman_runtime::{AtmanValue as Value, Executor, tools};
 
 fn e2e_executor() -> Executor {
     let mut executor = Executor::new();
@@ -102,7 +103,10 @@ async fn edit_and_verify_reverts_file_when_check_fails() {
             &file,
             "edit_and_verify",
             vec![
-                ("file".into(), Value::Path(file_path.clone())),
+                (
+                    "file".into(),
+                    Value::Host(AtmanPayload::Path(file_path.clone())),
+                ),
                 ("instruction".into(), Value::Str("swap greeting".into())),
                 ("verify_cmd".into(), Value::Str("exit 1".into())),
             ],
@@ -171,7 +175,10 @@ async fn fix_until_test_passes_iterates_until_bash_check_passes() {
             &file,
             "demo",
             vec![
-                ("target".into(), Value::Path(target.clone())),
+                (
+                    "target".into(),
+                    Value::Host(AtmanPayload::Path(target.clone())),
+                ),
                 ("script".into(), Value::Str(script)),
             ],
         )
@@ -214,7 +221,10 @@ async fn fix_until_test_passes_returns_gave_up_after_max_iters() {
             &file,
             "demo",
             vec![
-                ("target".into(), Value::Path(target.clone())),
+                (
+                    "target".into(),
+                    Value::Host(AtmanPayload::Path(target.clone())),
+                ),
                 ("script".into(), Value::Str("false".into())),
             ],
         )
@@ -255,7 +265,10 @@ async fn edit_and_verify_keeps_edit_when_check_passes() {
             &file,
             "edit_and_verify",
             vec![
-                ("file".into(), Value::Path(file_path.clone())),
+                (
+                    "file".into(),
+                    Value::Host(AtmanPayload::Path(file_path.clone())),
+                ),
                 ("instruction".into(), Value::Str("x".into())),
                 ("verify_cmd".into(), Value::Str("true".into())),
             ],

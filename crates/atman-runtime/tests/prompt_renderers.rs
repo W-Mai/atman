@@ -1,5 +1,5 @@
 use atman_dsl::parse::parse_file;
-use atman_runtime::{Executor, Value, tools};
+use atman_runtime::{AtmanValue as Value, Executor, tools};
 
 async fn eval(src: &str) -> Value {
     let file = parse_file(src).unwrap();

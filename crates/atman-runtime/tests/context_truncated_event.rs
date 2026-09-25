@@ -3,7 +3,7 @@ mod common;
 use atman_dsl::parse::parse_file;
 use atman_runtime::event::{Event, EventSink};
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::{Executor, Value};
+use atman_runtime::{AtmanValue as Value, Executor};
 use std::sync::Arc;
 
 #[tokio::test]

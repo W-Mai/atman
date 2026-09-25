@@ -1,5 +1,6 @@
 use crate::error::RuntimeError;
 use crate::tool::ToolArgs;
+use crate::value::AtmanPayload;
 use crate::value::Value;
 
 pub struct LlmNodeArgs {
@@ -131,7 +132,7 @@ pub fn parse_llm_args_from_toolargs(
                     let mut msgs = Vec::with_capacity(items.len());
                     for item in items {
                         match item {
-                            Value::Message(m) => msgs.push(m.clone()),
+                            Value::Host(AtmanPayload::Message(m)) => msgs.push(m.clone()),
                             other => {
                                 return Err(RuntimeError::TypeMismatch {
                                     expected: "message".into(),

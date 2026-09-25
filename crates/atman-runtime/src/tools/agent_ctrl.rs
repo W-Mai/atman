@@ -2010,7 +2010,7 @@ mod tests {
     use crate::permission::PermissionBroker;
     use crate::provider::ProviderRegistry;
     use crate::tool::{Tier, Tool, ToolArgs, ToolCtx, ToolRegistry};
-    use crate::{InvocationEnv, Value};
+    use crate::{InvocationEnv, value::Value};
     use std::cell::Cell;
     use std::sync::Arc;
 

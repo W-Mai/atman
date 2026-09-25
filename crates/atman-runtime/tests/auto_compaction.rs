@@ -90,12 +90,12 @@ async fn compact_messages_refreshes_window_from_compacted_history() {
 
 #[tokio::test]
 async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
+    use atman_runtime::AtmanValue as Value;
     use atman_runtime::compaction::{
         CompactionBudgetContext, is_compaction_summary, maybe_auto_compact_handle_locked,
     };
     use atman_runtime::provider::ProviderRegistry;
     use atman_runtime::providers::mock::MockProvider;
-    use atman_runtime::value::Value;
     use std::sync::{Arc, Mutex};
 
     let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
@@ -168,7 +168,7 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
         AssistantMessage, CallTiming, LlmRequest, Provider, StopReason, TokenUsage,
     };
     use atman_runtime::tool::BoxFut;
-    use atman_runtime::{Executor, Value, tools};
+    use atman_runtime::{AtmanValue as Value, Executor, tools};
 
     struct CompactingProvider {
         calls: AtomicUsize,
@@ -347,11 +347,11 @@ async fn maybe_auto_compact_emits_warning_when_no_range_found() {
 #[tokio::test]
 async fn maybe_auto_compact_calls_llm_and_writes_summary_event() {
     let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
+    use atman_runtime::AtmanValue as Value;
     use atman_runtime::compaction::maybe_auto_compact;
     use atman_runtime::event::Event;
     use atman_runtime::provider::ProviderRegistry;
     use atman_runtime::providers::mock::MockProvider;
-    use atman_runtime::value::Value;
     use std::sync::Arc;
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
@@ -391,9 +391,9 @@ async fn setup_review_env() -> (
     std::sync::Arc<Session>,
     atman_runtime::provider::ProviderRegistry,
 ) {
+    use atman_runtime::AtmanValue as Value;
     use atman_runtime::provider::ProviderRegistry;
     use atman_runtime::providers::mock::MockProvider;
-    use atman_runtime::value::Value;
     use std::sync::Arc;
     let tmp = tempfile::tempdir().unwrap();
     let session = Arc::new(Session::open(tmp.path()).unwrap());

@@ -3,6 +3,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
+use atman_runtime::AtmanValue as Value;
 use atman_runtime::error::RuntimeError;
 use atman_runtime::event::{Event, EventSink, FlowRunId};
 use atman_runtime::flow_authority::EffectiveAuthority;
@@ -14,7 +15,6 @@ use atman_runtime::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolRegistry, T
 use atman_runtime::tools::agent_ctrl::{
     AgentKill, AgentSpawn, AgentStatus, FlowRegistry, FlowRunStatus,
 };
-use atman_runtime::value::Value;
 
 struct LifecycleProbe;
 

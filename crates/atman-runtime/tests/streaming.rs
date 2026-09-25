@@ -1,7 +1,7 @@
+use atman_runtime::AtmanValue as Value;
 use atman_runtime::event::NodeEvent;
 use atman_runtime::provider::{LlmRequest, Provider};
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::value::Value;
 
 #[tokio::test]
 async fn mock_streaming_emits_chunks_then_done() {

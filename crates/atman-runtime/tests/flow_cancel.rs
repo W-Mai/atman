@@ -12,7 +12,7 @@ use atman_runtime::provider::{
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::session::Session;
 use atman_runtime::tool::BoxFut;
-use atman_runtime::{Executor, RuntimeError, Value};
+use atman_runtime::{AtmanValue as Value, Executor, RuntimeError};
 
 fn user_msg(turn_id: TurnId, text: &str) -> Message {
     Message {

@@ -1,6 +1,7 @@
 use crate::error::RuntimeError;
 use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::value::AtmanPayload;
 use crate::value::Value;
 
 pub struct ImageRead;
@@ -44,7 +45,7 @@ impl Tool for ImageRead {
 
     fn model_followups(&self, result: &Value, _ctx: &ToolCtx) -> Vec<Message> {
         match result {
-            Value::Message(message)
+            Value::Host(AtmanPayload::Message(message))
                 if message
                     .parts
                     .iter()
@@ -82,7 +83,7 @@ impl Tool for ImageRead {
                 source.media_type,
                 byte_len
             );
-            Ok(Value::Message(Message {
+            Ok(Value::Host(AtmanPayload::Message(Message {
                 role: MessageRole::User,
                 parts: vec![
                     MessagePart::Text { text: label },
@@ -93,7 +94,7 @@ impl Tool for ImageRead {
                     .clone()
                     .unwrap_or_else(crate::event::TurnId::now),
                 origin: MessageOrigin::Internal,
-            }))
+            })))
         })
     }
 }
@@ -102,7 +103,7 @@ fn extract_path(args: &ToolArgs) -> Result<std::path::PathBuf, RuntimeError> {
     let value = args.named("path").or_else(|| args.positional.first());
     match value {
         Some(Value::Str(path)) if !path.is_empty() => Ok(path.into()),
-        Some(Value::Path(path)) => Ok(path.clone()),
+        Some(Value::Host(AtmanPayload::Path(path))) => Ok(path.clone()),
         Some(other) => Err(RuntimeError::TypeMismatch {
             expected: "non-empty image path".into(),
             actual: other.kind_name().into(),
@@ -136,7 +137,7 @@ mod tests {
             .await
             .unwrap();
 
-        let Value::Message(message) = &value else {
+        let Value::Host(AtmanPayload::Message(message)) = &value else {
             panic!("expected image message")
         };
         assert_eq!(message.role, MessageRole::User);

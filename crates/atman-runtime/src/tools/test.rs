@@ -1,3 +1,4 @@
+use crate::value::AtmanPayload;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -200,7 +201,7 @@ fn extract_optional_int(args: &ToolArgs, name: &str) -> Option<i64> {
 
 fn extract_optional_path(args: &ToolArgs, name: &str) -> Option<PathBuf> {
     match args.named(name)? {
-        Value::Path(p) => Some(p.clone()),
+        Value::Host(AtmanPayload::Path(p)) => Some(p.clone()),
         Value::Str(s) => Some(PathBuf::from(s)),
         _ => None,
     }
@@ -386,7 +387,10 @@ mod tests {
             positional: vec![],
             named: vec![
                 ("framework".into(), Value::Str("cargo".into())),
-                ("cwd".into(), Value::Path(dir.path().to_path_buf())),
+                (
+                    "cwd".into(),
+                    Value::Host(AtmanPayload::Path(dir.path().to_path_buf())),
+                ),
                 ("timeout_ms".into(), Value::Int(30_000)),
             ],
         };
@@ -423,7 +427,10 @@ mod tests {
             positional: vec![],
             named: vec![
                 ("framework".into(), Value::Str(framework.into())),
-                ("cwd".into(), Value::Path(cwd.to_path_buf())),
+                (
+                    "cwd".into(),
+                    Value::Host(AtmanPayload::Path(cwd.to_path_buf())),
+                ),
                 ("timeout_ms".into(), Value::Int(30_000)),
             ],
         }

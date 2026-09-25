@@ -1,6 +1,6 @@
 use atman_dsl::parse::parse_file;
+use atman_runtime::AtmanValue as Value;
 use atman_runtime::Executor;
-use atman_runtime::value::Value;
 
 fn run(src: &str) -> Value {
     let parsed = parse_file(src).expect("parse");

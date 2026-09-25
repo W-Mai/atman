@@ -1,3 +1,4 @@
+use crate::value::AtmanPayload;
 use std::path::PathBuf;
 
 use crate::error::RuntimeError;
@@ -322,7 +323,7 @@ impl Tool for FsWrite {
                 });
             }
             Ok(Value::Struct(vec![
-                ("path".into(), Value::Path(path)),
+                ("path".into(), Value::Host(AtmanPayload::Path(path))),
                 (
                     "approval".into(),
                     Value::Str(if approved { "approved" } else { "auto" }.into()),
@@ -704,10 +705,12 @@ impl Tool for FsList {
                 .await
                 .map_err(|e| RuntimeError::ToolFailed(format!("fs.list next_entry: {e}")))?
             {
-                entries.push(Value::Path(entry.path()));
+                entries.push(Value::Host(AtmanPayload::Path(entry.path())));
             }
             entries.sort_by(|a, b| match (a, b) {
-                (Value::Path(a), Value::Path(b)) => a.cmp(b),
+                (Value::Host(AtmanPayload::Path(a)), Value::Host(AtmanPayload::Path(b))) => {
+                    a.cmp(b)
+                }
                 _ => std::cmp::Ordering::Equal,
             });
             Ok(Value::List(entries))
@@ -721,7 +724,7 @@ fn extract_path(args: &ToolArgs, name: &str, pos: usize) -> Result<PathBuf, Runt
         None => args.positional(pos)?,
     };
     match value {
-        Value::Path(p) => Ok(p.clone()),
+        Value::Host(AtmanPayload::Path(p)) => Ok(p.clone()),
         Value::Str(s) => Ok(PathBuf::from(s)),
         other => Err(RuntimeError::TypeMismatch {
             expected: "path or string".into(),
@@ -812,7 +815,7 @@ impl Tool for FsGrep {
 fn grep_root(args: &ToolArgs) -> Result<Option<PathBuf>, RuntimeError> {
     match args.named("path") {
         Some(Value::Str(s)) => Ok(Some(PathBuf::from(s))),
-        Some(Value::Path(p)) => Ok(Some(p.clone())),
+        Some(Value::Host(AtmanPayload::Path(p))) => Ok(Some(p.clone())),
         Some(other) => Err(RuntimeError::TypeMismatch {
             expected: "path or string".into(),
             actual: other.kind_name().into(),
@@ -912,7 +915,7 @@ mod tests {
 
         let ctx = ToolCtx::new();
         let args = ToolArgs {
-            positional: vec![Value::Path(path)],
+            positional: vec![Value::Host(AtmanPayload::Path(path))],
             named: vec![],
         };
         let v = FsRead.call(args, &ctx).await.unwrap();
@@ -984,7 +987,7 @@ mod tests {
         let result = FsRead
             .call(
                 ToolArgs {
-                    positional: vec![Value::Path(path)],
+                    positional: vec![Value::Host(AtmanPayload::Path(path))],
                     named: vec![],
                 },
                 &ctx,
@@ -1051,7 +1054,7 @@ mod tests {
         let result = FsRead
             .call(
                 ToolArgs {
-                    positional: vec![Value::Path(path)],
+                    positional: vec![Value::Host(AtmanPayload::Path(path))],
                     named: vec![],
                 },
                 &ctx,
@@ -1089,7 +1092,7 @@ mod tests {
         let result = FsRead
             .call(
                 ToolArgs {
-                    positional: vec![Value::Path(path)],
+                    positional: vec![Value::Host(AtmanPayload::Path(path))],
                     named: vec![
                         ("offset".into(), Value::Int(2)),
                         ("limit".into(), Value::Int(100)),
@@ -1137,7 +1140,7 @@ mod tests {
         let error = FsRead
             .call(
                 ToolArgs {
-                    positional: vec![Value::Path(path)],
+                    positional: vec![Value::Host(AtmanPayload::Path(path))],
                     named: vec![],
                 },
                 &ctx,
@@ -1164,7 +1167,7 @@ mod tests {
         let result = FsRead
             .call(
                 ToolArgs {
-                    positional: vec![Value::Path(path)],
+                    positional: vec![Value::Host(AtmanPayload::Path(path))],
                     named: vec![("offset".into(), Value::Int(20))],
                 },
                 &ctx,
@@ -1197,7 +1200,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let ctx = ToolCtx::new();
         let args = ToolArgs {
-            positional: vec![Value::Path(dir.path().join("nope"))],
+            positional: vec![Value::Host(AtmanPayload::Path(dir.path().join("nope")))],
             named: vec![],
         };
         let err = FsRead.call(args, &ctx).await.unwrap_err();
@@ -1216,13 +1219,13 @@ mod tests {
 
         let ctx = ToolCtx::new();
         let args = ToolArgs {
-            positional: vec![Value::Path(dir.path().to_path_buf())],
+            positional: vec![Value::Host(AtmanPayload::Path(dir.path().to_path_buf()))],
             named: vec![],
         };
         let v = FsList.call(args, &ctx).await.unwrap();
         if let Value::List(items) = v {
             assert_eq!(items.len(), 2);
-            if let Value::Path(p) = &items[0] {
+            if let Value::Host(AtmanPayload::Path(p)) = &items[0] {
                 assert!(p.ends_with("a.txt"));
             } else {
                 panic!("expected path");
@@ -1249,7 +1252,7 @@ mod tests {
             .unwrap();
         let ctx = ToolCtx::new();
         let args = ToolArgs {
-            positional: vec![Value::Path(path.clone())],
+            positional: vec![Value::Host(AtmanPayload::Path(path.clone()))],
             named: vec![
                 ("offset".into(), Value::Int(2)),
                 ("limit".into(), Value::Int(2)),
@@ -1273,7 +1276,7 @@ mod tests {
         tokio::fs::write(&path, b"only\n").await.unwrap();
         let ctx = ToolCtx::new();
         let args = ToolArgs {
-            positional: vec![Value::Path(path)],
+            positional: vec![Value::Host(AtmanPayload::Path(path))],
             named: vec![("offset".into(), Value::Int(99))],
         };
         let v = FsRead.call(args, &ctx).await.unwrap();
@@ -1295,7 +1298,7 @@ mod tests {
         let args = ToolArgs {
             positional: vec![],
             named: vec![
-                ("path".into(), Value::Path(path.clone())),
+                ("path".into(), Value::Host(AtmanPayload::Path(path.clone()))),
                 ("old_string".into(), Value::Str("fn foo() {}".into())),
                 (
                     "new_string".into(),
@@ -1338,7 +1341,10 @@ mod tests {
         let args = ToolArgs {
             positional: vec![],
             named: vec![
-                ("path".into(), Value::Path(PathBuf::from("Cargo.toml"))),
+                (
+                    "path".into(),
+                    Value::Host(AtmanPayload::Path(PathBuf::from("Cargo.toml"))),
+                ),
                 ("old_string".into(), Value::Str("managed-before".into())),
                 ("new_string".into(), Value::Str("managed-after".into())),
             ],
@@ -1363,7 +1369,7 @@ mod tests {
         let args = ToolArgs {
             positional: vec![],
             named: vec![
-                ("path".into(), Value::Path(path)),
+                ("path".into(), Value::Host(AtmanPayload::Path(path))),
                 ("old_string".into(), Value::Str("fn bar() {}".into())),
                 ("new_string".into(), Value::Str("changed".into())),
             ],
@@ -1388,7 +1394,7 @@ mod tests {
         let args = ToolArgs {
             positional: vec![],
             named: vec![
-                ("path".into(), Value::Path(path)),
+                ("path".into(), Value::Host(AtmanPayload::Path(path))),
                 ("old_string".into(), Value::Str("TODO".into())),
                 ("new_string".into(), Value::Str("DONE".into())),
             ],
@@ -1412,7 +1418,7 @@ mod tests {
         let args = ToolArgs {
             positional: vec![],
             named: vec![
-                ("path".into(), Value::Path(path.clone())),
+                ("path".into(), Value::Host(AtmanPayload::Path(path.clone()))),
                 ("old_string".into(), Value::Str("TODO".into())),
                 ("new_string".into(), Value::Str("DONE".into())),
                 ("replace_all".into(), Value::Bool(true)),
@@ -1432,7 +1438,7 @@ mod tests {
         let args = ToolArgs {
             positional: vec![],
             named: vec![
-                ("path".into(), Value::Path(path)),
+                ("path".into(), Value::Host(AtmanPayload::Path(path))),
                 ("old_string".into(), Value::Str("same".into())),
                 ("new_string".into(), Value::Str("same".into())),
             ],
@@ -1452,7 +1458,7 @@ mod tests {
         let args = ToolArgs {
             positional: vec![],
             named: vec![
-                ("path".into(), Value::Path(path)),
+                ("path".into(), Value::Host(AtmanPayload::Path(path))),
                 ("old_string".into(), Value::Str("foo".into())),
                 ("new_string".into(), Value::Str("bar".into())),
             ],
@@ -1469,14 +1475,14 @@ mod tests {
         let tracker = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         let ctx = ToolCtx::new().with_read_files(tracker);
         let read_args = ToolArgs {
-            positional: vec![Value::Path(path.clone())],
+            positional: vec![Value::Host(AtmanPayload::Path(path.clone()))],
             named: vec![],
         };
         FsRead.call(read_args, &ctx).await.unwrap();
         let edit_args = ToolArgs {
             positional: vec![],
             named: vec![
-                ("path".into(), Value::Path(path.clone())),
+                ("path".into(), Value::Host(AtmanPayload::Path(path.clone()))),
                 ("old_string".into(), Value::Str("foo".into())),
                 ("new_string".into(), Value::Str("bar".into())),
             ],
@@ -1493,7 +1499,7 @@ mod tests {
         let args = ToolArgs {
             positional: vec![],
             named: vec![
-                ("path".into(), Value::Path(path.clone())),
+                ("path".into(), Value::Host(AtmanPayload::Path(path.clone()))),
                 ("old_string".into(), Value::Str("foo".into())),
                 ("new_string".into(), Value::Str("foo foo".into())),
             ],
@@ -1516,7 +1522,9 @@ mod tests {
             branch: None,
         });
         let args = ToolArgs {
-            positional: vec![Value::Path(PathBuf::from("relative.txt"))],
+            positional: vec![Value::Host(AtmanPayload::Path(PathBuf::from(
+                "relative.txt",
+            )))],
             named: vec![],
         };
 
@@ -1531,7 +1539,7 @@ mod tests {
         tokio::fs::write(&path, b"one\ntwo\n").await.unwrap();
         let ctx = ToolCtx::new();
         let args = ToolArgs {
-            positional: vec![Value::Path(path)],
+            positional: vec![Value::Host(AtmanPayload::Path(path))],
             named: vec![],
         };
         let v = FsRead.call(args, &ctx).await.unwrap();
@@ -1549,7 +1557,7 @@ mod tests {
         tokio::fs::write(&path, body.as_bytes()).await.unwrap();
         let ctx = ToolCtx::new();
         let args = ToolArgs {
-            positional: vec![Value::Path(path)],
+            positional: vec![Value::Host(AtmanPayload::Path(path))],
             named: vec![
                 ("anchor".into(), Value::Str("line 10".into())),
                 ("context".into(), Value::Int(2)),
@@ -1572,7 +1580,7 @@ mod tests {
         tokio::fs::write(&path, b"only this line\n").await.unwrap();
         let ctx = ToolCtx::new();
         let args = ToolArgs {
-            positional: vec![Value::Path(path)],
+            positional: vec![Value::Host(AtmanPayload::Path(path))],
             named: vec![("anchor".into(), Value::Str("nope".into()))],
         };
         let err = FsRead.call(args, &ctx).await.unwrap_err();
@@ -1656,7 +1664,7 @@ mod tests {
         let value = FsRead
             .call(
                 ToolArgs {
-                    positional: vec![Value::Path(path)],
+                    positional: vec![Value::Host(AtmanPayload::Path(path))],
                     named: vec![],
                 },
                 &ctx,
@@ -1686,7 +1694,10 @@ mod tests {
                 ToolArgs {
                     positional: vec![],
                     named: vec![
-                        ("path".into(), Value::Path(target.clone())),
+                        (
+                            "path".into(),
+                            Value::Host(AtmanPayload::Path(target.clone())),
+                        ),
                         ("content".into(), Value::Str("ok".into())),
                     ],
                 },
@@ -1709,7 +1720,10 @@ mod tests {
         let args = ToolArgs {
             positional: vec![],
             named: vec![
-                ("path".into(), Value::Path(PathBuf::from("/etc/atman-evil"))),
+                (
+                    "path".into(),
+                    Value::Host(AtmanPayload::Path(PathBuf::from("/etc/atman-evil"))),
+                ),
                 ("content".into(), Value::Str("pwned".into())),
             ],
         };
@@ -1729,7 +1743,10 @@ mod tests {
         let args = ToolArgs {
             positional: vec![],
             named: vec![
-                ("path".into(), Value::Path(target.clone())),
+                (
+                    "path".into(),
+                    Value::Host(AtmanPayload::Path(target.clone())),
+                ),
                 ("content".into(), Value::Str("ok".into())),
             ],
         };
@@ -1746,7 +1763,10 @@ mod tests {
         let args = ToolArgs {
             positional: vec![],
             named: vec![
-                ("path".into(), Value::Path(target.clone())),
+                (
+                    "path".into(),
+                    Value::Host(AtmanPayload::Path(target.clone())),
+                ),
                 ("content".into(), Value::Str("go".into())),
             ],
         };

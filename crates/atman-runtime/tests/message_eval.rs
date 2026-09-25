@@ -1,6 +1,7 @@
 use atman_dsl::parse::parse_file;
+use atman_runtime::AtmanPayload;
 use atman_runtime::message::{ImageData, MessagePart, MessageRole};
-use atman_runtime::{Executor, Value};
+use atman_runtime::{AtmanValue as Value, Executor};
 
 #[tokio::test]
 async fn user_msg_positional_text_produces_message_value() {
@@ -10,8 +11,8 @@ async fn user_msg_positional_text_produces_message_value() {
     let file = parse_file(src).unwrap();
     let ex = Executor::new();
     let out = ex.run(&file, "build", vec![]).await.unwrap();
-    let Value::Message(msg) = out else {
-        panic!("expected Value::Message, got {out:?}");
+    let Value::Host(AtmanPayload::Message(msg)) = out else {
+        panic!("expected message value, got {out:?}");
     };
     assert_eq!(msg.role, MessageRole::User);
     assert_eq!(msg.parts.len(), 1);
@@ -26,7 +27,7 @@ async fn user_msg_with_attachments_prepends_image_parts() {
     let file = parse_file(src).unwrap();
     let ex = Executor::new();
     let out = ex.run(&file, "build", vec![]).await.unwrap();
-    let Value::Message(msg) = out else {
+    let Value::Host(AtmanPayload::Message(msg)) = out else {
         panic!("expected message");
     };
     assert_eq!(msg.parts.len(), 2);
@@ -48,7 +49,7 @@ async fn tool_result_takes_id_content_and_optional_is_error() {
     let file = parse_file(src).unwrap();
     let ex = Executor::new();
     let out = ex.run(&file, "build", vec![]).await.unwrap();
-    let Value::Message(msg) = out else {
+    let Value::Host(AtmanPayload::Message(msg)) = out else {
         panic!("expected message");
     };
     assert_eq!(msg.role, MessageRole::Tool);
@@ -73,7 +74,7 @@ async fn system_msg_text_only() {
     let file = parse_file(src).unwrap();
     let ex = Executor::new();
     let out = ex.run(&file, "build", vec![]).await.unwrap();
-    let Value::Message(msg) = out else {
+    let Value::Host(AtmanPayload::Message(msg)) = out else {
         panic!("expected message");
     };
     assert_eq!(msg.role, MessageRole::System);

@@ -2,6 +2,7 @@ use crate::error::RuntimeError;
 use crate::git;
 use crate::stream::StreamFrame;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::value::AtmanPayload;
 use crate::value::Value;
 
 pub struct GitDiff;
@@ -43,7 +44,7 @@ impl Tool for GitInit {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let explicit = match args.named("cwd") {
-                Some(Value::Path(path)) => Some(path.as_path()),
+                Some(Value::Host(AtmanPayload::Path(path))) => Some(path.as_path()),
                 Some(Value::Str(path)) => Some(std::path::Path::new(path)),
                 Some(other) => {
                     return Err(RuntimeError::TypeMismatch {
@@ -78,12 +79,17 @@ impl Tool for GitInit {
             let info = git::init_repository(&path, bare, initial_branch)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.init: {e}")))?;
             Ok(Value::Struct(vec![
-                ("path".into(), Value::Path(info.path)),
+                ("path".into(), Value::Host(AtmanPayload::Path(info.path))),
                 (
                     "workdir".into(),
-                    info.workdir.map(Value::Path).unwrap_or(Value::Unit),
+                    info.workdir
+                        .map(|path| Value::Host(AtmanPayload::Path(path)))
+                        .unwrap_or(Value::Unit),
                 ),
-                ("git_dir".into(), Value::Path(info.git_dir)),
+                (
+                    "git_dir".into(),
+                    Value::Host(AtmanPayload::Path(info.git_dir)),
+                ),
                 ("bare".into(), Value::Bool(info.bare)),
             ]))
         })

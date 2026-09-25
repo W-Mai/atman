@@ -7,6 +7,7 @@ pub mod ast;
 pub mod engine;
 pub mod env;
 pub mod pattern;
+pub mod value;
 
 pub use ast::File as Program;
 pub use engine::{
@@ -14,3 +15,4 @@ pub use engine::{
 };
 pub use env::Env;
 pub use pattern::{PatternBindError, PatternValue, bind_pattern};
+pub use value::{HostPayload, Value};

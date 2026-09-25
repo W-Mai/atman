@@ -1,7 +1,7 @@
+use atman_runtime::AtmanValue as Value;
 use atman_runtime::message::MessagePart;
 use atman_runtime::provider::{LlmRequest, Provider};
 use atman_runtime::providers::openai::OpenAiProvider;
-use atman_runtime::value::Value;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 

@@ -1,3 +1,4 @@
+use crate::value::AtmanPayload;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -569,7 +570,7 @@ pub(crate) fn git_mutation_provenance(
 
 fn cwd_path_arg(args: &ToolArgs) -> Result<Option<PathBuf>, RuntimeError> {
     match args.named("cwd") {
-        Some(Value::Path(p)) => Ok(Some(p.clone())),
+        Some(Value::Host(AtmanPayload::Path(p))) => Ok(Some(p.clone())),
         Some(Value::Str(s)) => Ok(Some(PathBuf::from(s))),
         Some(Value::Unit) | None => Ok(None),
         Some(other) => Err(RuntimeError::TypeMismatch {
@@ -581,7 +582,7 @@ fn cwd_path_arg(args: &ToolArgs) -> Result<Option<PathBuf>, RuntimeError> {
 
 fn extract_cwd(args: &ToolArgs, ctx: &ToolCtx, label: &str) -> Result<PathBuf, RuntimeError> {
     let explicit = match args.named("cwd") {
-        Some(Value::Path(p)) => Some(p.as_path()),
+        Some(Value::Host(AtmanPayload::Path(p))) => Some(p.as_path()),
         Some(Value::Str(s)) => Some(std::path::Path::new(s)),
         Some(other) => {
             return Err(RuntimeError::TypeMismatch {

@@ -1,3 +1,5 @@
+use crate::value::AtmanPayload;
+use crate::value::ValueJson;
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
@@ -716,11 +718,11 @@ pub fn assistant_message_to_value(am: &AssistantMessage) -> Value {
         .iter()
         .any(|p| !matches!(p, MessagePart::Text { .. }));
     if has_structural_part {
-        return Value::Message(am.message.clone());
+        return Value::Host(AtmanPayload::Message(am.message.clone()));
     }
     let text = am.text_concat();
     if text.is_empty() {
-        return Value::Message(am.message.clone());
+        return Value::Host(AtmanPayload::Message(am.message.clone()));
     }
     match serde_json::from_str::<serde_json::Value>(&text) {
         Ok(json) => Value::from_json(json),

@@ -1,3 +1,4 @@
+use crate::value::AtmanPayload;
 use std::path::PathBuf;
 
 use crate::error::RuntimeError;
@@ -25,7 +26,7 @@ fn text(args: &ToolArgs, name: &str, required: bool) -> Result<Option<String>, R
 
 fn path(args: &ToolArgs) -> Result<PathBuf, RuntimeError> {
     match args.named("path").or_else(|| args.positional.first()) {
-        Some(Value::Path(path)) => Ok(path.clone()),
+        Some(Value::Host(AtmanPayload::Path(path))) => Ok(path.clone()),
         Some(Value::Str(path)) => Ok(PathBuf::from(path)),
         Some(value) => Err(RuntimeError::TypeMismatch {
             expected: "path or string".into(),
@@ -257,7 +258,10 @@ mod tests {
                 ToolArgs {
                     positional: vec![],
                     named: vec![
-                        ("path".into(), Value::Path(fixture.clone())),
+                        (
+                            "path".into(),
+                            Value::Host(AtmanPayload::Path(fixture.clone())),
+                        ),
                         ("expected_file_hash".into(), Value::Str("unused".into())),
                         ("content".into(), Value::Str("changed".into())),
                     ],

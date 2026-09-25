@@ -1,3 +1,4 @@
+use atman_runtime::AtmanPayload;
 mod common;
 
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use atman_dsl::parse::parse_file;
 use atman_runtime::event::Event;
 use atman_runtime::injection::InjectionLevel;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::{Executor, Session, Value};
+use atman_runtime::{AtmanValue as Value, Executor, Session};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn l2_injection_mid_stream_triggers_restart_with_correction() {
@@ -77,7 +78,7 @@ flow t(user: string) -> string {
     session.end_turn();
 
     match result {
-        Value::Message(_) | Value::Err(_) => {}
+        Value::Host(AtmanPayload::Message(_)) | Value::Err(_) => {}
         other => panic!("expected message or err, got {other:?}"),
     }
 

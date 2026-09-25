@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use atman_dsl::parse::parse_file;
+use atman_runtime::AtmanValue as Value;
 use atman_runtime::Executor;
 use atman_runtime::error::RuntimeError;
 use atman_runtime::event::{NodeEvent, Observable};
@@ -12,7 +13,6 @@ use atman_runtime::provider::{
     AssistantMessage, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason, TokenUsage,
 };
 use atman_runtime::tool::BoxFut;
-use atman_runtime::value::Value;
 
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;

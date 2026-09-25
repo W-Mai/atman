@@ -4713,7 +4713,7 @@ mod tests {
             ("@./image.png inspect", crate::InvocationEnv::default()),
             (
                 "think harder",
-                crate::InvocationEnv::single("effort", crate::Value::Str("high".into())),
+                crate::InvocationEnv::single("effort", crate::value::Value::Str("high".into())),
             ),
         ] {
             session
@@ -4799,7 +4799,7 @@ mod tests {
             .enqueue_submission(
                 "check the result",
                 Vec::new(),
-                crate::InvocationEnv::single("effort", crate::Value::Str("medium".into())),
+                crate::InvocationEnv::single("effort", crate::value::Value::Str("medium".into())),
                 crate::message::MessageOrigin::User,
             )
             .unwrap();
@@ -4832,7 +4832,7 @@ mod tests {
         let restored_submission = session.pop_queued_submission().unwrap();
         assert!(matches!(
             restored_submission.invocation_env.get("effort"),
-            Some(crate::Value::Str(value)) if value == "medium"
+            Some(crate::value::Value::Str(value)) if value == "medium"
         ));
         assert!(restored[0].revision > selected.revision);
         assert!(session.list_pending_injections().is_empty());

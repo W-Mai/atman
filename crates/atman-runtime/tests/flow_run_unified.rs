@@ -16,7 +16,7 @@ use atman_runtime::flow_authority::{
 use atman_runtime::session::Session;
 use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
 use atman_runtime::tools::agent_ctrl::{FlowInterject, FlowRegistry};
-use atman_runtime::{Executor, Value, tools};
+use atman_runtime::{AtmanValue as Value, Executor, tools};
 
 static HOME_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -407,7 +407,7 @@ flow test_flow(goal: string) -> string {
     let providers = atman_runtime::provider::ProviderRegistry::new();
     providers.register(Arc::new(
         MockProvider::new("mock")
-            .with_fallback(atman_runtime::Value::Str("ok".into()))
+            .with_fallback(atman_runtime::AtmanValue::Str("ok".into()))
             .with_chunk_delay(std::time::Duration::from_secs(1)),
     ));
     let tools = ToolRegistry::new();
@@ -495,7 +495,7 @@ async fn l1_nudge_text_appears_in_entry_messages() {
             "mock", "mock", 100_000, None,
         )]))
         .await;
-    use atman_runtime::Value;
+    use atman_runtime::AtmanValue as Value;
     use atman_runtime::providers::mock::MockProvider;
     use atman_runtime::tool::{Tool, ToolRegistry};
     use atman_runtime::tools::agent_ctrl::{AgentSpawn, FlowRegistry};

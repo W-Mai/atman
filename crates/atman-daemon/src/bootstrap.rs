@@ -2,10 +2,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use atman_rt::Value as CoreValue;
 use atman_runtime::event::EventSink;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::sandbox::Sandbox;
-use atman_runtime::{Executor, Value, tools};
+use atman_runtime::{Executor, tools};
+
+type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 pub use atman_runtime::config_hub::{RedactConfig, SandboxConfig};
 
@@ -240,7 +243,7 @@ pub fn spawn_mcp_boot(
                                             model: model.clone(),
                                             messages,
                                             system: req.system_prompt,
-                                            input: atman_runtime::Value::Unit,
+                                            input: Value::Unit,
                                             schema: None,
                                             cache_prompt: false,
                                             prompt_cache_key: None,

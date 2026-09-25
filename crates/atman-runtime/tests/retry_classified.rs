@@ -1,3 +1,4 @@
+use atman_runtime::AtmanPayload;
 mod common;
 
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use atman_runtime::message::Message;
 use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, StopReason, TokenUsage};
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::tool::BoxFut;
-use atman_runtime::{Executor, Session, Value};
+use atman_runtime::{AtmanValue as Value, Executor, Session};
 
 struct ScriptedProvider {
     name: String,
@@ -396,7 +397,7 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
 
     match result.unwrap() {
         Value::Str(s) => assert!(s.contains("recovered"), "got {s}"),
-        Value::Message(message) => {
+        Value::Host(AtmanPayload::Message(message)) => {
             assert!(message.text_concat().contains("recovered"));
             assert_eq!(message.turn_id, turn_id);
         }

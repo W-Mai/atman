@@ -2,6 +2,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
+use atman_runtime::AtmanValue as Value;
 use atman_runtime::event::FlowRunId;
 use atman_runtime::flow_authority::EffectiveAuthority;
 use atman_runtime::flow_workspace::FlowWorkspaceService;
@@ -10,7 +11,6 @@ use atman_runtime::provider::ProviderRegistry;
 use atman_runtime::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolRegistry, ToolResult};
 use atman_runtime::tools::agent_ctrl::{AgentSpawn, FlowRegistry};
 use atman_runtime::tools::git_workspace::GitWorkspacePrune;
-use atman_runtime::value::Value;
 
 struct Noop;
 

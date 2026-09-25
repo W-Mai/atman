@@ -1,7 +1,12 @@
+#[cfg(test)]
+use atman_rt::Value as CoreValue;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
+
+#[cfg(test)]
+type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueAction {
@@ -308,10 +313,7 @@ mod tests {
             .enqueue_submission(
                 "@./image.png inspect",
                 Vec::new(),
-                atman_runtime::InvocationEnv::single(
-                    "effort",
-                    atman_runtime::Value::Str("medium".into()),
-                ),
+                atman_runtime::InvocationEnv::single("effort", Value::Str("medium".into())),
                 atman_runtime::message::MessageOrigin::User,
             )
             .unwrap();

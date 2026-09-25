@@ -1,75 +1,36 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::error::RuntimeError;
 use crate::hunk::EditProposal;
 use crate::message::Message;
-use atman_rt::ast::{Expr, Ident};
 
 #[derive(Debug, Clone)]
-pub enum Value {
-    Unit,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Str(String),
+pub enum AtmanPayload {
     Path(PathBuf),
-    List(Vec<Value>),
-    Struct(Vec<(String, Value)>),
     Message(Message),
     EditProposal(Box<EditProposal>),
-    Err(RuntimeError),
-    Lambda {
-        params: Vec<Ident>,
-        body: Arc<Expr>,
-        captured_env: atman_rt::Env<Value>,
-    },
 }
 
-impl atman_rt::PatternValue for Value {
-    fn struct_fields(&self) -> Option<&[(String, Self)]> {
+impl atman_rt::HostPayload for AtmanPayload {
+    fn kind_name(&self) -> &'static str {
         match self {
-            Self::Struct(fields) => Some(fields),
-            _ => None,
+            Self::Path(_) => "path",
+            Self::Message(_) => "message",
+            Self::EditProposal(_) => "edit_proposal",
         }
-    }
-
-    fn kind_name(&self) -> &str {
-        Value::kind_name(self)
     }
 }
 
-impl Value {
-    pub fn is_err(&self) -> bool {
-        matches!(self, Value::Err(_))
-    }
+pub type AtmanValue = atman_rt::Value<AtmanPayload, RuntimeError>;
+pub(crate) use AtmanValue as Value;
 
-    pub fn kind_name(&self) -> &'static str {
-        match self {
-            Value::Unit => "unit",
-            Value::Bool(_) => "bool",
-            Value::Int(_) => "int",
-            Value::Float(_) => "float",
-            Value::Str(_) => "string",
-            Value::Path(_) => "path",
-            Value::List(_) => "list",
-            Value::Struct(_) => "struct",
-            Value::Message(_) => "message",
-            Value::EditProposal(_) => "edit_proposal",
-            Value::Err(_) => "err",
-            Value::Lambda { .. } => "lambda",
-        }
-    }
+pub trait ValueJson {
+    fn to_json(&self) -> serde_json::Value;
+    fn from_json(value: serde_json::Value) -> Self;
+}
 
-    pub fn field(&self, name: &str) -> Option<&Value> {
-        if let Value::Struct(fields) = self {
-            fields.iter().find(|(k, _)| k == name).map(|(_, v)| v)
-        } else {
-            None
-        }
-    }
-
-    pub fn to_json(&self) -> serde_json::Value {
+impl ValueJson for AtmanValue {
+    fn to_json(&self) -> serde_json::Value {
         match self {
             Value::Unit => serde_json::Value::Null,
             Value::Bool(b) => serde_json::Value::Bool(*b),
@@ -78,7 +39,9 @@ impl Value {
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
             Value::Str(s) => serde_json::Value::String(s.clone()),
-            Value::Path(p) => serde_json::Value::String(p.display().to_string()),
+            Value::Host(AtmanPayload::Path(p)) => {
+                serde_json::Value::String(p.display().to_string())
+            }
             Value::List(items) => {
                 serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
             }
@@ -89,14 +52,18 @@ impl Value {
                 }
                 serde_json::Value::Object(m)
             }
-            Value::Message(msg) => serde_json::to_value(msg).unwrap_or(serde_json::Value::Null),
-            Value::EditProposal(p) => serde_json::to_value(p).unwrap_or(serde_json::Value::Null),
+            Value::Host(AtmanPayload::Message(msg)) => {
+                serde_json::to_value(msg).unwrap_or(serde_json::Value::Null)
+            }
+            Value::Host(AtmanPayload::EditProposal(p)) => {
+                serde_json::to_value(p).unwrap_or(serde_json::Value::Null)
+            }
             Value::Err(e) => serde_json::json!({ "error": e.to_string() }),
             Value::Lambda { .. } => serde_json::Value::Null,
         }
     }
 
-    pub fn from_json(v: serde_json::Value) -> Self {
+    fn from_json(v: serde_json::Value) -> Self {
         match v {
             serde_json::Value::Null => Value::Unit,
             serde_json::Value::Bool(b) => Value::Bool(b),
@@ -133,7 +100,10 @@ mod tests {
         assert_eq!(Value::Int(1).kind_name(), "int");
         assert_eq!(Value::Float(1.0).kind_name(), "float");
         assert_eq!(Value::Str("x".into()).kind_name(), "string");
-        assert_eq!(Value::Path(PathBuf::from("/tmp")).kind_name(), "path");
+        assert_eq!(
+            Value::Host(AtmanPayload::Path(PathBuf::from("/tmp"))).kind_name(),
+            "path"
+        );
         assert_eq!(Value::List(vec![]).kind_name(), "list");
         assert_eq!(Value::Struct(vec![]).kind_name(), "struct");
         assert_eq!(
@@ -182,5 +152,15 @@ mod tests {
         }
         .to_string();
         assert_eq!(msg, "type mismatch: expected int, got string");
+    }
+
+    #[test]
+    fn host_values_keep_the_existing_json_shape() {
+        let path = Value::Host(AtmanPayload::Path(PathBuf::from("src/main.rs")));
+        assert_eq!(path.to_json(), serde_json::json!("src/main.rs"));
+
+        let message = Message::assistant_text(crate::event::TurnId::now(), "hello");
+        let value = Value::Host(AtmanPayload::Message(message.clone()));
+        assert_eq!(value.to_json(), serde_json::to_value(message).unwrap());
     }
 }

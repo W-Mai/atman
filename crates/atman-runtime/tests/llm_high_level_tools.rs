@@ -2,8 +2,8 @@ use atman_dsl::parse::parse_file;
 use atman_runtime::{ContextCallPurpose, Event, Executor};
 mod common;
 
+use atman_runtime::AtmanValue as Value;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::value::Value;
 use std::sync::Arc;
 
 fn run(src: &str, provider: MockProvider) -> Value {

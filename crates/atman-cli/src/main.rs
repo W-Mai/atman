@@ -1,9 +1,13 @@
 use anyhow::{Context, Result, bail};
 use atman_dsl::parse::parse_file;
-use atman_runtime::{Executor, Session, Value};
+use atman_rt::Value as CoreValue;
+use atman_runtime::{Executor, Session, ValueJson};
+
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+
+type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 mod init;
 mod mcp_templates;
@@ -7790,7 +7794,7 @@ async fn cmd_flow_test(path: &Path, bless: bool) -> Result<()> {
     atman_runtime::tools::register_tier_zero(&ex.tools);
     ex.providers.register(std::sync::Arc::new(
         atman_runtime::providers::mock::MockProvider::new("mock")
-            .with_fallback(atman_runtime::Value::Str("[mock reply]".into())),
+            .with_fallback(Value::Str("[mock reply]".into())),
     ));
 
     let mut recorded: std::collections::BTreeMap<String, serde_json::Value> =

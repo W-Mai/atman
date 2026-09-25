@@ -1,3 +1,4 @@
+use crate::value::AtmanPayload;
 pub(crate) mod llm_args;
 mod llm_context;
 pub(crate) mod llm_dispatch;
@@ -1070,7 +1071,7 @@ fn tool_arg_string(args: &ToolArgs, name: &str, pos: usize) -> Option<String> {
 fn tool_arg_path(args: &ToolArgs, name: &str, pos: usize) -> Option<std::path::PathBuf> {
     let value = args.named(name).or_else(|| args.positional.get(pos))?;
     match value {
-        Value::Path(p) => Some(p.clone()),
+        Value::Host(AtmanPayload::Path(p)) => Some(p.clone()),
         Value::Str(s) => Some(std::path::PathBuf::from(s)),
         _ => None,
     }
@@ -1275,10 +1276,10 @@ fn preview_tool_value(v: &Value) -> String {
                 format!("struct[{}]", f.len())
             }
         }
-        Value::Message(_) => "<message>".into(),
+        Value::Host(AtmanPayload::Message(_)) => "<message>".into(),
         Value::Err(e) => format!("err({e})"),
-        Value::Path(p) => format!("{p:?}"),
-        Value::EditProposal(_) => "<edit_proposal>".into(),
+        Value::Host(AtmanPayload::Path(p)) => format!("{p:?}"),
+        Value::Host(AtmanPayload::EditProposal(_)) => "<edit_proposal>".into(),
         Value::Lambda { .. } => "<lambda>".into(),
     };
     truncate(&raw, 2000)
@@ -1661,7 +1662,7 @@ async fn eval_fix_until_test_passes<'a>(
                 }
             },
             "target" => match eval_expr(v, env, ctx).await {
-                Value::Path(p) => target_path = Some(p),
+                Value::Host(AtmanPayload::Path(p)) => target_path = Some(p),
                 Value::Str(s) => target_path = Some(std::path::PathBuf::from(s)),
                 Value::Unit => {}
                 other => {
@@ -1879,7 +1880,7 @@ async fn eval_message_node<'a>(
             }
             None => false,
         };
-        return Value::Message(Message {
+        return Value::Host(AtmanPayload::Message(Message {
             role,
             parts: vec![MessagePart::ToolResult {
                 tool_use_id,
@@ -1888,7 +1889,7 @@ async fn eval_message_node<'a>(
             }],
             turn_id,
             origin: MessageOrigin::User,
-        });
+        }));
     }
 
     let text = match positional.first() {
@@ -1909,7 +1910,7 @@ async fn eval_message_node<'a>(
                 let mut ps = Vec::with_capacity(items.len());
                 for it in items {
                     match it {
-                        Value::Path(p) => ps.push(p),
+                        Value::Host(AtmanPayload::Path(p)) => ps.push(p),
                         Value::Str(s) => ps.push(std::path::PathBuf::from(s)),
                         other => {
                             return Value::Err(RuntimeError::TypeMismatch {
@@ -1953,12 +1954,12 @@ async fn eval_message_node<'a>(
         parts.push(MessagePart::Text { text: t });
     }
 
-    Value::Message(Message {
+    Value::Host(AtmanPayload::Message(Message {
         role,
         parts,
         turn_id,
         origin: MessageOrigin::User,
-    })
+    }))
 }
 
 pub(super) fn render_injections(injections: &[crate::injection::Injection]) -> String {
@@ -2118,8 +2119,12 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Value {
             (Value::Int(a), Value::Int(b)) => Value::Int(a + b),
             (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
             (Value::Str(a), Value::Str(b)) => Value::Str(format!("{a}{b}")),
-            (Value::Str(a), Value::Path(b)) => Value::Str(format!("{a}{}", b.display())),
-            (Value::Path(a), Value::Str(b)) => Value::Str(format!("{}{b}", a.display())),
+            (Value::Str(a), Value::Host(AtmanPayload::Path(b))) => {
+                Value::Str(format!("{a}{}", b.display()))
+            }
+            (Value::Host(AtmanPayload::Path(a)), Value::Str(b)) => {
+                Value::Str(format!("{}{b}", a.display()))
+            }
             _ => type_mismatch(
                 "int+int | float+float | string+string | string+path | path+string",
                 l,
@@ -2182,7 +2187,7 @@ fn value_eq(l: &Value, r: &Value) -> bool {
         (Value::Int(a), Value::Int(b)) => a == b,
         (Value::Float(a), Value::Float(b)) => a == b,
         (Value::Str(a), Value::Str(b)) => a == b,
-        (Value::Path(a), Value::Path(b)) => a == b,
+        (Value::Host(AtmanPayload::Path(a)), Value::Host(AtmanPayload::Path(b))) => a == b,
         _ => false,
     }
 }
@@ -2536,8 +2541,8 @@ mod tests {
         };
 
         let mut env = Env::new();
-        env.bind("a", Value::Path(pa));
-        env.bind("b", Value::Path(pb));
+        env.bind("a", Value::Host(AtmanPayload::Path(pa)));
+        env.bind("b", Value::Host(AtmanPayload::Path(pb)));
 
         let src = r#"flow t() { return fanout [ fs.read(a), fs.read(b) ] collect: all }"#;
         let file = parse_file(src).unwrap();
@@ -2891,7 +2896,7 @@ flow parent() -> Int {
         };
 
         let mut env = Env::new();
-        env.bind("p", Value::Path(path));
+        env.bind("p", Value::Host(AtmanPayload::Path(path)));
 
         let src = r#"flow t() { return fs.read(p) }"#;
         let file = parse_file(src).unwrap();
