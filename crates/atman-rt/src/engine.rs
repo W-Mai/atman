@@ -14,6 +14,52 @@ pub enum StatementOutcome<V, E> {
     LoopContinue,
 }
 
+pub enum LoopExit<V, E> {
+    Break,
+    Interrupted(StatementOutcome<V, E>),
+}
+
+/// Supplies an iteration body and its product-specific node events.
+pub trait LoopHost: Send {
+    type Value: Send;
+    type Error: Send;
+
+    fn iteration_start(&mut self, iteration: u64, node_id: &str, parent_node_id: Option<&str>);
+    fn execute_iteration<'a>(
+        &'a mut self,
+        node_id: &'a str,
+    ) -> HostFuture<'a, StatementOutcome<Self::Value, Self::Error>>;
+    fn iteration_end(
+        &mut self,
+        node_id: &str,
+        outcome: &StatementOutcome<Self::Value, Self::Error>,
+        parent_node_id: Option<&str>,
+    );
+}
+
+/// Runs loop iterations and consumes only break and continue outcomes.
+pub async fn run_loop<H: LoopHost>(
+    host: &mut H,
+    parent_node_id: Option<&str>,
+) -> LoopExit<H::Value, H::Error> {
+    let mut iteration = 0u64;
+    loop {
+        let node_id = match parent_node_id {
+            Some(parent) => format!("{parent}.iter[{iteration}]"),
+            None => format!("iter[{iteration}]"),
+        };
+        host.iteration_start(iteration, &node_id, parent_node_id);
+        let outcome = host.execute_iteration(&node_id).await;
+        host.iteration_end(&node_id, &outcome, parent_node_id);
+        match outcome {
+            StatementOutcome::Continue | StatementOutcome::LoopContinue => {}
+            StatementOutcome::LoopBreak => return LoopExit::Break,
+            other => return LoopExit::Interrupted(other),
+        }
+        iteration += 1;
+    }
+}
+
 pub enum Preflight<E> {
     Continue,
     Stop(E),
@@ -205,5 +251,105 @@ mod tests {
         };
         assert!(matches!(result, StatementOutcome::Err("cancelled")));
         assert_eq!(events, vec!["start:0", "end:0:hard stop"]);
+    }
+
+    struct TestLoopHost<'a> {
+        events: &'a mut Vec<String>,
+        iteration: usize,
+        return_after_continue: bool,
+    }
+
+    impl LoopHost for TestLoopHost<'_> {
+        type Value = i32;
+        type Error = &'static str;
+
+        fn iteration_start(&mut self, iteration: u64, node_id: &str, parent: Option<&str>) {
+            self.events.push(alloc::format!(
+                "start:{iteration}:{node_id}:{}",
+                parent.unwrap_or("")
+            ));
+        }
+
+        fn execute_iteration<'b>(
+            &'b mut self,
+            node_id: &'b str,
+        ) -> HostFuture<'b, StatementOutcome<i32, &'static str>> {
+            Box::pin(async move {
+                self.events.push(alloc::format!("execute:{node_id}"));
+                let outcome = match self.iteration {
+                    0 => StatementOutcome::Continue,
+                    1 if self.return_after_continue => StatementOutcome::Return(7),
+                    1 => StatementOutcome::LoopContinue,
+                    _ => StatementOutcome::LoopBreak,
+                };
+                self.iteration += 1;
+                outcome
+            })
+        }
+
+        fn iteration_end(
+            &mut self,
+            node_id: &str,
+            _outcome: &StatementOutcome<i32, &'static str>,
+            _parent: Option<&str>,
+        ) {
+            self.events.push(alloc::format!("end:{node_id}"));
+        }
+    }
+
+    #[test]
+    fn loop_consumes_continue_and_break_after_ending_each_iteration() {
+        let mut events = Vec::new();
+        let result = run_ready(run_loop(
+            &mut TestLoopHost {
+                events: &mut events,
+                iteration: 0,
+                return_after_continue: false,
+            },
+            Some("loop.0"),
+        ));
+        assert!(matches!(result, LoopExit::Break));
+        assert_eq!(
+            events,
+            vec![
+                "start:0:loop.0.iter[0]:loop.0",
+                "execute:loop.0.iter[0]",
+                "end:loop.0.iter[0]",
+                "start:1:loop.0.iter[1]:loop.0",
+                "execute:loop.0.iter[1]",
+                "end:loop.0.iter[1]",
+                "start:2:loop.0.iter[2]:loop.0",
+                "execute:loop.0.iter[2]",
+                "end:loop.0.iter[2]",
+            ]
+        );
+    }
+
+    #[test]
+    fn loop_preserves_return_after_ending_its_iteration() {
+        let mut events = Vec::new();
+        let result = run_ready(run_loop(
+            &mut TestLoopHost {
+                events: &mut events,
+                iteration: 0,
+                return_after_continue: true,
+            },
+            None,
+        ));
+        assert!(matches!(
+            result,
+            LoopExit::Interrupted(StatementOutcome::Return(7))
+        ));
+        assert_eq!(
+            events,
+            vec![
+                "start:0:iter[0]:",
+                "execute:iter[0]",
+                "end:iter[0]",
+                "start:1:iter[1]:",
+                "execute:iter[1]",
+                "end:iter[1]",
+            ]
+        );
     }
 }

@@ -3,8 +3,8 @@ use std::{collections::HashMap, path::PathBuf};
 
 use atman_rt::ast::{Arg, CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
 use atman_rt::{
-    Engine, HostFuture, PatternBindError, Preflight, StatementExecution, StatementHost,
-    bind_pattern,
+    Engine, HostFuture, LoopExit, LoopHost, PatternBindError, Preflight, StatementExecution,
+    StatementHost, bind_pattern, run_loop,
 };
 
 use crate::error::RuntimeError;
@@ -45,6 +45,48 @@ struct AtmanStatementHost<'a> {
     env: &'a mut Env,
     ctx: &'a EvalCtx<'a>,
     watches: HashMap<String, Vec<&'a WatchDecl>>,
+}
+
+struct AtmanLoopHost<'a> {
+    body: &'a [Stmt],
+    env: &'a mut Env,
+    ctx: &'a EvalCtx<'a>,
+}
+
+impl LoopHost for AtmanLoopHost<'_> {
+    type Value = Value;
+    type Error = RuntimeError;
+
+    fn iteration_start(&mut self, iteration: u64, node_id: &str, parent_node_id: Option<&str>) {
+        emit_flow_node_start_raw(
+            self.ctx,
+            node_id,
+            crate::nodegraph::NodeKind::Return,
+            &format!("iteration {iteration}"),
+            parent_node_id,
+        );
+    }
+
+    fn execute_iteration<'a>(&'a mut self, node_id: &'a str) -> HostFuture<'a, StmtOutcome> {
+        Box::pin(async move {
+            let iter_ctx = self.ctx.with_node(node_id);
+            exec_stmts_prefixed(self.body, self.env, &iter_ctx, node_id.to_string()).await
+        })
+    }
+
+    fn iteration_end(
+        &mut self,
+        node_id: &str,
+        outcome: &StmtOutcome,
+        parent_node_id: Option<&str>,
+    ) {
+        let preview = match outcome {
+            StmtOutcome::LoopBreak => Some("break"),
+            StmtOutcome::LoopContinue => Some("continue"),
+            _ => None,
+        };
+        emit_flow_node_end(self.ctx, node_id, outcome, parent_node_id, preview);
+    }
 }
 
 impl StatementHost for AtmanStatementHost<'_> {
@@ -369,36 +411,11 @@ fn exec_stmt<'a>(
             Stmt::Watch(_) => (StmtOutcome::Continue, None),
             Stmt::Loop { body } => {
                 let loop_node_id = ctx.current_node_id.clone();
-                let mut iter = 0u64;
-                loop {
-                    let iter_id = match &loop_node_id {
-                        Some(p) => format!("{p}.iter[{iter}]"),
-                        None => format!("iter[{iter}]"),
-                    };
-                    emit_flow_node_start_raw(
-                        ctx,
-                        &iter_id,
-                        crate::nodegraph::NodeKind::Return,
-                        &format!("iteration {iter}"),
-                        loop_node_id.as_deref(),
-                    );
-                    let iter_ctx = ctx.with_node(&iter_id);
-                    let outcome = exec_stmts_prefixed(body, env, &iter_ctx, iter_id.clone()).await;
-                    let preview = match &outcome {
-                        StmtOutcome::LoopBreak => Some("break"),
-                        StmtOutcome::LoopContinue => Some("continue"),
-                        _ => None,
-                    };
-                    emit_flow_node_end(ctx, &iter_id, &outcome, loop_node_id.as_deref(), preview);
-                    match outcome {
-                        StmtOutcome::Continue => {}
-                        StmtOutcome::LoopContinue => {}
-                        StmtOutcome::LoopBreak => break,
-                        other => return (other, Some("loop interrupted".into())),
-                    }
-                    iter += 1;
+                let mut host = AtmanLoopHost { body, env, ctx };
+                match run_loop(&mut host, loop_node_id.as_deref()).await {
+                    LoopExit::Break => (StmtOutcome::Continue, Some("loop end".into())),
+                    LoopExit::Interrupted(outcome) => (outcome, Some("loop interrupted".into())),
                 }
-                (StmtOutcome::Continue, Some("loop end".into()))
             }
             Stmt::Break => (StmtOutcome::LoopBreak, Some("break".into())),
             Stmt::Continue => (StmtOutcome::LoopContinue, Some("continue".into())),
@@ -812,5 +829,46 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(out, Value::Unit));
+    }
+
+    #[tokio::test]
+    async fn loop_continues_then_breaks_without_skipping_following_statement() {
+        let out = run(
+            r#"flow t() -> Int {
+    n = 0
+    loop {
+        n = n + 1
+        when n == 2 {
+            continue
+        }
+        when n == 4 {
+            break
+        }
+    }
+    return n
+}
+"#,
+            vec![],
+        )
+        .await
+        .unwrap();
+        assert!(matches!(out, Value::Int(4)));
+    }
+
+    #[tokio::test]
+    async fn return_inside_loop_exits_flow() {
+        let out = run(
+            r#"flow t() -> Int {
+    loop {
+        return 7
+    }
+    return 0
+}
+"#,
+            vec![],
+        )
+        .await
+        .unwrap();
+        assert!(matches!(out, Value::Int(7)));
     }
 }
