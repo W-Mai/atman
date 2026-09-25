@@ -2,16 +2,18 @@ use alloc::{
     boxed::Box,
     format,
     string::{String, ToString},
+    vec::Vec,
 };
 use core::{future::Future, pin::Pin};
 
 use crate::{
     Value,
-    ast::{Expr, Pattern, Stmt},
+    ast::{Expr, FlowDecl, Pattern, Stmt},
 };
 
 pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type StatementExecution<V, E> = (StatementOutcome<V, E>, Option<String>);
+pub type FlowArgs<P, E> = Vec<(String, Value<P, E>)>;
 pub type FlowOutcome<P, E> = StatementOutcome<Value<P, E>, E>;
 pub type FlowExecution<P, E> = StatementExecution<Value<P, E>, E>;
 
@@ -97,6 +99,11 @@ pub trait StatementHost: Send {
     type Error: Send;
 
     fn preflight(&mut self, stmt: &Stmt, node_id: &str) -> Preflight<Self::Error>;
+    fn bind_parameter(&mut self, name: String, value: Value<Self::Payload, Self::Error>);
+    fn evaluate_default<'a>(
+        &'a mut self,
+        expr: &'a Expr,
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>>;
     fn node_start(&mut self, stmt: &Stmt, node_id: &str, parent_node_id: Option<&str>);
     fn evaluate<'a>(
         &'a mut self,
@@ -137,6 +144,26 @@ pub struct Engine<H> {
 impl<H: StatementHost> Engine<H> {
     pub fn new(host: H) -> Self {
         Self { host }
+    }
+
+    pub async fn run_flow(
+        &mut self,
+        flow: &FlowDecl,
+        args: FlowArgs<H::Payload, H::Error>,
+    ) -> FlowOutcome<H::Payload, H::Error> {
+        let provided: Vec<String> = args.iter().map(|(name, _)| name.clone()).collect();
+        for (name, value) in args {
+            self.host.bind_parameter(name, value);
+        }
+        for param in &flow.params {
+            if !provided.iter().any(|name| name == &param.name.name)
+                && let Some(default) = &param.default
+            {
+                let value = self.host.evaluate_default(default).await;
+                self.host.bind_parameter(param.name.name.clone(), value);
+            }
+        }
+        self.run_statements(&flow.body, "", None).await
     }
 
     pub async fn run_statements(
@@ -236,6 +263,17 @@ mod tests {
             } else {
                 Preflight::Continue
             }
+        }
+
+        fn bind_parameter(&mut self, _name: String, _value: Value<(), &'static str>) {
+            panic!("unexpected test parameter")
+        }
+
+        fn evaluate_default<'b>(
+            &'b mut self,
+            _expr: &'b Expr,
+        ) -> HostFuture<'b, Value<(), &'static str>> {
+            Box::pin(async { panic!("unexpected test default") })
         }
 
         fn node_start(&mut self, _stmt: &Stmt, node_id: &str, _parent_node_id: Option<&str>) {

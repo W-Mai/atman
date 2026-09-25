@@ -13,7 +13,7 @@ pub mod value;
 
 pub use ast::File as Program;
 pub use engine::{
-    Engine, FlowExecution, FlowOutcome, HostFuture, LoopExit, LoopHost, Preflight,
+    Engine, FlowArgs, FlowExecution, FlowOutcome, HostFuture, LoopExit, LoopHost, Preflight,
     StatementExecution, StatementHost, StatementOutcome, run_loop, run_when,
 };
 pub use env::Env;

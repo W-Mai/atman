@@ -123,6 +123,14 @@ impl StatementHost for AtmanStatementHost<'_> {
         }
     }
 
+    fn bind_parameter(&mut self, name: String, value: Value) {
+        self.env.bind(name, value);
+    }
+
+    fn evaluate_default<'a>(&'a mut self, expr: &'a Expr) -> HostFuture<'a, Value> {
+        Box::pin(async move { eval_expr(expr, self.env, self.ctx).await })
+    }
+
     fn node_start(&mut self, stmt: &Stmt, node_id: &str, parent_node_id: Option<&str>) {
         emit_flow_node_start(self.ctx, node_id, stmt, parent_node_id);
     }
@@ -646,19 +654,12 @@ pub async fn exec_flow_with_siblings(
         source_dir,
     };
     let mut env = Env::new();
-    let provided: std::collections::HashSet<String> = args.iter().map(|(n, _)| n.clone()).collect();
-    for (name, value) in args {
-        env.bind(name, value);
-    }
-    for p in &flow.params {
-        if !provided.contains(&p.name.name) {
-            if let Some(default) = &p.default {
-                let val = crate::eval::eval_expr(default, &env, &ctx).await;
-                env.bind(p.name.name.clone(), val);
-            }
-        }
-    }
-    let raw_outcome = exec_stmts(&flow.body, &mut env, &ctx).await;
+    let host = AtmanStatementHost {
+        env: &mut env,
+        ctx: &ctx,
+        watches: collect_watches(&flow.body),
+    };
+    let raw_outcome = Engine::new(host).run_flow(flow, args).await;
     match raw_outcome {
         StmtOutcome::Return(v) => Ok(v),
         StmtOutcome::Err(e) => Err(e),
@@ -760,6 +761,27 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(out, Value::Int(5)));
+    }
+
+    #[tokio::test]
+    async fn flow_defaults_follow_parameter_order_and_explicit_args_win() {
+        let source = r#"flow t(a: int = 7, b: int = a + 2) -> int {
+    return b
+}
+"#;
+        assert!(matches!(run(source, vec![]).await.unwrap(), Value::Int(9)));
+        assert!(matches!(
+            run(source, vec![("a".into(), Value::Int(3))])
+                .await
+                .unwrap(),
+            Value::Int(5)
+        ));
+        assert!(matches!(
+            run(source, vec![("b".into(), Value::Int(20))])
+                .await
+                .unwrap(),
+            Value::Int(20)
+        ));
     }
 
     #[tokio::test]

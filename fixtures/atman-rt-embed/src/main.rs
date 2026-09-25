@@ -12,7 +12,7 @@ use atman_rt::{
     Engine, Env, EvalError, ExpressionEffect, ExpressionHost, FlowExecution, FlowOutcome,
     HostFuture, LoopExit, LoopHost, PatternBindError, Preflight, StatementHost, StatementOutcome,
     Value,
-    ast::{BinOp, Expr, Ident, Literal, Node, Pattern, Span, Stmt},
+    ast::{BinOp, Expr, FlowDecl, Ident, Literal, Node, ParamDecl, Pattern, Span, Stmt, TypeExpr},
     bind_pattern, eval_expr, run_loop,
 };
 
@@ -80,6 +80,14 @@ impl StatementHost for FixtureHost {
 
     fn preflight(&mut self, _stmt: &Stmt, _node_id: &str) -> Preflight<EvalError> {
         Preflight::Continue
+    }
+
+    fn bind_parameter(&mut self, name: String, value: FixtureValue) {
+        self.env.lock().unwrap().bind(name, value);
+    }
+
+    fn evaluate_default<'a>(&'a mut self, expr: &'a Expr) -> HostFuture<'a, FixtureValue> {
+        self.evaluate(expr, "")
     }
 
     fn node_start(&mut self, _stmt: &Stmt, _node_id: &str, _parent: Option<&str>) {}
@@ -211,12 +219,16 @@ fn literal(value: i64) -> Expr {
 }
 
 fn main() {
-    let pure = [
-        Stmt::Bind {
-            name: Pattern::Ident(ident("x")),
-            value: literal(7),
-        },
-        Stmt::When {
+    let pure = FlowDecl {
+        name: ident("pure"),
+        params: vec![ParamDecl {
+            name: ident("x"),
+            ty: TypeExpr::Named(ident("Int")),
+            default: Some(literal(7)),
+        }],
+        ret: None,
+        contract: None,
+        body: vec![Stmt::When {
             cond: Expr::Literal(Literal::Bool(true)),
             body: vec![Stmt::Return {
                 value: Expr::Binary {
@@ -225,42 +237,54 @@ fn main() {
                     right: Box::new(literal(2)),
                 },
             }],
-        },
-    ];
+        }],
+    };
     let mut engine = Engine::new(FixtureHost::new());
     assert!(matches!(
-        block_on(engine.run_statements(&pure, "", None)),
+        block_on(engine.run_flow(&pure, vec![])),
         StatementOutcome::Return(Value::Int(9))
     ));
 
-    let effect = [Stmt::Return {
-        value: Expr::Binary {
-            op: BinOp::Add,
-            left: Box::new(literal(7)),
-            right: Box::new(Expr::Node(Node::ToolCall {
-                path: vec![ident("foreign")],
-                args: vec![],
-            })),
-        },
-    }];
+    let effect = FlowDecl {
+        name: ident("effect"),
+        params: vec![],
+        ret: None,
+        contract: None,
+        body: vec![Stmt::Return {
+            value: Expr::Binary {
+                op: BinOp::Add,
+                left: Box::new(Expr::Ident(ident("y"))),
+                right: Box::new(Expr::Node(Node::ToolCall {
+                    path: vec![ident("foreign")],
+                    args: vec![],
+                })),
+            },
+        }],
+    };
     let host = FixtureHost::new();
     let seen = Arc::clone(&host.effect_seen);
     let mut engine = Engine::new(host);
     assert!(matches!(
-        block_on(engine.run_statements(&effect, "", None)),
+        block_on(engine.run_flow(&effect, vec![("y".into(), Value::Int(7))])),
         StatementOutcome::Return(Value::Int(12))
     ));
     assert!(seen.load(Ordering::SeqCst));
 
-    let loop_flow = [
-        Stmt::Loop {
-            body: vec![Stmt::Break],
-        },
-        Stmt::Return { value: literal(1) },
-    ];
+    let loop_flow = FlowDecl {
+        name: ident("loop"),
+        params: vec![],
+        ret: None,
+        contract: None,
+        body: vec![
+            Stmt::Loop {
+                body: vec![Stmt::Break],
+            },
+            Stmt::Return { value: literal(1) },
+        ],
+    };
     let mut engine = Engine::new(FixtureHost::new());
     assert!(matches!(
-        block_on(engine.run_statements(&loop_flow, "", None)),
+        block_on(engine.run_flow(&loop_flow, vec![])),
         StatementOutcome::Return(Value::Int(1))
     ));
 }
