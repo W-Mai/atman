@@ -394,8 +394,11 @@ atman/
     atman-daemon/    # Daemon binary, Unix socket, HTTP+SSE, session pool
     atman-tui/       # Terminal UI — themes, workflow panel, diff preview, input
   examples/          # canonical .at flow examples
+  fixtures/atman-rt-embed/  # standalone runtime embedding check
   docs/              # Quickstart, context strategy, list combinators
 ```
+
+`cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml` executes pure, host-effect, and loop flows with `atman-rt` as its only dependency. It does not start the CLI or daemon.
 
 Language: Rust (edition 2024, MSRV 1.85). License: MIT OR Apache-2.0.
 

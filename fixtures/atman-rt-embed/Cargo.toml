@@ -1,0 +1,11 @@
+[package]
+name = "atman-rt-embed-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+atman-rt = { path = "../../crates/atman-rt" }
+
+[workspace]
+resolver = "3"
