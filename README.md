@@ -386,7 +386,7 @@ Drag across transcript text, including line-end space and short gaps between Mar
 ```
 atman/
   crates/
-    atman-rt/        # Portable AST, values, environments, and statement control
+    atman-rt/        # Portable AST, values, expression ops, and statement control
     atman-dsl/       # Parser + pretty-printer (.at files)
     atman-runtime/   # Atman executor, host payloads, tools, providers, memory, MCP
     atman-cli/       # Binary, REPL, slash commands, monitor, daemon client

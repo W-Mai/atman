@@ -4,7 +4,8 @@ mod llm_context;
 pub(crate) mod llm_dispatch;
 pub(crate) mod llm_parse;
 
-use atman_rt::ast::{Arg, BinOp, Expr, Literal, Node, UnOp};
+use atman_rt::ast::{Arg, Expr, Node};
+use atman_rt::{eval_binary, eval_literal, eval_unary};
 
 use std::sync::Arc;
 
@@ -213,14 +214,14 @@ async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>)
             if r.is_err() {
                 return r;
             }
-            eval_binop(*op, &l, &r)
+            eval_binary(*op, &l, &r)
         }
         Expr::Unary { op, operand } => {
             let v = eval_expr(operand, env, ctx).await;
             if v.is_err() {
                 return v;
             }
-            eval_unop(*op, &v)
+            eval_unary(*op, &v)
         }
         Expr::List(items) => {
             let mut acc = Vec::with_capacity(items.len());
@@ -2088,130 +2089,6 @@ fn is_type_annotation(path: &[atman_rt::ast::Ident]) -> bool {
         path[0].name.as_str(),
         "bool" | "int" | "float" | "string" | "path" | "bytes" | "duration"
     )
-}
-
-fn eval_literal(lit: &Literal) -> Value {
-    match lit {
-        Literal::Str(s) => Value::Str(s.clone()),
-        Literal::Int(n) => Value::Int(*n),
-        Literal::Float(f) => Value::Float(*f),
-        Literal::Bool(b) => Value::Bool(*b),
-    }
-}
-
-fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Value {
-    match op {
-        BinOp::Eq => Value::Bool(value_eq(l, r)),
-        BinOp::Ne => Value::Bool(!value_eq(l, r)),
-        BinOp::Lt => value_cmp(l, r, |a, b| a < b, |a, b| a < b, |a, b| a < b),
-        BinOp::Le => value_cmp(l, r, |a, b| a <= b, |a, b| a <= b, |a, b| a <= b),
-        BinOp::Gt => value_cmp(l, r, |a, b| a > b, |a, b| a > b, |a, b| a > b),
-        BinOp::Ge => value_cmp(l, r, |a, b| a >= b, |a, b| a >= b, |a, b| a >= b),
-        BinOp::And => match (l, r) {
-            (Value::Bool(a), Value::Bool(b)) => Value::Bool(*a && *b),
-            _ => type_mismatch("bool && bool", l, r),
-        },
-        BinOp::Or => match (l, r) {
-            (Value::Bool(a), Value::Bool(b)) => Value::Bool(*a || *b),
-            _ => type_mismatch("bool || bool", l, r),
-        },
-        BinOp::Add => match (l, r) {
-            (Value::Int(a), Value::Int(b)) => Value::Int(a + b),
-            (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
-            (Value::Str(a), Value::Str(b)) => Value::Str(format!("{a}{b}")),
-            (Value::Str(a), Value::Host(AtmanPayload::Path(b))) => {
-                Value::Str(format!("{a}{}", b.display()))
-            }
-            (Value::Host(AtmanPayload::Path(a)), Value::Str(b)) => {
-                Value::Str(format!("{}{b}", a.display()))
-            }
-            _ => type_mismatch(
-                "int+int | float+float | string+string | string+path | path+string",
-                l,
-                r,
-            ),
-        },
-        BinOp::Sub => match (l, r) {
-            (Value::Int(a), Value::Int(b)) => Value::Int(a - b),
-            (Value::Float(a), Value::Float(b)) => Value::Float(a - b),
-            _ => type_mismatch("int-int | float-float", l, r),
-        },
-        BinOp::Mul => match (l, r) {
-            (Value::Int(a), Value::Int(b)) => Value::Int(a * b),
-            (Value::Float(a), Value::Float(b)) => Value::Float(a * b),
-            _ => type_mismatch("int*int | float*float", l, r),
-        },
-        BinOp::Div => match (l, r) {
-            (Value::Int(_), Value::Int(0)) => {
-                Value::Err(RuntimeError::ToolFailed("integer div by zero".into()))
-            }
-            (Value::Int(a), Value::Int(b)) => Value::Int(a / b),
-            (Value::Float(a), Value::Float(b)) => Value::Float(a / b),
-            _ => type_mismatch("int/int | float/float", l, r),
-        },
-        BinOp::Mod => match (l, r) {
-            (Value::Int(_), Value::Int(0)) => {
-                Value::Err(RuntimeError::ToolFailed("integer mod by zero".into()))
-            }
-            (Value::Int(a), Value::Int(b)) => Value::Int(a % b),
-            (Value::Float(a), Value::Float(b)) => Value::Float(a % b),
-            _ => type_mismatch("int%int | float%float", l, r),
-        },
-    }
-}
-
-fn eval_unop(op: UnOp, v: &Value) -> Value {
-    match op {
-        UnOp::Not => match v {
-            Value::Bool(b) => Value::Bool(!b),
-            other => Value::Err(RuntimeError::TypeMismatch {
-                expected: "bool".into(),
-                actual: other.kind_name().into(),
-            }),
-        },
-        UnOp::Neg => match v {
-            Value::Int(n) => Value::Int(-n),
-            Value::Float(n) => Value::Float(-n),
-            other => Value::Err(RuntimeError::TypeMismatch {
-                expected: "int or float".into(),
-                actual: other.kind_name().into(),
-            }),
-        },
-    }
-}
-
-fn value_eq(l: &Value, r: &Value) -> bool {
-    match (l, r) {
-        (Value::Unit, Value::Unit) => true,
-        (Value::Bool(a), Value::Bool(b)) => a == b,
-        (Value::Int(a), Value::Int(b)) => a == b,
-        (Value::Float(a), Value::Float(b)) => a == b,
-        (Value::Str(a), Value::Str(b)) => a == b,
-        (Value::Host(AtmanPayload::Path(a)), Value::Host(AtmanPayload::Path(b))) => a == b,
-        _ => false,
-    }
-}
-
-fn value_cmp(
-    l: &Value,
-    r: &Value,
-    int_cmp: fn(i64, i64) -> bool,
-    float_cmp: fn(f64, f64) -> bool,
-    str_cmp: fn(&str, &str) -> bool,
-) -> Value {
-    match (l, r) {
-        (Value::Int(a), Value::Int(b)) => Value::Bool(int_cmp(*a, *b)),
-        (Value::Float(a), Value::Float(b)) => Value::Bool(float_cmp(*a, *b)),
-        (Value::Str(a), Value::Str(b)) => Value::Bool(str_cmp(a, b)),
-        _ => type_mismatch("comparable pair", l, r),
-    }
-}
-
-fn type_mismatch(expected: &str, l: &Value, r: &Value) -> Value {
-    Value::Err(RuntimeError::TypeMismatch {
-        expected: expected.into(),
-        actual: format!("{} vs {}", l.kind_name(), r.kind_name()),
-    })
 }
 
 #[cfg(test)]

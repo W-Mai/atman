@@ -6,6 +6,7 @@ extern crate alloc;
 pub mod ast;
 pub mod engine;
 pub mod env;
+pub mod ops;
 pub mod pattern;
 pub mod value;
 
@@ -14,5 +15,6 @@ pub use engine::{
     Engine, HostFuture, Preflight, StatementExecution, StatementHost, StatementOutcome,
 };
 pub use env::Env;
+pub use ops::{EvalError, HostValueOps, ValueError, eval_binary, eval_literal, eval_unary};
 pub use pattern::{PatternBindError, PatternValue, bind_pattern};
 pub use value::{HostPayload, Value};

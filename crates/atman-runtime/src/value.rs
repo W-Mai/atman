@@ -21,6 +21,40 @@ impl atman_rt::HostPayload for AtmanPayload {
     }
 }
 
+impl atman_rt::HostValueOps for AtmanPayload {
+    fn additive_text(&self) -> Option<String> {
+        match self {
+            Self::Path(path) => Some(path.display().to_string()),
+            _ => None,
+        }
+    }
+
+    fn equals(&self, other: &Self) -> bool {
+        matches!((self, other), (Self::Path(left), Self::Path(right)) if left == right)
+    }
+
+    fn add_expected() -> &'static str {
+        "int+int | float+float | string+string | string+path | path+string"
+    }
+}
+
+impl atman_rt::ValueError for RuntimeError {
+    fn type_mismatch(expected: &str, actual: String) -> Self {
+        Self::TypeMismatch {
+            expected: expected.into(),
+            actual,
+        }
+    }
+
+    fn integer_div_by_zero() -> Self {
+        Self::ToolFailed("integer div by zero".into())
+    }
+
+    fn integer_mod_by_zero() -> Self {
+        Self::ToolFailed("integer mod by zero".into())
+    }
+}
+
 pub type AtmanValue = atman_rt::Value<AtmanPayload, RuntimeError>;
 pub(crate) use AtmanValue as Value;
 
@@ -162,5 +196,21 @@ mod tests {
         let message = Message::assistant_text(crate::event::TurnId::now(), "hello");
         let value = Value::Host(AtmanPayload::Message(message.clone()));
         assert_eq!(value.to_json(), serde_json::to_value(message).unwrap());
+    }
+
+    #[test]
+    fn path_expression_behavior_uses_the_atman_host_adapter() {
+        use atman_rt::ast::BinOp;
+
+        let path = Value::Host(AtmanPayload::Path(PathBuf::from("src/main.rs")));
+        let text = Value::Str("file: ".into());
+        assert!(matches!(
+            atman_rt::eval_binary(BinOp::Add, &text, &path),
+            Value::Str(result) if result == "file: src/main.rs"
+        ));
+        assert!(matches!(
+            atman_rt::eval_binary(BinOp::Eq, &path, &path),
+            Value::Bool(true)
+        ));
     }
 }
