@@ -369,26 +369,9 @@ impl Executor {
         } else {
             result
         };
-        let status = match &result {
-            Ok(v) => {
-                if let Value::Err(e) = v
-                    && matches!(e, RuntimeError::Cancelled(_))
-                {
-                    FlowStatus::Cancelled
-                } else {
-                    FlowStatus::Ok
-                }
-            }
-            Err(e) => {
-                if matches!(e, RuntimeError::Cancelled(_)) {
-                    FlowStatus::Cancelled
-                } else {
-                    FlowStatus::Errored {
-                        message: e.to_string(),
-                    }
-                }
-            }
-        };
+        let status = FlowStatus::from(atman_rt::classify_result(&result, |error| {
+            matches!(error, RuntimeError::Cancelled(_))
+        }));
         let cancelled = matches!(status, FlowStatus::Cancelled);
         let suicide = task_id.as_ref().and_then(|id| {
             self.tool_ctx

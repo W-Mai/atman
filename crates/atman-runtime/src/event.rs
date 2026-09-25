@@ -433,6 +433,18 @@ impl FlowStatus {
     }
 }
 
+impl From<atman_rt::FlowTermination<'_, crate::error::RuntimeError>> for FlowStatus {
+    fn from(termination: atman_rt::FlowTermination<'_, crate::error::RuntimeError>) -> Self {
+        match termination {
+            atman_rt::FlowTermination::Ok => Self::Ok,
+            atman_rt::FlowTermination::Cancelled => Self::Cancelled,
+            atman_rt::FlowTermination::Errored(error) => Self::Errored {
+                message: error.to_string(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LlmCallStatus {

@@ -1536,27 +1536,16 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             };
             let outcome = crate::exec::exec_stmts(&target.body, &mut sub_env, &sub_ctx).await;
             drop(lifecycle_guard);
+            let status =
+                crate::event::FlowStatus::from(atman_rt::classify_outcome(&outcome, |error| {
+                    matches!(error, RuntimeError::Cancelled(_))
+                }));
             let (result, status, ok) = match outcome {
-                atman_rt::StatementOutcome::Return(v) => (v, crate::event::FlowStatus::Ok, true),
-                atman_rt::StatementOutcome::Err(e) => {
-                    let status = if matches!(&e, crate::error::RuntimeError::Cancelled(_)) {
-                        crate::event::FlowStatus::Cancelled
-                    } else {
-                        crate::event::FlowStatus::Errored {
-                            message: format!("{e}"),
-                        }
-                    };
-                    (Value::Err(e.clone()), status, false)
-                }
-                atman_rt::StatementOutcome::Continue => {
-                    (Value::Unit, crate::event::FlowStatus::Ok, true)
-                }
-                atman_rt::StatementOutcome::LoopBreak => {
-                    (Value::Unit, crate::event::FlowStatus::Ok, true)
-                }
-                atman_rt::StatementOutcome::LoopContinue => {
-                    (Value::Unit, crate::event::FlowStatus::Ok, true)
-                }
+                atman_rt::StatementOutcome::Return(v) => (v, status, true),
+                atman_rt::StatementOutcome::Err(e) => (Value::Err(e), status, false),
+                atman_rt::StatementOutcome::Continue => (Value::Unit, status, true),
+                atman_rt::StatementOutcome::LoopBreak => (Value::Unit, status, true),
+                atman_rt::StatementOutcome::LoopContinue => (Value::Unit, status, true),
             };
             let cancelled = matches!(status, crate::event::FlowStatus::Cancelled);
             if let Some(sink) = ctx.events {

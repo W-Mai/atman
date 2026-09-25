@@ -10,6 +10,7 @@ pub mod env;
 pub mod expr;
 pub mod ops;
 pub mod pattern;
+pub mod status;
 pub mod value;
 
 pub use ast::File as Program;
@@ -22,4 +23,5 @@ pub use env::Env;
 pub use expr::{ExpressionEffect, ExpressionHost, eval_expr};
 pub use ops::{EvalError, HostValueOps, ValueError, eval_binary, eval_literal, eval_unary};
 pub use pattern::{PatternBindError, PatternValue, bind_pattern};
+pub use status::{FlowTermination, classify_outcome, classify_result};
 pub use value::{HostPayload, Value};
