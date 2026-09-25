@@ -3,7 +3,7 @@ use syn::{
     LitBool, LitFloat, LitInt, LitStr, Result, Token, braced, bracketed, parenthesized, token,
 };
 
-use crate::ast::*;
+use atman_rt::ast::*;
 
 mod kw {
     syn::custom_keyword!(flow);
@@ -38,11 +38,11 @@ mod kw {
     syn::custom_keyword!(end);
 }
 
-fn to_span(_s: proc_macro2::Span) -> crate::ast::Span {
+fn to_span(_s: proc_macro2::Span) -> atman_rt::ast::Span {
     // proc_macro2::Span doesn't expose line/column in stable Rust.
     // syn errors still carry the original span; our Span is for
     // atman's own diagnostics and defaults to (0, 0) when parsed.
-    crate::ast::Span { line: 0, column: 0 }
+    atman_rt::ast::Span { line: 0, column: 0 }
 }
 
 fn to_ident(id: syn::Ident) -> Ident {
@@ -52,12 +52,14 @@ fn to_ident(id: syn::Ident) -> Ident {
     }
 }
 
-impl Parse for File {
+struct ParsedFile(File);
+
+impl Parse for ParsedFile {
     fn parse(input: ParseStream) -> Result<Self> {
         let mut file = File::default();
         while !input.is_empty() {
             if input.peek(kw::flow) {
-                file.flows.push(input.parse::<FlowDecl>()?);
+                file.flows.push(input.parse::<ParsedFlowDecl>()?.0);
             } else if input.peek(kw::route) {
                 file.routes.push(parse_route(input)?);
             } else if input.peek(kw::default_route) {
@@ -73,7 +75,7 @@ impl Parse for File {
                 ));
             }
         }
-        Ok(file)
+        Ok(Self(file))
     }
 }
 
@@ -167,7 +169,9 @@ fn parse_lifecycle(input: ParseStream) -> Result<LifecycleDecl> {
     })
 }
 
-impl Parse for FlowDecl {
+struct ParsedFlowDecl(FlowDecl);
+
+impl Parse for ParsedFlowDecl {
     fn parse(input: ParseStream) -> Result<Self> {
         input.parse::<kw::flow>()?;
         let name = to_ident(input.parse::<syn::Ident>()?);
@@ -194,13 +198,13 @@ impl Parse for FlowDecl {
 
         let body = parse_stmts(&body_content)?;
 
-        Ok(FlowDecl {
+        Ok(Self(FlowDecl {
             name,
             params,
             ret,
             contract,
             body,
-        })
+        }))
     }
 }
 
@@ -1001,5 +1005,5 @@ fn parse_fanout(input: ParseStream) -> Result<Node> {
 }
 
 pub fn parse_file(src: &str) -> Result<File> {
-    syn::parse_str::<File>(src)
+    Ok(syn::parse_str::<ParsedFile>(src)?.0)
 }

@@ -5,7 +5,7 @@ use crate::env::Env;
 use crate::error::RuntimeError;
 use crate::hunk::EditProposal;
 use crate::message::Message;
-use atman_dsl::ast::{Expr, Ident};
+use atman_rt::ast::{Expr, Ident};
 
 #[derive(Debug, Clone)]
 pub enum Value {

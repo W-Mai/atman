@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use atman_dsl::ast::{File, FlowDecl};
+use atman_rt::ast::{File, FlowDecl};
 
 use crate::error::RuntimeError;
 use crate::event::{Event, EventSink, FlowRunId, FlowStatus, TurnId};

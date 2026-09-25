@@ -86,7 +86,7 @@ Use named arguments when a tool has several parameters. The pipe form is useful 
 
 ## Current references
 
-- Lambda parser and AST: `crates/atman-dsl/src/parse.rs`, `crates/atman-dsl/src/ast.rs`
+- Lambda parser and AST: `crates/atman-dsl/src/parse.rs`, `crates/atman-rt/src/ast.rs`
 - `crates/atman-runtime/src/eval/mod.rs`
 - Canonical examples: `examples/agent.at`, `examples/review_code.at`, and `examples/look_into.at`
 - Flow tests: `atman flow test <path>`

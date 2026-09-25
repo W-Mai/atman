@@ -1,0 +1,15 @@
+[package]
+name = "atman-rt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Portable execution core for Atman flows"
+homepage = "https://atman.run"
+repository = "https://github.com/W-Mai/atman"
+keywords = ["atman", "runtime", "flow", "embedded"]
+categories = ["development-tools"]
+
+[dependencies]

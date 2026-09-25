@@ -192,6 +192,7 @@ dependencies = [
  "atman-daemon",
  "atman-dsl",
  "atman-proto",
+ "atman-rt",
  "atman-runtime",
  "atman-tui",
  "axum",
@@ -223,6 +224,7 @@ dependencies = [
  "async-stream",
  "atman-dsl",
  "atman-proto",
+ "atman-rt",
  "atman-runtime",
  "axum",
  "base64",
@@ -250,6 +252,7 @@ name = "atman-dsl"
 version = "1.13.2"
 dependencies = [
  "anyhow",
+ "atman-rt",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -269,11 +272,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "atman-rt"
+version = "1.13.2"
+
+[[package]]
 name = "atman-runtime"
 version = "1.13.2"
 dependencies = [
  "anyhow",
  "atman-dsl",
+ "atman-rt",
  "axum",
  "base64",
  "blake3",

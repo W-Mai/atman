@@ -1,12 +1,12 @@
-use atman_dsl::ast::Expr;
 use atman_dsl::parse::parse_file;
 use atman_dsl::print::print_file;
+use atman_rt::ast::Expr;
 
 fn parse_expr_str(src: &str) -> Expr {
     let file = parse_file(&format!("flow t() -> string {{ x = {src} }}")).expect("parse");
     let stmts = &file.flows[0].body;
     match &stmts[0] {
-        atman_dsl::ast::Stmt::Bind { value, .. } => value.clone(),
+        atman_rt::ast::Stmt::Bind { value, .. } => value.clone(),
         _ => panic!("expected bind stmt"),
     }
 }
@@ -52,7 +52,7 @@ fn subtraction_not_annotation() {
     // `a - b` should be subtraction, not annotation
     let expr = parse_expr_str("a - b");
     match expr {
-        Expr::Binary { op, .. } => assert_eq!(op, atman_dsl::ast::BinOp::Sub),
+        Expr::Binary { op, .. } => assert_eq!(op, atman_rt::ast::BinOp::Sub),
         other => panic!("expected Binary Sub, got {other:?}"),
     }
 }
@@ -63,12 +63,12 @@ fn double_negation_not_annotation() {
     let expr = parse_expr_str("a - -b");
     match expr {
         Expr::Binary {
-            op: atman_dsl::ast::BinOp::Sub,
+            op: atman_rt::ast::BinOp::Sub,
             right,
             ..
         } => match *right {
             Expr::Unary {
-                op: atman_dsl::ast::UnOp::Neg,
+                op: atman_rt::ast::UnOp::Neg,
                 ..
             } => {}
             other => panic!("expected Unary Neg on rhs, got {other:?}"),
@@ -88,7 +88,7 @@ flow t() -> string {
     let file = parse_file(src).expect("parse");
     let stmts = &file.flows[0].body;
     match &stmts[0] {
-        atman_dsl::ast::Stmt::Bind { value, .. } => match value {
+        atman_rt::ast::Stmt::Bind { value, .. } => match value {
             Expr::Struct(fields) => {
                 assert_eq!(fields.len(), 1);
                 assert_eq!(fields[0].0.name, "valid");

@@ -1,6 +1,6 @@
-use atman_dsl::ast::{CmpOp, OnBlock, Stmt, WatchAction, WatchEvent};
 use atman_dsl::parse::parse_file;
 use atman_dsl::print::print_file;
+use atman_rt::ast::{CmpOp, OnBlock, Stmt, WatchAction, WatchEvent};
 
 #[test]
 fn parses_watch_token_abort_block() {

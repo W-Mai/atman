@@ -418,7 +418,7 @@ async fn run_flow_inner(
             }));
     }
     let (lifecycle_tx, mut lifecycle_rx) =
-        tokio::sync::mpsc::unbounded_channel::<atman_dsl::ast::LifecycleEvent>();
+        tokio::sync::mpsc::unbounded_channel::<atman_rt::ast::LifecycleEvent>();
     executor.tool_ctx.lifecycle_fire_tx = Some(lifecycle_tx);
 
     let target_flow = parsed
@@ -437,7 +437,7 @@ async fn run_flow_inner(
     }
 
     lifecycles
-        .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionStart)
+        .fire(&executor, atman_rt::ast::LifecycleEvent::SessionStart)
         .await;
 
     let turn_id = atman_runtime::event::TurnId::now();
@@ -468,7 +468,7 @@ async fn run_flow_inner(
         session.begin_turn(user_msg);
     }
     lifecycles
-        .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnStart)
+        .fire(&executor, atman_rt::ast::LifecycleEvent::TurnStart)
         .await;
     let result = executor
         .run_with_invocation(
@@ -487,7 +487,7 @@ async fn run_flow_inner(
         lifecycles.fire(&executor, ev).await;
     }
     lifecycles
-        .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnEnd)
+        .fire(&executor, atman_rt::ast::LifecycleEvent::TurnEnd)
         .await;
     session.end_turn();
     if result.is_ok() && session.record_successful_flow().is_some() {
@@ -495,7 +495,7 @@ async fn run_flow_inner(
             atman_runtime::session_naming::maybe_generate_session_name(&executor, &session).await;
     }
     lifecycles
-        .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionEnd)
+        .fire(&executor, atman_rt::ast::LifecycleEvent::SessionEnd)
         .await;
     Ok(())
 }

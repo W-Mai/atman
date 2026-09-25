@@ -12,13 +12,12 @@ fn parses_default_params() {
     assert_eq!(f.params[0].name.name, "a");
     assert!(f.params[0].default.is_none());
     assert_eq!(f.params[1].name.name, "b");
-    let Some(atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Int(42))) =
-        &f.params[1].default
+    let Some(atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Int(42))) = &f.params[1].default
     else {
         panic!("expected Int(42) default for b");
     };
     assert_eq!(f.params[2].name.name, "c");
-    let Some(atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Str(s))) = &f.params[2].default
+    let Some(atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Str(s))) = &f.params[2].default
     else {
         panic!("expected Str default for c");
     };

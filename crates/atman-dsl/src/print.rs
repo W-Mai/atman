@@ -3,7 +3,7 @@
 
 use std::fmt::Write;
 
-use crate::ast::*;
+use atman_rt::ast::*;
 
 pub fn print_file(file: &File) -> String {
     let mut out = String::new();

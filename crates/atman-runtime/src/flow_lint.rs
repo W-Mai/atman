@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use atman_dsl::ast::{Arg, Expr, File, FlowDecl, Node, Stmt};
+use atman_rt::ast::{Arg, Expr, File, FlowDecl, Node, Stmt};
 
 const MANY_POSITIONAL_THRESHOLD: usize = 4;
 

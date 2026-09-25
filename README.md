@@ -386,7 +386,8 @@ Drag across transcript text, including line-end space and short gaps between Mar
 ```
 atman/
   crates/
-    atman-dsl/       # Parser + AST + pretty-printer (.at files)
+    atman-rt/        # Portable flow program types
+    atman-dsl/       # Parser + pretty-printer (.at files)
     atman-runtime/   # Executor, tools, providers, memory, MCP, hunk, compaction
     atman-cli/       # Binary, REPL, slash commands, monitor, daemon client
     atman-proto/     # JSON-RPC 2.0 envelope + daemon request/response types

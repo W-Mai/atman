@@ -131,7 +131,7 @@ pub struct ToolCtx {
     pub workspace: Option<crate::git_workspace::WorkspaceBinding>,
     pub flow_workspace_service: Option<std::sync::Arc<crate::flow_workspace::FlowWorkspaceService>>,
     pub lifecycle_fire_tx:
-        Option<tokio::sync::mpsc::UnboundedSender<atman_dsl::ast::LifecycleEvent>>,
+        Option<tokio::sync::mpsc::UnboundedSender<atman_rt::ast::LifecycleEvent>>,
     pub bg_registry: Option<std::sync::Arc<crate::tools::bash_bg::BgRegistry>>,
     pub term_registry: Option<std::sync::Arc<crate::tools::term::TermRegistry>>,
     pub watch_hub: Option<std::sync::Arc<crate::watch::WatchHub>>,
@@ -531,7 +531,7 @@ impl ToolCtx {
 
     pub fn with_lifecycle_fire_tx(
         mut self,
-        tx: tokio::sync::mpsc::UnboundedSender<atman_dsl::ast::LifecycleEvent>,
+        tx: tokio::sync::mpsc::UnboundedSender<atman_rt::ast::LifecycleEvent>,
     ) -> Self {
         self.lifecycle_fire_tx = Some(tx);
         self

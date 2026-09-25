@@ -1003,7 +1003,7 @@ mod tests {
                             name.name == "shell"
                                 && matches!(
                                     value,
-                                    atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Bool(
+                                    atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Bool(
                                         true
                                     ))
                                 )

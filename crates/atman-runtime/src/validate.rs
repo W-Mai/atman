@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use atman_dsl::ast::{Arg, Expr, FlowDecl, Node, Stmt, WatchEvent};
+use atman_rt::ast::{Arg, Expr, FlowDecl, Node, Stmt, WatchEvent};
 
 use crate::tool::ToolRegistry;
 
@@ -57,7 +57,7 @@ fn validate_invocation_contract(flow: &FlowDecl, errors: &mut Vec<ValidationErro
     }) else {
         return;
     };
-    let atman_dsl::ast::Expr::Ident(parameter_name) = value else {
+    let atman_rt::ast::Expr::Ident(parameter_name) = value else {
         errors.push(ValidationError::InvalidInvocationUserMessage);
         return;
     };
@@ -71,12 +71,12 @@ fn validate_invocation_contract(flow: &FlowDecl, errors: &mut Vec<ValidationErro
     };
     let is_string = matches!(
         &parameter.ty,
-        atman_dsl::ast::TypeExpr::Named(name) if name.name == "string"
+        atman_rt::ast::TypeExpr::Named(name) if name.name == "string"
     );
     let has_supported_default = parameter.default.as_ref().is_none_or(|default| {
         matches!(
             default,
-            atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Str(_))
+            atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Str(_))
         )
     });
     if !is_string || !has_supported_default {

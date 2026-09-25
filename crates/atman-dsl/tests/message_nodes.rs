@@ -1,11 +1,11 @@
-use atman_dsl::ast::{Arg, Expr, Literal, MessageRole, Node};
 use atman_dsl::parse::parse_file;
 use atman_dsl::print::print_file;
+use atman_rt::ast::{Arg, Expr, Literal, MessageRole, Node};
 
 fn only_return_expr(src: &str) -> Expr {
     let file = parse_file(src).unwrap_or_else(|e| panic!("parse: {e}"));
     let body = &file.flows[0].body;
-    if let atman_dsl::ast::Stmt::Return { value } = &body[0] {
+    if let atman_rt::ast::Stmt::Return { value } = &body[0] {
         return value.clone();
     }
     panic!("expected return stmt");
@@ -62,7 +62,7 @@ fn assistant_and_system_and_tool_result_parse() {
     let roles: Vec<MessageRole> = body
         .iter()
         .filter_map(|stmt| {
-            if let atman_dsl::ast::Stmt::Bind { value, .. } = stmt
+            if let atman_rt::ast::Stmt::Bind { value, .. } = stmt
                 && let Expr::Node(Node::Message { role, .. }) = value
             {
                 return Some(*role);

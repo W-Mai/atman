@@ -1,6 +1,6 @@
-use atman_dsl::ast::{Expr, Node, Stmt};
 use atman_dsl::parse::parse_file;
 use atman_dsl::print::print_file;
+use atman_rt::ast::{Expr, Node, Stmt};
 
 fn strip_spans(s: String) -> String {
     let mut out = String::with_capacity(s.len());

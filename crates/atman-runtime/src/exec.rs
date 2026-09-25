@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use atman_dsl::ast::{Arg, CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
+use atman_rt::ast::{Arg, CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
 
 use crate::env::Env;
 use crate::error::RuntimeError;
@@ -10,11 +10,11 @@ use crate::tool::{BoxFut, Tool, ToolArgs, ToolCtx, ToolRegistry};
 use crate::value::Value;
 
 fn bind_pattern(
-    pattern: &atman_dsl::ast::Pattern,
+    pattern: &atman_rt::ast::Pattern,
     value: Value,
     env: &mut Env,
 ) -> Result<(), RuntimeError> {
-    use atman_dsl::ast::{Pattern, PatternFieldBinding};
+    use atman_rt::ast::{Pattern, PatternFieldBinding};
     match pattern {
         Pattern::Ident(id) => {
             env.bind(id.name.clone(), value);
@@ -505,7 +505,7 @@ async fn eval_bind_with_watches(
 
 fn render_warn_msg(msg: &Option<Expr>, fallback: &str) -> String {
     match msg {
-        Some(Expr::Literal(atman_dsl::ast::Literal::Str(s))) => s.clone(),
+        Some(Expr::Literal(atman_rt::ast::Literal::Str(s))) => s.clone(),
         _ => fallback.to_string(),
     }
 }

@@ -1,4 +1,5 @@
-use std::fmt;
+use alloc::{boxed::Box, string::String, vec::Vec};
+use core::fmt;
 
 /// Source location.  Plain integers — `Copy + Send + Sync` — so the
 /// entire AST can be `Send`.

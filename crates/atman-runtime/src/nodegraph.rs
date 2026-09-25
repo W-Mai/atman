@@ -1,4 +1,4 @@
-use atman_dsl::ast::{Arg, Expr, FanoutCollect, FlowDecl, Ident, Node, Stmt};
+use atman_rt::ast::{Arg, Expr, FanoutCollect, FlowDecl, Ident, Node, Stmt};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -120,7 +120,7 @@ fn extract_node(node: &Node, prefix: &str, out: &mut Vec<StaticNode>) {
         {
             let model = args.iter().find_map(|a| match a {
                 Arg::Named { name, value } if name.name == "model" => {
-                    if let Expr::Literal(atman_dsl::ast::Literal::Str(s)) = value {
+                    if let Expr::Literal(atman_rt::ast::Literal::Str(s)) = value {
                         Some(s.clone())
                     } else {
                         None
@@ -186,10 +186,10 @@ fn extract_node(node: &Node, prefix: &str, out: &mut Vec<StaticNode>) {
         }
         Node::Message { role, args } => {
             let role_str = match role {
-                atman_dsl::ast::MessageRole::User => "user",
-                atman_dsl::ast::MessageRole::Assistant => "assistant",
-                atman_dsl::ast::MessageRole::System => "system",
-                atman_dsl::ast::MessageRole::Tool => "tool",
+                atman_rt::ast::MessageRole::User => "user",
+                atman_rt::ast::MessageRole::Assistant => "assistant",
+                atman_rt::ast::MessageRole::System => "system",
+                atman_rt::ast::MessageRole::Tool => "tool",
             };
             let _ = args;
             (
@@ -214,26 +214,26 @@ fn extract_node(node: &Node, prefix: &str, out: &mut Vec<StaticNode>) {
 
 pub fn format_expr_short(expr: &Expr) -> String {
     match expr {
-        Expr::Literal(atman_dsl::ast::Literal::Bool(b)) => b.to_string(),
-        Expr::Literal(atman_dsl::ast::Literal::Str(s)) => format!("\"{s}\""),
-        Expr::Literal(atman_dsl::ast::Literal::Int(i)) => i.to_string(),
-        Expr::Literal(atman_dsl::ast::Literal::Float(f)) => f.to_string(),
+        Expr::Literal(atman_rt::ast::Literal::Bool(b)) => b.to_string(),
+        Expr::Literal(atman_rt::ast::Literal::Str(s)) => format!("\"{s}\""),
+        Expr::Literal(atman_rt::ast::Literal::Int(i)) => i.to_string(),
+        Expr::Literal(atman_rt::ast::Literal::Float(f)) => f.to_string(),
         Expr::Ident(id) => id.name.clone(),
         Expr::Binary { op, left, right } => {
             let sym = match op {
-                atman_dsl::ast::BinOp::Eq => "==",
-                atman_dsl::ast::BinOp::Ne => "!=",
-                atman_dsl::ast::BinOp::Lt => "<",
-                atman_dsl::ast::BinOp::Le => "<=",
-                atman_dsl::ast::BinOp::Gt => ">",
-                atman_dsl::ast::BinOp::Ge => ">=",
-                atman_dsl::ast::BinOp::And => "and",
-                atman_dsl::ast::BinOp::Or => "or",
-                atman_dsl::ast::BinOp::Add => "+",
-                atman_dsl::ast::BinOp::Sub => "-",
-                atman_dsl::ast::BinOp::Mul => "*",
-                atman_dsl::ast::BinOp::Div => "/",
-                atman_dsl::ast::BinOp::Mod => "%",
+                atman_rt::ast::BinOp::Eq => "==",
+                atman_rt::ast::BinOp::Ne => "!=",
+                atman_rt::ast::BinOp::Lt => "<",
+                atman_rt::ast::BinOp::Le => "<=",
+                atman_rt::ast::BinOp::Gt => ">",
+                atman_rt::ast::BinOp::Ge => ">=",
+                atman_rt::ast::BinOp::And => "and",
+                atman_rt::ast::BinOp::Or => "or",
+                atman_rt::ast::BinOp::Add => "+",
+                atman_rt::ast::BinOp::Sub => "-",
+                atman_rt::ast::BinOp::Mul => "*",
+                atman_rt::ast::BinOp::Div => "/",
+                atman_rt::ast::BinOp::Mod => "%",
             };
             format!(
                 "{} {} {}",

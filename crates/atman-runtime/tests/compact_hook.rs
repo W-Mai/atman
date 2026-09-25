@@ -170,5 +170,5 @@ async fn replace_messages_range_sends_lifecycle_fire_signal() {
     };
     let _ = ReplaceMessagesRange.call(args, &ctx).await.unwrap();
     let ev = rx.try_recv().expect("lifecycle fire signal expected");
-    assert_eq!(ev, atman_dsl::ast::LifecycleEvent::ContextCompact);
+    assert_eq!(ev, atman_rt::ast::LifecycleEvent::ContextCompact);
 }

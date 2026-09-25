@@ -3,7 +3,7 @@ mod llm_context;
 pub(crate) mod llm_dispatch;
 pub(crate) mod llm_parse;
 
-use atman_dsl::ast::{Arg, BinOp, Expr, Literal, Node, UnOp};
+use atman_rt::ast::{Arg, BinOp, Expr, Literal, Node, UnOp};
 
 use std::sync::Arc;
 
@@ -25,8 +25,8 @@ pub struct EvalCtx<'a> {
     pub tools: &'a ToolRegistry,
     pub tool_ctx: &'a ToolCtx,
     pub providers: &'a crate::provider::ProviderRegistry,
-    pub flows: &'a std::collections::HashMap<String, atman_dsl::ast::FlowDecl>,
-    pub contract: Option<&'a atman_dsl::ast::Contract>,
+    pub flows: &'a std::collections::HashMap<String, atman_rt::ast::FlowDecl>,
+    pub contract: Option<&'a atman_rt::ast::Contract>,
     pub events: Option<&'a crate::event::EventSink>,
     pub turn_id: Option<crate::event::TurnId>,
     pub flow_run_id: Option<crate::event::FlowRunId>,
@@ -595,7 +595,7 @@ async fn eval_list_all<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) 
 pub async fn eval_dynamic_fanout<'a>(
     source: &'a Expr,
     lambda: &'a Expr,
-    collect: &'a atman_dsl::ast::FanoutCollect,
+    collect: &'a atman_rt::ast::FanoutCollect,
     env: &'a Env,
     ctx: &'a EvalCtx<'a>,
 ) -> Value {
@@ -630,15 +630,15 @@ pub async fn eval_dynamic_fanout<'a>(
         if let Value::Err(e) = &result {
             return Value::Err(e.clone());
         }
-        if matches!(collect, atman_dsl::ast::FanoutCollect::First) {
+        if matches!(collect, atman_rt::ast::FanoutCollect::First) {
             return result;
         }
         results.push(result);
     }
 
     match collect {
-        atman_dsl::ast::FanoutCollect::All => Value::List(results),
-        atman_dsl::ast::FanoutCollect::First => results.into_iter().next().unwrap_or(Value::Unit),
+        atman_rt::ast::FanoutCollect::All => Value::List(results),
+        atman_rt::ast::FanoutCollect::First => results.into_iter().next().unwrap_or(Value::Unit),
     }
 }
 
@@ -735,7 +735,7 @@ pub(crate) fn expr_shape(e: &Expr) -> &'static str {
 }
 
 async fn dispatch_tool_call<'a>(
-    path: &'a [atman_dsl::ast::Ident],
+    path: &'a [atman_rt::ast::Ident],
     args: &'a [Arg],
     prefix_positional: Vec<Value>,
     env: &'a Env,
@@ -1322,7 +1322,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             return eval_dynamic_fanout(source, lambda, collect, env, ctx).await;
         }
         Node::Fanout { items, collect } => match collect {
-            atman_dsl::ast::FanoutCollect::All => {
+            atman_rt::ast::FanoutCollect::All => {
                 let parent_id = ctx.current_node_id.clone();
                 let branch_ctxs: Vec<EvalCtx<'a>> = (0..items.len())
                     .map(|i| {
@@ -1389,7 +1389,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 }
                 Value::List(results)
             }
-            atman_dsl::ast::FanoutCollect::First => Value::Err(RuntimeError::ToolFailed(
+            atman_rt::ast::FanoutCollect::First => Value::Err(RuntimeError::ToolFailed(
                 "fanout collect: first not yet implemented".into(),
             )),
         },
@@ -1629,13 +1629,13 @@ fn session_fs_access_policy(session: &crate::session::Session) -> crate::fs_acce
     crate::fs_access::FsAccessPolicy { mode, workspace }
 }
 
-fn tool_name(path: &[atman_dsl::ast::Ident]) -> String {
+fn tool_name(path: &[atman_rt::ast::Ident]) -> String {
     let parts: Vec<&str> = path.iter().map(|i| i.name.as_str()).collect();
     parts.join(".")
 }
 
 async fn eval_fix_until_test_passes<'a>(
-    kwargs: &'a atman_dsl::ast::Kwargs,
+    kwargs: &'a atman_rt::ast::Kwargs,
     env: &'a Env,
     ctx: &'a EvalCtx<'a>,
 ) -> Value {
@@ -1776,7 +1776,7 @@ async fn eval_fix_until_test_passes<'a>(
 }
 
 async fn eval_message_node<'a>(
-    ast_role: atman_dsl::ast::MessageRole,
+    ast_role: atman_rt::ast::MessageRole,
     args: &'a [Arg],
     env: &'a Env,
     ctx: &'a EvalCtx<'a>,
@@ -1786,10 +1786,10 @@ async fn eval_message_node<'a>(
     };
 
     let role = match ast_role {
-        atman_dsl::ast::MessageRole::User => MessageRole::User,
-        atman_dsl::ast::MessageRole::Assistant => MessageRole::Assistant,
-        atman_dsl::ast::MessageRole::System => MessageRole::System,
-        atman_dsl::ast::MessageRole::Tool => MessageRole::Tool,
+        atman_rt::ast::MessageRole::User => MessageRole::User,
+        atman_rt::ast::MessageRole::Assistant => MessageRole::Assistant,
+        atman_rt::ast::MessageRole::System => MessageRole::System,
+        atman_rt::ast::MessageRole::Tool => MessageRole::Tool,
     };
     let turn_id = ctx
         .turn_id
@@ -2021,7 +2021,7 @@ fn guess_image_mime(path: &std::path::Path) -> Option<String> {
     )
 }
 
-fn contract_allows_shell(contract: Option<&atman_dsl::ast::Contract>) -> bool {
+fn contract_allows_shell(contract: Option<&atman_rt::ast::Contract>) -> bool {
     crate::flow_authority::contract_allows_shell(contract)
 }
 
@@ -2078,7 +2078,7 @@ fn char_boundary(s: &str, target: usize, round_up: bool) -> usize {
 }
 
 // Bare primitive names inside `schema: { valid: bool, ... }` parse as tool calls; treat as Unit.
-fn is_type_annotation(path: &[atman_dsl::ast::Ident]) -> bool {
+fn is_type_annotation(path: &[atman_rt::ast::Ident]) -> bool {
     if path.len() != 1 {
         return false;
     }
@@ -2318,7 +2318,7 @@ mod tests {
             source_dir: None,
         };
         let stmt = &file.flows[0].body[0];
-        if let atman_dsl::ast::Stmt::Return { value } = stmt {
+        if let atman_rt::ast::Stmt::Return { value } = stmt {
             eval_expr(value, &Env::new(), &ctx).await
         } else {
             panic!("expected return statement");
@@ -2414,7 +2414,7 @@ mod tests {
             current_node_id: None,
             source_dir: None,
         };
-        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+        if let atman_rt::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
             assert!(matches!(
                 v,
@@ -2478,7 +2478,7 @@ mod tests {
             current_node_id: None,
             source_dir: None,
         };
-        let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] else {
+        let atman_rt::ast::Stmt::Return { value } = &file.flows[0].body[0] else {
             panic!("expected return statement");
         };
 
@@ -2540,7 +2540,7 @@ mod tests {
 
         let src = r#"flow t() { return fanout [ fs.read(a), fs.read(b) ] collect: all }"#;
         let file = parse_file(src).unwrap();
-        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+        if let atman_rt::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &env, &ctx).await;
             if let Value::List(items) = v {
                 assert_eq!(items.len(), 2);
@@ -2575,7 +2575,7 @@ mod tests {
             current_node_id: None,
             source_dir: None,
         };
-        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+        if let atman_rt::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
             assert!(matches!(
                 v,
@@ -2643,7 +2643,7 @@ mod tests {
 }
 "#;
         let file = parse_file(src).unwrap();
-        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+        if let atman_rt::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
             if let Value::Struct(fields) = v {
                 assert_eq!(fields[0].0, "severity");
@@ -2677,7 +2677,7 @@ mod tests {
         };
         let src = r#"flow t() { return llm.call(prompt: "hi") }"#;
         let file = parse_file(src).unwrap();
-        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+        if let atman_rt::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
             assert!(v.is_err(), "expected error, got {v:?}");
         }
@@ -2706,7 +2706,7 @@ mod tests {
         };
         let src = r#"flow t() { return user_confirm("proceed?") }"#;
         let file = parse_file(src).unwrap();
-        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+        if let atman_rt::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             assert!(matches!(
                 eval_expr(value, &Env::new(), &ctx).await,
                 Value::Bool(true)
@@ -2894,7 +2894,7 @@ flow parent() -> Int {
 
         let src = r#"flow t() { return fs.read(p) }"#;
         let file = parse_file(src).unwrap();
-        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+        if let atman_rt::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &env, &ctx).await;
             assert!(matches!(v, Value::Str(s) if s == "hello runtime"));
         }
@@ -2924,7 +2924,7 @@ flow parent() -> Int {
             current_node_id: Some("stmt_1".into()),
             source_dir: None,
         };
-        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+        if let atman_rt::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let _ = eval_expr(value, &Env::new(), &ctx).await;
         }
         let snap = events.snapshot();
@@ -2954,7 +2954,7 @@ flow parent() -> Int {
     #[test]
     fn resolve_tool_specs_wildcard_unknown_prefix_skips_silently() {
         let tools = crate::tool::ToolRegistry::new();
-        let _expr = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
+        let _expr = Expr::List(vec![Expr::Literal(atman_rt::ast::Literal::Str(
             "nonexistent.*".into(),
         ))]);
         let specs = crate::eval::llm_args::resolve_tool_specs_from_values(
@@ -3027,7 +3027,7 @@ flow parent() -> Int {
         }));
 
         // "mcp.*" matches all 3 mcp.* tools, but not fs.read
-        let _expr = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
+        let _expr = Expr::List(vec![Expr::Literal(atman_rt::ast::Literal::Str(
             "mcp.*".into(),
         ))]);
         let specs = crate::eval::llm_args::resolve_tool_specs_from_values(
@@ -3042,7 +3042,7 @@ flow parent() -> Int {
         assert!(names.contains(&"mcp.siyuan.search".into()));
 
         // "mcp.lark.*" matches only the 2 lark tools
-        let _expr2 = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
+        let _expr2 = Expr::List(vec![Expr::Literal(atman_rt::ast::Literal::Str(
             "mcp.lark.*".into(),
         ))]);
         let specs2 = crate::eval::llm_args::resolve_tool_specs_from_values(
@@ -3110,24 +3110,24 @@ flow parent() -> Int {
         let file = atman_dsl::parse::parse_file(src).unwrap();
         let body = &file.flows[0].body;
         let tools_values: Vec<crate::value::Value> = match &body[0] {
-            atman_dsl::ast::Stmt::Bind { value, .. } => match value {
-                Expr::Node(atman_dsl::ast::Node::ToolCall { args, .. }) => {
+            atman_rt::ast::Stmt::Bind { value, .. } => match value {
+                Expr::Node(atman_rt::ast::Node::ToolCall { args, .. }) => {
                     let tools_expr = args
                         .iter()
                         .find_map(|a| match a {
-                            atman_dsl::ast::Arg::Named { name, value } if name.name == "tools" => {
+                            atman_rt::ast::Arg::Named { name, value } if name.name == "tools" => {
                                 Some(value.clone())
                             }
                             _ => None,
                         })
                         .unwrap();
-                    if let atman_dsl::ast::Expr::List(items) = tools_expr {
+                    if let atman_rt::ast::Expr::List(items) = tools_expr {
                         items
                             .iter()
                             .map(|i| {
-                                if let atman_dsl::ast::Expr::Literal(
-                                    atman_dsl::ast::Literal::Str(s),
-                                ) = i
+                                if let atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Str(
+                                    s,
+                                )) = i
                                 {
                                     crate::value::Value::Str(s.clone())
                                 } else {

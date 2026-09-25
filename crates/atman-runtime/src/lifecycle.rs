@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use atman_dsl::ast::{File, LifecycleDecl, LifecycleEvent};
+use atman_rt::ast::{File, LifecycleDecl, LifecycleEvent};
 
 use crate::executor::Executor;
 use crate::value::Value;
@@ -55,8 +55,8 @@ impl LifecycleRunner {
                 continue;
             }
             let flow_name = format!("__lifecycle_{}_{idx}", lifecycle_event_slug(event));
-            let flow = atman_dsl::ast::FlowDecl {
-                name: atman_dsl::ast::Ident {
+            let flow = atman_rt::ast::FlowDecl {
+                name: atman_rt::ast::Ident {
                     name: flow_name.clone(),
                     span: decl.span,
                 },
@@ -65,7 +65,7 @@ impl LifecycleRunner {
                 contract: None,
                 body: decl.body.clone(),
             };
-            let file = atman_dsl::ast::File {
+            let file = atman_rt::ast::File {
                 flows: vec![flow],
                 routes: Vec::new(),
                 default_route: None,

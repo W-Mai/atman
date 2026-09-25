@@ -992,8 +992,8 @@ fn finalize_workspace(
 
 struct PreparedFlowAgent {
     path: PathBuf,
-    flow: atman_dsl::ast::FlowDecl,
-    flows: std::collections::HashMap<String, atman_dsl::ast::FlowDecl>,
+    flow: atman_rt::ast::FlowDecl,
+    flows: std::collections::HashMap<String, atman_rt::ast::FlowDecl>,
 }
 
 async fn prepare_flow_agent(
@@ -1158,7 +1158,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
                 .iter()
                 .find(|parameter| parameter.name.name == "model")
                 .and_then(|parameter| match parameter.default.as_ref() {
-                    Some(atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Str(model))) => {
+                    Some(atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Str(model))) => {
                         Some(model.clone())
                     }
                     _ => None,
@@ -1643,7 +1643,7 @@ async fn run_prepared_flow_agent(
 }
 
 fn resolve_flow_arguments(
-    flow: &atman_dsl::ast::FlowDecl,
+    flow: &atman_rt::ast::FlowDecl,
     args: &ToolArgs,
 ) -> Result<Vec<(String, Value)>, RuntimeError> {
     let mut flow_args = Vec::new();
@@ -1720,7 +1720,7 @@ fn inherited_context_snapshot(parent: &Arc<Mutex<Vec<Message>>>) -> Vec<Message>
 }
 
 fn invocation_user_message(
-    flow: &atman_dsl::ast::FlowDecl,
+    flow: &atman_rt::ast::FlowDecl,
     flow_args: &[(String, Value)],
 ) -> Result<Option<String>, RuntimeError> {
     let Some((_, parameter_value)) = flow.contract.as_ref().and_then(|contract| {
@@ -1737,7 +1737,7 @@ fn invocation_user_message(
     }) else {
         return Ok(None);
     };
-    let atman_dsl::ast::Expr::Ident(parameter_name) = parameter_value else {
+    let atman_rt::ast::Expr::Ident(parameter_name) = parameter_value else {
         return Err(RuntimeError::ToolFailed(
             "flow.spawn: invocation user_message must reference a string flow parameter".into(),
         ));
@@ -1754,7 +1754,7 @@ fn invocation_user_message(
     };
     if !matches!(
         &parameter.ty,
-        atman_dsl::ast::TypeExpr::Named(name) if name.name == "string"
+        atman_rt::ast::TypeExpr::Named(name) if name.name == "string"
     ) {
         return Err(RuntimeError::ToolFailed(format!(
             "flow.spawn: invocation user_message parameter `{parameter_name}` must be a string"
@@ -1771,7 +1771,7 @@ fn invocation_user_message(
             actual: value.kind_name().into(),
         }),
         None => match parameter.default.as_ref() {
-            Some(atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Str(value))) => {
+            Some(atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Str(value))) => {
                 Ok(Some(value.clone()))
             }
             Some(_) => Err(RuntimeError::ToolFailed(format!(
@@ -1797,7 +1797,7 @@ fn seed_child_message_context(ctx: &ToolCtx, prompt: String) -> Result<(), Runti
 
 fn seed_parent_handoff_context(
     ctx: &ToolCtx,
-    flow: &atman_dsl::ast::FlowDecl,
+    flow: &atman_rt::ast::FlowDecl,
     child_run_id: &FlowRunId,
     invocation_prompt: Option<&str>,
     inherited_parent_context: bool,

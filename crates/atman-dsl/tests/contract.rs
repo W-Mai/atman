@@ -33,7 +33,7 @@ fn contract_roundtrip_stable() {
 
 #[test]
 fn subflow_node_parses_with_positional_args() {
-    use atman_dsl::ast::{Arg, Expr, Node, Stmt};
+    use atman_rt::ast::{Arg, Expr, Node, Stmt};
 
     let src = r#"flow parent(q: string) -> Report {
     r = subflow(child, q, 42)

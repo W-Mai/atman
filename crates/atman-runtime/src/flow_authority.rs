@@ -198,7 +198,7 @@ impl FlowIdentity {
     }
 }
 
-pub fn contract_allows_shell(contract: Option<&atman_dsl::ast::Contract>) -> bool {
+pub fn contract_allows_shell(contract: Option<&atman_rt::ast::Contract>) -> bool {
     contract.is_some_and(|contract| {
         contract.blocks.iter().any(|block| {
             block.name.name == "capabilities"
@@ -206,7 +206,7 @@ pub fn contract_allows_shell(contract: Option<&atman_dsl::ast::Contract>) -> boo
                     name.name == "shell"
                         && matches!(
                             value,
-                            atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Bool(true))
+                            atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Bool(true))
                         )
                 })
         })

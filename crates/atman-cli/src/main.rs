@@ -1339,7 +1339,7 @@ async fn run_slash_command_in_turn(
 }
 
 type SlashCommandParsed = (
-    atman_dsl::ast::File,
+    atman_rt::ast::File,
     String,
     Vec<(String, Value)>,
     Option<PathBuf>,
@@ -2013,7 +2013,7 @@ async fn cmd_repl_once(
     session.refresh_todos_from_store_async().await;
     session.refresh_plans_from_store_async().await;
     let (lifecycle_tx, mut lifecycle_rx) =
-        mpsc::unbounded_channel::<atman_dsl::ast::LifecycleEvent>();
+        mpsc::unbounded_channel::<atman_rt::ast::LifecycleEvent>();
     executor.tool_ctx.lifecycle_fire_tx = Some(lifecycle_tx);
     if use_tui {
         let resolver = std::sync::Arc::new(atman_tui::prompt_resolver::TuiPromptResolver::new(
@@ -2035,7 +2035,7 @@ async fn cmd_repl_once(
         .await;
     }
     lifecycles
-        .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionStart)
+        .fire(&executor, atman_rt::ast::LifecycleEvent::SessionStart)
         .await;
 
     if let Err(e) = run_boot_flow(&executor, &reporter).await {
@@ -3279,7 +3279,7 @@ async fn cmd_repl_once(
     }
 
     lifecycles
-        .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionEnd)
+        .fire(&executor, atman_rt::ast::LifecycleEvent::SessionEnd)
         .await;
 
     if let Some(tr) = &executor.tool_ctx.term_registry {
@@ -4787,7 +4787,7 @@ async fn run_turn_with_interjection(
         session.begin_turn_with_presentation(user_msg, presentation);
     }
     lifecycles
-        .fire(executor, atman_dsl::ast::LifecycleEvent::TurnStart)
+        .fire(executor, atman_rt::ast::LifecycleEvent::TurnStart)
         .await;
 
     let flow_fut = async {
@@ -4842,7 +4842,7 @@ async fn run_turn_with_interjection(
         Err(e) => reporter.error(format!("error: {e}")),
     }
     lifecycles
-        .fire(executor, atman_dsl::ast::LifecycleEvent::TurnEnd)
+        .fire(executor, atman_rt::ast::LifecycleEvent::TurnEnd)
         .await;
     session.end_turn();
     if succeeded && session.record_successful_flow().is_some() {
@@ -5710,7 +5710,7 @@ fn select_auto_snapshot(env_value: Option<&str>, config_value: Option<bool>) -> 
         || config_value.unwrap_or(false)
 }
 
-fn auto_snapshot_flows(source_path: &Path, source: &str, parsed: &atman_dsl::ast::File) {
+fn auto_snapshot_flows(source_path: &Path, source: &str, parsed: &atman_rt::ast::File) {
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let registry = match atman_runtime::flow_registry::FlowRegistry::open(&project_root) {
         Ok(r) => r,
@@ -7767,7 +7767,7 @@ async fn cmd_flow_test(path: &Path, bless: bool) -> Result<()> {
         std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let file = atman_dsl::parse::parse_file(&source)
         .with_context(|| format!("parse {}", path.display()))?;
-    let cases: Vec<&atman_dsl::ast::FlowDecl> =
+    let cases: Vec<&atman_rt::ast::FlowDecl> =
         file.flows.iter().filter(|f| f.params.is_empty()).collect();
     let skipped: Vec<String> = file
         .flows

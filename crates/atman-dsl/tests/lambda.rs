@@ -1,11 +1,11 @@
-use atman_dsl::ast::{Expr, Node};
 use atman_dsl::parse::parse_file;
 use atman_dsl::print::print_file;
+use atman_rt::ast::{Expr, Node};
 
 fn parse_bind_expr(src: &str) -> Expr {
     let file = parse_file(&format!("flow t() -> string {{ x = {src} }}")).expect("parse");
     match &file.flows[0].body[0] {
-        atman_dsl::ast::Stmt::Bind { value, .. } => value.clone(),
+        atman_rt::ast::Stmt::Bind { value, .. } => value.clone(),
         _ => panic!("expected bind stmt"),
     }
 }
@@ -52,7 +52,7 @@ fn logical_or_not_lambda() {
     let expr = parse_bind_expr("a || b");
     match expr {
         Expr::Binary {
-            op: atman_dsl::ast::BinOp::Or,
+            op: atman_rt::ast::BinOp::Or,
             ..
         } => {}
         other => panic!("expected Binary Or, got {other:?}"),
@@ -107,9 +107,9 @@ fn dynamic_fanout_parses_all() {
     let src = r#"flow t() -> string { r = fanout tasks { |t| t } collect: all return "ok" }"#;
     let file = parse_file(src).expect("parse");
     match &file.flows[0].body[0] {
-        atman_dsl::ast::Stmt::Bind { value, .. } => match value {
+        atman_rt::ast::Stmt::Bind { value, .. } => match value {
             Expr::Node(Node::DynamicFanout { collect, .. }) => {
-                assert!(matches!(collect, atman_dsl::ast::FanoutCollect::All));
+                assert!(matches!(collect, atman_rt::ast::FanoutCollect::All));
             }
             other => panic!("expected DynamicFanout, got {other:?}"),
         },
@@ -122,9 +122,9 @@ fn dynamic_fanout_parses_first() {
     let src = r#"flow t() -> string { r = fanout tasks { |t| t } collect: first return "ok" }"#;
     let file = parse_file(src).expect("parse");
     match &file.flows[0].body[0] {
-        atman_dsl::ast::Stmt::Bind { value, .. } => match value {
+        atman_rt::ast::Stmt::Bind { value, .. } => match value {
             Expr::Node(Node::DynamicFanout { collect, .. }) => {
-                assert!(matches!(collect, atman_dsl::ast::FanoutCollect::First));
+                assert!(matches!(collect, atman_rt::ast::FanoutCollect::First));
             }
             other => panic!("expected DynamicFanout, got {other:?}"),
         },

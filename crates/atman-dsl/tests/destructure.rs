@@ -1,7 +1,7 @@
-use atman_dsl::ast::{Pattern, PatternFieldBinding, Stmt};
 use atman_dsl::{parse::parse_file, print::print_file};
+use atman_rt::ast::{Pattern, PatternFieldBinding, Stmt};
 
-fn parse_flow(body: &str) -> atman_dsl::ast::File {
+fn parse_flow(body: &str) -> atman_rt::ast::File {
     let src = format!("flow f() {{\n{body}\n}}\n");
     parse_file(&src).unwrap_or_else(|e| panic!("parse: {e}\n---\n{src}"))
 }
