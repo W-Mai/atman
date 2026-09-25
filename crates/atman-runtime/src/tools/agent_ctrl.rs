@@ -1940,22 +1940,18 @@ fn emit_flow_agent_start(ctx: &ToolCtx, run_id: &FlowRunId, flow_name: &str) {
                 .filter(|candidate| candidate != run_id)
         });
     let parent_node_id = ctx.current_node_id.clone();
+    let start = atman_rt::FlowStartFact {
+        run_id: run_id.clone(),
+        flow_name: flow_name.into(),
+        parent_run_id,
+        parent_node_id,
+        spawned: true,
+    };
     if let Some(sink) = &ctx.events {
-        sink.emit(Event::FlowStart {
-            run_id: run_id.clone(),
-            flow_name: flow_name.into(),
-            parent_run_id: parent_run_id.clone(),
-            parent_node_id: parent_node_id.clone(),
-            spawned: true,
-        });
+        sink.emit(start.clone().into());
     }
     if let Some(tx) = &ctx.stream_tx {
-        let _ = tx.send(crate::stream::StreamFrame::FlowStart {
-            run_id: run_id.0.to_string(),
-            flow_name: flow_name.into(),
-            parent_run_id: parent_run_id.as_ref().map(|r| r.0.to_string()),
-            parent_node_id,
-        });
+        let _ = tx.send(start.into());
     }
 }
 
@@ -1970,11 +1966,14 @@ fn emit_child_flow_end(ctx: &ToolCtx, run_id: &FlowRunId, status: &FlowStatus) {
             })
     });
     if let Some(sink) = &ctx.events {
-        sink.emit(Event::FlowEnd {
-            run_id: run_id.clone(),
-            flow_name: "agent.sub".into(),
-            status: status.clone(),
-        });
+        sink.emit(
+            atman_rt::FlowEndFact {
+                run_id: run_id.clone(),
+                flow_name: "agent.sub".into(),
+                status: status.clone(),
+            }
+            .into(),
+        );
     }
     if let Some(tx) = &ctx.stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::FlowDone {
@@ -2003,9 +2002,11 @@ fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentSpawn, FlowRegistry, FlowRunStatus, extract_flow_version, inherited_context_snapshot,
-        prepare_flow_agent, resolve_flow_arguments, terminal_then_emit,
+        AgentSpawn, FlowRegistry, FlowRunStatus, emit_child_flow_end, emit_flow_agent_start,
+        extract_flow_version, inherited_context_snapshot, prepare_flow_agent,
+        resolve_flow_arguments, terminal_then_emit,
     };
+    use crate::event::{Event, EventSink, FlowRunId, FlowStatus};
     use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
     use crate::permission::PermissionBroker;
     use crate::provider::ProviderRegistry;
@@ -2013,6 +2014,47 @@ mod tests {
     use crate::{InvocationEnv, value::Value};
     use std::cell::Cell;
     use std::sync::Arc;
+
+    #[test]
+    fn spawned_flow_facts_preserve_event_and_stream_identity() {
+        let parent = FlowRunId::now();
+        let child = FlowRunId::now();
+        let sink = EventSink::new();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(4);
+        let mut ctx = ToolCtx::new();
+        ctx.events = Some(sink.clone());
+        ctx.stream_tx = Some(tx);
+        ctx.flow_run_id = Some(parent.clone());
+        ctx.current_node_id = Some("2".into());
+
+        emit_flow_agent_start(&ctx, &child, "worker");
+        assert!(matches!(
+            sink.snapshot().last(),
+            Some(Event::FlowStart {
+                run_id,
+                flow_name,
+                parent_run_id: Some(parent_run_id),
+                parent_node_id: Some(parent_node_id),
+                spawned: true,
+            }) if *run_id == child && flow_name == "worker" && *parent_run_id == parent && parent_node_id == "2"
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(crate::stream::StreamFrame::FlowStart {
+                run_id,
+                flow_name,
+                parent_run_id: Some(parent_run_id),
+                parent_node_id: Some(parent_node_id),
+            }) if run_id == child.to_string() && flow_name == "worker" && parent_run_id == parent.to_string() && parent_node_id == "2"
+        ));
+
+        emit_child_flow_end(&ctx, &child, &FlowStatus::Ok);
+        assert!(matches!(
+            sink.snapshot().last(),
+            Some(Event::FlowEnd { run_id, flow_name, status: FlowStatus::Ok })
+                if *run_id == child && flow_name == "agent.sub"
+        ));
+    }
 
     struct SandboxProbe;
 
