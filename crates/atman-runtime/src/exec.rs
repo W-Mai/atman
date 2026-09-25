@@ -4,7 +4,7 @@ use std::{collections::HashMap, path::PathBuf};
 use atman_rt::ast::{Arg, CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
 use atman_rt::{
     Engine, HostFuture, LoopExit, LoopHost, PatternBindError, Preflight, StatementExecution,
-    StatementHost, bind_pattern, run_loop,
+    StatementHost, bind_pattern, run_loop, run_when,
 };
 
 use crate::error::RuntimeError;
@@ -373,24 +373,13 @@ fn exec_stmt<'a>(
                 (StmtOutcome::Continue, preview)
             }
             Stmt::When { cond, body } => {
-                let c = eval_expr(cond, env, ctx).await;
-                let truthy = match c {
-                    Value::Bool(b) => b,
-                    Value::Unit => false,
-                    Value::Err(e) => {
-                        return (StmtOutcome::Err(e), None);
-                    }
-                    _ => true,
-                };
-                if truthy {
+                let condition = eval_expr(cond, env, ctx).await;
+                let (outcome, taken) = run_when(condition, || {
                     let prefix = ctx.current_node_id.clone().unwrap_or_default();
-                    (
-                        exec_stmts_prefixed(body, env, ctx, prefix).await,
-                        Some("true".into()),
-                    )
-                } else {
-                    (StmtOutcome::Continue, Some("false".into()))
-                }
+                    exec_stmts_prefixed(body, env, ctx, prefix)
+                })
+                .await;
+                (outcome, taken.map(|taken| taken.to_string()))
             }
             Stmt::Return { value } => {
                 let v = eval_expr(value, env, ctx).await;

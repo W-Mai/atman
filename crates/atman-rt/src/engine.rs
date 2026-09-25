@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, format, string::String};
 use core::{future::Future, pin::Pin};
 
-use crate::ast::Stmt;
+use crate::{Value, ast::Stmt};
 
 pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type StatementExecution<V, E> = (StatementOutcome<V, E>, Option<String>);
@@ -57,6 +57,22 @@ pub async fn run_loop<H: LoopHost>(
             other => return LoopExit::Interrupted(other),
         }
         iteration += 1;
+    }
+}
+
+/// Evaluates a condition and runs its body only when the value is truthy.
+pub async fn run_when<P, E, F, Fut>(
+    condition: Value<P, E>,
+    body: F,
+) -> (StatementOutcome<Value<P, E>, E>, Option<bool>)
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = StatementOutcome<Value<P, E>, E>>,
+{
+    match condition {
+        Value::Err(error) => (StatementOutcome::Err(error), None),
+        Value::Unit | Value::Bool(false) => (StatementOutcome::Continue, Some(false)),
+        _ => (body().await, Some(true)),
     }
 }
 
@@ -351,5 +367,36 @@ mod tests {
                 "end:iter[1]",
             ]
         );
+    }
+
+    #[test]
+    fn when_skips_false_values_and_propagates_condition_errors() {
+        let mut called = false;
+        let (outcome, taken) = run_ready(run_when(Value::<(), &'static str>::Unit, || {
+            called = true;
+            async { StatementOutcome::Return(Value::Int(42)) }
+        }));
+        assert!(matches!(outcome, StatementOutcome::Continue));
+        assert_eq!(taken, Some(false));
+        assert!(!called);
+
+        let (outcome, taken) = run_ready(run_when(
+            Value::<(), &'static str>::Err("condition"),
+            || {
+                called = true;
+                async { StatementOutcome::Return(Value::Int(42)) }
+            },
+        ));
+        assert!(matches!(outcome, StatementOutcome::Err("condition")));
+        assert_eq!(taken, None);
+        assert!(!called);
+
+        let (outcome, taken) = run_ready(run_when(Value::<(), &'static str>::Int(1), || {
+            called = true;
+            async { StatementOutcome::Return(Value::Int(42)) }
+        }));
+        assert!(matches!(outcome, StatementOutcome::Return(Value::Int(42))));
+        assert_eq!(taken, Some(true));
+        assert!(called);
     }
 }
