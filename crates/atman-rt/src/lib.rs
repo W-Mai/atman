@@ -8,6 +8,7 @@ pub mod cancel;
 pub mod engine;
 pub mod env;
 pub mod expr;
+pub mod lifecycle;
 pub mod ops;
 pub mod pattern;
 pub mod status;
@@ -21,6 +22,7 @@ pub use engine::{
 };
 pub use env::Env;
 pub use expr::{ExpressionEffect, ExpressionHost, eval_expr};
+pub use lifecycle::{FlowEndFact, FlowLifecycle, FlowStartFact, StartedFlow};
 pub use ops::{EvalError, HostValueOps, ValueError, eval_binary, eval_literal, eval_unary};
 pub use pattern::{PatternBindError, PatternValue, bind_pattern};
 pub use status::{FlowTermination, classify_outcome, classify_result};

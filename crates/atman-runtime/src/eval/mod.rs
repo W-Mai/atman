@@ -1498,31 +1498,21 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 Ok(guard) => guard,
                 Err(error) => return Value::Err(error),
             };
+            let (running, start) = atman_rt::FlowLifecycle::new(atman_rt::FlowStartFact {
+                run_id: sub_run_id.clone(),
+                flow_name: name.name.clone(),
+                parent_run_id: Some(parent_run_id.clone()),
+                parent_node_id: ctx.current_node_id.clone(),
+                spawned: false,
+            })
+            .start();
             if let Some(sink) = ctx.events {
-                sink.emit(crate::event::Event::FlowStart {
-                    run_id: sub_run_id.clone(),
-                    flow_name: name.name.clone(),
-                    parent_run_id: Some(parent_run_id.clone()),
-                    parent_node_id: ctx.current_node_id.clone(),
-                    spawned: false,
-                });
+                sink.emit(start.clone().into());
             }
             if let Some(session) = ctx.session_runtime.as_ref() {
-                let _ = session
-                    .stream_tx()
-                    .send(crate::stream::StreamFrame::FlowStart {
-                        run_id: sub_run_id.0.to_string(),
-                        flow_name: name.name.clone(),
-                        parent_run_id: Some(parent_run_id.0.to_string()),
-                        parent_node_id: ctx.current_node_id.clone(),
-                    });
+                let _ = session.stream_tx().send(start.into());
             } else if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
-                let _ = tx.send(crate::stream::StreamFrame::FlowStart {
-                    run_id: sub_run_id.0.to_string(),
-                    flow_name: name.name.clone(),
-                    parent_run_id: Some(parent_run_id.0.to_string()),
-                    parent_node_id: ctx.current_node_id.clone(),
-                });
+                let _ = tx.send(start.into());
             }
             let mut sub_tool_ctx = ctx.tool_ctx.clone();
             sub_tool_ctx.flow_run_id = Some(sub_run_id.clone());
@@ -1548,12 +1538,9 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 atman_rt::StatementOutcome::LoopContinue => (Value::Unit, status, true),
             };
             let cancelled = matches!(status, crate::event::FlowStatus::Cancelled);
+            let end = running.finish(status);
             if let Some(sink) = ctx.events {
-                sink.emit(crate::event::Event::FlowEnd {
-                    run_id: sub_run_id.clone(),
-                    flow_name: name.name.clone(),
-                    status,
-                });
+                sink.emit(end.into());
             }
             if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
                 let _ = tx.send(crate::stream::StreamFrame::FlowDone {

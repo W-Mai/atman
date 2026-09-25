@@ -275,22 +275,17 @@ impl Executor {
             )
         });
         let _lifecycle_guard = flow_registry.lifecycle_guard(&run_id);
-        self.events.emit(Event::FlowStart {
+        let (running, start) = atman_rt::FlowLifecycle::new(atman_rt::FlowStartFact {
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),
             parent_run_id: None,
             parent_node_id: None,
             spawned: false,
-        });
+        })
+        .start();
+        self.events.emit(start.clone().into());
         if let Some(sess) = session.as_ref() {
-            let _ = sess
-                .stream_tx()
-                .send(crate::stream::StreamFrame::FlowStart {
-                    run_id: run_id.0.to_string(),
-                    flow_name: flow.name.name.clone(),
-                    parent_run_id: None,
-                    parent_node_id: None,
-                });
+            let _ = sess.stream_tx().send(start.into());
         }
         let graph = crate::nodegraph::extract_graph(flow);
         self.events.emit(Event::FlowGraph {
@@ -389,11 +384,7 @@ impl Executor {
             tr.finish(tid, ts);
         }
         drop(_lifecycle_guard);
-        self.events.emit(Event::FlowEnd {
-            run_id: run_id.clone(),
-            flow_name: flow.name.name.clone(),
-            status: status.clone(),
-        });
+        self.events.emit(running.finish(status.clone()).into());
         if let Some(sess) = session.as_ref() {
             let _ = sess.stream_tx().send(crate::stream::StreamFrame::FlowDone {
                 run_id: run_id.0.to_string(),

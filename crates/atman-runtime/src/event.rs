@@ -408,6 +408,28 @@ pub enum Event {
     },
 }
 
+impl From<atman_rt::FlowStartFact<FlowRunId, String>> for Event {
+    fn from(fact: atman_rt::FlowStartFact<FlowRunId, String>) -> Self {
+        Self::FlowStart {
+            run_id: fact.run_id,
+            flow_name: fact.flow_name,
+            parent_run_id: fact.parent_run_id,
+            parent_node_id: fact.parent_node_id,
+            spawned: fact.spawned,
+        }
+    }
+}
+
+impl From<atman_rt::FlowEndFact<FlowRunId, FlowStatus>> for Event {
+    fn from(fact: atman_rt::FlowEndFact<FlowRunId, FlowStatus>) -> Self {
+        Self::FlowEnd {
+            run_id: fact.run_id,
+            flow_name: fact.flow_name,
+            status: fact.status,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum FlowNodeStatus {

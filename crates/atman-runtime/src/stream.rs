@@ -324,6 +324,17 @@ pub enum StreamFrame {
     Unknown,
 }
 
+impl From<atman_rt::FlowStartFact<crate::event::FlowRunId, String>> for StreamFrame {
+    fn from(fact: atman_rt::FlowStartFact<crate::event::FlowRunId, String>) -> Self {
+        Self::FlowStart {
+            run_id: fact.run_id.0.to_string(),
+            flow_name: fact.flow_name,
+            parent_run_id: fact.parent_run_id.map(|id| id.0.to_string()),
+            parent_node_id: fact.parent_node_id,
+        }
+    }
+}
+
 /// Extract the run_id (or flow_run_id) from any StreamFrame variant that carries one.
 /// Used to route frames to the correct sub-agent's entry / TUI item.
 pub fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
