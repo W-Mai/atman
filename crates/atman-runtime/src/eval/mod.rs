@@ -5,9 +5,7 @@ pub(crate) mod llm_dispatch;
 pub(crate) mod llm_parse;
 
 use atman_rt::ast::{Arg, Expr, Node};
-use atman_rt::{eval_binary, eval_literal, eval_unary};
-
-use std::sync::Arc;
+use atman_rt::{ExpressionEffect, ExpressionHost};
 
 use crate::error::RuntimeError;
 use crate::streaming::LlmStream;
@@ -51,7 +49,57 @@ impl<'a> EvalCtx<'a> {
 }
 
 pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxFut<'a, Value> {
-    Box::pin(async move { eval_expr_inner(expr, env, ctx).await })
+    atman_rt::eval_expr(expr, env, ctx)
+}
+
+impl ExpressionHost for EvalCtx<'_> {
+    type Payload = AtmanPayload;
+    type Error = RuntimeError;
+
+    fn undefined_var(&self, name: String) -> RuntimeError {
+        RuntimeError::UndefinedVar(name)
+    }
+
+    fn undefined_field(&self, name: String) -> RuntimeError {
+        RuntimeError::UndefinedVar(name)
+    }
+
+    fn eval_external<'a>(
+        &'a self,
+        effect: ExpressionEffect<'a>,
+        env: &'a Env,
+    ) -> BoxFut<'a, Value> {
+        Box::pin(async move {
+            match effect {
+                ExpressionEffect::FileRef(file) => {
+                    let path = if std::path::Path::new(file).is_relative() {
+                        if let Some(dir) = &self.source_dir {
+                            dir.join(file)
+                        } else {
+                            std::path::PathBuf::from(file)
+                        }
+                    } else {
+                        std::path::PathBuf::from(file)
+                    };
+                    match tokio::fs::read_to_string(&path).await {
+                        Ok(text) => Value::Str(text),
+                        Err(error) => Value::Err(RuntimeError::ToolFailed(format!(
+                            "@\"{}\": {error}",
+                            path.display()
+                        ))),
+                    }
+                }
+                ExpressionEffect::Node(node) => eval_node(node, env, self).await,
+                ExpressionEffect::Call { .. } => Value::Err(RuntimeError::ToolFailed(
+                    "bare function call not supported; use namespaced tool call".into(),
+                )),
+                ExpressionEffect::Pipe { lhs, rhs } => eval_pipe(lhs, rhs, env, self).await,
+                ExpressionEffect::Annotated { expr, annotation } => {
+                    eval_annotated(expr, annotation, env, self).await
+                }
+            }
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -167,95 +215,6 @@ pub(super) fn append_system_context(system: &mut Option<String>, parts: Vec<Stri
         None => {
             *system = Some(parts.join("\n\n"));
         }
-    }
-}
-
-async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
-    match expr {
-        Expr::Literal(lit) => eval_literal(lit),
-        Expr::Ident(id) => match env.lookup(&id.name) {
-            Some(v) => v.clone(),
-            None => Value::Err(RuntimeError::UndefinedVar(id.name.clone())),
-        },
-        Expr::FileRef(f) => {
-            let path = if std::path::Path::new(&f.path).is_relative() {
-                if let Some(dir) = &ctx.source_dir {
-                    dir.join(&f.path)
-                } else {
-                    std::path::PathBuf::from(&f.path)
-                }
-            } else {
-                std::path::PathBuf::from(&f.path)
-            };
-            match tokio::fs::read_to_string(&path).await {
-                Ok(s) => Value::Str(s),
-                Err(e) => Value::Err(RuntimeError::ToolFailed(format!(
-                    "@\"{}\": {e}",
-                    path.display()
-                ))),
-            }
-        }
-        Expr::Member { base, field } => {
-            let base_v = eval_expr(base, env, ctx).await;
-            if base_v.is_err() {
-                return base_v;
-            }
-            match base_v.field(&field.name) {
-                Some(v) => v.clone(),
-                None => Value::Err(RuntimeError::UndefinedVar(format!(".{}", field.name))),
-            }
-        }
-        Expr::Binary { op, left, right } => {
-            let l = eval_expr(left, env, ctx).await;
-            if l.is_err() {
-                return l;
-            }
-            let r = eval_expr(right, env, ctx).await;
-            if r.is_err() {
-                return r;
-            }
-            eval_binary(*op, &l, &r)
-        }
-        Expr::Unary { op, operand } => {
-            let v = eval_expr(operand, env, ctx).await;
-            if v.is_err() {
-                return v;
-            }
-            eval_unary(*op, &v)
-        }
-        Expr::List(items) => {
-            let mut acc = Vec::with_capacity(items.len());
-            for item in items {
-                let v = eval_expr(item, env, ctx).await;
-                if v.is_err() {
-                    return v;
-                }
-                acc.push(v);
-            }
-            Value::List(acc)
-        }
-        Expr::Struct(fields) => {
-            let mut acc = Vec::with_capacity(fields.len());
-            for (k, v) in fields {
-                let val = eval_expr(v, env, ctx).await;
-                if val.is_err() {
-                    return val;
-                }
-                acc.push((k.name.clone(), val));
-            }
-            Value::Struct(acc)
-        }
-        Expr::Node(node) => eval_node(node, env, ctx).await,
-        Expr::Call { .. } => Value::Err(RuntimeError::ToolFailed(
-            "bare function call not supported; use namespaced tool call".into(),
-        )),
-        Expr::Pipe { lhs, rhs } => eval_pipe(lhs, rhs, env, ctx).await,
-        Expr::Annotated { expr, annotation } => eval_annotated(expr, annotation, env, ctx).await,
-        Expr::Lambda { params, body } => Value::Lambda {
-            params: params.clone(),
-            body: Arc::new((**body).clone()),
-            captured_env: env.clone(),
-        },
     }
 }
 
