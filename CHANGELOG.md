@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.13.2] — 2026-09-25
+
 ### ✨ Features
 
 - **Formula setting in TUI** — Ctrl+P opens a formula display picker that saves rendered or raw Markdown mode.
