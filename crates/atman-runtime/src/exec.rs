@@ -1,7 +1,10 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use atman_rt::ast::{Arg, CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
-use atman_rt::{PatternBindError, bind_pattern};
+use atman_rt::{
+    Engine, HostFuture, PatternBindError, Preflight, StatementExecution, StatementHost,
+    bind_pattern,
+};
 
 use crate::error::RuntimeError;
 use crate::eval::{EvalCtx, eval_expr};
@@ -11,19 +14,13 @@ use crate::value::Value;
 
 type Env = atman_rt::Env<Value>;
 
-pub enum StmtOutcome {
-    Continue,
-    Return(Value),
-    Err(RuntimeError),
-    LoopBreak,
-    LoopContinue,
-}
+type StmtOutcome = atman_rt::StatementOutcome<Value, RuntimeError>;
 
 pub fn exec_stmts<'a>(
     stmts: &'a [Stmt],
     env: &'a mut Env,
     ctx: &'a EvalCtx<'a>,
-) -> BoxFut<'a, StmtOutcome> {
+) -> BoxFut<'a, atman_rt::StatementOutcome<Value, RuntimeError>> {
     exec_stmts_prefixed(stmts, env, ctx, String::new())
 }
 
@@ -32,63 +29,81 @@ pub fn exec_stmts_prefixed<'a>(
     env: &'a mut Env,
     ctx: &'a EvalCtx<'a>,
     prefix: String,
-) -> BoxFut<'a, StmtOutcome> {
+) -> BoxFut<'a, atman_rt::StatementOutcome<Value, RuntimeError>> {
     Box::pin(async move {
         let watches = collect_watches(stmts);
         let parent_node_id = ctx.current_node_id.clone();
-        for (i, stmt) in stmts.iter().enumerate() {
-            let node_id = if prefix.is_empty() {
-                format!("{i}")
-            } else {
-                format!("{prefix}.{i}")
-            };
-            // Check for pending L4 stop / L3 redirect between statements.
-            if let Some(session) = ctx.session_runtime.as_ref()
-                && let Some(turn_id) = ctx.turn_id.as_ref()
-            {
-                if let Some(inj) = session.peek_pending_l2_or_higher(turn_id) {
-                    match inj.level {
-                        crate::injection::InjectionLevel::L4HardStop => {
-                            session.mark_injection_consumed(&inj.id);
-                            emit_flow_node_start(ctx, &node_id, stmt, parent_node_id.as_deref());
-                            emit_flow_node_end(
-                                ctx,
-                                &node_id,
-                                &StmtOutcome::Continue,
-                                parent_node_id.as_deref(),
-                                Some("cancelled: hard stop"),
-                            );
-                            return StmtOutcome::Err(RuntimeError::Cancelled(
-                                "hard stop from user".into(),
-                            ));
-                        }
-                        crate::injection::InjectionLevel::L3Redirect => {
-                            if let Some(target) = inj.redirect_target.clone() {
-                                session.mark_injection_consumed(&inj.id);
-                                return StmtOutcome::Err(RuntimeError::Redirect(target));
-                            }
-                        }
-                        _ => {}
-                    }
+        let host = AtmanStatementHost { env, ctx, watches };
+        Engine::new(host)
+            .run_statements(stmts, &prefix, parent_node_id.as_deref())
+            .await
+    })
+}
+
+struct AtmanStatementHost<'a> {
+    env: &'a mut Env,
+    ctx: &'a EvalCtx<'a>,
+    watches: HashMap<String, Vec<&'a WatchDecl>>,
+}
+
+impl StatementHost for AtmanStatementHost<'_> {
+    type Value = Value;
+    type Error = RuntimeError;
+
+    fn preflight(&mut self, _stmt: &Stmt, _node_id: &str) -> Preflight<Self::Error> {
+        let Some(session) = self.ctx.session_runtime.as_ref() else {
+            return Preflight::Continue;
+        };
+        let Some(turn_id) = self.ctx.turn_id.as_ref() else {
+            return Preflight::Continue;
+        };
+        let Some(inj) = session.peek_pending_l2_or_higher(turn_id) else {
+            return Preflight::Continue;
+        };
+        match inj.level {
+            crate::injection::InjectionLevel::L4HardStop => {
+                session.mark_injection_consumed(&inj.id);
+                Preflight::StopAfterNode {
+                    error: RuntimeError::Cancelled("hard stop from user".into()),
+                    preview: "cancelled: hard stop".into(),
                 }
             }
-            emit_flow_node_start(ctx, &node_id, stmt, parent_node_id.as_deref());
-            let stmt_ctx = ctx.with_node(&node_id);
-            let (outcome, preview) = exec_stmt(stmt, env, &stmt_ctx, &watches).await;
-            emit_flow_node_end(
-                ctx,
-                &node_id,
-                &outcome,
-                parent_node_id.as_deref(),
-                preview.as_deref(),
-            );
-            match outcome {
-                StmtOutcome::Continue => continue,
-                other => return other,
+            crate::injection::InjectionLevel::L3Redirect => {
+                if let Some(target) = inj.redirect_target.clone() {
+                    session.mark_injection_consumed(&inj.id);
+                    Preflight::Stop(RuntimeError::Redirect(target))
+                } else {
+                    Preflight::Continue
+                }
             }
+            _ => Preflight::Continue,
         }
-        StmtOutcome::Continue
-    })
+    }
+
+    fn node_start(&mut self, stmt: &Stmt, node_id: &str, parent_node_id: Option<&str>) {
+        emit_flow_node_start(self.ctx, node_id, stmt, parent_node_id);
+    }
+
+    fn execute<'a>(
+        &'a mut self,
+        stmt: &'a Stmt,
+        node_id: &'a str,
+    ) -> HostFuture<'a, StatementExecution<Value, RuntimeError>> {
+        Box::pin(async move {
+            let stmt_ctx = self.ctx.with_node(node_id);
+            exec_stmt(stmt, &mut *self.env, &stmt_ctx, &self.watches).await
+        })
+    }
+
+    fn node_end(
+        &mut self,
+        node_id: &str,
+        outcome: &StmtOutcome,
+        parent_node_id: Option<&str>,
+        preview: Option<&str>,
+    ) {
+        emit_flow_node_end(self.ctx, node_id, outcome, parent_node_id, preview);
+    }
 }
 
 fn emit_flow_node_start(

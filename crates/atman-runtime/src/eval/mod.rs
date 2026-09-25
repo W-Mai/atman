@@ -1576,8 +1576,8 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let outcome = crate::exec::exec_stmts(&target.body, &mut sub_env, &sub_ctx).await;
             drop(lifecycle_guard);
             let (result, status, ok) = match outcome {
-                crate::exec::StmtOutcome::Return(v) => (v, crate::event::FlowStatus::Ok, true),
-                crate::exec::StmtOutcome::Err(e) => {
+                atman_rt::StatementOutcome::Return(v) => (v, crate::event::FlowStatus::Ok, true),
+                atman_rt::StatementOutcome::Err(e) => {
                     let status = if matches!(&e, crate::error::RuntimeError::Cancelled(_)) {
                         crate::event::FlowStatus::Cancelled
                     } else {
@@ -1587,13 +1587,13 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     };
                     (Value::Err(e.clone()), status, false)
                 }
-                crate::exec::StmtOutcome::Continue => {
+                atman_rt::StatementOutcome::Continue => {
                     (Value::Unit, crate::event::FlowStatus::Ok, true)
                 }
-                crate::exec::StmtOutcome::LoopBreak => {
+                atman_rt::StatementOutcome::LoopBreak => {
                     (Value::Unit, crate::event::FlowStatus::Ok, true)
                 }
-                crate::exec::StmtOutcome::LoopContinue => {
+                atman_rt::StatementOutcome::LoopContinue => {
                     (Value::Unit, crate::event::FlowStatus::Ok, true)
                 }
             };
