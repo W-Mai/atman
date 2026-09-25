@@ -2,12 +2,13 @@ use std::{collections::HashMap, path::PathBuf};
 
 use atman_rt::ast::{Arg, CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
 
-use crate::env::Env;
 use crate::error::RuntimeError;
 use crate::eval::{EvalCtx, eval_expr};
 use crate::streaming::{WarnRule, WatchRules};
 use crate::tool::{BoxFut, Tool, ToolArgs, ToolCtx, ToolRegistry};
 use crate::value::Value;
+
+type Env = atman_rt::Env<Value>;
 
 fn bind_pattern(
     pattern: &atman_rt::ast::Pattern,

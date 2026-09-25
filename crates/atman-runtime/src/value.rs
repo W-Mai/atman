@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::env::Env;
 use crate::error::RuntimeError;
 use crate::hunk::EditProposal;
 use crate::message::Message;
@@ -23,7 +22,7 @@ pub enum Value {
     Lambda {
         params: Vec<Ident>,
         body: Arc<Expr>,
-        captured_env: Env,
+        captured_env: atman_rt::Env<Value>,
     },
 }
 

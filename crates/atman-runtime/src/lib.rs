@@ -8,7 +8,6 @@ pub mod config_migration;
 pub mod config_provider;
 pub mod context_plan;
 pub mod cost;
-pub mod env;
 pub mod error;
 pub mod eval;
 pub mod event;
@@ -107,7 +106,6 @@ pub use context_plan::{
     ContextTokenLanes, ContextUsageKey, ContextUsageRecord, ModelContextPlan, TokenUsageSource,
 };
 pub use cost::{CostSummary, summarize_by_model, summarize_by_provider, total};
-pub use env::Env;
 pub use error::RuntimeError;
 pub use eval::{EvalCtx, eval_expr};
 pub use event::{

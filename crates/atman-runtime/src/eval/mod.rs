@@ -7,11 +7,12 @@ use atman_rt::ast::{Arg, BinOp, Expr, Literal, Node, UnOp};
 
 use std::sync::Arc;
 
-use crate::env::Env;
 use crate::error::RuntimeError;
 use crate::streaming::LlmStream;
 use crate::tool::{BoxFut, ToolArgs, ToolCtx, ToolRegistry};
 use crate::value::Value;
+
+type Env = atman_rt::Env<Value>;
 
 pub(crate) fn is_evaluator_intrinsic(name: &str) -> bool {
     matches!(
