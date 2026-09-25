@@ -1,6 +1,7 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use atman_rt::ast::{Arg, CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
+use atman_rt::{PatternBindError, bind_pattern};
 
 use crate::error::RuntimeError;
 use crate::eval::{EvalCtx, eval_expr};
@@ -9,51 +10,6 @@ use crate::tool::{BoxFut, Tool, ToolArgs, ToolCtx, ToolRegistry};
 use crate::value::Value;
 
 type Env = atman_rt::Env<Value>;
-
-fn bind_pattern(
-    pattern: &atman_rt::ast::Pattern,
-    value: Value,
-    env: &mut Env,
-) -> Result<(), RuntimeError> {
-    use atman_rt::ast::{Pattern, PatternFieldBinding};
-    match pattern {
-        Pattern::Ident(id) => {
-            env.bind(id.name.clone(), value);
-            Ok(())
-        }
-        Pattern::Struct { fields } => {
-            let pairs = match value {
-                Value::Struct(pairs) => pairs,
-                other => {
-                    return Err(RuntimeError::TypeMismatch {
-                        expected: "struct for destructuring bind".into(),
-                        actual: other.kind_name().into(),
-                    });
-                }
-            };
-            for field in fields {
-                let Some((_, matched)) = pairs.iter().find(|(k, _)| k == &field.source.name) else {
-                    return Err(RuntimeError::MissingArg(format!(
-                        "destructure: struct has no field `{}`",
-                        field.source.name
-                    )));
-                };
-                match &field.binding {
-                    PatternFieldBinding::Same => {
-                        env.bind(field.source.name.clone(), matched.clone());
-                    }
-                    PatternFieldBinding::Rename(target) => {
-                        env.bind(target.name.clone(), matched.clone());
-                    }
-                    PatternFieldBinding::Nested(inner) => {
-                        bind_pattern(inner, matched.clone(), env)?;
-                    }
-                }
-            }
-            Ok(())
-        }
-    }
-}
 
 pub enum StmtOutcome {
     Continue,
@@ -345,7 +301,16 @@ fn exec_stmt<'a>(
                 }
                 let preview = value_preview(&v);
                 if let Err(e) = bind_pattern(name, v, env) {
-                    return (StmtOutcome::Err(e), None);
+                    let error = match e {
+                        PatternBindError::NonStruct { actual } => RuntimeError::TypeMismatch {
+                            expected: "struct for destructuring bind".into(),
+                            actual,
+                        },
+                        PatternBindError::MissingField { name } => RuntimeError::MissingArg(
+                            format!("destructure: struct has no field `{name}`"),
+                        ),
+                    };
+                    return (StmtOutcome::Err(error), None);
                 }
                 (StmtOutcome::Continue, preview)
             }

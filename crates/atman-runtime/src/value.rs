@@ -26,6 +26,19 @@ pub enum Value {
     },
 }
 
+impl atman_rt::PatternValue for Value {
+    fn struct_fields(&self) -> Option<&[(String, Self)]> {
+        match self {
+            Self::Struct(fields) => Some(fields),
+            _ => None,
+        }
+    }
+
+    fn kind_name(&self) -> &str {
+        Value::kind_name(self)
+    }
+}
+
 impl Value {
     pub fn is_err(&self) -> bool {
         matches!(self, Value::Err(_))
