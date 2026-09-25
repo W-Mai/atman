@@ -13,8 +13,8 @@ pub mod value;
 
 pub use ast::File as Program;
 pub use engine::{
-    Engine, HostFuture, LoopExit, LoopHost, Preflight, StatementExecution, StatementHost,
-    StatementOutcome, run_loop, run_when,
+    Engine, FlowExecution, FlowOutcome, HostFuture, LoopExit, LoopHost, Preflight,
+    StatementExecution, StatementHost, StatementOutcome, run_loop, run_when,
 };
 pub use env::Env;
 pub use expr::{ExpressionEffect, ExpressionHost, eval_expr};

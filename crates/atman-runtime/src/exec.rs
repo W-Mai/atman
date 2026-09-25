@@ -4,7 +4,7 @@ use std::{collections::HashMap, path::PathBuf};
 use atman_rt::ast::{Arg, CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
 use atman_rt::{
     Engine, HostFuture, LoopExit, LoopHost, PatternBindError, Preflight, StatementExecution,
-    StatementHost, bind_pattern, run_loop, run_when,
+    StatementHost, bind_pattern, run_loop,
 };
 
 use crate::error::RuntimeError;
@@ -90,7 +90,7 @@ impl LoopHost for AtmanLoopHost<'_> {
 }
 
 impl StatementHost for AtmanStatementHost<'_> {
-    type Value = Value;
+    type Payload = AtmanPayload;
     type Error = RuntimeError;
 
     fn preflight(&mut self, _stmt: &Stmt, _node_id: &str) -> Preflight<Self::Error> {
@@ -127,15 +127,84 @@ impl StatementHost for AtmanStatementHost<'_> {
         emit_flow_node_start(self.ctx, node_id, stmt, parent_node_id);
     }
 
-    fn execute<'a>(
+    fn evaluate<'a>(&'a mut self, expr: &'a Expr, node_id: &'a str) -> HostFuture<'a, Value> {
+        Box::pin(async move {
+            let stmt_ctx = self.ctx.with_node(node_id);
+            eval_expr(expr, self.env, &stmt_ctx).await
+        })
+    }
+
+    fn bind<'a>(
         &'a mut self,
-        stmt: &'a Stmt,
+        pattern: &'a atman_rt::ast::Pattern,
+        expr: &'a Expr,
         node_id: &'a str,
     ) -> HostFuture<'a, StatementExecution<Value, RuntimeError>> {
         Box::pin(async move {
             let stmt_ctx = self.ctx.with_node(node_id);
-            exec_stmt(stmt, &mut *self.env, &stmt_ctx, &self.watches).await
+            let watch_target = pattern.as_single_ident().map(|id| id.name.clone());
+            let value = if let Some(target) = watch_target.as_ref()
+                && let Some(watches) = self.watches.get(target)
+            {
+                match eval_bind_with_watches(expr, self.env, &stmt_ctx, watches).await {
+                    Ok(value) => value,
+                    Err(error) => return (StmtOutcome::Err(error), None),
+                }
+            } else {
+                eval_expr(expr, self.env, &stmt_ctx).await
+            };
+            if let Value::Err(error) = value {
+                return (StmtOutcome::Err(error), None);
+            }
+            let preview = value_preview(&value);
+            if let Err(error) = bind_pattern(pattern, value, self.env) {
+                let error = match error {
+                    PatternBindError::NonStruct { actual } => RuntimeError::TypeMismatch {
+                        expected: "struct for destructuring bind".into(),
+                        actual,
+                    },
+                    PatternBindError::MissingField { name } => RuntimeError::MissingArg(format!(
+                        "destructure: struct has no field `{name}`"
+                    )),
+                };
+                return (StmtOutcome::Err(error), None);
+            }
+            (StmtOutcome::Continue, preview)
         })
+    }
+
+    fn run_body<'a>(
+        &'a mut self,
+        body: &'a [Stmt],
+        node_id: &'a str,
+    ) -> HostFuture<'a, StmtOutcome> {
+        Box::pin(async move {
+            let stmt_ctx = self.ctx.with_node(node_id);
+            exec_stmts_prefixed(body, self.env, &stmt_ctx, node_id.to_string()).await
+        })
+    }
+
+    fn run_loop<'a>(
+        &'a mut self,
+        body: &'a [Stmt],
+        node_id: &'a str,
+    ) -> HostFuture<'a, StatementExecution<Value, RuntimeError>> {
+        Box::pin(async move {
+            let stmt_ctx = self.ctx.with_node(node_id);
+            let mut host = AtmanLoopHost {
+                body,
+                env: self.env,
+                ctx: &stmt_ctx,
+            };
+            match run_loop(&mut host, Some(node_id)).await {
+                LoopExit::Break => (StmtOutcome::Continue, Some("loop end".into())),
+                LoopExit::Interrupted(outcome) => (outcome, Some("loop interrupted".into())),
+            }
+        })
+    }
+
+    fn preview(&self, value: &Value) -> Option<String> {
+        value_preview(value)
     }
 
     fn node_end(
@@ -332,84 +401,6 @@ fn collect_watches(stmts: &[Stmt]) -> HashMap<String, Vec<&WatchDecl>> {
         }
     }
     out
-}
-
-fn exec_stmt<'a>(
-    stmt: &'a Stmt,
-    env: &'a mut Env,
-    ctx: &'a EvalCtx<'a>,
-    watches: &'a HashMap<String, Vec<&'a WatchDecl>>,
-) -> BoxFut<'a, (StmtOutcome, Option<String>)> {
-    Box::pin(async move {
-        match stmt {
-            Stmt::Bind { name, value } => {
-                let watch_target = name.as_single_ident().map(|id| id.name.clone());
-                let v = if let Some(target) = watch_target.as_ref()
-                    && let Some(ws) = watches.get(target)
-                {
-                    match eval_bind_with_watches(value, env, ctx, ws).await {
-                        Ok(v) => v,
-                        Err(e) => return (StmtOutcome::Err(e), None),
-                    }
-                } else {
-                    eval_expr(value, env, ctx).await
-                };
-                if let Value::Err(e) = v {
-                    return (StmtOutcome::Err(e), None);
-                }
-                let preview = value_preview(&v);
-                if let Err(e) = bind_pattern(name, v, env) {
-                    let error = match e {
-                        PatternBindError::NonStruct { actual } => RuntimeError::TypeMismatch {
-                            expected: "struct for destructuring bind".into(),
-                            actual,
-                        },
-                        PatternBindError::MissingField { name } => RuntimeError::MissingArg(
-                            format!("destructure: struct has no field `{name}`"),
-                        ),
-                    };
-                    return (StmtOutcome::Err(error), None);
-                }
-                (StmtOutcome::Continue, preview)
-            }
-            Stmt::When { cond, body } => {
-                let condition = eval_expr(cond, env, ctx).await;
-                let (outcome, taken) = run_when(condition, || {
-                    let prefix = ctx.current_node_id.clone().unwrap_or_default();
-                    exec_stmts_prefixed(body, env, ctx, prefix)
-                })
-                .await;
-                (outcome, taken.map(|taken| taken.to_string()))
-            }
-            Stmt::Return { value } => {
-                let v = eval_expr(value, env, ctx).await;
-                if let Value::Err(e) = v {
-                    return (StmtOutcome::Err(e), None);
-                }
-                let preview = value_preview(&v);
-                (StmtOutcome::Return(v), preview)
-            }
-            Stmt::Expr(e) => {
-                let v = eval_expr(e, env, ctx).await;
-                if let Value::Err(err) = v {
-                    return (StmtOutcome::Err(err), None);
-                }
-                let preview = value_preview(&v);
-                (StmtOutcome::Continue, preview)
-            }
-            Stmt::Watch(_) => (StmtOutcome::Continue, None),
-            Stmt::Loop { body } => {
-                let loop_node_id = ctx.current_node_id.clone();
-                let mut host = AtmanLoopHost { body, env, ctx };
-                match run_loop(&mut host, loop_node_id.as_deref()).await {
-                    LoopExit::Break => (StmtOutcome::Continue, Some("loop end".into())),
-                    LoopExit::Interrupted(outcome) => (outcome, Some("loop interrupted".into())),
-                }
-            }
-            Stmt::Break => (StmtOutcome::LoopBreak, Some("break".into())),
-            Stmt::Continue => (StmtOutcome::LoopContinue, Some("continue".into())),
-        }
-    })
 }
 
 async fn eval_bind_with_watches(

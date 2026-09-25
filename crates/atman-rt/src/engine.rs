@@ -1,10 +1,19 @@
-use alloc::{boxed::Box, format, string::String};
+use alloc::{
+    boxed::Box,
+    format,
+    string::{String, ToString},
+};
 use core::{future::Future, pin::Pin};
 
-use crate::{Value, ast::Stmt};
+use crate::{
+    Value,
+    ast::{Expr, Pattern, Stmt},
+};
 
 pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type StatementExecution<V, E> = (StatementOutcome<V, E>, Option<String>);
+pub type FlowOutcome<P, E> = StatementOutcome<Value<P, E>, E>;
+pub type FlowExecution<P, E> = StatementExecution<Value<P, E>, E>;
 
 pub enum StatementOutcome<V, E> {
     Continue,
@@ -84,20 +93,37 @@ pub enum Preflight<E> {
 
 /// Supplies product-specific execution, cancellation decisions, and event sinks.
 pub trait StatementHost: Send {
-    type Value: Send;
+    type Payload: Clone + Send + Sync;
     type Error: Send;
 
     fn preflight(&mut self, stmt: &Stmt, node_id: &str) -> Preflight<Self::Error>;
     fn node_start(&mut self, stmt: &Stmt, node_id: &str, parent_node_id: Option<&str>);
-    fn execute<'a>(
+    fn evaluate<'a>(
         &'a mut self,
-        stmt: &'a Stmt,
+        expr: &'a Expr,
         node_id: &'a str,
-    ) -> HostFuture<'a, StatementExecution<Self::Value, Self::Error>>;
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>>;
+    fn bind<'a>(
+        &'a mut self,
+        pattern: &'a Pattern,
+        expr: &'a Expr,
+        node_id: &'a str,
+    ) -> HostFuture<'a, FlowExecution<Self::Payload, Self::Error>>;
+    fn run_body<'a>(
+        &'a mut self,
+        body: &'a [Stmt],
+        node_id: &'a str,
+    ) -> HostFuture<'a, FlowOutcome<Self::Payload, Self::Error>>;
+    fn run_loop<'a>(
+        &'a mut self,
+        body: &'a [Stmt],
+        node_id: &'a str,
+    ) -> HostFuture<'a, FlowExecution<Self::Payload, Self::Error>>;
+    fn preview(&self, value: &Value<Self::Payload, Self::Error>) -> Option<String>;
     fn node_end(
         &mut self,
         node_id: &str,
-        outcome: &StatementOutcome<Self::Value, Self::Error>,
+        outcome: &FlowOutcome<Self::Payload, Self::Error>,
         parent_node_id: Option<&str>,
         preview: Option<&str>,
     );
@@ -118,7 +144,7 @@ impl<H: StatementHost> Engine<H> {
         stmts: &[Stmt],
         prefix: &str,
         parent_node_id: Option<&str>,
-    ) -> StatementOutcome<H::Value, H::Error> {
+    ) -> FlowOutcome<H::Payload, H::Error> {
         for (index, stmt) in stmts.iter().enumerate() {
             let node_id = if prefix.is_empty() {
                 format!("{index}")
@@ -140,7 +166,36 @@ impl<H: StatementHost> Engine<H> {
                 }
             }
             self.host.node_start(stmt, &node_id, parent_node_id);
-            let (outcome, preview) = self.host.execute(stmt, &node_id).await;
+            let (outcome, preview) = match stmt {
+                Stmt::Bind { name, value } => self.host.bind(name, value, &node_id).await,
+                Stmt::When { cond, body } => {
+                    let condition = self.host.evaluate(cond, &node_id).await;
+                    let (outcome, taken) =
+                        run_when(condition, || self.host.run_body(body, &node_id)).await;
+                    (outcome, taken.map(|taken| taken.to_string()))
+                }
+                Stmt::Return { value } => {
+                    let value = self.host.evaluate(value, &node_id).await;
+                    match value {
+                        Value::Err(error) => (StatementOutcome::Err(error), None),
+                        value => {
+                            let preview = self.host.preview(&value);
+                            (StatementOutcome::Return(value), preview)
+                        }
+                    }
+                }
+                Stmt::Expr(expr) => {
+                    let value = self.host.evaluate(expr, &node_id).await;
+                    match value {
+                        Value::Err(error) => (StatementOutcome::Err(error), None),
+                        value => (StatementOutcome::Continue, self.host.preview(&value)),
+                    }
+                }
+                Stmt::Watch(_) => (StatementOutcome::Continue, None),
+                Stmt::Loop { body } => self.host.run_loop(body, &node_id).await,
+                Stmt::Break => (StatementOutcome::LoopBreak, Some("break".into())),
+                Stmt::Continue => (StatementOutcome::LoopContinue, Some("continue".into())),
+            };
             self.host
                 .node_end(&node_id, &outcome, parent_node_id, preview.as_deref());
             if !matches!(outcome, StatementOutcome::Continue) {
@@ -161,6 +216,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::ast::Literal;
 
     struct TestHost<'a> {
         events: &'a mut Vec<String>,
@@ -168,7 +224,7 @@ mod tests {
     }
 
     impl StatementHost for TestHost<'_> {
-        type Value = i32;
+        type Payload = ();
         type Error = &'static str;
 
         fn preflight(&mut self, _stmt: &Stmt, _node_id: &str) -> Preflight<Self::Error> {
@@ -186,26 +242,53 @@ mod tests {
             self.events.push(alloc::format!("start:{node_id}"));
         }
 
-        fn execute<'b>(
+        fn evaluate<'b>(
             &'b mut self,
-            _stmt: &'b Stmt,
+            expr: &'b Expr,
             node_id: &'b str,
-        ) -> HostFuture<'b, StatementExecution<Self::Value, Self::Error>> {
+        ) -> HostFuture<'b, Value<(), &'static str>> {
             Box::pin(async move {
                 self.events.push(alloc::format!("execute:{node_id}"));
-                let outcome = if node_id == "branch.1" {
-                    StatementOutcome::Return(7)
-                } else {
-                    StatementOutcome::Continue
-                };
-                (outcome, None)
+                match expr {
+                    Expr::Literal(Literal::Int(value)) => Value::Int(*value),
+                    _ => panic!("unexpected test expression"),
+                }
             })
+        }
+
+        fn bind<'b>(
+            &'b mut self,
+            _pattern: &'b Pattern,
+            _expr: &'b Expr,
+            _node_id: &'b str,
+        ) -> HostFuture<'b, StatementExecution<Value<(), &'static str>, &'static str>> {
+            Box::pin(async { panic!("unexpected test binding") })
+        }
+
+        fn run_body<'b>(
+            &'b mut self,
+            _body: &'b [Stmt],
+            _node_id: &'b str,
+        ) -> HostFuture<'b, StatementOutcome<Value<(), &'static str>, &'static str>> {
+            Box::pin(async { panic!("unexpected test branch") })
+        }
+
+        fn run_loop<'b>(
+            &'b mut self,
+            _body: &'b [Stmt],
+            _node_id: &'b str,
+        ) -> HostFuture<'b, StatementExecution<Value<(), &'static str>, &'static str>> {
+            Box::pin(async { panic!("unexpected test loop") })
+        }
+
+        fn preview(&self, _value: &Value<(), &'static str>) -> Option<String> {
+            None
         }
 
         fn node_end(
             &mut self,
             node_id: &str,
-            _outcome: &StatementOutcome<Self::Value, Self::Error>,
+            _outcome: &StatementOutcome<Value<(), &'static str>, Self::Error>,
             _parent_node_id: Option<&str>,
             preview: Option<&str>,
         ) {
@@ -235,12 +318,18 @@ mod tests {
             };
             let mut engine = Engine::new(host);
             run_ready(engine.run_statements(
-                &[Stmt::Break, Stmt::Break, Stmt::Break],
+                &[
+                    Stmt::Expr(Expr::Literal(Literal::Int(0))),
+                    Stmt::Return {
+                        value: Expr::Literal(Literal::Int(7)),
+                    },
+                    Stmt::Expr(Expr::Literal(Literal::Int(99))),
+                ],
                 "branch",
                 None,
             ))
         };
-        assert!(matches!(result, StatementOutcome::Return(7)));
+        assert!(matches!(result, StatementOutcome::Return(Value::Int(7))));
         assert_eq!(
             events,
             vec![
