@@ -4,6 +4,7 @@
 extern crate alloc;
 
 pub mod ast;
+pub mod cancel;
 pub mod engine;
 pub mod env;
 pub mod expr;
@@ -12,6 +13,7 @@ pub mod pattern;
 pub mod value;
 
 pub use ast::File as Program;
+pub use cancel::race_cancel;
 pub use engine::{
     Engine, FlowArgs, FlowExecution, FlowOutcome, HostFuture, LoopExit, LoopHost, Preflight,
     StatementExecution, StatementHost, StatementOutcome, run_loop, run_when,

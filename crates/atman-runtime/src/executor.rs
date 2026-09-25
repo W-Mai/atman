@@ -348,11 +348,11 @@ impl Executor {
             self.safety.as_ref(),
             self.source_dir.clone(),
         );
-        let result = tokio::select! {
-            biased;
-            _ = flow_cancel.cancelled() => Err(RuntimeError::Cancelled("flow cancelled by user".into())),
-            r = exec_fut => r,
-        };
+        let result = atman_rt::race_cancel(exec_fut, async {
+            flow_cancel.cancelled().await;
+            RuntimeError::Cancelled("flow cancelled by user".into())
+        })
+        .await;
         let result = if let Err(RuntimeError::Cancelled(_)) = &result {
             let suicide = task_id.as_ref().and_then(|id| {
                 self.tool_ctx
