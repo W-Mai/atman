@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 
 use crate::{
     Env, ExpressionHost, Value, ValueError,
-    ast::{Arg, Expr},
+    ast::{Arg, Expr, Ident},
     eval_expr,
 };
 
@@ -17,14 +17,25 @@ pub enum ListIntrinsic {
 }
 
 impl ListIntrinsic {
+    pub(crate) fn from_path(path: &[Ident]) -> Option<Self> {
+        match path {
+            [namespace, name] if namespace.name == "list" => Self::from_member(&name.name),
+            _ => None,
+        }
+    }
+
     pub fn from_name(name: &str) -> Option<Self> {
+        Self::from_member(name.strip_prefix("list.")?)
+    }
+
+    fn from_member(name: &str) -> Option<Self> {
         Some(match name {
-            "list.map" => Self::Map,
-            "list.filter" => Self::Filter,
-            "list.reduce" => Self::Reduce,
-            "list.find" => Self::Find,
-            "list.any" => Self::Any,
-            "list.all" => Self::All,
+            "map" => Self::Map,
+            "filter" => Self::Filter,
+            "reduce" => Self::Reduce,
+            "find" => Self::Find,
+            "any" => Self::Any,
+            "all" => Self::All,
             _ => return None,
         })
     }

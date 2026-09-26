@@ -35,6 +35,12 @@ impl ExpressionHost for AtmanHost<'_> {
         RuntimeError::UndefinedVar(name)
     }
 
+    fn cancellation_error(&self) -> Option<RuntimeError> {
+        self.flow_cancel
+            .is_cancelled()
+            .then(|| RuntimeError::Cancelled("flow cancelled by user".into()))
+    }
+
     fn eval_pipe_rhs<'a>(&'a self, rhs: &'a Expr, piped: Value, env: &'a Env) -> BoxFut<'a, Value> {
         Box::pin(async move {
             match rhs {
@@ -776,28 +782,9 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a AtmanHost<'a>) -> Value {
-    if ctx.flow_cancel.is_cancelled() {
-        return Value::Err(RuntimeError::Cancelled("flow cancelled by user".into()));
-    }
     match node {
-        Node::ToolCall { path, args } => {
-            let path_str = path
-                .iter()
-                .map(|p| p.name.as_str())
-                .collect::<Vec<_>>()
-                .join(".");
-            if let Some(intrinsic) = atman_rt::ListIntrinsic::from_name(&path_str) {
-                return atman_rt::eval_list_intrinsic(intrinsic, args, env, ctx).await;
-            }
-            dispatch_tool_call(path, args, Vec::new(), env, ctx).await
-        }
-        Node::DynamicFanout {
-            source,
-            lambda,
-            collect,
-        } => {
-            return atman_rt::eval_dynamic_fanout(source, lambda, collect, env, ctx).await;
-        }
+        Node::ToolCall { path, args } => dispatch_tool_call(path, args, Vec::new(), env, ctx).await,
+        Node::DynamicFanout { .. } => unreachable!("dynamic fanout is evaluated by atman-rt"),
         Node::Fanout { items, collect } => match collect {
             atman_rt::ast::FanoutCollect::All => {
                 let parent_id = ctx.current_node_id.clone();

@@ -12,7 +12,10 @@ use atman_rt::{
     Engine, Env, EvalError, ExpressionEffect, ExpressionHost, FlowExecution, FlowOutcome,
     HostFuture, LoopExit, LoopHost, PatternBindError, Preflight, StatementHost, StatementOutcome,
     Value,
-    ast::{BinOp, Expr, FlowDecl, Ident, Literal, Node, ParamDecl, Pattern, Span, Stmt, TypeExpr},
+    ast::{
+        Arg, BinOp, Expr, FanoutCollect, FlowDecl, Ident, Literal, Node, ParamDecl, Pattern, Span,
+        Stmt, TypeExpr,
+    },
     bind_pattern, eval_expr, run_loop,
 };
 
@@ -278,6 +281,46 @@ fn main() {
         StatementOutcome::Return(Value::Int(12))
     ));
     assert!(seen.load(Ordering::SeqCst));
+
+    let portable_nodes = FlowDecl {
+        name: ident("portable_nodes"),
+        params: vec![],
+        ret: None,
+        contract: None,
+        body: vec![Stmt::Return {
+            value: Expr::Node(Node::DynamicFanout {
+                source: Box::new(Expr::Node(Node::ToolCall {
+                    path: vec![ident("list"), ident("map")],
+                    args: vec![
+                        Arg::Positional(Expr::List(vec![literal(1), literal(2)])),
+                        Arg::Positional(Expr::Lambda {
+                            params: vec![ident("item")],
+                            body: Box::new(Expr::Binary {
+                                op: BinOp::Mul,
+                                left: Box::new(Expr::Ident(ident("item"))),
+                                right: Box::new(literal(2)),
+                            }),
+                        }),
+                    ],
+                })),
+                lambda: Box::new(Expr::Lambda {
+                    params: vec![ident("item")],
+                    body: Box::new(Expr::Binary {
+                        op: BinOp::Add,
+                        left: Box::new(Expr::Ident(ident("item"))),
+                        right: Box::new(literal(1)),
+                    }),
+                }),
+                collect: FanoutCollect::All,
+            }),
+        }],
+    };
+    let mut engine = Engine::new(FixtureHost::new());
+    assert!(matches!(
+        block_on(engine.run_flow(&portable_nodes, vec![])),
+        StatementOutcome::Return(Value::List(items))
+            if matches!(&items[..], [Value::Int(3), Value::Int(5)])
+    ));
 
     let loop_flow = FlowDecl {
         name: ident("loop"),

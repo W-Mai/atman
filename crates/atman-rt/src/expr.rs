@@ -3,6 +3,7 @@ use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use crate::{
     Env, HostFuture, HostValueOps, Value, ValueError,
     ast::{Expr, FanoutCollect, Ident, Node},
+    list::{ListIntrinsic, eval_list_intrinsic},
     ops::{eval_binary, eval_literal, eval_unary},
 };
 
@@ -37,6 +38,9 @@ pub trait ExpressionHost: Sync {
 
     fn undefined_var(&self, name: String) -> Self::Error;
     fn undefined_field(&self, name: String) -> Self::Error;
+    fn cancellation_error(&self) -> Option<Self::Error> {
+        None
+    }
     fn eval_pipe_rhs<'a>(
         &'a self,
         rhs: &'a Expr,
@@ -122,7 +126,23 @@ pub fn eval_expr<'a, H: ExpressionHost>(
                 host.eval_external(ExpressionEffect::FileRef(&file.path), env)
                     .await
             }
-            Expr::Node(node) => host.eval_external(ExpressionEffect::Node(node), env).await,
+            Expr::Node(node) => {
+                if let Some(error) = host.cancellation_error() {
+                    return Value::Err(error);
+                }
+                match node {
+                    Node::DynamicFanout {
+                        source,
+                        lambda,
+                        collect,
+                    } => eval_dynamic_fanout(source, lambda, collect, env, host).await,
+                    Node::ToolCall { path, args } => match ListIntrinsic::from_path(path) {
+                        Some(intrinsic) => eval_list_intrinsic(intrinsic, args, env, host).await,
+                        None => host.eval_external(ExpressionEffect::Node(node), env).await,
+                    },
+                    _ => host.eval_external(ExpressionEffect::Node(node), env).await,
+                }
+            }
             Expr::Call { func, args } => {
                 host.eval_external(ExpressionEffect::Call { func, args }, env)
                     .await
@@ -208,7 +228,12 @@ mod tests {
         ast::{BinOp, Ident, Literal, Node, Span},
     };
 
-    struct TestHost;
+    struct TestHost {
+        cancelled: bool,
+    }
+
+    const ACTIVE_HOST: TestHost = TestHost { cancelled: false };
+    const CANCELLED_HOST: TestHost = TestHost { cancelled: true };
 
     impl ExpressionHost for TestHost {
         type Payload = ();
@@ -226,6 +251,13 @@ mod tests {
                 expected: "defined field".into(),
                 actual: name,
             }
+        }
+
+        fn cancellation_error(&self) -> Option<EvalError> {
+            self.cancelled.then(|| EvalError::TypeMismatch {
+                expected: "active flow".into(),
+                actual: "cancelled".into(),
+            })
         }
 
         fn eval_pipe_rhs<'a>(
@@ -280,7 +312,7 @@ mod tests {
         let mut env = Env::new();
         env.bind("x", Value::<(), EvalError>::Int(7));
         assert!(matches!(
-            run_ready(eval_expr(&expr, &env, &TestHost)),
+            run_ready(eval_expr(&expr, &env, &ACTIVE_HOST)),
             Value::Int(12)
         ));
 
@@ -289,7 +321,7 @@ mod tests {
             Expr::Ident(Ident::new("missing", Span::default())),
         ]);
         assert!(matches!(
-            run_ready(eval_expr(&missing, &env, &TestHost)),
+            run_ready(eval_expr(&missing, &env, &ACTIVE_HOST)),
             Value::Err(EvalError::TypeMismatch { actual, .. }) if actual == "missing"
         ));
     }
@@ -304,7 +336,7 @@ mod tests {
             ))])),
             annotation: "items".into(),
         };
-        let value = run_ready(eval_expr(&list, &env, &TestHost));
+        let value = run_ready(eval_expr(&list, &env, &ACTIVE_HOST));
         let Value::Struct(fields) = value else {
             panic!("expected type descriptor")
         };
@@ -320,7 +352,7 @@ mod tests {
             annotation: "ignored".into(),
         };
         assert!(matches!(
-            run_ready(eval_expr(&ordinary, &env, &TestHost)),
+            run_ready(eval_expr(&ordinary, &env, &ACTIVE_HOST)),
             Value::Int(7)
         ));
     }
@@ -338,7 +370,7 @@ mod tests {
             rhs: rhs.clone(),
         };
         assert!(matches!(
-            run_ready(eval_expr(&pipe, &env, &TestHost)),
+            run_ready(eval_expr(&pipe, &env, &ACTIVE_HOST)),
             Value::Int(8)
         ));
 
@@ -347,7 +379,7 @@ mod tests {
             rhs,
         };
         assert!(matches!(
-            run_ready(eval_expr(&missing, &env, &TestHost)),
+            run_ready(eval_expr(&missing, &env, &ACTIVE_HOST)),
             Value::Err(EvalError::TypeMismatch { actual, .. }) if actual == "missing"
         ));
     }
@@ -374,7 +406,7 @@ mod tests {
             &lambda,
             &FanoutCollect::All,
             &env,
-            &TestHost,
+            &ACTIVE_HOST,
         ));
         assert!(
             matches!(all, Value::List(items) if matches!(&items[..], [Value::Int(11), Value::Int(12)]))
@@ -385,9 +417,30 @@ mod tests {
                 &lambda,
                 &FanoutCollect::First,
                 &env,
-                &TestHost,
+                &ACTIVE_HOST,
             )),
             Value::Int(11)
         ));
+    }
+
+    #[test]
+    fn cancellation_precedes_portable_and_external_nodes() {
+        let list = Expr::Node(Node::ToolCall {
+            path: vec![
+                Ident::new("list", Span::default()),
+                Ident::new("map", Span::default()),
+            ],
+            args: vec![],
+        });
+        let external = Expr::Node(Node::ToolCall {
+            path: vec![],
+            args: vec![],
+        });
+        for expr in [&list, &external] {
+            assert!(matches!(
+                run_ready(eval_expr(expr, &Env::new(), &CANCELLED_HOST)),
+                Value::Err(EvalError::TypeMismatch { actual, .. }) if actual == "cancelled"
+            ));
+        }
     }
 }
