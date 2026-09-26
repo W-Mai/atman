@@ -1434,60 +1434,74 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 Ok(guard) => guard,
                 Err(error) => return Value::Err(error),
             };
-            let (running, start) = atman_rt::FlowLifecycle::new(atman_rt::FlowStartFact {
+            let lifecycle = atman_rt::FlowLifecycle::new(atman_rt::FlowStartFact {
                 run_id: sub_run_id.clone(),
                 flow_name: name.name.clone(),
                 parent_run_id: Some(parent_run_id.clone()),
                 parent_node_id: ctx.current_node_id.clone(),
                 spawned: false,
-            })
-            .start();
-            if let Some(sink) = ctx.events {
-                sink.emit(start.clone().into());
+            });
+            let outcome = lifecycle
+                .run(
+                    |start| {
+                        if let Some(sink) = ctx.events {
+                            sink.emit(start.clone().into());
+                        }
+                        if let Some(session) = ctx.session_runtime.as_ref() {
+                            let _ = session.stream_tx().send(start.into());
+                        } else if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
+                            let _ = tx.send(start.into());
+                        }
+                    },
+                    || async {
+                        let mut sub_tool_ctx = ctx.tool_ctx.clone();
+                        sub_tool_ctx.flow_run_id = Some(sub_run_id.clone());
+                        sub_tool_ctx.flow_identity = Some(child_identity);
+                        let sub_ctx = EvalCtx {
+                            tool_ctx: &sub_tool_ctx,
+                            contract: target.contract.as_ref(),
+                            flow_run_id: Some(sub_run_id.clone()),
+                            current_node_id: None,
+                            ..ctx.clone()
+                        };
+                        let outcome =
+                            crate::exec::exec_stmts(&target.body, &mut sub_env, &sub_ctx).await;
+                        drop(lifecycle_guard);
+                        outcome
+                    },
+                    |outcome| {
+                        crate::event::FlowStatus::from(atman_rt::classify_outcome(
+                            outcome,
+                            |error| matches!(error, RuntimeError::Cancelled(_)),
+                        ))
+                    },
+                    |end, outcome| {
+                        let cancelled = matches!(end.status, crate::event::FlowStatus::Cancelled);
+                        let ok = !matches!(outcome, atman_rt::StatementOutcome::Err(_));
+                        let done_run_id = end.run_id.0.to_string();
+                        let done_flow_name = end.flow_name.clone();
+                        if let Some(sink) = ctx.events {
+                            sink.emit(end.into());
+                        }
+                        if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
+                            let _ = tx.send(crate::stream::StreamFrame::FlowDone {
+                                run_id: done_run_id,
+                                flow_name: done_flow_name,
+                                ok,
+                                cancelled,
+                                suicide: false,
+                            });
+                        }
+                    },
+                )
+                .await;
+            match outcome {
+                atman_rt::StatementOutcome::Return(value) => value,
+                atman_rt::StatementOutcome::Err(error) => Value::Err(error),
+                atman_rt::StatementOutcome::Continue
+                | atman_rt::StatementOutcome::LoopBreak
+                | atman_rt::StatementOutcome::LoopContinue => Value::Unit,
             }
-            if let Some(session) = ctx.session_runtime.as_ref() {
-                let _ = session.stream_tx().send(start.into());
-            } else if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
-                let _ = tx.send(start.into());
-            }
-            let mut sub_tool_ctx = ctx.tool_ctx.clone();
-            sub_tool_ctx.flow_run_id = Some(sub_run_id.clone());
-            sub_tool_ctx.flow_identity = Some(child_identity);
-            let sub_ctx = EvalCtx {
-                tool_ctx: &sub_tool_ctx,
-                contract: target.contract.as_ref(),
-                flow_run_id: Some(sub_run_id.clone()),
-                current_node_id: None,
-                ..ctx.clone()
-            };
-            let outcome = crate::exec::exec_stmts(&target.body, &mut sub_env, &sub_ctx).await;
-            drop(lifecycle_guard);
-            let status =
-                crate::event::FlowStatus::from(atman_rt::classify_outcome(&outcome, |error| {
-                    matches!(error, RuntimeError::Cancelled(_))
-                }));
-            let (result, status, ok) = match outcome {
-                atman_rt::StatementOutcome::Return(v) => (v, status, true),
-                atman_rt::StatementOutcome::Err(e) => (Value::Err(e), status, false),
-                atman_rt::StatementOutcome::Continue => (Value::Unit, status, true),
-                atman_rt::StatementOutcome::LoopBreak => (Value::Unit, status, true),
-                atman_rt::StatementOutcome::LoopContinue => (Value::Unit, status, true),
-            };
-            let cancelled = matches!(status, crate::event::FlowStatus::Cancelled);
-            let end = running.finish(status);
-            if let Some(sink) = ctx.events {
-                sink.emit(end.into());
-            }
-            if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
-                let _ = tx.send(crate::stream::StreamFrame::FlowDone {
-                    run_id: sub_run_id.0.to_string(),
-                    flow_name: name.name.clone(),
-                    ok,
-                    cancelled,
-                    suicide: false,
-                });
-            }
-            result
         }
     }
 }
