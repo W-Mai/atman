@@ -2,6 +2,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
+use anyhow::Context;
+
 use crate::auth_store::{ProviderKind, StoredProvider};
 use crate::config_hub::{
     AuthModelCacheCommit, AuthModelCacheUpdate, AuthProviderInsertCommit,
@@ -1760,6 +1762,88 @@ fn coordinator_key(path: &Path) -> PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
+impl ProviderLifecycle {
+    /// Restores enabled managed auth providers and returns catalogs to refresh.
+    pub async fn prepare_auth_runtime(&self) -> anyhow::Result<Vec<String>> {
+        self.reconcile_inactive_providers()?;
+        let store = self.hub.load_auth().context("load auth providers")?;
+        for record in store.providers {
+            if record.enabled && record.kind == ProviderKind::Codex {
+                self.restore_cached_codex_provider(record).await?;
+            }
+        }
+        Ok(self.catalog_refresh_plan())
+    }
+
+    async fn restore_cached_codex_provider(
+        &self,
+        mut record: StoredProvider,
+    ) -> anyhow::Result<()> {
+        for attempt in 0..2 {
+            let provider = crate::oauth::create_managed_oauth_provider_from_stored::<
+                crate::providers::codex::CodexProvider,
+            >(&record, self.hub.clone())?;
+            match self
+                .restore_provider(&record.id, ProviderKind::Codex, provider)
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(
+                    ProviderLifecycleError::ProviderNotFound { .. }
+                    | ProviderLifecycleError::ProviderDisabled { .. }
+                    | ProviderLifecycleError::Stale { .. },
+                ) => {
+                    let current = match self
+                        .reload_cached_codex_provider_after_conflict(&record.id, attempt == 0)
+                    {
+                        Ok(current) => current,
+                        Err(error) => {
+                            let _ = self.reconcile_inactive_providers();
+                            return Err(error);
+                        }
+                    };
+                    match current {
+                        Some(current) => record = current,
+                        None => {
+                            self.reconcile_inactive_providers()?;
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        unreachable!("cached provider restore attempts are bounded")
+    }
+
+    fn reload_cached_codex_provider_after_conflict(
+        &self,
+        provider_id: &str,
+        retry_available: bool,
+    ) -> anyhow::Result<Option<StoredProvider>> {
+        let current = self
+            .hub
+            .load_auth()
+            .context("reload auth providers after restore conflict")?
+            .providers
+            .into_iter()
+            .find(|provider| provider.id == provider_id);
+        match current {
+            Some(current) if current.enabled && current.kind == ProviderKind::Codex => {
+                if retry_available {
+                    Ok(Some(current))
+                } else {
+                    Err(ProviderLifecycleError::Stale {
+                        id: provider_id.to_string(),
+                    }
+                    .into())
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex as StdMutex;
@@ -1775,6 +1859,66 @@ mod tests {
         ModelCapabilities, ReasoningEffort,
     };
     use crate::tool::BoxFut;
+
+    #[test]
+    fn cached_provider_conflict_reload_is_authoritative_and_bounded() {
+        const PROVIDER_ID: &str = "restore-conflict-oauth";
+
+        let config = tempfile::tempdir().unwrap();
+        let hub = ConfigHub::from_config_dir(config.path());
+        hub.add_auth_provider(StoredProvider {
+            id: PROVIDER_ID.into(),
+            name: "Restore Conflict".into(),
+            kind: ProviderKind::Codex,
+            access_token: "old-access".into(),
+            refresh_token: None,
+            expires_at: 1,
+            account: None,
+            enabled: true,
+            model_cache: None,
+        })
+        .unwrap();
+        hub.update_auth_tokens(
+            PROVIDER_ID,
+            crate::config_hub::AuthTokenUpdate {
+                access_token: "current-access".into(),
+                refresh_token: Some("current-refresh".into()),
+                expires_at: 2,
+                account: Some("current-account".into()),
+            },
+        )
+        .unwrap();
+
+        let lifecycle = ProviderLifecycle::new(hub.clone(), ProviderRegistry::new());
+        let current = lifecycle
+            .reload_cached_codex_provider_after_conflict(PROVIDER_ID, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.access_token, "current-access");
+        assert_eq!(current.refresh_token.as_deref(), Some("current-refresh"));
+        let exhausted = lifecycle
+            .reload_cached_codex_provider_after_conflict(PROVIDER_ID, false)
+            .unwrap_err();
+        assert!(matches!(
+            exhausted.downcast_ref::<ProviderLifecycleError>(),
+            Some(ProviderLifecycleError::Stale { id }) if id == PROVIDER_ID
+        ));
+
+        hub.set_auth_provider_enabled(PROVIDER_ID, false).unwrap();
+        assert!(
+            lifecycle
+                .reload_cached_codex_provider_after_conflict(PROVIDER_ID, true)
+                .unwrap()
+                .is_none()
+        );
+        hub.remove_auth_provider(PROVIDER_ID).unwrap();
+        assert!(
+            lifecycle
+                .reload_cached_codex_provider_after_conflict(PROVIDER_ID, true)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     struct TestProvider {
         name: String,

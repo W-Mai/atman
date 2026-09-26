@@ -175,7 +175,7 @@ impl RunLauncher {
     pub async fn start_provider_catalog_refreshes(&self, state: &DaemonState) -> Result<()> {
         reload_model_config(self.config_dir.as_deref());
         let lifecycle = state.provider_lifecycle_for(self.config_dir.as_deref())?;
-        let plan = crate::bootstrap::prepare_auth_provider_runtime(&lifecycle).await?;
+        let plan = lifecycle.prepare_auth_runtime().await?;
         ProviderCatalogRefreshDispatcher {
             runtime: tokio::runtime::Handle::current(),
             lifecycle,
