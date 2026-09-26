@@ -2,7 +2,7 @@ use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 
 use crate::{
     Env, HostFuture, HostValueOps, Value, ValueError,
-    ast::{Expr, Ident, Node},
+    ast::{Expr, FanoutCollect, Ident, Node},
     ops::{eval_binary, eval_literal, eval_unary},
 };
 
@@ -143,6 +143,54 @@ pub fn eval_expr<'a, H: ExpressionHost>(
             },
         }
     })
+}
+
+/// Evaluates a dynamic fanout through the shared expression engine.
+pub async fn eval_dynamic_fanout<'a, H: ExpressionHost>(
+    source: &'a Expr,
+    lambda: &'a Expr,
+    collect: &'a FanoutCollect,
+    env: &'a Env<Value<H::Payload, H::Error>>,
+    host: &'a H,
+) -> Value<H::Payload, H::Error> {
+    let list_val = eval_expr(source, env, host).await;
+    let Value::List(items) = list_val else {
+        return Value::Err(H::Error::type_mismatch("list", list_val.kind_name().into()));
+    };
+
+    let lambda_val = eval_expr(lambda, env, host).await;
+    let Value::Lambda {
+        params,
+        body,
+        captured_env,
+    } = lambda_val
+    else {
+        return Value::Err(H::Error::type_mismatch(
+            "lambda",
+            lambda_val.kind_name().into(),
+        ));
+    };
+
+    let mut results = Vec::new();
+    for item in items {
+        let mut call_env = captured_env.child();
+        if let Some(param) = params.first() {
+            call_env.bind(param.name.clone(), item);
+        }
+        let result = eval_expr(&body, &call_env, host).await;
+        if let Value::Err(error) = &result {
+            return Value::Err(error.clone());
+        }
+        if matches!(collect, FanoutCollect::First) {
+            return result;
+        }
+        results.push(result);
+    }
+
+    match collect {
+        FanoutCollect::All => Value::List(results),
+        FanoutCollect::First => results.into_iter().next().unwrap_or(Value::Unit),
+    }
 }
 
 #[cfg(test)]
@@ -301,6 +349,45 @@ mod tests {
         assert!(matches!(
             run_ready(eval_expr(&missing, &env, &TestHost)),
             Value::Err(EvalError::TypeMismatch { actual, .. }) if actual == "missing"
+        ));
+    }
+
+    #[test]
+    fn dynamic_fanout_evaluates_lambda_with_captured_environment() {
+        let source = Expr::List(vec![
+            Expr::Literal(Literal::Int(1)),
+            Expr::Literal(Literal::Int(2)),
+        ]);
+        let lambda = Expr::Lambda {
+            params: vec![Ident::new("item", Span::default())],
+            body: Box::new(Expr::Binary {
+                op: BinOp::Add,
+                left: Box::new(Expr::Ident(Ident::new("item", Span::default()))),
+                right: Box::new(Expr::Ident(Ident::new("offset", Span::default()))),
+            }),
+        };
+        let mut env = Env::new();
+        env.bind("offset", Value::<(), EvalError>::Int(10));
+
+        let all = run_ready(eval_dynamic_fanout(
+            &source,
+            &lambda,
+            &FanoutCollect::All,
+            &env,
+            &TestHost,
+        ));
+        assert!(
+            matches!(all, Value::List(items) if matches!(&items[..], [Value::Int(11), Value::Int(12)]))
+        );
+        assert!(matches!(
+            run_ready(eval_dynamic_fanout(
+                &source,
+                &lambda,
+                &FanoutCollect::First,
+                &env,
+                &TestHost,
+            )),
+            Value::Int(11)
         ));
     }
 }

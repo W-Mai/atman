@@ -23,7 +23,7 @@ pub use engine::{
     run_loop, run_when,
 };
 pub use env::Env;
-pub use expr::{ExpressionEffect, ExpressionHost, eval_expr, is_type_name};
+pub use expr::{ExpressionEffect, ExpressionHost, eval_dynamic_fanout, eval_expr, is_type_name};
 pub use lifecycle::{FlowEndFact, FlowLifecycle, FlowStartFact, StartedFlow};
 pub use ops::{EvalError, HostValueOps, ValueError, eval_binary, eval_literal, eval_unary};
 pub use pattern::{PatternBindError, PatternValue, bind_pattern};

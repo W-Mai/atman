@@ -538,56 +538,6 @@ async fn eval_list_all<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a AtmanHost<'a>
     Value::Bool(true)
 }
 
-pub async fn eval_dynamic_fanout<'a>(
-    source: &'a Expr,
-    lambda: &'a Expr,
-    collect: &'a atman_rt::ast::FanoutCollect,
-    env: &'a Env,
-    ctx: &'a AtmanHost<'a>,
-) -> Value {
-    let list_val = eval_expr(source, env, ctx).await;
-    let Value::List(items) = list_val else {
-        return Value::Err(RuntimeError::TypeMismatch {
-            expected: "list".into(),
-            actual: list_val.kind_name().into(),
-        });
-    };
-
-    let lambda_val = eval_expr(lambda, env, ctx).await;
-    let Value::Lambda {
-        params,
-        body,
-        captured_env,
-    } = lambda_val
-    else {
-        return Value::Err(RuntimeError::TypeMismatch {
-            expected: "lambda".into(),
-            actual: lambda_val.kind_name().into(),
-        });
-    };
-
-    let mut results = Vec::new();
-    for item in items {
-        let mut call_env = captured_env.child();
-        if let Some(param) = params.first() {
-            call_env.bind(param.name.clone(), item);
-        }
-        let result = eval_expr(&body, &call_env, ctx).await;
-        if let Value::Err(e) = &result {
-            return Value::Err(e.clone());
-        }
-        if matches!(collect, atman_rt::ast::FanoutCollect::First) {
-            return result;
-        }
-        results.push(result);
-    }
-
-    match collect {
-        atman_rt::ast::FanoutCollect::All => Value::List(results),
-        atman_rt::ast::FanoutCollect::First => results.into_iter().next().unwrap_or(Value::Unit),
-    }
-}
-
 pub(crate) fn expr_shape(e: &Expr) -> &'static str {
     match e {
         Expr::Literal(_) => "literal",
@@ -1191,7 +1141,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a AtmanHost<'a>) -> 
             lambda,
             collect,
         } => {
-            return eval_dynamic_fanout(source, lambda, collect, env, ctx).await;
+            return atman_rt::eval_dynamic_fanout(source, lambda, collect, env, ctx).await;
         }
         Node::Fanout { items, collect } => match collect {
             atman_rt::ast::FanoutCollect::All => {
