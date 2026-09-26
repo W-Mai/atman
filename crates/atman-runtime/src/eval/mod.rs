@@ -7,9 +7,10 @@ pub(crate) mod llm_parse;
 use atman_rt::ast::{Arg, Expr, Node};
 use atman_rt::{ExpressionEffect, ExpressionHost};
 
+use crate::atman_host::AtmanHost;
 use crate::error::RuntimeError;
 use crate::streaming::LlmStream;
-use crate::tool::{BoxFut, ToolArgs, ToolCtx, ToolRegistry};
+use crate::tool::{BoxFut, ToolArgs, ToolCtx};
 use crate::value::Value;
 
 type Env = atman_rt::Env<Value>;
@@ -21,38 +22,11 @@ pub(crate) fn is_evaluator_intrinsic(name: &str) -> bool {
     )
 }
 
-#[derive(Clone)]
-pub struct EvalCtx<'a> {
-    pub tools: &'a ToolRegistry,
-    pub tool_ctx: &'a ToolCtx,
-    pub providers: &'a crate::provider::ProviderRegistry,
-    pub flows: &'a std::collections::HashMap<String, atman_rt::ast::FlowDecl>,
-    pub contract: Option<&'a atman_rt::ast::Contract>,
-    pub events: Option<&'a crate::event::EventSink>,
-    pub turn_id: Option<crate::event::TurnId>,
-    pub flow_run_id: Option<crate::event::FlowRunId>,
-    pub session_runtime: Option<std::sync::Arc<crate::session::Session>>,
-    pub flow_cancel: tokio_util::sync::CancellationToken,
-    pub safety: Option<&'a crate::safety::SafetyConfig>,
-    pub current_node_id: Option<String>,
-    /// Directory of the .at source file. When set, relative `@` paths
-    /// are resolved against this directory instead of the process CWD.
-    pub source_dir: Option<std::path::PathBuf>,
-}
-
-impl<'a> EvalCtx<'a> {
-    pub fn with_node(&self, node_id: impl Into<String>) -> Self {
-        let mut c = self.clone();
-        c.current_node_id = Some(node_id.into());
-        c
-    }
-}
-
-pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxFut<'a, Value> {
+pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a AtmanHost<'a>) -> BoxFut<'a, Value> {
     atman_rt::eval_expr(expr, env, ctx)
 }
 
-impl ExpressionHost for EvalCtx<'_> {
+impl ExpressionHost for AtmanHost<'_> {
     type Payload = AtmanPayload;
     type Error = RuntimeError;
 
@@ -250,7 +224,7 @@ fn arg_positional<'a>(
     )))
 }
 
-async fn eval_list_map<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+async fn eval_list_map<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a AtmanHost<'a>) -> Value {
     let list_expr = match arg_positional(args, 0, "list.map") {
         Ok(e) => e,
         Err(e) => return Value::Err(e),
@@ -301,7 +275,7 @@ async fn eval_list_map<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) 
     Value::List(out)
 }
 
-async fn eval_list_filter<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+async fn eval_list_filter<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a AtmanHost<'a>) -> Value {
     let list_expr = match arg_positional(args, 0, "list.filter") {
         Ok(e) => e,
         Err(e) => return Value::Err(e),
@@ -355,7 +329,7 @@ async fn eval_list_filter<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a
     Value::List(out)
 }
 
-async fn eval_list_reduce<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+async fn eval_list_reduce<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a AtmanHost<'a>) -> Value {
     let list_expr = match arg_positional(args, 0, "list.reduce") {
         Ok(e) => e,
         Err(e) => return Value::Err(e),
@@ -414,7 +388,7 @@ async fn eval_list_reduce<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a
     acc
 }
 
-async fn eval_list_find<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+async fn eval_list_find<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a AtmanHost<'a>) -> Value {
     let list_expr = match arg_positional(args, 0, "list.find") {
         Ok(e) => e,
         Err(e) => return Value::Err(e),
@@ -464,7 +438,7 @@ async fn eval_list_find<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>)
     Value::Unit
 }
 
-async fn eval_list_any<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+async fn eval_list_any<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a AtmanHost<'a>) -> Value {
     let list_expr = match arg_positional(args, 0, "list.any") {
         Ok(e) => e,
         Err(e) => return Value::Err(e),
@@ -514,7 +488,7 @@ async fn eval_list_any<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) 
     Value::Bool(false)
 }
 
-async fn eval_list_all<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+async fn eval_list_all<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a AtmanHost<'a>) -> Value {
     let list_expr = match arg_positional(args, 0, "list.all") {
         Ok(e) => e,
         Err(e) => return Value::Err(e),
@@ -569,7 +543,7 @@ pub async fn eval_dynamic_fanout<'a>(
     lambda: &'a Expr,
     collect: &'a atman_rt::ast::FanoutCollect,
     env: &'a Env,
-    ctx: &'a EvalCtx<'a>,
+    ctx: &'a AtmanHost<'a>,
 ) -> Value {
     let list_val = eval_expr(source, env, ctx).await;
     let Value::List(items) = list_val else {
@@ -637,7 +611,7 @@ async fn dispatch_tool_call<'a>(
     args: &'a [Arg],
     prefix_positional: Vec<Value>,
     env: &'a Env,
-    ctx: &'a EvalCtx<'a>,
+    ctx: &'a AtmanHost<'a>,
 ) -> Value {
     if ctx.flow_cancel.is_cancelled() {
         return Value::Err(RuntimeError::Cancelled("flow cancelled by user".into()));
@@ -856,7 +830,7 @@ async fn eval_invocation_env<'a>(
     args: &'a [Arg],
     mut positional: Vec<Value>,
     env: &'a Env,
-    ctx: &'a EvalCtx<'a>,
+    ctx: &'a AtmanHost<'a>,
 ) -> Value {
     for arg in args {
         match arg {
@@ -1190,7 +1164,7 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a AtmanHost<'a>) -> Value {
     if ctx.flow_cancel.is_cancelled() {
         return Value::Err(RuntimeError::Cancelled("flow cancelled by user".into()));
     }
@@ -1222,7 +1196,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
         Node::Fanout { items, collect } => match collect {
             atman_rt::ast::FanoutCollect::All => {
                 let parent_id = ctx.current_node_id.clone();
-                let branch_ctxs: Vec<EvalCtx<'a>> = (0..items.len())
+                let branch_ctxs: Vec<AtmanHost<'a>> = (0..items.len())
                     .map(|i| {
                         let branch_id = match &parent_id {
                             Some(p) => format!("{p}.branch[{i}]"),
@@ -1448,7 +1422,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         let mut sub_tool_ctx = ctx.tool_ctx.clone();
                         sub_tool_ctx.flow_run_id = Some(sub_run_id.clone());
                         sub_tool_ctx.flow_identity = Some(child_identity);
-                        let sub_ctx = EvalCtx {
+                        let sub_ctx = AtmanHost {
                             tool_ctx: &sub_tool_ctx,
                             contract: target.contract.as_ref(),
                             flow_run_id: Some(sub_run_id.clone()),
@@ -1516,7 +1490,7 @@ fn tool_name(path: &[atman_rt::ast::Ident]) -> String {
 async fn eval_fix_until_test_passes<'a>(
     kwargs: &'a atman_rt::ast::Kwargs,
     env: &'a Env,
-    ctx: &'a EvalCtx<'a>,
+    ctx: &'a AtmanHost<'a>,
 ) -> Value {
     let mut edit_flow_expr: Option<&Expr> = None;
     let mut test_expr: Option<&Expr> = None;
@@ -1658,7 +1632,7 @@ async fn eval_message_node<'a>(
     ast_role: atman_rt::ast::MessageRole,
     args: &'a [Arg],
     env: &'a Env,
-    ctx: &'a EvalCtx<'a>,
+    ctx: &'a AtmanHost<'a>,
 ) -> Value {
     use crate::message::{
         ImageData, ImageSource, Message, MessageOrigin, MessagePart, MessageRole,
@@ -1970,6 +1944,7 @@ fn is_type_annotation(path: &[atman_rt::ast::Ident]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::ToolRegistry;
     use atman_dsl::parse::parse_file;
 
     fn authorized_eval_tool_ctx(workspace: Option<&std::path::Path>) -> ToolCtx {
@@ -2061,7 +2036,7 @@ mod tests {
         let tool_ctx = ToolCtx::new();
         let providers = crate::provider::ProviderRegistry::new();
         let flows = std::collections::HashMap::new();
-        let ctx = EvalCtx {
+        let ctx = AtmanHost {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
@@ -2158,7 +2133,7 @@ mod tests {
         let tool_ctx = ToolCtx::new();
         let providers = crate::provider::ProviderRegistry::new();
         let flows = std::collections::HashMap::new();
-        let ctx = EvalCtx {
+        let ctx = AtmanHost {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
@@ -2222,7 +2197,7 @@ mod tests {
         tool_ctx.flow_identity = Some(identity);
         let providers = crate::provider::ProviderRegistry::new();
         let flows = std::collections::HashMap::new();
-        let ctx = EvalCtx {
+        let ctx = AtmanHost {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
@@ -2274,7 +2249,7 @@ mod tests {
         let tool_ctx = authorized_eval_tool_ctx(Some(dir.path()));
         let providers = crate::provider::ProviderRegistry::new();
         let flows = std::collections::HashMap::new();
-        let ctx = EvalCtx {
+        let ctx = AtmanHost {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
@@ -2319,7 +2294,7 @@ mod tests {
         let tool_ctx = ToolCtx::new();
         let providers = crate::provider::ProviderRegistry::new();
         let flows = std::collections::HashMap::new();
-        let ctx = EvalCtx {
+        let ctx = AtmanHost {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
@@ -2374,7 +2349,7 @@ mod tests {
             .with_providers(std::sync::Arc::new(providers.clone()))
             .with_registry(std::sync::Arc::new(tools.clone()));
         let flows = std::collections::HashMap::new();
-        let ctx = EvalCtx {
+        let ctx = AtmanHost {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
@@ -2419,7 +2394,7 @@ mod tests {
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();
         let flows = std::collections::HashMap::new();
-        let ctx = EvalCtx {
+        let ctx = AtmanHost {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
@@ -2448,7 +2423,7 @@ mod tests {
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();
         let flows = std::collections::HashMap::new();
-        let ctx = EvalCtx {
+        let ctx = AtmanHost {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
@@ -2629,7 +2604,7 @@ flow parent() -> Int {
         let tool_ctx = authorized_eval_tool_ctx(Some(dir.path()));
         let providers = crate::provider::ProviderRegistry::new();
         let flows = std::collections::HashMap::new();
-        let ctx = EvalCtx {
+        let ctx = AtmanHost {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
@@ -2668,7 +2643,7 @@ flow parent() -> Int {
         let providers = crate::provider::ProviderRegistry::new();
         let flows = std::collections::HashMap::new();
         let events = crate::event::EventSink::new();
-        let ctx = EvalCtx {
+        let ctx = AtmanHost {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,

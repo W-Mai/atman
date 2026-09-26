@@ -388,7 +388,7 @@ atman/
   crates/
     atman-rt/        # Portable AST, values, expression evaluator, argument/flow/redirect control, lifecycle ordering, cancellation
     atman-dsl/       # Parser + pretty-printer (.at files)
-    atman-runtime/   # AtmanRuntime host composition, executor, tools, providers, memory, MCP
+    atman-runtime/   # AtmanRuntime composition, AtmanHost effects, executor, tools, providers, memory, MCP
     atman-cli/       # Binary, REPL, slash commands, monitor, daemon client
     atman-proto/     # JSON-RPC 2.0 envelope + daemon request/response types
     atman-daemon/    # Daemon binary, Unix socket, HTTP+SSE, session pool

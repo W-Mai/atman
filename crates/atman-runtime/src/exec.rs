@@ -7,8 +7,9 @@ use atman_rt::{
     StatementHost, bind_pattern, run_loop,
 };
 
+use crate::atman_host::AtmanHost;
 use crate::error::RuntimeError;
-use crate::eval::{EvalCtx, eval_expr};
+use crate::eval::eval_expr;
 use crate::streaming::{WarnRule, WatchRules};
 use crate::tool::{BoxFut, Tool, ToolArgs, ToolCtx, ToolRegistry};
 use crate::value::Value;
@@ -20,7 +21,7 @@ type StmtOutcome = atman_rt::StatementOutcome<Value, RuntimeError>;
 pub fn exec_stmts<'a>(
     stmts: &'a [Stmt],
     env: &'a mut Env,
-    ctx: &'a EvalCtx<'a>,
+    ctx: &'a AtmanHost<'a>,
 ) -> BoxFut<'a, atman_rt::StatementOutcome<Value, RuntimeError>> {
     exec_stmts_prefixed(stmts, env, ctx, String::new())
 }
@@ -28,29 +29,29 @@ pub fn exec_stmts<'a>(
 pub fn exec_stmts_prefixed<'a>(
     stmts: &'a [Stmt],
     env: &'a mut Env,
-    ctx: &'a EvalCtx<'a>,
+    ctx: &'a AtmanHost<'a>,
     prefix: String,
 ) -> BoxFut<'a, atman_rt::StatementOutcome<Value, RuntimeError>> {
     Box::pin(async move {
         let watches = collect_watches(stmts);
         let parent_node_id = ctx.current_node_id.clone();
-        let host = AtmanStatementHost { env, ctx, watches };
+        let host = AtmanStatementAdapter { env, ctx, watches };
         Engine::new(host)
             .run_statements(stmts, &prefix, parent_node_id.as_deref())
             .await
     })
 }
 
-struct AtmanStatementHost<'a> {
+struct AtmanStatementAdapter<'a> {
     env: &'a mut Env,
-    ctx: &'a EvalCtx<'a>,
+    ctx: &'a AtmanHost<'a>,
     watches: HashMap<String, Vec<&'a WatchDecl>>,
 }
 
 struct AtmanLoopHost<'a> {
     body: &'a [Stmt],
     env: &'a mut Env,
-    ctx: &'a EvalCtx<'a>,
+    ctx: &'a AtmanHost<'a>,
 }
 
 impl LoopHost for AtmanLoopHost<'_> {
@@ -89,7 +90,7 @@ impl LoopHost for AtmanLoopHost<'_> {
     }
 }
 
-impl StatementHost for AtmanStatementHost<'_> {
+impl StatementHost for AtmanStatementAdapter<'_> {
     type Payload = AtmanPayload;
     type Error = RuntimeError;
 
@@ -227,7 +228,7 @@ impl StatementHost for AtmanStatementHost<'_> {
 }
 
 fn emit_flow_node_start(
-    ctx: &EvalCtx<'_>,
+    ctx: &AtmanHost<'_>,
     node_id: &str,
     stmt: &Stmt,
     parent_node_id: Option<&str>,
@@ -237,7 +238,7 @@ fn emit_flow_node_start(
 }
 
 fn emit_flow_node_start_raw(
-    ctx: &EvalCtx<'_>,
+    ctx: &AtmanHost<'_>,
     node_id: &str,
     kind: crate::nodegraph::NodeKind,
     label: &str,
@@ -313,7 +314,7 @@ fn value_preview(v: &Value) -> Option<String> {
 }
 
 fn emit_flow_node_end(
-    ctx: &EvalCtx<'_>,
+    ctx: &AtmanHost<'_>,
     node_id: &str,
     outcome: &StmtOutcome,
     parent_node_id: Option<&str>,
@@ -414,7 +415,7 @@ fn collect_watches(stmts: &[Stmt]) -> HashMap<String, Vec<&WatchDecl>> {
 async fn eval_bind_with_watches(
     expr: &Expr,
     env: &mut Env,
-    ctx: &EvalCtx<'_>,
+    ctx: &AtmanHost<'_>,
     watches: &[&WatchDecl],
 ) -> Result<Value, RuntimeError> {
     let Expr::Node(Node::ToolCall { path, args }) = expr else {
@@ -638,7 +639,7 @@ pub async fn exec_flow_with_siblings(
     safety: Option<&crate::safety::SafetyConfig>,
     source_dir: Option<PathBuf>,
 ) -> Result<Value, RuntimeError> {
-    let ctx = EvalCtx {
+    let ctx = AtmanHost {
         tools,
         tool_ctx,
         providers,
@@ -654,7 +655,7 @@ pub async fn exec_flow_with_siblings(
         source_dir,
     };
     let mut env = Env::new();
-    let host = AtmanStatementHost {
+    let host = AtmanStatementAdapter {
         env: &mut env,
         ctx: &ctx,
         watches: collect_watches(&flow.body),

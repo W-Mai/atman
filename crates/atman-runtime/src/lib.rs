@@ -1,5 +1,6 @@
 pub mod activity;
 pub mod approval;
+pub mod atman_host;
 pub mod atman_runtime;
 pub mod attachment_store;
 pub mod auth_store;
@@ -98,6 +99,7 @@ pub use watch::WatchHub;
 pub mod watch;
 pub mod workflow;
 
+pub use atman_host::AtmanHost;
 pub use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions};
 pub use attachment_store::AttachmentStore;
 pub use context_plan::{
@@ -109,7 +111,7 @@ pub use context_plan::{
 };
 pub use cost::{CostSummary, summarize_by_model, summarize_by_provider, total};
 pub use error::RuntimeError;
-pub use eval::{EvalCtx, eval_expr};
+pub use eval::eval_expr;
 pub use event::{
     Event, EventSink, FlowRunId, FlowStatus, LlmCallStatus, NodeEvent, Observable, TurnId,
 };
