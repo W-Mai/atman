@@ -231,6 +231,22 @@ fn literal(value: i64) -> Expr {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--demo") {
+        #[cfg(feature = "dsl-demo")]
+        {
+            if let Err(error) = run_demo() {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        #[cfg(not(feature = "dsl-demo"))]
+        {
+            eprintln!("the demo requires --features dsl-demo");
+            std::process::exit(2);
+        }
+    }
+
     let pure = FlowDecl {
         name: ident("pure"),
         params: vec![ParamDecl {
@@ -364,4 +380,46 @@ fn main() {
         block_on(engine.run_flow(&loop_flow, vec![])),
         StatementOutcome::Return(Value::Int(1))
     ));
+}
+
+#[cfg(feature = "dsl-demo")]
+fn run_demo() -> Result<(), String> {
+    use std::io::{self, Write};
+
+    let mut args = std::env::args().skip(2);
+    let input = match args.next() {
+        Some(value) => value,
+        None => {
+            print!("Enter an integer: ");
+            io::stdout().flush().map_err(|error| error.to_string())?;
+            let mut value = String::new();
+            io::stdin()
+                .read_line(&mut value)
+                .map_err(|error| error.to_string())?;
+            value.trim().to_owned()
+        }
+    };
+    if args.next().is_some() {
+        return Err("usage: --demo [integer]".into());
+    }
+    let input = input
+        .parse::<i64>()
+        .map_err(|_| "input must be an integer".to_string())?;
+
+    let program = atman_dsl::parse::parse_file(include_str!("demo.at"))
+        .map_err(|error| format!("invalid demo flow: {error}"))?;
+    let flow = program
+        .flows
+        .iter()
+        .find(|flow| flow.name.name == "demo")
+        .ok_or("demo flow not found")?;
+    let mut engine = Engine::new(FixtureHost::new());
+    match block_on(engine.run_flow(flow, vec![("input".into(), Value::Int(input))])) {
+        StatementOutcome::Return(Value::Int(value)) => {
+            println!("result: {value}");
+            Ok(())
+        }
+        StatementOutcome::Err(error) => Err(format!("flow failed: {error:?}")),
+        _ => Err("flow did not return an integer".into()),
+    }
 }

@@ -6,6 +6,10 @@ publish = false
 
 [dependencies]
 atman-rt = { path = "../../crates/atman-rt" }
+atman-dsl = { path = "../../crates/atman-dsl", optional = true }
+
+[features]
+dsl-demo = ["dep:atman-dsl"]
 
 [workspace]
 resolver = "3"

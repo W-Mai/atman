@@ -398,7 +398,9 @@ atman/
   docs/              # Quickstart, context strategy, list combinators
 ```
 
-`cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml` executes flows with default parameters, portable list and static/dynamic fanout nodes, a host effect, and a loop using `atman-rt` as its only dependency. It does not start the CLI or daemon. CI runs this fixture on Linux, macOS, and Windows, runs the same flows on Wasm/WASI, and checks the `no_std` core on `wasm32-unknown-unknown`.
+`cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml` executes flows with default parameters, portable list and static/dynamic fanout nodes, a host effect, and a loop using `atman-rt` as its only dependency. It does not start the CLI or daemon. The CI workflow is configured to run this fixture on Linux, macOS, and Windows, run the same flows on Wasm/WASI, and check the `no_std` core on `wasm32-unknown-unknown`.
+
+`cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --features dsl-demo -- --demo` starts an interactive demo that parses a `.at` flow, reads an integer, calls a host-provided effect, and prints the result. Add an integer after `--demo` for non-interactive execution. The parser dependency is enabled only for the demo; the default embedding fixture remains `atman-rt`-only.
 
 `atman-rt` requires an allocator, target support for pointer-width atomics for `Arc`-backed environments and lambda captures, and a host that polls its futures. `wasm32-unknown-unknown` passes the `no_std` check. `riscv32imc-unknown-none-elf` lacks pointer-width atomics and is not currently supported.
 
