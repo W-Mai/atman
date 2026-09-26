@@ -8,6 +8,7 @@ pub mod cancel;
 pub mod engine;
 pub mod env;
 pub mod expr;
+pub mod fanout;
 pub mod lifecycle;
 pub mod list;
 pub mod ops;
@@ -25,6 +26,7 @@ pub use engine::{
 };
 pub use env::Env;
 pub use expr::{ExpressionEffect, ExpressionHost, eval_dynamic_fanout, eval_expr, is_type_name};
+pub use fanout::join_fanout_all;
 pub use lifecycle::{FlowEndFact, FlowLifecycle, FlowStartFact, StartedFlow};
 pub use list::{ListIntrinsic, eval_list_intrinsic};
 pub use ops::{EvalError, HostValueOps, ValueError, eval_binary, eval_literal, eval_unary};

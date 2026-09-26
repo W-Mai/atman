@@ -832,8 +832,8 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a AtmanHost<'a>) -> 
                     .iter()
                     .zip(branch_ctxs.iter())
                     .map(|(item, bctx)| eval_expr(item, env, bctx));
-                let results: Vec<Value> = futures::future::join_all(futs).await;
-                for (bctx, v) in branch_ctxs.iter().zip(results.iter()) {
+                atman_rt::join_fanout_all(futs, |index, v| {
+                    let bctx = &branch_ctxs[index];
                     if let (Some(sink), Some(run_id), Some(bid)) =
                         (ctx.events, ctx.flow_run_id.clone(), &bctx.current_node_id)
                     {
@@ -858,13 +858,8 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a AtmanHost<'a>) -> 
                             });
                         }
                     }
-                }
-                for v in &results {
-                    if let Value::Err(e) = v {
-                        return Value::Err(e.clone());
-                    }
-                }
-                Value::List(results)
+                })
+                .await
             }
             atman_rt::ast::FanoutCollect::First => Value::Err(RuntimeError::ToolFailed(
                 "fanout collect: first not yet implemented".into(),

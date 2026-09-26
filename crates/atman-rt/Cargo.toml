@@ -13,3 +13,4 @@ keywords = ["atman", "runtime", "flow", "embedded"]
 categories = ["development-tools"]
 
 [dependencies]
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
