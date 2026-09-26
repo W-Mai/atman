@@ -402,6 +402,8 @@ atman/
 
 `atman-rt` requires an allocator, target support for pointer-width atomics for `Arc`-backed environments and lambda captures, and a host that polls its futures. `wasm32-unknown-unknown` passes the `no_std` check. `riscv32imc-unknown-none-elf` lacks pointer-width atomics and is not currently supported.
 
+The [atman-rt embedding guide](crates/atman-rt/README.md) describes the host traits and standalone fixture.
+
 Language: Rust (edition 2024, MSRV 1.85). License: MIT OR Apache-2.0.
 
 ## FAQ
