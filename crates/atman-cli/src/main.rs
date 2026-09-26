@@ -784,7 +784,7 @@ async fn cmd_run(
         auto_snapshot_flows(&file, &source, &parsed);
     }
 
-    let turn_id = atman_runtime::event::TurnId::now();
+    let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
     let user_text = if args.is_empty() {
         flow_name.clone()
     } else {
@@ -1266,7 +1266,7 @@ async fn route_input_in_turn(
     route: &atman_runtime::routing::RouteMatch,
     executor: &Executor,
     session: std::sync::Arc<Session>,
-    turn_id: atman_runtime::event::TurnId,
+    turn_id: atman_rt::TurnId<atman_runtime::event::AtmanUuid>,
     invocation_env: atman_runtime::InvocationEnv,
 ) -> RouteOutcome {
     match run_slash_command_in_turn(
@@ -1322,7 +1322,7 @@ async fn run_slash_command_in_turn(
     line: &str,
     executor: &Executor,
     session: std::sync::Arc<Session>,
-    turn_id: atman_runtime::event::TurnId,
+    turn_id: atman_rt::TurnId<atman_runtime::event::AtmanUuid>,
     invocation_env: atman_runtime::InvocationEnv,
 ) -> Result<Value> {
     let (parsed, flow_name, kv, source_dir) = resolve_slash_command(line)?;
@@ -4767,7 +4767,7 @@ async fn run_turn_with_interjection(
     reporter: &Reporter,
 ) {
     let (text, inline_attachments) = extract_at_paths(raw_line);
-    let turn_id = atman_runtime::event::TurnId::now();
+    let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
     let user_msg = match build_user_message(
         &session,
         &text,
@@ -4964,7 +4964,7 @@ fn build_user_message(
     text: &str,
     attachments: &[std::path::PathBuf],
     submitted_images: Option<&[atman_runtime::message::ImageSource]>,
-    turn_id: atman_runtime::event::TurnId,
+    turn_id: atman_rt::TurnId<atman_runtime::event::AtmanUuid>,
     origin: atman_runtime::message::MessageOrigin,
 ) -> Result<atman_runtime::message::Message, atman_runtime::RuntimeError> {
     use atman_runtime::message::{Message, MessagePart, MessageRole};
@@ -5527,7 +5527,7 @@ async fn handle_suggest(
     let choice = if reporter.is_tui() {
         let form = atman_runtime::form::PendingForm {
             form_id: "suggest_confirm".to_string(),
-            run_id: atman_runtime::event::FlowRunId::now(),
+            run_id: atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now(),
             tool_use_id: "suggest_confirm".to_string(),
             form: atman_runtime::form::CompositeForm {
                 questions: vec![atman_runtime::form::FormQuestion {
@@ -6569,7 +6569,7 @@ async fn preview_scene_chat(session: std::sync::Arc<Session>) {
 }
 
 async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) {
-    use atman_runtime::event::FlowRunId;
+    type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
     use atman_runtime::nodegraph::NodeKind;
     use atman_runtime::permission::PermissionRequestId;
     use atman_runtime::permission_audit::{
@@ -6666,7 +6666,7 @@ async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) 
 }
 
 async fn preview_scene_form(session: std::sync::Arc<Session>, kind: atman_runtime::form::FormKind) {
-    use atman_runtime::event::FlowRunId;
+    type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let form = atman_runtime::form::CompositeForm {
         questions: vec![atman_runtime::form::FormQuestion {
@@ -6686,7 +6686,7 @@ async fn preview_scene_form(session: std::sync::Arc<Session>, kind: atman_runtim
 }
 
 async fn preview_scene_form_sequence(session: std::sync::Arc<Session>) {
-    use atman_runtime::event::FlowRunId;
+    type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
     use atman_runtime::form::{FormKind, PendingForm};
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let forms = session.forms();
@@ -6865,7 +6865,8 @@ async fn preview_scene_notify(session: std::sync::Arc<Session>) {
 }
 
 async fn preview_scene_workflow(session: std::sync::Arc<Session>, cancel_midway: bool) {
-    use atman_runtime::event::{FlowNodeStatus, FlowRunId};
+    use atman_runtime::event::FlowNodeStatus;
+    type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
     use atman_runtime::nodegraph::NodeKind;
     use atman_runtime::stream::StreamFrame;
     let tx = session.stream_tx();
@@ -6951,7 +6952,8 @@ subcommand, and wired it into the daemon. All tests pass."
 }
 
 async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {
-    use atman_runtime::event::{FlowNodeStatus, FlowRunId};
+    use atman_runtime::event::FlowNodeStatus;
+    type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
     use atman_runtime::nodegraph::NodeKind;
     use atman_runtime::stream::StreamFrame;
     use atman_runtime::tools::term::{TerminalCell, TerminalColor, TerminalScreen};
@@ -7621,7 +7623,7 @@ fn replay_messages_into(
     messages: &[migrate_source::ImportedMessage],
 ) {
     for m in messages {
-        let turn_id = atman_runtime::event::TurnId::now();
+        let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
         let text = if let Some(agent) = &m.agent {
             format!("[migrated from {source_tag}, agent={agent}]\n{}", m.text)
         } else {
@@ -9265,7 +9267,7 @@ mod tests {
             "inspect",
             &[],
             Some(std::slice::from_ref(&submitted)),
-            atman_runtime::event::TurnId::now(),
+            atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             atman_runtime::message::MessageOrigin::User,
         )
         .unwrap();

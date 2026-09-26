@@ -784,7 +784,7 @@ fn hint_for(kind: &FormKind) -> &'static str {
 mod tests {
     use super::*;
     use crate::wm::modal::ModalOverlay;
-    use atman_runtime::event::FlowRunId;
+    type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
     fn mk_questions(kinds: Vec<FormKind>) -> PendingForm {
         PendingForm {
             form_id: "f".into(),

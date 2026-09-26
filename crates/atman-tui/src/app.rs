@@ -4685,7 +4685,9 @@ impl AppState {
                     done: false,
                     expanded: false,
                     messages: Vec::new(),
-                    workflow_graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
+                    workflow_graph: WorkflowProjection::new(atman_rt::TurnId::<
+                        atman_runtime::event::AtmanUuid,
+                    >::now()),
                     expanded_nodes: HashSet::new(),
                     workflow_expanded: false,
                 };
@@ -4900,7 +4902,9 @@ impl AppState {
             let idx = self.items.len();
             self.push_item(OutputItem::WorkflowPanel {
                 turn_index,
-                graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
+                graph: WorkflowProjection::new(
+                    atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
+                ),
                 expanded_nodes: HashSet::new(),
                 panel_expanded: false,
                 started_at: std::time::Instant::now(),
@@ -4977,7 +4981,9 @@ impl AppState {
             let idx = self.items.len();
             self.push_item(OutputItem::WorkflowPanel {
                 turn_index,
-                graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
+                graph: WorkflowProjection::new(
+                    atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
+                ),
                 expanded_nodes: HashSet::new(),
                 panel_expanded: false,
                 started_at: std::time::Instant::now(),
@@ -5391,7 +5397,7 @@ mod tests {
                         text: "Done.".into(),
                     },
                 ],
-                turn_id: atman_runtime::event::TurnId::now(),
+                turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                 origin: atman_runtime::message::MessageOrigin::FinalAnswer,
             },
         });
@@ -5625,7 +5631,7 @@ mod tests {
 
     #[test]
     fn s8_permission_frames_route_to_root_and_spawned_workflow_owners() {
-        use atman_runtime::event::FlowRunId;
+        type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
         use atman_runtime::permission::PermissionRequestId;
         use atman_runtime::permission_audit::{
             PermissionAuditTarget, PermissionPolicyReference, PermissionProvenanceSummary,
@@ -5843,7 +5849,7 @@ mod tests {
                     intent: ToolCallIntent::new("检查结果"),
                 },
             ],
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             origin: MessageOrigin::User,
         };
         app.apply_stream_frame(StreamFrame::AssistantMsg {
@@ -5892,7 +5898,7 @@ mod tests {
                     input: serde_json::json!({"path": "README.md", "offset": 1, "limit": 80}),
                     intent: ToolCallIntent::new("读取项目说明"),
                 }],
-                turn_id: atman_runtime::event::TurnId::now(),
+                turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                 origin: MessageOrigin::User,
             },
         });
@@ -5931,7 +5937,7 @@ mod tests {
                     input: serde_json::json!({"path": "README.md"}),
                     intent: ToolCallIntent::new("读取项目说明"),
                 }],
-                turn_id: atman_runtime::event::TurnId::now(),
+                turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                 origin: MessageOrigin::User,
             },
         });
@@ -5945,7 +5951,7 @@ mod tests {
                     content: "done".into(),
                     is_error: false,
                 }],
-                turn_id: atman_runtime::event::TurnId::now(),
+                turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                 origin: MessageOrigin::User,
             },
         });
@@ -5973,7 +5979,7 @@ mod tests {
                         input: serde_json::json!({"cmd": "true"}),
                         intent: ToolCallIntent::new("运行检查"),
                     }],
-                    turn_id: atman_runtime::event::TurnId::now(),
+                    turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                     origin: MessageOrigin::User,
                 },
             });
@@ -6008,7 +6014,7 @@ mod tests {
                         content: result.into(),
                         is_error: false,
                     }],
-                    turn_id: atman_runtime::event::TurnId::now(),
+                    turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                     origin: MessageOrigin::User,
                 },
             });
@@ -6053,7 +6059,7 @@ mod tests {
                     input: serde_json::json!({"cmd": "true", "block": true}),
                     intent: None,
                 }],
-                turn_id: atman_runtime::event::TurnId::now(),
+                turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                 origin: MessageOrigin::User,
             },
         });
@@ -6067,7 +6073,7 @@ mod tests {
                         .into(),
                     is_error: false,
                 }],
-                turn_id: atman_runtime::event::TurnId::now(),
+                turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                 origin: MessageOrigin::User,
             },
         });
@@ -6098,7 +6104,7 @@ mod tests {
                     input: serde_json::json!({"goal": "检查实现"}),
                     intent: None,
                 }],
-                turn_id: atman_runtime::event::TurnId::now(),
+                turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                 origin: MessageOrigin::User,
             },
         });
@@ -6118,7 +6124,7 @@ mod tests {
                     content: r#"{"handle":"agent_1","status":"running"}"#.into(),
                     is_error: false,
                 }],
-                turn_id: atman_runtime::event::TurnId::now(),
+                turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                 origin: MessageOrigin::User,
             },
         });
@@ -6390,7 +6396,7 @@ mod tests {
                     content: "failed".into(),
                     is_error: true,
                 }],
-                turn_id: atman_runtime::event::TurnId::now(),
+                turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                 origin: MessageOrigin::User,
             },
         });
@@ -6894,7 +6900,9 @@ mod tests {
         let mut app = AppState::new("s".into(), None);
         app.push_item(OutputItem::WorkflowPanel {
             turn_index: 0,
-            graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
+            graph: WorkflowProjection::new(
+                atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
+            ),
             expanded_nodes: HashSet::new(),
             panel_expanded: true,
             started_at: Instant::now(),
@@ -6967,7 +6975,9 @@ mod tests {
                 done: true,
                 expanded: false,
                 messages: Vec::new(),
-                workflow_graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
+                workflow_graph: WorkflowProjection::new(atman_rt::TurnId::<
+                    atman_runtime::event::AtmanUuid,
+                >::now()),
                 expanded_nodes: HashSet::new(),
                 workflow_expanded: false,
             },
@@ -6998,7 +7008,9 @@ mod tests {
         let mut store = OutputStore::default();
         store.push(OutputItem::WorkflowPanel {
             turn_index: 0,
-            graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
+            graph: WorkflowProjection::new(
+                atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
+            ),
             expanded_nodes: HashSet::from(["old".into()]),
             panel_expanded: true,
             started_at: Instant::now(),
@@ -7400,7 +7412,7 @@ mod tests {
                     content: "done".into(),
                     is_error: false,
                 }],
-                turn_id: atman_runtime::event::TurnId::now(),
+                turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                 origin: MessageOrigin::User,
             },
         });

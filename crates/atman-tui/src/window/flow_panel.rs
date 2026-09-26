@@ -580,9 +580,9 @@ mod tests {
 
     #[test]
     fn animation_ticks_reuse_subagent_panel_projection() {
-        let run_id = atman_runtime::event::FlowRunId::now();
+        let run_id = atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now();
         let graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root: vec![WorkflowNode {
                 id: run_id.to_string(),
                 kind: WorkflowNodeKind::Flow {
@@ -704,7 +704,7 @@ mod tests {
     fn animation_ticks_reuse_root_flow_panel_projection() {
         let run_id = "root-flow".to_string();
         let graph = WorkflowProjection::from(WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root: vec![WorkflowNode {
                 id: run_id.clone(),
                 kind: WorkflowNodeKind::Flow {

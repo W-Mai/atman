@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use atman_proto::{FlowRunId as ProtoRunId, SessionId as ProtoSessionId};
 use atman_rt::Value as CoreValue;
 
-use atman_runtime::event::FlowRunId as RuntimeRunId;
+type RuntimeRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
 
 use crate::state::{DaemonState, LiveSession};
 
@@ -443,7 +443,7 @@ async fn run_flow_inner(
         .fire(&executor, atman_rt::ast::LifecycleEvent::SessionStart)
         .await;
 
-    let turn_id = atman_runtime::event::TurnId::now();
+    let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
     let user_text = if args.is_empty() {
         flow_name.clone()
     } else {

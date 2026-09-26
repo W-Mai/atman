@@ -3,7 +3,7 @@
 //!
 //!     cargo test -p atman-tui --test workflow_preview -- --ignored --nocapture
 
-use atman_runtime::event::TurnId;
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::workflow::{
     ApprovalState, NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
 };

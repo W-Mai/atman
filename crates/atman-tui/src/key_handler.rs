@@ -108,7 +108,7 @@ pub(crate) fn open_project_storage_scope_picker(app: &mut AppState) {
     };
     let form = atman_runtime::form::PendingForm {
         form_id: crate::PROJECT_STORAGE_SCOPE_FORM_ID.to_string(),
-        run_id: atman_runtime::event::FlowRunId::now(),
+        run_id: atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now(),
         tool_use_id: crate::PROJECT_STORAGE_SCOPE_FORM_ID.to_string(),
         kind: kind.clone(),
         form: atman_runtime::form::CompositeForm {
@@ -146,7 +146,7 @@ pub(crate) fn open_formula_rendering_picker(app: &mut AppState) {
     };
     let form = atman_runtime::form::PendingForm {
         form_id: crate::FORMULA_RENDERING_FORM_ID.to_string(),
-        run_id: atman_runtime::event::FlowRunId::now(),
+        run_id: atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now(),
         tool_use_id: crate::FORMULA_RENDERING_FORM_ID.to_string(),
         kind: kind.clone(),
         form: atman_runtime::form::CompositeForm {
@@ -2297,7 +2297,7 @@ mod tests {
     }
 
     fn pending_permission(revision: u64) -> crate::app::PendingPermission {
-        use atman_runtime::event::FlowRunId;
+        type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
         use atman_runtime::permission::PermissionRequestId;
         use atman_runtime::permission_audit::{
             PermissionAuditTarget, PermissionPolicyReference, PermissionProvenanceSummary,

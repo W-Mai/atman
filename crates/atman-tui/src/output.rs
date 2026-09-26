@@ -9154,7 +9154,7 @@ mod tests {
 
     fn permission_request(
         request_id: atman_runtime::permission::PermissionRequestId,
-        run_id: &atman_runtime::event::FlowRunId,
+        run_id: &atman_rt::RunId<atman_runtime::event::AtmanUuid>,
         tool_use_id: String,
     ) -> atman_runtime::permission_audit::PermissionRequestAudit {
         atman_runtime::permission_audit::PermissionRequestAudit {
@@ -9190,9 +9190,9 @@ mod tests {
             NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
             WorkflowPermissionIdentity, WorkflowPermissionRequest, WorkflowPermissionState,
         };
-        let run_id = atman_runtime::event::FlowRunId::now();
+        let run_id = atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now();
         let mut graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root: vec![WorkflowNode {
                 id: run_id.to_string(),
                 kind: WorkflowNodeKind::Flow {
@@ -9242,7 +9242,7 @@ mod tests {
             ApprovalState, NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
             WorkflowPermissionIdentity, WorkflowPermissionRequest, WorkflowPermissionState,
         };
-        let run_id = atman_runtime::event::FlowRunId::now();
+        let run_id = atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now();
         let run_id_text = run_id.0.to_string();
         let tool_node_id = format!("tool:{run_id_text}:shared");
         let at = chrono::Utc::now();
@@ -9276,7 +9276,7 @@ mod tests {
             },
         );
         let graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root: vec![WorkflowNode {
                 id: run_id_text.clone(),
                 kind: WorkflowNodeKind::Flow {
@@ -9479,7 +9479,7 @@ mod tests {
         use std::collections::HashSet;
         use std::time::Instant;
         let graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root: vec![WorkflowNode {
                 id: "n0".into(),
                 kind: WorkflowNodeKind::Stmt {
@@ -11271,7 +11271,8 @@ mod tests {
         // SAFETY: same rationale as the guard's Drop.
         unsafe { std::env::set_var("ATMAN_LEGACY_WORKFLOW", "1") };
         let _legacy = LegacyEnvGuard;
-        let mut graph = WorkflowGraph::new(atman_runtime::event::TurnId::now());
+        let mut graph =
+            WorkflowGraph::new(atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now());
         graph.root.push(WorkflowNode {
             id: "r".into(),
             kind: WorkflowNodeKind::Flow {
@@ -11342,7 +11343,8 @@ mod tests {
         use atman_runtime::workflow::{
             NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
         };
-        let mut graph = WorkflowGraph::new(atman_runtime::event::TurnId::now());
+        let mut graph =
+            WorkflowGraph::new(atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now());
         graph.root.push(WorkflowNode {
             id: "r".into(),
             kind: WorkflowNodeKind::Flow {
@@ -11439,7 +11441,8 @@ mod tests {
             }
         }
 
-        let mut graph = WorkflowGraph::new(atman_runtime::event::TurnId::now());
+        let mut graph =
+            WorkflowGraph::new(atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now());
         graph.root.push(subflow_layer(0, 4));
         let panel = OutputItem::WorkflowPanel {
             turn_index: 0,
@@ -11516,7 +11519,7 @@ mod tests {
     fn workflow_footer_separates_auxiliary_calls_and_cache_write() {
         use atman_runtime::workflow::WorkflowGraph;
         let graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root: vec![
                 make_llm_stats_node(
                     "main",
@@ -11554,7 +11557,7 @@ mod tests {
     fn workflow_footer_does_not_blend_cache_rates_across_routes() {
         use atman_runtime::workflow::WorkflowGraph;
         let graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root: vec![
                 make_llm_stats_node(
                     "a",
@@ -11601,7 +11604,7 @@ mod tests {
             *call_intent = atman_runtime::message::ToolCallIntent::new("Inspect active processes");
         }
         let graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root: vec![node],
             permission_requests: Default::default(),
             permission_groups: Default::default(),
@@ -11656,7 +11659,7 @@ mod tests {
             })
             .collect();
         let graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root,
             permission_requests: Default::default(),
             permission_groups: Default::default(),
@@ -11673,7 +11676,7 @@ mod tests {
         use atman_runtime::workflow::WorkflowGraph;
         let now = chrono::Utc::now();
         let mut graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root: (0..8)
                 .map(|index| {
                     make_tool_node(
@@ -11714,7 +11717,7 @@ mod tests {
         use atman_runtime::workflow::WorkflowGraph;
         let now = chrono::Utc::now();
         let mut graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root: (0..8)
                 .map(|index| {
                     make_tool_node(
@@ -11757,7 +11760,7 @@ mod tests {
 
         let now = chrono::Utc::now();
         let graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root: (0..20_000)
                 .map(|index| {
                     make_tool_node(
@@ -11802,7 +11805,7 @@ mod tests {
 
         let now = chrono::Utc::now();
         let graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root: vec![
                 make_tool_node(
                     "newest",
@@ -11851,7 +11854,7 @@ mod tests {
             })
             .collect();
         let graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root,
             permission_requests: Default::default(),
             permission_groups: Default::default(),
@@ -11881,7 +11884,7 @@ mod tests {
             })
             .collect();
         let graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root,
             permission_requests: Default::default(),
             permission_groups: Default::default(),
@@ -11915,7 +11918,7 @@ mod tests {
             make_tool_node("new", "new_tool", Some(now + chrono::Duration::seconds(10))),
         ];
         let graph = WorkflowGraph {
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             root,
             permission_requests: Default::default(),
             permission_groups: Default::default(),

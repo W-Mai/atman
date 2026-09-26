@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use atman_runtime::event::{FlowRunId, TurnId};
+type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::permission::PermissionRequestId;
 use atman_runtime::permission_audit::{
     PermissionAuditTarget, PermissionPolicyReference, PermissionRequestAudit,

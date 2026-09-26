@@ -773,7 +773,7 @@ impl WindowManager {
                 if let (Some(tx), Some(session)) = (control_tx, app.session.as_ref()) {
                     let form = atman_runtime::form::PendingForm {
                         form_id: "session_move_path".to_string(),
-                        run_id: atman_runtime::event::FlowRunId::now(),
+                        run_id: atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now(),
                         tool_use_id: "session_move_path".to_string(),
                         kind: atman_runtime::form::FormKind::Text {
                             prompt: "New working directory:".to_string(),
@@ -1364,7 +1364,7 @@ mod tests {
             .form_modal
             .attach(atman_runtime::form::PendingForm {
                 form_id: "confirm_test".into(),
-                run_id: atman_runtime::event::FlowRunId::now(),
+                run_id: atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now(),
                 tool_use_id: "tool_test".into(),
                 form: atman_runtime::form::CompositeForm {
                     questions: vec![atman_runtime::form::FormQuestion {
@@ -1404,7 +1404,7 @@ mod tests {
             .form_modal
             .attach(atman_runtime::form::PendingForm {
                 form_id: "text_test".into(),
-                run_id: atman_runtime::event::FlowRunId::now(),
+                run_id: atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now(),
                 tool_use_id: "tool_text".into(),
                 form: atman_runtime::form::CompositeForm {
                     questions: vec![atman_runtime::form::FormQuestion {

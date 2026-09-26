@@ -167,7 +167,8 @@ fn flatten_transcript_impl(
     let mut sub_agent_messages: HashMap<String, Vec<Message>> = HashMap::new();
     let mut sub_agent_entries: HashMap<String, Vec<&TranscriptEntry>> = HashMap::new();
     let mut terminal_indices: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut work_start_by_turn: HashMap<atman_runtime::event::TurnId, usize> = HashMap::new();
+    let mut work_start_by_turn: HashMap<atman_rt::TurnId<atman_runtime::event::AtmanUuid>, usize> =
+        HashMap::new();
     let mut workflow_permission_batches: HashMap<
         usize,
         Vec<(
@@ -188,7 +189,9 @@ fn flatten_transcript_impl(
             .count();
         out.push(OutputItem::WorkflowPanel {
             turn_index,
-            graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
+            graph: WorkflowProjection::new(
+                atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
+            ),
             expanded_nodes: HashSet::new(),
             panel_expanded: false,
             started_at: Instant::now(),
@@ -333,9 +336,10 @@ fn flatten_transcript_impl(
                             done: flow_dones.contains_key(&root_id),
                             expanded: false,
                             messages: Vec::new(),
-                            workflow_graph: WorkflowProjection::new(
-                                atman_runtime::event::TurnId::now(),
-                            ),
+                            workflow_graph: WorkflowProjection::new(atman_rt::TurnId::<
+                                atman_runtime::event::AtmanUuid,
+                            >::now(
+                            )),
                             expanded_nodes: HashSet::new(),
                             workflow_expanded: false,
                         });
@@ -1616,7 +1620,9 @@ pub fn history_note(item_count: usize, message_count: usize) -> Option<OutputIte
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atman_runtime::event::{FlowNodeStatus, FlowRunId, TurnId};
+    use atman_runtime::event::FlowNodeStatus;
+    type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
+    type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 
     #[test]
     fn final_answer_history_inserts_a_fold_boundary_marker() {
@@ -2286,7 +2292,7 @@ mod tests {
             // Genuine user message (start of turn)
             TranscriptEntry::Message {
                 message: Message::user_text(
-                    atman_runtime::event::TurnId::now(),
+                    atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                     "hello".to_string(),
                 ),
                 flow_run_id: None,
@@ -2324,7 +2330,7 @@ mod tests {
             // THIS is the problematic event: user_msg from session.push(message.user(...))
             TranscriptEntry::Message {
                 message: Message::user_text(
-                    atman_runtime::event::TurnId::now(),
+                    atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                     "hello".to_string(),
                 ),
                 flow_run_id: None, // None! — same as genuine user message
