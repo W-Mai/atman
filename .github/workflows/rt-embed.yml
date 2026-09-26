@@ -25,6 +25,13 @@ jobs:
         run: rustup target add wasm32-unknown-unknown wasm32-wasip1
       - name: Check portable core without std
         run: cargo check -p atman-rt --no-default-features --target wasm32-unknown-unknown --locked
+      - name: Check portable dependency features
+        run: |
+          cargo tree -p atman-rt --target wasm32-unknown-unknown -e features --locked > rt-features.txt
+          if grep -q ' feature "std"' rt-features.txt; then
+            cat rt-features.txt
+            exit 1
+          fi
       - name: Run embedding fixture on Wasm
         run: |
           cargo build --manifest-path fixtures/atman-rt-embed/Cargo.toml --target wasm32-wasip1 --locked
