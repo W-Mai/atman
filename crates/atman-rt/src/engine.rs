@@ -8,7 +8,7 @@ use core::{future::Future, pin::Pin};
 
 use crate::{
     Value,
-    ast::{Expr, FlowDecl, Pattern, Stmt},
+    ast::{Arg, Expr, FlowDecl, ParamDecl, Pattern, Stmt},
 };
 
 pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -16,6 +16,41 @@ pub type StatementExecution<V, E> = (StatementOutcome<V, E>, Option<String>);
 pub type FlowArgs<P, E> = Vec<(String, Value<P, E>)>;
 pub type FlowOutcome<P, E> = StatementOutcome<Value<P, E>, E>;
 pub type FlowExecution<P, E> = StatementExecution<Value<P, E>, E>;
+
+#[derive(Debug)]
+pub enum CallArgumentError<P, E> {
+    TooManyPositional,
+    Evaluation(Value<P, E>),
+}
+
+/// Evaluates explicit call arguments in source order and binds their names.
+pub async fn bind_call_arguments<'a, P, E, F>(
+    params: &'a [ParamDecl],
+    args: &'a [Arg],
+    mut evaluate: F,
+) -> Result<FlowArgs<P, E>, CallArgumentError<P, E>>
+where
+    F: FnMut(&'a Expr) -> HostFuture<'a, Value<P, E>>,
+{
+    let mut bindings = Vec::with_capacity(args.len());
+    for (index, arg) in args.iter().enumerate() {
+        let (name, expr) = match arg {
+            Arg::Positional(expr) => {
+                let param = params
+                    .get(index)
+                    .ok_or(CallArgumentError::TooManyPositional)?;
+                (param.name.name.clone(), expr)
+            }
+            Arg::Named { name, value } => (name.name.clone(), value),
+        };
+        let value = evaluate(expr).await;
+        if matches!(value, Value::Err(_)) {
+            return Err(CallArgumentError::Evaluation(value));
+        }
+        bindings.push((name, value));
+    }
+    Ok(bindings)
+}
 
 pub enum StatementOutcome<V, E> {
     Continue,
@@ -243,7 +278,65 @@ mod tests {
     };
 
     use super::*;
-    use crate::ast::Literal;
+    use crate::ast::{Ident, Literal, Span, TypeExpr};
+
+    fn test_param(name: &str) -> ParamDecl {
+        ParamDecl {
+            name: Ident::new(name, Span::default()),
+            ty: TypeExpr::Named(Ident::new("Int", Span::default())),
+            default: None,
+        }
+    }
+
+    fn test_argument<'a>(expr: &'a Expr) -> HostFuture<'a, Value<(), &'static str>> {
+        Box::pin(async move {
+            match expr {
+                Expr::Literal(Literal::Int(99)) => panic!("argument after stop was evaluated"),
+                Expr::Literal(Literal::Int(value)) => Value::Int(*value),
+                _ => Value::Err("bad argument"),
+            }
+        })
+    }
+
+    #[test]
+    fn call_arguments_bind_in_order_and_stop_before_later_values() {
+        let params = [test_param("first"), test_param("second")];
+        let args = [
+            Arg::Positional(Expr::Literal(Literal::Int(1))),
+            Arg::Named {
+                name: Ident::new("chosen", Span::default()),
+                value: Expr::Literal(Literal::Int(2)),
+            },
+        ];
+        let bindings = run_ready(bind_call_arguments(&params, &args, test_argument)).unwrap();
+        assert_eq!(bindings[0].0, "first");
+        assert!(matches!(bindings[0].1, Value::Int(1)));
+        assert_eq!(bindings[1].0, "chosen");
+        assert!(matches!(bindings[1].1, Value::Int(2)));
+
+        let error_args = [
+            Arg::Positional(Expr::Literal(Literal::Int(1))),
+            Arg::Named {
+                name: Ident::new("chosen", Span::default()),
+                value: Expr::Ident(Ident::new("bad", Span::default())),
+            },
+            Arg::Positional(Expr::Literal(Literal::Int(99))),
+        ];
+        assert!(matches!(
+            run_ready(bind_call_arguments(&params, &error_args, test_argument)),
+            Err(CallArgumentError::Evaluation(Value::Err("bad argument")))
+        ));
+
+        let excess_args = [
+            Arg::Positional(Expr::Literal(Literal::Int(1))),
+            Arg::Positional(Expr::Literal(Literal::Int(2))),
+            Arg::Positional(Expr::Literal(Literal::Int(99))),
+        ];
+        assert!(matches!(
+            run_ready(bind_call_arguments(&params, &excess_args, test_argument)),
+            Err(CallArgumentError::TooManyPositional)
+        ));
+    }
 
     struct TestHost<'a> {
         events: &'a mut Vec<String>,

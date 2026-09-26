@@ -18,8 +18,9 @@ pub mod value;
 pub use ast::File as Program;
 pub use cancel::race_cancel;
 pub use engine::{
-    Engine, FlowArgs, FlowExecution, FlowOutcome, HostFuture, LoopExit, LoopHost, Preflight,
-    StatementExecution, StatementHost, StatementOutcome, run_loop, run_when,
+    CallArgumentError, Engine, FlowArgs, FlowExecution, FlowOutcome, HostFuture, LoopExit,
+    LoopHost, Preflight, StatementExecution, StatementHost, StatementOutcome, bind_call_arguments,
+    run_loop, run_when,
 };
 pub use env::Env;
 pub use expr::{ExpressionEffect, ExpressionHost, eval_expr, is_type_name};

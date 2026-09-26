@@ -1372,29 +1372,20 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     name.name
                 )));
             };
-            let mut bindings = Vec::with_capacity(args.len());
-            for (i, arg) in args.iter().enumerate() {
-                let (param_name, value) = match arg {
-                    Arg::Positional(e) => {
-                        let Some(p) = target.params.get(i) else {
-                            return Value::Err(RuntimeError::MissingArg(format!(
-                                "subflow({}): too many positional args",
-                                name.name
-                            )));
-                        };
-                        let v = eval_expr(e, env, ctx).await;
-                        (p.name.name.clone(), v)
-                    }
-                    Arg::Named { name: n, value } => {
-                        let v = eval_expr(value, env, ctx).await;
-                        (n.name.clone(), v)
-                    }
-                };
-                if value.is_err() {
-                    return value;
+            let bindings = match atman_rt::bind_call_arguments(&target.params, args, |expr| {
+                eval_expr(expr, env, ctx)
+            })
+            .await
+            {
+                Ok(bindings) => bindings,
+                Err(atman_rt::CallArgumentError::TooManyPositional) => {
+                    return Value::Err(RuntimeError::MissingArg(format!(
+                        "subflow({}): too many positional args",
+                        name.name
+                    )));
                 }
-                bindings.push((param_name, value));
-            }
+                Err(atman_rt::CallArgumentError::Evaluation(value)) => return value,
+            };
             let mut sub_env = Env::new();
             for (n, v) in bindings {
                 sub_env.bind(n, v);
