@@ -398,7 +398,7 @@ atman/
   docs/              # Quickstart, context strategy, list combinators
 ```
 
-`cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml` executes flows with default parameters, portable list and dynamic fanout nodes, a host effect, and a loop using `atman-rt` as its only dependency. It does not start the CLI or daemon. CI runs this fixture on Linux, macOS, and Windows and checks the core on the Wasm target without default features.
+`cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml` executes flows with default parameters, portable list and dynamic fanout nodes, a host effect, and a loop using `atman-rt` as its only dependency. It does not start the CLI or daemon. CI runs this fixture on Linux, macOS, and Windows, runs the same flows on Wasm/WASI, and checks the `no_std` core on `wasm32-unknown-unknown`.
 
 Language: Rust (edition 2024, MSRV 1.85). License: MIT OR Apache-2.0.
 
