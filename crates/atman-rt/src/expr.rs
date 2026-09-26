@@ -3,6 +3,7 @@ use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use crate::{
     Env, HostFuture, HostValueOps, Value, ValueError,
     ast::{Expr, FanoutCollect, Ident, Node},
+    fanout::join_fanout_all,
     list::{ListIntrinsic, eval_list_intrinsic},
     ops::{eval_binary, eval_literal, eval_unary},
 };
@@ -40,6 +41,22 @@ pub trait ExpressionHost: Sync {
     fn undefined_field(&self, name: String) -> Self::Error;
     fn cancellation_error(&self) -> Option<Self::Error> {
         None
+    }
+    fn fanout_branch_start(&self, _index: usize) {}
+    fn eval_fanout_branch<'a>(
+        &'a self,
+        expr: &'a Expr,
+        env: &'a Env<Value<Self::Payload, Self::Error>>,
+        _index: usize,
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>>
+    where
+        Self: Sized,
+    {
+        eval_expr(expr, env, self)
+    }
+    fn fanout_branch_end(&self, _index: usize, _value: &Value<Self::Payload, Self::Error>) {}
+    fn unsupported_fanout_first(&self) -> Self::Error {
+        Self::Error::type_mismatch("fanout collect: all", "first".into())
     }
     fn eval_pipe_rhs<'a>(
         &'a self,
@@ -136,6 +153,9 @@ pub fn eval_expr<'a, H: ExpressionHost>(
                         lambda,
                         collect,
                     } => eval_dynamic_fanout(source, lambda, collect, env, host).await,
+                    Node::Fanout { items, collect } => {
+                        eval_static_fanout(items, collect, env, host).await
+                    }
                     Node::ToolCall { path, args } => match ListIntrinsic::from_path(path) {
                         Some(intrinsic) => eval_list_intrinsic(intrinsic, args, env, host).await,
                         None => host.eval_external(ExpressionEffect::Node(node), env).await,
@@ -163,6 +183,29 @@ pub fn eval_expr<'a, H: ExpressionHost>(
             },
         }
     })
+}
+
+/// Evaluates static fanout while the host supplies branch context and events.
+pub async fn eval_static_fanout<'a, H: ExpressionHost>(
+    items: &'a [Expr],
+    collect: &'a FanoutCollect,
+    env: &'a Env<Value<H::Payload, H::Error>>,
+    host: &'a H,
+) -> Value<H::Payload, H::Error> {
+    if matches!(collect, FanoutCollect::First) {
+        return Value::Err(host.unsupported_fanout_first());
+    }
+    for index in 0..items.len() {
+        host.fanout_branch_start(index);
+    }
+    let branches = items
+        .iter()
+        .enumerate()
+        .map(|(index, expr)| host.eval_fanout_branch(expr, env, index));
+    join_fanout_all(branches, |index, value| {
+        host.fanout_branch_end(index, value)
+    })
+    .await
 }
 
 /// Evaluates a dynamic fanout through the shared expression engine.
@@ -420,6 +463,24 @@ mod tests {
                 &ACTIVE_HOST,
             )),
             Value::Int(11)
+        ));
+    }
+
+    #[test]
+    fn static_fanout_dispatches_without_external_node_handling() {
+        let expr = Expr::Node(Node::Fanout {
+            items: vec![
+                Expr::Literal(Literal::Int(1)),
+                Expr::Node(Node::ToolCall {
+                    path: vec![],
+                    args: vec![],
+                }),
+            ],
+            collect: FanoutCollect::All,
+        });
+        assert!(matches!(
+            run_ready(eval_expr(&expr, &Env::new(), &ACTIVE_HOST)),
+            Value::List(values) if matches!(&values[..], [Value::Int(1), Value::Int(5)])
         ));
     }
 

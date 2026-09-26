@@ -1,6 +1,6 @@
 # How to filter and map lists in atman
 
-The `.at` DSL supports lambda expressions and dynamic fanout. Use the list combinators when a list operation needs flow-defined logic, and use fanout for concurrent execution.
+The `.at` DSL supports lambda expressions and static and dynamic fanout. Use the list combinators when a list operation needs flow-defined logic, and use static fanout for concurrent execution of explicit branches.
 
 ## Lambda expressions
 
@@ -35,7 +35,7 @@ flow summarize_items(items: list) -> list {
 }
 ```
 
-`collect: all` waits for every branch and preserves the result list. `collect: first` returns the first completed branch.
+Dynamic fanout applies the lambda in source order. `collect: all` returns every result; `collect: first` returns the first source item's result without evaluating later items.
 
 Static fanout evaluates an explicit list of expressions:
 
@@ -47,6 +47,8 @@ flow compare_files() -> list {
     ] collect: all
 }
 ```
+
+Static fanout polls all branches concurrently and returns results in source order. `collect: first` is not yet supported for static fanout.
 
 Use `fanout` for independent work. Keep dependent operations as ordinary sequential expressions so their data flow remains explicit.
 
@@ -87,6 +89,6 @@ Use named arguments when a tool has several parameters. The pipe form is useful 
 ## Current references
 
 - Lambda parser and AST: `crates/atman-dsl/src/parse.rs`, `crates/atman-rt/src/ast.rs`
-- `crates/atman-runtime/src/eval/mod.rs`
+- `crates/atman-rt/src/expr.rs` and `crates/atman-runtime/src/eval/mod.rs`
 - Canonical examples: `examples/agent.at`, `examples/review_code.at`, and `examples/look_into.at`
 - Flow tests: `atman flow test <path>`

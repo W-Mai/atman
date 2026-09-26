@@ -322,6 +322,31 @@ fn main() {
             if matches!(&items[..], [Value::Int(3), Value::Int(5)])
     ));
 
+    let static_fanout = FlowDecl {
+        name: ident("static_fanout"),
+        params: vec![],
+        ret: None,
+        contract: None,
+        body: vec![Stmt::Return {
+            value: Expr::Node(Node::Fanout {
+                items: vec![
+                    Expr::Node(Node::ToolCall {
+                        path: vec![ident("foreign")],
+                        args: vec![],
+                    }),
+                    literal(2),
+                ],
+                collect: FanoutCollect::All,
+            }),
+        }],
+    };
+    let mut engine = Engine::new(FixtureHost::new());
+    assert!(matches!(
+        block_on(engine.run_flow(&static_fanout, vec![])),
+        StatementOutcome::Return(Value::List(items))
+            if matches!(&items[..], [Value::Int(5), Value::Int(2)])
+    ));
+
     let loop_flow = FlowDecl {
         name: ident("loop"),
         params: vec![],

@@ -41,6 +41,72 @@ impl ExpressionHost for AtmanHost<'_> {
             .then(|| RuntimeError::Cancelled("flow cancelled by user".into()))
     }
 
+    fn fanout_branch_start(&self, index: usize) {
+        let (Some(sink), Some(run_id)) = (self.events, self.flow_run_id.clone()) else {
+            return;
+        };
+        let branch_id = fanout_branch_id(self, index);
+        sink.emit(crate::event::Event::FlowNodeStart {
+            run_id: run_id.clone(),
+            node_id: branch_id.clone(),
+            kind: crate::nodegraph::NodeKind::UserConfirm,
+            label: format!("branch[{index}]"),
+            parent_node_id: self.current_node_id.clone(),
+        });
+        if let Some(tx) = self.tool_ctx.stream_tx.as_ref() {
+            let _ = tx.send(crate::stream::StreamFrame::FlowNodeStart {
+                run_id: run_id.0.to_string(),
+                node_id: branch_id,
+                kind: crate::nodegraph::NodeKind::UserConfirm,
+                label: format!("branch[{index}]"),
+                parent_node_id: self.current_node_id.clone(),
+            });
+        }
+    }
+
+    fn eval_fanout_branch<'a>(
+        &'a self,
+        expr: &'a Expr,
+        env: &'a Env,
+        index: usize,
+    ) -> BoxFut<'a, Value> {
+        Box::pin(async move {
+            let branch_ctx = self.with_node(fanout_branch_id(self, index));
+            eval_expr(expr, env, &branch_ctx).await
+        })
+    }
+
+    fn fanout_branch_end(&self, index: usize, value: &Value) {
+        let (Some(sink), Some(run_id)) = (self.events, self.flow_run_id.clone()) else {
+            return;
+        };
+        let branch_id = fanout_branch_id(self, index);
+        let status = if value.is_err() {
+            crate::event::FlowNodeStatus::Err
+        } else {
+            crate::event::FlowNodeStatus::Ok
+        };
+        sink.emit(crate::event::Event::FlowNodeEnd {
+            run_id: run_id.clone(),
+            node_id: branch_id.clone(),
+            status: status.clone(),
+            output_preview: None,
+        });
+        if let Some(tx) = self.tool_ctx.stream_tx.as_ref() {
+            let _ = tx.send(crate::stream::StreamFrame::FlowNodeEnd {
+                run_id: run_id.0.to_string(),
+                node_id: branch_id,
+                status,
+                output_preview: None,
+                parent_node_id: self.current_node_id.clone(),
+            });
+        }
+    }
+
+    fn unsupported_fanout_first(&self) -> RuntimeError {
+        RuntimeError::ToolFailed("fanout collect: first not yet implemented".into())
+    }
+
     fn eval_pipe_rhs<'a>(&'a self, rhs: &'a Expr, piped: Value, env: &'a Env) -> BoxFut<'a, Value> {
         Box::pin(async move {
             match rhs {
@@ -86,6 +152,13 @@ impl ExpressionHost for AtmanHost<'_> {
                 )),
             }
         })
+    }
+}
+
+fn fanout_branch_id(ctx: &AtmanHost<'_>, index: usize) -> String {
+    match ctx.current_node_id.as_deref() {
+        Some(parent) => format!("{parent}.branch[{index}]"),
+        None => format!("branch[{index}]"),
     }
 }
 
@@ -785,73 +858,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a AtmanHost<'a>) -> 
     match node {
         Node::ToolCall { path, args } => dispatch_tool_call(path, args, Vec::new(), env, ctx).await,
         Node::DynamicFanout { .. } => unreachable!("dynamic fanout is evaluated by atman-rt"),
-        Node::Fanout { items, collect } => match collect {
-            atman_rt::ast::FanoutCollect::All => {
-                let parent_id = ctx.current_node_id.clone();
-                let branch_ctxs: Vec<AtmanHost<'a>> = (0..items.len())
-                    .map(|i| {
-                        let branch_id = match &parent_id {
-                            Some(p) => format!("{p}.branch[{i}]"),
-                            None => format!("branch[{i}]"),
-                        };
-                        if let (Some(sink), Some(run_id)) = (ctx.events, ctx.flow_run_id.clone()) {
-                            sink.emit(crate::event::Event::FlowNodeStart {
-                                run_id: run_id.clone(),
-                                node_id: branch_id.clone(),
-                                kind: crate::nodegraph::NodeKind::UserConfirm,
-                                label: format!("branch[{i}]"),
-                                parent_node_id: parent_id.clone(),
-                            });
-                            if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
-                                let _ = tx.send(crate::stream::StreamFrame::FlowNodeStart {
-                                    run_id: run_id.0.to_string(),
-                                    node_id: branch_id.clone(),
-                                    kind: crate::nodegraph::NodeKind::UserConfirm,
-                                    label: format!("branch[{i}]"),
-                                    parent_node_id: parent_id.clone(),
-                                });
-                            }
-                        }
-                        ctx.with_node(branch_id)
-                    })
-                    .collect();
-                let futs = items
-                    .iter()
-                    .zip(branch_ctxs.iter())
-                    .map(|(item, bctx)| eval_expr(item, env, bctx));
-                atman_rt::join_fanout_all(futs, |index, v| {
-                    let bctx = &branch_ctxs[index];
-                    if let (Some(sink), Some(run_id), Some(bid)) =
-                        (ctx.events, ctx.flow_run_id.clone(), &bctx.current_node_id)
-                    {
-                        let status = if v.is_err() {
-                            crate::event::FlowNodeStatus::Err
-                        } else {
-                            crate::event::FlowNodeStatus::Ok
-                        };
-                        sink.emit(crate::event::Event::FlowNodeEnd {
-                            run_id: run_id.clone(),
-                            node_id: bid.clone(),
-                            status: status.clone(),
-                            output_preview: None,
-                        });
-                        if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
-                            let _ = tx.send(crate::stream::StreamFrame::FlowNodeEnd {
-                                run_id: run_id.0.to_string(),
-                                node_id: bid.clone(),
-                                status,
-                                output_preview: None,
-                                parent_node_id: parent_id.clone(),
-                            });
-                        }
-                    }
-                })
-                .await
-            }
-            atman_rt::ast::FanoutCollect::First => Value::Err(RuntimeError::ToolFailed(
-                "fanout collect: first not yet implemented".into(),
-            )),
-        },
+        Node::Fanout { .. } => unreachable!("static fanout is evaluated by atman-rt"),
         Node::UserConfirm { msg } => {
             let v = eval_expr(msg, env, ctx).await;
             if v.is_err() {
