@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 
 use crate::{
     Env, HostFuture, HostValueOps, Value, ValueError,
@@ -11,7 +11,24 @@ pub enum ExpressionEffect<'a> {
     Node(&'a Node),
     Call { func: &'a Ident, args: &'a [Expr] },
     Pipe { lhs: &'a Expr, rhs: &'a Expr },
-    Annotated { expr: &'a Expr, annotation: &'a str },
+}
+
+pub fn is_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "bool" | "int" | "float" | "string" | "path" | "bytes" | "duration"
+    )
+}
+
+fn annotation_type_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Ident(id) if is_type_name(&id.name) => Some(id.name.clone()),
+        Expr::List(items) if items.len() == 1 => match &items[0] {
+            Expr::Ident(id) if is_type_name(&id.name) => Some(format!("list of {}", id.name)),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Supplies external expressions and product-specific error messages.
@@ -109,10 +126,13 @@ pub fn eval_expr<'a, H: ExpressionHost>(
                 host.eval_external(ExpressionEffect::Pipe { lhs, rhs }, env)
                     .await
             }
-            Expr::Annotated { expr, annotation } => {
-                host.eval_external(ExpressionEffect::Annotated { expr, annotation }, env)
-                    .await
-            }
+            Expr::Annotated { expr, annotation } => match annotation_type_name(expr) {
+                Some(type_name) => Value::Struct(vec![
+                    ("type".into(), Value::Str(type_name)),
+                    ("desc".into(), Value::Str(annotation.clone())),
+                ]),
+                None => eval_expr(expr, env, host).await,
+            },
         }
     })
 }
@@ -201,6 +221,37 @@ mod tests {
         assert!(matches!(
             run_ready(eval_expr(&missing, &env, &TestHost)),
             Value::Err(EvalError::TypeMismatch { actual, .. }) if actual == "missing"
+        ));
+    }
+
+    #[test]
+    fn annotations_build_portable_type_descriptors() {
+        let env = Env::new();
+        let list = Expr::Annotated {
+            expr: Box::new(Expr::List(vec![Expr::Ident(Ident::new(
+                "string",
+                Span::default(),
+            ))])),
+            annotation: "items".into(),
+        };
+        let value = run_ready(eval_expr(&list, &env, &TestHost));
+        let Value::Struct(fields) = value else {
+            panic!("expected type descriptor")
+        };
+        assert!(
+            matches!(&fields[0], (key, Value::Str(value)) if key == "type" && value == "list of string")
+        );
+        assert!(
+            matches!(&fields[1], (key, Value::Str(value)) if key == "desc" && value == "items")
+        );
+
+        let ordinary = Expr::Annotated {
+            expr: Box::new(Expr::Literal(Literal::Int(7))),
+            annotation: "ignored".into(),
+        };
+        assert!(matches!(
+            run_ready(eval_expr(&ordinary, &env, &TestHost)),
+            Value::Int(7)
         ));
     }
 }

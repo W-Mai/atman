@@ -247,10 +247,10 @@ fn walk_expr(
             // Type names and type list expressions in annotation position
             // are not variable references
             match expr.as_ref() {
-                Expr::Ident(id) if crate::eval::is_type_name(&id.name) => {}
+                Expr::Ident(id) if atman_rt::is_type_name(&id.name) => {}
                 Expr::List(inner) if inner.len() == 1 => {
                     if let Expr::Ident(id) = &inner[0] {
-                        if crate::eval::is_type_name(&id.name) {
+                        if atman_rt::is_type_name(&id.name) {
                             return;
                         }
                     }
@@ -342,6 +342,18 @@ mod tests {
 "#;
         let file = parse_file(src).unwrap();
         validate(&file.flows[0], &registry_with_fs()).expect("valid flow");
+    }
+
+    #[test]
+    fn annotation_type_names_are_not_variable_references() {
+        let file = parse_file(
+            r#"flow t() -> Int {
+    fields = { count: int -- "number", items: [string] -- "names" }
+    return 1
+}"#,
+        )
+        .unwrap();
+        validate(&file.flows[0], &registry_with_fs()).expect("type descriptors are valid");
     }
 
     #[test]
