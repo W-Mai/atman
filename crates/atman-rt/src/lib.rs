@@ -1,4 +1,5 @@
 //! Portable flow program types and statement execution control.
+//! Embedding requires an allocator, pointer-width atomics, and a host future executor.
 #![no_std]
 
 extern crate alloc;

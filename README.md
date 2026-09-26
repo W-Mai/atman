@@ -400,6 +400,8 @@ atman/
 
 `cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml` executes flows with default parameters, portable list and static/dynamic fanout nodes, a host effect, and a loop using `atman-rt` as its only dependency. It does not start the CLI or daemon. CI runs this fixture on Linux, macOS, and Windows, runs the same flows on Wasm/WASI, and checks the `no_std` core on `wasm32-unknown-unknown`.
 
+`atman-rt` requires an allocator, target support for pointer-width atomics for `Arc`-backed environments and lambda captures, and a host that polls its futures. `wasm32-unknown-unknown` passes the `no_std` check. `riscv32imc-unknown-none-elf` lacks pointer-width atomics and is not currently supported.
+
 Language: Rust (edition 2024, MSRV 1.85). License: MIT OR Apache-2.0.
 
 ## FAQ
