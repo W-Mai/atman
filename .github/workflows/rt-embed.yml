@@ -1,0 +1,27 @@
+name: Portable runtime embedding
+
+"on":
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  embed:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run standalone embedding fixture
+        run: cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked
+
+  no-std:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Check portable core without std
+        run: cargo check -p atman-rt --no-default-features --target wasm32-unknown-unknown --locked
