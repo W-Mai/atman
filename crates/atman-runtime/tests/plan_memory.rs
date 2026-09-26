@@ -1,6 +1,6 @@
 use atman_runtime::Session;
 use atman_runtime::compaction::{find_compact_range, is_plan_related};
-use atman_runtime::event::TurnId;
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::memory::MemoryId;
 use atman_runtime::memory::plan::{Plan, PlanStore};
 use atman_runtime::memory::todo::{Todo, TodoStatus};

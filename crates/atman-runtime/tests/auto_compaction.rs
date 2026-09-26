@@ -1,7 +1,7 @@
 mod common;
 
 use atman_runtime::Session;
-use atman_runtime::event::TurnId;
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::message::{Message, MessageOrigin};
 
 fn compaction_config() -> atman_runtime::model_registry::ModelConfig {

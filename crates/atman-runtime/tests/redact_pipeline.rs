@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use atman_runtime::event::{Event, EventSink, TurnId};
+use atman_runtime::event::{Event, EventSink};
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::event_writer::EventWriter;
 use atman_runtime::message::Message;
 use atman_runtime::redact::{RedactMode, Redactor};

@@ -1,5 +1,5 @@
 type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
-use atman_runtime::event::TurnId;
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::LlmRequest;
 use atman_runtime::providers::anthropic::AnthropicProvider;

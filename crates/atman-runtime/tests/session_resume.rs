@@ -1,11 +1,13 @@
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::session::{Session, SessionOpenError};
 
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
+
 fn user_msg(text: &str) -> Message {
     Message {
         role: MessageRole::User,
         parts: vec![MessagePart::Text { text: text.into() }],
-        turn_id: atman_runtime::event::TurnId::now(),
+        turn_id: TurnId::now(),
         origin: MessageOrigin::User,
     }
 }
@@ -14,7 +16,7 @@ fn assistant_msg(text: &str) -> Message {
     Message {
         role: MessageRole::Assistant,
         parts: vec![MessagePart::Text { text: text.into() }],
-        turn_id: atman_runtime::event::TurnId::now(),
+        turn_id: TurnId::now(),
         origin: MessageOrigin::User,
     }
 }
@@ -43,7 +45,7 @@ async fn open_existing_rehydrates_messages_in_order() {
 #[tokio::test]
 async fn reopened_session_continues_context_record_revisions_without_duplicates() {
     let tmp = tempfile::tempdir().unwrap();
-    let turn_id = atman_runtime::event::TurnId::now();
+    let turn_id = TurnId::now();
     let spec = |text: &str| {
         atman_runtime::ContextRecordSpec::new(
             "session.goal",

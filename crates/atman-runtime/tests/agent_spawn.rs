@@ -2,7 +2,8 @@ mod common;
 
 type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use atman_runtime::RuntimeError;
-use atman_runtime::event::{Event, EventSink, Observable, TurnId};
+use atman_runtime::event::{Event, EventSink, Observable};
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::flow_authority::FlowExecutionState;
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::{
@@ -141,7 +142,7 @@ async fn spawn_test_setup(
             MockProvider::new("mock").with_fallback(Value::Str("ok — sub-agent completed".into())),
         ));
     }
-    let root_run_id = atman_runtime::event::FlowRunId::now();
+    let root_run_id = atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now();
     let root_identity = registry
         .register_root(
             "test-session".into(),
@@ -211,7 +212,7 @@ async fn sync_and_async_flow_end_observe_terminal_registry_state() {
         )
         .unwrap();
         let registry = Arc::new(FlowRegistry::new());
-        let root_run_id = atman_runtime::event::FlowRunId::now();
+        let root_run_id = atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now();
         let root_identity = registry
             .register_root(
                 "test-session".into(),
@@ -389,7 +390,7 @@ async fn spawned_managed_context_persists_assistant_tool_transactions() {
     .await;
 
     let flow_registry = Arc::new(FlowRegistry::new());
-    let root_run_id = atman_runtime::event::FlowRunId::now();
+    let root_run_id = atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now();
     let root_identity = flow_registry
         .register_root(
             "test-session".into(),

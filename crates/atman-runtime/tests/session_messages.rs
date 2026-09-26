@@ -1,4 +1,4 @@
-use atman_runtime::event::TurnId;
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::session::Session;
 

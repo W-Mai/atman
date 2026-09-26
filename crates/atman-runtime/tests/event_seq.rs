@@ -1,4 +1,6 @@
-use atman_runtime::event::{Event, EventSink, FlowRunId, FlowStatus, TurnId};
+use atman_runtime::event::{Event, EventSink, FlowStatus};
+type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 
 fn make_flow_start() -> Event {
     Event::FlowStart {

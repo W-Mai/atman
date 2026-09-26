@@ -1,6 +1,6 @@
 use atman_runtime::AtmanPayload;
 use atman_runtime::compaction::{CompactRange, find_compact_summaries, replace_range_with_summary};
-use atman_runtime::event::TurnId;
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 
 fn user(text: &str) -> Message {

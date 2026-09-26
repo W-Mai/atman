@@ -1,7 +1,7 @@
 use atman_runtime::AtmanPayload;
 type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use atman_runtime::Session;
-use atman_runtime::event::TurnId;
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::history_store::{HistoryStore, HistoryStoreImpl};
 use atman_runtime::message::Message;
 use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};

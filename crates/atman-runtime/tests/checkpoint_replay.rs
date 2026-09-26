@@ -2,10 +2,12 @@ use atman_runtime::Session;
 use atman_runtime::event::Event;
 use atman_runtime::message::Message;
 
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
+
 fn build_long_history(session: &Session, msg_count: usize) {
     let base = "x".repeat(4000);
     for i in 0..msg_count {
-        let turn = atman_runtime::event::TurnId::now();
+        let turn = TurnId::now();
         let msg = if i % 2 == 0 {
             Message::user_text(turn, format!("{base} user {i}"))
         } else {
@@ -49,10 +51,7 @@ async fn checkpoint_skips_dead_history_on_reopen() {
             .compact_messages_auto("compacted summary".into())
             .unwrap();
         session.append_message(
-            Message::user_text(
-                atman_runtime::event::TurnId::now(),
-                "post-compact user".to_string(),
-            ),
+            Message::user_text(TurnId::now(), "post-compact user".to_string()),
             None,
         );
         session.shutdown().await;
@@ -102,7 +101,7 @@ async fn checkpoint_restores_seq_counter_on_reopen() {
     let events = session.sink().snapshot_envelopes();
     let max_existing_seq = events.iter().map(|e| e.seq).max().unwrap_or(0);
     session.append_message(
-        Message::user_text(atman_runtime::event::TurnId::now(), "new msg".to_string()),
+        Message::user_text(TurnId::now(), "new msg".to_string()),
         None,
     );
     let events_after = session.sink().snapshot_envelopes();
@@ -125,12 +124,9 @@ async fn reopen_without_checkpoint_falls_back_to_full_replay() {
     {
         let session = Session::open(tmp.path()).unwrap();
         sid = session.id().to_string();
+        session.append_message(Message::user_text(TurnId::now(), "hello".to_string()), None);
         session.append_message(
-            Message::user_text(atman_runtime::event::TurnId::now(), "hello".to_string()),
-            None,
-        );
-        session.append_message(
-            Message::assistant_text(atman_runtime::event::TurnId::now(), "world".to_string()),
+            Message::assistant_text(TurnId::now(), "world".to_string()),
             None,
         );
         session.shutdown().await;

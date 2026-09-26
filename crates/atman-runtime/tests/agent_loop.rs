@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::error::RuntimeError;
-use atman_runtime::event::{Event, EventSink, NodeEvent, Observable, TurnId};
+use atman_runtime::event::{Event, EventSink, NodeEvent, Observable};
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, StopReason, TokenUsage};
 use atman_runtime::tool::BoxFut;

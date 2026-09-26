@@ -3,7 +3,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
-use atman_runtime::event::FlowRunId;
+type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::flow_authority::EffectiveAuthority;
 use atman_runtime::flow_workspace::FlowWorkspaceService;
 use atman_runtime::git_workspace::{WorkspaceManager, WorkspacePolicy, WorkspaceState};

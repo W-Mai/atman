@@ -115,7 +115,7 @@ async fn anthropic_multimodal_request_includes_image_block() {
                 text: "describe".into(),
             },
         ],
-        turn_id: atman_runtime::event::TurnId::now(),
+        turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
         origin: atman_runtime::message::MessageOrigin::User,
     };
     let v = provider

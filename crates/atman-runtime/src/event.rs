@@ -34,8 +34,8 @@ impl std::fmt::Display for AtmanUuid {
     }
 }
 
-pub type TurnId = atman_rt::TurnId<AtmanUuid>;
-pub type FlowRunId = atman_rt::RunId<AtmanUuid>;
+pub(crate) type TurnId = atman_rt::TurnId<AtmanUuid>;
+pub(crate) type FlowRunId = atman_rt::RunId<AtmanUuid>;
 
 /// Wraps an Event with assigned sequence number and timestamp.
 /// Serializes to the same JSONL format as the flat Event for backward compat.

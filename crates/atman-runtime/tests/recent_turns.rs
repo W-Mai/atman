@@ -5,6 +5,7 @@ use atman_runtime::memory::goal::GoalStore;
 use atman_runtime::message::{Message, MessageOrigin, MessageRole};
 use atman_runtime::{Executor, Session};
 type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 
 #[tokio::test]
 async fn recent_turns_returns_empty_before_any_message() {
@@ -24,7 +25,7 @@ async fn recent_turns_returns_empty_before_any_message() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
+    let user_msg = Message::user_text(TurnId::now(), "run");
     session.begin_turn(user_msg);
     let out = ex
         .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
@@ -44,7 +45,7 @@ async fn recent_turns_picks_up_appended_messages() {
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
 
     for role in ["hi", "world"] {
-        let m = Message::user_text(atman_runtime::event::TurnId::now(), role);
+        let m = Message::user_text(TurnId::now(), role);
         session.append_message(m, None);
     }
 
@@ -63,7 +64,7 @@ async fn recent_turns_picks_up_appended_messages() {
 "#;
     let file = parse_file(src).unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-    let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
+    let user_msg = Message::user_text(TurnId::now(), "run");
     session.begin_turn(user_msg);
     let out = ex
         .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
@@ -88,7 +89,7 @@ async fn recent_turns_caps_output_at_n() {
             parts: vec![atman_runtime::message::MessagePart::Text {
                 text: format!("msg{i}"),
             }],
-            turn_id: atman_runtime::event::TurnId::now(),
+            turn_id: TurnId::now(),
             origin: MessageOrigin::User,
         };
         session.append_message(m, None);
@@ -109,7 +110,7 @@ async fn recent_turns_caps_output_at_n() {
 "#;
     let file = parse_file(src).unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-    let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
+    let user_msg = Message::user_text(TurnId::now(), "run");
     session.begin_turn(user_msg);
     let out = ex
         .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
@@ -132,8 +133,8 @@ async fn recent_turns_excerpt_is_bounded_without_replacing_lossless_items() {
     ex.tools
         .register(Arc::new(atman_runtime::tools::memory::MemoryRecentTurns));
     let messages = Arc::new(vec![
-        Message::user_text(atman_runtime::event::TurnId::now(), "x".repeat(10_000)),
-        Message::assistant_text(atman_runtime::event::TurnId::now(), "latest-marker"),
+        Message::user_text(TurnId::now(), "x".repeat(10_000)),
+        Message::assistant_text(TurnId::now(), "latest-marker"),
     ]);
     let ctx = atman_runtime::ToolCtx::new().with_session_messages(messages);
     let args = atman_runtime::ToolArgs {
@@ -178,11 +179,11 @@ async fn recent_turns_excerpt_keeps_independent_head_and_tail() {
         .register(Arc::new(atman_runtime::tools::memory::MemoryRecentTurns));
     let messages = Arc::new(vec![
         Message::user_text(
-            atman_runtime::event::TurnId::now(),
+            TurnId::now(),
             format!("HEAD-MARKER {}", "middle ".repeat(80)),
         ),
         Message::assistant_text(
-            atman_runtime::event::TurnId::now(),
+            TurnId::now(),
             format!("{} TAIL-MARKER", "result ".repeat(80)),
         ),
     ]);

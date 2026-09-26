@@ -9,6 +9,7 @@ use atman_runtime::provider::LlmRequest;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::{Executor, Session};
 type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 
 fn mock_that_echoes_system() -> Arc<CapturedProvider> {
     Arc::new(CapturedProvider::default())
@@ -55,7 +56,7 @@ impl atman_runtime::provider::Provider for CapturedProvider {
         Box::pin(async move {
             *self.last_system.lock().unwrap() = req.system.clone();
             *self.last_messages.lock().unwrap() = req.messages.clone();
-            let turn_id = atman_runtime::event::TurnId::now();
+            let turn_id = TurnId::now();
             Ok(atman_runtime::provider::AssistantMessage::text_only(
                 Message {
                     role: MessageRole::Assistant,
@@ -78,7 +79,7 @@ impl atman_runtime::provider::Provider for CapturedProvider {
             let _ = key;
             let text = "ok".to_string();
             Box::pin(async move {
-                let turn_id = atman_runtime::event::TurnId::now();
+                let turn_id = TurnId::now();
                 Ok(atman_runtime::provider::AssistantMessage::text_only(
                     Message {
                         role: MessageRole::Assistant,
@@ -113,7 +114,7 @@ async fn goal_lands_in_llm_context_records() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
+    let user_msg = Message::user_text(TurnId::now(), "run");
     session.begin_turn(user_msg);
     let _ = ex
         .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
@@ -160,7 +161,7 @@ async fn goal_record_keeps_the_user_system_stable() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
+    let user_msg = Message::user_text(TurnId::now(), "run");
     session.begin_turn(user_msg);
     let _ = ex
         .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
@@ -198,7 +199,7 @@ async fn no_goal_leaves_system_untouched() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
+    let user_msg = Message::user_text(TurnId::now(), "run");
     session.begin_turn(user_msg);
     ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
@@ -230,7 +231,7 @@ async fn goal_survives_multiple_turns_in_same_session() {
     let file = parse_file(src).unwrap();
 
     for _ in 0..3 {
-        let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
+        let user_msg = Message::user_text(TurnId::now(), "run");
         session.begin_turn(user_msg);
         ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
             .await
@@ -272,7 +273,7 @@ async fn dsl_goal_set_persists_to_disk() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
+    let user_msg = Message::user_text(TurnId::now(), "run");
     session.begin_turn(user_msg);
     ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await

@@ -8,6 +8,7 @@ use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::stream::StreamFrame;
 use atman_runtime::{Executor, Session};
 type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 
 #[tokio::test]
 async fn llm_chunks_flow_from_provider_to_session_stream() {
@@ -28,8 +29,7 @@ async fn llm_chunks_flow_from_provider_to_session_stream() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let user_msg =
-        atman_runtime::message::Message::user_text(atman_runtime::event::TurnId::now(), "run");
+    let user_msg = atman_runtime::message::Message::user_text(TurnId::now(), "run");
     session.begin_turn(user_msg);
     ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
@@ -70,8 +70,7 @@ async fn tool_use_frames_wrap_dispatch() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let user_msg =
-        atman_runtime::message::Message::user_text(atman_runtime::event::TurnId::now(), "run");
+    let user_msg = atman_runtime::message::Message::user_text(TurnId::now(), "run");
     session.begin_turn(user_msg);
     ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
@@ -106,8 +105,7 @@ async fn zero_subscribers_makes_stream_send_a_noop() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let user_msg =
-        atman_runtime::message::Message::user_text(atman_runtime::event::TurnId::now(), "run");
+    let user_msg = atman_runtime::message::Message::user_text(TurnId::now(), "run");
     session.begin_turn(user_msg);
     let out = ex
         .run_in_turn(&file, "t", vec![], None, Some(session.clone()))

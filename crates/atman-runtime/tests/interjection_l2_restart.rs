@@ -45,7 +45,7 @@ flow t(user: string) -> string {
 "#;
     let file = parse_file(src).unwrap();
 
-    let turn_id = atman_runtime::event::TurnId::now();
+    let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
     let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), "start");
     session.begin_turn(user_msg);
 

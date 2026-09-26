@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use atman_dsl::parse::parse_file;
 use atman_runtime::Executor;
 use atman_runtime::error::RuntimeError;
-use atman_runtime::event::{LlmCallStatus, NodeEvent, Observable, TurnId};
+use atman_runtime::event::{LlmCallStatus, NodeEvent, Observable};
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::{
     AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason,

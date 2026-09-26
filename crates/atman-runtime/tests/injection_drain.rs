@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use atman_dsl::parse::parse_file;
-use atman_runtime::event::{Observable, TurnId};
+use atman_runtime::event::Observable;
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::{
     AssistantMessage, LlmRequest, Provider, StopReason, TokenUsage, wrap_call_as_streaming,

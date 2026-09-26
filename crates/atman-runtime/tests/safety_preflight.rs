@@ -201,7 +201,7 @@ async fn safety_auto_rewrite_retries_after_provider_content_filter_error() {
                 .messages
                 .first()
                 .map(|m| m.turn_id.clone())
-                .unwrap_or_else(atman_runtime::event::TurnId::now);
+                .unwrap_or_else(atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now);
             Box::pin(async move {
                 if n == 0 {
                     Err(RuntimeError::ToolFailed(
@@ -238,7 +238,7 @@ async fn safety_auto_rewrite_retries_after_provider_content_filter_error() {
                 .messages
                 .first()
                 .map(|m| m.turn_id.clone())
-                .unwrap_or_else(atman_runtime::event::TurnId::now);
+                .unwrap_or_else(atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now);
             let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> =
                 Box::pin(async move {
                     let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });

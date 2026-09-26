@@ -39,7 +39,7 @@ impl FlakyProvider {
                 parts: vec![MessagePart::Text {
                     text: self.good.clone(),
                 }],
-                turn_id: atman_runtime::event::TurnId::now(),
+                turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                 origin: MessageOrigin::User,
             },
             stop_reason: StopReason::End,

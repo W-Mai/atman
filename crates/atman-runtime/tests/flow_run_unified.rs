@@ -9,7 +9,7 @@ mod common;
 use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
-use atman_runtime::event::FlowRunId;
+type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::flow_authority::{
     ChildWorkspaceAuthority, EffectiveAuthority, FlowExecutionState, InvocationKind,
 };
@@ -583,7 +583,7 @@ flow test_flow(goal: string) -> string {
 
     // Push an L1 nudge.
     let inj = atman_runtime::injection::Injection::new_pending(
-        atman_runtime::event::TurnId::now(),
+        atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
         String::from("NUDGE: check config"),
     );
     let entry = registry.lookup(&handle).unwrap();

@@ -13,6 +13,7 @@ use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::tool::BoxFut;
 use atman_runtime::{Executor, Session};
 type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
+type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 
 struct ScriptedProvider {
     name: String,
@@ -58,7 +59,7 @@ impl Provider for ScriptedProvider {
                         req.messages
                             .first()
                             .map(|m| m.turn_id.clone())
-                            .unwrap_or_else(atman_runtime::event::TurnId::now),
+                            .unwrap_or_else(TurnId::now),
                         text,
                     ),
                     stop_reason: StopReason::End,
@@ -90,7 +91,7 @@ impl Provider for ScriptedProvider {
             .messages
             .first()
             .map(|m| m.turn_id.clone())
-            .unwrap_or_else(atman_runtime::event::TurnId::now);
+            .unwrap_or_else(TurnId::now);
         let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> =
             Box::pin(async move {
                 let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });
@@ -117,7 +118,7 @@ impl Provider for ScriptedProvider {
 fn build_long_history(session: &Session, turn_count: usize) {
     let base = "x".repeat(4000);
     for i in 0..turn_count {
-        let turn = atman_runtime::event::TurnId::now();
+        let turn = TurnId::now();
         session.append_message(
             Message::user_text(turn.clone(), format!("{base} user {i}")),
             None,
@@ -257,7 +258,7 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
                             req.messages
                                 .first()
                                 .map(|m| m.turn_id.clone())
-                                .unwrap_or_else(atman_runtime::event::TurnId::now),
+                                .unwrap_or_else(TurnId::now),
                             "summary after overflow",
                         ),
                         stop_reason: StopReason::End,
@@ -276,7 +277,7 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
                             req.messages
                                 .first()
                                 .map(|m| m.turn_id.clone())
-                                .unwrap_or_else(atman_runtime::event::TurnId::now),
+                                .unwrap_or_else(TurnId::now),
                             "recovered with compacted history",
                         ),
                         stop_reason: StopReason::End,
@@ -319,7 +320,7 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
                                 req.messages
                                     .first()
                                     .map(|m| m.turn_id.clone())
-                                    .unwrap_or_else(atman_runtime::event::TurnId::now),
+                                    .unwrap_or_else(TurnId::now),
                                 "summary after overflow",
                             ),
                             stop_reason: StopReason::End,
@@ -338,7 +339,7 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
                                     req.messages
                                         .first()
                                         .map(|m| m.turn_id.clone())
-                                        .unwrap_or_else(atman_runtime::event::TurnId::now),
+                                        .unwrap_or_else(TurnId::now),
                                     "recovered with compacted history",
                                 ),
                                 stop_reason: StopReason::End,
@@ -385,7 +386,7 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
     let ex = Executor::with_events(session.sink().clone());
     ex.providers.register(provider.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let turn_id = atman_runtime::event::TurnId::now();
+    let turn_id = TurnId::now();
     session.begin_turn(Message::user_text(turn_id.clone(), "run"));
     let result = rt.block_on(ex.run_in_turn(
         &file,
