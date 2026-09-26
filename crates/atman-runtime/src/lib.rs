@@ -111,7 +111,6 @@ pub use context_plan::{
 };
 pub use cost::{CostSummary, summarize_by_model, summarize_by_provider, total};
 pub use error::RuntimeError;
-pub use eval::eval_expr;
 pub use event::{Event, EventSink, FlowStatus, LlmCallStatus, NodeEvent, Observable};
 pub use executor::{Executor, ProviderLifecycleAlreadyAttached, RootInvocation};
 pub use hunk::{ApplyError, EditProposal, Hunk, HunkLine};
