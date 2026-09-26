@@ -153,4 +153,31 @@ mod tests {
         assert_eq!(result, 42);
         assert_eq!(*events.borrow(), vec!["start", "body", "end"]);
     }
+
+    #[test]
+    fn lifecycle_finishes_when_body_returns_error() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let begin_events = Rc::clone(&events);
+        let finish_events = Rc::clone(&events);
+        let result = run_ready(
+            FlowLifecycle::new(FlowStartFact {
+                run_id: 7,
+                flow_name: "child".to_string(),
+                parent_run_id: None,
+                parent_node_id: None::<String>,
+                spawned: true,
+            })
+            .run(
+                move |_| begin_events.borrow_mut().push("start"),
+                || async { Err::<(), _>("context initialization failed") },
+                |result| result.is_ok(),
+                move |end, _| {
+                    assert_eq!((end.run_id, end.status), (7, false));
+                    finish_events.borrow_mut().push("end");
+                },
+            ),
+        );
+        assert_eq!(result, Err("context initialization failed"));
+        assert_eq!(*events.borrow(), vec!["start", "end"]);
+    }
 }

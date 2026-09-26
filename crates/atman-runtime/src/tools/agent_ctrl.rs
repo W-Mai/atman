@@ -1598,48 +1598,55 @@ async fn run_prepared_flow_agent(
     };
     let PreparedFlowAgent { path, flow, flows } = prepared;
     let initial_prompt = invocation_user_message(&flow, &flow_args)?;
-    emit_flow_agent_start(ctx, &run_id, &flow.name.name);
-    let mut child_ctx = sanitize_child_ctx(ctx);
-    child_ctx.session_messages_handle = Some(child_messages);
-    child_ctx.compact_lock_handle = Some(child_compact_lock);
-    child_ctx.context_epoch_handle = Some(Arc::new(std::sync::atomic::AtomicU64::new(0)));
-    child_ctx.context_prefix_tracker = Some(Arc::new(std::sync::Mutex::new(
-        crate::context_plan::ContextPrefixTracker::default(),
-    )));
-    seed_parent_handoff_context(
-        &child_ctx,
-        &flow,
-        &run_id,
-        initial_prompt.as_deref(),
-        inherited_parent_context,
-    )?;
-    if let Some(prompt) = initial_prompt {
-        seed_child_message_context(&child_ctx, prompt)?;
-    }
-    let out = crate::exec::exec_flow_with_siblings(
-        &flow,
-        flow_args,
-        registry.as_ref(),
-        &child_ctx,
-        providers.as_ref(),
-        &flows,
-        child_ctx.events.as_ref(),
-        child_ctx.turn_id.clone(),
-        Some(run_id.clone()),
-        None,
-        child_ctx.cancel.clone(),
-        None,
-        path.parent().map(|p| p.to_path_buf()),
-    )
-    .await;
-    let status = match &out {
-        Ok(_) => FlowStatus::Ok,
-        Err(e) => FlowStatus::Errored {
-            message: e.to_string(),
-        },
-    };
-    mark_terminal_and_emit_child_flow_end(ctx, &run_id, &status);
-    out
+    let lifecycle = atman_rt::FlowLifecycle::new(child_flow_start(ctx, &run_id, &flow.name.name));
+    lifecycle
+        .run(
+            |start| emit_flow_agent_start(ctx, start),
+            || async {
+                let mut child_ctx = sanitize_child_ctx(ctx);
+                child_ctx.session_messages_handle = Some(child_messages);
+                child_ctx.compact_lock_handle = Some(child_compact_lock);
+                child_ctx.context_epoch_handle =
+                    Some(Arc::new(std::sync::atomic::AtomicU64::new(0)));
+                child_ctx.context_prefix_tracker = Some(Arc::new(std::sync::Mutex::new(
+                    crate::context_plan::ContextPrefixTracker::default(),
+                )));
+                seed_parent_handoff_context(
+                    &child_ctx,
+                    &flow,
+                    &run_id,
+                    initial_prompt.as_deref(),
+                    inherited_parent_context,
+                )?;
+                if let Some(prompt) = initial_prompt {
+                    seed_child_message_context(&child_ctx, prompt)?;
+                }
+                crate::exec::exec_flow_with_siblings(
+                    &flow,
+                    flow_args,
+                    registry.as_ref(),
+                    &child_ctx,
+                    providers.as_ref(),
+                    &flows,
+                    child_ctx.events.as_ref(),
+                    child_ctx.turn_id.clone(),
+                    Some(run_id.clone()),
+                    None,
+                    child_ctx.cancel.clone(),
+                    None,
+                    path.parent().map(|p| p.to_path_buf()),
+                )
+                .await
+            },
+            |out| match out {
+                Ok(_) => FlowStatus::Ok,
+                Err(error) => FlowStatus::Errored {
+                    message: error.to_string(),
+                },
+            },
+            |end, _out| mark_terminal_and_emit_child_flow_end(ctx, end),
+        )
+        .await
 }
 
 fn resolve_flow_arguments(
@@ -1859,14 +1866,19 @@ fn seed_parent_handoff_context(
     )
 }
 
-fn mark_terminal_and_emit_child_flow_end(ctx: &ToolCtx, run_id: &FlowRunId, status: &FlowStatus) {
+fn mark_terminal_and_emit_child_flow_end(
+    ctx: &ToolCtx,
+    mut end: atman_rt::FlowEndFact<FlowRunId, FlowStatus>,
+) {
+    let run_id = end.run_id.clone();
+    end.flow_name = "agent.sub".into();
     terminal_then_emit(
         || {
             if let Some(flow_registry) = &ctx.flow_registry {
-                flow_registry.mark_terminal(run_id);
+                flow_registry.mark_terminal(&run_id);
             }
         },
-        || emit_child_flow_end(ctx, run_id, status),
+        || emit_child_flow_end(ctx, &end),
     );
 }
 
@@ -1929,7 +1941,11 @@ async fn read_flow_source(
     )))
 }
 
-fn emit_flow_agent_start(ctx: &ToolCtx, run_id: &FlowRunId, flow_name: &str) {
+fn child_flow_start(
+    ctx: &ToolCtx,
+    run_id: &FlowRunId,
+    flow_name: &str,
+) -> atman_rt::FlowStartFact<FlowRunId, String> {
     let parent_run_id = ctx
         .flow_identity
         .as_ref()
@@ -1940,13 +1956,16 @@ fn emit_flow_agent_start(ctx: &ToolCtx, run_id: &FlowRunId, flow_name: &str) {
                 .filter(|candidate| candidate != run_id)
         });
     let parent_node_id = ctx.current_node_id.clone();
-    let start = atman_rt::FlowStartFact {
+    atman_rt::FlowStartFact {
         run_id: run_id.clone(),
         flow_name: flow_name.into(),
         parent_run_id,
         parent_node_id,
         spawned: true,
-    };
+    }
+}
+
+fn emit_flow_agent_start(ctx: &ToolCtx, start: atman_rt::FlowStartFact<FlowRunId, String>) {
     if let Some(sink) = &ctx.events {
         sink.emit(start.clone().into());
     }
@@ -1955,7 +1974,9 @@ fn emit_flow_agent_start(ctx: &ToolCtx, run_id: &FlowRunId, flow_name: &str) {
     }
 }
 
-fn emit_child_flow_end(ctx: &ToolCtx, run_id: &FlowRunId, status: &FlowStatus) {
+fn emit_child_flow_end(ctx: &ToolCtx, end: &atman_rt::FlowEndFact<FlowRunId, FlowStatus>) {
+    let run_id = &end.run_id;
+    let status = &end.status;
     let suicide = ctx.task_registry.as_ref().is_some_and(|registry| {
         registry
             .list(&crate::task_registry::TaskFilter::default())
@@ -1966,19 +1987,12 @@ fn emit_child_flow_end(ctx: &ToolCtx, run_id: &FlowRunId, status: &FlowStatus) {
             })
     });
     if let Some(sink) = &ctx.events {
-        sink.emit(
-            atman_rt::FlowEndFact {
-                run_id: run_id.clone(),
-                flow_name: "agent.sub".into(),
-                status: status.clone(),
-            }
-            .into(),
-        );
+        sink.emit(end.clone().into());
     }
     if let Some(tx) = &ctx.stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::FlowDone {
             run_id: run_id.0.to_string(),
-            flow_name: "agent.sub".into(),
+            flow_name: end.flow_name.clone(),
             ok: matches!(status, FlowStatus::Ok),
             cancelled: matches!(status, FlowStatus::Cancelled),
             suicide,
@@ -2002,9 +2016,9 @@ fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentSpawn, FlowRegistry, FlowRunStatus, emit_child_flow_end, emit_flow_agent_start,
-        extract_flow_version, inherited_context_snapshot, prepare_flow_agent,
-        resolve_flow_arguments, terminal_then_emit,
+        AgentSpawn, FlowRegistry, FlowRunStatus, child_flow_start, emit_child_flow_end,
+        emit_flow_agent_start, extract_flow_version, inherited_context_snapshot,
+        prepare_flow_agent, resolve_flow_arguments, terminal_then_emit,
     };
     use crate::event::{Event, EventSink, FlowRunId, FlowStatus};
     use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
@@ -2027,7 +2041,7 @@ mod tests {
         ctx.flow_run_id = Some(parent.clone());
         ctx.current_node_id = Some("2".into());
 
-        emit_flow_agent_start(&ctx, &child, "worker");
+        emit_flow_agent_start(&ctx, child_flow_start(&ctx, &child, "worker"));
         assert!(matches!(
             sink.snapshot().last(),
             Some(Event::FlowStart {
@@ -2048,7 +2062,14 @@ mod tests {
             }) if run_id == child.to_string() && flow_name == "worker" && parent_run_id == parent.to_string() && parent_node_id == "2"
         ));
 
-        emit_child_flow_end(&ctx, &child, &FlowStatus::Ok);
+        emit_child_flow_end(
+            &ctx,
+            &atman_rt::FlowEndFact {
+                run_id: child.clone(),
+                flow_name: "agent.sub".into(),
+                status: FlowStatus::Ok,
+            },
+        );
         assert!(matches!(
             sink.snapshot().last(),
             Some(Event::FlowEnd { run_id, flow_name, status: FlowStatus::Ok })
