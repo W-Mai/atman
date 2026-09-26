@@ -3,8 +3,9 @@ mod common;
 use std::time::Duration;
 
 use atman_dsl::parse::parse_file;
+use atman_runtime::RuntimeError;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::{AtmanValue as Value, RuntimeError};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 #[tokio::test]
 async fn watch_tokens_consumed_aborts_when_exceeded() {

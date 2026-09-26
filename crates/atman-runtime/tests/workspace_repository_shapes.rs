@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use atman_runtime::AtmanValue as Value;
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use atman_runtime::event::FlowRunId;
 use atman_runtime::flow_authority::EffectiveAuthority;
 use atman_runtime::flow_workspace::FlowWorkspaceService;

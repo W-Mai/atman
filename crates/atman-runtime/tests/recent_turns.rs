@@ -3,7 +3,8 @@ use std::sync::Arc;
 use atman_dsl::parse::parse_file;
 use atman_runtime::memory::goal::GoalStore;
 use atman_runtime::message::{Message, MessageOrigin, MessageRole};
-use atman_runtime::{AtmanValue as Value, Executor, Session};
+use atman_runtime::{Executor, Session};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 #[tokio::test]
 async fn recent_turns_returns_empty_before_any_message() {

@@ -1,6 +1,6 @@
 mod common;
 
-use atman_runtime::AtmanValue as Value;
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use atman_runtime::RuntimeError;
 use atman_runtime::event::{Event, EventSink, Observable, TurnId};
 use atman_runtime::flow_authority::FlowExecutionState;

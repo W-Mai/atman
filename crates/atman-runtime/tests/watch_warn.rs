@@ -3,9 +3,10 @@ mod common;
 use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
+use atman_runtime::Executor;
 use atman_runtime::event::{Event, EventSink};
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::{AtmanValue as Value, Executor};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 #[tokio::test]
 async fn watch_token_warn_emits_event_and_stream_completes() {

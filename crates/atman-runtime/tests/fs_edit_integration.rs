@@ -1,5 +1,5 @@
 use atman_runtime::AtmanPayload;
-use atman_runtime::AtmanValue as Value;
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use atman_runtime::tool::{ToolArgs, ToolCtx};
 use atman_runtime::tools::register_tier_zero;
 use std::sync::{Arc, Mutex};

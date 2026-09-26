@@ -7,7 +7,8 @@ use atman_runtime::memory::goal::GoalStore;
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::LlmRequest;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::{AtmanValue as Value, Executor, Session};
+use atman_runtime::{Executor, Session};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 fn mock_that_echoes_system() -> Arc<CapturedProvider> {
     Arc::new(CapturedProvider::default())

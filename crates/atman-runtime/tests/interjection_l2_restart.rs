@@ -8,7 +8,8 @@ use atman_dsl::parse::parse_file;
 use atman_runtime::event::Event;
 use atman_runtime::injection::InjectionLevel;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::{AtmanValue as Value, Executor, Session};
+use atman_runtime::{Executor, Session};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn l2_injection_mid_stream_triggers_restart_with_correction() {

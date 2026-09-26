@@ -1,9 +1,10 @@
 mod common;
 
 use atman_dsl::parse::parse_file;
+use atman_runtime::Event;
 use atman_runtime::event::LlmCallStatus;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::{AtmanValue as Value, Event};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 #[tokio::test]
 async fn llm_call_event_records_wallclock_and_tokens() {

@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::message::{MessagePart, MessageRole};
-use atman_runtime::{AtmanValue as Value, Executor, Session};
+use atman_runtime::{Executor, Session};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 const FLOW: &str = r#"
 flow remember(content: string) -> bool {

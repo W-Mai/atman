@@ -1,5 +1,5 @@
 use atman_dsl::parse::parse_file;
-use atman_runtime::AtmanValue as Value;
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use atman_runtime::Executor;
 
 fn run(src: &str) -> Value {

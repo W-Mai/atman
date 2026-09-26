@@ -4,9 +4,10 @@ mod common;
 use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
+use atman_runtime::Executor;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::tools::memory_stubs::RuleFetch;
-use atman_runtime::{AtmanValue as Value, Executor};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 const REVIEW_FLOW: &str = r#"flow review_code(file: path) -> Review {
     gather = fanout [

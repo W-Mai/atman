@@ -3,7 +3,8 @@ use std::sync::Arc;
 use atman_dsl::parse::parse_file;
 use atman_runtime::memory::confession::ConfessionStore;
 use atman_runtime::memory::todo::TodoStore;
-use atman_runtime::{AtmanValue as Value, Executor, tools};
+use atman_runtime::{Executor, tools};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use tempfile::TempDir;
 
 #[tokio::test]

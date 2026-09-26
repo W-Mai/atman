@@ -1,6 +1,7 @@
 use atman_dsl::parse::parse_file;
 use atman_runtime::AtmanPayload;
-use atman_runtime::{AtmanValue as Value, Executor, tools};
+use atman_runtime::{Executor, tools};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 fn apply_executor() -> Executor {
     let mut executor = Executor::new();

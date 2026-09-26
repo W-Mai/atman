@@ -5,7 +5,8 @@ use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::task_registry::{TaskFilter, TaskRegistry};
 use atman_runtime::tools::agent_ctrl::FlowRegistry;
 use atman_runtime::tools::memory_stubs::RuleFetch;
-use atman_runtime::{AtmanValue as Value, Event, Executor, FlowStatus, tools};
+use atman_runtime::{Event, Executor, FlowStatus, tools};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 mod common;
 

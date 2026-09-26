@@ -3,7 +3,8 @@ use std::sync::Arc;
 use atman_dsl::parse::parse_file;
 use atman_runtime::migration::{RuleScope, scan_migrated_rules};
 use atman_runtime::tools::memory_stubs::RuleFetch;
-use atman_runtime::{AtmanValue as Value, Executor, tools};
+use atman_runtime::{Executor, tools};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 fn write(dir: &std::path::Path, rel: &str, content: &str) {
     let path = dir.join(rel);

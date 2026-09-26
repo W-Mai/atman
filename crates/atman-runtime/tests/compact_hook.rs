@@ -83,7 +83,7 @@ fn find_compact_summaries_ignores_plain_system_messages() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn replace_messages_range_emits_context_compact_event_and_marks_sink() {
-    use atman_runtime::AtmanValue as Value;
+    type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
     use atman_runtime::event::{Event, EventSink};
     use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
     use atman_runtime::tools::stdlib::ReplaceMessagesRange;
@@ -145,7 +145,7 @@ async fn replace_messages_range_emits_context_compact_event_and_marks_sink() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn replace_messages_range_sends_lifecycle_fire_signal() {
-    use atman_runtime::AtmanValue as Value;
+    type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
     use atman_runtime::event::EventSink;
     use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
     use atman_runtime::tools::stdlib::ReplaceMessagesRange;

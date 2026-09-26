@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::memory::spec::SpecStore;
-use atman_runtime::{AtmanValue as Value, Executor, tools};
+use atman_runtime::{Executor, tools};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 #[tokio::test]
 async fn spec_workflow_from_status_through_update_to_deviate() {

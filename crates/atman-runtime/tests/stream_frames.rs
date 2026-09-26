@@ -6,7 +6,8 @@ use std::time::Duration;
 use atman_dsl::parse::parse_file;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::stream::StreamFrame;
-use atman_runtime::{AtmanValue as Value, Executor, Session};
+use atman_runtime::{Executor, Session};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 #[tokio::test]
 async fn llm_chunks_flow_from_provider_to_session_stream() {

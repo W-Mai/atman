@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use atman_runtime::AtmanValue as Value;
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use atman_runtime::mcp::{McpServerConfig, register_from_configs};
 use atman_runtime::tool::{Tier, ToolArgs, ToolCtx, ToolRegistry};
 

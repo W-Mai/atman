@@ -5,7 +5,8 @@ use atman_runtime::stream::StreamFrame;
 use atman_runtime::tool::{Tool, ToolArgs};
 use atman_runtime::tools::{self, agent_ctrl::FlowRegistry, term::TermSpawn};
 use atman_runtime::trust::{TrustConfig, TrustMode};
-use atman_runtime::{AtmanValue as Value, Executor, Tier};
+use atman_runtime::{Executor, Tier};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 

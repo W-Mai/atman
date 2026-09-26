@@ -1,7 +1,8 @@
 use atman_dsl::parse::parse_file;
 use atman_runtime::AtmanPayload;
+use atman_runtime::Executor;
 use atman_runtime::message::{ImageData, MessagePart, MessageRole};
-use atman_runtime::{AtmanValue as Value, Executor};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 #[tokio::test]
 async fn user_msg_positional_text_produces_message_value() {

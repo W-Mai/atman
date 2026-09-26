@@ -9,7 +9,8 @@ use atman_runtime::event::{Event, EventSink, NodeEvent, Observable, TurnId};
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, StopReason, TokenUsage};
 use atman_runtime::tool::BoxFut;
-use atman_runtime::{AtmanValue as Value, Executor, tools};
+use atman_runtime::{Executor, tools};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 struct ScriptedAgentProvider {
     turns: Vec<AgentTurn>,

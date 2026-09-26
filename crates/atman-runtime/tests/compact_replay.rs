@@ -1,6 +1,6 @@
 mod common;
 
-use atman_runtime::AtmanValue as Value;
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use atman_runtime::Session;
 use atman_runtime::event::TurnId;
 use atman_runtime::message::Message;

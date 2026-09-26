@@ -2,7 +2,7 @@ mod common;
 
 use std::sync::Arc;
 
-use atman_runtime::AtmanValue as Value;
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use atman_runtime::provider::{LlmRequest, Provider};
 use atman_runtime::providers::anthropic::AnthropicProvider;
 use wiremock::matchers::{body_partial_json, method, path};

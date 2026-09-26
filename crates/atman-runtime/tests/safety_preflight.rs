@@ -3,6 +3,7 @@ mod common;
 use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
+use atman_runtime::Executor;
 use atman_runtime::error::RuntimeError;
 use atman_runtime::event::{Event, EventSink};
 use atman_runtime::providers::mock::MockProvider;
@@ -10,7 +11,7 @@ use atman_runtime::safety::{
     NoopClassifier, SafetyClassifier, SafetyConfig, SafetyMode, ScanVerdict,
 };
 use atman_runtime::tool::BoxFut;
-use atman_runtime::{AtmanValue as Value, Executor};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 struct StaticClassifier {
     verdict: ScanVerdict,

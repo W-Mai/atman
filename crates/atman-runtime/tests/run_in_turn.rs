@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use atman_dsl::parse::parse_file;
+use atman_runtime::Executor;
 use atman_runtime::error::RuntimeError;
 use atman_runtime::event::{LlmCallStatus, NodeEvent, Observable, TurnId};
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
@@ -15,7 +16,7 @@ use atman_runtime::provider::{
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::session::Session;
 use atman_runtime::tool::BoxFut;
-use atman_runtime::{AtmanValue as Value, Executor};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 

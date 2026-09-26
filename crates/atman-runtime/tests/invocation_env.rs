@@ -12,7 +12,8 @@ use atman_runtime::provider::{
 };
 use atman_runtime::providers::openai::OpenAiReasoningFormat;
 use atman_runtime::tool::BoxFut;
-use atman_runtime::{AtmanValue as Value, Executor, InvocationEnv};
+use atman_runtime::{Executor, InvocationEnv};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 struct ReasoningCaptureProvider {
     captured: Mutex<Vec<LlmRequest>>,

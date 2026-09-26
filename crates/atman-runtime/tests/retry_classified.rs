@@ -11,7 +11,8 @@ use atman_runtime::message::Message;
 use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, StopReason, TokenUsage};
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::tool::BoxFut;
-use atman_runtime::{AtmanValue as Value, Executor, Session};
+use atman_runtime::{Executor, Session};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 struct ScriptedProvider {
     name: String,

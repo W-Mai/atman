@@ -1,4 +1,4 @@
-use atman_runtime::AtmanValue as Value;
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use atman_runtime::message::MessagePart;
 use atman_runtime::provider::{LlmRequest, Provider};
 use atman_runtime::providers::openai::OpenAiProvider;

@@ -3,7 +3,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use atman_runtime::AtmanValue as Value;
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use atman_runtime::error::RuntimeError;
 use atman_runtime::event::{Event, EventSink, FlowRunId};
 use atman_runtime::flow_authority::EffectiveAuthority;

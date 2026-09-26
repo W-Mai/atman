@@ -1,5 +1,7 @@
 use atman_dsl::parse::parse_file;
-use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, AtmanValue, model_registry};
+use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, model_registry};
+
+type AtmanValue = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 #[test]
 fn atman_runtime_builds_and_runs_without_daemon() {

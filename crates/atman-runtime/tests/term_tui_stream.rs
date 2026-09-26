@@ -1,6 +1,7 @@
 use atman_dsl::parse::parse_file;
 use atman_runtime::fs_access::{FsAccessMode, FsAccessPolicy};
-use atman_runtime::{AtmanValue as Value, Executor, tools};
+use atman_runtime::{Executor, tools};
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 #[tokio::test]
 async fn term_spawn_in_flow_captures_terminal_output() {

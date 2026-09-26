@@ -1,4 +1,4 @@
-use atman_runtime::AtmanValue as Value;
+type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use atman_runtime::mcp::{McpServerConfig, TransportKind, register_from_configs};
 use atman_runtime::tool::{Tier, ToolArgs, ToolCtx, ToolRegistry};
 use wiremock::matchers::{body_partial_json, method, path};
