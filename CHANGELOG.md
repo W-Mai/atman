@@ -9,6 +9,11 @@ All notable changes to atman are documented in this file.
 ### ⚠️ Breaking Changes
 
 - **Portable flow types** — Flow AST, lexical environments, `Value<P, E>`, and primitive expression operations are owned by `atman-rt`. Import core types from `atman-rt`; `atman-runtime::Value` and the old DSL AST paths are removed. Atman-specific path, message, and edit values use `AtmanPayload`.
+- **Core identity imports** — Flow and turn IDs are `atman_rt::{RunId, TurnId}<AtmanUuid>`. The `atman-runtime` crate-root `FlowRunId`, `TurnId`, `AtmanValue`, and `eval_expr` exports and the public `atman-runtime::event` ID aliases are removed.
+
+### ✨ Features
+
+- **Embeddable execution core** — `atman-rt` runs flow statements, expressions, list operations, fanout, cancellation, and lifecycle ordering through host callbacks without CLI, daemon, tool, or provider dependencies. The crate is `no_std` with `alloc` and pointer-width atomics.
 
 ## [1.13.2] — 2026-09-25
 
