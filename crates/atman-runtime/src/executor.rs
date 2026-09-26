@@ -281,127 +281,143 @@ impl Executor {
                 run_id.clone(),
             )
         });
-        let _lifecycle_guard = flow_registry.lifecycle_guard(&run_id);
-        let (running, start) = atman_rt::FlowLifecycle::new(atman_rt::FlowStartFact {
+        let lifecycle_guard = flow_registry.lifecycle_guard(&run_id);
+        let lifecycle = atman_rt::FlowLifecycle::new(atman_rt::FlowStartFact {
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),
             parent_run_id: None,
             parent_node_id: None,
             spawned: false,
-        })
-        .start();
-        self.events.emit(start.clone().into());
-        if let Some(sess) = session.as_ref() {
-            let _ = sess.stream_tx().send(start.into());
-        }
-        let graph = crate::nodegraph::extract_graph(flow);
-        self.events.emit(Event::FlowGraph {
-            run_id: run_id.clone(),
-            graph: graph.clone(),
         });
-        if let Some(sess) = session.as_ref() {
-            let _ = sess
-                .stream_tx()
-                .send(crate::stream::StreamFrame::FlowGraph {
-                    run_id: run_id.0.to_string(),
-                    graph,
-                });
-        }
-        // Root's tool_ctx carries session stream_tx so emit sites use
-        // tool_ctx.stream_tx uniformly.
-        let mut tool_ctx = self
-            .tool_ctx
-            .clone()
-            .with_invocation_env(invocation.env.clone());
-        tool_ctx.model_tool_exposures = Some(Default::default());
-        tool_ctx.flow_registry = Some(std::sync::Arc::clone(&flow_registry));
-        tool_ctx.permission_broker = Some(std::sync::Arc::clone(&permission_broker));
-        tool_ctx.trust = Some(trust);
-        tool_ctx.flow_identity = Some(identity);
-        tool_ctx.flow_run_id = Some(run_id.clone());
-        tool_ctx.session_id = Some(session_id);
-        if let Some(sess) = session.as_ref() {
-            tool_ctx.stream_tx = Some(sess.stream_tx());
-            tool_ctx.session_messages_handle = Some(sess.messages_handle());
-            // Register root so flow.output/interject("root") work. Root's llm
-            // context stays on session MessageStream; entry is for output +
-            // interjection addressing.
-            let root_entry = sess.flow_registry.create_entry(
-                "root".to_string(),
-                sess.goal().unwrap_or_else(|| flow.name.name.clone()),
-                String::new(),
-                run_id.clone(),
-            );
-            tool_ctx.agent_entry = Some(std::sync::Arc::clone(&root_entry));
-            sess.set_current_root("root".to_string());
-        }
-        let exec_fut = exec_flow_with_siblings(
-            flow,
-            args,
-            &self.tools,
-            &tool_ctx,
-            &self.providers,
-            flows,
-            Some(&self.events),
-            turn_id,
-            Some(run_id.clone()),
-            session.clone(),
-            flow_cancel.clone(),
-            self.safety.as_ref(),
-            self.source_dir.clone(),
-        );
-        let result = atman_rt::race_cancel(exec_fut, async {
-            flow_cancel.cancelled().await;
-            RuntimeError::Cancelled("flow cancelled by user".into())
-        })
-        .await;
-        let result = if let Err(RuntimeError::Cancelled(_)) = &result {
-            let suicide = task_id.as_ref().and_then(|id| {
-                self.tool_ctx
-                    .task_registry
-                    .as_ref()
-                    .and_then(|tr| tr.lookup(id))
-                    .and_then(|snap| snap.termination)
-            }) == Some(crate::task_registry::TaskTermination::Suicide);
-            if suicide {
-                Err(RuntimeError::Cancelled("flow terminated by suicide".into()))
-            } else {
-                result
-            }
-        } else {
-            result
-        };
-        let status = FlowStatus::from(atman_rt::classify_result(&result, |error| {
-            matches!(error, RuntimeError::Cancelled(_))
-        }));
-        let cancelled = matches!(status, FlowStatus::Cancelled);
-        let suicide = task_id.as_ref().and_then(|id| {
-            self.tool_ctx
-                .task_registry
-                .as_ref()
-                .and_then(|tr| tr.lookup(id))
-                .and_then(|snap| snap.termination)
-        }) == Some(crate::task_registry::TaskTermination::Suicide);
-        if let (Some(tr), Some(tid)) = (self.tool_ctx.task_registry.as_ref(), &task_id) {
-            let ts = match &status {
-                FlowStatus::Ok => crate::task_registry::TaskStatus::Ok,
-                FlowStatus::Cancelled => crate::task_registry::TaskStatus::Killed,
-                FlowStatus::Errored { .. } => crate::task_registry::TaskStatus::Err,
-            };
-            tr.finish(tid, ts);
-        }
-        drop(_lifecycle_guard);
-        self.events.emit(running.finish(status.clone()).into());
-        if let Some(sess) = session.as_ref() {
-            let _ = sess.stream_tx().send(crate::stream::StreamFrame::FlowDone {
-                run_id: run_id.0.to_string(),
-                flow_name: flow.name.name.clone(),
-                ok: matches!(status, FlowStatus::Ok),
-                cancelled,
-                suicide,
-            });
-        }
-        result
+        let body_session = session.clone();
+        let body_run_id = run_id.clone();
+        let body_flow_cancel = flow_cancel.clone();
+        let body_task_id = task_id.clone();
+        let invocation_env = invocation.env.clone();
+        let finish_session = session.clone();
+        lifecycle
+            .run(
+                |start| {
+                    self.events.emit(start.clone().into());
+                    if let Some(sess) = session.as_ref() {
+                        let _ = sess.stream_tx().send(start.into());
+                    }
+                    let graph = crate::nodegraph::extract_graph(flow);
+                    self.events.emit(Event::FlowGraph {
+                        run_id: run_id.clone(),
+                        graph: graph.clone(),
+                    });
+                    if let Some(sess) = session.as_ref() {
+                        let _ = sess
+                            .stream_tx()
+                            .send(crate::stream::StreamFrame::FlowGraph {
+                                run_id: run_id.0.to_string(),
+                                graph,
+                            });
+                    }
+                },
+                move || async move {
+                    // Root's tool_ctx carries session stream_tx so emit sites use
+                    // tool_ctx.stream_tx uniformly.
+                    let mut tool_ctx = self.tool_ctx.clone().with_invocation_env(invocation_env);
+                    tool_ctx.model_tool_exposures = Some(Default::default());
+                    tool_ctx.flow_registry = Some(std::sync::Arc::clone(&flow_registry));
+                    tool_ctx.permission_broker = Some(std::sync::Arc::clone(&permission_broker));
+                    tool_ctx.trust = Some(trust);
+                    tool_ctx.flow_identity = Some(identity);
+                    tool_ctx.flow_run_id = Some(body_run_id.clone());
+                    tool_ctx.session_id = Some(session_id);
+                    if let Some(sess) = body_session.as_ref() {
+                        tool_ctx.stream_tx = Some(sess.stream_tx());
+                        tool_ctx.session_messages_handle = Some(sess.messages_handle());
+                        // Register root so flow.output/interject("root") work. Root's llm
+                        // context stays on session MessageStream; entry is for output +
+                        // interjection addressing.
+                        let root_entry = sess.flow_registry.create_entry(
+                            "root".to_string(),
+                            sess.goal().unwrap_or_else(|| flow.name.name.clone()),
+                            String::new(),
+                            body_run_id.clone(),
+                        );
+                        tool_ctx.agent_entry = Some(std::sync::Arc::clone(&root_entry));
+                        sess.set_current_root("root".to_string());
+                    }
+                    let exec_fut = exec_flow_with_siblings(
+                        flow,
+                        args,
+                        &self.tools,
+                        &tool_ctx,
+                        &self.providers,
+                        flows,
+                        Some(&self.events),
+                        turn_id,
+                        Some(body_run_id),
+                        body_session.clone(),
+                        body_flow_cancel.clone(),
+                        self.safety.as_ref(),
+                        self.source_dir.clone(),
+                    );
+                    let result = atman_rt::race_cancel(exec_fut, async {
+                        body_flow_cancel.cancelled().await;
+                        RuntimeError::Cancelled("flow cancelled by user".into())
+                    })
+                    .await;
+                    if let Err(RuntimeError::Cancelled(_)) = &result {
+                        let suicide = body_task_id.as_ref().and_then(|id| {
+                            self.tool_ctx
+                                .task_registry
+                                .as_ref()
+                                .and_then(|tr| tr.lookup(id))
+                                .and_then(|snap| snap.termination)
+                        }) == Some(crate::task_registry::TaskTermination::Suicide);
+                        if suicide {
+                            return Err(RuntimeError::Cancelled(
+                                "flow terminated by suicide".into(),
+                            ));
+                        }
+                    }
+                    result
+                },
+                |result| {
+                    FlowStatus::from(atman_rt::classify_result(result, |error| {
+                        matches!(error, RuntimeError::Cancelled(_))
+                    }))
+                },
+                move |end, _result| {
+                    let status = end.status.clone();
+                    let cancelled = matches!(status, FlowStatus::Cancelled);
+                    let suicide = task_id.as_ref().and_then(|id| {
+                        self.tool_ctx
+                            .task_registry
+                            .as_ref()
+                            .and_then(|tr| tr.lookup(id))
+                            .and_then(|snap| snap.termination)
+                    }) == Some(crate::task_registry::TaskTermination::Suicide);
+                    if let (Some(tr), Some(tid)) = (self.tool_ctx.task_registry.as_ref(), &task_id)
+                    {
+                        let ts = match &status {
+                            FlowStatus::Ok => crate::task_registry::TaskStatus::Ok,
+                            FlowStatus::Cancelled => crate::task_registry::TaskStatus::Killed,
+                            FlowStatus::Errored { .. } => crate::task_registry::TaskStatus::Err,
+                        };
+                        tr.finish(tid, ts);
+                    }
+                    drop(lifecycle_guard);
+                    let done_run_id = end.run_id.0.to_string();
+                    let done_flow_name = end.flow_name.clone();
+                    self.events.emit(end.into());
+                    if let Some(sess) = finish_session.as_ref() {
+                        let _ = sess.stream_tx().send(crate::stream::StreamFrame::FlowDone {
+                            run_id: done_run_id,
+                            flow_name: done_flow_name,
+                            ok: matches!(status, FlowStatus::Ok),
+                            cancelled,
+                            suicide,
+                        });
+                    }
+                },
+            )
+            .await
     }
 }
 

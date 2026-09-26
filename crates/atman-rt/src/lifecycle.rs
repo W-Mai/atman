@@ -1,4 +1,5 @@
 use alloc::string::String;
+use core::future::Future;
 
 /// A sequence-independent flow start fact supplied to the embedding host.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +42,28 @@ impl<R: Clone, N> FlowLifecycle<R, N> {
         };
         (running, self.start)
     }
+
+    /// Emits start, executes the flow, then emits one terminal fact on completion.
+    pub async fn run<T, S, Begin, Execute, Fut, Classify, Finish>(
+        self,
+        begin: Begin,
+        execute: Execute,
+        classify: Classify,
+        finish: Finish,
+    ) -> T
+    where
+        Begin: FnOnce(FlowStartFact<R, N>),
+        Execute: FnOnce() -> Fut,
+        Fut: Future<Output = T>,
+        Classify: FnOnce(&T) -> S,
+        Finish: FnOnce(FlowEndFact<R, S>, &T),
+    {
+        let (running, start) = self.start();
+        begin(start);
+        let output = execute().await;
+        finish(running.finish(classify(&output)), &output);
+        output
+    }
 }
 
 impl<R> StartedFlow<R> {
@@ -56,7 +79,24 @@ impl<R> StartedFlow<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::string::ToString;
+    use alloc::{rc::Rc, string::ToString, vec, vec::Vec};
+    use core::{
+        cell::RefCell,
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+
+    fn run_ready<F: Future>(future: F) -> F::Output {
+        let mut future = pin!(future);
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("test flow must complete synchronously"),
+        }
+    }
 
     #[test]
     fn start_and_end_keep_one_flow_identity() {
@@ -75,5 +115,42 @@ mod tests {
             (end.run_id, end.flow_name.as_str(), end.status),
             (7, "child", "ok")
         );
+    }
+
+    #[test]
+    fn lifecycle_orders_start_body_and_one_end() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let begin_events = Rc::clone(&events);
+        let body_events = Rc::clone(&events);
+        let finish_events = Rc::clone(&events);
+        let result = run_ready(
+            FlowLifecycle::new(FlowStartFact {
+                run_id: 7,
+                flow_name: "root".to_string(),
+                parent_run_id: None,
+                parent_node_id: None::<String>,
+                spawned: false,
+            })
+            .run(
+                move |start| {
+                    assert_eq!(start.run_id, 7);
+                    begin_events.borrow_mut().push("start");
+                },
+                move || async move {
+                    body_events.borrow_mut().push("body");
+                    42
+                },
+                |result| *result == 42,
+                move |end, result| {
+                    assert_eq!(
+                        (end.run_id, end.flow_name.as_str(), end.status, *result),
+                        (7, "root", true, 42)
+                    );
+                    finish_events.borrow_mut().push("end");
+                },
+            ),
+        );
+        assert_eq!(result, 42);
+        assert_eq!(*events.borrow(), vec!["start", "body", "end"]);
     }
 }
