@@ -10,7 +10,6 @@ pub enum ExpressionEffect<'a> {
     FileRef(&'a str),
     Node(&'a Node),
     Call { func: &'a Ident, args: &'a [Expr] },
-    Pipe { lhs: &'a Expr, rhs: &'a Expr },
 }
 
 pub fn is_type_name(name: &str) -> bool {
@@ -38,6 +37,12 @@ pub trait ExpressionHost: Sync {
 
     fn undefined_var(&self, name: String) -> Self::Error;
     fn undefined_field(&self, name: String) -> Self::Error;
+    fn eval_pipe_rhs<'a>(
+        &'a self,
+        rhs: &'a Expr,
+        piped: Value<Self::Payload, Self::Error>,
+        env: &'a Env<Value<Self::Payload, Self::Error>>,
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>>;
     fn eval_external<'a>(
         &'a self,
         effect: ExpressionEffect<'a>,
@@ -123,8 +128,11 @@ pub fn eval_expr<'a, H: ExpressionHost>(
                     .await
             }
             Expr::Pipe { lhs, rhs } => {
-                host.eval_external(ExpressionEffect::Pipe { lhs, rhs }, env)
-                    .await
+                let piped = eval_expr(lhs, env, host).await;
+                if piped.is_err() {
+                    return piped;
+                }
+                host.eval_pipe_rhs(rhs, piped, env).await
             }
             Expr::Annotated { expr, annotation } => match annotation_type_name(expr) {
                 Some(type_name) => Value::Struct(vec![
@@ -170,6 +178,20 @@ mod tests {
                 expected: "defined field".into(),
                 actual: name,
             }
+        }
+
+        fn eval_pipe_rhs<'a>(
+            &'a self,
+            _rhs: &'a Expr,
+            piped: Value<(), EvalError>,
+            _env: &'a Env<Value<(), EvalError>>,
+        ) -> HostFuture<'a, Value<(), EvalError>> {
+            Box::pin(async move {
+                match piped {
+                    Value::Int(value) => Value::Int(value + 1),
+                    _ => panic!("pipe left side must be evaluated before host dispatch"),
+                }
+            })
         }
 
         fn eval_external<'a>(
@@ -252,6 +274,33 @@ mod tests {
         assert!(matches!(
             run_ready(eval_expr(&ordinary, &env, &TestHost)),
             Value::Int(7)
+        ));
+    }
+
+    #[test]
+    fn pipe_evaluates_left_once_and_stops_on_error() {
+        let mut env = Env::new();
+        env.bind("x", Value::<(), EvalError>::Int(7));
+        let rhs = Box::new(Expr::Node(Node::ToolCall {
+            path: vec![],
+            args: vec![],
+        }));
+        let pipe = Expr::Pipe {
+            lhs: Box::new(Expr::Ident(Ident::new("x", Span::default()))),
+            rhs: rhs.clone(),
+        };
+        assert!(matches!(
+            run_ready(eval_expr(&pipe, &env, &TestHost)),
+            Value::Int(8)
+        ));
+
+        let missing = Expr::Pipe {
+            lhs: Box::new(Expr::Ident(Ident::new("missing", Span::default()))),
+            rhs,
+        };
+        assert!(matches!(
+            run_ready(eval_expr(&missing, &env, &TestHost)),
+            Value::Err(EvalError::TypeMismatch { actual, .. }) if actual == "missing"
         ));
     }
 }

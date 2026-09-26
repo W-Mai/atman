@@ -1,4 +1,5 @@
 /target
+fixtures/atman-rt-embed/target/
 node_modules/
 .atman/
 public/

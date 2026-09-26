@@ -52,6 +52,15 @@ impl ExpressionHost for FixtureHost {
         }
     }
 
+    fn eval_pipe_rhs<'a>(
+        &'a self,
+        _rhs: &'a Expr,
+        _piped: FixtureValue,
+        _env: &'a Env<FixtureValue>,
+    ) -> HostFuture<'a, FixtureValue> {
+        Box::pin(async { panic!("unexpected pipe in embedding fixture") })
+    }
+
     fn eval_external<'a>(
         &'a self,
         effect: ExpressionEffect<'a>,

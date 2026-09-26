@@ -64,6 +64,20 @@ impl ExpressionHost for EvalCtx<'_> {
         RuntimeError::UndefinedVar(name)
     }
 
+    fn eval_pipe_rhs<'a>(&'a self, rhs: &'a Expr, piped: Value, env: &'a Env) -> BoxFut<'a, Value> {
+        Box::pin(async move {
+            match rhs {
+                Expr::Node(Node::ToolCall { path, args }) => {
+                    dispatch_tool_call(path, args, vec![piped], env, self).await
+                }
+                other => Value::Err(RuntimeError::ToolFailed(format!(
+                    "pipe rhs must be a tool call like `ns.tool(...)`, got {}",
+                    expr_shape(other)
+                ))),
+            }
+        })
+    }
+
     fn eval_external<'a>(
         &'a self,
         effect: ExpressionEffect<'a>,
@@ -93,7 +107,6 @@ impl ExpressionHost for EvalCtx<'_> {
                 ExpressionEffect::Call { .. } => Value::Err(RuntimeError::ToolFailed(
                     "bare function call not supported; use namespaced tool call".into(),
                 )),
-                ExpressionEffect::Pipe { lhs, rhs } => eval_pipe(lhs, rhs, env, self).await,
             }
         })
     }
@@ -598,22 +611,6 @@ pub async fn eval_dynamic_fanout<'a>(
     match collect {
         atman_rt::ast::FanoutCollect::All => Value::List(results),
         atman_rt::ast::FanoutCollect::First => results.into_iter().next().unwrap_or(Value::Unit),
-    }
-}
-
-async fn eval_pipe<'a>(lhs: &'a Expr, rhs: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
-    let piped = eval_expr(lhs, env, ctx).await;
-    if piped.is_err() {
-        return piped;
-    }
-    match rhs {
-        Expr::Node(Node::ToolCall { path, args }) => {
-            dispatch_tool_call(path, args, vec![piped], env, ctx).await
-        }
-        other => Value::Err(RuntimeError::ToolFailed(format!(
-            "pipe rhs must be a tool call like `ns.tool(...)`, got {}",
-            expr_shape(other)
-        ))),
     }
 }
 
