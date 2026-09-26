@@ -383,7 +383,7 @@ async fn run_flow_inner(
         .as_ref()
         .map(|state| state.daemon_generation().to_owned())
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-    let outcome = crate::bootstrap::build_executor(crate::bootstrap::BootstrapOptions {
+    let outcome = atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
         events: session.sink().clone(),
         mock: false,
         config_dir: config_dir.clone(),
@@ -733,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_workspace_service_uses_daemon_generation() {
+    fn runtime_workspace_service_uses_daemon_generation() {
         let _registry_lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -748,7 +748,7 @@ mod tests {
                     "daemon-generation".into(),
                 );
                 let outcome =
-                    crate::bootstrap::build_executor(crate::bootstrap::BootstrapOptions {
+                    atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
                         events: atman_runtime::event::EventSink::new(),
                         mock: true,
                         config_dir: None,
@@ -837,7 +837,7 @@ mod tests {
                     .unwrap();
                 let state = DaemonState::new(project.path().join("data"));
                 drop(state.provider_lifecycle_for(Some(config.path())).unwrap());
-                let options = || crate::bootstrap::BootstrapOptions {
+                let options = || atman_runtime::AtmanRuntimeOptions {
                     events: atman_runtime::event::EventSink::new(),
                     mock: false,
                     config_dir: Some(config.path().to_path_buf()),
@@ -846,7 +846,7 @@ mod tests {
                     workspace_generation: "launcher-root-test".into(),
                 };
 
-                let first = crate::bootstrap::build_executor(options()).await.unwrap();
+                let first = atman_runtime::AtmanRuntime::build(options()).await.unwrap();
                 assert!(first.executor.providers.contains(PROVIDER_ID));
                 drop(first);
                 assert!(
@@ -858,7 +858,7 @@ mod tests {
                 );
 
                 hub.set_auth_provider_enabled(PROVIDER_ID, false).unwrap();
-                let second = crate::bootstrap::build_executor(options()).await.unwrap();
+                let second = atman_runtime::AtmanRuntime::build(options()).await.unwrap();
                 assert!(!second.executor.providers.contains(PROVIDER_ID));
                 assert!(
                     !state

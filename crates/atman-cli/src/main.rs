@@ -743,12 +743,11 @@ async fn cmd_run(
 
     load_model_config_from_disk();
 
-    let atman_daemon::bootstrap::BootstrapOutcome {
+    let atman_runtime::AtmanRuntime {
         mut executor,
         provider_catalog_refresh_plan,
         ..
-    } = atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), mock)?)
-        .await?;
+    } = atman_runtime::AtmanRuntime::build(bootstrap_opts(session.sink().clone(), mock)?).await?;
     if !mock && let Some(lifecycle) = executor.provider_lifecycle() {
         consume_provider_catalog_refresh_plan(provider_catalog_refresh_plan, move |provider_id| {
             let lifecycle = lifecycle.clone();
@@ -1599,11 +1598,11 @@ async fn prebuild_session(
     emit(BootStepId::OpenSession, false, true);
 
     emit(BootStepId::BuildExecutor, true, false);
-    let atman_daemon::bootstrap::BootstrapOutcome {
+    let atman_runtime::AtmanRuntime {
         mut executor,
         provider_catalog_refresh_plan,
         ..
-    } = atman_daemon::bootstrap::build_executor(bootstrap_opts_for(
+    } = atman_runtime::AtmanRuntime::build(bootstrap_opts_for(
         session.sink().clone(),
         false,
         project_root,
@@ -7400,7 +7399,7 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
 fn bootstrap_opts(
     events: atman_runtime::event::EventSink,
     mock: bool,
-) -> Result<atman_daemon::bootstrap::BootstrapOptions> {
+) -> Result<atman_runtime::AtmanRuntimeOptions> {
     let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     bootstrap_opts_for(events, mock, project_root)
 }
@@ -7409,7 +7408,7 @@ fn bootstrap_opts_for(
     events: atman_runtime::event::EventSink,
     mock: bool,
     project_root: PathBuf,
-) -> Result<atman_daemon::bootstrap::BootstrapOptions> {
+) -> Result<atman_runtime::AtmanRuntimeOptions> {
     static WORKSPACE_GENERATION: OnceLock<String> = OnceLock::new();
 
     let home_dir = std::env::var("HOME").ok().map(std::path::PathBuf::from);
@@ -7417,7 +7416,7 @@ fn bootstrap_opts_for(
     let workspace_generation = WORKSPACE_GENERATION
         .get_or_init(|| uuid::Uuid::now_v7().to_string())
         .clone();
-    Ok(atman_daemon::bootstrap::BootstrapOptions {
+    Ok(atman_runtime::AtmanRuntimeOptions {
         events,
         mock,
         config_dir,
@@ -7486,7 +7485,7 @@ fn attach_memory_stores(
 }
 
 fn load_preview_config() -> atman_runtime::tools::preview::PreviewConfig {
-    atman_daemon::bootstrap::load_preview_config(config_dir().ok().as_deref())
+    atman_runtime::atman_runtime::load_preview_config(config_dir().ok().as_deref())
 }
 
 fn load_mcp_configs() -> Vec<atman_runtime::mcp::McpServerConfig> {

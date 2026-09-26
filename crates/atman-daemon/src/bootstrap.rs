@@ -1,25 +1,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use atman_rt::Value as CoreValue;
-use atman_runtime::event::EventSink;
-use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::sandbox::Sandbox;
 use atman_runtime::{Executor, tools};
 
 type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
-pub use atman_runtime::config_hub::{RedactConfig, SandboxConfig};
-
-pub struct BootstrapOptions {
-    pub events: EventSink,
-    pub mock: bool,
-    pub config_dir: Option<PathBuf>,
-    pub project_root: PathBuf,
-    pub home_dir: Option<PathBuf>,
-    pub workspace_generation: String,
-}
+use atman_runtime::config_hub::RedactConfig;
 
 pub fn load_redact_config(config_dir: Option<&Path>) -> RedactConfig {
     let Some(dir) = config_dir else {
@@ -47,13 +35,6 @@ pub fn build_redactor(config_dir: Option<&Path>) -> Option<Arc<atman_runtime::re
     let redactor =
         atman_runtime::redact::Redactor::from_pairs(&pairs, mode).with_allowlist(cfg.allowlist);
     Some(Arc::new(redactor))
-}
-
-#[non_exhaustive]
-pub struct BootstrapOutcome {
-    pub executor: Executor,
-    /// Provider ids whose restored model catalogs still need a conditional refresh.
-    pub provider_catalog_refresh_plan: Vec<String>,
 }
 
 pub(crate) fn resolve_config_hub(
@@ -344,129 +325,6 @@ pub fn spawn_mcp_boot(
     Some(shutdown_tx)
 }
 
-pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> {
-    let events = opts.events.clone();
-    let mut executor = Executor::with_events(events);
-    let workspace_service = atman_runtime::flow_workspace::FlowWorkspaceService::new(
-        &opts.project_root,
-        None,
-        &opts.workspace_generation,
-    )?;
-    executor.tool_ctx = executor
-        .tool_ctx
-        .clone()
-        .with_flow_workspace_service(Arc::new(workspace_service));
-
-    let rule_fetch = build_rule_fetch(&opts.project_root, opts.home_dir.as_deref()).await;
-    tools::register_tier_zero_with_rules(&executor.tools, rule_fetch);
-    tools::register_git_ops(&executor.tools);
-    tools::register_watch(&executor.tools);
-    let task_registry = atman_runtime::TaskRegistry::new();
-    let bg_registry =
-        tools::register_bash_bg_with_task_registry(&executor.tools, task_registry.clone());
-    let term_registry =
-        tools::register_terminal_with_task_registry(&executor.tools, task_registry.clone());
-    executor.tools.register(std::sync::Arc::new(
-        atman_runtime::tools::task_ops::TaskList,
-    ));
-    executor.tools.register(std::sync::Arc::new(
-        atman_runtime::tools::task_ops::TaskKill,
-    ));
-    let trust_config = load_trust_config(opts.config_dir.as_deref());
-    let tool_output_budget = opts
-        .config_dir
-        .as_deref()
-        .map(atman_runtime::config_hub::ConfigHub::from_config_dir)
-        .and_then(|hub| hub.tool_output_budget().ok())
-        .unwrap_or_default();
-    executor.tool_ctx = executor
-        .tool_ctx
-        .clone()
-        .with_bg_registry(bg_registry)
-        .with_term_registry(term_registry)
-        .with_task_registry(task_registry)
-        .with_trust(trust_config);
-    executor.tool_ctx.tool_output_budget = tool_output_budget;
-    tools::register_preview(
-        &executor.tools,
-        load_preview_config(opts.config_dir.as_deref()),
-    );
-    let web_config = load_web_config(opts.config_dir.as_deref());
-    tools::register_web(&executor.tools, web_config.fetch);
-    tools::register_web_search(&executor.tools, &web_config.search);
-    let auth_hub = resolve_config_hub(opts.config_dir.as_deref())?;
-    let provider_catalog_refresh_plan = register_providers(&mut executor, &auth_hub).await?;
-    if let Some(sandbox) =
-        build_sandbox(&opts.project_root, opts.config_dir.as_deref()).context("sandbox init")?
-    {
-        executor.tool_ctx = executor.tool_ctx.clone().with_sandbox(sandbox);
-    }
-    if opts.mock {
-        executor.providers.register(Arc::new(
-            MockProvider::new("mock").with_fallback(Value::Str("[mock response]".into())),
-        ));
-        use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-        let mut models = std::collections::HashMap::new();
-        models.insert(
-            "mock".into(),
-            ModelEntry {
-                model: "mock".into(),
-                context_budget: Some(200_000),
-                ..Default::default()
-            },
-        );
-        atman_runtime::model_registry::set_model_config(ModelConfig {
-            models,
-            providers: std::collections::HashMap::new(),
-            aliases: std::collections::HashMap::new(),
-        });
-    }
-    Ok(BootstrapOutcome {
-        executor,
-        provider_catalog_refresh_plan,
-    })
-}
-
-fn build_sandbox(
-    project_root: &Path,
-    config_dir: Option<&Path>,
-) -> Result<Option<Arc<dyn atman_runtime::sandbox::Sandbox>>> {
-    let cfg = load_sandbox_config(config_dir);
-    if !cfg.enabled {
-        return Ok(None);
-    }
-    let template = match &cfg.template_path {
-        Some(p) => std::fs::read_to_string(p)
-            .with_context(|| format!("read sandbox template {}", p.display()))?,
-        None => atman_runtime::sandbox::DEFAULT_PROFILE.to_string(),
-    };
-    let sandbox = atman_runtime::sandbox::SandboxExec::new(project_root)
-        .with_extra_read(cfg.extra_read.clone())
-        .with_extra_write(cfg.extra_write.clone())
-        .with_allow_network(cfg.allow_network)
-        .with_template(template);
-    if !sandbox.is_available() {
-        if cfg.strict {
-            anyhow::bail!("sandbox enabled + strict, but sandbox-exec not available on this host");
-        }
-        atman_runtime::notify!(
-            warn,
-            "sandbox enabled but sandbox-exec not available; falling back to no-sandbox path"
-        );
-        return Ok(None);
-    }
-    Ok(Some(Arc::new(sandbox)))
-}
-
-pub fn load_sandbox_config(config_dir: Option<&Path>) -> SandboxConfig {
-    let Some(dir) = config_dir else {
-        return SandboxConfig::default();
-    };
-    atman_runtime::config_hub::ConfigHub::from_config_dir(dir)
-        .sandbox_config()
-        .unwrap_or_default()
-}
-
 pub fn attach_memory_stores(
     executor: &mut Executor,
     session: &atman_runtime::Session,
@@ -527,72 +385,8 @@ pub fn attach_memory_stores_with_redactor(
     tools::register_spec_memory(&executor.tools, spec_store);
 }
 
-async fn build_rule_fetch(
-    project_root: &Path,
-    home: Option<&Path>,
-) -> atman_runtime::tools::memory_stubs::RuleFetch {
-    let rule_fetch = atman_runtime::tools::memory_stubs::RuleFetch::new();
-    if std::env::var("ATMAN_DISABLE_MIGRATION").is_ok() {
-        return rule_fetch;
-    }
-    let Some(home) = home else {
-        return rule_fetch;
-    };
-    let rules = atman_runtime::migration::scan_migrated_rules(project_root, home);
-    rule_fetch.set_migrated(rules).await;
-    rule_fetch
-}
-
-async fn register_providers(
-    executor: &mut Executor,
-    auth_hub: &atman_runtime::config_hub::ConfigHub,
-) -> Result<Vec<String>> {
-    let lifecycle = executor.attach_provider_lifecycle(auth_hub.clone())?;
-    lifecycle
-        .reload_config_providers()
-        .context("load model and provider configuration")?;
-    lifecycle.prepare_auth_runtime().await
-}
-
-pub fn load_preview_config(
-    config_dir: Option<&Path>,
-) -> atman_runtime::tools::preview::PreviewConfig {
-    let Some(dir) = config_dir else {
-        return atman_runtime::tools::preview::PreviewConfig::default();
-    };
-    atman_runtime::config_hub::ConfigHub::from_config_dir(dir)
-        .preview_config()
-        .unwrap_or_default()
-}
-
 pub fn default_config_dir() -> Result<PathBuf> {
     atman_runtime::storage::config_dir()
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct WebConfig {
-    pub fetch: atman_runtime::tools::web::WebConfig,
-    pub search: atman_runtime::tools::web::SearchConfig,
-}
-
-pub fn load_web_config(config_dir: Option<&Path>) -> WebConfig {
-    let Some(dir) = config_dir else {
-        return WebConfig::default();
-    };
-    let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(dir);
-    WebConfig {
-        fetch: hub.web_fetch_config().unwrap_or_default(),
-        search: hub.web_search_config().unwrap_or_default(),
-    }
-}
-
-pub fn load_trust_config(config_dir: Option<&Path>) -> atman_runtime::trust::TrustConfig {
-    let Some(dir) = config_dir else {
-        return atman_runtime::trust::TrustConfig::default();
-    };
-    atman_runtime::config_hub::ConfigHub::from_config_dir(dir)
-        .trust_config()
-        .unwrap_or_default()
 }
 
 pub fn default_data_dir() -> Result<PathBuf> {
@@ -602,9 +396,14 @@ pub fn default_data_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atman_runtime::atman_runtime::{
+        load_preview_config, load_sandbox_config, load_trust_config, load_web_config,
+    };
+    use atman_runtime::config_hub::SandboxConfig;
+    use atman_runtime::event::EventSink;
 
     #[test]
-    fn build_executor_injects_tool_output_budget() {
+    fn runtime_build_injects_tool_output_budget() {
         let _registry_lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -622,7 +421,7 @@ mod tests {
                 )
                 .unwrap();
 
-                let outcome = build_executor(BootstrapOptions {
+                let outcome = atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
                     events: EventSink::new(),
                     mock: true,
                     config_dir: Some(config.path().to_path_buf()),
@@ -645,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn build_executor_loads_config_providers_from_the_selected_config_dir() {
+    fn runtime_build_loads_config_providers_from_the_selected_config_dir() {
         struct ConfigReset;
 
         impl Drop for ConfigReset {
@@ -689,16 +488,17 @@ enabled = true
                 )
                 .unwrap();
 
-                let outcome = build_executor(BootstrapOptions {
-                    events: EventSink::new(),
-                    mock: false,
-                    config_dir: Some(config.path().to_path_buf()),
-                    project_root: project.path().to_path_buf(),
-                    home_dir: Some(home.path().to_path_buf()),
-                    workspace_generation: "selected-config-provider-test".into(),
-                })
-                .await
-                .unwrap();
+                let outcome =
+                    atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
+                        events: EventSink::new(),
+                        mock: false,
+                        config_dir: Some(config.path().to_path_buf()),
+                        project_root: project.path().to_path_buf(),
+                        home_dir: Some(home.path().to_path_buf()),
+                        workspace_generation: "selected-config-provider-test".into(),
+                    })
+                    .await
+                    .unwrap();
 
                 assert!(outcome.executor.providers.contains("config:selected"));
                 assert!(!outcome.executor.providers.contains("config:stale"));
@@ -711,7 +511,7 @@ enabled = true
     }
 
     #[test]
-    fn build_executor_restores_oauth_provider_from_selected_config_dir() {
+    fn runtime_build_restores_oauth_provider_from_selected_config_dir() {
         const PROVIDER_ID: &str = "selected-config-oauth";
 
         struct CatalogCleanup;
@@ -759,16 +559,17 @@ enabled = true
                 hub.ensure_auth_model_namespace(PROVIDER_ID, "selected@OAuth")
                     .unwrap();
 
-                let outcome = build_executor(BootstrapOptions {
-                    events: EventSink::new(),
-                    mock: false,
-                    config_dir: Some(config.path().to_path_buf()),
-                    project_root: project.path().to_path_buf(),
-                    home_dir: Some(home.path().to_path_buf()),
-                    workspace_generation: "oauth-config-test-generation".into(),
-                })
-                .await
-                .unwrap();
+                let outcome =
+                    atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
+                        events: EventSink::new(),
+                        mock: false,
+                        config_dir: Some(config.path().to_path_buf()),
+                        project_root: project.path().to_path_buf(),
+                        home_dir: Some(home.path().to_path_buf()),
+                        workspace_generation: "oauth-config-test-generation".into(),
+                    })
+                    .await
+                    .unwrap();
 
                 assert!(outcome.executor.providers.contains(PROVIDER_ID));
                 assert_eq!(
@@ -799,7 +600,7 @@ enabled = true
     }
 
     #[test]
-    fn build_executor_rejects_malformed_auth_state() {
+    fn runtime_build_rejects_malformed_auth_state() {
         let _registry_lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -812,15 +613,16 @@ enabled = true
                 let project = tempfile::tempdir().unwrap();
                 std::fs::write(config.path().join("auth.json"), b"{not-json").unwrap();
 
-                let result = build_executor(BootstrapOptions {
-                    events: EventSink::new(),
-                    mock: false,
-                    config_dir: Some(config.path().to_path_buf()),
-                    project_root: project.path().to_path_buf(),
-                    home_dir: None,
-                    workspace_generation: "malformed-auth-test".into(),
-                })
-                .await;
+                let result =
+                    atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
+                        events: EventSink::new(),
+                        mock: false,
+                        config_dir: Some(config.path().to_path_buf()),
+                        project_root: project.path().to_path_buf(),
+                        home_dir: None,
+                        workspace_generation: "malformed-auth-test".into(),
+                    })
+                    .await;
 
                 let error = result.err().expect("malformed auth must fail bootstrap");
                 let rendered = format!("{error:#}");

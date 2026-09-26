@@ -1,5 +1,6 @@
 pub mod activity;
 pub mod approval;
+pub mod atman_runtime;
 pub mod attachment_store;
 pub mod auth_store;
 pub mod compaction;
@@ -97,6 +98,7 @@ pub use watch::WatchHub;
 pub mod watch;
 pub mod workflow;
 
+pub use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions};
 pub use attachment_store::AttachmentStore;
 pub use context_plan::{
     ContentDigest, ContextCacheObservation, ContextCachePlan, ContextCacheResetReason,
