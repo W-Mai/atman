@@ -168,28 +168,35 @@ impl Executor {
             .iter()
             .map(|f| (f.name.name.clone(), f.clone()))
             .collect();
-        let mut current = flow_name.to_string();
-        let mut current_args = args;
+        let flows = &flows;
+        let invocation = &invocation;
         let mut next_run_id = invocation.first_run_id.clone();
-        for _ in 0..5 {
-            let flow = flows
-                .get(&current)
-                .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{current}`")))?;
-            match self
-                .run_flow(flow, current_args, &flows, &invocation, next_run_id.take())
-                .await
-            {
-                Err(RuntimeError::Redirect(target)) => {
-                    current = target;
-                    current_args = Vec::new();
-                    continue;
+        match atman_rt::run_redirects(
+            flow_name.to_string(),
+            args,
+            5,
+            |current, current_args| {
+                let run_id = next_run_id.take();
+                async move {
+                    let flow = flows
+                        .get(&current)
+                        .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{current}`")))?;
+                    self.run_flow(flow, current_args, flows, invocation, run_id)
+                        .await
                 }
-                other => return other,
-            }
+            },
+            |error| match error {
+                RuntimeError::Redirect(target) => Some(target.clone()),
+                _ => None,
+            },
+        )
+        .await
+        {
+            atman_rt::RedirectOutcome::Completed(result) => result,
+            atman_rt::RedirectOutcome::LimitExceeded => Err(RuntimeError::ToolFailed(
+                "redirect chain exceeded max depth (5)".into(),
+            )),
         }
-        Err(RuntimeError::ToolFailed(
-            "redirect chain exceeded max depth (5)".into(),
-        ))
     }
 
     async fn run_flow(
