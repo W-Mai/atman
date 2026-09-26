@@ -115,7 +115,7 @@ fn end_turn_emits_turn_end_and_clears_current() {
 fn assistant_msg_with_flow_run_id_records_correlation() {
     let session = Session::open_ephemeral();
     let turn_id = TurnId::now();
-    let flow_run_id = atman_runtime::FlowRunId::now();
+    let flow_run_id = atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now();
     let msg = assistant_msg(turn_id.clone(), "done");
 
     session.append_message(msg, Some(flow_run_id.clone()));

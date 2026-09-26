@@ -5,7 +5,7 @@ use atman_runtime::stream::StreamFrame;
 use atman_runtime::tool::{Tool, ToolArgs};
 use atman_runtime::tools::{self, agent_ctrl::FlowRegistry, term::TermSpawn};
 use atman_runtime::trust::{TrustConfig, TrustMode};
-use atman_runtime::{AtmanValue as Value, Executor, FlowRunId, Tier};
+use atman_runtime::{AtmanValue as Value, Executor, Tier};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -22,7 +22,7 @@ async fn term_spawn_emits_terminal_chunk_to_stream() {
     };
     let flows = Arc::new(FlowRegistry::new());
     let broker = PermissionBroker::shared(Arc::clone(&flows));
-    let run_id = FlowRunId::now();
+    let run_id = atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now();
     let identity = flows
         .register_root(
             "term-e2e".into(),

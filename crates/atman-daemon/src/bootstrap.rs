@@ -214,7 +214,7 @@ pub fn spawn_mcp_boot(
                                                     parts: vec![atman_runtime::MessagePart::Text {
                                                         text,
                                                     }],
-                                                    turn_id: atman_runtime::TurnId::now(),
+                                                    turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                                                     origin:
                                                         atman_runtime::message::MessageOrigin::User,
                                                 }

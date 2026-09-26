@@ -30,7 +30,7 @@ async fn scoped_plan_usage_does_not_replace_the_root_model_window() {
     let child_identity = ContextCallIdentity {
         scope: ContextCallScope::Child,
         session_id: Some(session_id),
-        flow_run_id: Some(atman_runtime::FlowRunId::now()),
+        flow_run_id: Some(atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now()),
     };
     let root_key = ContextUsageKey {
         provider: "root-provider".into(),

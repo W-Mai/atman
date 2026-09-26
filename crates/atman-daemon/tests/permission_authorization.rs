@@ -46,7 +46,7 @@ fn pending_request(
         .flow_registry
         .register_root(
             session.id().0.to_string(),
-            atman_runtime::FlowRunId::now(),
+            atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now(),
             EffectiveAuthority::root(&session.trust_config(), true, None),
         )
         .unwrap();
