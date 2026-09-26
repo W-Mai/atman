@@ -9,6 +9,7 @@ pub mod engine;
 pub mod env;
 pub mod expr;
 pub mod lifecycle;
+pub mod list;
 pub mod ops;
 pub mod pattern;
 pub mod redirect;
@@ -25,6 +26,7 @@ pub use engine::{
 pub use env::Env;
 pub use expr::{ExpressionEffect, ExpressionHost, eval_dynamic_fanout, eval_expr, is_type_name};
 pub use lifecycle::{FlowEndFact, FlowLifecycle, FlowStartFact, StartedFlow};
+pub use list::{ListIntrinsic, eval_list_intrinsic};
 pub use ops::{EvalError, HostValueOps, ValueError, eval_binary, eval_literal, eval_unary};
 pub use pattern::{PatternBindError, PatternValue, bind_pattern};
 pub use redirect::{RedirectOutcome, run_redirects};

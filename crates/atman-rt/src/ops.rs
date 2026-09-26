@@ -27,13 +27,27 @@ pub trait ValueError {
     fn type_mismatch(expected: &str, actual: String) -> Self;
     fn integer_div_by_zero() -> Self;
     fn integer_mod_by_zero() -> Self;
+    fn missing_positional_argument(name: &str, index: usize) -> Self;
+    fn invalid_lambda_arity(name: &str, expected: &str, actual: usize) -> Self;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalError {
-    TypeMismatch { expected: String, actual: String },
+    TypeMismatch {
+        expected: String,
+        actual: String,
+    },
     IntegerDivByZero,
     IntegerModByZero,
+    MissingPositionalArgument {
+        name: String,
+        index: usize,
+    },
+    InvalidLambdaArity {
+        name: String,
+        expected: String,
+        actual: usize,
+    },
 }
 
 impl ValueError for EvalError {
@@ -50,6 +64,21 @@ impl ValueError for EvalError {
 
     fn integer_mod_by_zero() -> Self {
         Self::IntegerModByZero
+    }
+
+    fn missing_positional_argument(name: &str, index: usize) -> Self {
+        Self::MissingPositionalArgument {
+            name: name.into(),
+            index,
+        }
+    }
+
+    fn invalid_lambda_arity(name: &str, expected: &str, actual: usize) -> Self {
+        Self::InvalidLambdaArity {
+            name: name.into(),
+            expected: expected.into(),
+            actual,
+        }
     }
 }
 

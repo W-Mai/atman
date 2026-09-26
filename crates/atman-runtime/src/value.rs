@@ -53,6 +53,14 @@ impl atman_rt::ValueError for RuntimeError {
     fn integer_mod_by_zero() -> Self {
         Self::ToolFailed("integer mod by zero".into())
     }
+
+    fn missing_positional_argument(name: &str, index: usize) -> Self {
+        Self::MissingArg(format!("{name}: missing positional arg {index}"))
+    }
+
+    fn invalid_lambda_arity(name: &str, expected: &str, actual: usize) -> Self {
+        Self::ToolFailed(format!("{name}: lambda must have {expected}, got {actual}"))
+    }
 }
 
 pub type AtmanValue = atman_rt::Value<AtmanPayload, RuntimeError>;

@@ -445,13 +445,13 @@ fn error_map_non_lambda() {
 
 #[test]
 fn error_arity_map() {
-    assert!(
+    assert!(matches!(
         run_result(
             r#"flow test() -> string { return to_json_string(list.map([1, 2], |x, y| x + y)) }"#
-        )
-        .is_err(),
-        "should return error for wrong arity"
-    );
+        ),
+        Err(atman_runtime::error::RuntimeError::ToolFailed(message))
+            if message == "list.map: lambda must have 1 parameter, got 2"
+    ));
 }
 
 #[test]
@@ -467,10 +467,11 @@ fn error_arity_reduce() {
 
 #[test]
 fn error_missing_lambda_arg() {
-    assert!(
-        run_result(r#"flow test() -> string { return to_json_string(list.map([1, 2])) }"#).is_err(),
-        "should return error for missing arg"
-    );
+    assert!(matches!(
+        run_result(r#"flow test() -> string { return to_json_string(list.map([1, 2])) }"#),
+        Err(atman_runtime::error::RuntimeError::MissingArg(message))
+            if message == "list.map: missing positional arg 1"
+    ));
 }
 
 #[test]
