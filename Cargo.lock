@@ -276,6 +276,7 @@ name = "atman-rt"
 version = "1.13.2"
 dependencies = [
  "futures",
+ "serde",
 ]
 
 [[package]]

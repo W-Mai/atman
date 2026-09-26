@@ -17,7 +17,7 @@ fn request_with_tools() -> LlmRequest {
             parts: vec![MessagePart::Text {
                 text: "list examples/".into(),
             }],
-            turn_id: TurnId(Uuid::nil()),
+            turn_id: TurnId::new(Uuid::nil().into()),
             origin: MessageOrigin::User,
         }],
         system: None,
@@ -75,7 +75,7 @@ fn anthropic_wire_body_omits_tools_field_when_list_empty() {
 fn anthropic_compact_resume_keeps_summary_tail_tool_pair_and_definitions() {
     let p = provider();
     let mut req = request_with_tools();
-    let turn = TurnId(Uuid::nil());
+    let turn = TurnId::new(Uuid::nil().into());
     req.system = Some("stable instructions".into());
     req.messages = vec![
         Message::system_compact_summary(turn.clone(), "retained summary", 1, 9, 9),

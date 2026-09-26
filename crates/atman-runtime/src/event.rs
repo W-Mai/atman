@@ -24,19 +24,27 @@ impl std::fmt::Display for FlowRunId {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(transparent)]
-pub struct TurnId(pub Uuid);
+pub struct AtmanUuid(pub Uuid);
 
-impl TurnId {
-    pub fn now() -> Self {
+impl From<Uuid> for AtmanUuid {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl atman_rt::IdSource for AtmanUuid {
+    fn fresh() -> Self {
         Self(Uuid::now_v7())
     }
 }
 
-impl std::fmt::Display for TurnId {
+impl std::fmt::Display for AtmanUuid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
     }
 }
+
+pub type TurnId = atman_rt::TurnId<AtmanUuid>;
 
 /// Wraps an Event with assigned sequence number and timestamp.
 /// Serializes to the same JSONL format as the flat Event for backward compat.
@@ -648,6 +656,20 @@ impl EventSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_id_replays_existing_uuid_json() {
+        let json = r#"{"type":"turn_start","turn_id":"0195e1c2-8f9d-7b3a-8c4d-123456789abc"}"#;
+        let event: Event = serde_json::from_str(json).unwrap();
+        let Event::TurnStart { turn_id } = &event else {
+            panic!("expected turn start")
+        };
+        assert_eq!(turn_id.to_string(), "0195e1c2-8f9d-7b3a-8c4d-123456789abc");
+        assert_eq!(
+            serde_json::to_value(&event).unwrap()["turn_id"],
+            turn_id.to_string()
+        );
+    }
 
     #[test]
     fn flow_start_serializes_parent_linkage() {

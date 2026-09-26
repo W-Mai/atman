@@ -10,7 +10,7 @@ fn provider() -> OpenAiProvider {
 }
 
 fn tid() -> TurnId {
-    TurnId(Uuid::nil())
+    TurnId::new(Uuid::nil().into())
 }
 
 fn user(text: &str) -> Message {
