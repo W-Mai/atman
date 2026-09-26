@@ -131,7 +131,7 @@ fn permission_request(
 }
 
 fn large_workflow(node_count: usize, permission_count: usize) -> OutputItem {
-    let run_id = FlowRunId(uuid::Uuid::from_u128(1));
+    let run_id = FlowRunId::new(uuid::Uuid::from_u128(1).into());
     let at = chrono::Utc::now();
     let root = WorkflowNode {
         id: run_id.to_string(),

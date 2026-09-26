@@ -336,10 +336,10 @@ impl Tool for PermissionBatch {
                 PermissionSelector::Group(group_id(&args)?)
             } else if args.named("descendant_run_id").is_some() {
                 let value = string_arg(&args, "descendant_run_id", 0)?;
-                PermissionSelector::DescendantRun(crate::event::FlowRunId(
-                    Uuid::parse_str(&value).map_err(|_| {
-                        failed(self.name(), "descendant_run_id is not a valid UUID")
-                    })?,
+                PermissionSelector::DescendantRun(crate::event::FlowRunId::new(
+                    Uuid::parse_str(&value)
+                        .map_err(|_| failed(self.name(), "descendant_run_id is not a valid UUID"))?
+                        .into(),
                 ))
             } else {
                 let kind = string_arg(&args, "selector", 0)?;

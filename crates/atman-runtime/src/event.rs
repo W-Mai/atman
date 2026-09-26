@@ -6,29 +6,19 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(transparent)]
-pub struct FlowRunId(pub Uuid);
-
-impl FlowRunId {
-    pub fn now() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl std::fmt::Display for FlowRunId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(transparent)]
 pub struct AtmanUuid(pub Uuid);
 
 impl From<Uuid> for AtmanUuid {
     fn from(value: Uuid) -> Self {
         Self(value)
+    }
+}
+
+impl From<AtmanUuid> for Uuid {
+    fn from(value: AtmanUuid) -> Self {
+        value.0
     }
 }
 
@@ -45,6 +35,7 @@ impl std::fmt::Display for AtmanUuid {
 }
 
 pub type TurnId = atman_rt::TurnId<AtmanUuid>;
+pub type FlowRunId = atman_rt::RunId<AtmanUuid>;
 
 /// Wraps an Event with assigned sequence number and timestamp.
 /// Serializes to the same JSONL format as the flat Event for backward compat.
@@ -668,6 +659,20 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&event).unwrap()["turn_id"],
             turn_id.to_string()
+        );
+    }
+
+    #[test]
+    fn flow_run_id_replays_existing_uuid_json() {
+        let json = r#"{"type":"flow_start","run_id":"0195e1c2-8f9d-7b3a-8c4d-123456789abc"}"#;
+        let event: Event = serde_json::from_str(json).unwrap();
+        let Event::FlowStart { run_id, .. } = &event else {
+            panic!("expected flow start")
+        };
+        assert_eq!(run_id.to_string(), "0195e1c2-8f9d-7b3a-8c4d-123456789abc");
+        assert_eq!(
+            serde_json::to_value(&event).unwrap()["run_id"],
+            run_id.to_string()
         );
     }
 

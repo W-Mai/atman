@@ -28,7 +28,7 @@ fn permission_scope(
         PermissionRpcScope::CurrentCall => atman_runtime::permission::GrantScope::CurrentCall,
         PermissionRpcScope::ChildRunSameTool { run_id, tool_name } => {
             atman_runtime::permission::GrantScope::ChildRunSameTool {
-                run_id: atman_runtime::event::FlowRunId(run_id.0),
+                run_id: run_id.into_core(),
                 tool_name,
             }
         }
@@ -37,7 +37,7 @@ fn permission_scope(
             tool_name,
             workspace_relative_path,
         } => atman_runtime::permission::GrantScope::ChildRunSamePathRule {
-            run_id: atman_runtime::event::FlowRunId(run_id.0),
+            run_id: run_id.into_core(),
             tool_name,
             workspace_relative_path,
         },
@@ -178,9 +178,7 @@ pub async fn dispatch_as(
                                 .map(|request| atman_proto::PermissionRequestView {
                                     request_id: request.request_id.0,
                                     session_id: request.session_id,
-                                    requesting_run_id: atman_proto::FlowRunId(
-                                        request.requesting_run_id.0,
-                                    ),
+                                    requesting_run_id: request.requesting_run_id.into(),
                                     tool: request.intent.tool_name,
                                     tier: format!("{:?}", request.intent.tier),
                                     state: format!("{:?}", request.state),

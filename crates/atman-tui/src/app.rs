@@ -5635,7 +5635,7 @@ mod tests {
         use chrono::Utc;
 
         fn payload(run_id: &str, tool_use_id: &str) -> PermissionRequestAudit {
-            let run_id = FlowRunId(uuid::Uuid::parse_str(run_id).unwrap());
+            let run_id = FlowRunId::new(uuid::Uuid::parse_str(run_id).unwrap().into());
             PermissionRequestAudit {
                 request_id: Some(PermissionRequestId::now()),
                 revision: 1,

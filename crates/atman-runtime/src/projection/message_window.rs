@@ -232,7 +232,7 @@ fn raw_event_belongs_to_root(
     value["flow_run_id"]
         .as_str()
         .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
-        .map(crate::event::FlowRunId)
+        .map(|uuid| crate::event::FlowRunId::new(uuid.into()))
         .is_none_or(|run_id| !spawned_flow_ids.contains(&run_id))
 }
 
@@ -480,11 +480,11 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
         let Ok(run_id) = uuid::Uuid::parse_str(raw_run_id) else {
             continue;
         };
-        let run_id = crate::event::FlowRunId(run_id);
+        let run_id = crate::event::FlowRunId::new(run_id.into());
         let parent = value["parent_run_id"]
             .as_str()
             .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
-            .map(crate::event::FlowRunId);
+            .map(|uuid| crate::event::FlowRunId::new(uuid.into()));
         known_flow_ids.insert(run_id.clone());
         if let Some(parent) = parent {
             flow_children
@@ -563,7 +563,7 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     }
                     let flow_run_id = v["flow_run_id"].as_str().and_then(|raw| {
                         let run_id = uuid::Uuid::parse_str(raw).ok()?;
-                        let run_id = crate::event::FlowRunId(run_id);
+                        let run_id = crate::event::FlowRunId::new(run_id.into());
                         if known_flow_ids.contains(&run_id) && !spawned_flow_ids.contains(&run_id) {
                             None
                         } else {
@@ -797,7 +797,7 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 let run_id = v["run_id"]
                     .as_str()
                     .and_then(|s| uuid::Uuid::parse_str(s).ok())
-                    .map(event::FlowRunId);
+                    .map(|uuid| event::FlowRunId::new(uuid.into()));
                 let node_id = v["node_id"].as_str().map(String::from);
                 let ts = parse_ts(v);
                 out.push(TranscriptEntry::LlmCall {
@@ -818,7 +818,7 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 let Some(run_id) = v["run_id"]
                     .as_str()
                     .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
-                    .map(event::FlowRunId)
+                    .map(|uuid| event::FlowRunId::new(uuid.into()))
                 else {
                     continue;
                 };
@@ -1838,8 +1838,8 @@ mod tests {
 
     #[test]
     fn replay_excludes_subagent_messages() {
-        let root = FlowRunId(Uuid::now_v7());
-        let child = FlowRunId(Uuid::now_v7());
+        let root = FlowRunId::now();
+        let child = FlowRunId::now();
         let envelopes = vec![
             EventEnvelope::new(1, flow_start(root.clone(), None, false)),
             EventEnvelope::new(2, flow_start(child.clone(), Some(root), true)),
@@ -2142,8 +2142,8 @@ mod tests {
 
     #[test]
     fn replay_excludes_ordinary_subflow_execution_messages() {
-        let root = FlowRunId(Uuid::now_v7());
-        let child = FlowRunId(Uuid::now_v7());
+        let root = FlowRunId::now();
+        let child = FlowRunId::now();
         let envelopes = vec![
             EventEnvelope::new(1, flow_start(root.clone(), None, false)),
             EventEnvelope::new(2, flow_start(child.clone(), Some(root), false)),
@@ -2163,9 +2163,9 @@ mod tests {
 
     #[test]
     fn replay_excludes_descendants_of_spawned_flows() {
-        let root = FlowRunId(Uuid::now_v7());
-        let spawned = FlowRunId(Uuid::now_v7());
-        let descendant = FlowRunId(Uuid::now_v7());
+        let root = FlowRunId::now();
+        let spawned = FlowRunId::now();
+        let descendant = FlowRunId::now();
         let envelopes = vec![
             EventEnvelope::new(1, flow_start(root.clone(), None, false)),
             EventEnvelope::new(2, flow_start(spawned.clone(), Some(root), true)),
@@ -2184,7 +2184,7 @@ mod tests {
 
     #[test]
     fn replay_keeps_unknown_nonspawned_message() {
-        let orphan = FlowRunId(Uuid::now_v7());
+        let orphan = FlowRunId::now();
         let envelopes = vec![EventEnvelope::new(
             1,
             Event::AssistantMsg {
@@ -2205,7 +2205,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
-        let run = FlowRunId(Uuid::now_v7());
+        let run = FlowRunId::now();
         let cases = [
             (
                 "auto",

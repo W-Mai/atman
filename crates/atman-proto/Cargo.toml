@@ -13,6 +13,7 @@ keywords = ["atman", "json-rpc", "protocol", "rpc"]
 categories = ["development-tools", "api-bindings"]
 
 [dependencies]
+atman-rt = { path = "../atman-rt", version = "1.13.2" }
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

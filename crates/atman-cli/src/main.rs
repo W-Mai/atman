@@ -6629,7 +6629,7 @@ async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) 
             args_preview: (*args).into(),
             call_intent: None,
         });
-        let flow_run_id = FlowRunId(uuid::Uuid::parse_str(&run_id).unwrap());
+        let flow_run_id = FlowRunId::new(uuid::Uuid::parse_str(&run_id).unwrap().into());
         let _ = tx.send(StreamFrame::PermissionRequestCreated {
             run_id: run_id.clone(),
             payload: PermissionRequestAudit {

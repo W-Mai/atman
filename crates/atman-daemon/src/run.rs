@@ -265,7 +265,7 @@ impl RunLauncher {
         queue_run_images(&session, images)?;
         let sid_proto = ProtoSessionId(session.id().0);
         let run_id_runtime = RuntimeRunId::now();
-        let run_id_proto = ProtoRunId(run_id_runtime.0);
+        let run_id_proto: ProtoRunId = run_id_runtime.clone().into();
 
         let cancel = session.flow_cancel_token();
         state.register_broker(sid_proto.clone(), session.clone(), owner_principal);

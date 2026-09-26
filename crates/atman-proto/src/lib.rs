@@ -20,6 +20,18 @@ impl std::fmt::Display for SessionId {
 #[schema(value_type = String, format = Uuid)]
 pub struct FlowRunId(pub Uuid);
 
+impl FlowRunId {
+    pub fn into_core<I: From<Uuid>>(self) -> atman_rt::RunId<I> {
+        atman_rt::RunId::new(self.0.into())
+    }
+}
+
+impl<I: Into<Uuid>> From<atman_rt::RunId<I>> for FlowRunId {
+    fn from(value: atman_rt::RunId<I>) -> Self {
+        Self(value.0.into())
+    }
+}
+
 impl std::fmt::Display for FlowRunId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
@@ -346,6 +358,18 @@ pub struct ResolvePermissionRequestsResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flow_run_id_converts_to_core_without_changing_wire_json() {
+        let wire = FlowRunId(Uuid::from_u128(1));
+        let core: atman_rt::RunId<Uuid> = wire.clone().into_core();
+        assert_eq!(
+            serde_json::to_value(&wire).unwrap(),
+            serde_json::to_value(&core).unwrap()
+        );
+        let round_trip: FlowRunId = core.into();
+        assert_eq!(round_trip, wire);
+    }
 
     #[test]
     fn json_rpc_request_round_trip() {

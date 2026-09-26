@@ -900,7 +900,7 @@ impl WorkflowGraph {
                 };
                 self.apply_event(&Event::AssistantMsg {
                     turn_id: crate::event::TurnId::now(),
-                    flow_run_id: Some(crate::event::FlowRunId(uuid)),
+                    flow_run_id: Some(crate::event::FlowRunId::new(uuid.into())),
                     message: message.clone(),
                 });
             }
@@ -911,7 +911,7 @@ impl WorkflowGraph {
                 let scoped_run_id = flow_run_id
                     .as_deref()
                     .and_then(|rid| uuid::Uuid::parse_str(rid).ok())
-                    .map(crate::event::FlowRunId);
+                    .map(|uuid| crate::event::FlowRunId::new(uuid.into()));
                 self.apply_event(&Event::ToolResultMsg {
                     turn_id: crate::event::TurnId::now(),
                     flow_run_id: scoped_run_id,

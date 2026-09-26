@@ -263,6 +263,7 @@ dependencies = [
 name = "atman-proto"
 version = "1.13.2"
 dependencies = [
+ "atman-rt",
  "chrono",
  "serde",
  "serde_json",
