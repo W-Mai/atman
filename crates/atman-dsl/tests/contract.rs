@@ -33,7 +33,7 @@ fn contract_roundtrip_stable() {
 
 #[test]
 fn subflow_node_parses_with_positional_args() {
-    use atman_rt::ast::{Arg, Expr, Node, Stmt};
+    use atman_rt::ast::{Arg, Expr, FlowRef, Node, Stmt};
 
     let src = r#"flow parent(q: string) -> Report {
     r = subflow(child, q, 42)
@@ -47,7 +47,7 @@ fn subflow_node_parses_with_positional_args() {
     let Expr::Node(Node::Subflow { name, args }) = value else {
         panic!("subflow node expected");
     };
-    assert_eq!(name.name, "child");
+    assert!(matches!(name, FlowRef::Local(id) if id.name == "child"));
     assert_eq!(args.len(), 2);
     assert!(matches!(&args[0], Arg::Positional(_)));
 }

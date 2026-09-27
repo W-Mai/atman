@@ -99,7 +99,29 @@ The LLM is just one node type inside that program. `llm.call(...)` is a stochast
 
 ## Flow DSL
 
-A `.at` file declares types, providers, tools, routes, lifecycle hooks, and flows. Flows are block-based and parsed by `syn`.
+A `.at` file declares flows, routes, lifecycle hooks, and static `use` bindings. Flows are block-based.
+
+### Use flows from another file
+
+In `.atman/lib/text.at`, mark a flow public so another file can call it:
+
+```atman
+pub flow normalize(input: string) -> string {
+    return input
+}
+```
+
+In `.atman/commands/review.at`, bind that flow by name:
+
+```atman
+use "project:text.at"::normalize
+
+flow review(input: string) -> string {
+    return subflow(normalize, input)
+}
+```
+
+`use "./lib/text.at"::normalize` resolves beside the file containing the declaration. Use `::{normalize, tokenize as words}` to bind several public flows, or `use "./lib/text.at" as text` and call `subflow(text.normalize, input)`. `project:` reads from `<project>/.atman/lib/`; `user:` reads from `~/.config/atman/lib/`. Only flows declared in the entry file can be selected with `--flow` or exposed as slash commands.
 
 ### The managed agent loop
 
@@ -304,6 +326,7 @@ atman upgrade [--yes] [--verbose] [--no-modify-path]
 atman monitor [--port 65098]       # event monitor
 atman preview serve [--port 65097] # artifact preview workbench
 atman daemon start | stop | status | run [--reasoning <level>] [--image <path>]...
+atman flow run <name> --revision <id-or-hash> [--mock] [--ephemeral]
 atman flow snapshot | versions | diff | rollback | lint | test
 atman sync init | push | pull      # git-based cross-machine memory sync
 atman migrate list | import [--from opencode|kiro]

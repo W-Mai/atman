@@ -228,6 +228,8 @@ atman flow diff hello <old-hash> <new-hash>
 atman flow rollback hello <old-hash>              # writes back the source
 ```
 
+A snapshot of a flow with `use` records its reachable `.at` sources. Editing a used source creates a new revision, and `atman flow diff <name> <old-hash> <new-hash>` shows changes in each source file. Run recorded code with `atman flow run <name> --revision <id-or-hash>`; the run uses current tools, configuration, and filesystem effects. `flow rollback` refuses revisions with dependencies because replacing only the entry file would leave an inconsistent source tree.
+
 **Regression-test a flow** (offline; uses a mock provider):
 
 ```bash
@@ -235,6 +237,28 @@ atman flow test ~/.config/atman/commands/hello.at
 ```
 
 First run writes `hello.at.snap.json`. Subsequent runs compare the current output to the snapshot; mismatches print one line per drift case and exit non-zero. Re-run with `--bless` when the change is intended.
+
+### Reuse a flow from another file
+
+Put a shared flow in `<project>/.atman/lib/text.at`:
+
+```atman
+pub flow normalize(input: string) -> string {
+    return input
+}
+```
+
+Call it from `<project>/.atman/commands/review.at`:
+
+```atman
+use "project:text.at"::normalize
+
+flow review(input: string) -> string {
+    return subflow(normalize, input)
+}
+```
+
+Run the entry flow with `atman run .atman/commands/review.at --flow review input=hello`. A relative specifier such as `use "./lib/text.at"::normalize` resolves beside its declaring file. `use "user:text.at"::normalize` reads from `~/.config/atman/lib/`. A named `use` makes only the selected public flow callable in the current file; the shared file's private helper flows remain available to its own flows.
 
 ### MCP readiness and direct calls
 

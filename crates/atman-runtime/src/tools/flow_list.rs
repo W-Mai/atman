@@ -1,8 +1,10 @@
 use crate::error::RuntimeError;
+use crate::source_program::{SourceRoots, load_program};
 use crate::storage;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 use atman_rt::ast::{Expr, FlowDecl, Literal, Stmt, TypeExpr};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_SEARCH_LIMIT: usize = 10;
@@ -42,6 +44,7 @@ struct FlowFile {
 struct FlowCatalog {
     fingerprint: String,
     files: Vec<FlowFile>,
+    diagnostics: HashMap<String, String>,
 }
 
 impl FlowCatalog {
@@ -51,7 +54,13 @@ impl FlowCatalog {
         let project_root = super::flow_source::project_root_for_ctx(ctx);
         let sources =
             super::flow_source::installed_sources(Some(&config_dir), project_root.as_deref());
-        Self::load_sources(sources)
+        Self::load_sources(
+            sources,
+            &SourceRoots {
+                project_root,
+                config_dir: Some(config_dir),
+            },
+        )
     }
 
     #[cfg(test)]
@@ -75,16 +84,23 @@ impl FlowCatalog {
                 });
             }
         }
-        Self::load_sources(sources)
+        Self::load_sources(sources, &SourceRoots::default())
     }
 
     fn load_sources(
         sources: Vec<super::flow_source::InstalledFlowSource>,
+        roots: &SourceRoots,
     ) -> Result<Self, RuntimeError> {
         let mut files = Vec::new();
+        let mut diagnostics = HashMap::new();
         for source in sources {
-            if let Ok(file) = scan_flow_file(&source.path, source.scope) {
-                files.push(file);
+            match scan_flow_file(&source.path, source.scope, roots) {
+                Ok(file) => files.push(file),
+                Err(error) => {
+                    if let Some(name) = source.path.file_name().and_then(|name| name.to_str()) {
+                        diagnostics.insert(name.to_owned(), error.to_string());
+                    }
+                }
             }
         }
         files.sort_by(|left, right| left.name.cmp(&right.name));
@@ -100,6 +116,7 @@ impl FlowCatalog {
         Ok(Self {
             fingerprint: format!("blake3:{}", hasher.finalize().to_hex()),
             files,
+            diagnostics,
         })
     }
 
@@ -130,6 +147,12 @@ impl FlowCatalog {
             .flows
             .iter()
             .find(|flow| flow.name != "describe")
+    }
+
+    fn diagnostic_for(&self, flow_ref: &str) -> Option<&str> {
+        let file_ref = flow_ref.split_once('@').map_or(flow_ref, |(file, _)| file);
+        let file_name = normalize_flow_file(file_ref)?;
+        self.diagnostics.get(&file_name).map(String::as_str)
     }
 
     fn legacy_value(&self) -> Value {
@@ -423,9 +446,14 @@ fn describe_catalog_entry(
     flow_ref: &str,
     expected_version: Option<&str>,
 ) -> ToolResult {
-    let flow = catalog.find(flow_ref).ok_or_else(|| {
-        RuntimeError::ToolFailed(format!("flow.describe: flow `{flow_ref}` not found"))
-    })?;
+    let flow = catalog
+        .find(flow_ref)
+        .ok_or_else(|| match catalog.diagnostic_for(flow_ref) {
+            Some(diagnostic) => RuntimeError::ToolFailed(format!(
+                "flow.describe: `{flow_ref}` cannot be loaded: {diagnostic}"
+            )),
+            None => RuntimeError::ToolFailed(format!("flow.describe: flow `{flow_ref}` not found")),
+        })?;
     if expected_version.is_some_and(|version| version != flow.version) {
         return Err(RuntimeError::ToolFailed(format!(
             "flow.describe: stale version for `{}`; search again",
@@ -438,13 +466,11 @@ fn describe_catalog_entry(
 fn scan_flow_file(
     path: &Path,
     scope: super::flow_source::FlowSourceScope,
+    roots: &SourceRoots,
 ) -> Result<FlowFile, RuntimeError> {
-    let source = std::fs::read_to_string(path).map_err(|error| {
-        RuntimeError::ToolFailed(format!("flow catalog: read {}: {error}", path.display()))
-    })?;
-    let parsed = atman_dsl::parse::parse_file(&source).map_err(|error| {
-        RuntimeError::ToolFailed(format!("flow catalog: parse {}: {error}", path.display()))
-    })?;
+    let program = load_program(path, roots)
+        .map_err(|error| RuntimeError::ToolFailed(format!("flow catalog: {error:#}")))?;
+    let parsed = program.entry_file();
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -456,7 +482,7 @@ fn scan_flow_file(
         .find(|flow| flow.name.name == "describe")
         .and_then(extract_return_string_literal)
         .unwrap_or_default();
-    let version = format!("blake3:{}", blake3::hash(source.as_bytes()).to_hex());
+    let version = format!("blake3:{}", program.closure_digest());
     let flows = parsed
         .flows
         .iter()
@@ -831,6 +857,69 @@ flow research_loop(goal: string) -> string { return goal }
             described.field("ref").and_then(as_str),
             Some("subagent.at@subagent")
         );
+    }
+
+    #[test]
+    fn catalog_tracks_used_sources_and_reports_broken_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let commands = project.join(".atman/commands");
+        let library = project.join(".atman/lib");
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::create_dir_all(&library).unwrap();
+        write_flow(
+            &commands,
+            "review.at",
+            "use \"project:text.at\"::normalize\nflow review(input: string) -> string { return subflow(normalize, input) }\n",
+        );
+        write_flow(&commands, "other.at", "flow other() { return \"ok\" }\n");
+        write_flow(
+            &library,
+            "text.at",
+            "pub flow normalize(input: string) -> string { return input }\n",
+        );
+        let roots = SourceRoots {
+            project_root: Some(project.to_path_buf()),
+            config_dir: None,
+        };
+        let load = || {
+            FlowCatalog::load_sources(
+                super::super::flow_source::installed_sources(None, Some(project)),
+                &roots,
+            )
+            .unwrap()
+        };
+
+        let original = load();
+        let first_version = original.find("review@review").unwrap().version.clone();
+        write_flow(
+            &library,
+            "text.at",
+            "pub flow normalize(input: string) -> string { return \"changed\" }\n",
+        );
+        let changed = load();
+        assert_ne!(
+            first_version,
+            changed.find("review@review").unwrap().version
+        );
+        assert!(
+            describe_catalog_entry(&changed, "review.at@review", Some(&first_version))
+                .unwrap_err()
+                .to_string()
+                .contains("stale version")
+        );
+
+        write_flow(
+            &library,
+            "text.at",
+            "flow normalize(input: string) -> string { return input }\n",
+        );
+        let broken = load();
+        assert!(broken.find("other@other").is_some());
+        assert!(broken.find("review@review").is_none());
+        let error = describe_catalog_entry(&broken, "review.at@review", None).unwrap_err();
+        assert!(error.to_string().contains("cannot be loaded"));
+        assert!(error.to_string().contains("pub flow"));
     }
 
     fn as_str(value: &Value) -> Option<&str> {

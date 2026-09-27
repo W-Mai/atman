@@ -370,10 +370,14 @@ async fn run_flow_inner(
             atman_runtime::templates::ensure_managed_agent_at(dir)?;
         }
     }
-    let source = std::fs::read_to_string(path)
-        .with_context(|| format!("reading flow {}", path.display()))?;
-    let parsed = atman_dsl::parse::parse_file(&source)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let program = atman_runtime::source_program::load_program(
+        path,
+        &atman_runtime::source_program::SourceRoots {
+            project_root: Some(project_root.clone()),
+            config_dir: config_dir.clone(),
+        },
+    )?;
+    let parsed = program.entry_file();
     if parsed.flows.is_empty() {
         anyhow::bail!("{} contains no flows", path.display());
     }
@@ -474,8 +478,8 @@ async fn run_flow_inner(
         .fire(&executor, atman_rt::ast::LifecycleEvent::TurnStart)
         .await;
     let result = executor
-        .run_with_invocation(
-            &parsed,
+        .run_linked_with_invocation(
+            &program,
             &flow_name,
             args,
             atman_runtime::RootInvocation {

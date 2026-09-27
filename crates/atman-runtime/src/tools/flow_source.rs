@@ -36,6 +36,13 @@ pub fn project_root_for_ctx(ctx: &ToolCtx) -> Option<PathBuf> {
         .or_else(current_project_root)
 }
 
+pub fn source_roots_for_ctx(ctx: &ToolCtx) -> crate::source_program::SourceRoots {
+    crate::source_program::SourceRoots {
+        project_root: project_root_for_ctx(ctx),
+        config_dir: crate::storage::config_dir().ok(),
+    }
+}
+
 pub fn installed_sources(
     config_dir: Option<&Path>,
     project_root: Option<&Path>,

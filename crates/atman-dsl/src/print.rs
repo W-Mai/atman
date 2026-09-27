@@ -8,6 +8,32 @@ use atman_rt::ast::*;
 pub fn print_file(file: &File) -> String {
     let mut out = String::new();
     let mut first = true;
+    for use_decl in &file.uses {
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        write!(out, "use {:?}", use_decl.source).unwrap();
+        match &use_decl.binding {
+            UseBinding::Module(alias) => {
+                write!(out, " as {}", alias.name).unwrap();
+            }
+            UseBinding::Flows(flows) if flows.len() == 1 => {
+                write_use_flow(&mut out, &flows[0], "::");
+            }
+            UseBinding::Flows(flows) => {
+                out.push_str("::{");
+                for (index, flow) in flows.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(", ");
+                    }
+                    write_use_flow(&mut out, flow, "");
+                }
+                out.push('}');
+            }
+        }
+        out.push('\n');
+    }
     for r in &file.routes {
         if !first {
             out.push('\n');
@@ -43,12 +69,26 @@ pub fn print_file(file: &File) -> String {
             out.push('\n');
         }
         first = false;
-        write_flow(&mut out, flow);
+        let is_public = file
+            .public_flows
+            .iter()
+            .any(|name| name.name == flow.name.name);
+        write_flow(&mut out, flow, is_public);
     }
     out
 }
 
-fn write_flow(out: &mut String, flow: &FlowDecl) {
+fn write_use_flow(out: &mut String, binding: &UseFlowBinding, prefix: &str) {
+    write!(out, "{prefix}{}", binding.name.name).unwrap();
+    if let Some(alias) = &binding.alias {
+        write!(out, " as {}", alias.name).unwrap();
+    }
+}
+
+fn write_flow(out: &mut String, flow: &FlowDecl, is_public: bool) {
+    if is_public {
+        out.push_str("pub ");
+    }
     write!(out, "flow {}(", flow.name.name).unwrap();
     for (i, p) in flow.params.iter().enumerate() {
         if i > 0 {
@@ -393,7 +433,7 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
             out.push(')');
         }
         Node::Subflow { name, args } => {
-            write!(out, "subflow({}", name.name).unwrap();
+            write!(out, "subflow({}", name.display_name()).unwrap();
             for a in args {
                 out.push_str(", ");
                 match a {

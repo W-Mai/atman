@@ -48,8 +48,14 @@ impl RouteProgram {
             .load_routes_source()
             .map_err(RouteLoadError::Config)?
             .map(|source| {
-                atman_dsl::parse::parse_file(&source)
-                    .map_err(|error| RouteLoadError::Parse(error.to_string()))
+                let file = atman_dsl::parse::parse_file(&source)
+                    .map_err(|error| RouteLoadError::Parse(error.to_string()))?;
+                if !file.uses.is_empty() {
+                    return Err(RouteLoadError::Parse(
+                        "`use` is not allowed in routes.at".to_owned(),
+                    ));
+                }
+                Ok(file)
             })
             .transpose()?;
         Ok(Self { file })
@@ -142,6 +148,13 @@ mod tests {
         let (_dir, hub) = hub_with(Some("route invalid"));
         let error = RouteProgram::load(&hub).unwrap_err().to_string();
         assert!(error.contains("parse routes.at"), "error: {error}");
+    }
+
+    #[test]
+    fn routes_reject_use_declarations() {
+        let (_dir, hub) = hub_with(Some("use \"./helper.at\" as helper\n"));
+        let error = RouteProgram::load(&hub).unwrap_err().to_string();
+        assert!(error.contains("`use` is not allowed in routes.at"));
     }
 
     #[test]

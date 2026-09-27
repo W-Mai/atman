@@ -42,6 +42,20 @@ pub fn exec_stmts_prefixed<'a>(
     })
 }
 
+pub(crate) async fn exec_subflow(
+    flow: &FlowDecl,
+    args: Vec<(String, Value)>,
+    ctx: &AtmanHost<'_>,
+) -> StmtOutcome {
+    let mut env = Env::new();
+    let host = AtmanStatementAdapter {
+        env: &mut env,
+        ctx,
+        watches: collect_watches(&flow.body),
+    };
+    Engine::new(host).run_flow(flow, args).await
+}
+
 struct AtmanStatementAdapter<'a> {
     env: &'a mut Env,
     ctx: &'a AtmanHost<'a>,
@@ -394,9 +408,9 @@ fn expr_to_node_kind_label(expr: &Expr) -> (crate::nodegraph::NodeKind, String) 
         ),
         Expr::Node(Node::Subflow { name, .. }) => (
             NodeKind::Subflow {
-                name: name.name.clone(),
+                name: name.display_name(),
             },
-            format!("subflow({})", name.name),
+            format!("subflow({})", name.display_name()),
         ),
         _ => (NodeKind::Return, "expr".into()),
     }
@@ -639,11 +653,51 @@ pub async fn exec_flow_with_siblings(
     safety: Option<&crate::safety::SafetyConfig>,
     source_dir: Option<PathBuf>,
 ) -> Result<Value, RuntimeError> {
+    exec_flow_with_linked_siblings(
+        flow,
+        args,
+        tools,
+        tool_ctx,
+        providers,
+        flows,
+        events,
+        turn_id,
+        flow_run_id,
+        session,
+        flow_cancel,
+        safety,
+        source_dir,
+        None,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn exec_flow_with_linked_siblings(
+    flow: &FlowDecl,
+    args: Vec<(String, Value)>,
+    tools: &ToolRegistry,
+    tool_ctx: &ToolCtx,
+    providers: &crate::provider::ProviderRegistry,
+    flows: &std::collections::HashMap<String, FlowDecl>,
+    events: Option<&crate::event::EventSink>,
+    turn_id: Option<crate::event::TurnId>,
+    flow_run_id: Option<crate::event::FlowRunId>,
+    session: Option<std::sync::Arc<crate::session::Session>>,
+    flow_cancel: tokio_util::sync::CancellationToken,
+    safety: Option<&crate::safety::SafetyConfig>,
+    source_dir: Option<PathBuf>,
+    linked_program: Option<&crate::source_program::LinkedProgram>,
+    current_module: Option<crate::source_program::ModuleId>,
+) -> Result<Value, RuntimeError> {
     let ctx = AtmanHost {
         tools,
         tool_ctx,
         providers,
         flows,
+        linked_program,
+        current_module,
         contract: flow.contract.as_ref(),
         events,
         turn_id,

@@ -58,7 +58,20 @@ impl Parse for ParsedFile {
     fn parse(input: ParseStream) -> Result<Self> {
         let mut file = File::default();
         while !input.is_empty() {
-            if input.peek(kw::flow) {
+            if input.peek(Token![use]) {
+                file.uses.push(parse_use(input)?);
+            } else if input.peek(Token![pub]) {
+                let visibility: Token![pub] = input.parse()?;
+                if !input.peek(kw::flow) {
+                    return Err(syn::Error::new(
+                        visibility.span,
+                        "`pub` is only allowed on `flow` declarations",
+                    ));
+                }
+                let flow = input.parse::<ParsedFlowDecl>()?.0;
+                file.public_flows.push(flow.name.clone());
+                file.flows.push(flow);
+            } else if input.peek(kw::flow) {
                 file.flows.push(input.parse::<ParsedFlowDecl>()?.0);
             } else if input.peek(kw::route) {
                 file.routes.push(parse_route(input)?);
@@ -71,12 +84,57 @@ impl Parse for ParsedFile {
                 file.lifecycles.push(parse_lifecycle(input)?);
             } else {
                 return Err(input.error(
-                    "expected `flow`, `route`, `default_route`, or `on` declaration at top level",
+                    "expected `use`, `pub flow`, `flow`, `route`, `default_route`, or `on` declaration at top level",
                 ));
             }
         }
         Ok(Self(file))
     }
+}
+
+fn parse_use(input: ParseStream) -> Result<UseDecl> {
+    input.parse::<Token![use]>()?;
+    let source: LitStr = input.parse()?;
+    let binding = if input.peek(Token![as]) {
+        input.parse::<Token![as]>()?;
+        UseBinding::Module(to_ident(input.parse::<syn::Ident>()?))
+    } else if input.peek(Token![::]) {
+        input.parse::<Token![::]>()?;
+        if input.peek(token::Brace) {
+            let content;
+            braced!(content in input);
+            if content.is_empty() {
+                return Err(content.error("expected at least one flow name in `use`"));
+            }
+            let mut flows = Vec::new();
+            while !content.is_empty() {
+                flows.push(parse_use_flow_binding(&content)?);
+                if !content.is_empty() {
+                    content.parse::<Token![,]>()?;
+                }
+            }
+            UseBinding::Flows(flows)
+        } else {
+            UseBinding::Flows(vec![parse_use_flow_binding(input)?])
+        }
+    } else {
+        return Err(input.error("expected `::flow` or `as module` after `use` source"));
+    };
+    Ok(UseDecl {
+        source: source.value(),
+        binding,
+    })
+}
+
+fn parse_use_flow_binding(input: ParseStream) -> Result<UseFlowBinding> {
+    let name = to_ident(input.parse::<syn::Ident>()?);
+    let alias = if input.peek(Token![as]) {
+        input.parse::<Token![as]>()?;
+        Some(to_ident(input.parse::<syn::Ident>()?))
+    } else {
+        None
+    };
+    Ok(UseFlowBinding { name, alias })
 }
 
 fn parse_route(input: ParseStream) -> Result<RouteDecl> {
@@ -901,7 +959,17 @@ fn parse_subflow(input: ParseStream) -> Result<Node> {
     input.parse::<kw::subflow>()?;
     let content;
     parenthesized!(content in input);
-    let name = to_ident(content.parse::<syn::Ident>()?);
+    let first = to_ident(content.parse::<syn::Ident>()?);
+    let name = if content.peek(Token![.]) {
+        content.parse::<Token![.]>()?;
+        let flow = to_ident(content.parse::<syn::Ident>()?);
+        FlowRef::Qualified {
+            module: first,
+            flow,
+        }
+    } else {
+        FlowRef::Local(first)
+    };
     let args = if content.peek(Token![,]) {
         content.parse::<Token![,]>()?;
         parse_call_args(&content)?

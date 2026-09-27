@@ -4,7 +4,7 @@ mod llm_context;
 pub(crate) mod llm_dispatch;
 pub(crate) mod llm_parse;
 
-use atman_rt::ast::{Arg, Expr, Node};
+use atman_rt::ast::{Arg, Expr, FlowRef, Node};
 use atman_rt::{ExpressionEffect, ExpressionHost};
 
 use crate::atman_host::AtmanHost;
@@ -934,10 +934,38 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a AtmanHost<'a>) -> 
         Node::FixUntilTestPasses { kwargs } => eval_fix_until_test_passes(kwargs, env, ctx).await,
         Node::Message { role, args } => eval_message_node(*role, args, env, ctx).await,
         Node::Subflow { name, args } => {
-            let Some(target) = ctx.flows.get(&name.name) else {
+            let display_name = name.display_name();
+            let (target_key, target_module, target_source_dir) =
+                match (ctx.linked_program, ctx.current_module) {
+                    (Some(program), Some(module)) => {
+                        let Some(id) = program.resolve(module, name) else {
+                            return Value::Err(RuntimeError::UndefinedTool(format!(
+                                "subflow({display_name})"
+                            )));
+                        };
+                        (
+                            id.runtime_key(),
+                            Some(id.module),
+                            program.source_dir(&id).map(std::path::Path::to_path_buf),
+                        )
+                    }
+                    (None, None) => match name {
+                        FlowRef::Local(local) => (local.name.clone(), None, ctx.source_dir.clone()),
+                        FlowRef::Qualified { .. } => {
+                            return Value::Err(RuntimeError::UndefinedTool(format!(
+                                "subflow({display_name})"
+                            )));
+                        }
+                    },
+                    _ => {
+                        return Value::Err(RuntimeError::ToolFailed(
+                            "subflow: incomplete linked program context".into(),
+                        ));
+                    }
+                };
+            let Some(target) = ctx.flows.get(&target_key) else {
                 return Value::Err(RuntimeError::UndefinedTool(format!(
-                    "subflow({})",
-                    name.name
+                    "subflow({display_name})"
                 )));
             };
             let bindings = match atman_rt::bind_call_arguments(&target.params, args, |expr| {
@@ -949,15 +977,11 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a AtmanHost<'a>) -> 
                 Err(atman_rt::CallArgumentError::TooManyPositional) => {
                     return Value::Err(RuntimeError::MissingArg(format!(
                         "subflow({}): too many positional args",
-                        name.name
+                        display_name
                     )));
                 }
                 Err(atman_rt::CallArgumentError::Evaluation(value)) => return value,
             };
-            let mut sub_env = Env::new();
-            for (n, v) in bindings {
-                sub_env.bind(n, v);
-            }
             let sub_run_id = crate::event::FlowRunId::now();
             let flow_registry = match ctx.tool_ctx.flow_registry.clone() {
                 Some(registry) => registry,
@@ -995,7 +1019,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a AtmanHost<'a>) -> 
             };
             let lifecycle = atman_rt::FlowLifecycle::new(atman_rt::FlowStartFact {
                 run_id: sub_run_id.clone(),
-                flow_name: name.name.clone(),
+                flow_name: display_name,
                 parent_run_id: Some(parent_run_id.clone()),
                 parent_node_id: ctx.current_node_id.clone(),
                 spawned: false,
@@ -1021,10 +1045,11 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a AtmanHost<'a>) -> 
                             contract: target.contract.as_ref(),
                             flow_run_id: Some(sub_run_id.clone()),
                             current_node_id: None,
+                            current_module: target_module,
+                            source_dir: target_source_dir,
                             ..ctx.clone()
                         };
-                        let outcome =
-                            crate::exec::exec_stmts(&target.body, &mut sub_env, &sub_ctx).await;
+                        let outcome = crate::exec::exec_subflow(target, bindings, &sub_ctx).await;
                         drop(lifecycle_guard);
                         outcome
                     },
@@ -1635,6 +1660,8 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            linked_program: None,
+            current_module: None,
             contract: None,
             events: None,
             turn_id: None,
@@ -1732,6 +1759,8 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            linked_program: None,
+            current_module: None,
             contract: None,
             events: None,
             turn_id: None,
@@ -1796,6 +1825,8 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            linked_program: None,
+            current_module: None,
             contract: None,
             events: None,
             turn_id: None,
@@ -1848,6 +1879,8 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            linked_program: None,
+            current_module: None,
             contract: None,
             events: None,
             turn_id: None,
@@ -1893,6 +1926,8 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            linked_program: None,
+            current_module: None,
             contract: None,
             events: None,
             turn_id: None,
@@ -1948,6 +1983,8 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            linked_program: None,
+            current_module: None,
             contract: None,
             events: None,
             turn_id: None,
@@ -1993,6 +2030,8 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            linked_program: None,
+            current_module: None,
             contract: None,
             events: None,
             turn_id: None,
@@ -2022,6 +2061,8 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            linked_program: None,
+            current_module: None,
             contract: None,
             events: None,
             turn_id: None,
@@ -2203,6 +2244,8 @@ flow parent() -> Int {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            linked_program: None,
+            current_module: None,
             contract: None,
             events: None,
             turn_id: None,
@@ -2242,6 +2285,8 @@ flow parent() -> Int {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            linked_program: None,
+            current_module: None,
             contract: None,
             events: Some(&events),
             turn_id: None,

@@ -1,12 +1,19 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use atman_rt::ast::{File, LifecycleDecl, LifecycleEvent};
 
-use crate::executor::Executor;
+use crate::executor::{Executor, RootInvocation};
+use crate::source_program::{LinkedProgram, SourceRoots, load_program};
 use crate::value::Value;
 
 pub struct LifecycleRunner {
-    decls: Vec<LifecycleDecl>,
+    decls: Vec<LifecycleHook>,
+}
+
+struct LifecycleHook {
+    decl: LifecycleDecl,
+    program: Option<Arc<LinkedProgram>>,
 }
 
 impl LifecycleRunner {
@@ -24,33 +31,51 @@ impl LifecycleRunner {
             if path.extension().and_then(|s| s.to_str()) != Some("at") {
                 continue;
             }
-            let Ok(source) = std::fs::read_to_string(&path) else {
-                continue;
+            let roots = SourceRoots {
+                project_root: None,
+                config_dir: Some(dir.to_owned()),
             };
-            let Ok(file) = atman_dsl::parse::parse_file(&source) else {
-                continue;
-            };
-            runner.absorb(&file);
+            match load_program(&path, &roots) {
+                Ok(program) => {
+                    let program = Arc::new(program);
+                    for decl in &program.entry_file().lifecycles {
+                        runner.decls.push(LifecycleHook {
+                            decl: decl.clone(),
+                            program: Some(Arc::clone(&program)),
+                        });
+                    }
+                }
+                Err(error) => crate::notify!(
+                    error,
+                    location = Inline,
+                    "lifecycle source {} failed to load: {error:#}",
+                    path.display()
+                ),
+            }
         }
         runner
     }
 
     pub fn absorb(&mut self, file: &File) {
         for decl in &file.lifecycles {
-            self.decls.push(decl.clone());
+            self.decls.push(LifecycleHook {
+                decl: decl.clone(),
+                program: None,
+            });
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.decls.iter().all(|d| d.body.is_empty())
+        self.decls.iter().all(|hook| hook.decl.body.is_empty())
     }
 
     pub fn has(&self, event: LifecycleEvent) -> bool {
-        self.decls.iter().any(|d| d.event == event)
+        self.decls.iter().any(|hook| hook.decl.event == event)
     }
 
     pub async fn fire(&self, executor: &Executor, event: LifecycleEvent) {
-        for (idx, decl) in self.decls.iter().enumerate() {
+        for (idx, hook) in self.decls.iter().enumerate() {
+            let decl = &hook.decl;
             if decl.event != event {
                 continue;
             }
@@ -65,13 +90,28 @@ impl LifecycleRunner {
                 contract: None,
                 body: decl.body.clone(),
             };
-            let file = atman_rt::ast::File {
-                flows: vec![flow],
-                routes: Vec::new(),
-                default_route: None,
-                lifecycles: Vec::new(),
+            let result = if let Some(program) = hook.program.as_ref() {
+                match program.with_entry_flow(flow) {
+                    Ok(program) => {
+                        executor
+                            .run_linked_with_invocation(
+                                &program,
+                                &flow_name,
+                                Vec::new(),
+                                RootInvocation::default(),
+                            )
+                            .await
+                    }
+                    Err(error) => Err(crate::error::RuntimeError::ToolFailed(error.to_string())),
+                }
+            } else {
+                let file = atman_rt::ast::File {
+                    flows: vec![flow],
+                    ..atman_rt::ast::File::default()
+                };
+                executor.run(&file, &flow_name, Vec::new()).await
             };
-            match executor.run(&file, &flow_name, Vec::new()).await {
+            match result {
                 Ok(Value::Err(e)) => {
                     let key = format!("lifecycle.{}.returned_error", lifecycle_event_slug(event));
                     crate::notify!(
@@ -225,5 +265,35 @@ mod tests {
         runner.fire(&ex, LifecycleEvent::SessionEnd).await;
         let todos = std::fs::read_to_string(dir.path().join("todos.jsonl")).unwrap();
         assert!(todos.contains("session_end_only"), "todos: {todos}");
+    }
+
+    #[tokio::test]
+    async fn discovered_hook_uses_its_loaded_flow_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("lib");
+        std::fs::create_dir(&library).unwrap();
+        let helper = library.join("helper.at");
+        std::fs::write(
+            &helper,
+            format!("pub flow create() {{ {} }}", set_todo_stmt("original")),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("hooks.at"),
+            "use \"user:helper.at\" as helper\nflow local() { x = subflow(helper.create) }\non session.start { x = subflow(local) }",
+        )
+        .unwrap();
+        let runner = LifecycleRunner::from_dir(dir.path());
+        assert!(runner.has(LifecycleEvent::SessionStart));
+        std::fs::write(
+            &helper,
+            format!("pub flow create() {{ {} }}", set_todo_stmt("updated")),
+        )
+        .unwrap();
+        let ex = build_executor_with_todos(dir.path());
+        runner.fire(&ex, LifecycleEvent::SessionStart).await;
+        let todos = std::fs::read_to_string(dir.path().join("todos.jsonl")).unwrap();
+        assert!(todos.contains("original"), "todos: {todos}");
+        assert!(!todos.contains("updated"), "todos: {todos}");
     }
 }

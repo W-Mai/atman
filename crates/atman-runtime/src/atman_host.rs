@@ -9,6 +9,7 @@ use crate::event::{EventSink, FlowRunId, TurnId};
 use crate::provider::ProviderRegistry;
 use crate::safety::SafetyConfig;
 use crate::session::Session;
+use crate::source_program::{LinkedProgram, ModuleId};
 use crate::tool::{ToolCtx, ToolRegistry};
 
 /// Atman services and external effects supplied to the portable expression engine.
@@ -18,6 +19,9 @@ pub struct AtmanHost<'a> {
     pub tool_ctx: &'a ToolCtx,
     pub providers: &'a ProviderRegistry,
     pub flows: &'a HashMap<String, FlowDecl>,
+    /// Resolved source graph for cross-file subflow calls.
+    pub linked_program: Option<&'a LinkedProgram>,
+    pub current_module: Option<ModuleId>,
     pub contract: Option<&'a Contract>,
     pub events: Option<&'a EventSink>,
     pub turn_id: Option<TurnId>,

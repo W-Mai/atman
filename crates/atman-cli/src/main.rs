@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use atman_dsl::parse::parse_file;
 use atman_rt::Value as CoreValue;
+use atman_runtime::source_program::{LinkedProgram, SourceRoots, load_program};
 use atman_runtime::{Executor, Session, ValueJson};
 
 use clap::{Parser, Subcommand};
@@ -182,6 +183,20 @@ enum SyncAction {
 
 #[derive(Subcommand, Debug)]
 enum FlowAction {
+    Run {
+        flow_name: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        mock: bool,
+        #[arg(long)]
+        ephemeral: bool,
+        #[arg(long, value_name = "LEVEL")]
+        reasoning: Option<String>,
+        #[arg(long = "image", value_name = "PATH")]
+        images: Vec<PathBuf>,
+        args: Vec<String>,
+    },
     Snapshot {
         path: PathBuf,
         #[arg(long)]
@@ -688,9 +703,26 @@ async fn cmd_run(
     images: Vec<PathBuf>,
     raw_args: Vec<String>,
 ) -> Result<()> {
-    let source =
-        std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-    let parsed = parse_file(&source).with_context(|| format!("parsing {}", file.display()))?;
+    let program = load_program(&file, &current_source_roots())?;
+    cmd_run_loaded(
+        &file, &program, flow_name, mock, ephemeral, reasoning, images, raw_args, true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_run_loaded(
+    file: &Path,
+    program: &LinkedProgram,
+    flow_name: Option<String>,
+    mock: bool,
+    ephemeral: bool,
+    reasoning: Option<String>,
+    images: Vec<PathBuf>,
+    raw_args: Vec<String>,
+    snapshot_live: bool,
+) -> Result<()> {
+    let parsed = program.entry_file();
 
     let flow_name = match flow_name {
         Some(n) => n,
@@ -780,8 +812,8 @@ async fn cmd_run(
         bail!("flow validation failed with {} error(s)", errs.len());
     }
 
-    if load_auto_snapshot() {
-        auto_snapshot_flows(&file, &source, &parsed);
+    if snapshot_live && load_auto_snapshot() {
+        auto_snapshot_flows(file, program);
     }
 
     let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
@@ -813,8 +845,8 @@ async fn cmd_run(
         session.begin_turn(user_msg);
     }
     let outcome = executor
-        .run_in_turn_with_env(
-            &parsed,
+        .run_linked_in_turn_with_env(
+            program,
             &flow_name,
             args,
             Some(turn_id),
@@ -1298,16 +1330,28 @@ async fn run_boot_flow(executor: &Executor, reporter: &Reporter) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    let source =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let parsed = parse_file(&source).with_context(|| format!("parsing {}", path.display()))?;
+    let program = load_program(
+        &path,
+        &SourceRoots {
+            project_root: atman_runtime::tools::flow_source::current_project_root(),
+            config_dir: Some(cfg),
+        },
+    )?;
+    let parsed = program.entry_file();
     if parsed.flows.is_empty() {
         return Ok(());
     }
     let flow_name = parsed.flows[0].name.name.clone();
     let mut executor = executor.clone();
     executor.source_dir = path.parent().map(|p| p.to_path_buf());
-    let value = executor.run(&parsed, &flow_name, vec![]).await?;
+    let value = executor
+        .run_linked_with_invocation(
+            &program,
+            &flow_name,
+            vec![],
+            atman_runtime::RootInvocation::default(),
+        )
+        .await?;
     let rendered = render_value(&value);
     if !rendered.is_empty() {
         // Route through Reporter so the boot flow's greeting lands as a
@@ -1325,12 +1369,12 @@ async fn run_slash_command_in_turn(
     turn_id: atman_rt::TurnId<atman_runtime::event::AtmanUuid>,
     invocation_env: atman_runtime::InvocationEnv,
 ) -> Result<Value> {
-    let (parsed, flow_name, kv, source_dir) = resolve_slash_command(line)?;
+    let (program, flow_name, kv, source_dir) = resolve_slash_command(line)?;
     let mut executor = executor.clone();
     executor.source_dir = source_dir;
     executor
-        .run_in_turn_with_env(
-            &parsed,
+        .run_linked_in_turn_with_env(
+            &program,
             &flow_name,
             kv,
             Some(turn_id),
@@ -1341,12 +1385,7 @@ async fn run_slash_command_in_turn(
         .map_err(Into::into)
 }
 
-type SlashCommandParsed = (
-    atman_rt::ast::File,
-    String,
-    Vec<(String, Value)>,
-    Option<PathBuf>,
-);
+type SlashCommandParsed = (LinkedProgram, String, Vec<(String, Value)>, Option<PathBuf>);
 
 fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
     let cfg = config_dir()?;
@@ -1383,9 +1422,14 @@ fn resolve_slash_command_from(
                     cfg.join("commands").display()
                 )
             })?;
-    let source =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let parsed = parse_file(&source).with_context(|| format!("parsing {}", path.display()))?;
+    let program = load_program(
+        &path,
+        &SourceRoots {
+            project_root: project_root.map(Path::to_path_buf),
+            config_dir: Some(cfg.to_path_buf()),
+        },
+    )?;
+    let parsed = program.entry_file();
     if parsed.flows.is_empty() {
         bail!("{} declares no flows", path.display());
     }
@@ -1423,7 +1467,7 @@ fn resolve_slash_command_from(
     if single_string_param {
         kv.push((params[0].clone(), Value::Str(rest_raw.to_string())));
         let source_dir = path.parent().map(|p| p.to_path_buf());
-        return Ok((parsed, flow_name, kv, source_dir));
+        return Ok((program, flow_name, kv, source_dir));
     }
 
     let mut positional_index = 0usize;
@@ -1442,7 +1486,7 @@ fn resolve_slash_command_from(
         }
     }
     let source_dir = path.parent().map(|p| p.to_path_buf());
-    Ok((parsed, flow_name, kv, source_dir))
+    Ok((program, flow_name, kv, source_dir))
 }
 
 fn split_quoted_args(input: &str) -> Vec<String> {
@@ -5713,7 +5757,7 @@ fn select_auto_snapshot(env_value: Option<&str>, config_value: Option<bool>) -> 
         || config_value.unwrap_or(false)
 }
 
-fn auto_snapshot_flows(source_path: &Path, source: &str, parsed: &atman_rt::ast::File) {
+fn auto_snapshot_flows(source_path: &Path, program: &LinkedProgram) {
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let registry = match atman_runtime::flow_registry::FlowRegistry::open(&project_root) {
         Ok(r) => r,
@@ -5722,16 +5766,19 @@ fn auto_snapshot_flows(source_path: &Path, source: &str, parsed: &atman_rt::ast:
             return;
         }
     };
-    let meta = match atman_runtime::flow_meta::FlowMeta::from_source(source_path, source) {
+    let meta = match atman_runtime::flow_meta::FlowMeta::from_source(
+        source_path,
+        program.entry_source(),
+    ) {
         Ok(m) => m,
         Err(e) => {
             atman_runtime::notify!(error, "auto_snapshot: read meta failed: {e}");
             return;
         }
     };
-    for flow in &parsed.flows {
+    for flow in &program.entry_file().flows {
         let name = &flow.name.name;
-        match registry.snapshot(name, source, &meta, Some(source_path)) {
+        match registry.snapshot_program(name, program, &meta) {
             Ok(atman_runtime::flow_registry::SnapshotOutcome::Inserted(rev)) => {
                 atman_runtime::notify!(
                     debug,
@@ -7748,6 +7795,28 @@ async fn cmd_flow(action: FlowAction) -> Result<()> {
     let registry = atman_runtime::flow_registry::FlowRegistry::open(&project_root)
         .with_context(|| format!("open flow registry under {}", project_root.display()))?;
     match action {
+        FlowAction::Run {
+            flow_name,
+            revision,
+            mock,
+            ephemeral,
+            reasoning,
+            images,
+            args,
+        } => {
+            cmd_flow_run(
+                &registry,
+                &project_root,
+                &flow_name,
+                &revision,
+                mock,
+                ephemeral,
+                reasoning,
+                images,
+                args,
+            )
+            .await
+        }
         FlowAction::Snapshot { path, author } => cmd_flow_snapshot(&registry, &path, author),
         FlowAction::Versions { flow_name } => cmd_flow_versions(&registry, &flow_name),
         FlowAction::Diff {
@@ -7767,11 +7836,88 @@ async fn cmd_flow(action: FlowAction) -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn cmd_flow_run(
+    registry: &atman_runtime::flow_registry::FlowRegistry,
+    project_root: &Path,
+    flow_name: &str,
+    revision: &str,
+    mock: bool,
+    ephemeral: bool,
+    reasoning: Option<String>,
+    images: Vec<PathBuf>,
+    args: Vec<String>,
+) -> Result<()> {
+    let by_id = match revision.parse::<i64>() {
+        Ok(id) => registry
+            .list_versions(flow_name)?
+            .into_iter()
+            .find(|candidate| candidate.id == id),
+        Err(_) => None,
+    };
+    let recorded = match by_id {
+        Some(recorded) => recorded,
+        None => registry
+            .find_by_version(flow_name, revision)?
+            .with_context(|| format!("no revision matches `{revision}` for `{flow_name}`"))?,
+    };
+    let bundle = recorded.bundle();
+    let roots = current_source_roots();
+    let (kind, relative) = bundle
+        .entry
+        .split_once(':')
+        .with_context(|| format!("invalid revision entry `{}`", bundle.entry))?;
+    let legacy_origin = if recorded.source_bundle.is_none() {
+        recorded
+            .origin_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+    } else {
+        None
+    };
+    let entry_path = match kind {
+        "project" => roots
+            .project_root
+            .as_deref()
+            .with_context(|| format!("revision {} requires a project root", recorded.id))?
+            .join(relative),
+        "user" => roots
+            .config_dir
+            .as_deref()
+            .with_context(|| format!("revision {} requires a user config directory", recorded.id))?
+            .join(relative),
+        "entry" => legacy_origin.unwrap_or_else(|| project_root.join(relative)),
+        _ => bail!("invalid revision entry `{}`", bundle.entry),
+    };
+    let program =
+        atman_runtime::source_program::load_program_from_bundle(&bundle, &entry_path, &roots)?;
+    if let Some(expected) = recorded.closure_digest.as_deref()
+        && program.closure_digest() != expected
+    {
+        bail!(
+            "revision {} source digest mismatch: expected {expected}, got {}",
+            recorded.id,
+            program.closure_digest()
+        );
+    }
+    cmd_run_loaded(
+        &entry_path,
+        &program,
+        Some(flow_name.to_owned()),
+        mock,
+        ephemeral,
+        reasoning,
+        images,
+        args,
+        false,
+    )
+    .await
+}
+
 async fn cmd_flow_test(path: &Path, bless: bool) -> Result<()> {
-    let source =
-        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let file = atman_dsl::parse::parse_file(&source)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let program = load_program(path, &current_source_roots())?;
+    let file = program.entry_file();
     let cases: Vec<&atman_rt::ast::FlowDecl> =
         file.flows.iter().filter(|f| f.params.is_empty()).collect();
     let skipped: Vec<String> = file
@@ -7802,7 +7948,15 @@ async fn cmd_flow_test(path: &Path, bless: bool) -> Result<()> {
         std::collections::BTreeMap::new();
     let mut errors: Vec<(String, String)> = Vec::new();
     for flow in &cases {
-        match ex.run(&file, flow.name.name.as_str(), vec![]).await {
+        match ex
+            .run_linked_with_invocation(
+                &program,
+                flow.name.name.as_str(),
+                vec![],
+                atman_runtime::RootInvocation::default(),
+            )
+            .await
+        {
             Ok(v) => {
                 recorded.insert(flow.name.name.clone(), v.to_json());
             }
@@ -7907,25 +8061,25 @@ fn write_snapshot(
 }
 
 fn cmd_flow_lint(path: &Path) -> Result<()> {
-    let source =
-        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let file = atman_dsl::parse::parse_file(&source)
-        .with_context(|| format!("parse {}", path.display()))?;
-    let hits = atman_runtime::flow_lint::lint_file(&file);
-    if hits.is_empty() {
+    let program = load_program(path, &current_source_roots())?;
+    let mut hit_count = 0;
+    for (source_path, file) in program.iter_modules() {
+        for hit in atman_runtime::flow_lint::lint_file(file) {
+            println!(
+                "{}:{}:{}: {}",
+                source_path.unwrap_or(path).display(),
+                hit.flow,
+                hit.rule.slug(),
+                hit.message
+            );
+            hit_count += 1;
+        }
+    }
+    if hit_count == 0 {
         println!("[atman] flow lint: {} — clean", path.display());
         return Ok(());
     }
-    for hit in &hits {
-        println!(
-            "{}:{}:{}: {}",
-            path.display(),
-            hit.flow,
-            hit.rule.slug(),
-            hit.message
-        );
-    }
-    bail!("flow lint: {} hit(s)", hits.len());
+    bail!("flow lint: {hit_count} hit(s)");
 }
 
 fn cmd_flow_snapshot(
@@ -7933,15 +8087,18 @@ fn cmd_flow_snapshot(
     path: &Path,
     author_override: Option<String>,
 ) -> Result<()> {
-    let content =
-        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let mut meta = atman_runtime::flow_meta::FlowMeta::from_source(path, &content)?;
+    let program = load_program(path, &current_source_roots())?;
+    let mut meta = atman_runtime::flow_meta::FlowMeta::from_source(path, program.entry_source())?;
     if let Some(a) = author_override {
         meta.author = Some(a);
     }
-    let name = flow_name_from_source_or_path(&content, path);
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let outcome = registry.snapshot(&name, &content, &meta, Some(canonical.as_path()))?;
+    let name = program
+        .entry_file()
+        .flows
+        .first()
+        .map(|flow| flow.name.name.as_str())
+        .with_context(|| format!("{} declares no flows", path.display()))?;
+    let outcome = registry.snapshot_program(name, &program, &meta)?;
     match outcome {
         atman_runtime::flow_registry::SnapshotOutcome::Inserted(rev) => println!(
             "[atman] snapshot ok: {} @ {} (id={}) — source={}",
@@ -7999,14 +8156,32 @@ fn cmd_flow_diff(
         from_rev.version, from_rev.id
     );
     println!("+++ {flow_name} @ {} (id={})", to_rev.version, to_rev.id);
-    let diff = similar::TextDiff::from_lines(&from_rev.content, &to_rev.content);
-    for change in diff.iter_all_changes() {
-        let sign = match change.tag() {
-            similar::ChangeTag::Delete => "-",
-            similar::ChangeTag::Insert => "+",
-            similar::ChangeTag::Equal => " ",
-        };
-        print!("{sign}{change}");
+    let from_bundle = from_rev.bundle();
+    let to_bundle = to_rev.bundle();
+    let source_ids = from_bundle
+        .sources
+        .keys()
+        .chain(to_bundle.sources.keys())
+        .collect::<std::collections::BTreeSet<_>>();
+    for source_id in source_ids {
+        let before = from_bundle.sources.get(source_id);
+        let after = to_bundle.sources.get(source_id);
+        if before == after {
+            continue;
+        }
+        println!("@@ {source_id} @@");
+        let diff = similar::TextDiff::from_lines(
+            before.map(String::as_str).unwrap_or(""),
+            after.map(String::as_str).unwrap_or(""),
+        );
+        for change in diff.iter_all_changes() {
+            let sign = match change.tag() {
+                similar::ChangeTag::Delete => "-",
+                similar::ChangeTag::Insert => "+",
+                similar::ChangeTag::Equal => " ",
+            };
+            print!("{sign}{change}");
+        }
     }
     Ok(())
 }
@@ -8021,6 +8196,13 @@ fn cmd_flow_rollback(
     let rev = registry
         .find_by_version(flow_name, version)?
         .with_context(|| format!("no revision matches `{version}` for `{flow_name}`"))?;
+    if rev.has_dependencies() {
+        bail!(
+            "revision {} for `{flow_name}` contains multiple source files; `flow rollback` cannot restore them together. Use `atman flow diff` to inspect the bundle or `atman flow run {flow_name} --revision {}` to run it without changing files",
+            rev.id,
+            rev.id
+        );
+    }
     let (target_buf, target_source) = match target {
         Some(t) => (t.to_path_buf(), "--to"),
         None => {
@@ -8095,17 +8277,6 @@ fn git_root_containing(target: &Path) -> Option<PathBuf> {
     atman_runtime::git::discover_toplevel(probe_dir).ok()
 }
 
-fn flow_name_from_source_or_path(source: &str, path: &Path) -> String {
-    if let Ok(file) = atman_dsl::parse::parse_file(source)
-        && let Some(first) = file.flows.first()
-    {
-        return first.name.name.clone();
-    }
-    path.file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
 async fn cmd_logs_stream(
     session_id: Option<String>,
     port: u16,
@@ -8160,6 +8331,13 @@ fn data_dir() -> Result<PathBuf> {
 
 fn config_dir() -> Result<PathBuf> {
     atman_runtime::storage::config_dir()
+}
+
+fn current_source_roots() -> SourceRoots {
+    SourceRoots {
+        project_root: atman_runtime::tools::flow_source::current_project_root(),
+        config_dir: config_dir().ok(),
+    }
 }
 
 fn load_global_trust_config() -> Result<atman_runtime::trust::TrustConfig> {
@@ -9354,6 +9532,41 @@ mod tests {
         assert_eq!(args[0].0, "input");
         assert!(matches!(&args[0].1, Value::Str(value) if value == "inspect this"));
         assert_eq!(source_dir, Some(project_commands));
+    }
+
+    #[tokio::test]
+    async fn slash_command_runs_a_flow_from_a_used_source() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config");
+        let project = root.path().join("project");
+        let commands = project.join(".atman/commands");
+        let library = project.join(".atman/lib");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::write(
+            library.join("text.at"),
+            "pub flow normalize(input: string) -> string { return input }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            commands.join("review.at"),
+            "use \"project:text.at\"::normalize\nflow review(input: string) -> string { return subflow(normalize, input) }\n",
+        )
+        .unwrap();
+
+        let (program, flow_name, args, _) =
+            resolve_slash_command_from("/review hello", &config, Some(&project)).unwrap();
+        let result = Executor::new()
+            .run_linked_with_invocation(
+                &program,
+                &flow_name,
+                args,
+                atman_runtime::RootInvocation::default(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, Value::Str(value) if value == "hello"));
     }
 
     #[test]

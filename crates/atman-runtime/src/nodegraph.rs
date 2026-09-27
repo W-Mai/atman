@@ -173,12 +173,12 @@ fn extract_node(node: &Node, prefix: &str, out: &mut Vec<StaticNode>) {
         Node::Subflow { name, args } => {
             let label = format!(
                 "subflow({}{})",
-                name.name,
+                name.display_name(),
                 if args.is_empty() { "" } else { ", …" }
             );
             (
                 NodeKind::Subflow {
-                    name: name.name.clone(),
+                    name: name.display_name(),
                 },
                 label,
                 Vec::new(),

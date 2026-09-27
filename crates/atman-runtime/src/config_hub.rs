@@ -1970,9 +1970,14 @@ fn parse_routes_source(context: &str, source: &str) -> Result<(), ConfigError> {
     if source.is_empty() {
         return Ok(());
     }
-    atman_dsl::parse::parse_file(source)
-        .map(|_| ())
-        .map_err(|error| ConfigError::Invalid(format!("parse {context}: {error}")))
+    let file = atman_dsl::parse::parse_file(source)
+        .map_err(|error| ConfigError::Invalid(format!("parse {context}: {error}")))?;
+    if !file.uses.is_empty() {
+        return Err(ConfigError::Invalid(format!(
+            "parse {context}: `use` is not allowed in routes.at"
+        )));
+    }
+    Ok(())
 }
 
 fn lock_path_for(path: &Path) -> PathBuf {

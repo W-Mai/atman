@@ -13,6 +13,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Reusable flow sources** — `use` binds public flows from other `.at` files by name or namespace. CLI, daemon, slash commands, and flow checks load dependencies before execution. Flow versions and snapshots include dependency contents; recorded source bundles support revision runs and multi-file diffs.
 - **Embeddable execution core** — `atman-rt` runs flow statements, expressions, list operations, fanout, cancellation, and lifecycle ordering through host callbacks without CLI, daemon, tool, or provider dependencies. The crate is `no_std` with `alloc` and pointer-width atomics.
 
 ## [1.13.2] — 2026-09-25

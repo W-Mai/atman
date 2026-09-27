@@ -44,12 +44,67 @@ async fn launcher_uses_injected_config_and_data_dirs_for_project_scope() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn launcher_runs_flow_with_used_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("project");
+    let library = project_root.join(".atman/lib");
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        library.join("helper.at"),
+        "pub flow helper() -> string { return \"ok\" }\n",
+    )
+    .unwrap();
+    let entry = project_root.join("main.at");
+    std::fs::write(
+        &entry,
+        "use \"project:helper.at\"::helper\nflow main() -> string { return subflow(helper) }\n",
+    )
+    .unwrap();
+
+    let state = Arc::new(DaemonState::new(data_dir.clone()));
+    let launcher = RunLauncher::new(project_root, Some(config_dir), None).unwrap();
+    let spawned = launcher
+        .spawn(state, entry.to_str().unwrap(), Vec::new())
+        .await
+        .unwrap();
+    let events_path = data_dir
+        .join("sessions")
+        .join(spawned.session_id.to_string())
+        .join("events.jsonl");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(events) = std::fs::read_to_string(&events_path) {
+            if let Some(end) = events
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|event| event["type"] == "flow_end" && event["flow_name"] == "main")
+            {
+                assert_eq!(end["status"]["kind"], "ok", "{events}");
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for flow_end in {}",
+            events_path.display()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn run_flow_end_to_end_writes_events_and_appears_in_list_sessions() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
 
-    let launcher =
-        Arc::new(RunLauncher::new(std::env::current_dir().unwrap(), None, None).unwrap());
+    let launcher = Arc::new(
+        RunLauncher::new(std::env::current_dir().unwrap(), Some(config_dir), None).unwrap(),
+    );
     state.set_launcher(launcher);
 
     let flow_path = repo_root().join("examples/hello.at");

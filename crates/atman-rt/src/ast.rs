@@ -131,7 +131,7 @@ pub enum Node {
         msg: Box<Expr>,
     },
     Subflow {
-        name: Ident,
+        name: FlowRef,
         args: Vec<Arg>,
     },
     Message {
@@ -141,6 +141,21 @@ pub enum Node {
     FixUntilTestPasses {
         kwargs: Kwargs,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum FlowRef {
+    Local(Ident),
+    Qualified { module: Ident, flow: Ident },
+}
+
+impl FlowRef {
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::Local(name) => name.name.clone(),
+            Self::Qualified { module, flow } => alloc::format!("{}.{}", module.name, flow.name),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,9 +341,29 @@ pub struct LifecycleDecl {
     pub span: Span,
 }
 
+#[derive(Debug, Clone)]
+pub struct UseDecl {
+    pub source: String,
+    pub binding: UseBinding,
+}
+
+#[derive(Debug, Clone)]
+pub enum UseBinding {
+    Module(Ident),
+    Flows(Vec<UseFlowBinding>),
+}
+
+#[derive(Debug, Clone)]
+pub struct UseFlowBinding {
+    pub name: Ident,
+    pub alias: Option<Ident>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct File {
+    pub uses: Vec<UseDecl>,
     pub flows: Vec<FlowDecl>,
+    pub public_flows: Vec<Ident>,
     pub routes: Vec<RouteDecl>,
     pub default_route: Option<DefaultRouteDecl>,
     pub lifecycles: Vec<LifecycleDecl>,

@@ -4,11 +4,12 @@ use atman_rt::ast::{File, FlowDecl};
 
 use crate::error::RuntimeError;
 use crate::event::{Event, EventSink, FlowRunId, FlowStatus, TurnId};
-use crate::exec::exec_flow_with_siblings;
+use crate::exec::exec_flow_with_linked_siblings;
 use crate::invocation_env::InvocationEnv;
 use crate::provider::ProviderRegistry;
 use crate::provider_lifecycle::ProviderLifecycle;
 use crate::session::Session;
+use crate::source_program::{LinkedProgram, ModuleId};
 use crate::tool::{ToolCtx, ToolRegistry};
 use crate::value::Value;
 
@@ -18,6 +19,12 @@ pub struct RootInvocation {
     pub session: Option<std::sync::Arc<Session>>,
     pub first_run_id: Option<FlowRunId>,
     pub env: InvocationEnv,
+}
+
+struct FlowSource<'a> {
+    linked_program: Option<&'a LinkedProgram>,
+    module: Option<ModuleId>,
+    dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone)]
@@ -163,6 +170,11 @@ impl Executor {
         args: Vec<(String, Value)>,
         invocation: RootInvocation,
     ) -> Result<Value, RuntimeError> {
+        if !file.uses.is_empty() {
+            return Err(RuntimeError::ToolFailed(
+                "source contains `use`; load and link the file before execution".into(),
+            ));
+        }
         let flows: HashMap<_, _> = file
             .flows
             .iter()
@@ -181,8 +193,95 @@ impl Executor {
                     let flow = flows
                         .get(&current)
                         .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{current}`")))?;
-                    self.run_flow(flow, current_args, flows, invocation, run_id)
-                        .await
+                    self.run_flow(
+                        flow,
+                        current_args,
+                        flows,
+                        invocation,
+                        run_id,
+                        FlowSource {
+                            linked_program: None,
+                            module: None,
+                            dir: self.source_dir.clone(),
+                        },
+                    )
+                    .await
+                }
+            },
+            |error| match error {
+                RuntimeError::Redirect(target) => Some(target.clone()),
+                _ => None,
+            },
+        )
+        .await
+        {
+            atman_rt::RedirectOutcome::Completed(result) => result,
+            atman_rt::RedirectOutcome::LimitExceeded => Err(RuntimeError::ToolFailed(
+                "redirect chain exceeded max depth (5)".into(),
+            )),
+        }
+    }
+
+    pub async fn run_linked_in_turn_with_env(
+        &self,
+        program: &LinkedProgram,
+        flow_name: &str,
+        args: Vec<(String, Value)>,
+        turn_id: Option<TurnId>,
+        session: Option<std::sync::Arc<Session>>,
+        invocation_env: InvocationEnv,
+    ) -> Result<Value, RuntimeError> {
+        self.run_linked_with_invocation(
+            program,
+            flow_name,
+            args,
+            RootInvocation {
+                turn_id,
+                session,
+                env: invocation_env,
+                ..RootInvocation::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn run_linked_with_invocation(
+        &self,
+        program: &LinkedProgram,
+        flow_name: &str,
+        args: Vec<(String, Value)>,
+        invocation: RootInvocation,
+    ) -> Result<Value, RuntimeError> {
+        let flows = program.flatten_flows();
+        let mut next_run_id = invocation.first_run_id.clone();
+        match atman_rt::run_redirects(
+            flow_name.to_string(),
+            args,
+            5,
+            |current, current_args| {
+                let run_id = next_run_id.take();
+                let flows = &flows;
+                let invocation = &invocation;
+                async move {
+                    let id = program
+                        .entry_flow(&current)
+                        .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{current}`")))?;
+                    let flow = program
+                        .flow(&id)
+                        .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{current}`")))?;
+                    self.run_flow(
+                        flow,
+                        current_args,
+                        flows,
+                        invocation,
+                        run_id,
+                        FlowSource {
+                            linked_program: Some(program),
+                            module: Some(id.module),
+                            dir: program.source_dir(&id).map(std::path::Path::to_path_buf),
+                        },
+                    )
+                    .await
                 }
             },
             |error| match error {
@@ -206,6 +305,7 @@ impl Executor {
         flows: &HashMap<String, FlowDecl>,
         invocation: &RootInvocation,
         run_id: Option<FlowRunId>,
+        source: FlowSource<'_>,
     ) -> Result<Value, RuntimeError> {
         let turn_id = invocation.turn_id.clone();
         let session = invocation.session.clone();
@@ -342,7 +442,7 @@ impl Executor {
                         tool_ctx.agent_entry = Some(std::sync::Arc::clone(&root_entry));
                         sess.set_current_root("root".to_string());
                     }
-                    let exec_fut = exec_flow_with_siblings(
+                    let exec_fut = exec_flow_with_linked_siblings(
                         flow,
                         args,
                         &self.tools,
@@ -355,7 +455,9 @@ impl Executor {
                         body_session.clone(),
                         body_flow_cancel.clone(),
                         self.safety.as_ref(),
-                        self.source_dir.clone(),
+                        source.dir,
+                        source.linked_program,
+                        source.module,
                     );
                     let result = atman_rt::race_cancel(exec_fut, async {
                         body_flow_cancel.cancelled().await;

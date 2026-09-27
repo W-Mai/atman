@@ -991,9 +991,9 @@ fn finalize_workspace(
 }
 
 struct PreparedFlowAgent {
-    path: PathBuf,
     flow: atman_rt::ast::FlowDecl,
-    flows: std::collections::HashMap<String, atman_rt::ast::FlowDecl>,
+    flow_id: crate::source_program::FlowId,
+    program: crate::source_program::LinkedProgram,
 }
 
 async fn prepare_flow_agent(
@@ -1005,33 +1005,47 @@ async fn prepare_flow_agent(
         Some((file, name)) => (file, Some(name)),
         None => (flow_ref, None),
     };
-    let (path, source) = read_flow_source(file_part, ctx).await?;
-    let actual_version = format!("blake3:{}", blake3::hash(source.as_bytes()).to_hex());
+    let path = resolve_flow_path(file_part, ctx).await?;
+    let program = crate::source_program::load_program(
+        &path,
+        &crate::source_program::SourceRoots {
+            project_root: super::flow_source::project_root_for_ctx(ctx),
+            config_dir: crate::storage::config_dir().ok(),
+        },
+    )
+    .map_err(|error| RuntimeError::ToolFailed(format!("flow.spawn: {error:#}")))?;
+    let actual_version = format!("blake3:{}", program.closure_digest());
     if expected_version.is_some_and(|version| version != actual_version) {
         return Err(RuntimeError::ToolFailed(format!(
             "flow.spawn: stale version for `{flow_ref}`; search again"
         )));
     }
-    let file = atman_dsl::parse::parse_file(&source).map_err(|error| {
-        RuntimeError::ToolFailed(format!("flow.spawn: parse {}: {error}", path.display()))
-    })?;
-    let flow = match flow_name {
-        Some(name) => file.flows.iter().find(|flow| flow.name.name == name),
-        None => file.flows.iter().find(|flow| flow.name.name != "describe"),
-    }
-    .cloned()
-    .ok_or_else(|| {
-        RuntimeError::ToolFailed(format!(
-            "flow.spawn: target flow not found in {}",
-            path.display()
-        ))
-    })?;
-    let flows = file
-        .flows
-        .into_iter()
-        .map(|flow| (flow.name.name.clone(), flow))
-        .collect();
-    Ok(PreparedFlowAgent { path, flow, flows })
+    let selected_name = match flow_name {
+        Some(name) => Some(name),
+        None => program
+            .entry_file()
+            .flows
+            .iter()
+            .find(|flow| flow.name.name != "describe")
+            .map(|flow| flow.name.name.as_str()),
+    };
+    let flow_id = selected_name
+        .and_then(|name| program.entry_flow(name))
+        .ok_or_else(|| {
+            RuntimeError::ToolFailed(format!(
+                "flow.spawn: target flow not found in {}",
+                path.display()
+            ))
+        })?;
+    let flow = program
+        .flow(&flow_id)
+        .expect("entry flow ID resolves to a declaration")
+        .clone();
+    Ok(PreparedFlowAgent {
+        flow,
+        flow_id,
+        program,
+    })
 }
 
 fn register_prepared_identity(
@@ -1596,7 +1610,12 @@ async fn run_prepared_flow_agent(
             "flow.spawn: no provider registry available on ctx".into(),
         ));
     };
-    let PreparedFlowAgent { path, flow, flows } = prepared;
+    let PreparedFlowAgent {
+        flow,
+        flow_id,
+        program,
+    } = prepared;
+    let flows = program.flatten_flows();
     let initial_prompt = invocation_user_message(&flow, &flow_args)?;
     let lifecycle = atman_rt::FlowLifecycle::new(child_flow_start(ctx, &run_id, &flow.name.name));
     lifecycle
@@ -1621,7 +1640,7 @@ async fn run_prepared_flow_agent(
                 if let Some(prompt) = initial_prompt {
                     seed_child_message_context(&child_ctx, prompt)?;
                 }
-                crate::exec::exec_flow_with_siblings(
+                crate::exec::exec_flow_with_linked_siblings(
                     &flow,
                     flow_args,
                     registry.as_ref(),
@@ -1634,7 +1653,11 @@ async fn run_prepared_flow_agent(
                     None,
                     child_ctx.cancel.clone(),
                     None,
-                    path.parent().map(|p| p.to_path_buf()),
+                    program
+                        .source_dir(&flow_id)
+                        .map(std::path::Path::to_path_buf),
+                    Some(&program),
+                    Some(flow_id.module),
                 )
                 .await
             },
@@ -1920,13 +1943,16 @@ fn extract_spawn_token(args: &ToolArgs) -> Result<String, RuntimeError> {
     }
 }
 
-async fn read_flow_source(
-    flow_ref: &str,
-    ctx: &ToolCtx,
-) -> Result<(PathBuf, String), RuntimeError> {
+async fn resolve_flow_path(flow_ref: &str, ctx: &ToolCtx) -> Result<PathBuf, RuntimeError> {
     for path in super::flow_source::candidates(flow_ref, ctx) {
-        match tokio::fs::read_to_string(&path).await {
-            Ok(src) => return Ok((path, src)),
+        match tokio::fs::metadata(&path).await {
+            Ok(metadata) if metadata.is_file() => return Ok(path),
+            Ok(_) => {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "flow.spawn: source {} is not a file",
+                    path.display()
+                )));
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
                 return Err(RuntimeError::ToolFailed(format!(
@@ -2163,10 +2189,17 @@ mod tests {
     async fn prepared_flow_rejects_a_stale_discovery_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("child.at");
-        let source = "flow child(goal: string) -> string { return goal }";
-        std::fs::write(&path, source).unwrap();
+        std::fs::write(&path, "flow child(goal: string) -> string { return goal }").unwrap();
         let flow_ref = format!("{}@child", path.display());
-        let version = format!("blake3:{}", blake3::hash(source.as_bytes()).to_hex());
+        let version = format!(
+            "blake3:{}",
+            crate::source_program::load_program(
+                &path,
+                &crate::source_program::SourceRoots::default(),
+            )
+            .unwrap()
+            .closure_digest()
+        );
         let ctx = ToolCtx::new();
 
         prepare_flow_agent(&flow_ref, Some(&version), &ctx)
@@ -2176,6 +2209,41 @@ mod tests {
             Ok(_) => panic!("stale version should fail"),
             Err(error) => error,
         };
+        assert!(error.to_string().contains("stale version"));
+    }
+
+    #[tokio::test]
+    async fn prepared_flow_version_includes_used_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let dependency = dir.path().join("helper.at");
+        let entry = dir.path().join("child.at");
+        std::fs::write(
+            &dependency,
+            "pub flow helper() -> string { return \"first\" }",
+        )
+        .unwrap();
+        std::fs::write(
+            &entry,
+            "use \"./helper.at\"::helper\nflow child() -> string { return subflow(helper) }",
+        )
+        .unwrap();
+        let flow_ref = format!("{}@child", entry.display());
+        let ctx = ToolCtx::new();
+        let prepared = prepare_flow_agent(&flow_ref, None, &ctx).await.unwrap();
+        let version = format!("blake3:{}", prepared.program.closure_digest());
+        prepare_flow_agent(&flow_ref, Some(&version), &ctx)
+            .await
+            .unwrap();
+
+        std::fs::write(
+            &dependency,
+            "pub flow helper() -> string { return \"second\" }",
+        )
+        .unwrap();
+        let error = prepare_flow_agent(&flow_ref, Some(&version), &ctx)
+            .await
+            .err()
+            .expect("dependency edit must stale the discovered version");
         assert!(error.to_string().contains("stale version"));
     }
 

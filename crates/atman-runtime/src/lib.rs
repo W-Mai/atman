@@ -82,6 +82,7 @@ pub mod session;
 pub mod session_meta;
 pub mod session_naming;
 pub mod settings_catalog;
+pub mod source_program;
 pub mod storage;
 pub mod stream;
 pub(crate) mod streaming;
