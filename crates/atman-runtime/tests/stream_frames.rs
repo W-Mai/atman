@@ -64,9 +64,9 @@ async fn tool_use_frames_wrap_dispatch() {
 
     let ex = Executor::new();
 
-    let src = r#"flow t() -> int {
-    n = len([1, 2, 3])
-    return n
+    let src = r#"flow t() -> string {
+    quoted = shell_quote("hello world")
+    return quoted
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -81,16 +81,16 @@ async fn tool_use_frames_wrap_dispatch() {
     let mut done = 0;
     while let Ok(frame) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
         match frame {
-            Ok(StreamFrame::ToolUseStart { tool, .. }) if tool == "len" => started += 1,
-            Ok(StreamFrame::ToolUseDone { tool, ok, .. }) if tool == "len" => {
-                assert!(ok, "len should succeed");
+            Ok(StreamFrame::ToolUseStart { tool, .. }) if tool == "shell_quote" => started += 1,
+            Ok(StreamFrame::ToolUseDone { tool, ok, .. }) if tool == "shell_quote" => {
+                assert!(ok, "shell_quote should succeed");
                 done += 1;
             }
             _ => {}
         }
     }
-    assert_eq!(started, 1, "want one ToolUseStart for len");
-    assert_eq!(done, 1, "want one ToolUseDone for len");
+    assert_eq!(started, 1, "want one ToolUseStart for shell_quote");
+    assert_eq!(done, 1, "want one ToolUseDone for shell_quote");
 }
 
 #[tokio::test]
