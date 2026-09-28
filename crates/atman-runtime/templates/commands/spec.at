@@ -2,7 +2,7 @@ flow spec(user_prompt: string) -> string {
     contract {
         invocation { user_message: user_prompt }
     }
-    return subflow(interview, user_prompt, "project-intake", "explicit", "")
+    return interview(user_prompt, "project-intake", "explicit", "").await
 }
 
 flow describe() -> string {

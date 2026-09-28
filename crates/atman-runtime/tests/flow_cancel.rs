@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use atman_rt::parse_file;
 use atman_runtime::event::Observable;
+use atman_runtime::event::{Event, FlowStatus};
 type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::{
@@ -138,6 +139,7 @@ async fn flow_cancel_between_nodes_stops_before_next_node_runs() {
     b = llm.call(model: "prov", prompt: "second")
     return b
 }
+
 "#;
     let file = parse_file(src).unwrap();
 
@@ -170,4 +172,161 @@ async fn flow_cancel_between_nodes_stops_before_next_node_runs() {
         1,
         "second llm call must be skipped by cancel-poll at eval_node entry"
     );
+}
+
+struct PendingProvider {
+    started: Arc<tokio::sync::Notify>,
+}
+
+impl Provider for PendingProvider {
+    fn name(&self) -> &str {
+        "pending"
+    }
+
+    fn call<'a>(&'a self, _req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
+        let started = self.started.clone();
+        Box::pin(async move {
+            started.notify_one();
+            std::future::pending().await
+        })
+    }
+
+    fn call_streaming(&self, _req: LlmRequest) -> Observable<AssistantMessage> {
+        let started = self.started.clone();
+        wrap_call_as_streaming(Box::pin(async move {
+            started.notify_one();
+            std::future::pending().await
+        }))
+    }
+}
+
+#[tokio::test]
+async fn cancelling_awaited_flow_closes_child_before_parent() {
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "pending", "pending", 8_192, None,
+        )]))
+        .await;
+    let file = parse_file(
+        r#"flow child() -> string {
+    return llm.call(model: "pending", prompt: "hold")
+}
+
+flow parent() -> string {
+    return child().await
+}
+"#,
+    )
+    .unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let executor = Executor::new();
+    executor.providers.register(Arc::new(PendingProvider {
+        started: started.clone(),
+    }));
+    let events = executor.events.clone();
+    let session = Arc::new(Session::open_ephemeral());
+    let turn_id = TurnId::now();
+    session.begin_turn(user_msg(turn_id.clone(), "go"));
+
+    let run_session = session.clone();
+    let run = tokio::spawn(async move {
+        executor
+            .run_in_turn(&file, "parent", vec![], Some(turn_id), Some(run_session))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), started.notified())
+        .await
+        .expect("child LLM call must start");
+    session.cancel_flow();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), run)
+        .await
+        .expect("cancelled flow must finish")
+        .expect("executor task must not panic");
+    assert!(matches!(result, Err(RuntimeError::Cancelled(_))));
+
+    let ends = events
+        .snapshot()
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::FlowEnd {
+                flow_name, status, ..
+            } => Some((flow_name, status)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ends.iter()
+            .map(|(name, status)| (name.as_str(), matches!(status, FlowStatus::Cancelled)))
+            .collect::<Vec<_>>(),
+        vec![("child", true), ("parent", true)]
+    );
+}
+
+#[tokio::test]
+async fn cancelling_fanout_closes_branch_before_parent() {
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "pending", "pending", 8_192, None,
+        )]))
+        .await;
+    let file = parse_file(
+        r#"flow child() -> string {
+    return llm.call(model: "pending", prompt: "hold")
+}
+
+flow parent() -> [string] {
+    return fanout [child()]
+}
+"#,
+    )
+    .unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let executor = Executor::new();
+    executor.providers.register(Arc::new(PendingProvider {
+        started: started.clone(),
+    }));
+    let events = executor.events.clone();
+    let session = Arc::new(Session::open_ephemeral());
+    let turn_id = TurnId::now();
+    session.begin_turn(user_msg(turn_id.clone(), "go"));
+    let run_session = session.clone();
+    let run = tokio::spawn(async move {
+        executor
+            .run_in_turn(&file, "parent", vec![], Some(turn_id), Some(run_session))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), started.notified())
+        .await
+        .expect("fanout child must start");
+    session.cancel_flow();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), run)
+        .await
+        .expect("cancelled fanout must finish")
+        .expect("executor task must not panic");
+    assert!(matches!(result, Err(RuntimeError::Cancelled(_))));
+
+    let events = events.snapshot();
+    let branch_start = events
+        .iter()
+        .filter(|event| matches!(event, Event::FlowNodeStart { label, .. } if label == "branch[0]"))
+        .count();
+    let branch_end = events
+        .iter()
+        .position(|event| matches!(event, Event::FlowNodeEnd { node_id, .. } if node_id.ends_with("branch[0]")))
+        .expect("cancelled branch must have a terminal node event");
+    let parent_end = events
+        .iter()
+        .position(
+            |event| matches!(event, Event::FlowEnd { flow_name, .. } if flow_name == "parent"),
+        )
+        .expect("parent must have a terminal flow event");
+    assert_eq!(branch_start, 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::FlowNodeEnd { node_id, .. } if node_id.ends_with("branch[0]")))
+            .count(),
+        1
+    );
+    assert!(branch_end < parent_end);
 }

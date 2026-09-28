@@ -413,7 +413,12 @@ struct PromptSpec<'a> {
 }
 
 fn json_str(v: &Value) -> String {
-    serde_json::to_string_pretty(&v.to_json()).unwrap_or_default()
+    v.to_json()
+        .and_then(|json| {
+            serde_json::to_string_pretty(&json)
+                .map_err(|error| RuntimeError::ToolFailed(format!("JSON encoding: {error}")))
+        })
+        .unwrap_or_else(|error| format!("[JSON error: {error}]"))
 }
 
 fn render_xml(spec: &PromptSpec<'_>) -> String {
@@ -552,7 +557,7 @@ impl Tool for ToJsonString {
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let v = args.positional(0)?.clone();
-            let json = v.to_json();
+            let json = v.to_json()?;
             let s = serde_json::to_string_pretty(&json)
                 .map_err(|e| RuntimeError::ToolFailed(format!("to_json_string: {e}")))?;
             Ok(Value::Str(s))
@@ -1529,7 +1534,10 @@ fn render_tool_result_text(v: &Value) -> String {
     match v {
         Value::Str(s) => s.clone(),
         Value::Host(AtmanPayload::Message(m)) => m.text_concat(),
-        other => other.to_json().to_string(),
+        other => other
+            .to_json()
+            .map(|json| json.to_string())
+            .unwrap_or_else(|error| format!("[JSON error: {error}]")),
     }
 }
 

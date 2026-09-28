@@ -380,7 +380,11 @@ async fn dispatch_tool_call(
     } else {
         ctx_with_anchors
     };
-    let stream_tx = ctx.session_runtime.as_ref().map(|s| s.stream_tx());
+    let stream_tx = ctx
+        .session_runtime
+        .as_ref()
+        .map(|session| session.stream_tx())
+        .or_else(|| ctx.tool_ctx.stream_tx.clone());
     let tool_call_id = uuid::Uuid::now_v7().to_string();
     let args_preview = preview_tool_args(&positional, &named);
     if let (Some(sink), Some(run_id), Some(parent_node)) =
@@ -804,6 +808,7 @@ fn preview_tool_value(v: &Value) -> String {
         Value::Host(AtmanPayload::Path(p)) => format!("{p:?}"),
         Value::Host(AtmanPayload::EditProposal(_)) => "<edit_proposal>".into(),
         Value::Lambda { .. } => "<lambda>".into(),
+        Value::FlowFuture(_) => "<flow future>".into(),
     };
     truncate(&raw, 2000)
 }
@@ -1712,13 +1717,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subflow_calls_target_flow_with_positional_args() {
+    async fn flow_call_awaits_target_with_positional_args() {
         let src = r#"flow child(n: Int) -> Int {
     return n + 100
 }
 
 flow parent(x: Int) -> Int {
-    y = subflow(child, x)
+    y = child(x).await
     return y + 1
 }
 "#;
@@ -1769,13 +1774,13 @@ flow parent(x: Int) -> Int {
     }
 
     #[tokio::test]
-    async fn subflow_rejects_spoofed_run_id_without_trusted_identity() {
+    async fn flow_call_rejects_spoofed_run_id_without_trusted_identity() {
         let src = r#"flow child() -> Int {
     return 1
 }
 
 flow parent() -> Int {
-    return subflow(child)
+    return child().await
 }
 "#;
         let file = parse_file(src).unwrap();
@@ -1813,14 +1818,14 @@ flow parent() -> Int {
         assert!(matches!(
             error,
             RuntimeError::ToolFailed(message)
-                if message == "subflow: trusted parent flow identity is unavailable"
+                if message == "flow call: trusted parent flow identity is unavailable"
         ));
     }
 
     #[tokio::test]
-    async fn subflow_missing_target_rejected_during_link() {
+    async fn unbound_call_remains_a_tool_call() {
         let src = r#"flow parent() -> Int {
-    return subflow(nope, 1)
+    return nope(1).await
 }
 "#;
         let file = parse_file(src).unwrap();
@@ -1849,9 +1854,7 @@ flow parent() -> Int {
         )
         .await
         .unwrap_err();
-        assert!(
-            matches!(err, RuntimeError::ToolFailed(message) if message.contains("undefined flow `nope`"))
-        );
+        assert!(matches!(err, RuntimeError::UndefinedTool(name) if name == "nope"));
     }
 
     #[tokio::test]

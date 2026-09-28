@@ -1,13 +1,36 @@
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeSet, format, string::String, sync::Arc, vec, vec::Vec};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::{
-    Env, HostFuture, HostValueOps, Value, ValueError,
+    Env, FlowDriveMode, FlowFuture, HostFuture, HostValueOps, Value, ValueError,
     ast::{Arg, Expr, FlowRef, MessageRole, Node},
     fanout::join_fanout_all,
     list::{ListIntrinsic, eval_list_intrinsic},
     ops::{eval_binary, eval_literal, eval_unary},
     watch::WatchRules,
 };
+
+impl<P: HostValueOps, E> ExpressionEffect<P, E> {
+    pub fn contains_flow_future(&self) -> bool {
+        match self {
+            Self::FileRef(_) => false,
+            Self::ToolCall {
+                positional, named, ..
+            }
+            | Self::Message {
+                positional, named, ..
+            } => {
+                positional.iter().any(Value::contains_flow_future)
+                    || named.iter().any(|(_, value)| value.contains_flow_future())
+            }
+            Self::Confirm(value) | Self::FixSnapshot { target: value } => {
+                value.contains_flow_future()
+            }
+            Self::Call { args, .. } => args.iter().any(Value::contains_flow_future),
+            Self::FixRestore { target, .. } => target.contains_flow_future(),
+        }
+    }
+}
 
 /// An external effect whose language expressions have already been evaluated.
 pub enum ExpressionEffect<P, E> {
@@ -70,6 +93,9 @@ pub trait ExpressionHost: Sync + Clone + Send {
     fn cancellation_error(&self) -> Option<Self::Error> {
         None
     }
+    fn await_drive_mode(&self) -> FlowDriveMode {
+        FlowDriveMode::Inline
+    }
     fn fanout_branch_start(&self, _index: usize) {}
     fn branch_host(&self, _index: usize) -> Self {
         self.clone()
@@ -79,19 +105,38 @@ pub trait ExpressionHost: Sync + Clone + Send {
     fn preflight_tool(&self, _name: &str) -> Option<Value<Self::Payload, Self::Error>> {
         None
     }
-    /// Check a resolved subflow call before its arguments run.
-    fn preflight_subflow(&self, _name: &FlowRef, _args: &[Arg]) -> Result<(), Self::Error> {
+    /// Check a resolved flow call before its arguments run.
+    fn preflight_flow(&self, _name: &FlowRef, _args: &[Arg]) -> Result<(), Self::Error> {
         Ok(())
     }
-    fn eval_subflow<'a>(
-        &'a self,
+    fn make_flow_future(
+        &self,
         name: FlowRef,
         _args: Vec<EvaluatedArg<Self::Payload, Self::Error>>,
+    ) -> Value<Self::Payload, Self::Error> {
+        Value::Err(Self::Error::type_mismatch(
+            "linked flow",
+            name.display_name(),
+        ))
+    }
+    fn validate_flow_future(
+        &self,
+        _future: &FlowFuture<Self::Payload, Self::Error>,
+    ) -> Result<(), Self::Error> {
+        Err(Self::Error::type_mismatch(
+            "flow future from current invocation",
+            "foreign future".into(),
+        ))
+    }
+    fn drive_flow_future<'a>(
+        &'a self,
+        _future: &'a FlowFuture<Self::Payload, Self::Error>,
+        _mode: FlowDriveMode,
     ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
-        Box::pin(async move {
+        Box::pin(async {
             Value::Err(Self::Error::type_mismatch(
-                "linked subflow",
-                name.display_name(),
+                "linked flow future",
+                "unavailable".into(),
             ))
         })
     }
@@ -132,6 +177,23 @@ pub fn eval_expr_with_watch<'a, H: ExpressionHost>(
                 match value.field(&field.name) {
                     Some(field) => field.clone(),
                     None => Value::Err(host.undefined_field(format!(".{}", field.name))),
+                }
+            }
+            Expr::Await { value } => {
+                let value = eval_expr(value, env, host).await;
+                match value {
+                    Value::FlowFuture(future) => {
+                        if let Err(error) = host.validate_flow_future(&future) {
+                            return Value::Err(error);
+                        }
+                        host.drive_flow_future(&future, host.await_drive_mode())
+                            .await
+                    }
+                    Value::Err(_) => value,
+                    other => Value::Err(H::Error::type_mismatch(
+                        "flow future",
+                        other.kind_name().into(),
+                    )),
                 }
             }
             Expr::Binary { op, left, right } => {
@@ -235,15 +297,15 @@ pub fn eval_expr_with_watch<'a, H: ExpressionHost>(
                         })
                         .await
                     }
-                    Node::Subflow { name, args } => {
-                        if let Err(error) = host.preflight_subflow(name, args) {
+                    Node::FlowCall { name, args } => {
+                        if let Err(error) = host.preflight_flow(name, args) {
                             return Value::Err(error);
                         }
                         let args = match eval_ordered_args(args, env, host).await {
                             Ok(values) => values,
                             Err(value) => return value,
                         };
-                        host.eval_subflow(name.clone(), args).await
+                        host.make_flow_future(name.clone(), args)
                     }
                     Node::FixUntilTestPasses { kwargs } => {
                         crate::fix::eval_fix_until_test_passes(kwargs, env, host).await
@@ -391,16 +453,48 @@ pub async fn eval_fanout<'a, H: ExpressionHost>(
     host: &'a H,
 ) -> Value<H::Payload, H::Error> {
     if let Expr::List(items) = source {
-        for index in 0..items.len() {
-            host.fanout_branch_start(index);
-        }
+        let mut scope = FanoutBranchScope::start(host, items.len());
+        let states = scope.states();
         let branches = items.iter().enumerate().map(|(index, expr)| {
             let branch_host = host.branch_host(index);
-            async move { eval_expr(expr, env, &branch_host).await }
+            let states = Arc::clone(&states);
+            async move {
+                let value = eval_expr(expr, env, &branch_host).await;
+                record_prepared_branch(&states, index, &value);
+                (branch_host, value)
+            }
         });
-        return join_fanout_all(branches, |index, value| {
-            host.fanout_branch_end(index, value)
-        })
+        let prepared = futures::future::join_all(branches).await;
+        let mut unique = BTreeSet::new();
+        for (branch_host, value) in &prepared {
+            if let Err(error) = validate_fanout_value(value, branch_host, &mut unique) {
+                let rejected = Value::Err(error.clone());
+                for (index, (_, value)) in prepared.iter().enumerate() {
+                    let terminal = if matches!(value, Value::FlowFuture(_)) {
+                        &rejected
+                    } else {
+                        value
+                    };
+                    scope.end(index, terminal);
+                }
+                return Value::Err(error);
+            }
+        }
+        let states = scope.states();
+        return join_fanout_all(
+            prepared
+                .into_iter()
+                .enumerate()
+                .map(|(index, (branch_host, value))| {
+                    let states = Arc::clone(&states);
+                    async move {
+                        let value = drive_fanout_value(value, &branch_host).await;
+                        record_finished_branch(&states, index, &value);
+                        value
+                    }
+                }),
+            |index, value| scope.end(index, value),
+        )
         .await;
     }
 
@@ -409,14 +503,137 @@ pub async fn eval_fanout<'a, H: ExpressionHost>(
         error @ Value::Err(_) => return error,
         other => return Value::Err(H::Error::type_mismatch("list", other.kind_name().into())),
     };
-    for index in 0..values.len() {
-        host.fanout_branch_start(index);
+    let mut unique = BTreeSet::new();
+    for value in &values {
+        if let Err(error) = validate_fanout_value(value, host, &mut unique) {
+            return Value::Err(error);
+        }
+    }
+    let mut scope = FanoutBranchScope::start(host, values.len());
+    let states = scope.states();
+    for (index, value) in values.iter().enumerate() {
+        record_prepared_branch(&states, index, value);
     }
     join_fanout_all(
-        values.into_iter().map(core::future::ready),
-        |index, value| host.fanout_branch_end(index, value),
+        values.into_iter().enumerate().map(|(index, value)| {
+            let branch_host = host.branch_host(index);
+            let states = Arc::clone(&states);
+            async move {
+                let value = drive_fanout_value(value, &branch_host).await;
+                record_finished_branch(&states, index, &value);
+                value
+            }
+        }),
+        |index, value| scope.end(index, value),
     )
     .await
+}
+
+pub(crate) const MAX_ACTIVE_FLOW_FUTURES: usize = 128;
+
+const BRANCH_RUNNING: u8 = 0;
+const BRANCH_OK: u8 = 1;
+const BRANCH_ERR: u8 = 2;
+
+struct FanoutBranchScope<'a, H: ExpressionHost> {
+    host: &'a H,
+    states: Arc<Vec<AtomicU8>>,
+    ended: Vec<bool>,
+}
+
+impl<'a, H: ExpressionHost> FanoutBranchScope<'a, H> {
+    fn start(host: &'a H, count: usize) -> Self {
+        let states = Arc::new((0..count).map(|_| AtomicU8::new(BRANCH_RUNNING)).collect());
+        for index in 0..count {
+            host.fanout_branch_start(index);
+        }
+        Self {
+            host,
+            states,
+            ended: vec![false; count],
+        }
+    }
+
+    fn states(&self) -> Arc<Vec<AtomicU8>> {
+        Arc::clone(&self.states)
+    }
+
+    fn end(&mut self, index: usize, value: &Value<H::Payload, H::Error>) {
+        if !self.ended[index] {
+            self.ended[index] = true;
+            self.host.fanout_branch_end(index, value);
+        }
+    }
+}
+
+impl<H: ExpressionHost> Drop for FanoutBranchScope<'_, H> {
+    fn drop(&mut self) {
+        if self.ended.iter().all(|ended| *ended) {
+            return;
+        }
+        let cancelled: Value<H::Payload, H::Error> =
+            Value::Err(self.host.cancellation_error().unwrap_or_else(|| {
+                H::Error::type_mismatch("completed fanout branch", "cancelled".into())
+            }));
+        let completed: Value<H::Payload, H::Error> = Value::Unit;
+        for index in 0..self.ended.len() {
+            if !self.ended[index] {
+                let value = if self.states[index].load(Ordering::Acquire) == BRANCH_OK {
+                    &completed
+                } else {
+                    &cancelled
+                };
+                self.end(index, value);
+            }
+        }
+    }
+}
+
+fn record_prepared_branch<P, E>(states: &[AtomicU8], index: usize, value: &Value<P, E>) {
+    if !matches!(value, Value::FlowFuture(_)) {
+        record_finished_branch(states, index, value);
+    }
+}
+
+fn record_finished_branch<P, E>(states: &[AtomicU8], index: usize, value: &Value<P, E>) {
+    let state = if matches!(value, Value::Err(_)) {
+        BRANCH_ERR
+    } else {
+        BRANCH_OK
+    };
+    states[index].store(state, Ordering::Release);
+}
+
+fn validate_fanout_value<H: ExpressionHost>(
+    value: &Value<H::Payload, H::Error>,
+    host: &H,
+    unique: &mut BTreeSet<usize>,
+) -> Result<(), H::Error> {
+    let Value::FlowFuture(future) = value else {
+        return Ok(());
+    };
+    host.validate_flow_future(future)?;
+    unique.insert(Arc::as_ptr(future) as usize);
+    if unique.len() > MAX_ACTIVE_FLOW_FUTURES {
+        return Err(H::Error::type_mismatch(
+            "fanout with at most 128 concurrent flow calls",
+            format!("{} distinct flow futures", unique.len()),
+        ));
+    }
+    Ok(())
+}
+
+async fn drive_fanout_value<H: ExpressionHost>(
+    value: Value<H::Payload, H::Error>,
+    host: &H,
+) -> Value<H::Payload, H::Error> {
+    match value {
+        Value::FlowFuture(future) => {
+            host.drive_flow_future(&future, FlowDriveMode::Parallel)
+                .await
+        }
+        other => other,
+    }
 }
 
 /// Evaluates a dynamic fanout through the shared expression engine.
@@ -456,15 +673,42 @@ pub async fn eval_dynamic_fanout<'a, H: ExpressionHost>(
         }
         results.push(result);
     }
-    Value::List(results)
+    let mut unique = BTreeSet::new();
+    for value in &results {
+        if let Err(error) = validate_fanout_value(value, host, &mut unique) {
+            return Value::Err(error);
+        }
+    }
+    if unique.is_empty() {
+        return Value::List(results);
+    }
+    let mut scope = FanoutBranchScope::start(host, results.len());
+    let states = scope.states();
+    for (index, value) in results.iter().enumerate() {
+        record_prepared_branch(&states, index, value);
+    }
+    join_fanout_all(
+        results.into_iter().enumerate().map(|(index, value)| {
+            let branch_host = host.branch_host(index);
+            let states = Arc::clone(&states);
+            async move {
+                let value = drive_fanout_value(value, &branch_host).await;
+                record_finished_branch(&states, index, &value);
+                value
+            }
+        }),
+        |index, value| scope.end(index, value),
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use alloc::vec;
     use core::{
-        future::Future,
+        future::{Future, poll_fn},
         pin::pin,
+        sync::atomic::{AtomicU8, Ordering},
         task::{Context, Poll, Waker},
     };
 
@@ -472,7 +716,170 @@ mod tests {
     use crate::{
         EvalError,
         ast::{BinOp, Ident, Literal, Node, Span},
+        program::{FlowId, ModuleId},
+        value::FlowFuture,
     };
+
+    #[derive(Default)]
+    struct BranchTrace {
+        starts: [AtomicU8; 2],
+        ends: [AtomicU8; 2],
+        statuses: [AtomicU8; 2],
+        order: [AtomicU8; 2],
+        next_order: AtomicU8,
+    }
+
+    #[derive(Clone, Default)]
+    struct BranchTraceHost(Arc<BranchTrace>);
+
+    impl ExpressionHost for BranchTraceHost {
+        type Payload = ();
+        type Error = EvalError;
+
+        fn undefined_var(&self, name: String) -> EvalError {
+            EvalError::type_mismatch("bound variable", name)
+        }
+
+        fn undefined_field(&self, name: String) -> EvalError {
+            EvalError::type_mismatch("existing field", name)
+        }
+
+        fn fanout_branch_start(&self, index: usize) {
+            self.0.starts[index].fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn fanout_branch_end(&self, index: usize, value: &Value<(), EvalError>) {
+            self.0.ends[index].fetch_add(1, Ordering::SeqCst);
+            self.0.statuses[index].store(
+                if value.is_err() {
+                    BRANCH_ERR
+                } else {
+                    BRANCH_OK
+                },
+                Ordering::SeqCst,
+            );
+            self.0.order[index].store(
+                self.0.next_order.fetch_add(1, Ordering::SeqCst) + 1,
+                Ordering::SeqCst,
+            );
+        }
+
+        fn validate_flow_future(
+            &self,
+            _future: &FlowFuture<(), EvalError>,
+        ) -> Result<(), EvalError> {
+            Ok(())
+        }
+
+        fn drive_flow_future<'a>(
+            &'a self,
+            _future: &'a FlowFuture<(), EvalError>,
+            _mode: FlowDriveMode,
+        ) -> HostFuture<'a, Value<(), EvalError>> {
+            Box::pin(poll_fn(|_| Poll::Pending))
+        }
+
+        fn eval_external<'a>(
+            &'a self,
+            effect: ExpressionEffect<(), EvalError>,
+        ) -> HostFuture<'a, Value<(), EvalError>> {
+            Box::pin(async move {
+                match effect {
+                    ExpressionEffect::ToolCall { name, .. } if name == "ready" => Value::Int(1),
+                    ExpressionEffect::ToolCall { name, .. } if name == "pending" => {
+                        poll_fn(|_| Poll::Pending).await
+                    }
+                    _ => panic!("unexpected effect"),
+                }
+            })
+        }
+    }
+
+    fn pending_flow_value() -> Value<(), EvalError> {
+        Value::FlowFuture(Arc::new(FlowFuture::new(
+            FlowId {
+                module: ModuleId(0),
+                name: "pending".into(),
+            },
+            Vec::new(),
+            Arc::new(()),
+        )))
+    }
+
+    fn poll_then_drop<F: Future<Output = Value<(), EvalError>>>(future: F) {
+        let mut future = Box::pin(future);
+        assert!(matches!(
+            future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        drop(future);
+    }
+
+    fn assert_branch_trace(host: &BranchTraceHost) {
+        for index in 0..2 {
+            assert_eq!(host.0.starts[index].load(Ordering::SeqCst), 1);
+            assert_eq!(host.0.ends[index].load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(host.0.statuses[0].load(Ordering::SeqCst), BRANCH_OK);
+        assert_eq!(host.0.statuses[1].load(Ordering::SeqCst), BRANCH_ERR);
+        assert_eq!(host.0.order[0].load(Ordering::SeqCst), 1);
+        assert_eq!(host.0.order[1].load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn dropped_static_variable_and_dynamic_fanout_close_every_started_branch() {
+        let tool = |name: &str| {
+            Expr::Node(Node::ToolCall {
+                path: vec![Ident::new(name, Span::default())],
+                args: vec![],
+            })
+        };
+        let static_source = Expr::List(vec![tool("ready"), tool("pending")]);
+        let env = Env::new();
+        let host = BranchTraceHost::default();
+        poll_then_drop(eval_fanout(&static_source, &env, &host));
+        assert_branch_trace(&host);
+
+        let mut env = Env::new();
+        env.bind(
+            "items",
+            Value::List(vec![Value::Int(1), pending_flow_value()]),
+        );
+        let source = Expr::Ident(Ident::new("items", Span::default()));
+        let host = BranchTraceHost::default();
+        poll_then_drop(eval_fanout(&source, &env, &host));
+        assert_branch_trace(&host);
+
+        let lambda = Expr::Lambda {
+            params: vec![Ident::new("item", Span::default())],
+            body: Box::new(Expr::Ident(Ident::new("item", Span::default()))),
+        };
+        let host = BranchTraceHost::default();
+        poll_then_drop(eval_dynamic_fanout(&source, &lambda, &env, &host));
+        assert_branch_trace(&host);
+    }
+
+    #[test]
+    fn completed_fanout_closes_branches_once_in_source_order() {
+        let source = Expr::List(vec![
+            Expr::Literal(Literal::Int(1)),
+            Expr::Literal(Literal::Int(2)),
+        ]);
+        let env = Env::new();
+        let host = BranchTraceHost::default();
+        let result = run_ready(eval_fanout(&source, &env, &host));
+        assert!(
+            matches!(result, Value::List(values) if matches!(&values[..], [Value::Int(1), Value::Int(2)]))
+        );
+        for index in 0..2 {
+            assert_eq!(host.0.starts[index].load(Ordering::SeqCst), 1);
+            assert_eq!(host.0.ends[index].load(Ordering::SeqCst), 1);
+            assert_eq!(host.0.statuses[index].load(Ordering::SeqCst), BRANCH_OK);
+            assert_eq!(host.0.order[index].load(Ordering::SeqCst), index as u8 + 1);
+        }
+    }
 
     #[derive(Clone)]
     struct TestHost {

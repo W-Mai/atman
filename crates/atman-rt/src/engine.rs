@@ -307,6 +307,13 @@ impl<H: StatementHost> Engine<H> {
                         let value = self.evaluate(value, &node_id).await;
                         match value {
                             Value::Err(error) => (StatementOutcome::Err(error), None),
+                            value if value.contains_flow_future() => (
+                                StatementOutcome::Err(H::Error::type_mismatch(
+                                    "resolved flow result",
+                                    "flow future".into(),
+                                )),
+                                None,
+                            ),
                             value => {
                                 let preview = self.host.preview(&value);
                                 (StatementOutcome::Return(value), preview)

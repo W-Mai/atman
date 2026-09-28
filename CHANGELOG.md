@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Flow call syntax** — `subflow(name, args)` is removed. Call a bound Flow with `name(args).await`; `name(args)` alone creates a cold Future that runs when awaited or passed to `fanout`.
 - **Pipe expressions** — The `|>` operator is removed from the DSL. Bind an intermediate value and pass it to the next call explicitly.
 - **Fanout syntax** — `fanout [expr, ...]`, `fanout pending`, and `fanout source { |item| expr }` return all results without a `collect:` clause. `collect: all` and `collect: first` are no longer parsed.
 - **Portable flow types** — Flow AST, lexical environments, `Value<P, E>`, and primitive expression operations are owned by `atman-rt`. Import core types from `atman-rt`; `atman-runtime::Value` and the old DSL AST paths are removed. Atman-specific path, message, and edit values use `AtmanPayload`.
@@ -16,8 +17,9 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Natural Flow calls** — Local and `use`-bound flows use function-call syntax. `fanout` concurrently drives cold Flow Futures and returns results in source order.
 - **Reusable flow sources** — `use` binds public flows from other `.at` files by name or namespace. CLI, daemon, slash commands, and flow checks load dependencies before execution. Flow versions and snapshots include dependency contents; recorded source bundles support revision runs and multi-file diffs.
-- **Embeddable Atman VM** — `Vm::compile` parses and links `.at` source with host-resolved imports. A `VmEmbedding` host supplies effects and optional execution callbacks; `Vm::run` executes flows and subflows. Builds without the default syntax feature retain the `no_std` AST execution path with `alloc` and pointer-width atomics.
+- **Embeddable Atman VM** — `Vm::compile` parses and links `.at` source with host-resolved imports. A `VmEmbedding` host supplies effects and optional execution callbacks; `Vm::run` executes entry and child flows. Builds without the default syntax feature retain the `no_std` AST execution path with `alloc` and pointer-width atomics.
 
 ## [1.13.2] — 2026-09-25
 

@@ -3,7 +3,7 @@ flow agent(user_prompt: string) -> string {
         capabilities { shell: true }
         invocation { user_message: user_prompt }
     }
-    return subflow(agent_loop, "direct")
+    return agent_loop("direct").await
 }
 
 flow agent_loop(completion_state: string) -> string {
@@ -74,18 +74,18 @@ flow agent_loop(completion_state: string) -> string {
                 completion_state = "worked"
             }
             session.push(message.user("Agent loop control: issue the required tool call instead of describing it."))
-            return subflow(agent_loop, completion_state)
+            return agent_loop(completion_state).await
         }
         when disposition == "continue_work" {
             when completion_state == "reminded" {
                 completion_state = "worked"
             }
             session.push(message.user("Agent loop control: continue the concrete work required by the current request."))
-            return subflow(agent_loop, completion_state)
+            return agent_loop(completion_state).await
         }
         when completion_state == "worked" {
             session.push(message.user("Agent loop control: your next response MUST include exactly one final.answer tool call and no other tool calls. Put the complete user-facing Markdown in message and include a concise _atman_intent for the work header. Any accompanying assistant text does not replace message."))
-            return subflow(agent_loop, "reminded")
+            return agent_loop("reminded").await
         }
         return candidate
     }
@@ -95,5 +95,5 @@ flow agent_loop(completion_state: string) -> string {
     when final_answer_attempt {
         completion_state = "reminded"
     }
-    return subflow(agent_loop, completion_state)
+    return agent_loop(completion_state).await
 }

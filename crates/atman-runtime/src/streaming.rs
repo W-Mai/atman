@@ -104,7 +104,12 @@ impl<'a> LlmStream<'a> {
                 .rev()
                 .find(|m| matches!(m.role, crate::message::MessageRole::User))
                 .map(|m| m.text_concat())
-                .unwrap_or_else(|| req.input.to_json().to_string());
+                .unwrap_or_else(|| {
+                    req.input
+                        .to_json()
+                        .map(|json| json.to_string())
+                        .unwrap_or_else(|error| format!("[JSON error: {error}]"))
+                });
             req.messages.push(crate::message::Message::user_text(
                 self.turn_id.clone().unwrap_or_else(TurnId::now),
                 format!("<user_correction>{correction}</user_correction>\n\n{last_prompt}"),

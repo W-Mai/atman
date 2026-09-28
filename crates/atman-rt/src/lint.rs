@@ -20,6 +20,7 @@ pub struct LintHit {
 pub enum LintRule {
     UnusedFlowParam,
     ManyPositional,
+    UnusedFlowFuture,
 }
 
 impl LintRule {
@@ -27,6 +28,7 @@ impl LintRule {
         match self {
             LintRule::UnusedFlowParam => "unused-flow-param",
             LintRule::ManyPositional => "many-positional",
+            LintRule::UnusedFlowFuture => "unused-flow-future",
         }
     }
 }
@@ -83,7 +85,9 @@ fn collect_ident_refs_expr(expr: &Expr, refs: &mut BTreeSet<String>) {
         Expr::Ident(id) => {
             refs.insert(id.name.clone());
         }
-        Expr::Member { base, .. } => collect_ident_refs_expr(base, refs),
+        Expr::Member { base, .. } | Expr::Await { value: base } => {
+            collect_ident_refs_expr(base, refs)
+        }
         Expr::Binary { left, right, .. } => {
             collect_ident_refs_expr(left, refs);
             collect_ident_refs_expr(right, refs);
@@ -117,7 +121,7 @@ fn collect_ident_refs_expr(expr: &Expr, refs: &mut BTreeSet<String>) {
 
 fn collect_ident_refs_node(node: &Node, refs: &mut BTreeSet<String>) {
     match node {
-        Node::ToolCall { args, .. } | Node::Subflow { args, .. } | Node::Message { args, .. } => {
+        Node::ToolCall { args, .. } | Node::FlowCall { args, .. } | Node::Message { args, .. } => {
             for a in args {
                 match a {
                     Arg::Positional(e) => collect_ident_refs_expr(e, refs),
@@ -142,7 +146,20 @@ fn collect_ident_refs_node(node: &Node, refs: &mut BTreeSet<String>) {
 fn walk_stmts_for_nodes(stmts: &[Stmt], flow_name: &str, hits: &mut Vec<LintHit>) {
     for stmt in stmts {
         match stmt {
-            Stmt::Bind { value, .. } | Stmt::Return { value } | Stmt::Expr(value) => {
+            Stmt::Bind { value, .. } | Stmt::Return { value } => {
+                walk_expr_for_nodes(value, flow_name, hits);
+            }
+            Stmt::Expr(value) => {
+                if let Expr::Node(Node::FlowCall { name, .. }) = value {
+                    hits.push(LintHit {
+                        flow: flow_name.to_string(),
+                        rule: LintRule::UnusedFlowFuture,
+                        message: format!(
+                            "flow call `{}` creates an unused future; add `.await` or bind it",
+                            name.display_name()
+                        ),
+                    });
+                }
                 walk_expr_for_nodes(value, flow_name, hits);
             }
             Stmt::When { cond, body } => {
@@ -162,7 +179,9 @@ fn walk_stmts_for_nodes(stmts: &[Stmt], flow_name: &str, hits: &mut Vec<LintHit>
 fn walk_expr_for_nodes(expr: &Expr, flow_name: &str, hits: &mut Vec<LintHit>) {
     match expr {
         Expr::Literal(_) | Expr::FileRef(_) | Expr::Ident(_) => {}
-        Expr::Member { base, .. } => walk_expr_for_nodes(base, flow_name, hits),
+        Expr::Member { base, .. } | Expr::Await { value: base } => {
+            walk_expr_for_nodes(base, flow_name, hits)
+        }
         Expr::Binary { left, right, .. } => {
             walk_expr_for_nodes(left, flow_name, hits);
             walk_expr_for_nodes(right, flow_name, hits);
@@ -195,36 +214,40 @@ fn walk_expr_for_nodes(expr: &Expr, flow_name: &str, hits: &mut Vec<LintHit>) {
 }
 
 fn check_node(node: &Node, flow_name: &str, hits: &mut Vec<LintHit>) {
-    if let Node::ToolCall { path, args } = node {
-        let positional = args
-            .iter()
-            .filter(|a| matches!(a, Arg::Positional(_)))
-            .count();
-        let named = args
-            .iter()
-            .filter(|a| matches!(a, Arg::Named { .. }))
-            .count();
-        if positional >= MANY_POSITIONAL_THRESHOLD && named == 0 {
-            let name = path
-                .iter()
-                .map(|i| i.name.as_str())
+    let (name, args) = match node {
+        Node::ToolCall { path, args } => (
+            path.iter()
+                .map(|part| part.name.as_str())
                 .collect::<Vec<_>>()
-                .join(".");
-            hits.push(LintHit {
-                flow: flow_name.to_string(),
-                rule: LintRule::ManyPositional,
-                message: format!(
-                    "{name} takes {positional} positional args with no names — prefer named args for readability"
-                ),
-            });
-        }
+                .join("."),
+            args,
+        ),
+        Node::FlowCall { name, args } => (name.display_name(), args),
+        _ => return,
+    };
+    let positional = args
+        .iter()
+        .filter(|a| matches!(a, Arg::Positional(_)))
+        .count();
+    let named = args
+        .iter()
+        .filter(|a| matches!(a, Arg::Named { .. }))
+        .count();
+    if positional >= MANY_POSITIONAL_THRESHOLD && named == 0 {
+        hits.push(LintHit {
+            flow: flow_name.to_string(),
+            rule: LintRule::ManyPositional,
+            message: format!(
+                "{name} takes {positional} positional args with no names — prefer named args for readability"
+            ),
+        });
     }
 }
 
 fn child_exprs(node: &Node) -> Vec<&Expr> {
     let mut out: Vec<&Expr> = Vec::new();
     match node {
-        Node::ToolCall { args, .. } | Node::Subflow { args, .. } | Node::Message { args, .. } => {
+        Node::ToolCall { args, .. } | Node::FlowCall { args, .. } | Node::Message { args, .. } => {
             for a in args {
                 match a {
                     Arg::Positional(e) => out.push(e),
@@ -251,6 +274,7 @@ fn child_exprs(node: &Node) -> Vec<&Expr> {
 mod tests {
     use super::*;
     use crate::parse_file;
+    use alloc::vec;
 
     fn lint(src: &str) -> Vec<LintHit> {
         let file = parse_file(src).unwrap_or_else(|e| panic!("parse: {e}"));
@@ -276,6 +300,32 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].rule, LintRule::UnusedFlowParam);
         assert!(hits[0].message.contains("`y`"), "hit={:?}", hits[0]);
+    }
+
+    #[test]
+    fn discarded_linked_flow_future_is_reported() {
+        use crate::program::{LinkedProgram, ModuleId, ModuleInput};
+
+        let source = "flow child() {}\nflow main() { child() child().await }";
+        let file = parse_file(source).unwrap();
+        let program = LinkedProgram::link(
+            vec![ModuleInput {
+                source_id: "main.at".into(),
+                display_name: "main.at".into(),
+                source: source.into(),
+                file,
+                dependencies: Default::default(),
+            }],
+            ModuleId(0),
+        )
+        .unwrap();
+        let hits = lint_file(program.entry_file());
+        assert_eq!(
+            hits.iter()
+                .filter(|hit| hit.rule == LintRule::UnusedFlowFuture)
+                .count(),
+            1
+        );
     }
 
     #[test]

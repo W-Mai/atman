@@ -137,7 +137,7 @@ impl Provider for RecordingProvider {
 
 const AGENT_CONTEXT_SESSION: &str = r#"
 flow agent(user_prompt: string) -> string {
-    return subflow(agent_loop, 0)
+    return agent_loop(0).await
 }
 
 flow agent_loop(iteration: int) -> string {
@@ -156,7 +156,7 @@ flow agent_loop(iteration: int) -> string {
     tool_results = dispatch_all(tool_uses)
     session.push(tool_results)
     j = iteration + 1
-    return subflow(agent_loop, j)
+    return agent_loop(j).await
 }
 "#;
 
@@ -689,5 +689,121 @@ async fn session_state_changes_append_records_and_clear_with_a_tombstone() {
             .as_deref()
             .is_some_and(|system| system.contains("ship the context migration"))
     }));
+    session.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fanout_flow_calls_use_isolated_session_snapshots() {
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "recording",
+            "recording",
+            200_000,
+            None,
+        )]))
+        .await;
+    let provider = Arc::new(RecordingProvider::new(vec![
+        vec![MessagePart::Text {
+            text: "branch-a".into(),
+        }],
+        vec![MessagePart::Text {
+            text: "branch-b".into(),
+        }],
+    ]));
+    let temp = tempfile::tempdir().unwrap();
+    let session = Arc::new(Session::open(temp.path()).unwrap());
+    session.set_goal(Some("parallel context goal".into()));
+    atman_runtime::memory::PlanStore::at(session.dir())
+        .upsert(atman_runtime::memory::plan::Plan::new(
+            "parallel-plan",
+            "Parallel context plan",
+            vec!["Keep branch history isolated".into()],
+        ))
+        .await
+        .unwrap();
+    let turn_id = TurnId::now();
+    session.begin_turn(Message::user_text(turn_id.clone(), "root prompt"));
+    let mut frames = session.stream_subscribe();
+    let executor = Executor::with_events(session.sink().clone());
+    executor.providers.register(provider.clone());
+    let file = parse_file(
+        r#"flow child(label: string) -> string {
+    reply = llm.call(model: "recording", context: "session", prompt: label)
+    recent = memory.recent_turns(n: 10, excerpt_chars: 2000)
+    return recent.excerpt
+}
+
+flow parent() -> [string] {
+    return fanout [child("a"), child("b")]
+}
+"#,
+    )
+    .unwrap();
+    executor
+        .tools
+        .register(Arc::new(atman_runtime::tools::memory::MemoryRecentTurns));
+
+    let result = executor
+        .run_in_turn(
+            &file,
+            "parent",
+            vec![],
+            Some(turn_id),
+            Some(session.clone()),
+        )
+        .await
+        .unwrap();
+    let Value::List(items) = result else {
+        panic!("fanout must return branch excerpts");
+    };
+    assert_eq!(items.len(), 2);
+    for item in items {
+        let Value::Str(excerpt) = item else {
+            panic!("recent-turn excerpt must be text");
+        };
+        assert!(excerpt.contains("root prompt"));
+        assert_ne!(excerpt.contains("branch-a"), excerpt.contains("branch-b"));
+    }
+    let captured = provider.captured();
+    assert_eq!(captured.len(), 2);
+    for request in &captured {
+        assert!(
+            request
+                .iter()
+                .any(|message| message.text_concat() == "root prompt")
+        );
+        let record_keys = request
+            .iter()
+            .flat_map(|message| &message.parts)
+            .filter_map(|part| match part {
+                MessagePart::ContextRecord(record) => Some(record.key()),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert!(record_keys.contains("session.goal"));
+        assert!(record_keys.contains("session.plan"));
+        assert!(record_keys.contains("session.models"));
+        assert!(!request.iter().any(|message| {
+            message.role == MessageRole::Assistant && message.text_concat().starts_with("branch-")
+        }));
+    }
+    assert!(!session.messages().iter().any(|message| {
+        message.role == MessageRole::Assistant && message.text_concat().starts_with("branch-")
+    }));
+    assert_eq!(
+        executor
+            .events
+            .snapshot()
+            .iter()
+            .filter(|event| matches!(event, Event::FlowStart { flow_name, spawned: true, .. } if flow_name == "child"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        std::iter::from_fn(|| frames.try_recv().ok())
+            .filter(|frame| matches!(frame, atman_runtime::stream::StreamFrame::ToolNode { tool, .. } if tool == "memory.recent_turns"))
+            .count(),
+        2
+    );
     session.shutdown().await;
 }

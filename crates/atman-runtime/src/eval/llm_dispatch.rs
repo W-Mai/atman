@@ -932,18 +932,22 @@ async fn sync_runtime_context_records(ctx: &ToolCtx, turn_id: &crate::event::Tur
     let Some(messages) = ctx.session_messages_handle.as_ref() else {
         return;
     };
-    let workspace = tool_context_working_directory_context(ctx);
-    let spec = crate::context_plan::ContextRecordSpec::new(
-        "session.workspace",
-        crate::context_plan::ContextRecordAuthority::Runtime,
-        crate::context_plan::ContextRecordRetention::Latest,
-        workspace.map_or_else(
-            crate::context_plan::ContextRecordBody::tombstone,
-            crate::context_plan::ContextRecordBody::text,
-        ),
-    );
+    let specs = if let Some(session) = ctx.context_records_session.as_ref() {
+        session_context_record_specs(session).await
+    } else {
+        let workspace = tool_context_working_directory_context(ctx);
+        vec![crate::context_plan::ContextRecordSpec::new(
+            "session.workspace",
+            crate::context_plan::ContextRecordAuthority::Runtime,
+            crate::context_plan::ContextRecordRetention::Latest,
+            workspace.map_or_else(
+                crate::context_plan::ContextRecordBody::tombstone,
+                crate::context_plan::ContextRecordBody::text,
+            ),
+        )]
+    };
     let mut messages = messages.lock().unwrap();
-    let records = crate::context_plan::compile_context_records(&messages, [spec]);
+    let records = crate::context_plan::compile_context_records(&messages, specs);
     messages.extend(
         records
             .into_iter()

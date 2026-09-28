@@ -1,4 +1,4 @@
-use atman_rt::ast::{Arg, Expr, FlowDecl, Ident, Node, Stmt};
+use atman_rt::ast::{Arg, Expr, FlowDecl, FlowRef, Ident, Node, Stmt};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -22,6 +22,8 @@ pub enum NodeKind {
     ToolCall { path: String },
     Fanout,
     UserConfirm,
+    FlowFuture { name: String },
+    FlowAwait { target: String },
     Subflow { name: String },
     Message { role: String },
     FixUntilTest,
@@ -87,9 +89,44 @@ fn extract_stmt(stmt: &Stmt, prefix: &str, out: &mut Vec<StaticNode>) {
 }
 
 fn extract_expr(expr: &Expr, prefix: &str, out: &mut Vec<StaticNode>) {
-    if let Expr::Node(node) = expr {
-        extract_node(node, prefix, out);
+    match expr {
+        Expr::Node(node) => extract_node(node, prefix, out),
+        Expr::Await { value } => {
+            let (kind, children) = match value.as_ref() {
+                Expr::Node(Node::FlowCall { name, .. }) => (
+                    NodeKind::Subflow {
+                        name: name.display_name(),
+                    },
+                    Vec::new(),
+                ),
+                _ => {
+                    let mut children = Vec::new();
+                    extract_expr(value, &format!("{prefix}.value"), &mut children);
+                    (
+                        NodeKind::FlowAwait {
+                            target: format_expr_short(value),
+                        },
+                        children,
+                    )
+                }
+            };
+            out.push(StaticNode {
+                node_id: prefix.to_string(),
+                kind,
+                label: format_expr_short(expr),
+                children,
+            });
+        }
+        _ => {}
     }
+}
+
+fn flow_call_label(name: &FlowRef, args: &[Arg]) -> String {
+    format!(
+        "{}({})",
+        name.display_name(),
+        if args.is_empty() { "" } else { "…" }
+    )
 }
 
 fn extract_node(node: &Node, prefix: &str, out: &mut Vec<StaticNode>) {
@@ -138,20 +175,13 @@ fn extract_node(node: &Node, prefix: &str, out: &mut Vec<StaticNode>) {
             (NodeKind::Fanout, label, branch_children)
         }
         Node::UserConfirm { .. } => (NodeKind::UserConfirm, "user_confirm".into(), Vec::new()),
-        Node::Subflow { name, args } => {
-            let label = format!(
-                "subflow({}{})",
-                name.display_name(),
-                if args.is_empty() { "" } else { ", …" }
-            );
-            (
-                NodeKind::Subflow {
-                    name: name.display_name(),
-                },
-                label,
-                Vec::new(),
-            )
-        }
+        Node::FlowCall { name, args } => (
+            NodeKind::FlowFuture {
+                name: name.display_name(),
+            },
+            flow_call_label(name, args),
+            Vec::new(),
+        ),
         Node::Message { role, args } => {
             let role_str = match role {
                 atman_rt::ast::MessageRole::User => "user",
@@ -182,6 +212,8 @@ fn extract_node(node: &Node, prefix: &str, out: &mut Vec<StaticNode>) {
 
 pub fn format_expr_short(expr: &Expr) -> String {
     match expr {
+        Expr::Await { value } => format!("{}.await", format_expr_short(value)),
+        Expr::Node(Node::FlowCall { name, args }) => flow_call_label(name, args),
         Expr::Literal(atman_rt::ast::Literal::Bool(b)) => b.to_string(),
         Expr::Literal(atman_rt::ast::Literal::Str(s)) => format!("\"{s}\""),
         Expr::Literal(atman_rt::ast::Literal::Int(i)) => i.to_string(),
@@ -220,6 +252,7 @@ fn _unused_ident(_: &Ident, _: &[Arg]) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atman_rt::ast::Span;
     use atman_rt::parse_file;
 
     fn parse_first_flow(src: &str) -> FlowDecl {
@@ -269,6 +302,56 @@ mod tests {
             .find(|n| matches!(n.kind, NodeKind::Fanout))
             .expect("has fanout");
         assert!(fanout.children.len() >= 2);
+    }
+
+    #[test]
+    fn distinguishes_cold_flow_calls_from_awaited_flows() {
+        let call = Expr::Node(Node::FlowCall {
+            name: FlowRef::Local(Ident::new("worker", Span::default())),
+            args: Vec::new(),
+        });
+        let mut nodes = Vec::new();
+        extract_expr(&call, "0", &mut nodes);
+        assert_eq!(
+            nodes[0].kind,
+            NodeKind::FlowFuture {
+                name: "worker".into()
+            }
+        );
+        assert_eq!(nodes[0].label, "worker()");
+
+        nodes.clear();
+        extract_expr(
+            &Expr::Await {
+                value: Box::new(call),
+            },
+            "1",
+            &mut nodes,
+        );
+        assert_eq!(
+            nodes[0].kind,
+            NodeKind::Subflow {
+                name: "worker".into()
+            }
+        );
+        assert_eq!(nodes[0].label, "worker().await");
+
+        nodes.clear();
+        let handle = Expr::Ident(Ident::new("pending", Span::default()));
+        extract_expr(
+            &Expr::Await {
+                value: Box::new(handle),
+            },
+            "2",
+            &mut nodes,
+        );
+        assert_eq!(
+            nodes[0].kind,
+            NodeKind::FlowAwait {
+                target: "pending".into()
+            }
+        );
+        assert_eq!(nodes[0].label, "pending.await");
     }
 
     #[test]

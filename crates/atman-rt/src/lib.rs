@@ -54,6 +54,6 @@ pub use redirect::{RedirectOutcome, run_redirects};
 pub use route::{RouteMatch, resolve_route};
 pub use status::{FlowTermination, classify_outcome, classify_result};
 pub use validate::{LanguageValidationError, LanguageValidationReport, validate_flow};
-pub use value::{HostPayload, Value};
-pub use vm::{FlowCall, Vm, VmCallError, VmEmbedding, VmHost};
+pub use value::{FlowFuture, HostPayload, Value};
+pub use vm::{FlowCall, FlowDriveMode, Vm, VmCallError, VmEmbedding, VmHost};
 pub use watch::{WatchObservation, WatchRules, WatchState, WatchWarning};

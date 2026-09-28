@@ -304,17 +304,31 @@ fn write_expr(out: &mut String, expr: &Expr, indent: usize) {
         Expr::Ident(id) => out.push_str(&id.name),
         Expr::FileRef(f) => write!(out, "@\"{}\"", f.path).unwrap(),
         Expr::Member { base, field } => {
-            write_expr(out, base, indent);
+            write_postfix_base(out, base, indent);
             write!(out, ".{}", field.name).unwrap();
         }
+        Expr::Await { value } => {
+            write_postfix_base(out, value, indent);
+            out.push_str(".await");
+        }
         Expr::Binary { op, left, right } => {
-            write_expr(out, left, indent);
+            write_binary_operand(out, left, *op, false, indent);
             write!(out, " {} ", binop_str(*op)).unwrap();
-            write_expr(out, right, indent);
+            write_binary_operand(out, right, *op, true, indent);
         }
         Expr::Unary { op, operand } => {
             out.push_str(unop_str(*op));
+            let grouped = matches!(
+                operand.as_ref(),
+                Expr::Binary { .. } | Expr::Annotated { .. }
+            );
+            if grouped {
+                out.push('(');
+            }
             write_expr(out, operand, indent);
+            if grouped {
+                out.push(')');
+            }
         }
         Expr::Call { func, args } => {
             write!(out, "{}(", func.name).unwrap();
@@ -368,6 +382,48 @@ fn write_expr(out: &mut String, expr: &Expr, indent: usize) {
     }
 }
 
+fn write_postfix_base(out: &mut String, value: &Expr, indent: usize) {
+    let grouped = matches!(
+        value,
+        Expr::Binary { .. } | Expr::Unary { .. } | Expr::Annotated { .. } | Expr::Lambda { .. }
+    );
+    if grouped {
+        out.push('(');
+    }
+    write_expr(out, value, indent);
+    if grouped {
+        out.push(')');
+    }
+}
+
+fn binary_precedence(op: BinOp) -> u8 {
+    match op {
+        BinOp::Or => 1,
+        BinOp::And => 2,
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => 3,
+        BinOp::Add | BinOp::Sub => 4,
+        BinOp::Mul | BinOp::Div | BinOp::Mod => 5,
+    }
+}
+
+fn write_binary_operand(out: &mut String, child: &Expr, parent: BinOp, right: bool, indent: usize) {
+    let grouped = match child {
+        Expr::Binary { op, .. } => {
+            binary_precedence(*op) < binary_precedence(parent)
+                || (right && binary_precedence(*op) == binary_precedence(parent))
+        }
+        Expr::Annotated { .. } | Expr::Lambda { .. } => true,
+        _ => false,
+    };
+    if grouped {
+        out.push('(');
+    }
+    write_expr(out, child, indent);
+    if grouped {
+        out.push(')');
+    }
+}
+
 fn write_node(out: &mut String, node: &Node, indent: usize) {
     let pad = "    ".repeat(indent + 1);
     let outer_pad = "    ".repeat(indent);
@@ -380,18 +436,12 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
                 out.push_str(&seg.name);
             }
             out.push('(');
-            for (i, a) in args.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                match a {
-                    Arg::Positional(e) => write_expr(out, e, indent),
-                    Arg::Named { name, value } => {
-                        write!(out, "{}: ", name.name).unwrap();
-                        write_expr(out, value, indent);
-                    }
-                }
-            }
+            write_args(out, args, indent);
+            out.push(')');
+        }
+        Node::FlowCall { name, args } => {
+            write!(out, "{}(", name.display_name()).unwrap();
+            write_args(out, args, indent);
             out.push(')');
         }
         Node::Fanout { source } => {
@@ -418,20 +468,6 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
         Node::UserConfirm { msg } => {
             out.push_str("user_confirm(");
             write_expr(out, msg, indent);
-            out.push(')');
-        }
-        Node::Subflow { name, args } => {
-            write!(out, "subflow({}", name.display_name()).unwrap();
-            for a in args {
-                out.push_str(", ");
-                match a {
-                    Arg::Positional(e) => write_expr(out, e, indent),
-                    Arg::Named { name, value } => {
-                        write!(out, "{}: ", name.name).unwrap();
-                        write_expr(out, value, indent);
-                    }
-                }
-            }
             out.push(')');
         }
         Node::FixUntilTestPasses { kwargs } => {
@@ -461,6 +497,21 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
                 }
             }
             out.push(')');
+        }
+    }
+}
+
+fn write_args(out: &mut String, args: &[Arg], indent: usize) {
+    for (index, arg) in args.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        match arg {
+            Arg::Positional(value) => write_expr(out, value, indent),
+            Arg::Named { name, value } => {
+                write!(out, "{}: ", name.name).unwrap();
+                write_expr(out, value, indent);
+            }
         }
     }
 }

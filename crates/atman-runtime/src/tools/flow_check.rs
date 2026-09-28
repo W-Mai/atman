@@ -138,7 +138,7 @@ mod tests {
         let entry = dir.path().join("review.at");
         std::fs::write(
             &entry,
-            "use \"./lib/text.at\"::normalize\nflow review(input: string) -> string { return subflow(normalize, input) }\n",
+            "use \"./lib/text.at\"::normalize\nflow review(input: string) -> string { return normalize(input).await }\n",
         )
         .unwrap();
         std::fs::write(

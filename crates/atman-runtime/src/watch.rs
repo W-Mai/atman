@@ -668,6 +668,11 @@ impl Tool for HasPendingInjections {
             {
                 return Ok(Value::Bool(true));
             }
+            if matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned)
+                && ctx.agent_entry.is_none()
+            {
+                return Ok(Value::Bool(false));
+            }
             let Some(session) = ctx.session_runtime.as_ref() else {
                 return if ctx.agent_entry.is_some() {
                     Ok(Value::Bool(false))

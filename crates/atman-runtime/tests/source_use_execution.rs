@@ -14,7 +14,7 @@ async fn named_and_namespace_uses_execute_with_dependency_source_dir() {
         lib.join("text.at"),
         r#"
 flow read_private() -> string { return @"payload.txt" }
-pub flow read() -> string { return subflow(read_private) }
+pub flow read() -> string { return read_private().await }
 pub flow defaulted(input: string = @"payload.txt") -> string { return input }
 "#,
     )
@@ -26,9 +26,9 @@ pub flow defaulted(input: string = @"payload.txt") -> string { return input }
 use "./lib/text.at"::read as direct
 use "./lib/text.at" as text
 
-flow named() -> string { return subflow(direct) }
-flow namespaced() -> string { return subflow(text.read) }
-flow with_default() -> string { return subflow(text.defaulted) }
+flow named() -> string { return direct().await }
+flow namespaced() -> string { return text.read().await }
+flow with_default() -> string { return text.defaulted().await }
 "#,
     )
     .unwrap();

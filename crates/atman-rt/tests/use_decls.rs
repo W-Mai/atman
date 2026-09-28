@@ -1,4 +1,4 @@
-use atman_rt::ast::{Expr, FlowRef, Node, Stmt, UseBinding};
+use atman_rt::ast::{Expr, Node, Stmt, UseBinding};
 use atman_rt::{parse_file, print_file};
 
 #[test]
@@ -10,8 +10,8 @@ use "./lib/text.at"::{normalize as clean, tokenize}
 use "./lib/text.at" as text
 
 pub flow review(input: string) -> string {
-    result = subflow(text.normalize, input)
-    return subflow(clean, result)
+    result = text.normalize(input).await
+    return clean(result).await
 }
 
 flow helper(input: string) -> string {
@@ -35,16 +35,15 @@ flow helper(input: string) -> string {
     assert!(matches!(&file.uses[3].binding, UseBinding::Module(alias) if alias.name == "text"));
 
     let Stmt::Bind {
-        value: Expr::Node(Node::Subflow { name, .. }),
+        value: Expr::Await { value },
         ..
     } = &file.flows[0].body[0]
     else {
-        panic!("expected qualified subflow");
+        panic!("expected awaited qualified call");
     };
     assert!(
-        matches!(name, FlowRef::Qualified { module, flow } if module.name == "text" && flow.name == "normalize")
+        matches!(&**value, Expr::Node(Node::ToolCall { path, .. }) if matches!(&path[..], [module, flow] if module.name == "text" && flow.name == "normalize"))
     );
-    assert_eq!(name.display_name(), "text.normalize");
 
     let printed = print_file(&file);
     let parsed_again = parse_file(&printed).expect("parse printed source");
@@ -53,7 +52,7 @@ flow helper(input: string) -> string {
 
 #[test]
 fn escapes_use_source_when_printing() {
-    let file = parse_file("use \"./lib/quo\\\"te\\\\x.at\"::f\nflow main() { return subflow(f) }")
+    let file = parse_file("use \"./lib/quo\\\"te\\\\x.at\"::f\nflow main() { return f().await }")
         .expect("parse source with escaped path");
     let printed = print_file(&file);
     let parsed_again = parse_file(&printed).expect("parse printed escaped path");

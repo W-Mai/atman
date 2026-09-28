@@ -2,7 +2,9 @@ use crate::value::AtmanPayload;
 use std::path::PathBuf;
 
 use atman_rt::ast::{Expr, FlowDecl, Node, Stmt};
-use atman_rt::{FlowCall, PatternBindError, Preflight, StatementHost, Vm, VmCallError, VmHost};
+use atman_rt::{
+    FlowCall, FlowDriveMode, PatternBindError, Preflight, StatementHost, Vm, VmCallError, VmHost,
+};
 
 use crate::atman_host::AtmanHost;
 use crate::error::RuntimeError;
@@ -60,25 +62,30 @@ impl VmHost for AtmanStatementAdapter<'_> {
     fn call_error(&self, error: VmCallError) -> RuntimeError {
         match error {
             VmCallError::MissingEntry(name) => RuntimeError::UndefinedTool(name),
-            VmCallError::MissingFlow(name) => {
-                RuntimeError::UndefinedTool(format!("subflow({name})"))
-            }
+            VmCallError::MissingFlow(name) => RuntimeError::UndefinedTool(name),
             VmCallError::TooManyPositional(name) => {
-                RuntimeError::MissingArg(format!("subflow({name}): too many positional args"))
+                RuntimeError::MissingArg(format!("{name}(): too many positional args"))
             }
             VmCallError::CallDepthExceeded(name) => {
-                RuntimeError::ToolFailed(format!("subflow({name}): maximum call depth exceeded"))
+                RuntimeError::ToolFailed(format!("{name}(): maximum call depth exceeded"))
             }
-            VmCallError::ControlFlowEscaped(name) => RuntimeError::ToolFailed(format!(
-                "subflow({name}): break or continue escaped the flow"
-            )),
+            VmCallError::ControlFlowEscaped(name) => {
+                RuntimeError::ToolFailed(format!("{name}(): break or continue escaped the flow"))
+            }
+            VmCallError::Cancelled => RuntimeError::Cancelled("flow call cancelled".into()),
+            VmCallError::InvalidFutureOwner => {
+                RuntimeError::ToolFailed("flow future belongs to another invocation".into())
+            }
+            VmCallError::FutureBoundary => {
+                RuntimeError::ToolFailed("flow future cannot cross a flow or host boundary".into())
+            }
         }
     }
 
     fn enter_child(&self, call: &FlowCall<'_>) -> Result<(Self, Self::ChildGuard), RuntimeError> {
         let ctx = &self.ctx;
         let registry = ctx.tool_ctx.flow_registry.clone().ok_or_else(|| {
-            RuntimeError::ToolFailed("subflow: trusted flow registry is unavailable".into())
+            RuntimeError::ToolFailed("flow call: trusted flow registry is unavailable".into())
         })?;
         let parent_run_id = ctx
             .tool_ctx
@@ -87,7 +94,7 @@ impl VmHost for AtmanStatementAdapter<'_> {
             .map(|identity| identity.run_id.clone())
             .ok_or_else(|| {
                 RuntimeError::ToolFailed(
-                    "subflow: trusted parent flow identity is unavailable".into(),
+                    "flow call: trusted parent flow identity is unavailable".into(),
                 )
             })?;
         let run_id = crate::event::FlowRunId::now();
@@ -106,7 +113,7 @@ impl VmHost for AtmanStatementAdapter<'_> {
             flow_name: call.display_name.to_string(),
             parent_run_id: Some(parent_run_id),
             parent_node_id: Some(call.parent_node_id.to_string()),
-            spawned: false,
+            spawned: matches!(call.mode, FlowDriveMode::Parallel),
         })
         .start();
         if let Some(sink) = ctx.events {
@@ -124,6 +131,40 @@ impl VmHost for AtmanStatementAdapter<'_> {
         let mut child_tool_ctx = ctx.tool_ctx.as_ref().clone();
         child_tool_ctx.flow_run_id = Some(run_id.clone());
         child_tool_ctx.flow_identity = Some(child_identity);
+        if matches!(call.mode, FlowDriveMode::Parallel) {
+            let mut snapshot = ctx
+                .session_runtime
+                .as_ref()
+                .map(|session| session.messages().to_vec())
+                .or_else(|| {
+                    ctx.tool_ctx
+                        .session_messages_handle
+                        .as_ref()
+                        .map(|messages| messages.lock().unwrap().clone())
+                })
+                .unwrap_or_default();
+            crate::message::retain_complete_tool_pairs(&mut snapshot);
+            child_tool_ctx.session_runtime = None;
+            child_tool_ctx.deferred_input_session = None;
+            child_tool_ctx.context_records_session = ctx
+                .session_runtime
+                .clone()
+                .or_else(|| ctx.tool_ctx.context_records_session.clone());
+            child_tool_ctx.session_messages = None;
+            child_tool_ctx.agent_entry = None;
+            child_tool_ctx.on_memory_recent = None;
+            child_tool_ctx.history_segment = crate::tool::HistorySegment::Spawned;
+            child_tool_ctx.session_messages_handle =
+                Some(std::sync::Arc::new(std::sync::Mutex::new(snapshot)));
+            child_tool_ctx.compact_lock_handle =
+                Some(std::sync::Arc::new(tokio::sync::Mutex::new(())));
+            child_tool_ctx.context_epoch_handle =
+                Some(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)));
+            child_tool_ctx.context_prefix_tracker = Some(std::sync::Arc::new(
+                std::sync::Mutex::new(crate::context_plan::ContextPrefixTracker::default()),
+            ));
+            child_tool_ctx.call_intent = None;
+        }
         let source_dir = ctx
             .linked_program
             .and_then(|program| program.source_dir(call.target))
@@ -136,6 +177,11 @@ impl VmHost for AtmanStatementAdapter<'_> {
             current_node_id: None,
             current_module: Some(call.target.module),
             source_dir,
+            session_runtime: if matches!(call.mode, FlowDriveMode::Parallel) {
+                None
+            } else {
+                ctx.session_runtime.clone()
+            },
             ..ctx.clone()
         };
         Ok((
@@ -331,6 +377,7 @@ fn value_preview(v: &Value) -> Option<String> {
         ),
         Value::Host(AtmanPayload::EditProposal(_)) => "<edit proposal>".into(),
         Value::Lambda { .. } => "<lambda>".into(),
+        Value::FlowFuture(_) => "<flow future>".into(),
     };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -400,6 +447,20 @@ fn stmt_to_node_kind_label(stmt: &Stmt) -> (crate::nodegraph::NodeKind, String) 
 fn expr_to_node_kind_label(expr: &Expr) -> (crate::nodegraph::NodeKind, String) {
     use crate::nodegraph::NodeKind;
     match expr {
+        Expr::Await { value } => match value.as_ref() {
+            Expr::Node(Node::FlowCall { name, .. }) => (
+                NodeKind::Subflow {
+                    name: name.display_name(),
+                },
+                crate::nodegraph::format_expr_short(expr),
+            ),
+            _ => (
+                NodeKind::FlowAwait {
+                    target: crate::nodegraph::format_expr_short(value),
+                },
+                crate::nodegraph::format_expr_short(expr),
+            ),
+        },
         Expr::Node(Node::ToolCall { path, .. })
             if path.len() == 2 && path[0].name == "llm" && path[1].name == "call" =>
         {
@@ -420,11 +481,11 @@ fn expr_to_node_kind_label(expr: &Expr) -> (crate::nodegraph::NodeKind, String) 
                 _ => "fanout".into(),
             },
         ),
-        Expr::Node(Node::Subflow { name, .. }) => (
-            NodeKind::Subflow {
+        Expr::Node(Node::FlowCall { name, .. }) => (
+            NodeKind::FlowFuture {
                 name: name.display_name(),
             },
-            format!("subflow({})", name.display_name()),
+            crate::nodegraph::format_expr_short(expr),
         ),
         _ => (NodeKind::Return, "expr".into()),
     }
@@ -575,7 +636,48 @@ pub async fn exec_flow_with_linked_siblings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atman_rt::ast::{FlowRef, Ident, Span};
     use atman_rt::parse_file;
+
+    #[test]
+    fn flow_node_labels_distinguish_creation_and_execution() {
+        let call = Expr::Node(Node::FlowCall {
+            name: FlowRef::Local(Ident::new("worker", Span::default())),
+            args: Vec::new(),
+        });
+        assert_eq!(
+            expr_to_node_kind_label(&call),
+            (
+                crate::nodegraph::NodeKind::FlowFuture {
+                    name: "worker".into()
+                },
+                "worker()".into(),
+            )
+        );
+        assert_eq!(
+            expr_to_node_kind_label(&Expr::Await {
+                value: Box::new(call)
+            }),
+            (
+                crate::nodegraph::NodeKind::Subflow {
+                    name: "worker".into()
+                },
+                "worker().await".into(),
+            )
+        );
+        let handle = Expr::Ident(Ident::new("pending", Span::default()));
+        assert_eq!(
+            expr_to_node_kind_label(&Expr::Await {
+                value: Box::new(handle)
+            }),
+            (
+                crate::nodegraph::NodeKind::FlowAwait {
+                    target: "pending".into()
+                },
+                "pending.await".into(),
+            )
+        );
+    }
 
     #[test]
     fn dropped_child_guard_emits_cancelled_terminal_event_once() {
@@ -629,6 +731,7 @@ mod tests {
             source_id: "entry:memory.at",
             contract: None,
             parent_node_id: "parent.0",
+            mode: FlowDriveMode::Inline,
         };
         let (_, guard) = host.enter_child(&call).unwrap();
         drop(guard);

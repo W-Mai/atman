@@ -397,7 +397,7 @@ async fn inline_subflow_inherits_invocation_snapshot() {
     let file = parse_file(
         r#"
 flow root() -> string {
-    return subflow(read_effort)
+    return read_effort().await
 }
 
 flow read_effort() -> string {

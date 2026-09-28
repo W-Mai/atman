@@ -14,6 +14,7 @@ keywords = ["atman", "runtime", "flow", "embedded"]
 categories = ["development-tools"]
 
 [dependencies]
+async-lock = { version = "3.4", default-features = false }
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 syn = { workspace = true, optional = true }

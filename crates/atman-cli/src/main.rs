@@ -1792,7 +1792,7 @@ async fn loaded_rule_views(executor: &Executor) -> Result<Vec<atman_tui::RuleVie
     };
     let mut result = Vec::with_capacity(entries.len());
     for entry in entries {
-        let mut rule: atman_tui::RuleView = serde_json::from_value(entry.to_json())?;
+        let mut rule: atman_tui::RuleView = serde_json::from_value(entry.to_json()?)?;
         let content = tool
             .call(
                 ToolArgs {
@@ -7958,7 +7958,7 @@ async fn cmd_flow_test(path: &Path, bless: bool) -> Result<()> {
             .await
         {
             Ok(v) => {
-                recorded.insert(flow.name.name.clone(), v.to_json());
+                recorded.insert(flow.name.name.clone(), v.to_json()?);
             }
             Err(e) => errors.push((flow.name.name.clone(), format!("{e}"))),
         }
@@ -8660,7 +8660,7 @@ async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
                 anyhow::bail!("MCP tool input must be a JSON object");
             }
             let result = client.call_tool(&tool, arguments).await?;
-            println!("{}", serde_json::to_string_pretty(&result.to_json())?);
+            println!("{}", serde_json::to_string_pretty(&result.to_json()?)?);
         }
         McpAction::Import { file } => {
             let text = std::fs::read_to_string(&file)
@@ -9551,7 +9551,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             commands.join("review.at"),
-            "use \"project:text.at\"::normalize\nflow review(input: string) -> string { return subflow(normalize, input) }\n",
+            "use \"project:text.at\"::normalize\nflow review(input: string) -> string { return normalize(input).await }\n",
         )
         .unwrap();
 

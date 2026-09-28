@@ -80,9 +80,9 @@ atman run examples/agent.at --flow agent user_prompt="read Cargo.toml and list t
 
 > **आत्मन् (ātman)** — Sanskrit for *self*, the inner essence that witnesses thought but is not thought itself. The agent that watches the LLM's words and acts on them.
 
-atman is a code interpreter for the `.at` language. It parses `.at` files, manages their runtime, and emits a typed event trace for every execution. The `.at` language is Turing-complete — it has variables, conditionals, recursion, fan-out, and subflows — so you can express any agent workflow as a deterministic program, not a prompt.
+atman is a code interpreter for the `.at` language. It parses `.at` files, manages their runtime, and emits a typed event trace for every execution. The `.at` language is Turing-complete — it has variables, conditionals, recursion, fan-out, and Flow calls — so you can express any agent workflow as a deterministic program, not a prompt.
 
-The LLM is just one node type inside that program. `llm.call(...)` is a stochastic node; everything around it (the tool dispatch, the approval gates, the retry loops, the subflow recursion, the context compaction) is deterministic orchestration written in an unambiguous, concrete, and inspectable language. You orchestrate the agent's entire workflow in `.at`; the LLM only executes what the flow assigns to it — the *witness* that observes, never the driver.
+The LLM is just one node type inside that program. `llm.call(...)` is a stochastic node; everything around it (the tool dispatch, the approval gates, the retry loops, the Flow recursion, the context compaction) is deterministic orchestration written in an unambiguous, concrete, and inspectable language. You orchestrate the agent's entire workflow in `.at`; the LLM only executes what the flow assigns to it — the *witness* that observes, never the driver.
 
 ## Why atman?
 
@@ -94,7 +94,7 @@ The LLM is just one node type inside that program. `llm.call(...)` is a stochast
 | Tool safety | Prompt-level | 5-tier capability sandbox, statically checked at flow load |
 | Workflow definition | Natural language prompts | Typed DSL with schema validation + flow versioning |
 | Session trace | Chat log | Typed `events.jsonl` (replayable, FTS5-searchable) |
-| Sub-agents | Hard-coded agent types | Arbitrary `subflow` with full scope isolation |
+| Sub-agents | Hard-coded agent types | Named Flow calls and explicit agent spawning |
 | Headless | Limited | JSON-RPC daemon + SSE events + bearer auth |
 
 ## Flow DSL
@@ -117,11 +117,11 @@ In `.atman/commands/review.at`, bind that flow by name:
 use "project:text.at"::normalize
 
 flow review(input: string) -> string {
-    return subflow(normalize, input)
+    return normalize(input).await
 }
 ```
 
-`use "./lib/text.at"::normalize` resolves beside the file containing the declaration. Use `::{normalize, tokenize as words}` to bind several public flows, or `use "./lib/text.at" as text` and call `subflow(text.normalize, input)`. `project:` reads from `<project>/.atman/lib/`; `user:` reads from `~/.config/atman/lib/`. Only flows declared in the entry file can be selected with `--flow` or exposed as slash commands.
+`use "./lib/text.at"::normalize` resolves beside the file containing the declaration. Use `::{normalize, tokenize as words}` to bind several public flows, or `use "./lib/text.at" as text` and call `text.normalize(input).await`. A Flow call such as `normalize(input)` creates a cold Future; `.await` executes one call, while `fanout [normalize(a), normalize(b)]` runs both and returns ordered results. `project:` reads from `<project>/.atman/lib/`; `user:` reads from `~/.config/atman/lib/`. Only flows declared in the entry file can be selected with `--flow` or exposed as slash commands.
 
 ### The managed agent loop
 
@@ -245,10 +245,10 @@ atman run examples/edit_and_verify.at --flow edit_and_verify \
 |---|---|---|
 | LLM | `llm.call(...)` | Stochastic model call with prompt/messages, tools, context, retry, cache, and compaction |
 | Tool call | `fs.read(...)`, `bash.spawn(...)` | Dispatch a registered tool |
-| Subflow | `subflow(name, args)` | Spawn a child flow with isolated scope |
+| Flow call | `name(args).await` | Execute a lexically bound Flow and return its result |
 | Approval | `user_confirm(msg)` | Pause for human approval |
 | User input | `user_ask(prompt, schema)` | Request structured user input |
-| Fanout | `fanout [...]`, `fanout pending` | Evaluate literal branches concurrently or collect an array value |
+| Fanout | `fanout [...]`, `fanout pending` | Run cold Flow calls concurrently or collect already evaluated values |
 | List | `list.map`, `list.filter`, `list.find`, `list.any`, `list.all`, `list.reduce` | Apply lambdas to list values |
 | Composers | `retry { ... }`, `fallback { ... }` | Retry or choose fallback execution |
 

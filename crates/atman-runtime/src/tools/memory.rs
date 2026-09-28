@@ -358,11 +358,10 @@ impl Tool for MemoryRecentTurns {
     fn description(&self) -> Option<&str> {
         Some(
             "Return the last N Message values (user + assistant + tool_result) from the \
-             current session's event log so a flow can hand the code agent a sliding \
+             current context so a flow can hand the code agent a sliding \
              history window. `items` remain lossless; `excerpt: {head, tail}` returns a \
              bounded text excerpt retaining independently selected transcript edges. \
-             `excerpt_chars` remains a legacy recent-first budget. Reads from disk; cost \
-             O(events file size).",
+             `excerpt_chars` selects a recent-first budget.",
         )
     }
 
@@ -403,6 +402,21 @@ impl Tool for MemoryRecentTurns {
                     cb(0);
                 }
                 return Ok(recent_turns_value(0, 0, Vec::new(), excerpt));
+            }
+            if matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned)
+                && let Some(handle) = ctx.session_messages_handle.as_ref()
+            {
+                let msgs = handle.lock().unwrap().clone();
+                let (total, recent) = crate::history_store::recent_turn_messages(&msgs, n);
+                if let Some(cb) = &ctx.on_memory_recent {
+                    cb(recent.len() as u16);
+                }
+                return Ok(recent_turns_value(
+                    msgs.len() as u64,
+                    total,
+                    recent,
+                    excerpt,
+                ));
             }
             // Sub-agent path: session_messages has the child's local message list.
             if let Some(msgs) = ctx.session_messages.as_ref() {

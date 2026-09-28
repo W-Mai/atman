@@ -71,13 +71,19 @@ pub type AtmanValue = atman_rt::Value<AtmanPayload, RuntimeError>;
 pub(crate) use AtmanValue as Value;
 
 pub trait ValueJson {
-    fn to_json(&self) -> serde_json::Value;
+    fn to_json(&self) -> Result<serde_json::Value, RuntimeError>;
     fn from_json(value: serde_json::Value) -> Self;
 }
 
 impl ValueJson for AtmanValue {
-    fn to_json(&self) -> serde_json::Value {
-        match self {
+    fn to_json(&self) -> Result<serde_json::Value, RuntimeError> {
+        if self.contains_flow_future() {
+            return Err(RuntimeError::TypeMismatch {
+                expected: "serializable value".into(),
+                actual: "flow future".into(),
+            });
+        }
+        Ok(match self {
             Value::Unit => serde_json::Value::Null,
             Value::Bool(b) => serde_json::Value::Bool(*b),
             Value::Int(i) => serde_json::Value::Number((*i).into()),
@@ -88,13 +94,16 @@ impl ValueJson for AtmanValue {
             Value::Host(AtmanPayload::Path(p)) => {
                 serde_json::Value::String(p.display().to_string())
             }
-            Value::List(items) => {
-                serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
-            }
+            Value::List(items) => serde_json::Value::Array(
+                items
+                    .iter()
+                    .map(ValueJson::to_json)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
             Value::Struct(fields) => {
                 let mut m = serde_json::Map::with_capacity(fields.len());
                 for (k, v) in fields {
-                    m.insert(k.clone(), v.to_json());
+                    m.insert(k.clone(), v.to_json()?);
                 }
                 serde_json::Value::Object(m)
             }
@@ -106,7 +115,8 @@ impl ValueJson for AtmanValue {
             }
             Value::Err(e) => serde_json::json!({ "error": e.to_string() }),
             Value::Lambda { .. } => serde_json::Value::Null,
-        }
+            Value::FlowFuture(_) => unreachable!("future checked before serialization"),
+        })
     }
 
     fn from_json(v: serde_json::Value) -> Self {
@@ -203,11 +213,14 @@ mod tests {
     #[test]
     fn host_values_keep_the_existing_json_shape() {
         let path = Value::Host(AtmanPayload::Path(PathBuf::from("src/main.rs")));
-        assert_eq!(path.to_json(), serde_json::json!("src/main.rs"));
+        assert_eq!(path.to_json().unwrap(), serde_json::json!("src/main.rs"));
 
         let message = Message::assistant_text(crate::event::TurnId::now(), "hello");
         let value = Value::Host(AtmanPayload::Message(message.clone()));
-        assert_eq!(value.to_json(), serde_json::to_value(message).unwrap());
+        assert_eq!(
+            value.to_json().unwrap(),
+            serde_json::to_value(message).unwrap()
+        );
     }
 
     #[test]

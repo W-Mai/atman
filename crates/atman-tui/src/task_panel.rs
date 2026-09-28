@@ -120,6 +120,8 @@ pub fn node_kind_glyph(kind: &atman_runtime::nodegraph::NodeKind) -> (&'static s
         NodeKind::ToolCall { .. } => ("🔧", t.heading.into()),
         NodeKind::Fanout => ("⇉", t.accent.into()),
         NodeKind::UserConfirm => ("?", t.warn.into()),
+        NodeKind::FlowFuture { .. } => ("◇", t.subtle_fg.into()),
+        NodeKind::FlowAwait { .. } => ("↳", t.accent.into()),
         NodeKind::Subflow { .. } => ("↳", t.accent.into()),
         NodeKind::Message { .. } => ("✉", t.tinted_fg.into()),
         NodeKind::FixUntilTest => ("↻", t.warn.into()),
@@ -1052,6 +1054,19 @@ mod tests {
         use atman_runtime::nodegraph::NodeKind;
         let (icon, _) = node_kind_glyph(&NodeKind::Llm { model: None });
         assert_eq!(icon, "✦");
+    }
+
+    #[test]
+    fn flow_future_and_await_have_distinct_glyphs() {
+        use atman_runtime::nodegraph::NodeKind;
+        let (future, _) = node_kind_glyph(&NodeKind::FlowFuture {
+            name: "worker".into(),
+        });
+        let (awaited, _) = node_kind_glyph(&NodeKind::FlowAwait {
+            target: "pending".into(),
+        });
+        assert_eq!(future, "◇");
+        assert_eq!(awaited, "↳");
     }
 
     fn activity_node(node_id: &str, parent_node_id: Option<&str>, label: &str) -> ActivityNode {

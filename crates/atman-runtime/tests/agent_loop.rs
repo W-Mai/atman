@@ -114,7 +114,7 @@ fn agent_source() -> &'static str {
     r#"
 flow agent(user_prompt: string) -> string {
     initial = user_msg(user_prompt)
-    return subflow(agent_loop, [initial], 0)
+    return agent_loop([initial], 0).await
 }
 
 flow agent_loop(messages: list, iteration: int) -> string {
@@ -133,7 +133,7 @@ flow agent_loop(messages: list, iteration: int) -> string {
     tool_results = dispatch_all(tool_uses)
     new_history = concat(messages, concat([reply], tool_results))
     next_iter = iteration + 1
-    return subflow(agent_loop, new_history, next_iter)
+    return agent_loop(new_history, next_iter).await
 }
 "#
 }

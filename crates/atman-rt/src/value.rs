@@ -3,7 +3,33 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 use crate::{
     Env,
     ast::{Expr, Ident},
+    engine::FlowArgs,
+    program::FlowId,
 };
+
+/// A resolved flow call that has not executed its body yet.
+#[derive(Debug)]
+pub struct FlowFuture<P, E> {
+    pub(crate) target: FlowId,
+    pub(crate) args: FlowArgs<P, E>,
+    pub(crate) owner: Arc<()>,
+    pub(crate) result: async_lock::Mutex<Option<Value<P, E>>>,
+}
+
+impl<P, E> FlowFuture<P, E> {
+    pub(crate) fn new(target: FlowId, args: FlowArgs<P, E>, owner: Arc<()>) -> Self {
+        Self {
+            target,
+            args,
+            owner,
+            result: async_lock::Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn belongs_to(&self, owner: &Arc<()>) -> bool {
+        Arc::ptr_eq(&self.owner, owner)
+    }
+}
 
 /// Describes a host-owned value without requiring the core to know its shape.
 pub trait HostPayload {
@@ -28,6 +54,7 @@ pub enum Value<P, E> {
     Struct(Vec<(String, Self)>),
     Host(P),
     Err(E),
+    FlowFuture(Arc<FlowFuture<P, E>>),
     Lambda {
         params: Vec<Ident>,
         body: Arc<Expr>,
@@ -51,7 +78,21 @@ impl<P: HostPayload, E> Value<P, E> {
             Self::Struct(_) => "struct",
             Self::Host(payload) => payload.kind_name(),
             Self::Err(_) => "err",
+            Self::FlowFuture(_) => "flow future",
             Self::Lambda { .. } => "lambda",
+        }
+    }
+
+    /// Detects a pending flow call at any depth before crossing a host boundary.
+    pub fn contains_flow_future(&self) -> bool {
+        match self {
+            Self::FlowFuture(_) => true,
+            Self::List(items) => items.iter().any(Self::contains_flow_future),
+            Self::Struct(fields) => fields.iter().any(|(_, value)| value.contains_flow_future()),
+            Self::Lambda { captured_env, .. } => captured_env
+                .iter()
+                .any(|(_, value)| value.contains_flow_future()),
+            _ => false,
         }
     }
 

@@ -380,18 +380,18 @@ flow subagent(goal: string, role: string = "research", model: string = "smart", 
         invocation { user_message: goal }
     }
     when role == "research" {
-        return subflow(research_loop, goal, model, max_iter)
+        return research_loop(goal, model, max_iter).await
     }
     when role == "verify" {
-        return subflow(verify_loop, goal, model, max_iter)
+        return verify_loop(goal, model, max_iter).await
     }
     when role == "implement" {
-        return subflow(implement_loop, goal, model, max_iter)
+        return implement_loop(goal, model, max_iter).await
     }
     when role == "review" {
-        return subflow(review_loop, goal, model, max_iter)
+        return review_loop(goal, model, max_iter).await
     }
-    return subflow(research_loop, goal, model, max_iter)
+    return research_loop(goal, model, max_iter).await
 }
 
 flow research_loop(goal: string, model: string, max_iter: int) -> string {
@@ -918,7 +918,7 @@ mod tests {
         let direct_return = AGENT_AT.rfind("return candidate_response").unwrap();
         assert!(worked < reminder && reminder < direct_return);
         let example = include_str!("../../../examples/agent.at");
-        assert!(example.contains("subflow(agent_loop, \"direct\")"));
+        assert!(example.contains("agent_loop(\"direct\").await"));
         assert!(example.contains("flow agent_loop(completion_state: string)"));
         assert!(!example.contains("final_answer_reminded"));
         assert_eq!(SUBAGENT_AT.matches("\"final.answer\"").count(), 4);

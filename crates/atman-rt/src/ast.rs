@@ -59,6 +59,9 @@ pub enum Expr {
         base: Box<Expr>,
         field: Ident,
     },
+    Await {
+        value: Box<Expr>,
+    },
     Binary {
         op: BinOp,
         left: Box<Expr>,
@@ -124,7 +127,7 @@ pub enum Node {
     UserConfirm {
         msg: Box<Expr>,
     },
-    Subflow {
+    FlowCall {
         name: FlowRef,
         args: Vec<Arg>,
     },

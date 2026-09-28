@@ -870,7 +870,7 @@ flow research_loop(goal: string) -> string { return goal }
         write_flow(
             &commands,
             "review.at",
-            "use \"project:text.at\"::normalize\nflow review(input: string) -> string { return subflow(normalize, input) }\n",
+            "use \"project:text.at\"::normalize\nflow review(input: string) -> string { return normalize(input).await }\n",
         );
         write_flow(&commands, "other.at", "flow other() { return \"ok\" }\n");
         write_flow(

@@ -61,7 +61,7 @@ fn infer_node_kind(value: &Expr) -> Option<&'static str> {
         Expr::Node(Node::ToolCall { .. }) => Some("tool_call"),
         Expr::Node(Node::Fanout { .. }) => Some("fanout"),
         Expr::Node(Node::UserConfirm { .. }) => Some("user_confirm"),
-        Expr::Node(Node::Subflow { .. }) => Some("subflow"),
+        Expr::Node(Node::FlowCall { .. }) => Some("flow_call"),
         Expr::Node(Node::FixUntilTestPasses { .. }) => Some("fix_until"),
         Expr::Node(Node::Message { .. }) => Some("message"),
         _ => None,
@@ -71,7 +71,7 @@ fn infer_node_kind(value: &Expr) -> Option<&'static str> {
 fn watch_event_expected_kinds(event: &WatchEvent) -> &'static [&'static str] {
     match event {
         WatchEvent::Token { .. } | WatchEvent::TokensConsumed { .. } => &["llm"],
-        WatchEvent::Elapsed { .. } => &["llm", "tool_call", "subflow", "fix_until"],
+        WatchEvent::Elapsed { .. } => &["llm", "tool_call", "flow_call", "fix_until"],
     }
 }
 
@@ -145,7 +145,7 @@ fn walk_expr(expr: &Expr, scope: &BTreeSet<String>, report: &mut LanguageValidat
                     .push(LanguageValidationError::UndefinedVar(id.name.clone()));
             }
         }
-        Expr::Member { base, .. } => walk_expr(base, scope, report),
+        Expr::Member { base, .. } | Expr::Await { value: base } => walk_expr(base, scope, report),
         Expr::Binary { left, right, .. } => {
             walk_expr(left, scope, report);
             walk_expr(right, scope, report);
@@ -214,7 +214,7 @@ fn walk_node(node: &Node, scope: &BTreeSet<String>, report: &mut LanguageValidat
         }
         Node::Fanout { source } => walk_expr(source, scope, report),
         Node::UserConfirm { msg } => walk_expr(msg, scope, report),
-        Node::Subflow { args, .. } | Node::Message { args, .. } => {
+        Node::FlowCall { args, .. } | Node::Message { args, .. } => {
             walk_args(args, scope, report);
         }
         Node::FixUntilTestPasses { kwargs } => {

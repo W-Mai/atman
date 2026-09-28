@@ -194,6 +194,7 @@ impl LinkedProgram {
             let mut names = BTreeMap::new();
             for flow in &input.file.flows {
                 let name = flow.name.name.clone();
+                ensure_callable_name(&name, &input.display_name)?;
                 if names
                     .insert(
                         name.clone(),
@@ -235,6 +236,7 @@ impl LinkedProgram {
         let mut program = Self { modules, entry };
         program.check_dependencies()?;
         program.bind_uses()?;
+        program.lower_flow_calls()?;
         program.validate_calls()?;
         Ok(program)
     }
@@ -328,7 +330,7 @@ impl LinkedProgram {
     }
 
     /// Attach a synthetic entry flow without changing the source closure.
-    pub fn with_entry_flow(&self, flow: FlowDecl) -> Result<Self, LinkError> {
+    pub fn with_entry_flow(&self, mut flow: FlowDecl) -> Result<Self, LinkError> {
         let mut program = self.clone();
         let module = &mut program.modules[program.entry.0];
         let name = flow.name.name.clone();
@@ -340,7 +342,12 @@ impl LinkedProgram {
                 name,
             },
         );
-        module.input.file.flows.push(flow);
+        program
+            .lower_flow(program.entry, &mut flow)
+            .map_err(|error| {
+                error.context(program.modules[program.entry.0].input.display_name.as_str())
+            })?;
+        program.modules[program.entry.0].input.file.flows.push(flow);
         program.validate_calls()?;
         Ok(program)
     }
@@ -485,6 +492,167 @@ impl LinkedProgram {
         Ok(())
     }
 
+    fn lower_flow_calls(&mut self) -> Result<(), LinkError> {
+        for index in 0..self.modules.len() {
+            let caller = ModuleId(index);
+            let mut file = core::mem::take(&mut self.modules[index].input.file);
+            let result = self
+                .lower_file(caller, &mut file)
+                .map_err(|error| error.context(self.modules[index].input.display_name.as_str()));
+            self.modules[index].input.file = file;
+            result?;
+        }
+        Ok(())
+    }
+
+    fn lower_file(&self, caller: ModuleId, file: &mut File) -> Result<(), LinkError> {
+        for flow in &mut file.flows {
+            self.lower_flow(caller, flow)?;
+        }
+        for lifecycle in &mut file.lifecycles {
+            self.lower_stmts(caller, &mut lifecycle.body)?;
+        }
+        Ok(())
+    }
+
+    fn lower_flow(&self, caller: ModuleId, flow: &mut FlowDecl) -> Result<(), LinkError> {
+        for param in &mut flow.params {
+            if let Some(default) = &mut param.default {
+                self.lower_expr(caller, default)?;
+            }
+        }
+        if let Some(contract) = &mut flow.contract {
+            for block in &mut contract.blocks {
+                for (_, expr) in &mut block.kwargs {
+                    self.lower_expr(caller, expr)?;
+                }
+            }
+        }
+        self.lower_stmts(caller, &mut flow.body)
+    }
+
+    fn lower_stmts(&self, caller: ModuleId, stmts: &mut [Stmt]) -> Result<(), LinkError> {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Bind { value, .. } | Stmt::Return { value } | Stmt::Expr(value) => {
+                    self.lower_expr(caller, value)?;
+                }
+                Stmt::When { cond, body } => {
+                    self.lower_expr(caller, cond)?;
+                    self.lower_stmts(caller, body)?;
+                }
+                Stmt::Loop { body } => self.lower_stmts(caller, body)?,
+                Stmt::Watch(watch) => {
+                    for block in &mut watch.on_blocks {
+                        for action in &mut block.actions {
+                            match action {
+                                WatchAction::Abort { msg: Some(expr) }
+                                | WatchAction::Warn { msg: Some(expr) } => {
+                                    self.lower_expr(caller, expr)?;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                Stmt::Break | Stmt::Continue => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn lower_args(&self, caller: ModuleId, args: &mut [Arg]) -> Result<(), LinkError> {
+        for arg in args {
+            match arg {
+                Arg::Positional(expr) | Arg::Named { value: expr, .. } => {
+                    self.lower_expr(caller, expr)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn lower_expr(&self, caller: ModuleId, expr: &mut Expr) -> Result<(), LinkError> {
+        match expr {
+            Expr::Literal(_) | Expr::Ident(_) | Expr::FileRef(_) => {}
+            Expr::Member { base, .. }
+            | Expr::Await { value: base }
+            | Expr::Unary { operand: base, .. }
+            | Expr::Annotated { expr: base, .. } => self.lower_expr(caller, base)?,
+            Expr::Binary { left, right, .. } => {
+                self.lower_expr(caller, left)?;
+                self.lower_expr(caller, right)?;
+            }
+            Expr::Call { args, .. } | Expr::List(args) => {
+                for arg in args {
+                    self.lower_expr(caller, arg)?;
+                }
+            }
+            Expr::Struct(fields) => {
+                for (_, value) in fields {
+                    self.lower_expr(caller, value)?;
+                }
+            }
+            Expr::Lambda { body, .. } => self.lower_expr(caller, body)?,
+            Expr::Node(node) => match node {
+                Node::ToolCall { path, args } => {
+                    self.lower_args(caller, args)?;
+                    if let Some(name) = self.flow_ref_for_call(caller, path)? {
+                        *node = Node::FlowCall {
+                            name,
+                            args: core::mem::take(args),
+                        };
+                    }
+                }
+                Node::FlowCall { args, .. } | Node::Message { args, .. } => {
+                    self.lower_args(caller, args)?;
+                }
+                Node::Fanout { source } | Node::UserConfirm { msg: source } => {
+                    self.lower_expr(caller, source)?;
+                }
+                Node::DynamicFanout { source, lambda } => {
+                    self.lower_expr(caller, source)?;
+                    self.lower_expr(caller, lambda)?;
+                }
+                Node::FixUntilTestPasses { kwargs } => {
+                    for (_, value) in kwargs {
+                        self.lower_expr(caller, value)?;
+                    }
+                }
+            },
+        }
+        Ok(())
+    }
+
+    fn flow_ref_for_call(
+        &self,
+        caller: ModuleId,
+        path: &[crate::ast::Ident],
+    ) -> Result<Option<FlowRef>, LinkError> {
+        let module = &self.modules[caller.0];
+        match path {
+            [name] if module.names.contains_key(&name.name) => {
+                Ok(Some(FlowRef::Local(name.clone())))
+            }
+            [name] if module.namespaces.contains_key(&name.name) => Err(LinkError::new(format!(
+                "`{}` is a module alias; use `{}.flow(...)`",
+                name.name, name.name
+            ))),
+            [alias, flow] if module.namespaces.contains_key(&alias.name) => {
+                let target = FlowRef::Qualified {
+                    module: alias.clone(),
+                    flow: flow.clone(),
+                };
+                self.resolve_checked(caller, &target)?;
+                Ok(Some(target))
+            }
+            [alias, ..] if module.namespaces.contains_key(&alias.name) => Err(LinkError::new(
+                format!("module alias `{}` has no nested namespace", alias.name),
+            )),
+            _ => Ok(None),
+        }
+    }
+
     fn resolve_checked(&self, caller: ModuleId, target: &FlowRef) -> Result<FlowId, LinkError> {
         if let Some(id) = self.resolve(caller, target) {
             return Ok(id);
@@ -620,7 +788,9 @@ impl LinkedProgram {
     fn check_expr(&self, caller: ModuleId, expr: &Expr) -> Result<(), LinkError> {
         match expr {
             Expr::Literal(_) | Expr::Ident(_) | Expr::FileRef(_) => {}
-            Expr::Member { base, .. } | Expr::Unary { operand: base, .. } => {
+            Expr::Member { base, .. }
+            | Expr::Await { value: base }
+            | Expr::Unary { operand: base, .. } => {
                 self.check_expr(caller, base)?;
             }
             Expr::Binary { left, right, .. } => {
@@ -640,10 +810,9 @@ impl LinkedProgram {
             Expr::Annotated { expr, .. } => self.check_expr(caller, expr)?,
             Expr::Lambda { body, .. } => self.check_expr(caller, body)?,
             Expr::Node(node) => match node {
-                Node::Subflow { name, args } => {
-                    self.resolve_checked(caller, name).map_err(|error| {
-                        error.context(format!("subflow({})", name.display_name()))
-                    })?;
+                Node::FlowCall { name, args } => {
+                    self.resolve_checked(caller, name)
+                        .map_err(|error| error.context(format!("{}(...)", name.display_name())))?;
                     self.check_args(caller, args)?;
                 }
                 Node::ToolCall { args, .. } | Node::Message { args, .. } => {
@@ -767,10 +936,20 @@ impl<R: SourceResolver> Compiler<'_, R> {
 }
 
 fn ensure_unbound(module: &LinkedModule, name: &str) -> Result<(), LinkError> {
+    ensure_callable_name(name, &module.input.display_name)?;
     if module.names.contains_key(name) || module.namespaces.contains_key(name) {
         return Err(LinkError::new(format!(
             "{}: duplicate local binding `{name}`",
             module.input.display_name
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_callable_name(name: &str, source: &str) -> Result<(), LinkError> {
+    if matches!(name, "env" | "list") {
+        return Err(LinkError::new(format!(
+            "{source}: `{name}` is reserved and cannot bind a flow or module"
         )));
     }
     Ok(())
@@ -798,7 +977,7 @@ mod tests {
     fn text_compiler_links_public_flows_without_host_ast_interpretation() {
         let entry = Source::new(
             "entry.at",
-            "use \"./lib.at\"::{visible as imported}\nflow start() -> string { return subflow(imported) }",
+            "use \"./lib.at\"::{visible as imported}\nflow start() -> string { return imported().await }",
         );
         let sources = Sources(BTreeMap::from([(
             ("entry.at".to_string(), "./lib.at".to_string()),
@@ -814,6 +993,16 @@ mod tests {
         assert_eq!(resolved.name, "visible");
         assert_ne!(resolved.module, start.module);
         assert!(program.entry_flow("imported").is_none());
+        let flow = program.flow(&start).unwrap();
+        let Stmt::Return {
+            value: Expr::Await { value },
+        } = &flow.body[0]
+        else {
+            panic!("expected an awaited flow call");
+        };
+        assert!(
+            matches!(value.as_ref(), Expr::Node(Node::FlowCall { name: FlowRef::Local(name), .. }) if name.name == "imported")
+        );
     }
 
     #[test]
@@ -825,5 +1014,101 @@ mod tests {
         )]));
         let error = LinkedProgram::compile(entry, &sources).unwrap_err();
         assert!(error.to_string().contains("private"));
+    }
+
+    #[test]
+    fn qualified_flow_calls_lower_and_unknown_tools_remain_tools() {
+        let entry = Source::new(
+            "entry.at",
+            "use \"./lib.at\" as lib\nflow local() -> int { return 1 }\nflow start() -> int { a = local().await b = lib.visible().await c = foreign.echo(a) return b }",
+        );
+        let sources = Sources(BTreeMap::from([(
+            ("entry.at".to_string(), "./lib.at".to_string()),
+            Source::new("lib.at", "pub flow visible() -> int { return 2 }"),
+        )]));
+        let program = LinkedProgram::compile(entry, &sources).unwrap();
+        let start = program.flow(&program.entry_flow("start").unwrap()).unwrap();
+        assert!(
+            matches!(&start.body[0], Stmt::Bind { value: Expr::Await { value }, .. } if matches!(value.as_ref(), Expr::Node(Node::FlowCall { name: FlowRef::Local(name), .. }) if name.name == "local"))
+        );
+        assert!(
+            matches!(&start.body[1], Stmt::Bind { value: Expr::Await { value }, .. } if matches!(value.as_ref(), Expr::Node(Node::FlowCall { name: FlowRef::Qualified { module, flow }, .. }) if module.name == "lib" && flow.name == "visible"))
+        );
+        assert!(
+            matches!(&start.body[2], Stmt::Bind { value: Expr::Node(Node::ToolCall { path, .. }), .. } if path[0].name == "foreign")
+        );
+    }
+
+    #[test]
+    fn known_module_members_fail_at_link_time() {
+        let sources = Sources(BTreeMap::from([(
+            ("entry.at".to_string(), "./lib.at".to_string()),
+            Source::new("lib.at", "flow hidden() {}\npub flow visible() {}"),
+        )]));
+        for (member, expected) in [("hidden", "private"), ("missing", "does not exist")] {
+            let entry = Source::new(
+                "entry.at",
+                format!("use \"./lib.at\" as lib\nflow start() {{ return lib.{member}().await }}"),
+            );
+            let error = LinkedProgram::compile(entry, &sources).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn intrinsic_names_cannot_bind_flows_or_modules() {
+        for name in ["env", "list"] {
+            let entry = Source::new("entry.at", format!("flow {name}() {{}}"));
+            let error = LinkedProgram::compile(entry, &Sources(BTreeMap::new())).unwrap_err();
+            assert!(error.to_string().contains("reserved"), "{error}");
+        }
+        let entry = Source::new("entry.at", "use \"./lib.at\" as list\nflow start() {}");
+        let sources = Sources(BTreeMap::from([(
+            ("entry.at".to_string(), "./lib.at".to_string()),
+            Source::new("lib.at", "pub flow visible() {}"),
+        )]));
+        let error = LinkedProgram::compile(entry, &sources).unwrap_err();
+        assert!(error.to_string().contains("reserved"), "{error}");
+    }
+
+    #[test]
+    fn synthetic_entry_flows_use_the_same_call_lowering() {
+        let program = LinkedProgram::compile(
+            Source::new("entry.at", "flow child() -> int { return 3 }"),
+            &Sources(BTreeMap::new()),
+        )
+        .unwrap();
+        let synthetic = crate::parse_file("flow synthetic() -> int { return child().await }")
+            .unwrap()
+            .flows
+            .remove(0);
+        let program = program.with_entry_flow(synthetic).unwrap();
+        let flow = program
+            .flow(&program.entry_flow("synthetic").unwrap())
+            .unwrap();
+        assert!(
+            matches!(&flow.body[0], Stmt::Return { value: Expr::Await { value } } if matches!(value.as_ref(), Expr::Node(Node::FlowCall { name: FlowRef::Local(name), .. }) if name.name == "child"))
+        );
+    }
+
+    #[test]
+    fn synthetic_entry_flow_does_not_rebind_existing_tool_calls() {
+        let program = LinkedProgram::compile(
+            Source::new("entry.at", "flow start() { return helper() }"),
+            &Sources(BTreeMap::new()),
+        )
+        .unwrap();
+        let synthetic = crate::parse_file("flow helper() { return 1 }")
+            .unwrap()
+            .flows
+            .remove(0);
+        let program = program.with_entry_flow(synthetic).unwrap();
+        let start = program.flow(&program.entry_flow("start").unwrap()).unwrap();
+        assert!(matches!(
+            &start.body[0],
+            Stmt::Return {
+                value: Expr::Node(Node::ToolCall { path, .. })
+            } if path[0].name == "helper"
+        ));
     }
 }

@@ -734,17 +734,17 @@ mod tests {
         write(
             dir.path(),
             "lib/text.at",
-            "flow helper() -> string { return \"ok\" }\npub flow normalize() -> string { return subflow(helper) }",
+            "flow helper() -> string { return \"ok\" }\npub flow normalize() -> string { return helper().await }",
         );
         write(
             dir.path(),
             "lib/wrapper.at",
-            "use \"./text.at\"::normalize as inner\npub flow wrapped() -> string { return subflow(inner) }",
+            "use \"./text.at\"::normalize as inner\npub flow wrapped() -> string { return inner().await }",
         );
         let entry = write(
             dir.path(),
             "entry.at",
-            "use \"./lib/wrapper.at\"::{wrapped as word}\nuse \"./lib/text.at\" as text\nflow start() -> string { result = subflow(word) return subflow(text.normalize) }",
+            "use \"./lib/wrapper.at\"::{wrapped as word}\nuse \"./lib/text.at\" as text\nflow start() -> string { result = word().await return text.normalize().await }",
         );
         let program = load_program(&entry, &SourceRoots::default()).unwrap();
         let start = program.entry_flow("start").unwrap();
@@ -793,7 +793,7 @@ mod tests {
 
         fs::write(
             &entry,
-            "use \"./lib.at\" as lib\nflow start() { return subflow(lib.hidden) }",
+            "use \"./lib.at\" as lib\nflow start() { return lib.hidden().await }",
         )
         .unwrap();
         let error = load_program(&entry, &SourceRoots::default()).unwrap_err();
@@ -910,7 +910,7 @@ mod tests {
         let entry = write(
             &project,
             "commands/main.at",
-            "use \"project:shared.at\" as project_lib\nuse \"user:user.at\"::user_flow as named\nflow start() -> string { result = subflow(named) return subflow(project_lib.shared) }",
+            "use \"project:shared.at\" as project_lib\nuse \"user:user.at\"::user_flow as named\nflow start() -> string { result = named().await return project_lib.shared().await }",
         );
         let roots = SourceRoots {
             project_root: Some(project.clone()),
@@ -971,7 +971,7 @@ mod tests {
         let entry = write(
             &project,
             "commands/main.at",
-            "use \"project:helper.at\" as helper\nflow start() -> string { return subflow(helper.answer) }",
+            "use \"project:helper.at\" as helper\nflow start() -> string { return helper.answer().await }",
         );
         let roots = SourceRoots {
             project_root: Some(project),

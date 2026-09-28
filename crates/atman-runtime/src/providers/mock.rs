@@ -186,7 +186,10 @@ fn turn_id_from_req(req: &LlmRequest) -> crate::event::TurnId {
 fn value_to_stream_text(v: &Value) -> String {
     match v {
         Value::Str(s) => s.clone(),
-        other => other.to_json().to_string(),
+        other => other
+            .to_json()
+            .map(|json| json.to_string())
+            .unwrap_or_else(|error| format!("[JSON error: {error}]")),
     }
 }
 

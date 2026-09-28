@@ -32,11 +32,11 @@ fn contract_roundtrip_stable() {
 }
 
 #[test]
-fn subflow_node_parses_with_positional_args() {
-    use atman_rt::ast::{Arg, Expr, FlowRef, Node, Stmt};
+fn flow_call_parses_with_positional_args() {
+    use atman_rt::ast::{Arg, Expr, Node, Stmt};
 
     let src = r#"flow parent(q: string) -> Report {
-    r = subflow(child, q, 42)
+    r = child(q, 42)
     return r
 }
 "#;
@@ -44,18 +44,18 @@ fn subflow_node_parses_with_positional_args() {
     let Stmt::Bind { value, .. } = &file.flows[0].body[0] else {
         panic!("bind expected");
     };
-    let Expr::Node(Node::Subflow { name, args }) = value else {
-        panic!("subflow node expected");
+    let Expr::Node(Node::ToolCall { path, args }) = value else {
+        panic!("call node expected");
     };
-    assert!(matches!(name, FlowRef::Local(id) if id.name == "child"));
+    assert!(matches!(&path[..], [id] if id.name == "child"));
     assert_eq!(args.len(), 2);
     assert!(matches!(&args[0], Arg::Positional(_)));
 }
 
 #[test]
-fn subflow_roundtrips() {
+fn flow_call_roundtrips() {
     let src = r#"flow parent(q: string) -> Report {
-    r = subflow(child, q, 42)
+    r = child(q, 42)
     return r
 }
 "#;
@@ -65,7 +65,7 @@ fn subflow_roundtrips() {
         .unwrap_or_else(|e| panic!("re-parse failed:\n{printed}\n\nerror: {e}"));
     let a = strip_spans(&format!("{:#?}", file1));
     let b = strip_spans(&format!("{:#?}", file2));
-    assert_eq!(a, b, "subflow AST diverged after roundtrip");
+    assert_eq!(a, b, "flow call AST diverged after roundtrip");
 }
 
 #[test]

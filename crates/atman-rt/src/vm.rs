@@ -7,18 +7,29 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::fmt;
+use core::{
+    fmt,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use crate::{
     Engine, ExpressionEffect, ExpressionHost, FlowArgs, FlowOutcome, HostFuture, HostValueOps,
     Preflight, StatementHost, StatementOutcome, Value, ValueError,
     ast::{Arg, Contract, FlowRef, LifecycleEvent, Stmt},
     engine::bind_evaluated_call_arguments,
-    expr::EvaluatedArg,
+    expr::{EvaluatedArg, MAX_ACTIVE_FLOW_FUTURES},
     pattern::PatternBindError,
     program::{FlowId, LinkedProgram, ModuleId},
     route::RouteMatch,
+    value::FlowFuture,
 };
+
+/// Selects the child context when a cold flow call is first driven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowDriveMode {
+    Inline,
+    Parallel,
+}
 
 /// Information about a flow call that has already been resolved by the VM.
 ///
@@ -30,6 +41,7 @@ pub struct FlowCall<'a> {
     pub source_id: &'a str,
     pub contract: Option<&'a Contract>,
     pub parent_node_id: &'a str,
+    pub mode: FlowDriveMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,22 +51,28 @@ pub enum VmCallError {
     TooManyPositional(String),
     CallDepthExceeded(String),
     ControlFlowEscaped(String),
+    InvalidFutureOwner,
+    FutureBoundary,
+    Cancelled,
 }
 
 impl fmt::Display for VmCallError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingEntry(name) => write!(f, "entry flow `{name}` does not exist"),
-            Self::MissingFlow(name) => write!(f, "subflow `{name}` does not exist"),
+            Self::MissingFlow(name) => write!(f, "flow `{name}` does not exist"),
             Self::TooManyPositional(name) => {
-                write!(f, "subflow `{name}` received too many positional arguments")
+                write!(f, "flow `{name}` received too many positional arguments")
             }
             Self::CallDepthExceeded(name) => {
-                write!(f, "subflow `{name}` exceeded the maximum call depth")
+                write!(f, "flow `{name}` exceeded the maximum call depth")
             }
             Self::ControlFlowEscaped(name) => {
                 write!(f, "break or continue escaped from flow `{name}`")
             }
+            Self::InvalidFutureOwner => write!(f, "flow future belongs to another invocation"),
+            Self::FutureBoundary => write!(f, "flow future cannot cross a flow or host boundary"),
+            Self::Cancelled => write!(f, "flow call was cancelled"),
         }
     }
 }
@@ -78,9 +96,40 @@ pub trait VmHost: StatementHost + Clone {
     );
 }
 
+struct ChildExit<'a, H: VmHost> {
+    host: &'a H,
+    call: FlowCall<'a>,
+    guard: Option<H::ChildGuard>,
+}
+
+struct ParallelPermit(Arc<AtomicUsize>);
+
+impl Drop for ParallelPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl<H: VmHost> ChildExit<'_, H> {
+    fn finish(mut self, outcome: &FlowOutcome<H::Payload, H::Error>) {
+        if let Some(guard) = self.guard.take() {
+            self.host.exit_child(&self.call, outcome, guard);
+        }
+    }
+}
+
+impl<H: VmHost> Drop for ChildExit<'_, H> {
+    fn drop(&mut self) {
+        if let Some(guard) = self.guard.take() {
+            let outcome = StatementOutcome::Err(self.host.call_error(VmCallError::Cancelled));
+            self.host.exit_child(&self.call, &outcome, guard);
+        }
+    }
+}
+
 /// The minimal interface for embedding an Atman VM in another application.
 ///
-/// Effects contain evaluated values. Subflow calls are handled by the VM and
+/// Effects contain evaluated values. Flow calls are handled by the VM and
 /// never reach `effect`. All other methods have defaults so a host can begin
 /// with one effect dispatcher and add context or observation as needed.
 pub trait VmEmbedding: Clone + Send + Sync {
@@ -289,6 +338,9 @@ impl Vm {
         args: FlowArgs<H::Payload, H::Error>,
         host: H,
     ) -> FlowOutcome<H::Payload, H::Error> {
+        if args.iter().any(|(_, value)| value.contains_flow_future()) {
+            return StatementOutcome::Err(host.call_error(VmCallError::FutureBoundary));
+        }
         let Some(flow) = self.program.flow(&id) else {
             return StatementOutcome::Err(host.call_error(VmCallError::MissingFlow(id.name)));
         };
@@ -297,6 +349,8 @@ impl Vm {
             program: Arc::clone(&self.program),
             module: id.module,
             depth: 0,
+            owner: Arc::new(()),
+            parallel_active: Arc::new(AtomicUsize::new(0)),
         });
         engine.run_flow(flow, args).await
     }
@@ -314,6 +368,8 @@ impl Vm {
                 program: Arc::clone(&self.program),
                 module: self.program.entry_module(),
                 depth: 0,
+                owner: Arc::new(()),
+                parallel_active: Arc::new(AtomicUsize::new(0)),
             });
             let outcome = engine.run_flow(&flow, Vec::new()).await;
             outcomes.push(outcome);
@@ -335,6 +391,8 @@ struct VmStatementHost<H: VmHost> {
     program: Arc<LinkedProgram>,
     module: ModuleId,
     depth: usize,
+    owner: Arc<()>,
+    parallel_active: Arc<AtomicUsize>,
 }
 
 impl<H: VmHost> StatementHost for VmStatementHost<H> {
@@ -358,6 +416,9 @@ impl<H: VmHost> StatementHost for VmStatementHost<H> {
             module: self.module,
             depth: self.depth,
             node_id: node_id.into(),
+            owner: Arc::clone(&self.owner),
+            parallel_active: Arc::clone(&self.parallel_active),
+            await_mode: FlowDriveMode::Inline,
         }
     }
 
@@ -402,6 +463,9 @@ struct VmExpressionHost<H: VmHost> {
     module: ModuleId,
     depth: usize,
     node_id: String,
+    owner: Arc<()>,
+    parallel_active: Arc<AtomicUsize>,
+    await_mode: FlowDriveMode,
 }
 
 impl<H: VmHost> Clone for VmExpressionHost<H> {
@@ -413,25 +477,83 @@ impl<H: VmHost> Clone for VmExpressionHost<H> {
             module: self.module,
             depth: self.depth,
             node_id: self.node_id.clone(),
+            owner: Arc::clone(&self.owner),
+            parallel_active: Arc::clone(&self.parallel_active),
+            await_mode: self.await_mode,
         }
     }
 }
 
 impl<H: VmHost> VmExpressionHost<H> {
-    fn call_subflow<'a>(
-        &'a self,
+    fn acquire_parallel_permit(&self) -> Option<ParallelPermit> {
+        loop {
+            let active = self.parallel_active.load(Ordering::Acquire);
+            if active >= MAX_ACTIVE_FLOW_FUTURES {
+                return None;
+            }
+            if self
+                .parallel_active
+                .compare_exchange_weak(active, active + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(ParallelPermit(Arc::clone(&self.parallel_active)));
+            }
+        }
+    }
+
+    fn create_flow_future(
+        &self,
         name: FlowRef,
         args: Vec<EvaluatedArg<H::Payload, H::Error>>,
+    ) -> Value<H::Payload, H::Error> {
+        let display_name = name.display_name();
+        let Some(id) = self.program.resolve(self.module, &name) else {
+            return Value::Err(self.host.call_error(VmCallError::MissingFlow(display_name)));
+        };
+        let Some(flow) = self.program.flow(&id) else {
+            return Value::Err(self.host.call_error(VmCallError::MissingFlow(display_name)));
+        };
+        if self.depth >= Vm::MAX_CALL_DEPTH {
+            return Value::Err(
+                self.host
+                    .call_error(VmCallError::CallDepthExceeded(display_name)),
+            );
+        }
+        let bindings = match bind_evaluated_call_arguments(&flow.params, args) {
+            Ok(bindings) => bindings,
+            Err(crate::CallArgumentError::TooManyPositional) => {
+                return Value::Err(
+                    self.host
+                        .call_error(VmCallError::TooManyPositional(display_name)),
+                );
+            }
+            Err(crate::CallArgumentError::Evaluation(value)) => return value,
+        };
+        if bindings
+            .iter()
+            .any(|(_, value)| value.contains_flow_future())
+        {
+            return Value::Err(self.host.call_error(VmCallError::FutureBoundary));
+        }
+        Value::FlowFuture(Arc::new(FlowFuture::new(
+            id,
+            bindings,
+            Arc::clone(&self.owner),
+        )))
+    }
+
+    fn call_flow_future<'a>(
+        &'a self,
+        future: &'a FlowFuture<H::Payload, H::Error>,
+        mode: FlowDriveMode,
     ) -> HostFuture<'a, Value<H::Payload, H::Error>> {
         Box::pin(async move {
             if let Some(error) = self.effect_host.cancellation_error() {
                 return Value::Err(error);
             }
-            let display_name = name.display_name();
-            let Some(id) = self.program.resolve(self.module, &name) else {
-                return Value::Err(self.host.call_error(VmCallError::MissingFlow(display_name)));
-            };
-            let Some(flow) = self.program.flow(&id) else {
+            let id = &future.target;
+            let display_name = id.name.clone();
+            let Some(flow) = self.program.flow(id) else {
                 return Value::Err(self.host.call_error(VmCallError::MissingFlow(display_name)));
             };
             if self.depth >= Vm::MAX_CALL_DEPTH {
@@ -440,42 +562,40 @@ impl<H: VmHost> VmExpressionHost<H> {
                         .call_error(VmCallError::CallDepthExceeded(display_name)),
                 );
             }
-            let bindings = match bind_evaluated_call_arguments(&flow.params, args) {
-                Ok(bindings) => bindings,
-                Err(crate::CallArgumentError::TooManyPositional) => {
-                    return Value::Err(
-                        self.host
-                            .call_error(VmCallError::TooManyPositional(display_name)),
-                    );
-                }
-                Err(crate::CallArgumentError::Evaluation(value)) => return value,
-            };
             let Some(source) = self.program.module(id.module) else {
                 return Value::Err(self.host.call_error(VmCallError::MissingFlow(display_name)));
             };
             let call = FlowCall {
-                target: &id,
+                target: id,
                 display_name: &display_name,
                 source_id: &source.source_id,
                 contract: flow.contract.as_ref(),
                 parent_node_id: &self.node_id,
+                mode,
             };
             let (child_host, guard) = match self.host.enter_child(&call) {
                 Ok(child) => child,
                 Err(error) => return Value::Err(error),
+            };
+            let exit = ChildExit {
+                host: &self.host,
+                call,
+                guard: Some(guard),
             };
             let mut engine = Engine::new(VmStatementHost {
                 host: child_host,
                 program: Arc::clone(&self.program),
                 module: id.module,
                 depth: self.depth + 1,
+                owner: Arc::new(()),
+                parallel_active: Arc::clone(&self.parallel_active),
             });
-            let outcome = engine.run_flow(flow, bindings).await;
+            let outcome = engine.run_flow(flow, future.args.clone()).await;
             let outcome = match self.effect_host.cancellation_error() {
                 Some(error) => StatementOutcome::Err(error),
                 None => outcome,
             };
-            self.host.exit_child(&call, &outcome, guard);
+            exit.finish(&outcome);
             match outcome {
                 StatementOutcome::Return(value) => value,
                 StatementOutcome::Err(error) => Value::Err(error),
@@ -505,11 +625,15 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
         self.effect_host.cancellation_error()
     }
 
+    fn await_drive_mode(&self) -> FlowDriveMode {
+        self.await_mode
+    }
+
     fn preflight_tool(&self, name: &str) -> Option<Value<Self::Payload, Self::Error>> {
         self.effect_host.preflight_tool(name)
     }
 
-    fn preflight_subflow(&self, name: &FlowRef, args: &[Arg]) -> Result<(), Self::Error> {
+    fn preflight_flow(&self, name: &FlowRef, args: &[Arg]) -> Result<(), Self::Error> {
         let display_name = name.display_name();
         let id = self.program.resolve(self.module, name).ok_or_else(|| {
             self.host
@@ -543,6 +667,9 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
             module: self.module,
             depth: self.depth,
             node_id: format!("{}.branch[{index}]", self.node_id),
+            owner: Arc::clone(&self.owner),
+            parallel_active: Arc::clone(&self.parallel_active),
+            await_mode: FlowDriveMode::Parallel,
         }
     }
 
@@ -550,18 +677,68 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
         self.effect_host.fanout_branch_end(index, value);
     }
 
-    fn eval_subflow<'a>(
-        &'a self,
+    fn make_flow_future(
+        &self,
         name: FlowRef,
         args: Vec<EvaluatedArg<Self::Payload, Self::Error>>,
+    ) -> Value<Self::Payload, Self::Error> {
+        self.create_flow_future(name, args)
+    }
+
+    fn validate_flow_future(
+        &self,
+        future: &FlowFuture<Self::Payload, Self::Error>,
+    ) -> Result<(), Self::Error> {
+        future
+            .belongs_to(&self.owner)
+            .then_some(())
+            .ok_or_else(|| self.host.call_error(VmCallError::InvalidFutureOwner))
+    }
+
+    fn drive_flow_future<'a>(
+        &'a self,
+        future: &'a FlowFuture<Self::Payload, Self::Error>,
+        mode: FlowDriveMode,
     ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
-        self.call_subflow(name, args)
+        Box::pin(async move {
+            if let Err(error) = self.validate_flow_future(future) {
+                return Value::Err(error);
+            }
+            if let Some(error) = self.effect_host.cancellation_error() {
+                return Value::Err(error);
+            }
+            let mut result = future.result.lock().await;
+            if let Some(value) = result.as_ref() {
+                return value.clone();
+            }
+            let _permit = if mode == FlowDriveMode::Parallel {
+                match self.acquire_parallel_permit() {
+                    Some(permit) => Some(permit),
+                    None => {
+                        return Value::Err(H::Error::type_mismatch(
+                            "fanout with at most 128 concurrent flow calls",
+                            "active flow limit exceeded".into(),
+                        ));
+                    }
+                }
+            } else {
+                None
+            };
+            let value = self.call_flow_future(future, mode).await;
+            *result = Some(value.clone());
+            value
+        })
     }
 
     fn eval_external<'a>(
         &'a self,
         effect: ExpressionEffect<Self::Payload, Self::Error>,
     ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
+        if effect.contains_flow_future() {
+            return Box::pin(async move {
+                Value::Err(self.host.call_error(VmCallError::FutureBoundary))
+            });
+        }
         self.effect_host.eval_external(effect)
     }
 }

@@ -60,7 +60,7 @@ async fn launcher_runs_flow_with_used_source() {
     let entry = project_root.join("main.at");
     std::fs::write(
         &entry,
-        "use \"project:helper.at\"::helper\nflow main() -> string { return subflow(helper) }\n",
+        "use \"project:helper.at\"::helper\nflow main() -> string { return helper().await }\n",
     )
     .unwrap();
 

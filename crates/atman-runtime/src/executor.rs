@@ -416,6 +416,8 @@ impl Executor {
                         source.linked_program,
                         source.module,
                     );
+                    // Child flow futures stay in this scope. Dropping exec_fut
+                    // closes their terminal events before the root FlowEnd.
                     let result = atman_rt::race_cancel(exec_fut, async {
                         body_flow_cancel.cancelled().await;
                         RuntimeError::Cancelled("flow cancelled by user".into())

@@ -1174,12 +1174,12 @@ pub fn mcp_result_to_value(result: serde_json::Value) -> crate::value::Value {
     crate::value::Value::from_json(result)
 }
 
-pub fn value_to_mcp_args(args: &crate::tool::ToolArgs) -> serde_json::Value {
+pub fn value_to_mcp_args(args: &crate::tool::ToolArgs) -> Result<serde_json::Value, RuntimeError> {
     let mut map = serde_json::Map::new();
     for (name, value) in &args.named {
-        map.insert(name.clone(), value.to_json());
+        map.insert(name.clone(), value.to_json()?);
     }
-    serde_json::Value::Object(map)
+    Ok(serde_json::Value::Object(map))
 }
 
 // Some MCP servers use a schema like {action: enum, params: {type: "object"}}
@@ -1321,7 +1321,7 @@ impl crate::tool::Tool for McpToolAdapter {
         _ctx: &'a crate::tool::ToolCtx,
     ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
         Box::pin(async move {
-            let params = value_to_mcp_args(&args);
+            let params = value_to_mcp_args(&args)?;
             let params = if let Some(plan) = &self.reconcile {
                 let map = match params {
                     serde_json::Value::Object(m) => m,

@@ -20,7 +20,6 @@ mod kw {
     syn::custom_keyword!(fanout);
     syn::custom_keyword!(user_confirm);
     syn::custom_keyword!(contract);
-    syn::custom_keyword!(subflow);
     syn::custom_keyword!(user_msg);
     syn::custom_keyword!(assistant_msg);
     syn::custom_keyword!(system_msg);
@@ -482,7 +481,7 @@ fn parse_expr(input: ParseStream) -> Result<Expr> {
 }
 
 fn parse_expr_bp(input: ParseStream, min_bp: u8) -> Result<Expr> {
-    let mut lhs = parse_expr_primary(input)?;
+    let mut lhs = parse_expr_prefix(input)?;
     loop {
         let op = peek_binop(input);
         let Some((op, bp)) = op else { break };
@@ -502,6 +501,45 @@ fn parse_expr_bp(input: ParseStream, min_bp: u8) -> Result<Expr> {
         lhs = parse_annotation_suffix(input, lhs)?;
     }
     Ok(lhs)
+}
+
+fn parse_expr_prefix(input: ParseStream) -> Result<Expr> {
+    if input.peek(Token![!]) && !input.peek(Token![!=]) {
+        input.parse::<Token![!]>()?;
+        return Ok(Expr::Unary {
+            op: UnOp::Not,
+            operand: Box::new(parse_expr_prefix(input)?),
+        });
+    }
+    if input.peek(Token![-]) {
+        input.parse::<Token![-]>()?;
+        return Ok(Expr::Unary {
+            op: UnOp::Neg,
+            operand: Box::new(parse_expr_prefix(input)?),
+        });
+    }
+    let mut expr = parse_expr_primary(input)?;
+    while peek_await_suffix(input) {
+        input.parse::<Token![.]>()?;
+        let suffix = <syn::Ident as syn::ext::IdentExt>::parse_any(input)?;
+        debug_assert_eq!(suffix.to_string(), "await");
+        expr = Expr::Await {
+            value: Box::new(expr),
+        };
+    }
+    Ok(expr)
+}
+
+fn peek_await_suffix(input: ParseStream) -> bool {
+    if !input.peek(Token![.]) {
+        return false;
+    }
+    let ahead = input.fork();
+    if ahead.parse::<Token![.]>().is_err() {
+        return false;
+    }
+    <syn::Ident as syn::ext::IdentExt>::parse_any(&ahead)
+        .is_ok_and(|suffix| suffix == "await" && !ahead.peek(token::Paren))
 }
 
 fn parse_annotation_suffix(input: ParseStream, lhs: Expr) -> Result<Expr> {
@@ -629,22 +667,6 @@ fn parse_expr_primary(input: ParseStream) -> Result<Expr> {
             body: Box::new(body),
         });
     }
-    if input.peek(Token![!]) && !input.peek(Token![!=]) {
-        input.parse::<Token![!]>()?;
-        let operand = parse_expr_primary(input)?;
-        return Ok(Expr::Unary {
-            op: UnOp::Not,
-            operand: Box::new(operand),
-        });
-    }
-    if input.peek(Token![-]) {
-        input.parse::<Token![-]>()?;
-        let operand = parse_expr_primary(input)?;
-        return Ok(Expr::Unary {
-            op: UnOp::Neg,
-            operand: Box::new(operand),
-        });
-    }
     if input.peek(Token![@]) {
         input.parse::<Token![@]>()?;
         let s: LitStr = input.parse()?;
@@ -656,9 +678,6 @@ fn parse_expr_primary(input: ParseStream) -> Result<Expr> {
     }
     if input.peek(kw::user_confirm) {
         return Ok(Expr::Node(parse_user_confirm(input)?));
-    }
-    if input.peek(kw::subflow) {
-        return Ok(Expr::Node(parse_subflow(input)?));
     }
     if input.peek(kw::user_msg) {
         input.parse::<kw::user_msg>()?;
@@ -720,6 +739,16 @@ fn parse_expr_primary(input: ParseStream) -> Result<Expr> {
         return Ok(Expr::List(items));
     }
 
+    if input.peek(token::Paren) {
+        let content;
+        parenthesized!(content in input);
+        let expr = parse_expr(&content)?;
+        if !content.is_empty() {
+            return Err(content.error("expected one expression in parentheses"));
+        }
+        return Ok(expr);
+    }
+
     if input.peek(syn::Ident) {
         return parse_ident_expr(input);
     }
@@ -749,7 +778,7 @@ fn parse_ident_expr(input: ParseStream) -> Result<Expr> {
 
     if input.peek(Token![.]) {
         let mut path = vec![first];
-        while input.peek(Token![.]) {
+        while input.peek(Token![.]) && !peek_await_suffix(input) {
             input.parse::<Token![.]>()?;
             let seg = to_ident(<syn::Ident as syn::ext::IdentExt>::parse_any(input)?);
             path.push(seg);
@@ -942,32 +971,6 @@ fn parse_kwargs(input: ParseStream) -> Result<Kwargs> {
     Ok(kwargs)
 }
 
-fn parse_subflow(input: ParseStream) -> Result<Node> {
-    input.parse::<kw::subflow>()?;
-    let content;
-    parenthesized!(content in input);
-    let first = to_ident(content.parse::<syn::Ident>()?);
-    let name = if content.peek(Token![.]) {
-        content.parse::<Token![.]>()?;
-        let flow = to_ident(content.parse::<syn::Ident>()?);
-        FlowRef::Qualified {
-            module: first,
-            flow,
-        }
-    } else {
-        FlowRef::Local(first)
-    };
-    let args = if content.peek(Token![,]) {
-        content.parse::<Token![,]>()?;
-        parse_call_args(&content)?
-    } else if content.is_empty() {
-        Vec::new()
-    } else {
-        return Err(content.error("expected `,` after subflow name"));
-    };
-    Ok(Node::Subflow { name, args })
-}
-
 fn parse_user_confirm(input: ParseStream) -> Result<Node> {
     input.parse::<kw::user_confirm>()?;
     let content;
@@ -1007,7 +1010,7 @@ fn parse_fanout(input: ParseStream) -> Result<Node> {
     let source = if mapping {
         parse_expr(input)?
     } else {
-        parse_expr_primary(input)?
+        parse_expr_prefix(input)?
     };
     if mapping {
         let body_content;
@@ -1050,4 +1053,40 @@ pub fn parse_file(src: &str) -> core::result::Result<File, ParseError> {
         .map_err(|error| ParseError {
             message: error.to_string(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn await_suffix_parses_after_calls_variables_and_grouping() {
+        let source = "flow main() { a = child().await b = future.await c = (other()).await d = !(child().await) return (a + b) * c }";
+        let file = parse_file(source).unwrap();
+        for stmt in file.flows[0].body.iter().take(3) {
+            assert!(matches!(
+                stmt,
+                Stmt::Bind {
+                    value: Expr::Await { .. },
+                    ..
+                }
+            ));
+        }
+        let printed = crate::print_file(&file);
+        let reparsed = parse_file(&printed).unwrap();
+        assert_eq!(format!("{file:#?}"), format!("{reparsed:#?}"));
+    }
+
+    #[test]
+    fn await_segment_followed_by_arguments_remains_a_tool_name() {
+        let file =
+            parse_file("flow main() { ready = mcp.await(server: \"jira\") return ready }").unwrap();
+        assert!(matches!(
+            &file.flows[0].body[0],
+            Stmt::Bind {
+                value: Expr::Node(Node::ToolCall { path, .. }),
+                ..
+            } if path.iter().map(|part| part.name.as_str()).collect::<Vec<_>>() == ["mcp", "await"]
+        ));
+    }
 }

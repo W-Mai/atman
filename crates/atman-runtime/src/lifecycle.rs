@@ -262,7 +262,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.path().join("hooks.at"),
-            "use \"user:helper.at\" as helper\nflow local() { x = subflow(helper.create) }\non session.start { x = subflow(local) }",
+            "use \"user:helper.at\" as helper\nflow local() { x = helper.create().await }\non session.start { x = local().await }",
         )
         .unwrap();
         let runner = LifecycleRunner::from_dir(dir.path());

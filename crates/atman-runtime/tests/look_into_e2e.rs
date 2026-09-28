@@ -8,7 +8,7 @@ use atman_runtime::providers::mock::MockProvider;
 type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 #[test]
-fn examples_look_into_at_parses_with_subflow() {
+fn examples_look_into_at_parses_with_flow_calls() {
     let src = std::fs::read_to_string("../../examples/look_into.at").unwrap();
     let file = parse_file(&src).unwrap();
     let names: Vec<_> = file.flows.iter().map(|f| f.name.name.as_str()).collect();
@@ -26,8 +26,8 @@ async fn look_into_fanout_subflow_synthesizes_via_mock_providers() {
     // Inline flow avoids `@"..."` FileRef which resolves against process CWD.
     const FLOW: &str = r#"flow look_into(question: string) -> Report {
     findings = fanout [
-        subflow(explore_module, question, "src/"),
-        subflow(explore_module, question, "tests/"),
+        explore_module(question, "src/"),
+        explore_module(question, "tests/"),
     ]
 
     summary = llm.call(

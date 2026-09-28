@@ -703,7 +703,7 @@ mod tests {
         std::fs::write(&helper, "pub flow helper() -> string { return \"one\" }").unwrap();
         std::fs::write(
             &entry,
-            "use \"./helper.at\"::helper\nflow start() -> string { return subflow(helper) }",
+            "use \"./helper.at\"::helper\nflow start() -> string { return helper().await }",
         )
         .unwrap();
         let roots = SourceRoots::default();
@@ -769,6 +769,6 @@ mod tests {
             .unwrap();
         let replayed = load_program_from_bundle(&saved.bundle(), &entry, &roots).unwrap();
         assert_eq!(replayed.closure_digest(), first_program.closure_digest());
-        assert!(replayed.entry_source().contains("subflow(helper)"));
+        assert!(replayed.entry_source().contains("helper().await"));
     }
 }

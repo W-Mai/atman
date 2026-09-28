@@ -7320,6 +7320,16 @@ fn collect_boxed_details(
         } => {
             push_detail_section(out, "subflow", name);
         }
+        WorkflowNodeKind::Stmt {
+            node_kind: atman_runtime::nodegraph::NodeKind::FlowFuture { name },
+        } => {
+            push_detail_section(out, "future", name);
+        }
+        WorkflowNodeKind::Stmt {
+            node_kind: atman_runtime::nodegraph::NodeKind::FlowAwait { target },
+        } => {
+            push_detail_section(out, "await", target);
+        }
         WorkflowNodeKind::Subflow { flow_name, .. } => {
             push_detail_section(out, "flow", flow_name);
         }
@@ -7623,6 +7633,8 @@ fn stmt_kind_glyph(kind: &atman_runtime::nodegraph::NodeKind) -> (&'static str, 
         NodeKind::ToolCall { .. } => ("🔧", t.accent.into()),
         NodeKind::Fanout => ("⇉", t.accent.into()),
         NodeKind::UserConfirm => ("?", t.accent.into()),
+        NodeKind::FlowFuture { .. } => ("◇", t.subtle_fg.into()),
+        NodeKind::FlowAwait { .. } => ("↳", t.accent.into()),
         NodeKind::Subflow { .. } => ("↳", t.accent.into()),
         NodeKind::Message { .. } => ("✉", t.tinted_fg.into()),
         NodeKind::FixUntilTest => ("↻", t.accent.into()),

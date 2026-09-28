@@ -98,11 +98,11 @@ flow countdown(n: int) -> int {
     when n <= 0 {
         return 0
     }
-    return subflow(countdown, n - 1)
+    return countdown(n - 1).await
 }
 
 flow start() -> int {
-    return subflow(countdown, 10)
+    return countdown(10).await
 }
 "#)
     .await;
@@ -152,11 +152,11 @@ flow sum(xs: [int]) -> int {
     when is_empty(xs) {
         return 0
     }
-    return head(xs) + subflow(sum, tail(xs))
+    return head(xs) + sum(tail(xs)).await
 }
 
 flow start() -> int {
-    return subflow(sum, [1, 2, 3, 4, 5])
+    return sum([1, 2, 3, 4, 5]).await
 }
 "#)
     .await;

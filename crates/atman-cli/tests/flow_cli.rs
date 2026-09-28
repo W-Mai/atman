@@ -324,7 +324,7 @@ fn flow_revision_runs_recorded_dependencies_and_refuses_partial_rollback() {
     std::fs::create_dir_all(&library).unwrap();
     std::fs::write(
         root.join("review.at"),
-        "use \"project:text.at\"::normalize\nflow review(input: string) -> string { return subflow(normalize, input) }\n",
+        "use \"project:text.at\"::normalize\nflow review(input: string) -> string { return normalize(input).await }\n",
     )
     .unwrap();
     let dependency = library.join("text.at");

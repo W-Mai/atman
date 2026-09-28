@@ -33,7 +33,7 @@ Supported statements are bindings, struct destructuring, `when`, `return`, bare
 expressions, `watch`, unconditional `loop`, `break`, and `continue`.
 
 There is no `if`, `else`, `for`, or `while`. Use `when`, a bounded recursive
-subflow, or `loop` with an explicit `break`. Every unconditional loop needs a
+Flow call, or `loop` with an explicit `break`. Every unconditional loop needs a
 termination path; a loop without `break`, `return`, error, or cancellation does
 not converge.
 
@@ -123,26 +123,23 @@ selection = llm.extract(
 `fields` must be a non-empty struct. Supported extraction types include `bool`,
 `int`, `float`, `string`, `[string]`, and `[int]`.
 
-## Subflows and Fanout
+## Flow Calls and Fanout
 
-A same-file subflow call uses an identifier and positional or named arguments:
+A local or `use`-bound Flow uses function-call syntax with positional or named arguments:
 
 ```atman
-answer = subflow(worker, question, limit: 3)
+answer = worker(question, limit: 3).await
 ```
 
-Subflow calls create child flow-run events and inherit the parent evaluation context.
-The target flow's own contract and default parameter values are not installed by
-this path, so pass required values explicitly and put effective capabilities on
-the parent flow.
+`worker(...)` evaluates its explicit arguments and creates a cold Flow Future without running the body. `.await` executes one child Flow and returns its result. The child uses its own declared defaults and contract, within the parent's authority. A single await shares the parent session context; `fanout` drives child Flows with separate message contexts.
 
 ### Parallelism decision table
 
 | Need | Use | Important limitation |
 |---|---|---|
 | Run a fixed set of same-file expressions concurrently | `fanout [a, b]` | Preserves input order; any branch error fails the fanout. |
-| Collect an existing array | `fanout pending` | Array elements are already evaluated; earlier tool calls cannot become concurrent. |
-| Run one expression per item | `fanout source { |item| expr }` | Current evaluator is sequential despite the name. |
+| Collect an existing array | `fanout pending` | Cold Flow calls run concurrently; earlier tool calls have already executed. |
+| Run one expression per item | `fanout source { |item| expr }` | Mapping is sequential; cold Flow Futures returned by the mapping run concurrently. |
 | Batch assistant tool calls | `dispatch_all(tool_uses)` | Auto-approved calls can run in parallel; approval-gated calls are serialized after approval. |
 | Run independent external coding workers | `flow.instances()` then `flow.spawn(spawn_token: inventory.spawn_token, async: true)` | Inspect and clean up the session inventory before spending the single-use token; the spawn returns a handle immediately. |
 
@@ -199,7 +196,7 @@ watch reply {
 }
 ```
 
-They do not instrument `llm.extract`, arbitrary tools, subflows, fanout results, or
+They do not instrument `llm.extract`, arbitrary tools, child Flow calls, fanout results, or
 later aliases. Although `<` and `<=` parse, runtime enforcement currently supports
 `>` and `>=`; use those forms.
 
@@ -221,7 +218,7 @@ flow run() -> string {
 `capabilities { shell: true }` is enforced for Tier Four tools such as bash and
 terminal. `scope` and `interjection` are declarative metadata; filesystem access
 still follows the session trust/access configuration. If a parent path can reach
-shell tools through a subflow, declare the capability on the parent.
+shell tools through a child Flow, declare the capability on the parent.
 
 ## Complete Explicit Orchestration Example
 
@@ -271,8 +268,8 @@ flow orchestrate(user_prompt: string) -> string {
     )
 
     research = fanout [
-        subflow(research_worker, user_prompt, "runtime"),
-        subflow(research_worker, user_prompt, "tests"),
+        research_worker(user_prompt, "runtime"),
+        research_worker(user_prompt, "tests"),
     ]
     test_result = bash.spawn(
         cmd: "cargo test --workspace",
