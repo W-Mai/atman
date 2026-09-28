@@ -40,6 +40,14 @@ pub enum ToolCallMode {
     Deferred,
 }
 
+/// Terminal state reported for a fanout branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanoutBranchStatus {
+    Ok,
+    Err,
+    Cancelled,
+}
+
 /// An external effect whose language expressions have already been evaluated.
 pub enum ExpressionEffect<P, E> {
     FileRef(String),
@@ -108,7 +116,10 @@ pub trait ExpressionHost: Sync + Clone + Send {
     fn branch_host(&self, _index: usize) -> Self {
         self.clone()
     }
-    fn fanout_branch_end(&self, _index: usize, _value: &Value<Self::Payload, Self::Error>) {}
+    fn fanout_error_status(&self, _error: &Self::Error) -> FanoutBranchStatus {
+        FanoutBranchStatus::Err
+    }
+    fn fanout_branch_end(&self, _index: usize, _status: FanoutBranchStatus) {}
     /// Return a value to reject or short-circuit a tool before its arguments run.
     fn preflight_tool(&self, _name: &str) -> Option<Value<Self::Payload, Self::Error>> {
         None
@@ -565,7 +576,7 @@ pub async fn eval_fanout<'a, H: ExpressionHost>(
             let states = Arc::clone(&states);
             async move {
                 let value = eval_expr(expr, env, &branch_host).await;
-                record_prepared_branch(&states, index, &value);
+                record_prepared_branch(&states, index, &value, &branch_host);
                 (branch_host, value)
             }
         });
@@ -574,13 +585,13 @@ pub async fn eval_fanout<'a, H: ExpressionHost>(
         for (branch_host, value) in &prepared {
             if let Err(error) = validate_fanout_value(value, branch_host, &mut unique) {
                 let rejected = Value::Err(error.clone());
-                for (index, (_, value)) in prepared.iter().enumerate() {
+                for (index, (branch_host, value)) in prepared.iter().enumerate() {
                     let terminal = if is_pending_call(value) {
                         &rejected
                     } else {
                         value
                     };
-                    scope.end(index, terminal);
+                    scope.end(index, fanout_branch_status(terminal, branch_host));
                 }
                 return Value::Err(error);
             }
@@ -594,11 +605,11 @@ pub async fn eval_fanout<'a, H: ExpressionHost>(
                     let states = Arc::clone(&states);
                     async move {
                         let value = drive_fanout_value(value, &branch_host).await;
-                        record_finished_branch(&states, index, &value);
+                        record_finished_branch(&states, index, &value, &branch_host);
                         value
                     }
                 }),
-            |index, value| scope.end(index, value),
+            |index, value| scope.end(index, fanout_branch_status(value, host)),
         )
         .await;
     }
@@ -617,7 +628,7 @@ pub async fn eval_fanout<'a, H: ExpressionHost>(
     let mut scope = FanoutBranchScope::start(host, values.len());
     let states = scope.states();
     for (index, value) in values.iter().enumerate() {
-        record_prepared_branch(&states, index, value);
+        record_prepared_branch(&states, index, value, host);
     }
     join_fanout_all(
         values.into_iter().enumerate().map(|(index, value)| {
@@ -625,11 +636,11 @@ pub async fn eval_fanout<'a, H: ExpressionHost>(
             let states = Arc::clone(&states);
             async move {
                 let value = drive_fanout_value(value, &branch_host).await;
-                record_finished_branch(&states, index, &value);
+                record_finished_branch(&states, index, &value, &branch_host);
                 value
             }
         }),
-        |index, value| scope.end(index, value),
+        |index, value| scope.end(index, fanout_branch_status(value, host)),
     )
     .await
 }
@@ -639,6 +650,7 @@ pub(crate) const MAX_ACTIVE_CALLS: usize = 128;
 const BRANCH_RUNNING: u8 = 0;
 const BRANCH_OK: u8 = 1;
 const BRANCH_ERR: u8 = 2;
+const BRANCH_CANCELLED: u8 = 3;
 
 struct FanoutBranchScope<'a, H: ExpressionHost> {
     host: &'a H,
@@ -663,10 +675,10 @@ impl<'a, H: ExpressionHost> FanoutBranchScope<'a, H> {
         Arc::clone(&self.states)
     }
 
-    fn end(&mut self, index: usize, value: &Value<H::Payload, H::Error>) {
+    fn end(&mut self, index: usize, status: FanoutBranchStatus) {
         if !self.ended[index] {
             self.ended[index] = true;
-            self.host.fanout_branch_end(index, value);
+            self.host.fanout_branch_end(index, status);
         }
     }
 }
@@ -676,21 +688,28 @@ impl<H: ExpressionHost> Drop for FanoutBranchScope<'_, H> {
         if self.ended.iter().all(|ended| *ended) {
             return;
         }
-        let cancelled: Value<H::Payload, H::Error> =
-            Value::Err(self.host.cancellation_error().unwrap_or_else(|| {
-                H::Error::type_mismatch("completed fanout branch", "cancelled".into())
-            }));
-        let completed: Value<H::Payload, H::Error> = Value::Unit;
         for index in 0..self.ended.len() {
             if !self.ended[index] {
-                let value = if self.states[index].load(Ordering::Acquire) == BRANCH_OK {
-                    &completed
-                } else {
-                    &cancelled
+                let status = match self.states[index].load(Ordering::Acquire) {
+                    BRANCH_OK => FanoutBranchStatus::Ok,
+                    BRANCH_ERR => FanoutBranchStatus::Err,
+                    BRANCH_CANCELLED => FanoutBranchStatus::Cancelled,
+                    BRANCH_RUNNING => FanoutBranchStatus::Cancelled,
+                    _ => unreachable!("invalid fanout branch state"),
                 };
-                self.end(index, value);
+                self.end(index, status);
             }
         }
+    }
+}
+
+fn fanout_branch_status<H: ExpressionHost>(
+    value: &Value<H::Payload, H::Error>,
+    host: &H,
+) -> FanoutBranchStatus {
+    match value {
+        Value::Err(error) => host.fanout_error_status(error),
+        _ => FanoutBranchStatus::Ok,
     }
 }
 
@@ -698,17 +717,27 @@ fn is_pending_call<P, E>(value: &Value<P, E>) -> bool {
     matches!(value, Value::FlowFuture(_) | Value::ToolFuture(_))
 }
 
-fn record_prepared_branch<P, E>(states: &[AtomicU8], index: usize, value: &Value<P, E>) {
+fn record_prepared_branch<H: ExpressionHost>(
+    states: &[AtomicU8],
+    index: usize,
+    value: &Value<H::Payload, H::Error>,
+    host: &H,
+) {
     if !is_pending_call(value) {
-        record_finished_branch(states, index, value);
+        record_finished_branch(states, index, value, host);
     }
 }
 
-fn record_finished_branch<P, E>(states: &[AtomicU8], index: usize, value: &Value<P, E>) {
-    let state = if matches!(value, Value::Err(_)) {
-        BRANCH_ERR
-    } else {
-        BRANCH_OK
+fn record_finished_branch<H: ExpressionHost>(
+    states: &[AtomicU8],
+    index: usize,
+    value: &Value<H::Payload, H::Error>,
+    host: &H,
+) {
+    let state = match fanout_branch_status(value, host) {
+        FanoutBranchStatus::Ok => BRANCH_OK,
+        FanoutBranchStatus::Err => BRANCH_ERR,
+        FanoutBranchStatus::Cancelled => BRANCH_CANCELLED,
     };
     states[index].store(state, Ordering::Release);
 }
@@ -805,7 +834,7 @@ pub async fn eval_dynamic_fanout<'a, H: ExpressionHost>(
     let mut scope = FanoutBranchScope::start(host, results.len());
     let states = scope.states();
     for (index, value) in results.iter().enumerate() {
-        record_prepared_branch(&states, index, value);
+        record_prepared_branch(&states, index, value, host);
     }
     join_fanout_all(
         results.into_iter().enumerate().map(|(index, value)| {
@@ -813,11 +842,11 @@ pub async fn eval_dynamic_fanout<'a, H: ExpressionHost>(
             let states = Arc::clone(&states);
             async move {
                 let value = drive_fanout_value(value, &branch_host).await;
-                record_finished_branch(&states, index, &value);
+                record_finished_branch(&states, index, &value, &branch_host);
                 value
             }
         }),
-        |index, value| scope.end(index, value),
+        |index, value| scope.end(index, fanout_branch_status(value, host)),
     )
     .await
 }
@@ -850,7 +879,15 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct BranchTraceHost(Arc<BranchTrace>);
+    struct BranchTraceHost(Arc<BranchTrace>, bool);
+
+    fn branch_status_code(status: FanoutBranchStatus) -> u8 {
+        match status {
+            FanoutBranchStatus::Ok => BRANCH_OK,
+            FanoutBranchStatus::Err => BRANCH_ERR,
+            FanoutBranchStatus::Cancelled => BRANCH_CANCELLED,
+        }
+    }
 
     impl ExpressionHost for BranchTraceHost {
         type Payload = ();
@@ -868,16 +905,17 @@ mod tests {
             self.0.starts[index].fetch_add(1, Ordering::SeqCst);
         }
 
-        fn fanout_branch_end(&self, index: usize, value: &Value<(), EvalError>) {
+        fn fanout_error_status(&self, _error: &EvalError) -> FanoutBranchStatus {
+            if self.1 {
+                FanoutBranchStatus::Cancelled
+            } else {
+                FanoutBranchStatus::Err
+            }
+        }
+
+        fn fanout_branch_end(&self, index: usize, status: FanoutBranchStatus) {
             self.0.ends[index].fetch_add(1, Ordering::SeqCst);
-            self.0.statuses[index].store(
-                if value.is_err() {
-                    BRANCH_ERR
-                } else {
-                    BRANCH_OK
-                },
-                Ordering::SeqCst,
-            );
+            self.0.statuses[index].store(branch_status_code(status), Ordering::SeqCst);
             self.0.order[index].store(
                 self.0.next_order.fetch_add(1, Ordering::SeqCst) + 1,
                 Ordering::SeqCst,
@@ -937,19 +975,22 @@ mod tests {
         drop(future);
     }
 
-    fn assert_branch_trace(host: &BranchTraceHost) {
+    fn assert_dropped_branch_trace(host: &BranchTraceHost, completed: FanoutBranchStatus) {
         for index in 0..2 {
             assert_eq!(host.0.starts[index].load(Ordering::SeqCst), 1);
             assert_eq!(host.0.ends[index].load(Ordering::SeqCst), 1);
         }
-        assert_eq!(host.0.statuses[0].load(Ordering::SeqCst), BRANCH_OK);
-        assert_eq!(host.0.statuses[1].load(Ordering::SeqCst), BRANCH_ERR);
+        assert_eq!(
+            host.0.statuses[0].load(Ordering::SeqCst),
+            branch_status_code(completed)
+        );
+        assert_eq!(host.0.statuses[1].load(Ordering::SeqCst), BRANCH_CANCELLED);
         assert_eq!(host.0.order[0].load(Ordering::SeqCst), 1);
         assert_eq!(host.0.order[1].load(Ordering::SeqCst), 2);
     }
 
     #[test]
-    fn dropped_static_variable_and_dynamic_fanout_close_every_started_branch() {
+    fn dropped_static_variable_and_dynamic_fanout_report_cancelled_branches() {
         let tool = |name: &str| {
             Expr::Node(Node::ToolCall {
                 path: vec![Ident::new(name, Span::default())],
@@ -960,7 +1001,7 @@ mod tests {
         let env = Env::new();
         let host = BranchTraceHost::default();
         poll_then_drop(eval_fanout(&static_source, &env, &host));
-        assert_branch_trace(&host);
+        assert_dropped_branch_trace(&host, FanoutBranchStatus::Ok);
 
         let mut env = Env::new();
         env.bind(
@@ -970,7 +1011,7 @@ mod tests {
         let source = Expr::Ident(Ident::new("items", Span::default()));
         let host = BranchTraceHost::default();
         poll_then_drop(eval_fanout(&source, &env, &host));
-        assert_branch_trace(&host);
+        assert_dropped_branch_trace(&host, FanoutBranchStatus::Ok);
 
         let lambda = Expr::Lambda {
             params: vec![Ident::new("item", Span::default())],
@@ -978,7 +1019,41 @@ mod tests {
         };
         let host = BranchTraceHost::default();
         poll_then_drop(eval_dynamic_fanout(&source, &lambda, &env, &host));
-        assert_branch_trace(&host);
+        assert_dropped_branch_trace(&host, FanoutBranchStatus::Ok);
+    }
+
+    #[test]
+    fn dropped_fanout_preserves_completed_error_before_cancelling_running_branch() {
+        let source = Expr::List(vec![
+            Expr::Ident(Ident::new("missing", Span::default())),
+            Expr::Node(Node::ToolCall {
+                path: vec![Ident::new("pending", Span::default())],
+                args: vec![],
+            }),
+        ]);
+        let env = Env::new();
+        let host = BranchTraceHost::default();
+
+        poll_then_drop(eval_fanout(&source, &env, &host));
+
+        assert_dropped_branch_trace(&host, FanoutBranchStatus::Err);
+    }
+
+    #[test]
+    fn dropped_fanout_preserves_host_classified_cancellation() {
+        let source = Expr::List(vec![
+            Expr::Ident(Ident::new("cancelled", Span::default())),
+            Expr::Node(Node::ToolCall {
+                path: vec![Ident::new("pending", Span::default())],
+                args: vec![],
+            }),
+        ]);
+        let env = Env::new();
+        let host = BranchTraceHost(Arc::default(), true);
+
+        poll_then_drop(eval_fanout(&source, &env, &host));
+
+        assert_dropped_branch_trace(&host, FanoutBranchStatus::Cancelled);
     }
 
     #[test]

@@ -9,13 +9,12 @@ use std::{
 };
 
 use atman_rt::{
-    Engine, EvalError, ExpressionEffect, ExpressionHost, FlowOutcome, HostFuture, PatternBindError,
-    Preflight, Source, SourceResolver, StatementHost, StatementOutcome, ToolRouter, Value, Vm,
+    Engine, EvalError, ExpressionEffect, ExpressionHost, HostFuture, PatternBindError, Preflight,
+    Source, SourceResolver, StatementHost, StatementOutcome, ToolRouter, Value, Vm, VmDelegates,
     ast::{Arg, BinOp, Expr, FlowDecl, Ident, Literal, Node, ParamDecl, Span, Stmt, TypeExpr},
 };
 
 type FixtureValue = Value<(), EvalError>;
-type FixtureOutcome = FlowOutcome<(), EvalError>;
 
 struct FixtureSources;
 
@@ -84,14 +83,31 @@ impl StatementHost for FixtureHost {
     type Payload = ();
     type Error = EvalError;
     type ExprHost = Self;
+    type NodeScope = ();
+    type IterationScope = ();
 
-    fn preflight(&mut self, _stmt: &Stmt, _node_id: &str) -> Preflight<EvalError> {
+    fn preflight(
+        &mut self,
+        _stmt: &Stmt,
+        _node_id: &str,
+        _parent: Option<&str>,
+    ) -> Preflight<EvalError> {
         Preflight::Continue
     }
 
-    fn node_start(&mut self, _stmt: &Stmt, _node_id: &str, _parent: Option<&str>) {}
+    fn node_start(
+        &mut self,
+        _stmt: &Stmt,
+        _node_id: &str,
+        _parent: Option<&str>,
+    ) -> Self::NodeScope {
+    }
 
-    fn expression_host(&self, _node_id: &str) -> Self::ExprHost {
+    fn expression_host(
+        &self,
+        _node_id: Option<&str>,
+        _parent: Option<&str>,
+    ) -> Self::ExprHost {
         self.clone()
     }
 
@@ -102,17 +118,21 @@ impl StatementHost for FixtureHost {
         }
     }
 
-    fn preview(&self, _value: &FixtureValue) -> Option<String> {
+    fn preview(
+        &self,
+        _value: &FixtureValue,
+        _node_id: &str,
+        _parent_node_id: Option<&str>,
+    ) -> Option<String> {
         None
     }
 
-    fn node_end(
+    fn iteration_start(
         &mut self,
+        _iteration: u64,
         _node_id: &str,
-        _outcome: &FixtureOutcome,
         _parent: Option<&str>,
-        _preview: Option<&str>,
-    ) {
+    ) -> Self::IterationScope {
     }
 }
 
@@ -316,7 +336,11 @@ fn run_demo() -> Result<(), String> {
     tools
         .register("foreign", |_| async { Ok(Value::Int(5)) })
         .map_err(|error| error.to_string())?;
-    match block_on(vm.run("demo", vec![("input".into(), Value::Int(input))], tools)) {
+    match block_on(vm.run(
+        "demo",
+        vec![("input".into(), Value::Int(input))],
+        VmDelegates::new(tools),
+    )) {
         StatementOutcome::Return(Value::Int(value)) => {
             println!("result: {value}");
             Ok(())

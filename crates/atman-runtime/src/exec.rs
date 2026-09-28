@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use atman_rt::ast::{Expr, FlowDecl, Node, Stmt};
 use atman_rt::{
-    FlowCall, FlowDriveMode, PatternBindError, Preflight, StatementHost, Vm, VmCallError, VmHost,
+    ExecutionScope, FlowCall, FlowDriveMode, PatternBindError, Preflight, StatementHost, Vm,
+    VmCallError, VmHost,
 };
 
 use crate::atman_host::AtmanHost;
@@ -16,6 +17,45 @@ type StmtOutcome = atman_rt::StatementOutcome<Value, RuntimeError>;
 #[derive(Clone)]
 struct AtmanStatementAdapter<'a> {
     ctx: AtmanHost<'a>,
+}
+
+enum AtmanScopeKind {
+    Node,
+    Iteration,
+}
+
+struct AtmanExecutionScope<'a> {
+    ctx: AtmanHost<'a>,
+    node_id: String,
+    parent_node_id: Option<String>,
+    kind: AtmanScopeKind,
+}
+
+impl ExecutionScope<Value, RuntimeError> for AtmanExecutionScope<'_> {
+    fn finish(self, outcome: &StmtOutcome, preview: Option<&str>) {
+        let preview = match (&self.kind, outcome) {
+            (AtmanScopeKind::Iteration, StmtOutcome::LoopBreak) => Some("break"),
+            (AtmanScopeKind::Iteration, StmtOutcome::LoopContinue) => Some("continue"),
+            _ => preview,
+        };
+        emit_flow_node_end(
+            &self.ctx,
+            &self.node_id,
+            outcome,
+            self.parent_node_id.as_deref(),
+            preview,
+        );
+    }
+
+    fn cancel(self) {
+        emit_flow_node_terminal(
+            &self.ctx,
+            &self.node_id,
+            crate::event::FlowNodeStatus::Cancelled,
+            self.parent_node_id.as_deref(),
+            None,
+        );
+    }
 }
 
 struct ChildFlowGuard {
@@ -112,7 +152,7 @@ impl VmHost for AtmanStatementAdapter<'_> {
             run_id: run_id.clone(),
             flow_name: call.display_name.to_string(),
             parent_run_id: Some(parent_run_id),
-            parent_node_id: Some(call.parent_node_id.to_string()),
+            parent_node_id: call.parent_node_id.map(String::from),
             spawned: matches!(call.mode, FlowDriveMode::Parallel),
         })
         .start();
@@ -210,8 +250,15 @@ impl<'a> StatementHost for AtmanStatementAdapter<'a> {
     type Payload = AtmanPayload;
     type Error = RuntimeError;
     type ExprHost = AtmanHost<'a>;
+    type NodeScope = AtmanExecutionScope<'a>;
+    type IterationScope = AtmanExecutionScope<'a>;
 
-    fn preflight(&mut self, _stmt: &Stmt, _node_id: &str) -> Preflight<Self::Error> {
+    fn preflight(
+        &mut self,
+        _stmt: &Stmt,
+        _node_id: &str,
+        _parent_node_id: Option<&str>,
+    ) -> Preflight<Self::Error> {
         let Some(session) = self.ctx.session_runtime.as_ref() else {
             return Preflight::Continue;
         };
@@ -241,12 +288,34 @@ impl<'a> StatementHost for AtmanStatementAdapter<'a> {
         }
     }
 
-    fn node_start(&mut self, stmt: &Stmt, node_id: &str, parent_node_id: Option<&str>) {
+    fn node_start(
+        &mut self,
+        stmt: &Stmt,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Self::NodeScope {
         emit_flow_node_start(&self.ctx, node_id, stmt, parent_node_id);
+        AtmanExecutionScope {
+            ctx: self.ctx.clone(),
+            node_id: node_id.into(),
+            parent_node_id: parent_node_id.map(String::from),
+            kind: AtmanScopeKind::Node,
+        }
     }
 
-    fn expression_host(&self, node_id: &str) -> Self::ExprHost {
-        self.ctx.with_node(node_id)
+    fn expression_host(
+        &self,
+        node_id: Option<&str>,
+        _parent_node_id: Option<&str>,
+    ) -> Self::ExprHost {
+        match node_id {
+            Some(node_id) => self.ctx.with_node(node_id),
+            None => {
+                let mut ctx = self.ctx.clone();
+                ctx.current_node_id = None;
+                ctx
+            }
+        }
     }
 
     fn pattern_error(&self, error: PatternBindError) -> RuntimeError {
@@ -261,7 +330,12 @@ impl<'a> StatementHost for AtmanStatementAdapter<'a> {
         }
     }
 
-    fn iteration_start(&mut self, iteration: u64, node_id: &str, parent_node_id: Option<&str>) {
+    fn iteration_start(
+        &mut self,
+        iteration: u64,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Self::IterationScope {
         emit_flow_node_start_raw(
             &self.ctx,
             node_id,
@@ -269,34 +343,21 @@ impl<'a> StatementHost for AtmanStatementAdapter<'a> {
             &format!("iteration {iteration}"),
             parent_node_id,
         );
+        AtmanExecutionScope {
+            ctx: self.ctx.clone(),
+            node_id: node_id.into(),
+            parent_node_id: parent_node_id.map(String::from),
+            kind: AtmanScopeKind::Iteration,
+        }
     }
 
-    fn iteration_end(
-        &mut self,
-        node_id: &str,
-        outcome: &StmtOutcome,
-        parent_node_id: Option<&str>,
-    ) {
-        let preview = match outcome {
-            StmtOutcome::LoopBreak => Some("break"),
-            StmtOutcome::LoopContinue => Some("continue"),
-            _ => None,
-        };
-        emit_flow_node_end(&self.ctx, node_id, outcome, parent_node_id, preview);
-    }
-
-    fn preview(&self, value: &Value) -> Option<String> {
+    fn preview(
+        &self,
+        value: &Value,
+        _node_id: &str,
+        _parent_node_id: Option<&str>,
+    ) -> Option<String> {
         value_preview(value)
-    }
-
-    fn node_end(
-        &mut self,
-        node_id: &str,
-        outcome: &StmtOutcome,
-        parent_node_id: Option<&str>,
-        preview: Option<&str>,
-    ) {
-        emit_flow_node_end(&self.ctx, node_id, outcome, parent_node_id, preview);
     }
 }
 
@@ -395,14 +456,24 @@ fn emit_flow_node_end(
     parent_node_id: Option<&str>,
     output_preview: Option<&str>,
 ) {
-    let Some(run_id) = ctx.flow_run_id.clone() else {
-        return;
-    };
     let status = match outcome {
         StmtOutcome::Err(_) => crate::event::FlowNodeStatus::Err,
         StmtOutcome::LoopBreak => crate::event::FlowNodeStatus::Ok,
         StmtOutcome::LoopContinue => crate::event::FlowNodeStatus::Ok,
         _ => crate::event::FlowNodeStatus::Ok,
+    };
+    emit_flow_node_terminal(ctx, node_id, status, parent_node_id, output_preview);
+}
+
+fn emit_flow_node_terminal(
+    ctx: &AtmanHost<'_>,
+    node_id: &str,
+    status: crate::event::FlowNodeStatus,
+    parent_node_id: Option<&str>,
+    output_preview: Option<&str>,
+) {
+    let Some(run_id) = ctx.flow_run_id.clone() else {
+        return;
     };
     let preview_owned = output_preview.map(String::from);
     if let Some(sink) = ctx.events {
@@ -768,8 +839,9 @@ mod tests {
             display_name: "child",
             source_id: "entry:memory.at",
             contract: None,
-            parent_node_id: "parent.0",
+            parent_node_id: Some("parent.0"),
             mode: FlowDriveMode::Inline,
+            branch_index: None,
         };
         let (_, guard) = host.enter_child(&call).unwrap();
         drop(guard);

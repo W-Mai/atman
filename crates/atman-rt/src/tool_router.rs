@@ -10,8 +10,8 @@ use alloc::{
 use core::{fmt, future::Future};
 
 use crate::{
-    ExpressionEffect, HostFuture, HostPayload, HostValueOps, ListIntrinsic, ToolCallMode, Value,
-    ValueError, VmEmbedding,
+    EffectDelegate, ExpressionEffect, HostFuture, HostPayload, HostValueOps, ListIntrinsic,
+    ToolCallMode, Value, ValueError, VmContext,
 };
 
 /// Evaluated arguments passed to a host tool. Named arguments take precedence
@@ -209,26 +209,32 @@ impl<P: HostValueOps, E: ValueError> ToolRouter<P, E> {
     }
 }
 
-impl<P, E> VmEmbedding for ToolRouter<P, E>
+impl<P, E> EffectDelegate for ToolRouter<P, E>
 where
     P: HostValueOps + Clone + Send + Sync + 'static,
     E: ValueError + Clone + Send + Sync + 'static,
 {
     type Payload = P;
     type Error = E;
+    type Permit = ();
 
-    fn preflight_tool(&self, name: &str) -> Option<Value<P, E>> {
+    fn preflight_tool(&self, name: &str, _context: &VmContext) -> Option<Value<P, E>> {
         (!self.contains(name))
             .then(|| Value::Err(E::type_mismatch("registered tool", name.to_string())))
     }
 
-    fn tool_call_mode(&self, name: &str) -> ToolCallMode {
+    fn tool_call_mode(&self, name: &str, _context: &VmContext) -> ToolCallMode {
         self.handlers
             .get(name)
             .map_or(ToolCallMode::Immediate, |tool| tool.mode)
     }
 
-    fn effect<'a>(&'a self, effect: ExpressionEffect<P, E>) -> HostFuture<'a, Value<P, E>> {
+    fn invoke<'a>(
+        &'a self,
+        effect: ExpressionEffect<P, E>,
+        _permit: Self::Permit,
+        _context: &'a VmContext,
+    ) -> HostFuture<'a, Value<P, E>> {
         Box::pin(async move {
             match effect {
                 ExpressionEffect::ToolCall {

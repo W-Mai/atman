@@ -13,8 +13,11 @@ use core::{
 };
 
 use crate::{
-    Engine, ExpressionEffect, ExpressionHost, FlowArgs, FlowOutcome, HostFuture, HostValueOps,
-    NamedValues, Preflight, StatementHost, StatementOutcome, ToolCallMode, Value, ValueError,
+    AuthorizationDelegate, CancellationDelegate, ControlDelegate, EffectDelegate, Engine,
+    ExecutionScope, ExpressionEffect, ExpressionHost, FanoutBranchStatus, FlowArgs, FlowDelegate,
+    FlowOutcome, HostFuture, HostValueOps, NamedValues, ObserverDelegate, Preflight, StatementHost,
+    StatementOutcome, ToolCallMode, Value, ValueError, VmContext, VmDelegates, VmEffect, VmEvent,
+    VmNode, VmRunId, VmStatus,
     ast::{Arg, Contract, FlowRef, LifecycleEvent, Stmt},
     engine::bind_evaluated_call_arguments,
     expr::{EvaluatedArg, MAX_ACTIVE_CALLS},
@@ -41,8 +44,9 @@ pub struct FlowCall<'a> {
     pub display_name: &'a str,
     pub source_id: &'a str,
     pub contract: Option<&'a Contract>,
-    pub parent_node_id: &'a str,
+    pub parent_node_id: Option<&'a str>,
     pub mode: FlowDriveMode,
+    pub branch_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +99,15 @@ pub trait VmHost: StatementHost + Clone {
         outcome: &FlowOutcome<Self::Payload, Self::Error>,
         guard: Self::ChildGuard,
     );
+
+    fn cancel_child(
+        &self,
+        call: &FlowCall<'_>,
+        outcome: &FlowOutcome<Self::Payload, Self::Error>,
+        guard: Self::ChildGuard,
+    ) {
+        self.exit_child(call, outcome, guard);
+    }
 }
 
 struct ChildExit<'a, H: VmHost> {
@@ -123,79 +136,91 @@ impl<H: VmHost> Drop for ChildExit<'_, H> {
     fn drop(&mut self) {
         if let Some(guard) = self.guard.take() {
             let outcome = StatementOutcome::Err(self.host.call_error(VmCallError::Cancelled));
-            self.host.exit_child(&self.call, &outcome, guard);
+            self.host.cancel_child(&self.call, &outcome, guard);
         }
     }
 }
 
-/// The minimal interface for embedding an Atman VM in another application.
+/// The high-level interface between the VM and an embedding application.
 ///
-/// Effects contain evaluated values. Flow calls are handled by the VM and
-/// never reach `effect`. All other methods have defaults so a host can begin
-/// with one effect dispatcher and add context or observation as needed.
-pub trait VmEmbedding: Clone + Send + Sync {
+/// The VM owns language control flow. Delegates receive evaluated external
+/// effects, authorization requests, cancellation checks, and typed lifecycle
+/// events with VM-owned execution context.
+pub trait VmDelegate: Clone + Send + Sync {
     type Payload: HostValueOps + Clone + Send + Sync;
     type Error: ValueError + Clone + Send + Sync;
+    type Permit: Send;
+    type FlowGuard: Send;
 
-    fn effect<'a>(
+    fn invoke<'a>(
         &'a self,
         effect: ExpressionEffect<Self::Payload, Self::Error>,
+        permit: Self::Permit,
+        context: &'a VmContext,
     ) -> HostFuture<'a, Value<Self::Payload, Self::Error>>;
 
-    fn cancellation_error(&self) -> Option<Self::Error> {
+    fn authorize<'a>(
+        &'a self,
+        effect: &'a ExpressionEffect<Self::Payload, Self::Error>,
+        context: &'a VmContext,
+    ) -> HostFuture<'a, Result<Self::Permit, Self::Error>>;
+
+    fn enter_flow(
+        &self,
+        call: Option<&FlowCall<'_>>,
+        context: &VmContext,
+    ) -> Result<(Self, Self::FlowGuard), Self::Error>;
+
+    fn exit_flow(
+        &self,
+        call: Option<&FlowCall<'_>>,
+        context: &VmContext,
+        outcome: &FlowOutcome<Self::Payload, Self::Error>,
+        guard: Self::FlowGuard,
+    );
+
+    fn cancel_flow(&self, call: Option<&FlowCall<'_>>, context: &VmContext, guard: Self::FlowGuard);
+
+    fn cancellation_error(&self, _context: &VmContext) -> Option<Self::Error> {
         None
     }
 
-    /// Reject a tool before its arguments run. Recheck authorization in `effect`.
-    fn preflight_tool(&self, _name: &str) -> Option<Value<Self::Payload, Self::Error>> {
+    /// Reject a tool before its arguments run. Authorization runs after evaluation.
+    fn preflight_tool(
+        &self,
+        _name: &str,
+        _context: &VmContext,
+    ) -> Option<Value<Self::Payload, Self::Error>> {
         None
     }
 
-    fn tool_call_mode(&self, _name: &str) -> ToolCallMode {
+    fn tool_call_mode(&self, _name: &str, _context: &VmContext) -> ToolCallMode {
         ToolCallMode::Immediate
+    }
+
+    fn preflight_statement(&self, _node: &VmNode, _context: &VmContext) -> Preflight<Self::Error> {
+        Preflight::Continue
     }
 
     fn call_error(&self, error: VmCallError) -> Self::Error {
         Self::Error::type_mismatch("valid Atman call", error.to_string())
     }
 
-    fn node_start(&self, _node_id: &str, _parent_node_id: Option<&str>) {}
-
-    fn node_end(
+    fn preview(
         &self,
-        _node_id: &str,
-        _outcome: &FlowOutcome<Self::Payload, Self::Error>,
-        _parent_node_id: Option<&str>,
-        _preview: Option<&str>,
-    ) {
-    }
-
-    fn preview(&self, _value: &Value<Self::Payload, Self::Error>) -> Option<String> {
+        _value: &Value<Self::Payload, Self::Error>,
+        _context: &VmContext,
+    ) -> Option<String> {
         None
     }
 
-    fn child(&self, _call: &FlowCall<'_>) -> Result<Self, Self::Error> {
-        Ok(self.clone())
+    fn error_status(&self, _error: &Self::Error) -> VmStatus {
+        VmStatus::Err
     }
 
-    fn child_end(&self, _call: &FlowCall<'_>, _outcome: &FlowOutcome<Self::Payload, Self::Error>) {}
-}
-
-struct EmbeddingAdapter<H: VmEmbedding> {
-    host: H,
-}
-
-impl<H: VmEmbedding> Clone for EmbeddingAdapter<H> {
-    fn clone(&self) -> Self {
-        Self {
-            host: self.host.clone(),
-        }
+    fn error_preview(&self, _error: &Self::Error) -> Option<String> {
+        None
     }
-}
-
-impl<H: VmEmbedding> ExpressionHost for EmbeddingAdapter<H> {
-    type Payload = H::Payload;
-    type Error = H::Error;
 
     fn undefined_var(&self, name: String) -> Self::Error {
         Self::Error::type_mismatch("bound variable", name)
@@ -205,84 +230,673 @@ impl<H: VmEmbedding> ExpressionHost for EmbeddingAdapter<H> {
         Self::Error::type_mismatch("existing field", name)
     }
 
+    fn pattern_error(&self, error: PatternBindError) -> Self::Error {
+        Self::Error::type_mismatch("matching pattern", format!("{error:?}"))
+    }
+
+    fn on_event(&self, _event: VmEvent) {}
+}
+
+impl<D, A, O, C, F, L> VmDelegate for VmDelegates<D, A, O, C, F, L>
+where
+    D: EffectDelegate,
+    A: AuthorizationDelegate<D::Payload, D::Error, Permit = D::Permit>,
+    O: ObserverDelegate,
+    C: CancellationDelegate<D::Error>,
+    F: FlowDelegate<D::Payload, D::Error>,
+    L: ControlDelegate<D::Error>,
+{
+    type Payload = D::Payload;
+    type Error = D::Error;
+    type Permit = D::Permit;
+    type FlowGuard = F::Guard;
+
+    fn invoke<'a>(
+        &'a self,
+        effect: ExpressionEffect<Self::Payload, Self::Error>,
+        permit: Self::Permit,
+        context: &'a VmContext,
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
+        self.effect.invoke(effect, permit, context)
+    }
+
+    fn authorize<'a>(
+        &'a self,
+        effect: &'a ExpressionEffect<Self::Payload, Self::Error>,
+        context: &'a VmContext,
+    ) -> HostFuture<'a, Result<Self::Permit, Self::Error>> {
+        self.authorization.authorize(effect, context)
+    }
+
+    fn enter_flow(
+        &self,
+        call: Option<&FlowCall<'_>>,
+        context: &VmContext,
+    ) -> Result<(Self, Self::FlowGuard), Self::Error> {
+        self.flows
+            .enter(call, context)
+            .map(|guard| (self.clone(), guard))
+    }
+
+    fn exit_flow(
+        &self,
+        call: Option<&FlowCall<'_>>,
+        context: &VmContext,
+        outcome: &FlowOutcome<Self::Payload, Self::Error>,
+        guard: Self::FlowGuard,
+    ) {
+        self.flows.exit(call, context, outcome, guard);
+    }
+
+    fn cancel_flow(
+        &self,
+        call: Option<&FlowCall<'_>>,
+        context: &VmContext,
+        guard: Self::FlowGuard,
+    ) {
+        self.flows.cancel(call, context, guard);
+    }
+
+    fn cancellation_error(&self, context: &VmContext) -> Option<Self::Error> {
+        self.cancellation.cancellation_error(context)
+    }
+
+    fn preflight_tool(
+        &self,
+        name: &str,
+        context: &VmContext,
+    ) -> Option<Value<Self::Payload, Self::Error>> {
+        self.effect.preflight_tool(name, context)
+    }
+
+    fn tool_call_mode(&self, name: &str, context: &VmContext) -> ToolCallMode {
+        self.effect.tool_call_mode(name, context)
+    }
+
+    fn preflight_statement(&self, node: &VmNode, context: &VmContext) -> Preflight<Self::Error> {
+        self.control.preflight_statement(node, context)
+    }
+
+    fn call_error(&self, error: VmCallError) -> Self::Error {
+        self.control.call_error(error)
+    }
+
+    fn preview(
+        &self,
+        value: &Value<Self::Payload, Self::Error>,
+        context: &VmContext,
+    ) -> Option<String> {
+        self.effect.preview(value, context)
+    }
+
+    fn error_status(&self, error: &Self::Error) -> VmStatus {
+        if self.cancellation.is_cancellation(error) {
+            VmStatus::Cancelled
+        } else {
+            self.effect.error_status(error)
+        }
+    }
+
+    fn error_preview(&self, error: &Self::Error) -> Option<String> {
+        self.effect.error_preview(error)
+    }
+
+    fn undefined_var(&self, name: String) -> Self::Error {
+        self.control.undefined_var(name)
+    }
+
+    fn undefined_field(&self, name: String) -> Self::Error {
+        self.control.undefined_field(name)
+    }
+
+    fn pattern_error(&self, error: PatternBindError) -> Self::Error {
+        self.control.pattern_error(error)
+    }
+
+    fn on_event(&self, event: VmEvent) {
+        self.observer.on_event(event);
+    }
+}
+
+fn outcome_status<H: VmDelegate>(
+    delegate: &H,
+    outcome: &FlowOutcome<H::Payload, H::Error>,
+) -> VmStatus {
+    match outcome {
+        StatementOutcome::Err(error) => delegate.error_status(error),
+        _ => VmStatus::Ok,
+    }
+}
+
+fn outcome_error<H: VmDelegate>(
+    delegate: &H,
+    outcome: &FlowOutcome<H::Payload, H::Error>,
+) -> Option<String> {
+    match outcome {
+        StatementOutcome::Err(error) => delegate.error_preview(error),
+        _ => None,
+    }
+}
+
+impl VmContext {
+    fn for_node(&self, node_id: &str, parent_node_id: Option<&str>) -> Self {
+        let mut context = self.clone();
+        context.node_id = Some(node_id.into());
+        context.parent_node_id = parent_node_id.map(String::from);
+        context
+    }
+
+    fn for_branch(&self, index: usize) -> Self {
+        let mut context = self.clone();
+        context.parent_node_id = self.node_id.clone();
+        context.node_id = self
+            .node_id
+            .as_ref()
+            .map(|node_id| format!("{node_id}.branch[{index}]"));
+        context.drive_mode = FlowDriveMode::Parallel;
+        context.branch_index = Some(index);
+        context
+    }
+}
+
+struct DelegateAdapter<H: VmDelegate> {
+    delegate: H,
+    context: VmContext,
+    run_ids: Arc<AtomicUsize>,
+}
+
+impl<H: VmDelegate> Clone for DelegateAdapter<H> {
+    fn clone(&self) -> Self {
+        Self {
+            delegate: self.delegate.clone(),
+            context: self.context.clone(),
+            run_ids: Arc::clone(&self.run_ids),
+        }
+    }
+}
+
+impl<H: VmDelegate> DelegateAdapter<H> {
+    fn next_run_id(&self) -> VmRunId {
+        VmRunId(self.run_ids.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn cancellation_error(&self) -> Option<H::Error> {
+        observe_cancellation(&self.delegate, &self.context)
+    }
+}
+
+fn observe_cancellation<H: VmDelegate>(delegate: &H, context: &VmContext) -> Option<H::Error> {
+    let error = delegate.cancellation_error(context);
+    if error.is_some() {
+        delegate.on_event(VmEvent::CancellationObserved {
+            context: context.clone(),
+        });
+    }
+    error
+}
+
+struct AuthorizationExit<H: VmDelegate> {
+    delegate: H,
+    context: VmContext,
+    effect: VmEffect,
+    active: bool,
+}
+
+impl<H: VmDelegate> AuthorizationExit<H> {
+    fn start(delegate: H, context: VmContext, effect: VmEffect) -> Self {
+        delegate.on_event(VmEvent::AuthorizationRequested {
+            context: context.clone(),
+            effect: effect.clone(),
+        });
+        Self {
+            delegate,
+            context,
+            effect,
+            active: true,
+        }
+    }
+
+    fn finish(mut self, status: VmStatus) {
+        self.active = false;
+        self.delegate.on_event(VmEvent::AuthorizationResolved {
+            context: self.context.clone(),
+            effect: self.effect.clone(),
+            status,
+        });
+    }
+}
+
+impl<H: VmDelegate> Drop for AuthorizationExit<H> {
+    fn drop(&mut self) {
+        if self.active {
+            self.delegate.on_event(VmEvent::AuthorizationResolved {
+                context: self.context.clone(),
+                effect: self.effect.clone(),
+                status: VmStatus::Cancelled,
+            });
+        }
+    }
+}
+
+struct EffectExit<H: VmDelegate> {
+    delegate: H,
+    context: VmContext,
+    effect: VmEffect,
+    active: bool,
+}
+
+impl<H: VmDelegate> EffectExit<H> {
+    fn start(delegate: H, context: VmContext, effect: VmEffect) -> Self {
+        delegate.on_event(VmEvent::EffectStarted {
+            context: context.clone(),
+            effect: effect.clone(),
+        });
+        Self {
+            delegate,
+            context,
+            effect,
+            active: true,
+        }
+    }
+
+    fn finish(mut self, status: VmStatus, preview: Option<String>) {
+        self.active = false;
+        self.delegate.on_event(VmEvent::EffectEnded {
+            context: self.context.clone(),
+            effect: self.effect.clone(),
+            status,
+            preview,
+        });
+    }
+}
+
+impl<H: VmDelegate> Drop for EffectExit<H> {
+    fn drop(&mut self) {
+        if self.active {
+            self.delegate.on_event(VmEvent::EffectEnded {
+                context: self.context.clone(),
+                effect: self.effect.clone(),
+                status: VmStatus::Cancelled,
+                preview: None,
+            });
+        }
+    }
+}
+
+fn value_status<H: VmDelegate>(delegate: &H, value: &Value<H::Payload, H::Error>) -> VmStatus {
+    match value {
+        Value::Err(error) => delegate.error_status(error),
+        _ => VmStatus::Ok,
+    }
+}
+
+impl<H: VmDelegate> ExpressionHost for DelegateAdapter<H> {
+    type Payload = H::Payload;
+    type Error = H::Error;
+
+    fn undefined_var(&self, name: String) -> Self::Error {
+        self.delegate.undefined_var(name)
+    }
+
+    fn undefined_field(&self, name: String) -> Self::Error {
+        self.delegate.undefined_field(name)
+    }
+
     fn cancellation_error(&self) -> Option<Self::Error> {
-        self.host.cancellation_error()
+        self.cancellation_error()
+    }
+
+    fn await_drive_mode(&self) -> FlowDriveMode {
+        self.context.drive_mode
+    }
+
+    fn fanout_branch_start(&self, index: usize) {
+        self.delegate.on_event(VmEvent::FanoutBranchStarted {
+            context: self.context.for_branch(index),
+        });
+    }
+
+    fn branch_host(&self, index: usize) -> Self {
+        Self {
+            delegate: self.delegate.clone(),
+            context: self.context.for_branch(index),
+            run_ids: Arc::clone(&self.run_ids),
+        }
+    }
+
+    fn fanout_branch_end(&self, index: usize, status: FanoutBranchStatus) {
+        self.delegate.on_event(VmEvent::FanoutBranchEnded {
+            context: self.context.for_branch(index),
+            status: match status {
+                FanoutBranchStatus::Ok => VmStatus::Ok,
+                FanoutBranchStatus::Err => VmStatus::Err,
+                FanoutBranchStatus::Cancelled => VmStatus::Cancelled,
+            },
+        });
+    }
+
+    fn fanout_error_status(&self, error: &Self::Error) -> FanoutBranchStatus {
+        match self.delegate.error_status(error) {
+            VmStatus::Cancelled => FanoutBranchStatus::Cancelled,
+            VmStatus::Ok => FanoutBranchStatus::Ok,
+            VmStatus::Err => FanoutBranchStatus::Err,
+        }
     }
 
     fn preflight_tool(&self, name: &str) -> Option<Value<Self::Payload, Self::Error>> {
-        self.host.preflight_tool(name)
+        self.delegate.preflight_tool(name, &self.context)
     }
 
     fn tool_call_mode(&self, name: &str) -> ToolCallMode {
-        self.host.tool_call_mode(name)
+        self.delegate.tool_call_mode(name, &self.context)
     }
 
     fn eval_external<'a>(
         &'a self,
         effect: ExpressionEffect<Self::Payload, Self::Error>,
     ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
-        self.host.effect(effect)
+        let delegate = self.delegate.clone();
+        let context = self.context.clone();
+        Box::pin(async move {
+            if let Some(error) = observe_cancellation(&delegate, &context) {
+                return Value::Err(error);
+            }
+            let metadata = VmEffect::from(&effect);
+            let authorization =
+                AuthorizationExit::start(delegate.clone(), context.clone(), metadata.clone());
+            let permit = match delegate.authorize(&effect, &context).await {
+                Ok(permit) => {
+                    if let Some(error) = observe_cancellation(&delegate, &context) {
+                        authorization.finish(VmStatus::Cancelled);
+                        return Value::Err(error);
+                    }
+                    authorization.finish(VmStatus::Ok);
+                    permit
+                }
+                Err(error) => {
+                    let status = delegate.error_status(&error);
+                    authorization.finish(status);
+                    return Value::Err(error);
+                }
+            };
+            let invocation = EffectExit::start(delegate.clone(), context.clone(), metadata.clone());
+            let value = delegate.invoke(effect, permit, &context).await;
+            if let Some(error) = observe_cancellation(&delegate, &context) {
+                invocation.finish(VmStatus::Cancelled, None);
+                return Value::Err(error);
+            }
+            let status = value_status(&delegate, &value);
+            let preview = delegate.preview(&value, &context);
+            invocation.finish(status, preview);
+            value
+        })
     }
 }
 
-impl<H: VmEmbedding> StatementHost for EmbeddingAdapter<H> {
-    type Payload = H::Payload;
-    type Error = H::Error;
-    type ExprHost = Self;
+enum DelegateScopeKind {
+    Node,
+    Iteration,
+}
 
-    fn preflight(&mut self, _stmt: &Stmt, _node_id: &str) -> Preflight<Self::Error> {
-        match self.host.cancellation_error() {
-            Some(error) => Preflight::Stop(error),
-            None => Preflight::Continue,
+struct DelegateExecutionScope<H: VmDelegate> {
+    delegate: H,
+    context: VmContext,
+    kind: DelegateScopeKind,
+}
+
+impl<H: VmDelegate> ExecutionScope<Value<H::Payload, H::Error>, H::Error>
+    for DelegateExecutionScope<H>
+{
+    fn finish(self, outcome: &FlowOutcome<H::Payload, H::Error>, preview: Option<&str>) {
+        let status = outcome_status(&self.delegate, outcome);
+        match self.kind {
+            DelegateScopeKind::Node => self.delegate.on_event(VmEvent::NodeEnded {
+                context: self.context,
+                status,
+                preview: preview.map(String::from),
+            }),
+            DelegateScopeKind::Iteration => {
+                self.delegate.on_event(VmEvent::IterationEnded {
+                    context: self.context,
+                    status,
+                });
+            }
         }
     }
 
-    fn node_start(&mut self, _stmt: &Stmt, node_id: &str, parent_node_id: Option<&str>) {
-        self.host.node_start(node_id, parent_node_id);
-    }
-
-    fn expression_host(&self, _node_id: &str) -> Self::ExprHost {
-        self.clone()
-    }
-
-    fn pattern_error(&self, error: PatternBindError) -> Self::Error {
-        Self::Error::type_mismatch("matching pattern", format!("{error:?}"))
-    }
-
-    fn preview(&self, value: &Value<Self::Payload, Self::Error>) -> Option<String> {
-        self.host.preview(value)
-    }
-
-    fn node_end(
-        &mut self,
-        node_id: &str,
-        outcome: &FlowOutcome<Self::Payload, Self::Error>,
-        parent_node_id: Option<&str>,
-        preview: Option<&str>,
-    ) {
-        self.host
-            .node_end(node_id, outcome, parent_node_id, preview);
+    fn cancel(self) {
+        match self.kind {
+            DelegateScopeKind::Node => self.delegate.on_event(VmEvent::NodeEnded {
+                context: self.context,
+                status: VmStatus::Cancelled,
+                preview: None,
+            }),
+            DelegateScopeKind::Iteration => {
+                self.delegate.on_event(VmEvent::IterationEnded {
+                    context: self.context,
+                    status: VmStatus::Cancelled,
+                });
+            }
+        }
     }
 }
 
-impl<H: VmEmbedding> VmHost for EmbeddingAdapter<H> {
-    type ChildGuard = ();
+impl<H: VmDelegate> StatementHost for DelegateAdapter<H> {
+    type Payload = H::Payload;
+    type Error = H::Error;
+    type ExprHost = Self;
+    type NodeScope = DelegateExecutionScope<H>;
+    type IterationScope = DelegateExecutionScope<H>;
+
+    fn preflight(
+        &mut self,
+        stmt: &Stmt,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Preflight<Self::Error> {
+        let context = self.context.for_node(node_id, parent_node_id);
+        if let Some(error) = self.delegate.cancellation_error(&context) {
+            self.delegate.on_event(VmEvent::CancellationObserved {
+                context: context.clone(),
+            });
+            return Preflight::Stop(error);
+        }
+        self.delegate
+            .preflight_statement(&VmNode::from(stmt), &context)
+    }
+
+    fn node_start(
+        &mut self,
+        stmt: &Stmt,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Self::NodeScope {
+        let context = self.context.for_node(node_id, parent_node_id);
+        self.delegate.on_event(VmEvent::NodeStarted {
+            context: context.clone(),
+            node: VmNode::from(stmt),
+        });
+        DelegateExecutionScope {
+            delegate: self.delegate.clone(),
+            context,
+            kind: DelegateScopeKind::Node,
+        }
+    }
+
+    fn expression_host(
+        &self,
+        node_id: Option<&str>,
+        parent_node_id: Option<&str>,
+    ) -> Self::ExprHost {
+        let context = match node_id {
+            Some(node_id) => self.context.for_node(node_id, parent_node_id),
+            None => self.context.clone(),
+        };
+        Self {
+            delegate: self.delegate.clone(),
+            context,
+            run_ids: Arc::clone(&self.run_ids),
+        }
+    }
+
+    fn pattern_error(&self, error: PatternBindError) -> Self::Error {
+        self.delegate.pattern_error(error)
+    }
+
+    fn preview(
+        &self,
+        value: &Value<Self::Payload, Self::Error>,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Option<String> {
+        self.delegate
+            .preview(value, &self.context.for_node(node_id, parent_node_id))
+    }
+
+    fn iteration_start(
+        &mut self,
+        iteration: u64,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Self::IterationScope {
+        let context = self.context.for_node(node_id, parent_node_id);
+        self.delegate.on_event(VmEvent::IterationStarted {
+            context: context.clone(),
+            iteration,
+        });
+        DelegateExecutionScope {
+            delegate: self.delegate.clone(),
+            context,
+            kind: DelegateScopeKind::Iteration,
+        }
+    }
+}
+
+struct DelegateChild<H: VmDelegate> {
+    delegate: H,
+    context: VmContext,
+    flow_guard: H::FlowGuard,
+}
+
+impl<H: VmDelegate> VmHost for DelegateAdapter<H> {
+    type ChildGuard = DelegateChild<H>;
 
     fn call_error(&self, error: VmCallError) -> Self::Error {
-        self.host.call_error(error)
+        self.delegate.call_error(error)
     }
 
     fn enter_child(&self, call: &FlowCall<'_>) -> Result<(Self, Self::ChildGuard), Self::Error> {
-        self.host.child(call).map(|host| (Self { host }, ()))
+        let context = VmContext {
+            run_id: self.next_run_id(),
+            parent_run_id: Some(self.context.run_id),
+            source_id: call.source_id.into(),
+            flow: call.target.clone(),
+            caller_node_id: call.parent_node_id.map(String::from),
+            node_id: None,
+            parent_node_id: None,
+            drive_mode: call.mode,
+            branch_index: call.branch_index,
+        };
+        let (delegate, flow_guard) = self.delegate.enter_flow(Some(call), &context)?;
+        delegate.on_event(VmEvent::FlowStarted {
+            context: context.clone(),
+        });
+        Ok((
+            Self {
+                delegate: delegate.clone(),
+                context: context.clone(),
+                run_ids: Arc::clone(&self.run_ids),
+            },
+            DelegateChild {
+                delegate,
+                context,
+                flow_guard,
+            },
+        ))
     }
 
     fn exit_child(
         &self,
         call: &FlowCall<'_>,
         outcome: &FlowOutcome<Self::Payload, Self::Error>,
-        _guard: Self::ChildGuard,
+        guard: Self::ChildGuard,
     ) {
-        self.host.child_end(call, outcome);
+        let DelegateChild {
+            delegate,
+            context,
+            flow_guard,
+        } = guard;
+        let status = outcome_status(&delegate, outcome);
+        let error = outcome_error(&delegate, outcome);
+        delegate.exit_flow(Some(call), &context, outcome, flow_guard);
+        delegate.on_event(VmEvent::FlowEnded {
+            context,
+            status,
+            error,
+        });
+    }
+
+    fn cancel_child(
+        &self,
+        call: &FlowCall<'_>,
+        _outcome: &FlowOutcome<Self::Payload, Self::Error>,
+        guard: Self::ChildGuard,
+    ) {
+        let DelegateChild {
+            delegate,
+            context,
+            flow_guard,
+        } = guard;
+        delegate.cancel_flow(Some(call), &context, flow_guard);
+        delegate.on_event(VmEvent::FlowEnded {
+            context,
+            status: VmStatus::Cancelled,
+            error: None,
+        });
+    }
+}
+
+struct DelegateFlowExit<H: VmDelegate> {
+    delegate: H,
+    context: VmContext,
+    guard: Option<H::FlowGuard>,
+}
+
+impl<H: VmDelegate> DelegateFlowExit<H> {
+    fn start(delegate: H, context: VmContext, guard: H::FlowGuard) -> Self {
+        delegate.on_event(VmEvent::FlowStarted {
+            context: context.clone(),
+        });
+        Self {
+            delegate,
+            context,
+            guard: Some(guard),
+        }
+    }
+
+    fn finish(mut self, outcome: &FlowOutcome<H::Payload, H::Error>) {
+        let guard = self.guard.take().expect("flow guard must be present");
+        let status = outcome_status(&self.delegate, outcome);
+        let error = outcome_error(&self.delegate, outcome);
+        self.delegate.exit_flow(None, &self.context, outcome, guard);
+        self.delegate.on_event(VmEvent::FlowEnded {
+            context: self.context.clone(),
+            status,
+            error,
+        });
+    }
+}
+
+impl<H: VmDelegate> Drop for DelegateFlowExit<H> {
+    fn drop(&mut self) {
+        if let Some(guard) = self.guard.take() {
+            self.delegate.cancel_flow(None, &self.context, guard);
+            self.delegate.on_event(VmEvent::FlowEnded {
+                context: self.context.clone(),
+                status: VmStatus::Cancelled,
+                error: None,
+            });
+        }
     }
 }
 
@@ -290,6 +904,7 @@ impl<H: VmEmbedding> VmHost for EmbeddingAdapter<H> {
 #[derive(Clone)]
 pub struct Vm {
     program: Arc<LinkedProgram>,
+    run_ids: Arc<AtomicUsize>,
 }
 
 impl Vm {
@@ -300,7 +915,14 @@ impl Vm {
     }
 
     pub fn from_shared(program: Arc<LinkedProgram>) -> Self {
-        Self { program }
+        Self {
+            program,
+            run_ids: Arc::new(AtomicUsize::new(1)),
+        }
+    }
+
+    fn next_run_id(&self) -> VmRunId {
+        VmRunId(self.run_ids.fetch_add(1, Ordering::Relaxed))
     }
 
     #[cfg(feature = "syntax")]
@@ -319,14 +941,64 @@ impl Vm {
         self.program.route(input)
     }
 
-    /// Runs one entry flow with the minimal embedding interface.
-    pub async fn run<H: VmEmbedding>(
+    /// Runs one entry flow through a high-level delegate contract.
+    pub async fn run<H: VmDelegate>(
         &self,
         name: &str,
         args: FlowArgs<H::Payload, H::Error>,
-        host: H,
+        delegate: H,
     ) -> FlowOutcome<H::Payload, H::Error> {
-        self.run_entry(name, args, EmbeddingAdapter { host }).await
+        let Some(id) = self.program.entry_flow(name) else {
+            return StatementOutcome::Err(
+                delegate.call_error(VmCallError::MissingEntry(name.into())),
+            );
+        };
+        self.run_flow_with(id, args, delegate).await
+    }
+
+    /// Runs one resolved flow through the same high-level delegate contract.
+    pub async fn run_flow_with<H: VmDelegate>(
+        &self,
+        id: FlowId,
+        args: FlowArgs<H::Payload, H::Error>,
+        delegate: H,
+    ) -> FlowOutcome<H::Payload, H::Error> {
+        let Some(source) = self.program.module(id.module) else {
+            return StatementOutcome::Err(delegate.call_error(VmCallError::MissingFlow(id.name)));
+        };
+        let context = VmContext {
+            run_id: self.next_run_id(),
+            parent_run_id: None,
+            source_id: source.source_id.clone(),
+            flow: id.clone(),
+            caller_node_id: None,
+            node_id: None,
+            parent_node_id: None,
+            drive_mode: FlowDriveMode::Inline,
+            branch_index: None,
+        };
+        let (delegate, guard) = match delegate.enter_flow(None, &context) {
+            Ok(entered) => entered,
+            Err(error) => return StatementOutcome::Err(error),
+        };
+        let exit = DelegateFlowExit::start(delegate.clone(), context.clone(), guard);
+        let adapter = DelegateAdapter {
+            delegate,
+            context,
+            run_ids: Arc::clone(&self.run_ids),
+        };
+        let outcome = match adapter.cancellation_error() {
+            Some(error) => StatementOutcome::Err(error),
+            None => {
+                let outcome = self.run_flow(id, args, adapter.clone()).await;
+                match adapter.cancellation_error() {
+                    Some(error) => StatementOutcome::Err(error),
+                    None => outcome,
+                }
+            }
+        };
+        exit.finish(&outcome);
+        outcome
     }
 
     pub async fn run_entry<H: VmHost>(
@@ -386,12 +1058,68 @@ impl Vm {
         outcomes
     }
 
-    pub async fn run_lifecycle_with<H: VmEmbedding>(
+    pub async fn run_lifecycle_with<H: VmDelegate>(
         &self,
         event: LifecycleEvent,
-        host: H,
+        delegate: H,
     ) -> Vec<FlowOutcome<H::Payload, H::Error>> {
-        self.run_lifecycle(event, EmbeddingAdapter { host }).await
+        let module = self.program.entry_module();
+        let source_id = self
+            .program
+            .module(module)
+            .map(|source| source.source_id.clone())
+            .unwrap_or_default();
+        let mut outcomes = Vec::new();
+        for flow in self.program.lifecycle_flows(event) {
+            let context = VmContext {
+                run_id: self.next_run_id(),
+                parent_run_id: None,
+                source_id: source_id.clone(),
+                flow: FlowId {
+                    module,
+                    name: flow.name.name.clone(),
+                },
+                caller_node_id: None,
+                node_id: None,
+                parent_node_id: None,
+                drive_mode: FlowDriveMode::Inline,
+                branch_index: None,
+            };
+            let (flow_delegate, guard) = match delegate.enter_flow(None, &context) {
+                Ok(entered) => entered,
+                Err(error) => {
+                    outcomes.push(StatementOutcome::Err(error));
+                    continue;
+                }
+            };
+            let exit = DelegateFlowExit::start(flow_delegate.clone(), context.clone(), guard);
+            let adapter = DelegateAdapter {
+                delegate: flow_delegate,
+                context,
+                run_ids: Arc::clone(&self.run_ids),
+            };
+            let mut engine = Engine::new(VmStatementHost {
+                host: adapter.clone(),
+                program: Arc::clone(&self.program),
+                module,
+                depth: 0,
+                owner: Arc::new(()),
+                parallel_active: Arc::new(AtomicUsize::new(0)),
+            });
+            let outcome = match adapter.cancellation_error() {
+                Some(error) => StatementOutcome::Err(error),
+                None => {
+                    let outcome = engine.run_flow(&flow, Vec::new()).await;
+                    match adapter.cancellation_error() {
+                        Some(error) => StatementOutcome::Err(error),
+                        None => outcome,
+                    }
+                }
+            };
+            exit.finish(&outcome);
+            outcomes.push(outcome);
+        }
+        outcomes
     }
 }
 
@@ -408,26 +1136,43 @@ impl<H: VmHost> StatementHost for VmStatementHost<H> {
     type Payload = H::Payload;
     type Error = H::Error;
     type ExprHost = VmExpressionHost<H>;
+    type NodeScope = H::NodeScope;
+    type IterationScope = H::IterationScope;
 
-    fn preflight(&mut self, stmt: &Stmt, node_id: &str) -> Preflight<Self::Error> {
-        self.host.preflight(stmt, node_id)
+    fn preflight(
+        &mut self,
+        stmt: &Stmt,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Preflight<Self::Error> {
+        self.host.preflight(stmt, node_id, parent_node_id)
     }
 
-    fn node_start(&mut self, stmt: &Stmt, node_id: &str, parent_node_id: Option<&str>) {
-        self.host.node_start(stmt, node_id, parent_node_id);
+    fn node_start(
+        &mut self,
+        stmt: &Stmt,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Self::NodeScope {
+        self.host.node_start(stmt, node_id, parent_node_id)
     }
 
-    fn expression_host(&self, node_id: &str) -> Self::ExprHost {
+    fn expression_host(
+        &self,
+        node_id: Option<&str>,
+        parent_node_id: Option<&str>,
+    ) -> Self::ExprHost {
         VmExpressionHost {
-            effect_host: self.host.expression_host(node_id),
+            effect_host: self.host.expression_host(node_id, parent_node_id),
             host: self.host.clone(),
             program: Arc::clone(&self.program),
             module: self.module,
             depth: self.depth,
-            node_id: node_id.into(),
+            node_id: node_id.map(String::from),
             owner: Arc::clone(&self.owner),
             parallel_active: Arc::clone(&self.parallel_active),
             await_mode: FlowDriveMode::Inline,
+            branch_index: None,
         }
     }
 
@@ -435,33 +1180,23 @@ impl<H: VmHost> StatementHost for VmStatementHost<H> {
         self.host.pattern_error(error)
     }
 
-    fn iteration_start(&mut self, iteration: u64, node_id: &str, parent_node_id: Option<&str>) {
-        self.host
-            .iteration_start(iteration, node_id, parent_node_id);
-    }
-
-    fn iteration_end(
+    fn iteration_start(
         &mut self,
+        iteration: u64,
         node_id: &str,
-        outcome: &FlowOutcome<Self::Payload, Self::Error>,
         parent_node_id: Option<&str>,
-    ) {
-        self.host.iteration_end(node_id, outcome, parent_node_id);
-    }
-
-    fn preview(&self, value: &Value<Self::Payload, Self::Error>) -> Option<String> {
-        self.host.preview(value)
-    }
-
-    fn node_end(
-        &mut self,
-        node_id: &str,
-        outcome: &FlowOutcome<Self::Payload, Self::Error>,
-        parent_node_id: Option<&str>,
-        preview: Option<&str>,
-    ) {
+    ) -> Self::IterationScope {
         self.host
-            .node_end(node_id, outcome, parent_node_id, preview);
+            .iteration_start(iteration, node_id, parent_node_id)
+    }
+
+    fn preview(
+        &self,
+        value: &Value<Self::Payload, Self::Error>,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Option<String> {
+        self.host.preview(value, node_id, parent_node_id)
     }
 }
 
@@ -471,10 +1206,11 @@ struct VmExpressionHost<H: VmHost> {
     program: Arc<LinkedProgram>,
     module: ModuleId,
     depth: usize,
-    node_id: String,
+    node_id: Option<String>,
     owner: Arc<()>,
     parallel_active: Arc<AtomicUsize>,
     await_mode: FlowDriveMode,
+    branch_index: Option<usize>,
 }
 
 impl<H: VmHost> Clone for VmExpressionHost<H> {
@@ -489,6 +1225,7 @@ impl<H: VmHost> Clone for VmExpressionHost<H> {
             owner: Arc::clone(&self.owner),
             parallel_active: Arc::clone(&self.parallel_active),
             await_mode: self.await_mode,
+            branch_index: self.branch_index,
         }
     }
 }
@@ -588,8 +1325,9 @@ impl<H: VmHost> VmExpressionHost<H> {
                 display_name: &display_name,
                 source_id: &source.source_id,
                 contract: flow.contract.as_ref(),
-                parent_node_id: &self.node_id,
+                parent_node_id: self.node_id.as_deref(),
                 mode,
+                branch_index: self.branch_index,
             };
             let (child_host, guard) = match self.host.enter_child(&call) {
                 Ok(child) => child,
@@ -714,15 +1452,23 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
             program: Arc::clone(&self.program),
             module: self.module,
             depth: self.depth,
-            node_id: format!("{}.branch[{index}]", self.node_id),
+            node_id: Some(match self.node_id.as_deref() {
+                Some(node_id) => format!("{node_id}.branch[{index}]"),
+                None => format!("branch[{index}]"),
+            }),
             owner: Arc::clone(&self.owner),
             parallel_active: Arc::clone(&self.parallel_active),
             await_mode: FlowDriveMode::Parallel,
+            branch_index: Some(index),
         }
     }
 
-    fn fanout_branch_end(&self, index: usize, value: &Value<Self::Payload, Self::Error>) {
-        self.effect_host.fanout_branch_end(index, value);
+    fn fanout_branch_end(&self, index: usize, status: FanoutBranchStatus) {
+        self.effect_host.fanout_branch_end(index, status);
+    }
+
+    fn fanout_error_status(&self, error: &Self::Error) -> FanoutBranchStatus {
+        self.effect_host.fanout_error_status(error)
     }
 
     fn make_flow_future(
@@ -756,6 +1502,9 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
                 return Value::Err(error);
             }
             let mut result = future.result.lock().await;
+            if let Some(error) = self.effect_host.cancellation_error() {
+                return Value::Err(error);
+            }
             if let Some(value) = result.as_ref() {
                 return value.clone();
             }
@@ -782,6 +1531,9 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
                 return Value::Err(error);
             }
             let mut result = future.result.lock().await;
+            if let Some(error) = self.effect_host.cancellation_error() {
+                return Value::Err(error);
+            }
             if let Some(value) = result.as_ref() {
                 return value.clone();
             }

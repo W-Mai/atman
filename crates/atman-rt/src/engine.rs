@@ -5,7 +5,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use core::{future::Future, pin::Pin};
+use core::{future::Future, marker::PhantomData, pin::Pin};
 
 use crate::{
     Env, ExpressionHost, HostValueOps, Value, ValueError,
@@ -85,6 +85,60 @@ pub enum StatementOutcome<V, E> {
     LoopContinue,
 }
 
+/// Owns one execution lifecycle after its start event has been emitted.
+///
+/// The engine consumes the scope with [`ExecutionScope::finish`] on a normal
+/// terminal path and with [`ExecutionScope::cancel`] when the driving future is
+/// dropped while execution is suspended.
+pub trait ExecutionScope<V, E>: Send {
+    fn finish(self, outcome: &StatementOutcome<V, E>, preview: Option<&str>);
+    fn cancel(self);
+}
+
+impl<V, E> ExecutionScope<V, E> for () {
+    fn finish(self, _outcome: &StatementOutcome<V, E>, _preview: Option<&str>) {}
+
+    fn cancel(self) {}
+}
+
+struct ScopeExit<S, V, E>
+where
+    S: ExecutionScope<V, E>,
+{
+    scope: Option<S>,
+    marker: PhantomData<fn() -> (V, E)>,
+}
+
+impl<S, V, E> ScopeExit<S, V, E>
+where
+    S: ExecutionScope<V, E>,
+{
+    fn new(scope: S) -> Self {
+        Self {
+            scope: Some(scope),
+            marker: PhantomData,
+        }
+    }
+
+    fn finish(mut self, outcome: &StatementOutcome<V, E>, preview: Option<&str>) {
+        self.scope
+            .take()
+            .expect("execution scope must be present")
+            .finish(outcome, preview);
+    }
+}
+
+impl<S, V, E> Drop for ScopeExit<S, V, E>
+where
+    S: ExecutionScope<V, E>,
+{
+    fn drop(&mut self) {
+        if let Some(scope) = self.scope.take() {
+            scope.cancel();
+        }
+    }
+}
+
 pub enum LoopExit<V, E> {
     Break,
     Interrupted(StatementOutcome<V, E>),
@@ -94,18 +148,18 @@ pub enum LoopExit<V, E> {
 pub trait LoopHost: Send {
     type Value: Send;
     type Error: Send;
+    type IterationScope: ExecutionScope<Self::Value, Self::Error>;
 
-    fn iteration_start(&mut self, iteration: u64, node_id: &str, parent_node_id: Option<&str>);
+    fn iteration_start(
+        &mut self,
+        iteration: u64,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Self::IterationScope;
     fn execute_iteration<'a>(
         &'a mut self,
         node_id: &'a str,
     ) -> HostFuture<'a, StatementOutcome<Self::Value, Self::Error>>;
-    fn iteration_end(
-        &mut self,
-        node_id: &str,
-        outcome: &StatementOutcome<Self::Value, Self::Error>,
-        parent_node_id: Option<&str>,
-    );
 }
 
 /// Runs loop iterations and consumes only break and continue outcomes.
@@ -119,9 +173,9 @@ pub async fn run_loop<H: LoopHost>(
             Some(parent) => format!("{parent}.iter[{iteration}]"),
             None => format!("iter[{iteration}]"),
         };
-        host.iteration_start(iteration, &node_id, parent_node_id);
+        let scope = ScopeExit::new(host.iteration_start(iteration, &node_id, parent_node_id));
         let outcome = host.execute_iteration(&node_id).await;
-        host.iteration_end(&node_id, &outcome, parent_node_id);
+        scope.finish(&outcome, None);
         match outcome {
             StatementOutcome::Continue | StatementOutcome::LoopContinue => {}
             StatementOutcome::LoopBreak => return LoopExit::Break,
@@ -159,27 +213,39 @@ pub trait StatementHost: Send + Sync {
     type Payload: HostValueOps + Clone + Send + Sync;
     type Error: ValueError + Clone + Send + Sync;
     type ExprHost: ExpressionHost<Payload = Self::Payload, Error = Self::Error> + Send;
+    type NodeScope: ExecutionScope<Value<Self::Payload, Self::Error>, Self::Error>;
+    type IterationScope: ExecutionScope<Value<Self::Payload, Self::Error>, Self::Error>;
 
-    fn preflight(&mut self, stmt: &Stmt, node_id: &str) -> Preflight<Self::Error>;
-    fn node_start(&mut self, stmt: &Stmt, node_id: &str, parent_node_id: Option<&str>);
-    fn expression_host(&self, node_id: &str) -> Self::ExprHost;
-    fn pattern_error(&self, error: PatternBindError) -> Self::Error;
-    fn iteration_start(&mut self, _iteration: u64, _node_id: &str, _parent_node_id: Option<&str>) {}
-    fn iteration_end(
+    fn preflight(
         &mut self,
-        _node_id: &str,
-        _outcome: &FlowOutcome<Self::Payload, Self::Error>,
-        _parent_node_id: Option<&str>,
-    ) {
-    }
-    fn preview(&self, value: &Value<Self::Payload, Self::Error>) -> Option<String>;
-    fn node_end(
-        &mut self,
+        stmt: &Stmt,
         node_id: &str,
-        outcome: &FlowOutcome<Self::Payload, Self::Error>,
         parent_node_id: Option<&str>,
-        preview: Option<&str>,
-    );
+    ) -> Preflight<Self::Error>;
+    fn node_start(
+        &mut self,
+        stmt: &Stmt,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Self::NodeScope;
+    fn expression_host(
+        &self,
+        node_id: Option<&str>,
+        parent_node_id: Option<&str>,
+    ) -> Self::ExprHost;
+    fn pattern_error(&self, error: PatternBindError) -> Self::Error;
+    fn iteration_start(
+        &mut self,
+        iteration: u64,
+        _node_id: &str,
+        _parent_node_id: Option<&str>,
+    ) -> Self::IterationScope;
+    fn preview(
+        &self,
+        value: &Value<Self::Payload, Self::Error>,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Option<String>;
 }
 
 /// Drives the ordered statement sequence through one host implementation.
@@ -204,9 +270,10 @@ impl<H: StatementHost> Engine<H> {
     fn evaluate<'a>(
         &'a self,
         expr: &'a Expr,
-        node_id: &'a str,
+        node_id: Option<&'a str>,
+        parent_node_id: Option<&'a str>,
     ) -> HostFuture<'a, Value<H::Payload, H::Error>> {
-        let host = self.host.expression_host(node_id);
+        let host = self.host.expression_host(node_id, parent_node_id);
         Box::pin(async move { eval_expr(expr, &self.env, &host).await })
     }
 
@@ -223,7 +290,7 @@ impl<H: StatementHost> Engine<H> {
             if !provided.iter().any(|name| name == &param.name.name)
                 && let Some(default) = &param.default
             {
-                let value = self.evaluate(default, "").await;
+                let value = self.evaluate(default, None, None).await;
                 if let Value::Err(error) = value {
                     return StatementOutcome::Err(error);
                 }
@@ -252,28 +319,24 @@ impl<H: StatementHost> Engine<H> {
                 } else {
                     format!("{prefix}.{index}")
                 };
-                match self.host.preflight(stmt, &node_id) {
+                match self.host.preflight(stmt, &node_id, parent_node_id) {
                     Preflight::Continue => {}
                     Preflight::Stop(error) => return StatementOutcome::Err(error),
                     Preflight::StopAfterNode { error, preview } => {
-                        self.host.node_start(stmt, &node_id, parent_node_id);
-                        self.host.node_end(
-                            &node_id,
-                            &StatementOutcome::Continue,
-                            parent_node_id,
-                            Some(&preview),
-                        );
+                        self.host
+                            .node_start(stmt, &node_id, parent_node_id)
+                            .finish(&StatementOutcome::Continue, Some(&preview));
                         return StatementOutcome::Err(error);
                     }
                 }
-                self.host.node_start(stmt, &node_id, parent_node_id);
+                let scope = ScopeExit::new(self.host.node_start(stmt, &node_id, parent_node_id));
                 let (outcome, preview) = match stmt {
                     Stmt::Bind { name, value } => {
                         let target = name.as_single_ident().map(|id| id.name.as_str());
                         let watch_rules = target
                             .and_then(|target| watches.get(target))
                             .map(|watches| WatchRules::compile(watches));
-                        let expr_host = self.host.expression_host(&node_id);
+                        let expr_host = self.host.expression_host(Some(&node_id), parent_node_id);
                         let value = eval_expr_with_watch(
                             value,
                             &self.env,
@@ -284,7 +347,7 @@ impl<H: StatementHost> Engine<H> {
                         match value {
                             Value::Err(error) => (StatementOutcome::Err(error), None),
                             value => {
-                                let preview = self.host.preview(&value);
+                                let preview = self.host.preview(&value, &node_id, parent_node_id);
                                 match bind_pattern(name, value, &mut self.env) {
                                     Ok(()) => (StatementOutcome::Continue, preview),
                                     Err(error) => (
@@ -296,7 +359,7 @@ impl<H: StatementHost> Engine<H> {
                         }
                     }
                     Stmt::When { cond, body } => {
-                        let condition = self.evaluate(cond, &node_id).await;
+                        let condition = self.evaluate(cond, Some(&node_id), parent_node_id).await;
                         let (outcome, taken) = run_when(condition, || {
                             self.run_statements(body, &node_id, Some(&node_id))
                         })
@@ -304,7 +367,7 @@ impl<H: StatementHost> Engine<H> {
                         (outcome, taken.map(|taken| taken.to_string()))
                     }
                     Stmt::Return { value } => {
-                        let value = self.evaluate(value, &node_id).await;
+                        let value = self.evaluate(value, Some(&node_id), parent_node_id).await;
                         match value {
                             Value::Err(error) => (StatementOutcome::Err(error), None),
                             value if value.contains_pending_call() => (
@@ -315,16 +378,19 @@ impl<H: StatementHost> Engine<H> {
                                 None,
                             ),
                             value => {
-                                let preview = self.host.preview(&value);
+                                let preview = self.host.preview(&value, &node_id, parent_node_id);
                                 (StatementOutcome::Return(value), preview)
                             }
                         }
                     }
                     Stmt::Expr(expr) => {
-                        let value = self.evaluate(expr, &node_id).await;
+                        let value = self.evaluate(expr, Some(&node_id), parent_node_id).await;
                         match value {
                             Value::Err(error) => (StatementOutcome::Err(error), None),
-                            value => (StatementOutcome::Continue, self.host.preview(&value)),
+                            value => (
+                                StatementOutcome::Continue,
+                                self.host.preview(&value, &node_id, parent_node_id),
+                            ),
                         }
                     }
                     Stmt::Watch(_) => (StatementOutcome::Continue, None),
@@ -342,8 +408,7 @@ impl<H: StatementHost> Engine<H> {
                     Stmt::Break => (StatementOutcome::LoopBreak, Some("break".into())),
                     Stmt::Continue => (StatementOutcome::LoopContinue, Some("continue".into())),
                 };
-                self.host
-                    .node_end(&node_id, &outcome, parent_node_id, preview.as_deref());
+                scope.finish(&outcome, preview.as_deref());
                 if !matches!(outcome, StatementOutcome::Continue) {
                     return outcome;
                 }
@@ -361,11 +426,17 @@ struct EngineLoopHost<'e, 'b, H: StatementHost> {
 impl<H: StatementHost> LoopHost for EngineLoopHost<'_, '_, H> {
     type Value = Value<H::Payload, H::Error>;
     type Error = H::Error;
+    type IterationScope = H::IterationScope;
 
-    fn iteration_start(&mut self, iteration: u64, node_id: &str, parent_node_id: Option<&str>) {
+    fn iteration_start(
+        &mut self,
+        iteration: u64,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Self::IterationScope {
         self.engine
             .host
-            .iteration_start(iteration, node_id, parent_node_id);
+            .iteration_start(iteration, node_id, parent_node_id)
     }
 
     fn execute_iteration<'a>(
@@ -375,27 +446,19 @@ impl<H: StatementHost> LoopHost for EngineLoopHost<'_, '_, H> {
         self.engine
             .run_statements(self.body, node_id, Some(node_id))
     }
-
-    fn iteration_end(
-        &mut self,
-        node_id: &str,
-        outcome: &FlowOutcome<H::Payload, H::Error>,
-        parent_node_id: Option<&str>,
-    ) {
-        self.engine
-            .host
-            .iteration_end(node_id, outcome, parent_node_id);
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use alloc::{string::ToString, vec, vec::Vec};
     use core::{
         future::Future,
         pin::pin,
         task::{Context, Poll, Waker},
     };
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::{
@@ -461,13 +524,40 @@ mod tests {
         ));
     }
 
-    struct TestHost<'a> {
-        events: &'a mut Vec<String>,
+    struct RecordedScope {
+        events: Arc<Mutex<Vec<String>>>,
+        node_id: String,
+        include_preview: bool,
+    }
+
+    impl<V, E> ExecutionScope<V, E> for RecordedScope {
+        fn finish(self, _outcome: &StatementOutcome<V, E>, preview: Option<&str>) {
+            let event = if self.include_preview {
+                alloc::format!("end:{}:{}", self.node_id, preview.unwrap_or(""))
+            } else {
+                alloc::format!("end:{}", self.node_id)
+            };
+            self.events.lock().unwrap().push(event);
+        }
+
+        fn cancel(self) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(alloc::format!("cancel:{}", self.node_id));
+        }
+    }
+
+    struct TestHost {
+        events: Arc<Mutex<Vec<String>>>,
         stop_before: bool,
+        pending_external: bool,
     }
 
     #[derive(Clone)]
-    struct TestExprHost;
+    struct TestExprHost {
+        pending_external: bool,
+    }
 
     impl ExpressionHost for TestExprHost {
         type Payload = ();
@@ -485,16 +575,27 @@ mod tests {
             &'b self,
             _effect: crate::ExpressionEffect<(), EvalError>,
         ) -> HostFuture<'b, Value<(), EvalError>> {
-            Box::pin(async { panic!("unexpected external expression") })
+            if self.pending_external {
+                Box::pin(core::future::pending())
+            } else {
+                Box::pin(async { panic!("unexpected external expression") })
+            }
         }
     }
 
-    impl StatementHost for TestHost<'_> {
+    impl StatementHost for TestHost {
         type Payload = ();
         type Error = EvalError;
         type ExprHost = TestExprHost;
+        type NodeScope = RecordedScope;
+        type IterationScope = RecordedScope;
 
-        fn preflight(&mut self, _stmt: &Stmt, _node_id: &str) -> Preflight<Self::Error> {
+        fn preflight(
+            &mut self,
+            _stmt: &Stmt,
+            _node_id: &str,
+            _parent_node_id: Option<&str>,
+        ) -> Preflight<Self::Error> {
             if self.stop_before {
                 Preflight::StopAfterNode {
                     error: EvalError::type_mismatch("active flow", "cancelled".into()),
@@ -505,31 +606,61 @@ mod tests {
             }
         }
 
-        fn node_start(&mut self, _stmt: &Stmt, node_id: &str, _parent_node_id: Option<&str>) {
-            self.events.push(alloc::format!("start:{node_id}"));
+        fn node_start(
+            &mut self,
+            _stmt: &Stmt,
+            node_id: &str,
+            _parent_node_id: Option<&str>,
+        ) -> Self::NodeScope {
+            self.events
+                .lock()
+                .unwrap()
+                .push(alloc::format!("start:{node_id}"));
+            RecordedScope {
+                events: self.events.clone(),
+                node_id: node_id.to_string(),
+                include_preview: true,
+            }
         }
 
-        fn expression_host(&self, _node_id: &str) -> Self::ExprHost {
-            TestExprHost
+        fn expression_host(
+            &self,
+            _node_id: Option<&str>,
+            _parent_node_id: Option<&str>,
+        ) -> Self::ExprHost {
+            TestExprHost {
+                pending_external: self.pending_external,
+            }
         }
 
         fn pattern_error(&self, error: PatternBindError) -> EvalError {
             EvalError::type_mismatch("matching pattern", alloc::format!("{error:?}"))
         }
 
-        fn preview(&self, _value: &Value<(), EvalError>) -> Option<String> {
+        fn preview(
+            &self,
+            _value: &Value<(), EvalError>,
+            _node_id: &str,
+            _parent_node_id: Option<&str>,
+        ) -> Option<String> {
             None
         }
 
-        fn node_end(
+        fn iteration_start(
             &mut self,
+            iteration: u64,
             node_id: &str,
-            _outcome: &StatementOutcome<Value<(), EvalError>, Self::Error>,
             _parent_node_id: Option<&str>,
-            preview: Option<&str>,
-        ) {
+        ) -> Self::IterationScope {
             self.events
-                .push(alloc::format!("end:{node_id}:{}", preview.unwrap_or("")));
+                .lock()
+                .unwrap()
+                .push(alloc::format!("iteration:{iteration}:{node_id}"));
+            RecordedScope {
+                events: self.events.clone(),
+                node_id: node_id.to_string(),
+                include_preview: false,
+            }
         }
     }
 
@@ -546,11 +677,12 @@ mod tests {
 
     #[test]
     fn engine_orders_node_events_and_stops_after_return() {
-        let mut events = Vec::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
         let result = {
             let host = TestHost {
-                events: &mut events,
+                events: events.clone(),
                 stop_before: false,
+                pending_external: false,
             };
             let mut engine = Engine::new(host);
             run_ready(engine.run_statements(
@@ -567,7 +699,7 @@ mod tests {
         };
         assert!(matches!(result, StatementOutcome::Return(Value::Int(7))));
         assert_eq!(
-            events,
+            *events.lock().unwrap(),
             vec![
                 "start:branch.0",
                 "end:branch.0:",
@@ -579,11 +711,12 @@ mod tests {
 
     #[test]
     fn preflight_stop_records_node_without_executing_it() {
-        let mut events = Vec::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
         let result = {
             let host = TestHost {
-                events: &mut events,
+                events: events.clone(),
                 stop_before: true,
+                pending_external: false,
             };
             let mut engine = Engine::new(host);
             run_ready(engine.run_statements(&[Stmt::Break], "", None))
@@ -591,32 +724,75 @@ mod tests {
         assert!(
             matches!(result, StatementOutcome::Err(EvalError::TypeMismatch { actual, .. }) if actual == "cancelled")
         );
-        assert_eq!(events, vec!["start:0", "end:0:hard stop"]);
+        assert_eq!(*events.lock().unwrap(), vec!["start:0", "end:0:hard stop"]);
     }
 
-    struct TestLoopHost<'a> {
-        events: &'a mut Vec<String>,
+    #[test]
+    fn dropping_engine_future_cancels_open_node_scope_once() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let host = TestHost {
+            events: events.clone(),
+            stop_before: false,
+            pending_external: true,
+        };
+        let mut engine = Engine::new(host);
+        let stmts = [Stmt::Expr(Expr::Call {
+            func: Ident::new("wait", Span::default()),
+            args: Vec::new(),
+        })];
+        {
+            let mut future = engine.run_statements(&stmts, "", None);
+            assert!(matches!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Pending
+            ));
+        }
+        assert_eq!(*events.lock().unwrap(), vec!["start:0", "cancel:0"]);
+    }
+
+    struct TestLoopHost {
+        events: Arc<Mutex<Vec<String>>>,
         iteration: usize,
         return_after_continue: bool,
+        pending: bool,
     }
 
-    impl LoopHost for TestLoopHost<'_> {
+    impl LoopHost for TestLoopHost {
         type Value = i32;
         type Error = &'static str;
+        type IterationScope = RecordedScope;
 
-        fn iteration_start(&mut self, iteration: u64, node_id: &str, parent: Option<&str>) {
-            self.events.push(alloc::format!(
+        fn iteration_start(
+            &mut self,
+            iteration: u64,
+            node_id: &str,
+            parent: Option<&str>,
+        ) -> Self::IterationScope {
+            self.events.lock().unwrap().push(alloc::format!(
                 "start:{iteration}:{node_id}:{}",
                 parent.unwrap_or("")
             ));
+            RecordedScope {
+                events: self.events.clone(),
+                node_id: node_id.to_string(),
+                include_preview: false,
+            }
         }
 
         fn execute_iteration<'b>(
             &'b mut self,
             node_id: &'b str,
         ) -> HostFuture<'b, StatementOutcome<i32, &'static str>> {
+            if self.pending {
+                return Box::pin(core::future::pending());
+            }
             Box::pin(async move {
-                self.events.push(alloc::format!("execute:{node_id}"));
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(alloc::format!("execute:{node_id}"));
                 let outcome = match self.iteration {
                     0 => StatementOutcome::Continue,
                     1 if self.return_after_continue => StatementOutcome::Return(7),
@@ -627,31 +803,23 @@ mod tests {
                 outcome
             })
         }
-
-        fn iteration_end(
-            &mut self,
-            node_id: &str,
-            _outcome: &StatementOutcome<i32, &'static str>,
-            _parent: Option<&str>,
-        ) {
-            self.events.push(alloc::format!("end:{node_id}"));
-        }
     }
 
     #[test]
     fn loop_consumes_continue_and_break_after_ending_each_iteration() {
-        let mut events = Vec::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
         let result = run_ready(run_loop(
             &mut TestLoopHost {
-                events: &mut events,
+                events: events.clone(),
                 iteration: 0,
                 return_after_continue: false,
+                pending: false,
             },
             Some("loop.0"),
         ));
         assert!(matches!(result, LoopExit::Break));
         assert_eq!(
-            events,
+            *events.lock().unwrap(),
             vec![
                 "start:0:loop.0.iter[0]:loop.0",
                 "execute:loop.0.iter[0]",
@@ -668,12 +836,13 @@ mod tests {
 
     #[test]
     fn loop_preserves_return_after_ending_its_iteration() {
-        let mut events = Vec::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
         let result = run_ready(run_loop(
             &mut TestLoopHost {
-                events: &mut events,
+                events: events.clone(),
                 iteration: 0,
                 return_after_continue: true,
+                pending: false,
             },
             None,
         ));
@@ -682,7 +851,7 @@ mod tests {
             LoopExit::Interrupted(StatementOutcome::Return(7))
         ));
         assert_eq!(
-            events,
+            *events.lock().unwrap(),
             vec![
                 "start:0:iter[0]:",
                 "execute:iter[0]",
@@ -691,6 +860,30 @@ mod tests {
                 "execute:iter[1]",
                 "end:iter[1]",
             ]
+        );
+    }
+
+    #[test]
+    fn dropping_loop_future_cancels_open_iteration_scope_once() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut host = TestLoopHost {
+            events: events.clone(),
+            iteration: 0,
+            return_after_continue: false,
+            pending: true,
+        };
+        {
+            let mut future = Box::pin(run_loop(&mut host, Some("loop.0")));
+            assert!(matches!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Pending
+            ));
+        }
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["start:0:loop.0.iter[0]:loop.0", "cancel:loop.0.iter[0]"]
         );
     }
 

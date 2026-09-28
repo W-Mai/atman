@@ -23,6 +23,14 @@ pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a AtmanHost<'a>) -> Bo
     atman_rt::eval_expr(expr, env, ctx)
 }
 
+fn fanout_error_status(error: &RuntimeError) -> atman_rt::FanoutBranchStatus {
+    if matches!(error, RuntimeError::Cancelled(_)) {
+        atman_rt::FanoutBranchStatus::Cancelled
+    } else {
+        atman_rt::FanoutBranchStatus::Err
+    }
+}
+
 impl ExpressionHost for AtmanHost<'_> {
     type Payload = AtmanPayload;
     type Error = RuntimeError;
@@ -82,15 +90,19 @@ impl ExpressionHost for AtmanHost<'_> {
         self.with_node(fanout_branch_id(self, index))
     }
 
-    fn fanout_branch_end(&self, index: usize, value: &Value) {
+    fn fanout_error_status(&self, error: &RuntimeError) -> atman_rt::FanoutBranchStatus {
+        fanout_error_status(error)
+    }
+
+    fn fanout_branch_end(&self, index: usize, status: atman_rt::FanoutBranchStatus) {
         let (Some(sink), Some(run_id)) = (self.events, self.flow_run_id.clone()) else {
             return;
         };
         let branch_id = fanout_branch_id(self, index);
-        let status = if value.is_err() {
-            crate::event::FlowNodeStatus::Err
-        } else {
-            crate::event::FlowNodeStatus::Ok
+        let status = match status {
+            atman_rt::FanoutBranchStatus::Ok => crate::event::FlowNodeStatus::Ok,
+            atman_rt::FanoutBranchStatus::Err => crate::event::FlowNodeStatus::Err,
+            atman_rt::FanoutBranchStatus::Cancelled => crate::event::FlowNodeStatus::Cancelled,
         };
         sink.emit(crate::event::Event::FlowNodeEnd {
             run_id: run_id.clone(),
@@ -1206,6 +1218,18 @@ mod tests {
     use super::*;
     use crate::tool::ToolRegistry;
     use atman_rt::parse_file;
+
+    #[test]
+    fn fanout_only_classifies_runtime_cancellation_as_cancelled() {
+        assert_eq!(
+            fanout_error_status(&RuntimeError::Cancelled("stopped".into())),
+            atman_rt::FanoutBranchStatus::Cancelled
+        );
+        assert_eq!(
+            fanout_error_status(&RuntimeError::ToolFailed("failed".into())),
+            atman_rt::FanoutBranchStatus::Err
+        );
+    }
 
     fn authorized_eval_tool_ctx(workspace: Option<&std::path::Path>) -> ToolCtx {
         let trust = crate::trust::TrustConfig {

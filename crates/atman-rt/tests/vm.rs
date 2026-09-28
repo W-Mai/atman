@@ -10,7 +10,8 @@ use std::{
 
 use atman_rt::{
     EvalError, ExpressionEffect, FlowCall, FlowDriveMode, FlowOutcome, HostFuture, Source,
-    SourceResolver, StatementOutcome, Value, Vm, VmCallError, VmEmbedding, ast::LifecycleEvent,
+    SourceResolver, StatementOutcome, Value, Vm, VmCallError, VmContext, VmDelegate,
+    ast::LifecycleEvent,
 };
 
 type TestValue = Value<(), EvalError>;
@@ -61,11 +62,69 @@ struct TestHost {
     second_started: Arc<AtomicBool>,
 }
 
-impl VmEmbedding for TestHost {
+impl VmDelegate for TestHost {
     type Payload = ();
     type Error = EvalError;
+    type Permit = ();
+    type FlowGuard = ();
 
-    fn cancellation_error(&self) -> Option<Self::Error> {
+    fn authorize<'a>(
+        &'a self,
+        _effect: &'a ExpressionEffect<Self::Payload, Self::Error>,
+        _context: &'a VmContext,
+    ) -> HostFuture<'a, Result<Self::Permit, Self::Error>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn enter_flow(
+        &self,
+        call: Option<&FlowCall<'_>>,
+        _context: &VmContext,
+    ) -> Result<(Self, Self::FlowGuard), Self::Error> {
+        if let Some(call) = call {
+            self.modes.lock().unwrap().push(call.mode);
+            self.events.lock().unwrap().push(format!(
+                "enter:{}:{}:{}:{}",
+                call.target.name,
+                call.source_id,
+                call.parent_node_id.unwrap_or("<none>"),
+                call.contract.is_some()
+            ));
+        }
+        Ok((self.clone(), ()))
+    }
+
+    fn exit_flow(
+        &self,
+        call: Option<&FlowCall<'_>>,
+        _context: &VmContext,
+        outcome: &FlowOutcome<Self::Payload, Self::Error>,
+        _guard: Self::FlowGuard,
+    ) {
+        if let Some(call) = call {
+            self.events.lock().unwrap().push(format!(
+                "exit:{}:{}",
+                call.target.name,
+                matches!(outcome, StatementOutcome::Return(Value::Int(_)))
+            ));
+        }
+    }
+
+    fn cancel_flow(
+        &self,
+        call: Option<&FlowCall<'_>>,
+        _context: &VmContext,
+        _guard: Self::FlowGuard,
+    ) {
+        if let Some(call) = call {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("exit:{}:false", call.target.name));
+        }
+    }
+
+    fn cancellation_error(&self, _context: &VmContext) -> Option<Self::Error> {
         self.cancelled
             .load(Ordering::SeqCst)
             .then(|| EvalError::TypeMismatch {
@@ -74,7 +133,7 @@ impl VmEmbedding for TestHost {
             })
     }
 
-    fn preflight_tool(&self, name: &str) -> Option<TestValue> {
+    fn preflight_tool(&self, name: &str, _context: &VmContext) -> Option<TestValue> {
         (name == "blocked").then(|| {
             Value::Err(EvalError::TypeMismatch {
                 expected: "allowed tool".into(),
@@ -83,9 +142,11 @@ impl VmEmbedding for TestHost {
         })
     }
 
-    fn effect<'a>(
+    fn invoke<'a>(
         &'a self,
         effect: ExpressionEffect<Self::Payload, Self::Error>,
+        _permit: Self::Permit,
+        _context: &'a VmContext,
     ) -> HostFuture<'a, TestValue> {
         Box::pin(async move {
             match effect {
@@ -131,24 +192,13 @@ impl VmEmbedding for TestHost {
         }
     }
 
-    fn child(&self, call: &FlowCall<'_>) -> Result<Self, Self::Error> {
-        self.modes.lock().unwrap().push(call.mode);
-        self.events.lock().unwrap().push(format!(
-            "enter:{}:{}:{}:{}",
-            call.target.name,
-            call.source_id,
-            call.parent_node_id,
-            call.contract.is_some()
-        ));
-        Ok(self.clone())
-    }
-
-    fn child_end(&self, call: &FlowCall<'_>, outcome: &FlowOutcome<Self::Payload, Self::Error>) {
-        self.events.lock().unwrap().push(format!(
-            "exit:{}:{}",
-            call.target.name,
-            matches!(outcome, StatementOutcome::Return(Value::Int(_)))
-        ));
+    fn error_status(&self, error: &Self::Error) -> atman_rt::VmStatus {
+        match error {
+            EvalError::TypeMismatch { actual, .. } if actual == "cancelled" => {
+                atman_rt::VmStatus::Cancelled
+            }
+            _ => atman_rt::VmStatus::Err,
+        }
     }
 }
 

@@ -9,8 +9,10 @@ use std::{
 };
 
 use atman_rt::{
-    EvalError, ExpressionEffect, Source, SourceResolver, StatementOutcome, ToolArgs,
-    ToolRegisterError, ToolRouter, Value, Vm, VmEmbedding,
+    EffectDelegate, EvalError, ExpressionEffect, FlowDriveMode, Source, SourceResolver,
+    StatementOutcome, ToolArgs, ToolRegisterError, ToolRouter, Value, Vm, VmContext, VmDelegates,
+    VmRunId,
+    program::{FlowId, ModuleId},
 };
 use futures::task::AtomicWaker;
 
@@ -47,6 +49,23 @@ fn ready<F: Future>(future: F) -> F::Output {
     }
 }
 
+fn context() -> VmContext {
+    VmContext {
+        run_id: VmRunId(1),
+        parent_run_id: None,
+        source_id: "main.at".into(),
+        flow: FlowId {
+            module: ModuleId(0),
+            name: "main".into(),
+        },
+        caller_node_id: None,
+        node_id: None,
+        parent_node_id: None,
+        drive_mode: FlowDriveMode::Inline,
+        branch_index: None,
+    }
+}
+
 #[test]
 fn registered_tool_receives_evaluated_named_and_positional_arguments() {
     let vm = Vm::compile(
@@ -61,7 +80,7 @@ fn registered_tool_receives_evaluated_named_and_positional_arguments() {
         })
         .expect("register tool");
     assert!(matches!(
-        ready(vm.run("main", vec![], tools)),
+        ready(vm.run("main", vec![], VmDelegates::new(tools))),
         StatementOutcome::Return(Value::Int(5))
     ));
 }
@@ -90,7 +109,7 @@ fn async_tool_is_cold_until_await_and_reuses_its_result() {
     )
     .expect("compile cold call");
     assert!(matches!(
-        ready(cold.run("main", vec![], tools.clone())),
+        ready(cold.run("main", vec![], VmDelegates::new(tools.clone()))),
         StatementOutcome::Return(Value::Int(0))
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -104,7 +123,7 @@ fn async_tool_is_cold_until_await_and_reuses_its_result() {
     )
     .expect("compile awaited call");
     assert!(matches!(
-        ready(awaited.run("main", vec![], tools.clone())),
+        ready(awaited.run("main", vec![], VmDelegates::new(tools.clone()))),
         StatementOutcome::Return(Value::Int(8))
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -115,7 +134,7 @@ fn async_tool_is_cold_until_await_and_reuses_its_result() {
     )
     .expect("compile escaped call");
     assert!(matches!(
-        ready(escaped.run("main", vec![], tools)),
+        ready(escaped.run("main", vec![], VmDelegates::new(tools))),
         StatementOutcome::Err(EvalError::TypeMismatch { actual, .. }) if actual == "pending call"
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -158,7 +177,7 @@ fn fanout_starts_async_tools_concurrently() {
             }
         })
         .expect("register async tool");
-    let mut future = pin!(vm.run("main", vec![], tools));
+    let mut future = pin!(vm.run("main", vec![], VmDelegates::new(tools)));
     let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
     let waker = Waker::from(Arc::clone(&wake_flag));
     let mut context = Context::from_waker(&waker);
@@ -191,7 +210,7 @@ fn unknown_tools_fail_before_arguments_run_and_at_dispatch() {
     .expect("compile source");
     let tools = ToolRouter::<(), EvalError>::new();
     assert!(matches!(
-        ready(vm.run("main", vec![], tools.clone())),
+        ready(vm.run("main", vec![], VmDelegates::new(tools.clone()))),
         StatementOutcome::Err(EvalError::TypeMismatch { actual, .. }) if actual == "missing"
     ));
     assert!(matches!(
@@ -256,7 +275,11 @@ fn handler_errors_and_non_tool_effects_remain_explicit() {
         Value::Err(EvalError::MissingArgument(name)) if name == "input"
     ));
     assert!(matches!(
-        ready(tools.effect(ExpressionEffect::FileRef("file.txt".into()))),
+        ready(tools.invoke(
+            ExpressionEffect::FileRef("file.txt".into()),
+            (),
+            &context()
+        )),
         Value::Err(EvalError::TypeMismatch { actual, .. }) if actual == "file reference"
     ));
 }

@@ -4,7 +4,9 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use atman_rt::{EvalError, Source, SourceResolver, StatementOutcome, ToolRouter, Value, Vm};
+use atman_rt::{
+    EvalError, Source, SourceResolver, StatementOutcome, ToolRouter, Value, Vm, VmDelegates,
+};
 
 type TestValue = Value<(), EvalError>;
 
@@ -31,7 +33,11 @@ fn ready<F: Future>(future: F) -> F::Output {
 
 fn run(source: &str) -> StatementOutcome<TestValue, EvalError> {
     let vm = Vm::compile(Source::new("main.at", source), &NoSources).expect("compile source");
-    ready(vm.run("main", vec![], ToolRouter::<(), EvalError>::new()))
+    ready(vm.run(
+        "main",
+        vec![],
+        VmDelegates::new(ToolRouter::<(), EvalError>::new()),
+    ))
 }
 
 #[test]

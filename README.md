@@ -421,7 +421,7 @@ atman/
   docs/              # Quickstart, context strategy, list combinators
 ```
 
-`atman-rt` is the complete Atman language VM. `Vm::compile(Source, &resolver)` parses and links `.at` source, including `use` and `pub` flows. `#[atman_rt::tools]` generates typed tool bindings from Rust functions; a host can also register handlers manually with `ToolRouter` or implement `VmEmbedding` for other effects and callbacks. Atman's tools, providers, sessions, and storage are supplied by `atman-runtime`; another host can use `atman-rt` without that crate. `#[atman_runtime::tools]` generates tool schemas and registration with an explicit Tier through the existing approval and event path; `ToolRegistry::register_fn` remains available for manual bindings.
+`atman-rt` is the complete Atman language VM. `Vm::compile(Source, &resolver)` parses and links `.at` source, including `use` and `pub` flows. `#[atman_rt::tools]` generates typed tool bindings from Rust functions; a host can also register handlers manually with `ToolRouter` and compose authorization, observation, cancellation, flow lifecycle, and language-control callbacks with `VmDelegates`. Atman's tools, providers, sessions, and storage are supplied by `atman-runtime`; another host can use `atman-rt` without that crate. `#[atman_runtime::tools]` generates tool schemas and registration with an explicit Tier through the existing approval and event path; `ToolRegistry::register_fn` remains available for manual bindings.
 
 ```rust
 #[atman_runtime::tools]

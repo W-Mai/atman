@@ -7,6 +7,7 @@ use std::{
 
 use atman_rt::{
     EvalError, Source, SourceResolver, StatementOutcome, ToolArgs, ToolRegisterError, Value, Vm,
+    VmDelegates,
 };
 
 #[atman_rt::tools]
@@ -143,7 +144,7 @@ fn generated_router_preserves_rust_async_semantics_in_the_vm() {
     )
     .expect("compile cold call");
     assert!(matches!(
-        ready(cold.run("main", vec![], tools.clone())),
+        ready(cold.run("main", vec![], VmDelegates::new(tools.clone()))),
         StatementOutcome::Return(Value::Int(3))
     ));
     assert_eq!(host_tools::ASYNC_CALLS.load(Ordering::SeqCst), 0);
@@ -158,7 +159,7 @@ fn generated_router_preserves_rust_async_semantics_in_the_vm() {
     )
     .expect("compile awaited call");
     assert!(matches!(
-        ready(awaited.run("main", vec![], tools)),
+        ready(awaited.run("main", vec![], VmDelegates::new(tools))),
         StatementOutcome::Return(Value::Int(7))
     ));
     assert_eq!(host_tools::ASYNC_CALLS.load(Ordering::SeqCst), 1);
