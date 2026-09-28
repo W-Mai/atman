@@ -117,7 +117,31 @@ fn extract_expr(expr: &Expr, prefix: &str, out: &mut Vec<StaticNode>) {
                 children,
             });
         }
-        _ => {}
+        _ => {
+            if let Some(effect) = first_effect_expr(expr) {
+                extract_expr(effect, prefix, out);
+            }
+        }
+    }
+}
+
+pub(crate) fn first_effect_expr(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::Node(_) | Expr::Await { .. } => Some(expr),
+        Expr::Member { base, .. }
+        | Expr::Unary { operand: base, .. }
+        | Expr::Annotated { expr: base, .. } => first_effect_expr(base),
+        Expr::Index { base, index }
+        | Expr::Binary {
+            left: base,
+            right: index,
+            ..
+        } => first_effect_expr(base).or_else(|| first_effect_expr(index)),
+        Expr::Call { args, .. } | Expr::List(args) => args.iter().find_map(first_effect_expr),
+        Expr::Struct(fields) => fields
+            .iter()
+            .find_map(|(_, value)| first_effect_expr(value)),
+        Expr::Literal(_) | Expr::Ident(_) | Expr::FileRef(_) | Expr::Lambda { .. } => None,
     }
 }
 
@@ -213,12 +237,16 @@ fn extract_node(node: &Node, prefix: &str, out: &mut Vec<StaticNode>) {
 pub fn format_expr_short(expr: &Expr) -> String {
     match expr {
         Expr::Await { value } => format!("{}.await", format_expr_short(value)),
+        Expr::Index { base, index } => {
+            format!("{}[{}]", format_expr_short(base), format_expr_short(index))
+        }
         Expr::Node(Node::FlowCall { name, args }) => flow_call_label(name, args),
         Expr::Literal(atman_rt::ast::Literal::Bool(b)) => b.to_string(),
         Expr::Literal(atman_rt::ast::Literal::Str(s)) => format!("\"{s}\""),
         Expr::Literal(atman_rt::ast::Literal::Int(i)) => i.to_string(),
         Expr::Literal(atman_rt::ast::Literal::Float(f)) => f.to_string(),
         Expr::Ident(id) => id.name.clone(),
+        Expr::Member { base, field } => format!("{}.{}", format_expr_short(base), field.name),
         Expr::Binary { op, left, right } => {
             let sym = match op {
                 atman_rt::ast::BinOp::Eq => "==",
@@ -352,6 +380,38 @@ mod tests {
             }
         );
         assert_eq!(nodes[0].label, "pending.await");
+    }
+
+    #[test]
+    fn indexes_keep_labels_and_nested_nodes() {
+        let expr = Expr::Index {
+            base: Box::new(Expr::Ident(Ident::new("items", Span::default()))),
+            index: Box::new(Expr::Node(Node::ToolCall {
+                path: vec![
+                    Ident::new("cursor", Span::default()),
+                    Ident::new("next", Span::default()),
+                ],
+                args: Vec::new(),
+            })),
+        };
+        assert_eq!(format_expr_short(&expr), "items[…]");
+        let mut nodes = Vec::new();
+        extract_expr(&expr, "0", &mut nodes);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_id, "0");
+        assert!(matches!(
+            &nodes[0].kind,
+            NodeKind::ToolCall { path } if path == "cursor.next"
+        ));
+
+        let member = Expr::Member {
+            base: Box::new(expr),
+            field: Ident::new("value", Span::default()),
+        };
+        nodes.clear();
+        extract_expr(&member, "1", &mut nodes);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_id, "1");
     }
 
     #[test]

@@ -17,6 +17,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **List indexing** — `.at` expressions can read list elements with zero-based `items[index]` syntax or `list.get(items, index)`. Negative and out-of-range indexes fail explicitly, and chained indexing preserves cold Flow and tool futures until `.await` or `fanout` drives them.
 - **Portable list basics** — `atman-rt` now evaluates `list.len`, `list.is_empty`, `list.first`, `list.last`, `list.tail`, and `list.concat` without host tools. Existing `len`, `is_empty`, `head`, `tail`, and `concat` calls use the same core implementation.
 - **Cold async tools** — Rust `async fn` bindings create deferred tool calls that start on `.await` or `fanout`; synchronous bindings continue to execute immediately. Repeated waits reuse the first result, and approval begins when a deferred call is driven.
 - **Typed tool bindings** — `#[atman_rt::tools]` and `#[atman_runtime::tools]` generate argument decoding and registration from Rust function signatures. Product bindings generate input schemas and require an explicit permission tier.

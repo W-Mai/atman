@@ -48,11 +48,10 @@ not converge.
 | `[a, b]` | List |
 | `{ field: value }` | Ordered struct of string/value fields |
 | `record.field` | Struct member access |
+| `items[index]` | Zero-based list access; negative and out-of-range indexes are errors |
 | `||`, `&&`, comparisons, arithmetic | Boolean, comparison, and arithmetic operators |
 
-There is no map literal distinct from a struct and no `items[0]`/`map[key]` index
-syntax. Use `head`, `tail`, `len`, list combinators, destructuring, or a tool that
-returns the required shape.
+There is no map literal distinct from a struct and no `map[key]` lookup syntax. Use struct member access for named fields.
 
 ### Lambdas and list combinators
 
@@ -68,7 +67,7 @@ The lambda forms `list.map`, `list.filter`, `list.find`, `list.any`, `list.all`,
 and `list.reduce` execute sequentially. The older registered tools such as
 `list_map` and `list_reduce` are separate APIs and are not lambda aliases.
 
-`list.len`, `list.is_empty`, `list.first`, `list.last`, `list.tail`, and `list.concat` are portable VM intrinsics. The established `len`, `is_empty`, `head`, `tail`, and `concat` spellings use the same implementation.
+`list.len`, `list.is_empty`, `list.get`, `list.first`, `list.last`, `list.tail`, and `list.concat` are portable VM intrinsics. The established `len`, `is_empty`, `head`, `tail`, and `concat` spellings use the same implementation.
 
 ## Tool Calls and LLM Calls
 

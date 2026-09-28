@@ -6,7 +6,7 @@ use crate::{
     ValueError,
     ast::{Arg, Expr, FlowRef, MessageRole, Node},
     fanout::join_fanout_all,
-    list::{ListIntrinsic, eval_list_intrinsic_named},
+    list::{ListIntrinsic, eval_list_index, eval_list_intrinsic_named},
     ops::{eval_binary, eval_literal, eval_unary},
     watch::WatchRules,
 };
@@ -243,6 +243,17 @@ pub fn eval_expr_with_watch<'a, H: ExpressionHost>(
                     Some(field) => field.clone(),
                     None => Value::Err(host.undefined_field(format!(".{}", field.name))),
                 }
+            }
+            Expr::Index { base, index } => {
+                let base = eval_expr(base, env, host).await;
+                if base.is_err() {
+                    return base;
+                }
+                let index = eval_expr(index, env, host).await;
+                if index.is_err() {
+                    return index;
+                }
+                eval_list_index(base, index)
             }
             Expr::Await { value } => {
                 let value = eval_expr(value, env, host).await;

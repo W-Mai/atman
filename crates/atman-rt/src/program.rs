@@ -583,6 +583,10 @@ impl LinkedProgram {
                 self.lower_expr(caller, left)?;
                 self.lower_expr(caller, right)?;
             }
+            Expr::Index { base, index } => {
+                self.lower_expr(caller, base)?;
+                self.lower_expr(caller, index)?;
+            }
             Expr::Call { args, .. } | Expr::List(args) => {
                 for arg in args {
                     self.lower_expr(caller, arg)?;
@@ -796,6 +800,10 @@ impl LinkedProgram {
             Expr::Binary { left, right, .. } => {
                 self.check_expr(caller, left)?;
                 self.check_expr(caller, right)?;
+            }
+            Expr::Index { base, index } => {
+                self.check_expr(caller, base)?;
+                self.check_expr(caller, index)?;
             }
             Expr::Call { args, .. } | Expr::List(args) => {
                 for arg in args {

@@ -12,7 +12,7 @@ flow double_values(xs: list) -> list {
 }
 ```
 
-The built-in list operations are `list.len`, `list.is_empty`, `list.first`, `list.last`, `list.tail`, `list.concat`, `list.map`, `list.filter`, `list.find`, `list.any`, `list.all`, and `list.reduce`. Lambda calls evaluate sequentially.
+The built-in list operations are `list.len`, `list.is_empty`, `list.get`, `list.first`, `list.last`, `list.tail`, `list.concat`, `list.map`, `list.filter`, `list.find`, `list.any`, `list.all`, and `list.reduce`. Lambda calls evaluate sequentially.
 
 For example, filter non-empty strings:
 
@@ -83,11 +83,11 @@ Use variable bindings when a later step needs an earlier result:
 ```atman
 flow first_non_empty(xs: list) -> value {
     filtered = list.filter(xs, |item| item != "")
-    return head(filtered)
+    return filtered[0]
 }
 ```
 
-The binding makes the intermediate value available for later calls without introducing a second expression operator.
+The binding makes the intermediate value available for later expressions. List indexes are zero-based and fail explicitly when the index is negative or outside the list.
 
 ## Current references
 

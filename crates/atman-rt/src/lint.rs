@@ -92,6 +92,10 @@ fn collect_ident_refs_expr(expr: &Expr, refs: &mut BTreeSet<String>) {
             collect_ident_refs_expr(left, refs);
             collect_ident_refs_expr(right, refs);
         }
+        Expr::Index { base, index } => {
+            collect_ident_refs_expr(base, refs);
+            collect_ident_refs_expr(index, refs);
+        }
         Expr::Unary { operand, .. } => collect_ident_refs_expr(operand, refs),
         Expr::List(items) => {
             for it in items {
@@ -185,6 +189,10 @@ fn walk_expr_for_nodes(expr: &Expr, flow_name: &str, hits: &mut Vec<LintHit>) {
         Expr::Binary { left, right, .. } => {
             walk_expr_for_nodes(left, flow_name, hits);
             walk_expr_for_nodes(right, flow_name, hits);
+        }
+        Expr::Index { base, index } => {
+            walk_expr_for_nodes(base, flow_name, hits);
+            walk_expr_for_nodes(index, flow_name, hits);
         }
         Expr::Unary { operand, .. } => walk_expr_for_nodes(operand, flow_name, hits),
         Expr::List(items) => {
@@ -333,6 +341,15 @@ mod tests {
         let src = r#"flow t(x: int, y: int) -> int {
     z = x
     return z + y
+}
+"#;
+        assert!(lint(src).is_empty());
+    }
+
+    #[test]
+    fn index_operands_count_as_references() {
+        let src = r#"flow t(items: [int], index: int) -> int {
+    return items[index]
 }
 "#;
         assert!(lint(src).is_empty());

@@ -59,6 +59,10 @@ pub enum Expr {
         base: Box<Expr>,
         field: Ident,
     },
+    Index {
+        base: Box<Expr>,
+        index: Box<Expr>,
+    },
     Await {
         value: Box<Expr>,
     },

@@ -519,13 +519,35 @@ fn parse_expr_prefix(input: ParseStream) -> Result<Expr> {
         });
     }
     let mut expr = parse_expr_primary(input)?;
-    while peek_await_suffix(input) {
-        input.parse::<Token![.]>()?;
-        let suffix = <syn::Ident as syn::ext::IdentExt>::parse_any(input)?;
-        debug_assert_eq!(suffix.to_string(), "await");
-        expr = Expr::Await {
-            value: Box::new(expr),
-        };
+    loop {
+        if input.peek(token::Bracket) {
+            let content;
+            bracketed!(content in input);
+            let index = parse_expr(&content)?;
+            if !content.is_empty() {
+                return Err(content.error("expected one index expression"));
+            }
+            expr = Expr::Index {
+                base: Box::new(expr),
+                index: Box::new(index),
+            };
+        } else if peek_await_suffix(input) {
+            input.parse::<Token![.]>()?;
+            let suffix = <syn::Ident as syn::ext::IdentExt>::parse_any(input)?;
+            debug_assert_eq!(suffix.to_string(), "await");
+            expr = Expr::Await {
+                value: Box::new(expr),
+            };
+        } else if input.peek(Token![.]) {
+            input.parse::<Token![.]>()?;
+            let field = to_ident(<syn::Ident as syn::ext::IdentExt>::parse_any(input)?);
+            expr = Expr::Member {
+                base: Box::new(expr),
+                field,
+            };
+        } else {
+            break;
+        }
     }
     Ok(expr)
 }
@@ -1088,5 +1110,64 @@ mod tests {
                 ..
             } if path.iter().map(|part| part.name.as_str()).collect::<Vec<_>>() == ["mcp", "await"]
         ));
+    }
+
+    #[test]
+    fn index_postfix_chains_round_trip() {
+        let source = r#"flow main(result: value, matrix: [[int]], pending: value, a: int, b: int) -> value {
+    member = result.items[0]
+    nested = matrix[0][1]
+    grouped = (a + b)[0]
+    awaited = pending.await[0]
+    field = matrix[0].field
+    return member
+}"#;
+        let file = parse_file(source).unwrap();
+        assert!(matches!(
+            &file.flows[0].body[1],
+            Stmt::Bind {
+                value: Expr::Index { base, .. },
+                ..
+            } if matches!(base.as_ref(), Expr::Index { .. })
+        ));
+        assert!(matches!(
+            &file.flows[0].body[3],
+            Stmt::Bind {
+                value: Expr::Index { base, .. },
+                ..
+            } if matches!(base.as_ref(), Expr::Await { .. })
+        ));
+        let printed = crate::print_file(&file);
+        let reparsed = parse_file(&printed).unwrap();
+        assert_eq!(format!("{file:#?}"), format!("{reparsed:#?}"));
+    }
+
+    #[test]
+    fn fanout_source_index_and_fanout_result_index_are_distinct() {
+        let source = r#"flow main(groups: [[int]], pending: [value]) -> value {
+    selected = fanout groups[0]
+    first = (fanout pending)[0]
+    return first
+}"#;
+        let file = parse_file(source).unwrap();
+        assert!(matches!(
+            &file.flows[0].body[0],
+            Stmt::Bind {
+                value: Expr::Node(Node::Fanout { source }),
+                ..
+            } if matches!(source.as_ref(), Expr::Index { .. })
+        ));
+        assert!(matches!(
+            &file.flows[0].body[1],
+            Stmt::Bind {
+                value: Expr::Index { base, .. },
+                ..
+            } if matches!(base.as_ref(), Expr::Node(Node::Fanout { .. }))
+        ));
+        let printed = crate::print_file(&file);
+        assert!(printed.contains("fanout groups[0]"));
+        assert!(printed.contains("(fanout pending)[0]"));
+        let reparsed = parse_file(&printed).unwrap();
+        assert_eq!(format!("{file:#?}"), format!("{reparsed:#?}"));
     }
 }

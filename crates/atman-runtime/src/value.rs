@@ -54,6 +54,12 @@ impl atman_rt::ValueError for RuntimeError {
         Self::ToolFailed(format!("{name}: empty list"))
     }
 
+    fn index_out_of_bounds(index: i64, len: usize) -> Self {
+        Self::ToolFailed(format!(
+            "list index {index} is out of bounds for length {len}"
+        ))
+    }
+
     fn integer_div_by_zero() -> Self {
         Self::ToolFailed("integer div by zero".into())
     }

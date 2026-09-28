@@ -447,6 +447,11 @@ fn stmt_to_node_kind_label(stmt: &Stmt) -> (crate::nodegraph::NodeKind, String) 
 
 fn expr_to_node_kind_label(expr: &Expr) -> (crate::nodegraph::NodeKind, String) {
     use crate::nodegraph::NodeKind;
+    if !matches!(expr, Expr::Await { .. } | Expr::Node(_))
+        && let Some(effect) = crate::nodegraph::first_effect_expr(expr)
+    {
+        return expr_to_node_kind_label(effect);
+    }
     match expr {
         Expr::Await { value } => match value.as_ref() {
             Expr::Node(Node::FlowCall { name, .. }) => (
@@ -676,6 +681,38 @@ mod tests {
                     target: "pending".into()
                 },
                 "pending.await".into(),
+            )
+        );
+
+        let indexed = Expr::Index {
+            base: Box::new(Expr::Node(Node::ToolCall {
+                path: vec![
+                    Ident::new("foreign", Span::default()),
+                    Ident::new("fetch", Span::default()),
+                ],
+                args: Vec::new(),
+            })),
+            index: Box::new(Expr::Literal(atman_rt::ast::Literal::Int(0))),
+        };
+        assert_eq!(
+            expr_to_node_kind_label(&indexed),
+            (
+                crate::nodegraph::NodeKind::ToolCall {
+                    path: "foreign.fetch".into()
+                },
+                "⟶ foreign.fetch".into(),
+            )
+        );
+        assert_eq!(
+            expr_to_node_kind_label(&Expr::Member {
+                base: Box::new(indexed),
+                field: Ident::new("value", Span::default()),
+            }),
+            (
+                crate::nodegraph::NodeKind::ToolCall {
+                    path: "foreign.fetch".into()
+                },
+                "⟶ foreign.fetch".into(),
             )
         );
     }

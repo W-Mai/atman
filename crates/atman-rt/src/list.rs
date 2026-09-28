@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 use crate::{
-    Env, ExpressionHost, Value, ValueError,
+    Env, ExpressionHost, HostValueOps, Value, ValueError,
     ast::{Arg, Expr, Ident},
     eval_expr,
 };
@@ -12,6 +12,7 @@ pub enum ListIntrinsic {
     LenOrString,
     IsEmpty,
     IsEmptyOrString,
+    Get,
     First,
     Last,
     Tail,
@@ -54,6 +55,7 @@ impl ListIntrinsic {
         Some(match name {
             "len" => Self::Len,
             "is_empty" => Self::IsEmpty,
+            "get" => Self::Get,
             "first" => Self::First,
             "last" => Self::Last,
             "tail" => Self::Tail,
@@ -74,6 +76,7 @@ impl ListIntrinsic {
             Self::LenOrString => "len",
             Self::IsEmpty => "list.is_empty",
             Self::IsEmptyOrString => "is_empty",
+            Self::Get => "list.get",
             Self::First => "list.first",
             Self::Last => "list.last",
             Self::Tail => "list.tail",
@@ -94,6 +97,7 @@ impl ListIntrinsic {
                 | Self::LenOrString
                 | Self::IsEmpty
                 | Self::IsEmptyOrString
+                | Self::Get
                 | Self::First
                 | Self::Last
                 | Self::Tail
@@ -128,6 +132,23 @@ fn argument<'a, E: ValueError>(
         })
         .map(Ok)
         .unwrap_or_else(|| positional(args, index, name))
+}
+
+pub(crate) fn eval_list_index<P: HostValueOps + Clone, E: ValueError + Clone>(
+    base: Value<P, E>,
+    index: Value<P, E>,
+) -> Value<P, E> {
+    let Value::List(items) = base else {
+        return Value::Err(E::type_mismatch("list", base.kind_name().into()));
+    };
+    let Value::Int(index) = index else {
+        return Value::Err(E::type_mismatch("int", index.kind_name().into()));
+    };
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| items.get(index))
+        .cloned()
+        .unwrap_or_else(|| Value::Err(E::index_out_of_bounds(index, items.len())))
 }
 
 /// Evaluates a list intrinsic while delegating external lambda effects to the host.
@@ -270,6 +291,7 @@ pub(crate) async fn eval_list_intrinsic_named<'a, H: ExpressionHost>(
             | ListIntrinsic::LenOrString
             | ListIntrinsic::IsEmpty
             | ListIntrinsic::IsEmptyOrString
+            | ListIntrinsic::Get
             | ListIntrinsic::First
             | ListIntrinsic::Last
             | ListIntrinsic::Tail
@@ -287,6 +309,7 @@ pub(crate) async fn eval_list_intrinsic_named<'a, H: ExpressionHost>(
         | ListIntrinsic::LenOrString
         | ListIntrinsic::IsEmpty
         | ListIntrinsic::IsEmptyOrString
+        | ListIntrinsic::Get
         | ListIntrinsic::First
         | ListIntrinsic::Last
         | ListIntrinsic::Tail
@@ -341,6 +364,17 @@ async fn eval_basic_list_intrinsic<'a, H: ExpressionHost>(
                 other.kind_name().into(),
             )),
         },
+        ListIntrinsic::Get => {
+            let index_expr = match argument::<H::Error>(args, 1, "index", name) {
+                Ok(expr) => expr,
+                Err(error) => return Value::Err(error),
+            };
+            let index = eval_expr(index_expr, env, host).await;
+            if index.is_err() {
+                return index;
+            }
+            eval_list_index(first, index)
+        }
         ListIntrinsic::First => match first {
             Value::List(items) => items
                 .first()

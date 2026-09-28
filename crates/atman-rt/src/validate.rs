@@ -150,6 +150,10 @@ fn walk_expr(expr: &Expr, scope: &BTreeSet<String>, report: &mut LanguageValidat
             walk_expr(left, scope, report);
             walk_expr(right, scope, report);
         }
+        Expr::Index { base, index } => {
+            walk_expr(base, scope, report);
+            walk_expr(index, scope, report);
+        }
         Expr::Unary { operand, .. } => walk_expr(operand, scope, report),
         Expr::List(items) => {
             for item in items {
@@ -238,5 +242,16 @@ mod tests {
         let report = validate_flow(&file.flows[0], &["external"]);
         assert!(report.errors.is_empty());
         assert_eq!(report.tool_calls, ["foreign.echo"]);
+    }
+
+    #[test]
+    fn validates_both_sides_of_an_index_expression() {
+        let file =
+            crate::parse_file("flow main(items: [int]) -> int { return items[missing] }").unwrap();
+        let report = validate_flow(&file.flows[0], &[]);
+        assert!(matches!(
+            report.errors.as_slice(),
+            [LanguageValidationError::UndefinedVar(name)] if name == "missing"
+        ));
     }
 }

@@ -174,3 +174,15 @@ async fn empty_head_keeps_the_published_tool_error() {
         atman_runtime::RuntimeError::ToolFailed(message) if message == "head: empty list"
     ));
 }
+
+#[tokio::test]
+async fn list_index_reports_bounds_through_the_host_error() {
+    let file = parse_file(r#"flow start() -> int { return [1][2] }"#).unwrap();
+    let ex = Executor::new();
+    let error = ex.run(&file, "start", vec![]).await.unwrap_err();
+    assert!(matches!(
+        error,
+        atman_runtime::RuntimeError::ToolFailed(message)
+            if message == "list index 2 is out of bounds for length 1"
+    ));
+}

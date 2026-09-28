@@ -307,6 +307,12 @@ fn write_expr(out: &mut String, expr: &Expr, indent: usize) {
             write_postfix_base(out, base, indent);
             write!(out, ".{}", field.name).unwrap();
         }
+        Expr::Index { base, index } => {
+            write_postfix_base(out, base, indent);
+            out.push('[');
+            write_expr(out, index, indent);
+            out.push(']');
+        }
         Expr::Await { value } => {
             write_postfix_base(out, value, indent);
             out.push_str(".await");
@@ -385,7 +391,11 @@ fn write_expr(out: &mut String, expr: &Expr, indent: usize) {
 fn write_postfix_base(out: &mut String, value: &Expr, indent: usize) {
     let grouped = matches!(
         value,
-        Expr::Binary { .. } | Expr::Unary { .. } | Expr::Annotated { .. } | Expr::Lambda { .. }
+        Expr::Binary { .. }
+            | Expr::Unary { .. }
+            | Expr::Annotated { .. }
+            | Expr::Lambda { .. }
+            | Expr::Node(Node::Fanout { .. } | Node::DynamicFanout { .. })
     );
     if grouped {
         out.push('(');
