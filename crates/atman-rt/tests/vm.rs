@@ -110,7 +110,7 @@ impl VmDelegate for TestHost {
         }
     }
 
-    fn cancel_flow(
+    fn abort_flow(
         &self,
         call: Option<&FlowCall<'_>>,
         _context: &VmContext,
@@ -290,7 +290,7 @@ flow main() -> int { return 0 }
     .expect("compile lifecycle source");
     let host = TestHost::default();
     let events = Arc::clone(&host.events);
-    let outcomes = run_ready(vm.run_lifecycle_with(LifecycleEvent::TurnStart, host));
+    let outcomes = run_ready(vm.run_lifecycle(LifecycleEvent::TurnStart, host));
     assert_eq!(outcomes.len(), 3);
     assert!(matches!(outcomes[0], StatementOutcome::Continue));
     assert!(matches!(outcomes[1], StatementOutcome::Err(_)));

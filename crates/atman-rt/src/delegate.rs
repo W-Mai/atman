@@ -97,6 +97,7 @@ pub enum VmEvent {
     IterationEnded {
         context: VmContext,
         status: VmStatus,
+        preview: Option<String>,
     },
     FanoutBranchStarted {
         context: VmContext,
@@ -186,10 +187,6 @@ pub trait EffectDelegate: Clone + Send + Sync {
     fn error_status(&self, _error: &Self::Error) -> VmStatus {
         VmStatus::Err
     }
-
-    fn error_preview(&self, _error: &Self::Error) -> Option<String> {
-        None
-    }
 }
 
 /// Authorizes one evaluated effect and returns a one-use invocation permit.
@@ -211,6 +208,15 @@ pub trait ObserverDelegate: Clone + Send + Sync {
 /// Reports cancellation at VM checkpoints.
 pub trait CancellationDelegate<E>: Clone + Send + Sync {
     fn cancellation_error(&self, context: &VmContext) -> Option<E>;
+
+    /// Resolves when pending VM work must be interrupted.
+    fn cancelled<'a>(&'a self, _context: &'a VmContext) -> HostFuture<'a, E> {
+        Box::pin(async {
+            loop {
+                core::future::pending::<()>().await;
+            }
+        })
+    }
 
     fn is_cancellation(&self, error: &E) -> bool;
 }
@@ -236,6 +242,10 @@ pub trait ControlDelegate<E: ValueError>: Clone + Send + Sync {
     fn pattern_error(&self, error: PatternBindError) -> E {
         E::type_mismatch("matching pattern", alloc::format!("{error:?}"))
     }
+
+    fn error_preview(&self, _error: &E) -> Option<String> {
+        None
+    }
 }
 
 /// Establishes and tears down host state for each root or child flow.
@@ -252,7 +262,8 @@ pub trait FlowDelegate<P, E>: Clone + Send + Sync {
         guard: Self::Guard,
     );
 
-    fn cancel(&self, call: Option<&FlowCall<'_>>, context: &VmContext, guard: Self::Guard) {
+    /// Tears down a flow whose driving future was dropped before an outcome existed.
+    fn abort(&self, call: Option<&FlowCall<'_>>, context: &VmContext, guard: Self::Guard) {
         let _ = (call, context, guard);
     }
 }

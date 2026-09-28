@@ -86,10 +86,14 @@ impl core::error::Error for VmCallError {}
 
 /// A product host supplies effects, execution observations, and child-flow context.
 /// Flow resolution, argument binding, and body execution are owned by the VM.
-pub trait VmHost: StatementHost + Clone {
+pub(crate) trait VmHost: StatementHost + Clone {
     type ChildGuard: Send;
 
     fn call_error(&self, error: VmCallError) -> Self::Error;
+
+    fn cancellation_error(&self) -> Option<Self::Error>;
+
+    fn cancelled(&self) -> HostFuture<'_, Self::Error>;
 
     fn enter_child(&self, call: &FlowCall<'_>) -> Result<(Self, Self::ChildGuard), Self::Error>;
 
@@ -100,7 +104,7 @@ pub trait VmHost: StatementHost + Clone {
         guard: Self::ChildGuard,
     );
 
-    fn cancel_child(
+    fn abort_child(
         &self,
         call: &FlowCall<'_>,
         outcome: &FlowOutcome<Self::Payload, Self::Error>,
@@ -111,7 +115,8 @@ pub trait VmHost: StatementHost + Clone {
 }
 
 struct ChildExit<'a, H: VmHost> {
-    host: &'a H,
+    parent_host: &'a H,
+    child_host: H,
     call: FlowCall<'a>,
     guard: Option<H::ChildGuard>,
 }
@@ -127,7 +132,7 @@ impl Drop for ParallelPermit {
 impl<H: VmHost> ChildExit<'_, H> {
     fn finish(mut self, outcome: &FlowOutcome<H::Payload, H::Error>) {
         if let Some(guard) = self.guard.take() {
-            self.host.exit_child(&self.call, outcome, guard);
+            self.parent_host.exit_child(&self.call, outcome, guard);
         }
     }
 }
@@ -135,8 +140,14 @@ impl<H: VmHost> ChildExit<'_, H> {
 impl<H: VmHost> Drop for ChildExit<'_, H> {
     fn drop(&mut self) {
         if let Some(guard) = self.guard.take() {
-            let outcome = StatementOutcome::Err(self.host.call_error(VmCallError::Cancelled));
-            self.host.cancel_child(&self.call, &outcome, guard);
+            if let Some(error) = self.child_host.cancellation_error() {
+                let outcome = StatementOutcome::Err(error);
+                self.parent_host.exit_child(&self.call, &outcome, guard);
+            } else {
+                let outcome =
+                    StatementOutcome::Err(self.parent_host.call_error(VmCallError::Cancelled));
+                self.parent_host.abort_child(&self.call, &outcome, guard);
+            }
         }
     }
 }
@@ -179,10 +190,19 @@ pub trait VmDelegate: Clone + Send + Sync {
         guard: Self::FlowGuard,
     );
 
-    fn cancel_flow(&self, call: Option<&FlowCall<'_>>, context: &VmContext, guard: Self::FlowGuard);
+    fn abort_flow(&self, call: Option<&FlowCall<'_>>, context: &VmContext, guard: Self::FlowGuard);
 
     fn cancellation_error(&self, _context: &VmContext) -> Option<Self::Error> {
         None
+    }
+
+    /// Resolves when pending authorization, effects, or flow execution must stop.
+    fn cancelled<'a>(&'a self, _context: &'a VmContext) -> HostFuture<'a, Self::Error> {
+        Box::pin(async {
+            loop {
+                core::future::pending::<()>().await;
+            }
+        })
     }
 
     /// Reject a tool before its arguments run. Authorization runs after evaluation.
@@ -288,17 +308,16 @@ where
         self.flows.exit(call, context, outcome, guard);
     }
 
-    fn cancel_flow(
-        &self,
-        call: Option<&FlowCall<'_>>,
-        context: &VmContext,
-        guard: Self::FlowGuard,
-    ) {
-        self.flows.cancel(call, context, guard);
+    fn abort_flow(&self, call: Option<&FlowCall<'_>>, context: &VmContext, guard: Self::FlowGuard) {
+        self.flows.abort(call, context, guard);
     }
 
     fn cancellation_error(&self, context: &VmContext) -> Option<Self::Error> {
         self.cancellation.cancellation_error(context)
+    }
+
+    fn cancelled<'a>(&'a self, context: &'a VmContext) -> HostFuture<'a, Self::Error> {
+        self.cancellation.cancelled(context)
     }
 
     fn preflight_tool(
@@ -338,7 +357,7 @@ where
     }
 
     fn error_preview(&self, error: &Self::Error) -> Option<String> {
-        self.effect.error_preview(error)
+        self.control.error_preview(error)
     }
 
     fn undefined_var(&self, name: String) -> Self::Error {
@@ -432,6 +451,14 @@ fn observe_cancellation<H: VmDelegate>(delegate: &H, context: &VmContext) -> Opt
             context: context.clone(),
         });
     }
+    error
+}
+
+async fn wait_for_cancellation<H: VmDelegate>(delegate: &H, context: &VmContext) -> H::Error {
+    let error = delegate.cancelled(context).await;
+    delegate.on_event(VmEvent::CancellationObserved {
+        context: context.clone(),
+    });
     error
 }
 
@@ -604,7 +631,12 @@ impl<H: VmDelegate> ExpressionHost for DelegateAdapter<H> {
             let metadata = VmEffect::from(&effect);
             let authorization =
                 AuthorizationExit::start(delegate.clone(), context.clone(), metadata.clone());
-            let permit = match delegate.authorize(&effect, &context).await {
+            let permit = match crate::race_cancel(
+                delegate.authorize(&effect, &context),
+                wait_for_cancellation(&delegate, &context),
+            )
+            .await
+            {
                 Ok(permit) => {
                     if let Some(error) = observe_cancellation(&delegate, &context) {
                         authorization.finish(VmStatus::Cancelled);
@@ -620,7 +652,18 @@ impl<H: VmDelegate> ExpressionHost for DelegateAdapter<H> {
                 }
             };
             let invocation = EffectExit::start(delegate.clone(), context.clone(), metadata.clone());
-            let value = delegate.invoke(effect, permit, &context).await;
+            let value = match crate::race_cancel(
+                async { Ok::<_, H::Error>(delegate.invoke(effect, permit, &context).await) },
+                wait_for_cancellation(&delegate, &context),
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    invocation.finish(VmStatus::Cancelled, None);
+                    return Value::Err(error);
+                }
+            };
             if let Some(error) = observe_cancellation(&delegate, &context) {
                 invocation.finish(VmStatus::Cancelled, None);
                 return Value::Err(error);
@@ -659,12 +702,13 @@ impl<H: VmDelegate> ExecutionScope<Value<H::Payload, H::Error>, H::Error>
                 self.delegate.on_event(VmEvent::IterationEnded {
                     context: self.context,
                     status,
+                    preview: preview.map(String::from),
                 });
             }
         }
     }
 
-    fn cancel(self) {
+    fn abort(self) {
         match self.kind {
             DelegateScopeKind::Node => self.delegate.on_event(VmEvent::NodeEnded {
                 context: self.context,
@@ -675,6 +719,7 @@ impl<H: VmDelegate> ExecutionScope<Value<H::Payload, H::Error>, H::Error>
                 self.delegate.on_event(VmEvent::IterationEnded {
                     context: self.context,
                     status: VmStatus::Cancelled,
+                    preview: None,
                 });
             }
         }
@@ -785,6 +830,14 @@ impl<H: VmDelegate> VmHost for DelegateAdapter<H> {
         self.delegate.call_error(error)
     }
 
+    fn cancellation_error(&self) -> Option<Self::Error> {
+        DelegateAdapter::cancellation_error(self)
+    }
+
+    fn cancelled(&self) -> HostFuture<'_, Self::Error> {
+        Box::pin(wait_for_cancellation(&self.delegate, &self.context))
+    }
+
     fn enter_child(&self, call: &FlowCall<'_>) -> Result<(Self, Self::ChildGuard), Self::Error> {
         let context = VmContext {
             run_id: self.next_run_id(),
@@ -836,7 +889,7 @@ impl<H: VmDelegate> VmHost for DelegateAdapter<H> {
         });
     }
 
-    fn cancel_child(
+    fn abort_child(
         &self,
         call: &FlowCall<'_>,
         _outcome: &FlowOutcome<Self::Payload, Self::Error>,
@@ -847,7 +900,7 @@ impl<H: VmDelegate> VmHost for DelegateAdapter<H> {
             context,
             flow_guard,
         } = guard;
-        delegate.cancel_flow(Some(call), &context, flow_guard);
+        delegate.abort_flow(Some(call), &context, flow_guard);
         delegate.on_event(VmEvent::FlowEnded {
             context,
             status: VmStatus::Cancelled,
@@ -890,7 +943,7 @@ impl<H: VmDelegate> DelegateFlowExit<H> {
 impl<H: VmDelegate> Drop for DelegateFlowExit<H> {
     fn drop(&mut self) {
         if let Some(guard) = self.guard.take() {
-            self.delegate.cancel_flow(None, &self.context, guard);
+            self.delegate.abort_flow(None, &self.context, guard);
             self.delegate.on_event(VmEvent::FlowEnded {
                 context: self.context.clone(),
                 status: VmStatus::Cancelled,
@@ -953,11 +1006,11 @@ impl Vm {
                 delegate.call_error(VmCallError::MissingEntry(name.into())),
             );
         };
-        self.run_flow_with(id, args, delegate).await
+        self.run_flow(id, args, delegate).await
     }
 
     /// Runs one resolved flow through the same high-level delegate contract.
-    pub async fn run_flow_with<H: VmDelegate>(
+    pub async fn run_flow<H: VmDelegate>(
         &self,
         id: FlowId,
         args: FlowArgs<H::Payload, H::Error>,
@@ -990,10 +1043,20 @@ impl Vm {
         let outcome = match adapter.cancellation_error() {
             Some(error) => StatementOutcome::Err(error),
             None => {
-                let outcome = self.run_flow(id, args, adapter.clone()).await;
-                match adapter.cancellation_error() {
-                    Some(error) => StatementOutcome::Err(error),
-                    None => outcome,
+                let run_adapter = adapter.clone();
+                match crate::race_cancel(
+                    async {
+                        Ok::<_, H::Error>(self.run_flow_internal(id, args, run_adapter).await)
+                    },
+                    adapter.cancelled(),
+                )
+                .await
+                {
+                    Err(error) => StatementOutcome::Err(error),
+                    Ok(outcome) => match adapter.cancellation_error() {
+                        Some(error) => StatementOutcome::Err(error),
+                        None => outcome,
+                    },
                 }
             }
         };
@@ -1001,19 +1064,7 @@ impl Vm {
         outcome
     }
 
-    pub async fn run_entry<H: VmHost>(
-        &self,
-        name: &str,
-        args: FlowArgs<H::Payload, H::Error>,
-        host: H,
-    ) -> FlowOutcome<H::Payload, H::Error> {
-        let Some(id) = self.program.entry_flow(name) else {
-            return StatementOutcome::Err(host.call_error(VmCallError::MissingEntry(name.into())));
-        };
-        self.run_flow(id, args, host).await
-    }
-
-    pub async fn run_flow<H: VmHost>(
+    async fn run_flow_internal<H: VmHost>(
         &self,
         id: FlowId,
         args: FlowArgs<H::Payload, H::Error>,
@@ -1037,28 +1088,7 @@ impl Vm {
     }
 
     /// Executes matching lifecycle bodies in declaration order.
-    pub async fn run_lifecycle<H: VmHost>(
-        &self,
-        event: LifecycleEvent,
-        host: H,
-    ) -> Vec<FlowOutcome<H::Payload, H::Error>> {
-        let mut outcomes = Vec::new();
-        for flow in self.program.lifecycle_flows(event) {
-            let mut engine = Engine::new(VmStatementHost {
-                host: host.clone(),
-                program: Arc::clone(&self.program),
-                module: self.program.entry_module(),
-                depth: 0,
-                owner: Arc::new(()),
-                parallel_active: Arc::new(AtomicUsize::new(0)),
-            });
-            let outcome = engine.run_flow(&flow, Vec::new()).await;
-            outcomes.push(outcome);
-        }
-        outcomes
-    }
-
-    pub async fn run_lifecycle_with<H: VmDelegate>(
+    pub async fn run_lifecycle<H: VmDelegate>(
         &self,
         event: LifecycleEvent,
         delegate: H,
@@ -1109,10 +1139,17 @@ impl Vm {
             let outcome = match adapter.cancellation_error() {
                 Some(error) => StatementOutcome::Err(error),
                 None => {
-                    let outcome = engine.run_flow(&flow, Vec::new()).await;
-                    match adapter.cancellation_error() {
-                        Some(error) => StatementOutcome::Err(error),
-                        None => outcome,
+                    match crate::race_cancel(
+                        async { Ok::<_, H::Error>(engine.run_flow(&flow, Vec::new()).await) },
+                        adapter.cancelled(),
+                    )
+                    .await
+                    {
+                        Err(error) => StatementOutcome::Err(error),
+                        Ok(outcome) => match adapter.cancellation_error() {
+                            Some(error) => StatementOutcome::Err(error),
+                            None => outcome,
+                        },
                     }
                 }
             };
@@ -1333,8 +1370,10 @@ impl<H: VmHost> VmExpressionHost<H> {
                 Ok(child) => child,
                 Err(error) => return Value::Err(error),
             };
+            let child_cancellation = child_host.clone();
             let exit = ChildExit {
-                host: &self.host,
+                parent_host: &self.host,
+                child_host: child_cancellation.clone(),
                 call,
                 guard: Some(guard),
             };
@@ -1346,10 +1385,20 @@ impl<H: VmHost> VmExpressionHost<H> {
                 owner: Arc::new(()),
                 parallel_active: Arc::clone(&self.parallel_active),
             });
-            let outcome = engine.run_flow(flow, future.args.clone()).await;
-            let outcome = match self.effect_host.cancellation_error() {
+            let outcome = match child_cancellation.cancellation_error() {
                 Some(error) => StatementOutcome::Err(error),
-                None => outcome,
+                None => match crate::race_cancel(
+                    async { Ok::<_, H::Error>(engine.run_flow(flow, future.args.clone()).await) },
+                    child_cancellation.cancelled(),
+                )
+                .await
+                {
+                    Err(error) => StatementOutcome::Err(error),
+                    Ok(outcome) => match child_cancellation.cancellation_error() {
+                        Some(error) => StatementOutcome::Err(error),
+                        None => outcome,
+                    },
+                },
             };
             exit.finish(&outcome);
             match outcome {

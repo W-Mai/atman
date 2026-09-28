@@ -88,17 +88,17 @@ pub enum StatementOutcome<V, E> {
 /// Owns one execution lifecycle after its start event has been emitted.
 ///
 /// The engine consumes the scope with [`ExecutionScope::finish`] on a normal
-/// terminal path and with [`ExecutionScope::cancel`] when the driving future is
+/// terminal path and with [`ExecutionScope::abort`] when the driving future is
 /// dropped while execution is suspended.
 pub trait ExecutionScope<V, E>: Send {
     fn finish(self, outcome: &StatementOutcome<V, E>, preview: Option<&str>);
-    fn cancel(self);
+    fn abort(self);
 }
 
 impl<V, E> ExecutionScope<V, E> for () {
     fn finish(self, _outcome: &StatementOutcome<V, E>, _preview: Option<&str>) {}
 
-    fn cancel(self) {}
+    fn abort(self) {}
 }
 
 struct ScopeExit<S, V, E>
@@ -134,7 +134,7 @@ where
 {
     fn drop(&mut self) {
         if let Some(scope) = self.scope.take() {
-            scope.cancel();
+            scope.abort();
         }
     }
 }
@@ -175,7 +175,12 @@ pub async fn run_loop<H: LoopHost>(
         };
         let scope = ScopeExit::new(host.iteration_start(iteration, &node_id, parent_node_id));
         let outcome = host.execute_iteration(&node_id).await;
-        scope.finish(&outcome, None);
+        let preview = match &outcome {
+            StatementOutcome::LoopBreak => Some("break"),
+            StatementOutcome::LoopContinue => Some("continue"),
+            _ => None,
+        };
+        scope.finish(&outcome, preview);
         match outcome {
             StatementOutcome::Continue | StatementOutcome::LoopContinue => {}
             StatementOutcome::LoopBreak => return LoopExit::Break,
@@ -540,7 +545,7 @@ mod tests {
             self.events.lock().unwrap().push(event);
         }
 
-        fn cancel(self) {
+        fn abort(self) {
             self.events
                 .lock()
                 .unwrap()

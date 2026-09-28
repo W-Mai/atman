@@ -5,14 +5,14 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    task::{Context, Poll, Waker},
+    task::{Context, Poll, Wake, Waker},
 };
 
 use atman_rt::{
     AuthorizationDelegate, CancellationDelegate, ControlDelegate, EffectDelegate, EvalError,
-    ExpressionEffect, FlowCall, FlowOutcome, HostFuture, ObserverDelegate, Preflight, Source,
-    SourceResolver, StatementOutcome, ToolRouter, Value, Vm, VmContext, VmDelegate, VmDelegates,
-    VmEffect, VmEvent, VmNode, VmStatus,
+    ExpressionEffect, FlowCall, FlowDelegate, FlowOutcome, HostFuture, ObserverDelegate, Preflight,
+    Source, SourceResolver, StatementOutcome, ToolRouter, Value, Vm, VmContext, VmDelegate,
+    VmDelegates, VmEffect, VmEvent, VmNode, VmStatus,
 };
 
 struct NoSources;
@@ -105,6 +105,115 @@ struct Cancellation {
     cancelled: Arc<AtomicBool>,
 }
 
+#[derive(Default)]
+struct CancellationSignal {
+    cancelled: AtomicBool,
+    waiters: Mutex<Vec<Waker>>,
+}
+
+impl CancellationSignal {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        for waiter in self.waiters.lock().unwrap().drain(..) {
+            waiter.wake();
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WakeableCancellation {
+    signal: Arc<CancellationSignal>,
+}
+
+impl CancellationDelegate<EvalError> for WakeableCancellation {
+    fn cancellation_error(&self, _context: &VmContext) -> Option<EvalError> {
+        self.signal
+            .cancelled
+            .load(Ordering::SeqCst)
+            .then(|| EvalError::MissingArgument("cancelled".into()))
+    }
+
+    fn cancelled<'a>(&'a self, _context: &'a VmContext) -> HostFuture<'a, EvalError> {
+        Box::pin(std::future::poll_fn(move |context| {
+            if self.signal.cancelled.load(Ordering::SeqCst) {
+                Poll::Ready(EvalError::MissingArgument("cancelled".into()))
+            } else {
+                let mut waiters = self.signal.waiters.lock().unwrap();
+                if !waiters
+                    .iter()
+                    .any(|waiter| waiter.will_wake(context.waker()))
+                {
+                    waiters.push(context.waker().clone());
+                }
+                Poll::Pending
+            }
+        }))
+    }
+
+    fn is_cancellation(&self, error: &EvalError) -> bool {
+        matches!(error, EvalError::MissingArgument(message) if message == "cancelled")
+    }
+}
+
+#[derive(Default)]
+struct WakeCounter(AtomicUsize);
+
+impl Wake for WakeCounter {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[derive(Clone)]
+struct RecordingFlows {
+    terminals: Arc<Mutex<Vec<String>>>,
+}
+
+impl FlowDelegate<(), EvalError> for RecordingFlows {
+    type Guard = String;
+
+    fn enter(
+        &self,
+        _call: Option<&FlowCall<'_>>,
+        context: &VmContext,
+    ) -> Result<Self::Guard, EvalError> {
+        Ok(context.flow.name.clone())
+    }
+
+    fn exit(
+        &self,
+        _call: Option<&FlowCall<'_>>,
+        _context: &VmContext,
+        outcome: &FlowOutcome<(), EvalError>,
+        guard: Self::Guard,
+    ) {
+        let status = match outcome {
+            StatementOutcome::Err(EvalError::MissingArgument(message))
+                if message == "cancelled" =>
+            {
+                "cancelled"
+            }
+            StatementOutcome::Err(_) => "error",
+            _ => "ok",
+        };
+        self.terminals
+            .lock()
+            .unwrap()
+            .push(format!("exit:{guard}:{status}"));
+    }
+
+    fn abort(&self, _call: Option<&FlowCall<'_>>, _context: &VmContext, guard: Self::Guard) {
+        self.terminals
+            .lock()
+            .unwrap()
+            .push(format!("abort:{guard}"));
+    }
+}
+
 impl CancellationDelegate<EvalError> for Cancellation {
     fn cancellation_error(&self, _context: &VmContext) -> Option<EvalError> {
         self.cancelled
@@ -184,6 +293,15 @@ impl ControlDelegate<EvalError> for StopControl {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ErrorPreviewControl;
+
+impl ControlDelegate<EvalError> for ErrorPreviewControl {
+    fn error_preview(&self, _error: &EvalError) -> Option<String> {
+        Some("control error".into())
+    }
+}
+
 #[derive(Clone)]
 struct GatedApproval {
     ready: Arc<AtomicBool>,
@@ -210,6 +328,103 @@ impl AuthorizationDelegate<(), EvalError> for GatedApproval {
 struct ScopedDelegate {
     scope: String,
     terminals: Arc<Mutex<Vec<String>>>,
+}
+
+#[derive(Clone)]
+struct ChildCancellationDelegate {
+    scope: String,
+    cancelled: Arc<AtomicBool>,
+    terminals: Arc<Mutex<Vec<String>>>,
+}
+
+impl VmDelegate for ChildCancellationDelegate {
+    type Payload = ();
+    type Error = EvalError;
+    type Permit = ();
+    type FlowGuard = String;
+
+    fn invoke<'a>(
+        &'a self,
+        effect: ExpressionEffect<Self::Payload, Self::Error>,
+        _permit: Self::Permit,
+        _context: &'a VmContext,
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
+        Box::pin(async move {
+            if matches!(effect, ExpressionEffect::ToolCall { ref name, .. } if name == "cancel_child")
+            {
+                self.cancelled.store(true, Ordering::SeqCst);
+                Value::Int(1)
+            } else {
+                Value::Unit
+            }
+        })
+    }
+
+    fn authorize<'a>(
+        &'a self,
+        _effect: &'a ExpressionEffect<Self::Payload, Self::Error>,
+        _context: &'a VmContext,
+    ) -> HostFuture<'a, Result<Self::Permit, Self::Error>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn enter_flow(
+        &self,
+        _call: Option<&FlowCall<'_>>,
+        context: &VmContext,
+    ) -> Result<(Self, Self::FlowGuard), Self::Error> {
+        let scope = context.flow.name.clone();
+        Ok((
+            Self {
+                scope: scope.clone(),
+                cancelled: Arc::clone(&self.cancelled),
+                terminals: Arc::clone(&self.terminals),
+            },
+            scope,
+        ))
+    }
+
+    fn exit_flow(
+        &self,
+        call: Option<&FlowCall<'_>>,
+        _context: &VmContext,
+        outcome: &FlowOutcome<Self::Payload, Self::Error>,
+        guard: Self::FlowGuard,
+    ) {
+        if call.is_some() {
+            self.terminals.lock().unwrap().push(format!(
+                "exit:{guard}:{}",
+                matches!(outcome, StatementOutcome::Err(_))
+            ));
+        }
+    }
+
+    fn abort_flow(
+        &self,
+        call: Option<&FlowCall<'_>>,
+        _context: &VmContext,
+        guard: Self::FlowGuard,
+    ) {
+        if call.is_some() {
+            self.terminals
+                .lock()
+                .unwrap()
+                .push(format!("abort:{guard}"));
+        }
+    }
+
+    fn cancellation_error(&self, _context: &VmContext) -> Option<Self::Error> {
+        (self.scope == "child" && self.cancelled.load(Ordering::SeqCst))
+            .then(|| EvalError::MissingArgument("child cancelled".into()))
+    }
+
+    fn error_status(&self, error: &Self::Error) -> VmStatus {
+        if matches!(error, EvalError::MissingArgument(message) if message == "child cancelled") {
+            VmStatus::Cancelled
+        } else {
+            VmStatus::Err
+        }
+    }
 }
 
 impl VmDelegate for ScopedDelegate {
@@ -269,7 +484,7 @@ impl VmDelegate for ScopedDelegate {
         }
     }
 
-    fn cancel_flow(
+    fn abort_flow(
         &self,
         call: Option<&FlowCall<'_>>,
         _context: &VmContext,
@@ -279,7 +494,7 @@ impl VmDelegate for ScopedDelegate {
             self.terminals
                 .lock()
                 .unwrap()
-                .push(format!("cancel:{}:{guard}", self.scope));
+                .push(format!("abort:{}:{guard}", self.scope));
         }
     }
 }
@@ -552,6 +767,34 @@ fn composed_control_delegate_drives_statement_preflight() {
 }
 
 #[test]
+fn control_delegate_formats_terminal_errors() {
+    let vm = Vm::compile(
+        Source::new("main.at", "flow main() { missing() }"),
+        &NoSources,
+    )
+    .unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let delegates = VmDelegates::new(ToolRouter::<(), EvalError>::new())
+        .with_observer(Observer {
+            trace: Arc::new(Mutex::new(Vec::new())),
+            events: Arc::clone(&events),
+        })
+        .with_control(ErrorPreviewControl);
+
+    assert!(matches!(
+        ready(vm.run("main", vec![], delegates)),
+        StatementOutcome::Err(_)
+    ));
+    assert!(events.lock().unwrap().iter().any(|event| matches!(
+        event,
+        VmEvent::FlowEnded {
+            error: Some(error),
+            ..
+        } if error == "control error"
+    )));
+}
+
+#[test]
 fn authorization_permit_is_consumed_by_the_matching_effect() {
     let vm = Vm::compile(
         Source::new("main.at", "flow main() -> int { return permitted() }"),
@@ -783,7 +1026,153 @@ fn cancellation_after_authorization_wait_skips_invocation() {
 }
 
 #[test]
-fn child_scoped_delegate_receives_exit_and_cancel() {
+fn cancellation_future_wakes_pending_authorization_and_exits_the_flow() {
+    let vm = Vm::compile(
+        Source::new("main.at", "flow main() -> int { return guarded().await }"),
+        &NoSources,
+    )
+    .unwrap();
+    let signal = Arc::new(CancellationSignal::default());
+    let terminals = Arc::new(Mutex::new(Vec::new()));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRouter::<(), EvalError>::new();
+    tools
+        .register("guarded", |_| async { Ok(Value::Int(1)) })
+        .unwrap();
+    let delegates = VmDelegates::new(tools)
+        .with_authorization(PendingApproval)
+        .with_observer(Observer {
+            trace: Arc::new(Mutex::new(Vec::new())),
+            events: Arc::clone(&events),
+        })
+        .with_cancellation(WakeableCancellation {
+            signal: Arc::clone(&signal),
+        })
+        .with_flows(RecordingFlows {
+            terminals: Arc::clone(&terminals),
+        });
+    let mut future = Box::pin(vm.run("main", vec![], delegates));
+    let wakes = Arc::new(WakeCounter::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut context = Context::from_waker(&waker);
+
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    signal.cancel();
+    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+    assert!(matches!(
+        future.as_mut().poll(&mut context),
+        Poll::Ready(StatementOutcome::Err(EvalError::MissingArgument(message)))
+            if message == "cancelled"
+    ));
+    assert_eq!(*terminals.lock().unwrap(), ["exit:main:cancelled"]);
+    let events = events.lock().unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        VmEvent::AuthorizationResolved {
+            status: VmStatus::Cancelled,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn cancellation_future_wakes_pending_effect() {
+    let vm = Vm::compile(
+        Source::new("main.at", "flow main() -> int { return wait().await }"),
+        &NoSources,
+    )
+    .unwrap();
+    let signal = Arc::new(CancellationSignal::default());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRouter::<(), EvalError>::new();
+    tools
+        .register("wait", |_| async {
+            core::future::pending::<Result<Value<(), EvalError>, EvalError>>().await
+        })
+        .unwrap();
+    let delegates = VmDelegates::new(tools)
+        .with_observer(Observer {
+            trace: Arc::new(Mutex::new(Vec::new())),
+            events: Arc::clone(&events),
+        })
+        .with_cancellation(WakeableCancellation {
+            signal: Arc::clone(&signal),
+        });
+    let mut future = Box::pin(vm.run("main", vec![], delegates));
+    let wakes = Arc::new(WakeCounter::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut context = Context::from_waker(&waker);
+
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    signal.cancel();
+    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+    assert!(matches!(
+        future.as_mut().poll(&mut context),
+        Poll::Ready(StatementOutcome::Err(EvalError::MissingArgument(message)))
+            if message == "cancelled"
+    ));
+    let events = events.lock().unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        VmEvent::EffectEnded {
+            status: VmStatus::Cancelled,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn shared_cancellation_exits_an_active_child_instead_of_aborting_it() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            r#"
+flow child() -> int { return wait().await }
+flow main() -> int { return child().await }
+"#,
+        ),
+        &NoSources,
+    )
+    .unwrap();
+    let signal = Arc::new(CancellationSignal::default());
+    let terminals = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRouter::<(), EvalError>::new();
+    tools
+        .register("wait", |_| async {
+            core::future::pending::<Result<Value<(), EvalError>, EvalError>>().await
+        })
+        .unwrap();
+    let delegates = VmDelegates::new(tools)
+        .with_cancellation(WakeableCancellation {
+            signal: Arc::clone(&signal),
+        })
+        .with_flows(RecordingFlows {
+            terminals: Arc::clone(&terminals),
+        });
+    let mut future = Box::pin(vm.run("main", vec![], delegates));
+    let wakes = Arc::new(WakeCounter::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut context = Context::from_waker(&waker);
+
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    signal.cancel();
+    assert!(matches!(
+        future.as_mut().poll(&mut context),
+        Poll::Ready(StatementOutcome::Err(EvalError::MissingArgument(message)))
+            if message == "cancelled"
+    ));
+    let terminals = terminals.lock().unwrap();
+    assert!(
+        terminals
+            .iter()
+            .any(|event| event == "exit:child:cancelled")
+    );
+    assert!(terminals.iter().any(|event| event == "exit:main:cancelled"));
+    assert!(!terminals.iter().any(|event| event.starts_with("abort:")));
+}
+
+#[test]
+fn child_scoped_delegate_receives_exit_and_abort() {
     let vm = Vm::compile(
         Source::new(
             "main.at",
@@ -825,8 +1214,77 @@ flow main_wait() -> int { return child_wait().await }
     assert!(
         terminals
             .iter()
-            .any(|event| event == "cancel:child_wait:child_wait")
+            .any(|event| event == "abort:child_wait:child_wait")
     );
+}
+
+#[test]
+fn child_postflight_uses_the_child_delegate_context() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            r#"
+flow child() -> int { return cancel_child() }
+flow main() -> int { return child().await }
+"#,
+        ),
+        &NoSources,
+    )
+    .unwrap();
+    let terminals = Arc::new(Mutex::new(Vec::new()));
+    let delegate = ChildCancellationDelegate {
+        scope: "unscoped".into(),
+        cancelled: Arc::new(AtomicBool::new(false)),
+        terminals: Arc::clone(&terminals),
+    };
+
+    assert!(matches!(
+        ready(vm.run("main", vec![], delegate)),
+        StatementOutcome::Err(EvalError::MissingArgument(message))
+            if message == "child cancelled"
+    ));
+    assert_eq!(*terminals.lock().unwrap(), ["exit:child:true"]);
+}
+
+#[test]
+fn iteration_terminal_events_keep_break_and_continue_previews() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            r#"
+flow main() {
+    index = 0
+    loop {
+        index = index + 1
+        when index == 1 { continue }
+        break
+    }
+}
+"#,
+        ),
+        &NoSources,
+    )
+    .unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let delegates = VmDelegates::new(ToolRouter::<(), EvalError>::new()).with_observer(Observer {
+        trace: Arc::new(Mutex::new(Vec::new())),
+        events: Arc::clone(&events),
+    });
+
+    assert!(matches!(
+        ready(vm.run("main", vec![], delegates)),
+        StatementOutcome::Continue
+    ));
+    let previews = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            VmEvent::IterationEnded { preview, .. } => preview.clone(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(previews, ["continue", "break"]);
 }
 
 #[test]
