@@ -203,7 +203,7 @@ pub async fn eval_list_intrinsic<'a, H: ExpressionHost>(
 
 #[cfg(test)]
 mod tests {
-    use alloc::{boxed::Box, string::String, vec};
+    use alloc::{boxed::Box, string::String, sync::Arc, vec};
     use core::{
         future::Future,
         pin::pin,
@@ -217,9 +217,9 @@ mod tests {
         ast::{BinOp, Ident, Literal, Node, Span},
     };
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct TestHost {
-        effects: AtomicUsize,
+        effects: Arc<AtomicUsize>,
     }
 
     impl ExpressionHost for TestHost {
@@ -242,8 +242,7 @@ mod tests {
 
         fn eval_external<'a>(
             &'a self,
-            _effect: ExpressionEffect<'a>,
-            _env: &'a Env<Value<(), EvalError>>,
+            _effect: ExpressionEffect<(), EvalError>,
         ) -> HostFuture<'a, Value<(), EvalError>> {
             self.effects.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Value::Unit })

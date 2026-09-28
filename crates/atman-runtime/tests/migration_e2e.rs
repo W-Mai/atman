@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 use atman_runtime::migration::{RuleScope, scan_migrated_rules};
 use atman_runtime::tools::memory_stubs::RuleFetch;
 use atman_runtime::{Executor, tools};

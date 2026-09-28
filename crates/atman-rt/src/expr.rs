@@ -2,16 +2,44 @@ use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 
 use crate::{
     Env, HostFuture, HostValueOps, Value, ValueError,
-    ast::{Expr, Ident, Node},
+    ast::{Arg, Expr, FlowRef, MessageRole, Node},
     fanout::join_fanout_all,
     list::{ListIntrinsic, eval_list_intrinsic},
     ops::{eval_binary, eval_literal, eval_unary},
+    watch::WatchRules,
 };
 
-pub enum ExpressionEffect<'a> {
-    FileRef(&'a str),
-    Node(&'a Node),
-    Call { func: &'a Ident, args: &'a [Expr] },
+/// An external effect whose language expressions have already been evaluated.
+pub enum ExpressionEffect<P, E> {
+    FileRef(String),
+    ToolCall {
+        name: String,
+        positional: Vec<Value<P, E>>,
+        named: Vec<(String, Value<P, E>)>,
+        watch_rules: Option<WatchRules>,
+    },
+    Confirm(Value<P, E>),
+    Message {
+        role: MessageRole,
+        positional: Vec<Value<P, E>>,
+        named: Vec<(String, Value<P, E>)>,
+    },
+    Call {
+        name: String,
+        args: Vec<Value<P, E>>,
+    },
+    FixSnapshot {
+        target: Value<P, E>,
+    },
+    FixRestore {
+        target: Value<P, E>,
+        pristine: String,
+    },
+}
+
+pub enum EvaluatedArg<P, E> {
+    Positional(Value<P, E>),
+    Named(String, Value<P, E>),
 }
 
 pub fn is_type_name(name: &str) -> bool {
@@ -33,7 +61,7 @@ fn annotation_type_name(expr: &Expr) -> Option<String> {
 }
 
 /// Supplies external expressions and product-specific error messages.
-pub trait ExpressionHost: Sync {
+pub trait ExpressionHost: Sync + Clone + Send {
     type Payload: HostValueOps + Clone + Send + Sync;
     type Error: ValueError + Clone + Send + Sync;
 
@@ -43,22 +71,33 @@ pub trait ExpressionHost: Sync {
         None
     }
     fn fanout_branch_start(&self, _index: usize) {}
-    fn eval_fanout_branch<'a>(
-        &'a self,
-        expr: &'a Expr,
-        env: &'a Env<Value<Self::Payload, Self::Error>>,
-        _index: usize,
-    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>>
-    where
-        Self: Sized,
-    {
-        eval_expr(expr, env, self)
+    fn branch_host(&self, _index: usize) -> Self {
+        self.clone()
     }
     fn fanout_branch_end(&self, _index: usize, _value: &Value<Self::Payload, Self::Error>) {}
+    /// Return a value to reject or short-circuit a tool before its arguments run.
+    fn preflight_tool(&self, _name: &str) -> Option<Value<Self::Payload, Self::Error>> {
+        None
+    }
+    /// Check a resolved subflow call before its arguments run.
+    fn preflight_subflow(&self, _name: &FlowRef, _args: &[Arg]) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn eval_subflow<'a>(
+        &'a self,
+        name: FlowRef,
+        _args: Vec<EvaluatedArg<Self::Payload, Self::Error>>,
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
+        Box::pin(async move {
+            Value::Err(Self::Error::type_mismatch(
+                "linked subflow",
+                name.display_name(),
+            ))
+        })
+    }
     fn eval_external<'a>(
         &'a self,
-        effect: ExpressionEffect<'a>,
-        env: &'a Env<Value<Self::Payload, Self::Error>>,
+        effect: ExpressionEffect<Self::Payload, Self::Error>,
     ) -> HostFuture<'a, Value<Self::Payload, Self::Error>>;
 }
 
@@ -67,6 +106,16 @@ pub fn eval_expr<'a, H: ExpressionHost>(
     expr: &'a Expr,
     env: &'a Env<Value<H::Payload, H::Error>>,
     host: &'a H,
+) -> HostFuture<'a, Value<H::Payload, H::Error>> {
+    eval_expr_with_watch(expr, env, host, None)
+}
+
+/// Evaluates a binding expression with its compiled stream watch rules.
+pub fn eval_expr_with_watch<'a, H: ExpressionHost>(
+    expr: &'a Expr,
+    env: &'a Env<Value<H::Payload, H::Error>>,
+    host: &'a H,
+    watch_rules: Option<&'a WatchRules>,
 ) -> HostFuture<'a, Value<H::Payload, H::Error>> {
     Box::pin(async move {
         match expr {
@@ -131,7 +180,7 @@ pub fn eval_expr<'a, H: ExpressionHost>(
                 captured_env: env.clone(),
             },
             Expr::FileRef(file) => {
-                host.eval_external(ExpressionEffect::FileRef(&file.path), env)
+                host.eval_external(ExpressionEffect::FileRef(file.path.clone()))
                     .await
             }
             Expr::Node(node) => {
@@ -145,14 +194,76 @@ pub fn eval_expr<'a, H: ExpressionHost>(
                     Node::Fanout { source } => eval_fanout(source, env, host).await,
                     Node::ToolCall { path, args } => match ListIntrinsic::from_path(path) {
                         Some(intrinsic) => eval_list_intrinsic(intrinsic, args, env, host).await,
-                        None => host.eval_external(ExpressionEffect::Node(node), env).await,
+                        None => {
+                            let name = path
+                                .iter()
+                                .map(|id| id.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(".");
+                            if let Some(value) = host.preflight_tool(&name) {
+                                return value;
+                            }
+                            let (positional, named) = match eval_args(args, env, host).await {
+                                Ok(values) => values,
+                                Err(value) => return value,
+                            };
+                            host.eval_external(ExpressionEffect::ToolCall {
+                                name,
+                                positional,
+                                named,
+                                watch_rules: watch_rules.cloned(),
+                            })
+                            .await
+                        }
                     },
-                    _ => host.eval_external(ExpressionEffect::Node(node), env).await,
+                    Node::UserConfirm { msg } => {
+                        let value = eval_expr(msg, env, host).await;
+                        if value.is_err() {
+                            return value;
+                        }
+                        host.eval_external(ExpressionEffect::Confirm(value)).await
+                    }
+                    Node::Message { role, args } => {
+                        let (positional, named) = match eval_message_args(args, env, host).await {
+                            Ok(values) => values,
+                            Err(value) => return value,
+                        };
+                        host.eval_external(ExpressionEffect::Message {
+                            role: *role,
+                            positional,
+                            named,
+                        })
+                        .await
+                    }
+                    Node::Subflow { name, args } => {
+                        if let Err(error) = host.preflight_subflow(name, args) {
+                            return Value::Err(error);
+                        }
+                        let args = match eval_ordered_args(args, env, host).await {
+                            Ok(values) => values,
+                            Err(value) => return value,
+                        };
+                        host.eval_subflow(name.clone(), args).await
+                    }
+                    Node::FixUntilTestPasses { kwargs } => {
+                        crate::fix::eval_fix_until_test_passes(kwargs, env, host).await
+                    }
                 }
             }
             Expr::Call { func, args } => {
-                host.eval_external(ExpressionEffect::Call { func, args }, env)
-                    .await
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    let value = eval_expr(arg, env, host).await;
+                    if value.is_err() {
+                        return value;
+                    }
+                    values.push(value);
+                }
+                host.eval_external(ExpressionEffect::Call {
+                    name: func.name.clone(),
+                    args: values,
+                })
+                .await
             }
             Expr::Annotated { expr, annotation } => match annotation_type_name(expr) {
                 Some(type_name) => Value::Struct(vec![
@@ -165,6 +276,114 @@ pub fn eval_expr<'a, H: ExpressionHost>(
     })
 }
 
+pub async fn eval_args<'a, H: ExpressionHost>(
+    args: &'a [Arg],
+    env: &'a Env<Value<H::Payload, H::Error>>,
+    host: &'a H,
+) -> Result<
+    (
+        Vec<Value<H::Payload, H::Error>>,
+        Vec<(String, Value<H::Payload, H::Error>)>,
+    ),
+    Value<H::Payload, H::Error>,
+> {
+    let ordered = eval_ordered_args(args, env, host).await?;
+    let mut positional = Vec::new();
+    let mut named = Vec::new();
+    for arg in ordered {
+        match arg {
+            EvaluatedArg::Positional(value) => {
+                positional.push(value);
+            }
+            EvaluatedArg::Named(name, value) => {
+                named.push((name, value));
+            }
+        }
+    }
+    Ok((positional, named))
+}
+
+pub async fn eval_ordered_args<'a, H: ExpressionHost>(
+    args: &'a [Arg],
+    env: &'a Env<Value<H::Payload, H::Error>>,
+    host: &'a H,
+) -> Result<Vec<EvaluatedArg<H::Payload, H::Error>>, Value<H::Payload, H::Error>> {
+    let mut values = Vec::with_capacity(args.len());
+    for arg in args {
+        match arg {
+            Arg::Positional(expr) => {
+                let value = eval_expr(expr, env, host).await;
+                if value.is_err() {
+                    return Err(value);
+                }
+                values.push(EvaluatedArg::Positional(value));
+            }
+            Arg::Named { name, value } => {
+                let value = eval_expr(value, env, host).await;
+                if value.is_err() {
+                    return Err(value);
+                }
+                values.push(EvaluatedArg::Named(name.name.clone(), value));
+            }
+        }
+    }
+    Ok(values)
+}
+
+async fn eval_message_args<'a, H: ExpressionHost>(
+    args: &'a [Arg],
+    env: &'a Env<Value<H::Payload, H::Error>>,
+    host: &'a H,
+) -> Result<
+    (
+        Vec<Value<H::Payload, H::Error>>,
+        Vec<(String, Value<H::Payload, H::Error>)>,
+    ),
+    Value<H::Payload, H::Error>,
+> {
+    let mut positional = Vec::new();
+    let mut named = Vec::new();
+    for arg in args {
+        match arg {
+            Arg::Positional(expr) => {
+                let value = eval_expr(expr, env, host).await;
+                if value.is_err() {
+                    return Err(value);
+                }
+                positional.push(value);
+            }
+            Arg::Named { name, value } if name.name == "attachments" => {
+                if let Expr::List(items) = value
+                    && items.iter().all(|item| matches!(item, Expr::FileRef(_)))
+                {
+                    let paths = items
+                        .iter()
+                        .map(|item| match item {
+                            Expr::FileRef(file) => Value::Str(file.path.clone()),
+                            _ => unreachable!(),
+                        })
+                        .collect();
+                    named.push((name.name.clone(), Value::List(paths)));
+                    continue;
+                }
+                let value = eval_expr(value, env, host).await;
+                if value.is_err() {
+                    return Err(value);
+                }
+                named.push((name.name.clone(), value));
+            }
+            Arg::Named { name, value } => {
+                let value = eval_expr(value, env, host).await;
+                if value.is_err() {
+                    return Err(value);
+                }
+                named.push((name.name.clone(), value));
+            }
+        }
+    }
+    Ok((positional, named))
+}
+
 /// Evaluates a list source, polling literal branches concurrently.
 pub async fn eval_fanout<'a, H: ExpressionHost>(
     source: &'a Expr,
@@ -175,10 +394,10 @@ pub async fn eval_fanout<'a, H: ExpressionHost>(
         for index in 0..items.len() {
             host.fanout_branch_start(index);
         }
-        let branches = items
-            .iter()
-            .enumerate()
-            .map(|(index, expr)| host.eval_fanout_branch(expr, env, index));
+        let branches = items.iter().enumerate().map(|(index, expr)| {
+            let branch_host = host.branch_host(index);
+            async move { eval_expr(expr, env, &branch_host).await }
+        });
         return join_fanout_all(branches, |index, value| {
             host.fanout_branch_end(index, value)
         })
@@ -255,6 +474,7 @@ mod tests {
         ast::{BinOp, Ident, Literal, Node, Span},
     };
 
+    #[derive(Clone)]
     struct TestHost {
         cancelled: bool,
     }
@@ -289,12 +509,11 @@ mod tests {
 
         fn eval_external<'a>(
             &'a self,
-            effect: ExpressionEffect<'a>,
-            _env: &'a Env<Value<(), EvalError>>,
+            effect: ExpressionEffect<(), EvalError>,
         ) -> HostFuture<'a, Value<(), EvalError>> {
             Box::pin(async move {
                 match effect {
-                    ExpressionEffect::Node(_) => Value::Int(5),
+                    ExpressionEffect::ToolCall { .. } => Value::Int(5),
                     _ => panic!("unexpected external expression"),
                 }
             })

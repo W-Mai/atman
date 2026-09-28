@@ -170,56 +170,10 @@ impl Executor {
         args: Vec<(String, Value)>,
         invocation: RootInvocation,
     ) -> Result<Value, RuntimeError> {
-        if !file.uses.is_empty() {
-            return Err(RuntimeError::ToolFailed(
-                "source contains `use`; load and link the file before execution".into(),
-            ));
-        }
-        let flows: HashMap<_, _> = file
-            .flows
-            .iter()
-            .map(|f| (f.name.name.clone(), f.clone()))
-            .collect();
-        let flows = &flows;
-        let invocation = &invocation;
-        let mut next_run_id = invocation.first_run_id.clone();
-        match atman_rt::run_redirects(
-            flow_name.to_string(),
-            args,
-            5,
-            |current, current_args| {
-                let run_id = next_run_id.take();
-                async move {
-                    let flow = flows
-                        .get(&current)
-                        .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{current}`")))?;
-                    self.run_flow(
-                        flow,
-                        current_args,
-                        flows,
-                        invocation,
-                        run_id,
-                        FlowSource {
-                            linked_program: None,
-                            module: None,
-                            dir: self.source_dir.clone(),
-                        },
-                    )
-                    .await
-                }
-            },
-            |error| match error {
-                RuntimeError::Redirect(target) => Some(target.clone()),
-                _ => None,
-            },
-        )
-        .await
-        {
-            atman_rt::RedirectOutcome::Completed(result) => result,
-            atman_rt::RedirectOutcome::LimitExceeded => Err(RuntimeError::ToolFailed(
-                "redirect chain exceeded max depth (5)".into(),
-            )),
-        }
+        let program = crate::source_program::link_inline(file.clone())
+            .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
+        self.run_linked_with_invocation(&program, flow_name, args, invocation)
+            .await
     }
 
     pub async fn run_linked_in_turn_with_env(
@@ -278,7 +232,10 @@ impl Executor {
                         FlowSource {
                             linked_program: Some(program),
                             module: Some(id.module),
-                            dir: program.source_dir(&id).map(std::path::Path::to_path_buf),
+                            dir: program
+                                .source_dir(&id)
+                                .map(std::path::Path::to_path_buf)
+                                .or_else(|| self.source_dir.clone()),
                         },
                     )
                     .await
@@ -635,7 +592,7 @@ mod tests {
         let mut executor = Executor::new();
         executor.tool_ctx.tool_output_budget = budget;
         let session = std::sync::Arc::new(Session::open_ephemeral());
-        let file = atman_dsl::parse::parse_file(
+        let file = atman_rt::parse_file(
             r#"flow start() -> string {
     return "ok"
 }"#,

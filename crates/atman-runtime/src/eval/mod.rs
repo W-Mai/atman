@@ -4,7 +4,7 @@ mod llm_context;
 pub(crate) mod llm_dispatch;
 pub(crate) mod llm_parse;
 
-use atman_rt::ast::{Arg, Expr, FlowRef, Node};
+use atman_rt::ast::Expr;
 use atman_rt::{ExpressionEffect, ExpressionHost};
 
 use crate::atman_host::AtmanHost;
@@ -41,6 +41,13 @@ impl ExpressionHost for AtmanHost<'_> {
             .then(|| RuntimeError::Cancelled("flow cancelled by user".into()))
     }
 
+    fn preflight_tool(&self, name: &str) -> Option<Value> {
+        match check_tool_call(name, self) {
+            Ok(value) => value,
+            Err(error) => Some(Value::Err(error)),
+        }
+    }
+
     fn fanout_branch_start(&self, index: usize) {
         let (Some(sink), Some(run_id)) = (self.events, self.flow_run_id.clone()) else {
             return;
@@ -64,16 +71,8 @@ impl ExpressionHost for AtmanHost<'_> {
         }
     }
 
-    fn eval_fanout_branch<'a>(
-        &'a self,
-        expr: &'a Expr,
-        env: &'a Env,
-        index: usize,
-    ) -> BoxFut<'a, Value> {
-        Box::pin(async move {
-            let branch_ctx = self.with_node(fanout_branch_id(self, index));
-            eval_expr(expr, env, &branch_ctx).await
-        })
+    fn branch_host(&self, index: usize) -> Self {
+        self.with_node(fanout_branch_id(self, index))
     }
 
     fn fanout_branch_end(&self, index: usize, value: &Value) {
@@ -105,20 +104,19 @@ impl ExpressionHost for AtmanHost<'_> {
 
     fn eval_external<'a>(
         &'a self,
-        effect: ExpressionEffect<'a>,
-        env: &'a Env,
+        effect: ExpressionEffect<AtmanPayload, RuntimeError>,
     ) -> BoxFut<'a, Value> {
         Box::pin(async move {
             match effect {
                 ExpressionEffect::FileRef(file) => {
-                    let path = if std::path::Path::new(file).is_relative() {
+                    let path = if std::path::Path::new(&file).is_relative() {
                         if let Some(dir) = &self.source_dir {
-                            dir.join(file)
+                            dir.join(&file)
                         } else {
-                            std::path::PathBuf::from(file)
+                            std::path::PathBuf::from(&file)
                         }
                     } else {
-                        std::path::PathBuf::from(file)
+                        std::path::PathBuf::from(&file)
                     };
                     match tokio::fs::read_to_string(&path).await {
                         Ok(text) => Value::Str(text),
@@ -128,7 +126,25 @@ impl ExpressionHost for AtmanHost<'_> {
                         ))),
                     }
                 }
-                ExpressionEffect::Node(node) => eval_node(node, env, self).await,
+                ExpressionEffect::ToolCall {
+                    name,
+                    positional,
+                    named,
+                    watch_rules,
+                } => {
+                    dispatch_tool_call(name, ToolArgs { positional, named }, watch_rules, self)
+                        .await
+                }
+                ExpressionEffect::Confirm(value) => eval_confirm(value, self).await,
+                ExpressionEffect::Message {
+                    role,
+                    positional,
+                    named,
+                } => eval_message_node(role, positional, named, self).await,
+                ExpressionEffect::FixSnapshot { target } => fix_snapshot(target).await,
+                ExpressionEffect::FixRestore { target, pristine } => {
+                    fix_restore(target, pristine).await
+                }
                 ExpressionEffect::Call { .. } => Value::Err(RuntimeError::ToolFailed(
                     "bare function call not supported; use namespaced tool call".into(),
                 )),
@@ -260,55 +276,28 @@ pub(super) fn append_system_context(system: &mut Option<String>, parts: Vec<Stri
     }
 }
 
-async fn dispatch_tool_call<'a>(
-    path: &'a [atman_rt::ast::Ident],
-    args: &'a [Arg],
-    env: &'a Env,
-    ctx: &'a AtmanHost<'a>,
+async fn dispatch_tool_call(
+    name: String,
+    call_args: ToolArgs,
+    watch_rules: Option<crate::streaming::WatchRules>,
+    ctx: &AtmanHost<'_>,
 ) -> Value {
-    if ctx.flow_cancel.is_cancelled() {
-        return Value::Err(RuntimeError::Cancelled("flow cancelled by user".into()));
+    match check_tool_call(&name, ctx) {
+        Ok(Some(value)) => return value,
+        Err(error) => return Value::Err(error),
+        Ok(None) => {}
     }
-    let name = tool_name(path);
     if name == "env" {
-        return eval_invocation_env(args, env, ctx).await;
+        return eval_invocation_env(call_args, ctx);
     }
     let tool = match ctx.tools.get(&name) {
         Some(t) => t,
-        None => {
-            if is_type_annotation(path) {
-                return Value::Unit;
-            }
-            return Value::Err(RuntimeError::UndefinedTool(name));
-        }
+        None => return Value::Err(RuntimeError::UndefinedTool(name)),
     };
-    if matches!(tool.tier(), crate::tool::Tier::Four) && !contract_allows_shell(ctx.contract) {
-        return Value::Err(RuntimeError::ToolFailed(format!(
-            "tool `{name}` is Tier 4 (shell); flow contract must declare `capabilities {{ shell: true }}`"
-        )));
-    }
-    let mut positional = Vec::new();
-    let mut named = Vec::new();
-    for arg in args {
-        match arg {
-            Arg::Positional(e) => {
-                let v = eval_expr(e, env, ctx).await;
-                if v.is_err() {
-                    return v;
-                }
-                positional.push(v);
-            }
-            Arg::Named { name, value } => {
-                let v = eval_expr(value, env, ctx).await;
-                if v.is_err() {
-                    return v;
-                }
-                named.push((name.name.clone(), v));
-            }
-        }
-    }
+    let ToolArgs { positional, named } = call_args;
     let ctx_with_anchors = ctx
         .tool_ctx
+        .as_ref()
         .clone()
         .with_anchors(
             ctx.turn_id.clone(),
@@ -333,6 +322,10 @@ async fn dispatch_tool_call<'a>(
         ctx_with_anchors
     };
     let ctx_with_anchors = ctx_with_anchors.for_tool_invocation(tool.tier());
+    let ctx_with_anchors = match watch_rules {
+        Some(rules) => ctx_with_anchors.with_watch_rules(rules),
+        None => ctx_with_anchors,
+    };
     let ctx_with_anchors = ctx_with_anchors.with_current_node(ctx.current_node_id.clone());
     let ctx_with_anchors = if let Some(s) = ctx.safety.cloned() {
         ctx_with_anchors.with_safety(s)
@@ -479,29 +472,40 @@ async fn dispatch_tool_call<'a>(
     }
 }
 
-async fn eval_invocation_env<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a AtmanHost<'a>) -> Value {
-    let mut positional = Vec::new();
-    for arg in args {
-        match arg {
-            Arg::Positional(expr) => {
-                let value = eval_expr(expr, env, ctx).await;
-                if value.is_err() {
-                    return value;
-                }
-                positional.push(value);
-            }
-            Arg::Named { .. } => {
-                return Value::Err(RuntimeError::ToolFailed(
-                    "env: expected exactly one positional string key".into(),
-                ));
-            }
-        }
+fn check_tool_call(name: &str, ctx: &AtmanHost<'_>) -> Result<Option<Value>, RuntimeError> {
+    if ctx.flow_cancel.is_cancelled() {
+        return Err(RuntimeError::Cancelled("flow cancelled by user".into()));
     }
+    if name == "env" {
+        return Ok(None);
+    }
+    let Some(tool) = ctx.tools.get(name) else {
+        return if atman_rt::is_type_name(name) {
+            Ok(Some(Value::Unit))
+        } else {
+            Err(RuntimeError::UndefinedTool(name.into()))
+        };
+    };
+    if matches!(tool.tier(), crate::tool::Tier::Four) && !ctx.allows_shell {
+        return Err(RuntimeError::ToolFailed(format!(
+            "tool `{name}` is Tier 4 (shell); flow contract must declare `capabilities {{ shell: true }}`"
+        )));
+    }
+    Ok(None)
+}
+
+fn eval_invocation_env(args: ToolArgs, ctx: &AtmanHost<'_>) -> Value {
+    let ToolArgs { positional, named } = args;
     let [key] = positional.as_slice() else {
         return Value::Err(RuntimeError::ToolFailed(
             "env: expected exactly one positional string key".into(),
         ));
     };
+    if !named.is_empty() {
+        return Value::Err(RuntimeError::ToolFailed(
+            "env: expected exactly one positional string key".into(),
+        ));
+    }
     let Value::Str(key) = key else {
         return Value::Err(RuntimeError::TypeMismatch {
             expected: "string (invocation environment key)".into(),
@@ -813,240 +817,70 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a AtmanHost<'a>) -> Value {
-    match node {
-        Node::ToolCall { path, args } => dispatch_tool_call(path, args, env, ctx).await,
-        Node::DynamicFanout { .. } => unreachable!("dynamic fanout is evaluated by atman-rt"),
-        Node::Fanout { .. } => unreachable!("fanout is evaluated by atman-rt"),
-        Node::UserConfirm { msg } => {
-            let v = eval_expr(msg, env, ctx).await;
-            if v.is_err() {
-                return v;
-            }
-            let prompt = match &v {
-                Value::Str(s) => s.clone(),
-                other => other.kind_name().to_string(),
-            };
-            let confirm_kind = crate::form::FormKind::Confirm {
-                prompt: prompt.clone(),
-            };
-            // Daemon clients drive the confirm through the prompt resolver
-            // over RPC; in-process TUI subscribes to FormRegistry. Boot /
-            // headless / unit tests without either wired keep the historical
-            // auto-approve so they don't deadlock.
-            if let Some(resolver) = ctx.tool_ctx.prompt_resolver.clone() {
-                let id = crate::rendezvous::PromptId::now();
-                let payload =
-                    serde_json::to_value(&confirm_kind).unwrap_or(serde_json::Value::Null);
-                let timeout = std::time::Duration::from_secs(300);
-                let result = crate::rendezvous::await_prompt_with_payload_cancel(
-                    &resolver,
-                    id,
-                    "form_ask",
-                    payload,
-                    timeout,
-                    &ctx.tool_ctx.cancel,
-                )
-                .await;
-                let answer: crate::form::FormAnswer = match result {
-                    Ok(v) => {
-                        serde_json::from_value(v).unwrap_or(crate::form::FormAnswer::Cancelled)
-                    }
-                    Err(_) => crate::form::FormAnswer::Cancelled,
-                };
-                return Value::Bool(matches!(
-                    answer,
-                    crate::form::FormAnswer::Confirmed { value: true }
-                ));
-            }
-            let Some(session) = ctx.session_runtime.as_ref() else {
-                return Value::Bool(true);
-            };
-            let forms = session.forms();
-            if forms.subscriber_count() == 0 {
-                return Value::Bool(true);
-            }
-            let Some(run_id) = ctx.flow_run_id.clone() else {
-                return Value::Bool(true);
-            };
-            let pending = crate::form::PendingForm {
-                form_id: uuid::Uuid::now_v7().to_string(),
-                run_id,
-                tool_use_id: ctx.current_node_id.clone().unwrap_or_default(),
-                form: crate::form::CompositeForm {
-                    questions: vec![crate::form::FormQuestion {
-                        id: "question".into(),
-                        kind: confirm_kind.clone(),
-                    }],
-                },
-                kind: confirm_kind,
-                emitted_at: chrono::Utc::now(),
-            };
-            let rx = forms.request(pending);
-            let submission = rx.await.unwrap_or(crate::form::FormSubmission::Rejected);
-            Value::Bool(matches!(
-                submission,
-                crate::form::FormSubmission::Submitted { answers }
-                    if matches!(answers.first(), Some(crate::form::FormAnswer::Confirmed { value: true }))
-            ))
-        }
-        Node::FixUntilTestPasses { kwargs } => eval_fix_until_test_passes(kwargs, env, ctx).await,
-        Node::Message { role, args } => eval_message_node(*role, args, env, ctx).await,
-        Node::Subflow { name, args } => {
-            let display_name = name.display_name();
-            let (target_key, target_module, target_source_dir) =
-                match (ctx.linked_program, ctx.current_module) {
-                    (Some(program), Some(module)) => {
-                        let Some(id) = program.resolve(module, name) else {
-                            return Value::Err(RuntimeError::UndefinedTool(format!(
-                                "subflow({display_name})"
-                            )));
-                        };
-                        (
-                            id.runtime_key(),
-                            Some(id.module),
-                            program.source_dir(&id).map(std::path::Path::to_path_buf),
-                        )
-                    }
-                    (None, None) => match name {
-                        FlowRef::Local(local) => (local.name.clone(), None, ctx.source_dir.clone()),
-                        FlowRef::Qualified { .. } => {
-                            return Value::Err(RuntimeError::UndefinedTool(format!(
-                                "subflow({display_name})"
-                            )));
-                        }
-                    },
-                    _ => {
-                        return Value::Err(RuntimeError::ToolFailed(
-                            "subflow: incomplete linked program context".into(),
-                        ));
-                    }
-                };
-            let Some(target) = ctx.flows.get(&target_key) else {
-                return Value::Err(RuntimeError::UndefinedTool(format!(
-                    "subflow({display_name})"
-                )));
-            };
-            let bindings = match atman_rt::bind_call_arguments(&target.params, args, |expr| {
-                eval_expr(expr, env, ctx)
-            })
-            .await
-            {
-                Ok(bindings) => bindings,
-                Err(atman_rt::CallArgumentError::TooManyPositional) => {
-                    return Value::Err(RuntimeError::MissingArg(format!(
-                        "subflow({}): too many positional args",
-                        display_name
-                    )));
-                }
-                Err(atman_rt::CallArgumentError::Evaluation(value)) => return value,
-            };
-            let sub_run_id = crate::event::FlowRunId::now();
-            let flow_registry = match ctx.tool_ctx.flow_registry.clone() {
-                Some(registry) => registry,
-                None => {
-                    return Value::Err(RuntimeError::ToolFailed(
-                        "subflow: trusted flow registry is unavailable".into(),
-                    ));
-                }
-            };
-            let Some(parent_run_id) = ctx
-                .tool_ctx
-                .flow_identity
-                .as_ref()
-                .map(|identity| identity.run_id.clone())
-            else {
-                return Value::Err(RuntimeError::ToolFailed(
-                    "subflow: trusted parent flow identity is unavailable".into(),
-                ));
-            };
-            let child_identity = match flow_registry.register_child(
-                &parent_run_id,
-                sub_run_id.clone(),
-                crate::flow_authority::InvocationKind::InlineSubflow,
-                crate::flow_authority::contract_allows_shell(target.contract.as_ref()),
-                crate::flow_authority::ChildWorkspaceAuthority::Inherit,
-            ) {
-                Ok(identity) => identity,
-                Err(error) => return Value::Err(error),
-            };
-            let lifecycle_guard = flow_registry.lifecycle_guard(&sub_run_id);
-            let _block_guard = match flow_registry.block_on_descendant(&parent_run_id, &sub_run_id)
-            {
-                Ok(guard) => guard,
-                Err(error) => return Value::Err(error),
-            };
-            let lifecycle = atman_rt::FlowLifecycle::new(atman_rt::FlowStartFact {
-                run_id: sub_run_id.clone(),
-                flow_name: display_name,
-                parent_run_id: Some(parent_run_id.clone()),
-                parent_node_id: ctx.current_node_id.clone(),
-                spawned: false,
-            });
-            let outcome = lifecycle
-                .run(
-                    |start| {
-                        if let Some(sink) = ctx.events {
-                            sink.emit(start.clone().into());
-                        }
-                        if let Some(session) = ctx.session_runtime.as_ref() {
-                            let _ = session.stream_tx().send(start.into());
-                        } else if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
-                            let _ = tx.send(start.into());
-                        }
-                    },
-                    || async {
-                        let mut sub_tool_ctx = ctx.tool_ctx.clone();
-                        sub_tool_ctx.flow_run_id = Some(sub_run_id.clone());
-                        sub_tool_ctx.flow_identity = Some(child_identity);
-                        let sub_ctx = AtmanHost {
-                            tool_ctx: &sub_tool_ctx,
-                            contract: target.contract.as_ref(),
-                            flow_run_id: Some(sub_run_id.clone()),
-                            current_node_id: None,
-                            current_module: target_module,
-                            source_dir: target_source_dir,
-                            ..ctx.clone()
-                        };
-                        let outcome = crate::exec::exec_subflow(target, bindings, &sub_ctx).await;
-                        drop(lifecycle_guard);
-                        outcome
-                    },
-                    |outcome| {
-                        crate::event::FlowStatus::from(atman_rt::classify_outcome(
-                            outcome,
-                            |error| matches!(error, RuntimeError::Cancelled(_)),
-                        ))
-                    },
-                    |end, outcome| {
-                        let cancelled = matches!(end.status, crate::event::FlowStatus::Cancelled);
-                        let ok = !matches!(outcome, atman_rt::StatementOutcome::Err(_));
-                        let done_run_id = end.run_id.0.to_string();
-                        let done_flow_name = end.flow_name.clone();
-                        if let Some(sink) = ctx.events {
-                            sink.emit(end.into());
-                        }
-                        if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
-                            let _ = tx.send(crate::stream::StreamFrame::FlowDone {
-                                run_id: done_run_id,
-                                flow_name: done_flow_name,
-                                ok,
-                                cancelled,
-                                suicide: false,
-                            });
-                        }
-                    },
-                )
-                .await;
-            match outcome {
-                atman_rt::StatementOutcome::Return(value) => value,
-                atman_rt::StatementOutcome::Err(error) => Value::Err(error),
-                atman_rt::StatementOutcome::Continue
-                | atman_rt::StatementOutcome::LoopBreak
-                | atman_rt::StatementOutcome::LoopContinue => Value::Unit,
-            }
-        }
+async fn eval_confirm(v: Value, ctx: &AtmanHost<'_>) -> Value {
+    let prompt = match &v {
+        Value::Str(s) => s.clone(),
+        other => other.kind_name().to_string(),
+    };
+    let confirm_kind = crate::form::FormKind::Confirm {
+        prompt: prompt.clone(),
+    };
+    // Daemon clients drive the confirm through the prompt resolver
+    // over RPC; in-process TUI subscribes to FormRegistry. Boot /
+    // headless / unit tests without either wired keep the historical
+    // auto-approve so they don't deadlock.
+    if let Some(resolver) = ctx.tool_ctx.prompt_resolver.clone() {
+        let id = crate::rendezvous::PromptId::now();
+        let payload = serde_json::to_value(&confirm_kind).unwrap_or(serde_json::Value::Null);
+        let timeout = std::time::Duration::from_secs(300);
+        let result = crate::rendezvous::await_prompt_with_payload_cancel(
+            &resolver,
+            id,
+            "form_ask",
+            payload,
+            timeout,
+            &ctx.tool_ctx.cancel,
+        )
+        .await;
+        let answer: crate::form::FormAnswer = match result {
+            Ok(v) => serde_json::from_value(v).unwrap_or(crate::form::FormAnswer::Cancelled),
+            Err(_) => crate::form::FormAnswer::Cancelled,
+        };
+        return Value::Bool(matches!(
+            answer,
+            crate::form::FormAnswer::Confirmed { value: true }
+        ));
     }
+    let Some(session) = ctx.session_runtime.as_ref() else {
+        return Value::Bool(true);
+    };
+    let forms = session.forms();
+    if forms.subscriber_count() == 0 {
+        return Value::Bool(true);
+    }
+    let Some(run_id) = ctx.flow_run_id.clone() else {
+        return Value::Bool(true);
+    };
+    let pending = crate::form::PendingForm {
+        form_id: uuid::Uuid::now_v7().to_string(),
+        run_id,
+        tool_use_id: ctx.current_node_id.clone().unwrap_or_default(),
+        form: crate::form::CompositeForm {
+            questions: vec![crate::form::FormQuestion {
+                id: "question".into(),
+                kind: confirm_kind.clone(),
+            }],
+        },
+        kind: confirm_kind,
+        emitted_at: chrono::Utc::now(),
+    };
+    let rx = forms.request(pending);
+    let submission = rx.await.unwrap_or(crate::form::FormSubmission::Rejected);
+    Value::Bool(matches!(
+        submission,
+        crate::form::FormSubmission::Submitted { answers }
+            if matches!(answers.first(), Some(crate::form::FormAnswer::Confirmed { value: true }))
+    ))
 }
 
 fn session_fs_access_policy(session: &crate::session::Session) -> crate::fs_access::FsAccessPolicy {
@@ -1060,157 +894,50 @@ fn session_fs_access_policy(session: &crate::session::Session) -> crate::fs_acce
     crate::fs_access::FsAccessPolicy { mode, workspace }
 }
 
-fn tool_name(path: &[atman_rt::ast::Ident]) -> String {
-    let parts: Vec<&str> = path.iter().map(|i| i.name.as_str()).collect();
-    parts.join(".")
+fn fix_target_path(target: Value) -> Result<std::path::PathBuf, RuntimeError> {
+    match target {
+        Value::Host(AtmanPayload::Path(path)) => Ok(path),
+        Value::Str(path) => Ok(path.into()),
+        other => Err(RuntimeError::TypeMismatch {
+            expected: "path (target)".into(),
+            actual: other.kind_name().into(),
+        }),
+    }
 }
 
-async fn eval_fix_until_test_passes<'a>(
-    kwargs: &'a atman_rt::ast::Kwargs,
-    env: &'a Env,
-    ctx: &'a AtmanHost<'a>,
-) -> Value {
-    let mut edit_flow_expr: Option<&Expr> = None;
-    let mut test_expr: Option<&Expr> = None;
-    let mut on_giveup_expr: Option<&Expr> = None;
-    let mut max_iters: u32 = 5;
-    let mut target_path: Option<std::path::PathBuf> = None;
-
-    for (k, v) in kwargs {
-        match k.name.as_str() {
-            "edit_flow" => edit_flow_expr = Some(v),
-            "test" => test_expr = Some(v),
-            "on_giveup" => on_giveup_expr = Some(v),
-            "max_iters" => match eval_expr(v, env, ctx).await {
-                Value::Int(n) if n > 0 => max_iters = n as u32,
-                other => {
-                    return Value::Err(RuntimeError::TypeMismatch {
-                        expected: "positive int (max_iters)".into(),
-                        actual: other.kind_name().into(),
-                    });
-                }
-            },
-            "target" => match eval_expr(v, env, ctx).await {
-                Value::Host(AtmanPayload::Path(p)) => target_path = Some(p),
-                Value::Str(s) => target_path = Some(std::path::PathBuf::from(s)),
-                Value::Unit => {}
-                other => {
-                    return Value::Err(RuntimeError::TypeMismatch {
-                        expected: "path (target)".into(),
-                        actual: other.kind_name().into(),
-                    });
-                }
-            },
-            _ => {}
-        }
-    }
-
-    let Some(edit_flow_expr) = edit_flow_expr else {
-        return Value::Err(RuntimeError::MissingArg(
-            "fix_until_test_passes.edit_flow".into(),
-        ));
+async fn fix_snapshot(target: Value) -> Value {
+    let path = match fix_target_path(target) {
+        Ok(path) => path,
+        Err(error) => return Value::Err(error),
     };
-    let Some(test_expr) = test_expr else {
-        return Value::Err(RuntimeError::MissingArg(
-            "fix_until_test_passes.test".into(),
-        ));
-    };
-
-    let pristine: Option<String> = match &target_path {
-        Some(p) => match tokio::fs::read_to_string(p).await {
-            Ok(s) => Some(s),
-            Err(e) => {
-                return Value::Err(RuntimeError::ToolFailed(format!(
-                    "fix_until_test_passes: cannot read target {}: {e}",
-                    p.display()
-                )));
-            }
-        },
-        None => None,
-    };
-
-    let mut prev_fail = String::new();
-    let mut last_test_result: Option<Value> = None;
-
-    for iter in 0..max_iters {
-        let mut loop_env = env.clone();
-        loop_env.bind("iter", Value::Int(iter as i64));
-        loop_env.bind("prev_fail", Value::Str(prev_fail.clone()));
-
-        let edit_v = eval_expr(edit_flow_expr, &loop_env, ctx).await;
-        if edit_v.is_err() {
-            return edit_v;
-        }
-        loop_env.bind("last_edit", edit_v);
-
-        let test_v = eval_expr(test_expr, &loop_env, ctx).await;
-        if test_v.is_err() {
-            return test_v;
-        }
-        let exit = test_v
-            .field("exit_code")
-            .or_else(|| test_v.field("exit"))
-            .and_then(|v| match v {
-                Value::Int(n) => Some(*n),
-                _ => None,
-            });
-        last_test_result = Some(test_v.clone());
-        if let Some(0) = exit {
-            return Value::Struct(vec![
-                ("status".into(), Value::Str("passed".into())),
-                ("iters".into(), Value::Int((iter + 1) as i64)),
-                ("test".into(), test_v),
-            ]);
-        }
-        let stderr_tail = test_v
-            .field("stderr_tail")
-            .or_else(|| test_v.field("output"))
-            .and_then(|v| match v {
-                Value::Str(s) => Some(s.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        let stdout_tail = test_v
-            .field("stdout_tail")
-            .and_then(|v| match v {
-                Value::Str(s) => Some(s.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        prev_fail = format!(
-            "iter {iter} exit={:?}\n--- stderr ---\n{stderr_tail}\n--- stdout ---\n{stdout_tail}",
-            exit
-        );
-
-        if let (Some(target), Some(pristine)) = (&target_path, &pristine)
-            && let Err(e) = tokio::fs::write(target, pristine.as_bytes()).await
-        {
-            return Value::Err(RuntimeError::ToolFailed(format!(
-                "fix_until_test_passes: revert failed on {}: {e}",
-                target.display()
-            )));
-        }
+    match tokio::fs::read_to_string(&path).await {
+        Ok(text) => Value::Str(text),
+        Err(error) => Value::Err(RuntimeError::ToolFailed(format!(
+            "fix_until_test_passes: cannot read target {}: {error}",
+            path.display()
+        ))),
     }
-
-    if let Some(giveup) = on_giveup_expr {
-        let mut giveup_env = env.clone();
-        giveup_env.bind("iters", Value::Int(max_iters as i64));
-        giveup_env.bind("prev_fail", Value::Str(prev_fail));
-        return eval_expr(giveup, &giveup_env, ctx).await;
-    }
-
-    Value::Struct(vec![
-        ("status".into(), Value::Str("gave_up".into())),
-        ("iters".into(), Value::Int(max_iters as i64)),
-        ("last_test".into(), last_test_result.unwrap_or(Value::Unit)),
-    ])
 }
 
-async fn eval_message_node<'a>(
+async fn fix_restore(target: Value, pristine: String) -> Value {
+    let path = match fix_target_path(target) {
+        Ok(path) => path,
+        Err(error) => return Value::Err(error),
+    };
+    match tokio::fs::write(&path, pristine.as_bytes()).await {
+        Ok(()) => Value::Unit,
+        Err(error) => Value::Err(RuntimeError::ToolFailed(format!(
+            "fix_until_test_passes: revert failed on {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+async fn eval_message_node(
     ast_role: atman_rt::ast::MessageRole,
-    args: &'a [Arg],
-    env: &'a Env,
-    ctx: &'a AtmanHost<'a>,
+    positional: Vec<Value>,
+    mut named: Vec<(String, Value)>,
+    ctx: &AtmanHost<'_>,
 ) -> Value {
     use crate::message::{
         ImageData, ImageSource, Message, MessageOrigin, MessagePart, MessageRole,
@@ -1227,45 +954,6 @@ async fn eval_message_node<'a>(
         .clone()
         .unwrap_or_else(crate::event::TurnId::now);
 
-    let mut positional = Vec::new();
-    let mut named: Vec<(String, Value)> = Vec::new();
-    let mut attachment_paths_raw: Option<Vec<std::path::PathBuf>> = None;
-    for arg in args {
-        match arg {
-            Arg::Positional(e) => {
-                let v = eval_expr(e, env, ctx).await;
-                if v.is_err() {
-                    return v;
-                }
-                positional.push(v);
-            }
-            Arg::Named { name, value } => {
-                if name.name == "attachments" {
-                    if let Expr::List(items) = value {
-                        let mut collected = Vec::with_capacity(items.len());
-                        let mut all_fileref = true;
-                        for it in items {
-                            if let Expr::FileRef(f) = it {
-                                collected.push(std::path::PathBuf::from(&f.path));
-                            } else {
-                                all_fileref = false;
-                                break;
-                            }
-                        }
-                        if all_fileref {
-                            attachment_paths_raw = Some(collected);
-                            continue;
-                        }
-                    }
-                }
-                let v = eval_expr(value, env, ctx).await;
-                if v.is_err() {
-                    return v;
-                }
-                named.push((name.name.clone(), v));
-            }
-        }
-    }
     let take_named = |k: &str, named: &mut Vec<(String, Value)>| -> Option<Value> {
         let pos = named.iter().position(|(n, _)| n == k)?;
         Some(named.remove(pos).1)
@@ -1331,34 +1019,30 @@ async fn eval_message_node<'a>(
         }
         None => None,
     };
-    let attachment_paths: Vec<std::path::PathBuf> = if let Some(raw) = attachment_paths_raw {
-        raw
-    } else {
-        match take_named("attachments", &mut named) {
-            Some(Value::List(items)) => {
-                let mut ps = Vec::with_capacity(items.len());
-                for it in items {
-                    match it {
-                        Value::Host(AtmanPayload::Path(p)) => ps.push(p),
-                        Value::Str(s) => ps.push(std::path::PathBuf::from(s)),
-                        other => {
-                            return Value::Err(RuntimeError::TypeMismatch {
-                                expected: "path (attachment)".into(),
-                                actual: other.kind_name().into(),
-                            });
-                        }
+    let attachment_paths: Vec<std::path::PathBuf> = match take_named("attachments", &mut named) {
+        Some(Value::List(items)) => {
+            let mut ps = Vec::with_capacity(items.len());
+            for it in items {
+                match it {
+                    Value::Host(AtmanPayload::Path(p)) => ps.push(p),
+                    Value::Str(s) => ps.push(std::path::PathBuf::from(s)),
+                    other => {
+                        return Value::Err(RuntimeError::TypeMismatch {
+                            expected: "path (attachment)".into(),
+                            actual: other.kind_name().into(),
+                        });
                     }
                 }
-                ps
             }
-            Some(other) => {
-                return Value::Err(RuntimeError::TypeMismatch {
-                    expected: "list of path".into(),
-                    actual: other.kind_name().into(),
-                });
-            }
-            None => Vec::new(),
+            ps
         }
+        Some(other) => {
+            return Value::Err(RuntimeError::TypeMismatch {
+                expected: "list of path".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+        None => Vec::new(),
     };
 
     let mut parts: Vec<MessagePart> =
@@ -1452,10 +1136,6 @@ fn guess_image_mime(path: &std::path::Path) -> Option<String> {
     )
 }
 
-fn contract_allows_shell(contract: Option<&atman_rt::ast::Contract>) -> bool {
-    crate::flow_authority::contract_allows_shell(contract)
-}
-
 pub struct TruncationStat {
     pub original_chars: usize,
     pub result_chars: usize,
@@ -1508,22 +1188,11 @@ fn char_boundary(s: &str, target: usize, round_up: bool) -> usize {
     idx
 }
 
-// Bare primitive names inside `schema: { valid: bool, ... }` parse as tool calls; treat as Unit.
-fn is_type_annotation(path: &[atman_rt::ast::Ident]) -> bool {
-    if path.len() != 1 {
-        return false;
-    }
-    matches!(
-        path[0].name.as_str(),
-        "bool" | "int" | "float" | "string" | "path" | "bytes" | "duration"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tool::ToolRegistry;
-    use atman_dsl::parse::parse_file;
+    use atman_rt::parse_file;
 
     fn authorized_eval_tool_ctx(workspace: Option<&std::path::Path>) -> ToolCtx {
         let trust = crate::trust::TrustConfig {
@@ -1616,12 +1285,12 @@ mod tests {
         let flows = std::collections::HashMap::new();
         let ctx = AtmanHost {
             tools: &tools,
-            tool_ctx: &tool_ctx,
+            tool_ctx: std::borrow::Cow::Borrowed(&tool_ctx),
             providers: &providers,
             flows: &flows,
             linked_program: None,
             current_module: None,
-            contract: None,
+            allows_shell: false,
             events: None,
             turn_id: None,
             flow_run_id: None,
@@ -1715,12 +1384,12 @@ mod tests {
         let flows = std::collections::HashMap::new();
         let ctx = AtmanHost {
             tools: &tools,
-            tool_ctx: &tool_ctx,
+            tool_ctx: std::borrow::Cow::Borrowed(&tool_ctx),
             providers: &providers,
             flows: &flows,
             linked_program: None,
             current_module: None,
-            contract: None,
+            allows_shell: false,
             events: None,
             turn_id: None,
             flow_run_id: None,
@@ -1781,12 +1450,12 @@ mod tests {
         let flows = std::collections::HashMap::new();
         let ctx = AtmanHost {
             tools: &tools,
-            tool_ctx: &tool_ctx,
+            tool_ctx: std::borrow::Cow::Borrowed(&tool_ctx),
             providers: &providers,
             flows: &flows,
             linked_program: None,
             current_module: None,
-            contract: None,
+            allows_shell: false,
             events: None,
             turn_id: None,
             flow_run_id: Some(run_id),
@@ -1835,12 +1504,12 @@ mod tests {
         let flows = std::collections::HashMap::new();
         let ctx = AtmanHost {
             tools: &tools,
-            tool_ctx: &tool_ctx,
+            tool_ctx: std::borrow::Cow::Borrowed(&tool_ctx),
             providers: &providers,
             flows: &flows,
             linked_program: None,
             current_module: None,
-            contract: None,
+            allows_shell: false,
             events: None,
             turn_id: None,
             flow_run_id: tool_ctx
@@ -1882,12 +1551,12 @@ mod tests {
         let flows = std::collections::HashMap::new();
         let ctx = AtmanHost {
             tools: &tools,
-            tool_ctx: &tool_ctx,
+            tool_ctx: std::borrow::Cow::Borrowed(&tool_ctx),
             providers: &providers,
             flows: &flows,
             linked_program: None,
             current_module: None,
-            contract: None,
+            allows_shell: false,
             events: None,
             turn_id: None,
             flow_run_id: None,
@@ -1939,12 +1608,12 @@ mod tests {
         let flows = std::collections::HashMap::new();
         let ctx = AtmanHost {
             tools: &tools,
-            tool_ctx: &tool_ctx,
+            tool_ctx: std::borrow::Cow::Borrowed(&tool_ctx),
             providers: &providers,
             flows: &flows,
             linked_program: None,
             current_module: None,
-            contract: None,
+            allows_shell: false,
             events: None,
             turn_id: None,
             flow_run_id: tool_ctx
@@ -1986,12 +1655,12 @@ mod tests {
         let flows = std::collections::HashMap::new();
         let ctx = AtmanHost {
             tools: &tools,
-            tool_ctx: &tool_ctx,
+            tool_ctx: std::borrow::Cow::Borrowed(&tool_ctx),
             providers: &providers,
             flows: &flows,
             linked_program: None,
             current_module: None,
-            contract: None,
+            allows_shell: false,
             events: None,
             turn_id: None,
             flow_run_id: None,
@@ -2017,12 +1686,12 @@ mod tests {
         let flows = std::collections::HashMap::new();
         let ctx = AtmanHost {
             tools: &tools,
-            tool_ctx: &tool_ctx,
+            tool_ctx: std::borrow::Cow::Borrowed(&tool_ctx),
             providers: &providers,
             flows: &flows,
             linked_program: None,
             current_module: None,
-            contract: None,
+            allows_shell: false,
             events: None,
             turn_id: None,
             flow_run_id: None,
@@ -2149,7 +1818,7 @@ flow parent() -> Int {
     }
 
     #[tokio::test]
-    async fn subflow_missing_target_reports_undefined_tool() {
+    async fn subflow_missing_target_rejected_during_link() {
         let src = r#"flow parent() -> Int {
     return subflow(nope, 1)
 }
@@ -2180,7 +1849,9 @@ flow parent() -> Int {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, RuntimeError::UndefinedTool(name) if name.contains("nope")));
+        assert!(
+            matches!(err, RuntimeError::ToolFailed(message) if message.contains("undefined flow `nope`"))
+        );
     }
 
     #[tokio::test]
@@ -2200,12 +1871,12 @@ flow parent() -> Int {
         let flows = std::collections::HashMap::new();
         let ctx = AtmanHost {
             tools: &tools,
-            tool_ctx: &tool_ctx,
+            tool_ctx: std::borrow::Cow::Borrowed(&tool_ctx),
             providers: &providers,
             flows: &flows,
             linked_program: None,
             current_module: None,
-            contract: None,
+            allows_shell: false,
             events: None,
             turn_id: None,
             flow_run_id: tool_ctx
@@ -2241,12 +1912,12 @@ flow parent() -> Int {
         let events = crate::event::EventSink::new();
         let ctx = AtmanHost {
             tools: &tools,
-            tool_ctx: &tool_ctx,
+            tool_ctx: std::borrow::Cow::Borrowed(&tool_ctx),
             providers: &providers,
             flows: &flows,
             linked_program: None,
             current_module: None,
-            contract: None,
+            allows_shell: false,
             events: Some(&events),
             turn_id: None,
             flow_run_id: Some(crate::event::FlowRunId::now()),
@@ -2439,7 +2110,7 @@ flow parent() -> Int {
     )
     return "ok"
 }"#;
-        let file = atman_dsl::parse::parse_file(src).unwrap();
+        let file = atman_rt::parse_file(src).unwrap();
         let body = &file.flows[0].body;
         let tools_values: Vec<crate::value::Value> = match &body[0] {
             atman_rt::ast::Stmt::Bind { value, .. } => match value {

@@ -3,7 +3,7 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use atman_runtime::Executor;
 use atman_runtime::error::RuntimeError;

@@ -1,24 +1,9 @@
 use std::fmt;
 
 use atman_rt::ast::File;
+pub use atman_rt::route::RouteMatch;
 
 use crate::config_hub::{ConfigError, ConfigHub};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RouteMatch {
-    pub command: String,
-    pub args: String,
-}
-
-impl RouteMatch {
-    pub fn slash_call(&self) -> String {
-        if self.args.is_empty() {
-            format!("/{}", self.command)
-        } else {
-            format!("/{} {}", self.command, self.args)
-        }
-    }
-}
 
 #[derive(Debug)]
 pub enum RouteLoadError {
@@ -48,7 +33,7 @@ impl RouteProgram {
             .load_routes_source()
             .map_err(RouteLoadError::Config)?
             .map(|source| {
-                let file = atman_dsl::parse::parse_file(&source)
+                let file = atman_rt::parse_file(&source)
                     .map_err(|error| RouteLoadError::Parse(error.to_string()))?;
                 if !file.uses.is_empty() {
                     return Err(RouteLoadError::Parse(
@@ -62,19 +47,7 @@ impl RouteProgram {
     }
 
     pub fn resolve(&self, input: &str) -> Option<RouteMatch> {
-        let file = self.file.as_ref()?;
-        for route in &file.routes {
-            if let Some(rest) = input.strip_prefix(&route.pattern) {
-                return Some(RouteMatch {
-                    command: route.flow.name.clone(),
-                    args: rest.trim().to_string(),
-                });
-            }
-        }
-        file.default_route.as_ref().map(|route| RouteMatch {
-            command: route.flow.name.clone(),
-            args: input.trim().to_string(),
-        })
+        atman_rt::resolve_route(self.file.as_ref()?, input)
     }
 }
 

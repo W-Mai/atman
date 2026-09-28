@@ -3,7 +3,7 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 use atman_runtime::error::RuntimeError;
 use atman_runtime::event::{Event, NodeEvent, Observable};
 type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;

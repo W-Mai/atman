@@ -1,5 +1,5 @@
-use atman_dsl::{parse::parse_file, print::print_file};
 use atman_rt::ast::{Pattern, PatternFieldBinding, Stmt};
+use atman_rt::{parse_file, print_file};
 
 fn parse_flow(body: &str) -> atman_rt::ast::File {
     let src = format!("flow f() {{\n{body}\n}}\n");

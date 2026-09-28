@@ -2,7 +2,7 @@ mod common;
 
 use std::sync::Arc;
 
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 use atman_runtime::memory::goal::GoalStore;
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::LlmRequest;

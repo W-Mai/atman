@@ -4,7 +4,7 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 use atman_runtime::Executor;
 use atman_runtime::error::RuntimeError;
 use atman_runtime::event::{LlmCallStatus, NodeEvent, Observable};

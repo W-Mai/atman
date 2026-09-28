@@ -83,7 +83,7 @@ impl Tool for FlowCheck {
             let mut warnings: Vec<Value> = Vec::new();
             for (source_path, file) in program.iter_modules() {
                 let source_path = source_path.unwrap_or(&path);
-                for hit in crate::flow_lint::lint_file(file) {
+                for hit in atman_rt::lint_file(file) {
                     warnings.push(Value::Struct(vec![
                         ("kind".into(), Value::Str(hit.rule.slug().into())),
                         ("flow".into(), Value::Str(hit.flow)),

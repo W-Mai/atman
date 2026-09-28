@@ -1,4 +1,4 @@
-use atman_dsl::{parse::parse_file, print::print_file};
+use atman_rt::{parse_file, print_file};
 
 #[test]
 fn pipe_operator_is_rejected() {

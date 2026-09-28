@@ -46,6 +46,10 @@ impl atman_rt::ValueError for RuntimeError {
         }
     }
 
+    fn missing_argument(name: &str) -> Self {
+        Self::MissingArg(name.into())
+    }
+
     fn integer_div_by_zero() -> Self {
         Self::ToolFailed("integer div by zero".into())
     }

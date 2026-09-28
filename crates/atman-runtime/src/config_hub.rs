@@ -1963,14 +1963,14 @@ fn dsl_route_source(flow_name: &str, trigger: &str) -> Result<String, ConfigErro
 
 fn syn_identifier(value: &str) -> Option<()> {
     let source = format!("flow {value}() {{}}\n");
-    atman_dsl::parse::parse_file(&source).ok().map(|_| ())
+    atman_rt::parse_file(&source).ok().map(|_| ())
 }
 
 fn parse_routes_source(context: &str, source: &str) -> Result<(), ConfigError> {
     if source.is_empty() {
         return Ok(());
     }
-    let file = atman_dsl::parse::parse_file(source)
+    let file = atman_rt::parse_file(source)
         .map_err(|error| ConfigError::Invalid(format!("parse {context}: {error}")))?;
     if !file.uses.is_empty() {
         return Err(ConfigError::Invalid(format!(
@@ -2597,7 +2597,7 @@ mod tests {
             .unwrap();
 
         let source = std::fs::read_to_string(hub.routes_at_path()).unwrap();
-        let parsed = atman_dsl::parse::parse_file(&source).unwrap();
+        let parsed = atman_rt::parse_file(&source).unwrap();
         assert_eq!(parsed.routes.len(), 1);
         assert_eq!(parsed.routes[0].pattern, "say \"hi\"\\now\n");
         assert_eq!(parsed.routes[0].flow.name, "review_code");
@@ -2656,7 +2656,7 @@ mod tests {
         }
 
         let source = std::fs::read_to_string(hub.routes_at_path()).unwrap();
-        let parsed = atman_dsl::parse::parse_file(&source).unwrap();
+        let parsed = atman_rt::parse_file(&source).unwrap();
         assert_eq!(parsed.routes.len(), 12);
         for index in 0..12 {
             assert!(parsed.routes.iter().any(|route| {

@@ -1,4 +1,4 @@
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 use atman_runtime::{ContextCallPurpose, Event, Executor};
 mod common;
 

@@ -409,9 +409,8 @@ Drag across transcript text, including line-end space and short gaps between Mar
 ```
 atman/
   crates/
-    atman-rt/        # Portable AST, values, flow/turn IDs, expressions, list intrinsics, fanout scheduling, lifecycle, cancellation
-    atman-dsl/       # Parser + pretty-printer (.at files)
-    atman-runtime/   # AtmanRuntime composition, AtmanHost effects, executor, tools, providers, memory, MCP
+    atman-rt/        # Complete .at language VM: syntax, linking, validation, values, flow execution
+    atman-runtime/   # Atman host: effects, executor, tools, providers, sessions, memory, MCP
     atman-cli/       # Binary, REPL, slash commands, monitor, daemon client
     atman-proto/     # JSON-RPC 2.0 envelope + daemon request/response types
     atman-daemon/    # Daemon binary, Unix socket, HTTP+SSE, session pool
@@ -421,13 +420,13 @@ atman/
   docs/              # Quickstart, context strategy, list combinators
 ```
 
-`cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml` executes flows with default parameters, portable list and static/dynamic fanout nodes, a host effect, and a loop using `atman-rt` as its only dependency. It does not start the CLI or daemon. The CI workflow is configured to run this fixture on Linux, macOS, and Windows, run the same flows on Wasm/WASI, and check the `no_std` core on `wasm32-unknown-unknown`.
+`atman-rt` is the complete Atman language VM. `Vm::compile(Source, &resolver)` parses and links `.at` source, including `use` and `pub` flows. A Rust host implements `VmEmbedding` to supply external effects and optional execution callbacks, then calls `Vm::run` to execute a flow. Atman's tools, providers, sessions, and storage are supplied by `atman-runtime`; another host can use `atman-rt` without that crate.
 
-`cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --features dsl-demo -- --demo` starts an interactive demo that parses a `.at` flow, reads an integer, calls a host-provided effect, and prints the result. Add an integer after `--demo` for non-interactive execution. The parser dependency is enabled only for the demo; the default embedding fixture remains `atman-rt`-only.
+`cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked` checks portable flow behavior with only `atman-rt` as an Atman dependency. `cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked -- --demo 6` compiles `.at` source, imports a public flow, invokes a host effect, and prints `result: 18`. Omit `6` to enter an integer interactively. The CI workflow runs the fixture on Linux, macOS, and Windows, runs it on Wasm/WASI, and checks the `no_std` core on `wasm32-unknown-unknown`.
 
-`atman-rt` requires an allocator, target support for pointer-width atomics for `Arc`-backed environments and lambda captures, and a host that polls its futures. `wasm32-unknown-unknown` passes the `no_std` check. `riscv32imc-unknown-none-elf` lacks pointer-width atomics and is not currently supported.
+The default `syntax` feature enables source compilation. With `default-features = false`, the VM executes a program built from Atman AST without the parser dependency. Both modes require an allocator, pointer-width atomics for `Arc`-backed environments and lambda captures, and a host that polls returned futures. `riscv32imc-unknown-none-elf` lacks pointer-width atomics and is not currently supported.
 
-The [atman-rt embedding guide](crates/atman-rt/README.md) describes the host traits and standalone fixture.
+The [atman-rt embedding guide](crates/atman-rt/README.md) describes the VM API and standalone fixture.
 
 Language: Rust (edition 2024, MSRV 1.85). License: MIT OR Apache-2.0.
 

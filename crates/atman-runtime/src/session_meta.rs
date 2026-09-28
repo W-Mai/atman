@@ -597,7 +597,7 @@ mod tests {
 
     #[test]
     fn built_in_session_name_flow_parses() {
-        let parsed = atman_dsl::parse::parse_file(crate::templates::SESSION_NAME_AT).unwrap();
+        let parsed = atman_rt::parse_file(crate::templates::SESSION_NAME_AT).unwrap();
         assert_eq!(parsed.flows[0].name.name, "session_name");
     }
 

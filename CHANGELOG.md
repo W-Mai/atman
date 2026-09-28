@@ -12,11 +12,12 @@ All notable changes to atman are documented in this file.
 - **Fanout syntax** — `fanout [expr, ...]`, `fanout pending`, and `fanout source { |item| expr }` return all results without a `collect:` clause. `collect: all` and `collect: first` are no longer parsed.
 - **Portable flow types** — Flow AST, lexical environments, `Value<P, E>`, and primitive expression operations are owned by `atman-rt`. Import core types from `atman-rt`; `atman-runtime::Value` and the old DSL AST paths are removed. Atman-specific path, message, and edit values use `AtmanPayload`.
 - **Core identity imports** — Flow and turn IDs are `atman_rt::{RunId, TurnId}<AtmanUuid>`. The `atman-runtime` crate-root `FlowRunId`, `TurnId`, `AtmanValue`, and `eval_expr` exports and the public `atman-runtime::event` ID aliases are removed.
+- **Language crate imports** — `.at` parsing, printing, AST types, linting, module linking, and flow execution are provided by `atman-rt`. The separate `atman-dsl` crate is removed.
 
 ### ✨ Features
 
 - **Reusable flow sources** — `use` binds public flows from other `.at` files by name or namespace. CLI, daemon, slash commands, and flow checks load dependencies before execution. Flow versions and snapshots include dependency contents; recorded source bundles support revision runs and multi-file diffs.
-- **Embeddable execution core** — `atman-rt` runs flow statements, expressions, list operations, fanout, cancellation, and lifecycle ordering through host callbacks without CLI, daemon, tool, or provider dependencies. The crate is `no_std` with `alloc` and pointer-width atomics.
+- **Embeddable Atman VM** — `Vm::compile` parses and links `.at` source with host-resolved imports. A `VmEmbedding` host supplies effects and optional execution callbacks; `Vm::run` executes flows and subflows. Builds without the default syntax feature retain the `no_std` AST execution path with `alloc` and pointer-width atomics.
 
 ## [1.13.2] — 2026-09-25
 

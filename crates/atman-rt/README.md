@@ -1,24 +1,26 @@
 # atman-rt
 
-`atman-rt` is a `no_std` Rust library for executing Atman flow ASTs inside another program. It owns expression and statement dispatch, portable values and environments, list operations, fanout scheduling, cancellation precedence, and flow lifecycle ordering. It does not start an async runtime or depend on Atman tools, providers, sessions, storage, the CLI, or the daemon.
+`atman-rt` is an embeddable Atman language VM. It parses and prints `.at` source, resolves `use` and `pub` flows, validates and links modules, and executes expressions, statements, subflows, list operations, fanout, routes, watch rules, cancellation, and lifecycle hooks. It does not start an async runtime or depend on Atman tools, providers, sessions, storage, the CLI, or the daemon.
 
-An embedding application constructs an `atman_rt::ast::FlowDecl` and runs it with `atman_rt::Engine::run_flow`. The returned future is polled by the application's executor. `StatementHost` supplies bindings, product preflight decisions, and node event publication. `ExpressionHost` supplies external effects such as tools and file reads; portable expressions and list/fanout nodes execute in the core. Both traits use the embedding application's payload and error types through `Value<P, E>`.
+An embedding application calls `atman_rt::Vm::compile(Source, &resolver)` to build a VM from source text. The host implements `SourceResolver` to load imported source under its own path and trust policy, and `VmEmbedding` to dispatch evaluated external effects. `Vm::run(flow_name, args, host)` executes a flow and its subflows; the host polls the returned future with its own executor. `VmEmbedding` also has optional callbacks for tool preflight before argument evaluation, cancellation, node observation, and child-flow context. A host that authorizes tools should recheck authorization when dispatching the effect. The host chooses its payload and error types through `Value<P, E>`.
 
-The [standalone embedding fixture](https://github.com/W-Mai/atman/tree/main/fixtures/atman-rt-embed) implements both host traits and runs pure flows, host effects, loops, list operations, and static and dynamic fanout without any other Atman crate dependency:
+The default `syntax` feature includes the text parser. With `default-features = false`, a host can construct a linked program from AST and execute it through `Vm::new` without the parser dependency. The VM uses `no_std` and `alloc`; `syntax` is disabled for the checked `no_std` dependency configuration.
+
+The [standalone embedding fixture](https://github.com/W-Mai/atman/tree/main/fixtures/atman-rt-embed) runs pure flows, host effects, loops, list operations, and static and dynamic fanout without any other Atman crate dependency:
 
 ```sh
 cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked
 ```
 
-The same fixture includes an interactive `.at` demo. The `dsl-demo` feature adds `atman-dsl` only for this mode; the default embedding check still depends on `atman-rt` alone. The demo parses [`demo.at`](../../fixtures/atman-rt-embed/src/demo.at), prompts for an integer, invokes the host-provided `foreign()` effect, and prints the result. Pass a number after `--demo` to run it without a prompt:
+The same fixture includes an interactive `.at` demo using `Vm::compile` and a `VmEmbedding` host. The demo compiles [`demo.at`](../../fixtures/atman-rt-embed/src/demo.at) with a host source resolver, links a `pub flow` from `helper.at`, prompts for an integer, invokes the host-provided `foreign()` effect, and prints the result. Pass a number after `--demo` to run it without a prompt:
 
 ```sh
-cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked --features dsl-demo -- --demo
-cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked --features dsl-demo -- --demo 6
+cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked -- --demo
+cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked -- --demo 6
 ```
 
-The second command prints `result: 17`.
+The second command prints `result: 18`.
 
-`atman-dsl` can parse `.at` source for hosts that want a text frontend; the core accepts the AST directly and does not require the parser.
+`atman_rt::parse_file` parses `.at` source and `atman_rt::print_file` prints an AST. `Engine`, `StatementHost`, and `ExpressionHost` remain available for lower-level integration; `Vm` handles source linking and flow calls for the normal embedding path.
 
 The core requires an allocator and target support for pointer-width atomics because environments and lambda captures use `Arc`. The host must poll returned futures. `wasm32-unknown-unknown` passes the `no_std` compile check, and the fixture runs on `wasm32-wasip1` with a WASI host. Targets without pointer-width atomics, including `riscv32imc-unknown-none-elf`, are not currently supported.

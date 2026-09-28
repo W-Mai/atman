@@ -3,36 +3,19 @@
 version = 4
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
-name = "atman-dsl"
-version = "1.13.2"
-dependencies = [
- "anyhow",
- "atman-rt",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "thiserror",
-]
-
-[[package]]
 name = "atman-rt"
 version = "1.13.2"
 dependencies = [
  "futures",
+ "proc-macro2",
  "serde",
+ "syn 2.0.119",
 ]
 
 [[package]]
 name = "atman-rt-embed-fixture"
 version = "0.0.0"
 dependencies = [
- "atman-dsl",
  "atman-rt",
 ]
 
@@ -177,26 +160,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "thiserror"
-version = "2.0.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
-dependencies = [
- "thiserror-impl",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "2.0.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.6",
 ]
 
 [[package]]

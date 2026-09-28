@@ -18,7 +18,6 @@ pub mod event_writer;
 pub mod exec;
 pub mod executor;
 pub mod flow_authority;
-pub mod flow_lint;
 pub mod flow_meta;
 pub mod flow_registry;
 pub mod flow_workspace;

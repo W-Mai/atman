@@ -1,5 +1,42 @@
-use alloc::string::String;
+use alloc::{format, string::String, vec::Vec};
 use core::future::Future;
+
+use crate::ast::{File, FlowDecl, Ident, LifecycleDecl, LifecycleEvent};
+
+/// Selects lifecycle bodies in their source declaration order.
+pub fn lifecycle_hooks(
+    file: &File,
+    event: LifecycleEvent,
+) -> impl Iterator<Item = (usize, &LifecycleDecl)> {
+    file.lifecycles
+        .iter()
+        .enumerate()
+        .filter(move |(_, hook)| hook.event == event)
+}
+
+/// Turns one `on` body into an executable flow without a host-side AST rewrite.
+pub fn lifecycle_flow(hook: &LifecycleDecl, index: usize) -> FlowDecl {
+    FlowDecl {
+        name: Ident::new(
+            format!("__lifecycle_{}_{}", lifecycle_event_slug(hook.event), index),
+            hook.span,
+        ),
+        params: Vec::new(),
+        ret: None,
+        contract: None,
+        body: hook.body.clone(),
+    }
+}
+
+pub fn lifecycle_event_slug(event: LifecycleEvent) -> &'static str {
+    match event {
+        LifecycleEvent::SessionStart => "session.start",
+        LifecycleEvent::SessionEnd => "session.end",
+        LifecycleEvent::TurnStart => "turn.start",
+        LifecycleEvent::TurnEnd => "turn.end",
+        LifecycleEvent::ContextCompact => "session.context_compact",
+    }
+}
 
 /// A sequence-independent flow start fact supplied to the embedding host.
 #[derive(Clone, Debug, PartialEq, Eq)]

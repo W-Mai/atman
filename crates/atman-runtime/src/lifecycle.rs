@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use atman_rt::ast::{File, LifecycleDecl, LifecycleEvent};
+use atman_rt::lifecycle::{lifecycle_event_slug, lifecycle_flow};
 
 use crate::executor::{Executor, RootInvocation};
 use crate::source_program::{LinkedProgram, SourceRoots, load_program};
@@ -79,17 +80,8 @@ impl LifecycleRunner {
             if decl.event != event {
                 continue;
             }
-            let flow_name = format!("__lifecycle_{}_{idx}", lifecycle_event_slug(event));
-            let flow = atman_rt::ast::FlowDecl {
-                name: atman_rt::ast::Ident {
-                    name: flow_name.clone(),
-                    span: decl.span,
-                },
-                params: Vec::new(),
-                ret: None,
-                contract: None,
-                body: decl.body.clone(),
-            };
+            let flow = lifecycle_flow(decl, idx);
+            let flow_name = flow.name.name.clone();
             let result = if let Some(program) = hook.program.as_ref() {
                 match program.with_entry_flow(flow) {
                     Ok(program) => {
@@ -144,20 +136,10 @@ impl Default for LifecycleRunner {
     }
 }
 
-fn lifecycle_event_slug(event: LifecycleEvent) -> &'static str {
-    match event {
-        LifecycleEvent::SessionStart => "session.start",
-        LifecycleEvent::SessionEnd => "session.end",
-        LifecycleEvent::TurnStart => "turn.start",
-        LifecycleEvent::TurnEnd => "turn.end",
-        LifecycleEvent::ContextCompact => "session.context_compact",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atman_dsl::parse::parse_file;
+    use atman_rt::parse_file;
 
     fn drain_lifecycle_from(src: &str) -> LifecycleRunner {
         let file = parse_file(src).unwrap();

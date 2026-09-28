@@ -26,7 +26,6 @@ name = "atman"
 path = "src/main.rs"
 
 [dependencies]
-atman-dsl      = { path = "../atman-dsl", version = "1.13.2" }
 atman-rt       = { path = "../atman-rt", version = "1.13.2" }
 atman-runtime  = { path = "../atman-runtime", version = "1.13.2" }
 atman-daemon   = { path = "../atman-daemon", version = "1.13.2" }

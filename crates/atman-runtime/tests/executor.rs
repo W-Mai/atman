@@ -1,8 +1,9 @@
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::flow_authority::EffectiveAuthority;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::task_registry::{TaskFilter, TaskRegistry};
+use atman_runtime::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use atman_runtime::tools::agent_ctrl::FlowRegistry;
 use atman_runtime::tools::memory_stubs::RuleFetch;
 use atman_runtime::{Event, Executor, FlowStatus, tools};
@@ -10,7 +11,55 @@ type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::Runtime
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+struct ProbeTool {
+    name: &'static str,
+    tier: Tier,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Tool for ProbeTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn tier(&self) -> Tier {
+        self.tier
+    }
+
+    fn requires_call_intent(&self) -> bool {
+        false
+    }
+
+    fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(Value::Int(1)) })
+    }
+}
+
+#[tokio::test]
+async fn denied_or_missing_tool_does_not_run_argument_effects() {
+    let ex = Executor::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    for (name, tier) in [("side.effect", Tier::Zero), ("shell.exec", Tier::Four)] {
+        ex.tools.register(Arc::new(ProbeTool {
+            name,
+            tier,
+            calls: Arc::clone(&calls),
+        }));
+    }
+    for (outer, expected) in [("shell.exec", "Tier 4"), ("missing.tool", "undefined tool")] {
+        let source = format!("flow t() -> int {{ return {outer}(side.effect()) }}");
+        let file = parse_file(&source).unwrap();
+        let error = ex.run(&file, "t", vec![]).await.unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+}
 
 #[tokio::test]
 async fn executor_runs_flow_and_emits_start_end() {

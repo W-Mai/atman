@@ -1,6 +1,6 @@
-use atman_dsl::parse::parse_file;
-use atman_dsl::print::print_file;
 use atman_rt::ast::{Expr, Node};
+use atman_rt::parse_file;
+use atman_rt::print_file;
 
 fn parse_bind_expr(src: &str) -> Expr {
     let file = parse_file(&format!("flow t() -> string {{ x = {src} }}")).expect("parse");

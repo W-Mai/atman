@@ -2249,7 +2249,7 @@ mod tests {
 
     #[test]
     fn flow_arguments_reject_unknown_and_duplicate_fields() {
-        let file = atman_dsl::parse::parse_file(
+        let file = atman_rt::parse_file(
             "flow child(goal: string, retries: int = 1) -> string { return goal }",
         )
         .unwrap();

@@ -1,6 +1,6 @@
 mod common;
 
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 use atman_runtime::Event;
 use atman_runtime::event::LlmCallStatus;
 use atman_runtime::providers::mock::MockProvider;

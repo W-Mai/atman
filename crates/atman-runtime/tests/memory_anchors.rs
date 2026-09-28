@@ -42,7 +42,7 @@ async fn memory_confess_auto_fills_flow_run_and_turn_anchors_when_called_from_fl
     return id
 }
 "#;
-    let file = atman_dsl::parse::parse_file(src).unwrap();
+    let file = atman_rt::parse_file(src).unwrap();
     ex.run(&file, "t", vec![]).await.expect("flow ok");
 
     let all: Vec<Confession> = confession_store.list().await.unwrap();
@@ -92,7 +92,7 @@ async fn memory_confess_appends_user_anchors_after_auto_anchors() {
     return id
 }
 "#;
-    let file = atman_dsl::parse::parse_file(src).unwrap();
+    let file = atman_rt::parse_file(src).unwrap();
     ex.run(&file, "t", vec![]).await.expect("flow ok");
 
     let all: Vec<Confession> = confession_store.list().await.unwrap();

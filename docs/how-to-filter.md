@@ -91,7 +91,7 @@ The binding makes the intermediate value available for later calls without intro
 
 ## Current references
 
-- Lambda parser and AST: `crates/atman-dsl/src/parse.rs`, `crates/atman-rt/src/ast.rs`
+- Lambda parser and AST: `crates/atman-rt/src/parse.rs`, `crates/atman-rt/src/ast.rs`
 - `crates/atman-rt/src/expr.rs` and `crates/atman-runtime/src/eval/mod.rs`
 - Canonical examples: `examples/agent.at`, `examples/review_code.at`, and `examples/look_into.at`
 - Flow tests: `atman flow test <path>`

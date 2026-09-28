@@ -8,7 +8,7 @@ use atman_runtime::providers::anthropic::AnthropicProvider;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 use atman_runtime::Executor;
 
 #[tokio::test]

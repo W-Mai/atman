@@ -1,6 +1,6 @@
-use atman_dsl::parse::parse_file;
-use atman_dsl::print::print_file;
 use atman_rt::ast::LifecycleEvent;
+use atman_rt::parse_file;
+use atman_rt::print_file;
 
 #[test]
 fn parses_route_declaration() {

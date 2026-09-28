@@ -593,7 +593,7 @@ flow invoke() {
     return {ready: ready, tools: tools, result: result}
 }
 "#;
-        let file = atman_dsl::parse::parse_file(source).unwrap();
+        let file = atman_rt::parse_file(source).unwrap();
         let registry = crate::tool::ToolRegistry::new();
         registry.register(std::sync::Arc::new(McpStatus));
         registry.register(std::sync::Arc::new(McpTools));

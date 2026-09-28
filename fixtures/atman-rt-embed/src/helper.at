@@ -1,0 +1,3 @@
+pub flow bonus() -> int {
+    return 1
+}

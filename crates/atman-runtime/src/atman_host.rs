@@ -1,8 +1,9 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use atman_rt::ast::{Contract, FlowDecl};
+use atman_rt::ast::FlowDecl;
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{EventSink, FlowRunId, TurnId};
@@ -16,13 +17,13 @@ use crate::tool::{ToolCtx, ToolRegistry};
 #[derive(Clone)]
 pub struct AtmanHost<'a> {
     pub tools: &'a ToolRegistry,
-    pub tool_ctx: &'a ToolCtx,
+    pub tool_ctx: Cow<'a, ToolCtx>,
     pub providers: &'a ProviderRegistry,
     pub flows: &'a HashMap<String, FlowDecl>,
     /// Resolved source graph for cross-file subflow calls.
     pub linked_program: Option<&'a LinkedProgram>,
     pub current_module: Option<ModuleId>,
-    pub contract: Option<&'a Contract>,
+    pub allows_shell: bool,
     pub events: Option<&'a EventSink>,
     pub turn_id: Option<TurnId>,
     pub flow_run_id: Option<FlowRunId>,

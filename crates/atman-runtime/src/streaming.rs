@@ -1,7 +1,9 @@
 use crate::value::ValueJson;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
+
+pub use atman_rt::watch::WatchRules;
+use atman_rt::watch::{WatchObservation, WatchState};
 
 use tokio::sync::broadcast::Sender;
 use tokio_util::sync::CancellationToken;
@@ -232,12 +234,12 @@ impl<'a> StreamingLlmStream<'a> {
         let elapsed_active = self
             .watch_rules
             .as_ref()
-            .and_then(|r| r.elapsed_ms_gt)
+            .and_then(WatchRules::elapsed_abort_deadline_ms)
             .is_some();
         let elapsed_deadline_ms = self
             .watch_rules
             .as_ref()
-            .and_then(|r| r.elapsed_ms_gt)
+            .and_then(WatchRules::elapsed_abort_deadline_ms)
             .unwrap_or(u64::MAX / 2);
         let elapsed_sleep = tokio::time::sleep(tokio::time::Duration::from_millis(
             elapsed_deadline_ms.saturating_add(1),
@@ -310,9 +312,8 @@ impl<'a> StreamingLlmStream<'a> {
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     }
                 }
-                _ = &mut elapsed_sleep, if elapsed_active && state.abort_reason.is_none() => {
-                    state.abort_reason = Some(format!("elapsed > {elapsed_deadline_ms}ms"));
-                    cancel.cancel();
+                _ = &mut elapsed_sleep, if elapsed_active && state.abort_reason().is_none() => {
+                    state.on_elapsed(self.base.request_start, self.watch_rules.as_ref(), &cancel);
                     break Err(RuntimeError::Cancelled("elapsed".into()));
                 }
                 _ = &mut stall_sleep, if stall_active => {
@@ -370,10 +371,11 @@ impl<'a> StreamingLlmStream<'a> {
             }
         }
 
-        if let Some(reason) = state.abort_reason {
-            return Err(RuntimeError::Aborted(reason));
+        if let Some(reason) = state.abort_reason() {
+            return Err(RuntimeError::Aborted(reason.to_string()));
         }
-        final_result.map_err(|e| merge_restart_error(e, state.text_captured, state.tokens_seen))
+        final_result
+            .map_err(|e| merge_restart_error(e, state.text_captured, state.watch.tokens_seen()))
     }
 
     fn on_chunk(
@@ -454,42 +456,9 @@ fn merge_restart_error(
     }
 }
 
-#[derive(Clone, Default)]
-pub struct WatchRules {
-    pub(crate) token_matches: Vec<(String, String)>,
-    pub(crate) tokens_gt: Option<u64>,
-    pub(crate) elapsed_ms_gt: Option<u64>,
-    pub(crate) warn_token: Vec<WarnRule>,
-    pub(crate) warn_tokens_gt: Vec<(u64, WarnRule)>,
-    pub(crate) warn_elapsed_ms_gt: Vec<(u64, WarnRule)>,
-}
-
-impl WatchRules {
-    pub(crate) fn is_active(&self) -> bool {
-        !self.token_matches.is_empty()
-            || self.tokens_gt.is_some()
-            || self.elapsed_ms_gt.is_some()
-            || !self.warn_token.is_empty()
-            || !self.warn_tokens_gt.is_empty()
-            || !self.warn_elapsed_ms_gt.is_empty()
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct WarnRule {
-    pub(crate) target: String,
-    pub(crate) message: String,
-    pub(crate) pattern: String,
-}
-
 struct StreamMonitor<'a> {
-    window: String,
     text_captured: String,
-    tokens_seen: u64,
-    abort_reason: Option<String>,
-    fired_warn_token: HashSet<String>,
-    fired_warn_tokens: HashSet<u64>,
-    fired_warn_elapsed: HashSet<u64>,
+    watch: WatchState,
     event_sink: Option<&'a EventSink>,
     turn_id: Option<TurnId>,
     flow_run_id: Option<FlowRunId>,
@@ -498,70 +467,34 @@ struct StreamMonitor<'a> {
 impl<'a> StreamMonitor<'a> {
     fn new(stream: &LlmStream<'a>) -> Self {
         Self {
-            window: String::new(),
             text_captured: String::new(),
-            tokens_seen: 0,
-            abort_reason: None,
-            fired_warn_token: Default::default(),
-            fired_warn_tokens: Default::default(),
-            fired_warn_elapsed: Default::default(),
+            watch: WatchState::default(),
             event_sink: stream.event_sink,
             turn_id: stream.turn_id.clone(),
             flow_run_id: stream.flow_run_id.clone(),
         }
     }
 
-    fn push_window(&mut self, text: &str) {
-        self.window.push_str(text);
-        while self.window.len() > 512 {
-            let mut drop = self.window.len() - 512;
-            while drop < self.window.len() && !self.window.is_char_boundary(drop) {
-                drop += 1;
-            }
-            self.window.drain(..drop);
-        }
-        self.text_captured.push_str(text);
+    fn abort_reason(&self) -> Option<&str> {
+        self.watch.abort_reason()
     }
 
-    fn emit_warn(&self, rule: &WarnRule, trigger: &str) {
+    fn apply(&self, observation: WatchObservation, cancel: Option<&CancellationToken>) {
         if let Some(sink) = self.event_sink {
-            sink.emit(crate::event::Event::WatchWarn {
-                turn_id: self.turn_id.clone(),
-                flow_run_id: self.flow_run_id.clone(),
-                target: rule.target.clone(),
-                trigger: trigger.to_string(),
-                message: rule.message.clone(),
-            });
-        }
-    }
-
-    fn check_token_warns(&mut self, rules: &WatchRules) {
-        for rule in &rules.warn_token {
-            if !self.fired_warn_token.contains(&rule.pattern)
-                && self.window.contains(rule.pattern.as_str())
-            {
-                self.fired_warn_token.insert(rule.pattern.clone());
-                self.emit_warn(rule, &format!("token({})", rule.pattern));
+            for warning in observation.warnings {
+                sink.emit(crate::event::Event::WatchWarn {
+                    turn_id: self.turn_id.clone(),
+                    flow_run_id: self.flow_run_id.clone(),
+                    target: warning.target,
+                    trigger: warning.trigger,
+                    message: warning.message,
+                });
             }
         }
-    }
-
-    fn check_tokens_consumed_warns(&mut self, rules: &WatchRules) {
-        for (threshold, rule) in &rules.warn_tokens_gt {
-            if !self.fired_warn_tokens.contains(threshold) && self.tokens_seen > *threshold {
-                self.fired_warn_tokens.insert(*threshold);
-                self.emit_warn(rule, &format!("tokens_consumed>{threshold}"));
-            }
-        }
-    }
-
-    fn check_elapsed_warns(&mut self, rules: &WatchRules, started: Instant) {
-        let elapsed = started.elapsed().as_millis() as u64;
-        for (threshold, rule) in &rules.warn_elapsed_ms_gt {
-            if !self.fired_warn_elapsed.contains(threshold) && elapsed > *threshold {
-                self.fired_warn_elapsed.insert(*threshold);
-                self.emit_warn(rule, &format!("elapsed>{threshold}ms"));
-            }
+        if observation.abort_reason.is_some()
+            && let Some(cancel) = cancel
+        {
+            cancel.cancel();
         }
     }
 
@@ -573,45 +506,41 @@ impl<'a> StreamMonitor<'a> {
         rules: Option<&WatchRules>,
         cancel: &CancellationToken,
     ) {
-        self.tokens_seen = cumulative_tokens.max(self.tokens_seen);
-        self.push_window(text);
-        let Some(rules) = rules else {
-            return;
-        };
-        if self.abort_reason.is_none() {
-            for (pat, reason) in &rules.token_matches {
-                if self.window.contains(pat.as_str()) {
-                    self.abort_reason = Some(reason.clone());
-                    cancel.cancel();
-                    break;
-                }
-            }
-        }
-        if self.abort_reason.is_none()
-            && let Some(limit) = rules.tokens_gt
-            && self.tokens_seen > limit
-        {
-            self.abort_reason = Some(format!("tokens_consumed > {limit}"));
-            cancel.cancel();
-        }
-        self.check_token_warns(rules);
-        self.check_tokens_consumed_warns(rules);
-        self.check_elapsed_warns(rules, started);
+        self.text_captured.push_str(text);
+        let empty = WatchRules::default();
+        let observation = self.watch.on_chunk(
+            text,
+            cumulative_tokens,
+            started.elapsed().as_millis() as u64,
+            rules.unwrap_or(&empty),
+        );
+        self.apply(observation, Some(cancel));
     }
 
     fn on_done(&mut self, total_tokens: u64, started: Instant, rules: Option<&WatchRules>) {
-        self.tokens_seen = total_tokens.max(self.tokens_seen);
-        let Some(rules) = rules else {
-            return;
-        };
-        if self.abort_reason.is_none()
-            && let Some(limit) = rules.tokens_gt
-            && self.tokens_seen > limit
-        {
-            self.abort_reason = Some(format!("tokens_consumed > {limit}"));
-        }
-        self.check_tokens_consumed_warns(rules);
-        self.check_elapsed_warns(rules, started);
+        let empty = WatchRules::default();
+        let observation = self.watch.on_done(
+            total_tokens,
+            started.elapsed().as_millis() as u64,
+            rules.unwrap_or(&empty),
+        );
+        self.apply(observation, None);
+    }
+
+    fn on_elapsed(
+        &mut self,
+        started: Instant,
+        rules: Option<&WatchRules>,
+        cancel: &CancellationToken,
+    ) {
+        let empty = WatchRules::default();
+        let rules = rules.unwrap_or(&empty);
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let elapsed_ms = rules
+            .elapsed_abort_deadline_ms()
+            .map_or(elapsed_ms, |limit| elapsed_ms.max(limit.saturating_add(1)));
+        let observation = self.watch.on_elapsed(elapsed_ms, rules);
+        self.apply(observation, Some(cancel));
     }
 }
 
@@ -1184,18 +1113,28 @@ mod tests {
 
     #[tokio::test]
     async fn watch_rules_abort_and_warn() {
+        use atman_rt::ast::{Ident, OnBlock, Span, WatchAction, WatchDecl, WatchEvent};
+
         let provider = ScriptProvider::new(vec![vec![Step::Chunk("danger", 3), Step::Done(3)]]);
         let (stream_tx, _) = broadcast::channel(16);
         let sink = EventSink::new();
-        let rules = WatchRules {
-            token_matches: vec![("danger".into(), "token match: danger".into())],
-            warn_token: vec![WarnRule {
-                target: "x".into(),
-                message: "warn".into(),
-                pattern: "danger".into(),
+        let decl = WatchDecl {
+            target: Ident::new("x", Span::default()),
+            on_blocks: vec![OnBlock {
+                event: WatchEvent::Token {
+                    patterns: vec!["danger".into()],
+                },
+                actions: vec![
+                    WatchAction::Abort { msg: None },
+                    WatchAction::Warn {
+                        msg: Some(atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Str(
+                            "warn".into(),
+                        ))),
+                    },
+                ],
             }],
-            ..Default::default()
         };
+        let rules = WatchRules::compile(&[&decl]);
         let mut stream = LlmStream::new(&provider, req(1))
             .with_stream_tx(stream_tx)
             .with_watch_rules(rules)

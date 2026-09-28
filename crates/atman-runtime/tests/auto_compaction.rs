@@ -160,7 +160,7 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use atman_dsl::parse::parse_file;
+    use atman_rt::parse_file;
     use atman_runtime::error::RuntimeError;
     use atman_runtime::event::{NodeEvent, Observable};
     use atman_runtime::message::{MessagePart, MessageRole};

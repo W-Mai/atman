@@ -1,6 +1,11 @@
-use std::collections::HashSet;
+use alloc::{
+    collections::BTreeSet,
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
-use atman_rt::ast::{Arg, Expr, File, FlowDecl, Node, Stmt};
+use crate::ast::{Arg, Expr, File, FlowDecl, Node, Stmt};
 
 const MANY_POSITIONAL_THRESHOLD: usize = 4;
 
@@ -35,7 +40,7 @@ pub fn lint_file(file: &File) -> Vec<LintHit> {
 }
 
 fn lint_flow(flow: &FlowDecl, hits: &mut Vec<LintHit>) {
-    let mut refs = HashSet::new();
+    let mut refs = BTreeSet::new();
     collect_ident_refs_stmts(&flow.body, &mut refs);
     for p in &flow.params {
         if !refs.contains(&p.name.name) {
@@ -52,7 +57,7 @@ fn lint_flow(flow: &FlowDecl, hits: &mut Vec<LintHit>) {
     walk_stmts_for_nodes(&flow.body, &flow.name.name, hits);
 }
 
-fn collect_ident_refs_stmts(stmts: &[Stmt], refs: &mut HashSet<String>) {
+fn collect_ident_refs_stmts(stmts: &[Stmt], refs: &mut BTreeSet<String>) {
     for stmt in stmts {
         match stmt {
             Stmt::Bind { value, .. } => collect_ident_refs_expr(value, refs),
@@ -72,7 +77,7 @@ fn collect_ident_refs_stmts(stmts: &[Stmt], refs: &mut HashSet<String>) {
     }
 }
 
-fn collect_ident_refs_expr(expr: &Expr, refs: &mut HashSet<String>) {
+fn collect_ident_refs_expr(expr: &Expr, refs: &mut BTreeSet<String>) {
     match expr {
         Expr::Literal(_) | Expr::FileRef(_) => {}
         Expr::Ident(id) => {
@@ -110,7 +115,7 @@ fn collect_ident_refs_expr(expr: &Expr, refs: &mut HashSet<String>) {
     }
 }
 
-fn collect_ident_refs_node(node: &Node, refs: &mut HashSet<String>) {
+fn collect_ident_refs_node(node: &Node, refs: &mut BTreeSet<String>) {
     match node {
         Node::ToolCall { args, .. } | Node::Subflow { args, .. } | Node::Message { args, .. } => {
             for a in args {
@@ -242,10 +247,10 @@ fn child_exprs(node: &Node) -> Vec<&Expr> {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "syntax"))]
 mod tests {
     use super::*;
-    use atman_dsl::parse::parse_file;
+    use crate::parse_file;
 
     fn lint(src: &str) -> Vec<LintHit> {
         let file = parse_file(src).unwrap_or_else(|e| panic!("parse: {e}"));

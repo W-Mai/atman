@@ -1,4 +1,4 @@
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 use atman_runtime::tools::stdlib::{compose_email_preview, shell_quote};
 
 #[test]

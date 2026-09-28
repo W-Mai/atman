@@ -1,9 +1,10 @@
 // Not source-preserving: comments and formatting are lost. Only guarantee
 // is `parse(print(parse(x))) == parse(x)`, checked by the roundtrip test.
 
-use std::fmt::Write;
+use alloc::{format, string::String};
+use core::fmt::Write;
 
-use atman_rt::ast::*;
+use crate::ast::*;
 
 pub fn print_file(file: &File) -> String {
     let mut out = String::new();

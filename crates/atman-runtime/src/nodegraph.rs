@@ -220,7 +220,7 @@ fn _unused_ident(_: &Ident, _: &[Arg]) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atman_dsl::parse::parse_file;
+    use atman_rt::parse_file;
 
     fn parse_first_flow(src: &str) -> FlowDecl {
         let file = parse_file(src).expect("parse ok");

@@ -316,14 +316,14 @@ mod tests {
 
     #[test]
     fn agent_template_parses_as_valid_dsl() {
-        let file = atman_dsl::parse::parse_file(AGENT_AT).expect("agent template must parse");
+        let file = atman_rt::parse_file(AGENT_AT).expect("agent template must parse");
         let names: Vec<&str> = file.flows.iter().map(|f| f.name.name.as_str()).collect();
         assert_eq!(names, vec!["agent"]);
     }
 
     #[test]
     fn agent_template_exposes_flow_named_agent_for_slash_resolver() {
-        let file = atman_dsl::parse::parse_file(AGENT_AT).unwrap();
+        let file = atman_rt::parse_file(AGENT_AT).unwrap();
         let entry = file.flows.iter().find(|f| f.name.name == "agent");
         assert!(
             entry.is_some(),
@@ -333,14 +333,14 @@ mod tests {
 
     #[test]
     fn hello_template_parses_and_returns_hello() {
-        let file = atman_dsl::parse::parse_file(HELLO_AT).expect("hello template must parse");
+        let file = atman_rt::parse_file(HELLO_AT).expect("hello template must parse");
         assert_eq!(file.flows.len(), 1);
         assert_eq!(file.flows[0].name.name, "hello");
     }
 
     #[test]
     fn routes_template_parses() {
-        let file = atman_dsl::parse::parse_file(ROUTES_AT).expect("routes template must parse");
+        let file = atman_rt::parse_file(ROUTES_AT).expect("routes template must parse");
         assert!(
             !file.routes.is_empty() || file.default_route.is_some(),
             "want at least one route or default_route"
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn on_session_start_template_parses() {
-        let file = atman_dsl::parse::parse_file(ON_SESSION_START_AT)
+        let file = atman_rt::parse_file(ON_SESSION_START_AT)
             .expect("on_session_start template must parse");
         assert_eq!(file.flows.len(), 1);
         assert_eq!(file.flows[0].name.name, "on_session_start");

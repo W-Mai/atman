@@ -1,4 +1,4 @@
-use atman_dsl::{parse::parse_file, print::print_file};
+use atman_rt::{parse_file, print_file};
 
 const SRC: &str = include_str!("../../../examples/review_code_with_contract.at");
 

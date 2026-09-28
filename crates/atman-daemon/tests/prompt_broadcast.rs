@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use atman_daemon::DaemonState;
 use atman_daemon::prompt_bridge::DaemonPromptResolver;
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 use atman_runtime::event::{Event, EventSink};
 use atman_runtime::{Executor, tools};
 use tempfile::TempDir;

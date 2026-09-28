@@ -106,7 +106,7 @@ fn dsl_topic_complete_flow_examples_parse() {
             panic!("unterminated atman block {index}")
         };
         if block.trim_start().starts_with("flow ") {
-            atman_dsl::parse::parse_file(block)
+            atman_rt::parse_file(block)
                 .unwrap_or_else(|error| panic!("atman block {index} does not parse: {error}"));
         }
     }

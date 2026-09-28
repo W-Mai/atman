@@ -1,6 +1,5 @@
-use std::collections::{HashMap, HashSet};
-
-use atman_rt::ast::{Arg, Expr, FlowDecl, Node, Stmt, WatchEvent};
+use atman_rt::ast::{Expr, FlowDecl, Literal, TypeExpr};
+use atman_rt::{LanguageValidationError, validate_flow};
 
 use crate::tool::ToolRegistry;
 
@@ -29,12 +28,26 @@ pub enum ValidationError {
 pub fn validate(flow: &FlowDecl, tools: &ToolRegistry) -> Result<(), Vec<ValidationError>> {
     let mut errors = Vec::new();
     validate_invocation_contract(flow, &mut errors);
-    let mut scope: HashSet<String> = flow.params.iter().map(|p| p.name.name.clone()).collect();
-    for name in BUILTIN_VARS {
-        scope.insert(name.to_string());
+    let report = validate_flow(flow, BUILTIN_VARS);
+    errors.extend(report.errors.into_iter().map(|error| match error {
+        LanguageValidationError::UndefinedVar(name) => ValidationError::UndefinedVar(name),
+        LanguageValidationError::WatchEventMismatch {
+            target,
+            event,
+            target_kind,
+            expected,
+        } => ValidationError::WatchEventMismatch {
+            target,
+            event,
+            target_kind,
+            expected,
+        },
+    }));
+    for name in report.tool_calls {
+        if !crate::eval::is_evaluator_intrinsic(&name) && !tools.has(&name) {
+            errors.push(ValidationError::UndefinedTool(name));
+        }
     }
-    let mut kinds: HashMap<String, &'static str> = HashMap::new();
-    walk_stmts(&flow.body, &mut scope, &mut kinds, tools, &mut errors);
     if errors.is_empty() {
         Ok(())
     } else {
@@ -57,7 +70,7 @@ fn validate_invocation_contract(flow: &FlowDecl, errors: &mut Vec<ValidationErro
     }) else {
         return;
     };
-    let atman_rt::ast::Expr::Ident(parameter_name) = value else {
+    let Expr::Ident(parameter_name) = value else {
         errors.push(ValidationError::InvalidInvocationUserMessage);
         return;
     };
@@ -71,14 +84,12 @@ fn validate_invocation_contract(flow: &FlowDecl, errors: &mut Vec<ValidationErro
     };
     let is_string = matches!(
         &parameter.ty,
-        atman_rt::ast::TypeExpr::Named(name) if name.name == "string"
+        TypeExpr::Named(name) if name.name == "string"
     );
-    let has_supported_default = parameter.default.as_ref().is_none_or(|default| {
-        matches!(
-            default,
-            atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Str(_))
-        )
-    });
+    let has_supported_default = parameter
+        .default
+        .as_ref()
+        .is_none_or(|default| matches!(default, Expr::Literal(Literal::Str(_))));
     if !is_string || !has_supported_default {
         errors.push(ValidationError::InvalidInvocationUserMessage);
     }
@@ -105,219 +116,11 @@ const BUILTIN_VARS: &[&str] = &[
     "watcher",
 ];
 
-fn infer_node_kind(value: &Expr) -> Option<&'static str> {
-    match value {
-        Expr::Node(Node::ToolCall { path, .. })
-            if path.len() == 2 && path[0].name == "llm" && path[1].name == "call" =>
-        {
-            Some("llm")
-        }
-        Expr::Node(Node::ToolCall { path, .. }) => {
-            let _ = path;
-            Some("tool_call")
-        }
-        Expr::Node(Node::Fanout { .. }) => Some("fanout"),
-        Expr::Node(Node::UserConfirm { .. }) => Some("user_confirm"),
-        Expr::Node(Node::Subflow { .. }) => Some("subflow"),
-        Expr::Node(Node::FixUntilTestPasses { .. }) => Some("fix_until"),
-        Expr::Node(Node::Message { .. }) => Some("message"),
-        _ => None,
-    }
-}
-
-fn watch_event_expected_kinds(event: &WatchEvent) -> &'static [&'static str] {
-    match event {
-        WatchEvent::Token { .. } => &["llm"],
-        WatchEvent::TokensConsumed { .. } => &["llm"],
-        WatchEvent::Elapsed { .. } => &["llm", "tool_call", "subflow", "fix_until"],
-    }
-}
-
-fn walk_stmts(
-    stmts: &[Stmt],
-    scope: &mut HashSet<String>,
-    kinds: &mut HashMap<String, &'static str>,
-    tools: &ToolRegistry,
-    errors: &mut Vec<ValidationError>,
-) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::Bind { name, value } => {
-                walk_expr(value, scope, tools, errors);
-                let bound = name.bound_names();
-                if let Some(k) = infer_node_kind(value)
-                    && let Some(single) = name.as_single_ident()
-                {
-                    kinds.insert(single.name.clone(), k);
-                }
-                for n in bound {
-                    scope.insert(n);
-                }
-            }
-            Stmt::When { cond, body } => {
-                walk_expr(cond, scope, tools, errors);
-                walk_stmts(body, scope, kinds, tools, errors);
-            }
-            Stmt::Return { value } => walk_expr(value, scope, tools, errors),
-            Stmt::Expr(e) => walk_expr(e, scope, tools, errors),
-            Stmt::Watch(w) => {
-                if !scope.contains(&w.target.name) {
-                    errors.push(ValidationError::UndefinedVar(w.target.name.clone()));
-                    continue;
-                }
-                let Some(target_kind) = kinds.get(&w.target.name).copied() else {
-                    continue;
-                };
-                for on in &w.on_blocks {
-                    let expected = watch_event_expected_kinds(&on.event);
-                    if !expected.contains(&target_kind) {
-                        errors.push(ValidationError::WatchEventMismatch {
-                            target: w.target.name.clone(),
-                            event: watch_event_label(&on.event).into(),
-                            target_kind: target_kind.into(),
-                            expected: expected.join(", "),
-                        });
-                    }
-                }
-            }
-            Stmt::Loop { body } => {
-                walk_stmts(body, scope, kinds, tools, errors);
-            }
-            Stmt::Break => {}
-            Stmt::Continue => {}
-        }
-    }
-}
-
-fn watch_event_label(event: &WatchEvent) -> &'static str {
-    match event {
-        WatchEvent::Token { .. } => "token",
-        WatchEvent::TokensConsumed { .. } => "tokens_consumed",
-        WatchEvent::Elapsed { .. } => "elapsed",
-    }
-}
-
-fn walk_expr(
-    expr: &Expr,
-    scope: &HashSet<String>,
-    tools: &ToolRegistry,
-    errors: &mut Vec<ValidationError>,
-) {
-    match expr {
-        Expr::Literal(_) | Expr::FileRef(_) => {}
-        Expr::Ident(id) => {
-            if !scope.contains(&id.name) {
-                errors.push(ValidationError::UndefinedVar(id.name.clone()));
-            }
-        }
-        Expr::Member { base, .. } => walk_expr(base, scope, tools, errors),
-        Expr::Binary { left, right, .. } => {
-            walk_expr(left, scope, tools, errors);
-            walk_expr(right, scope, tools, errors);
-        }
-        Expr::Unary { operand, .. } => walk_expr(operand, scope, tools, errors),
-        Expr::List(items) => {
-            for item in items {
-                walk_expr(item, scope, tools, errors);
-            }
-        }
-        Expr::Struct(fields) => {
-            for (_, v) in fields {
-                walk_expr(v, scope, tools, errors);
-            }
-        }
-        Expr::Node(node) => walk_node(node, scope, tools, errors),
-        Expr::Call { args, .. } => {
-            for a in args {
-                walk_expr(a, scope, tools, errors);
-            }
-        }
-        Expr::Lambda { params, body } => {
-            let mut child_scope = scope.clone();
-            for p in params {
-                child_scope.insert(p.name.clone());
-            }
-            walk_expr(body, &child_scope, tools, errors);
-        }
-        Expr::Annotated { expr, .. } => {
-            // Type names and type list expressions in annotation position
-            // are not variable references
-            match expr.as_ref() {
-                Expr::Ident(id) if atman_rt::is_type_name(&id.name) => {}
-                Expr::List(inner) if inner.len() == 1 => {
-                    if let Expr::Ident(id) = &inner[0] {
-                        if atman_rt::is_type_name(&id.name) {
-                            return;
-                        }
-                    }
-                    walk_expr(expr, scope, tools, errors);
-                }
-                _ => walk_expr(expr, scope, tools, errors),
-            }
-        }
-    }
-}
-
-fn walk_node(
-    node: &Node,
-    scope: &HashSet<String>,
-    tools: &ToolRegistry,
-    errors: &mut Vec<ValidationError>,
-) {
-    match node {
-        Node::ToolCall { path, args } => {
-            let name = path
-                .iter()
-                .map(|i| i.name.as_str())
-                .collect::<Vec<_>>()
-                .join(".");
-            // Evaluator intrinsics are not registered or exposed as provider tools.
-            let is_intrinsic = crate::eval::is_evaluator_intrinsic(&name);
-            if !is_intrinsic && !tools.has(&name) {
-                errors.push(ValidationError::UndefinedTool(name));
-            }
-            for arg in args {
-                match arg {
-                    Arg::Positional(e) => walk_expr(e, scope, tools, errors),
-                    Arg::Named { value, .. } => walk_expr(value, scope, tools, errors),
-                }
-            }
-        }
-        Node::DynamicFanout { source, lambda, .. } => {
-            walk_expr(source, scope, tools, errors);
-            walk_expr(lambda, scope, tools, errors);
-        }
-        Node::Fanout { source } => walk_expr(source, scope, tools, errors),
-        Node::UserConfirm { msg } => walk_expr(msg, scope, tools, errors),
-        Node::Subflow { args, .. } => {
-            for arg in args {
-                match arg {
-                    Arg::Positional(e) => walk_expr(e, scope, tools, errors),
-                    Arg::Named { value, .. } => walk_expr(value, scope, tools, errors),
-                }
-            }
-        }
-        Node::FixUntilTestPasses { kwargs } => {
-            for (_, v) in kwargs {
-                walk_expr(v, scope, tools, errors);
-            }
-        }
-        Node::Message { args, .. } => {
-            for arg in args {
-                match arg {
-                    Arg::Positional(e) => walk_expr(e, scope, tools, errors),
-                    Arg::Named { value, .. } => walk_expr(value, scope, tools, errors),
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tools;
-    use atman_dsl::parse::parse_file;
+    use atman_rt::parse_file;
 
     fn registry_with_fs() -> ToolRegistry {
         let reg = ToolRegistry::new();

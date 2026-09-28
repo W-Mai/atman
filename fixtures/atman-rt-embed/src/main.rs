@@ -2,35 +2,42 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll, Wake, Waker},
 };
 
 use atman_rt::{
-    Engine, Env, EvalError, ExpressionEffect, ExpressionHost, FlowExecution, FlowOutcome,
-    HostFuture, LoopExit, LoopHost, PatternBindError, Preflight, StatementHost, StatementOutcome,
-    Value,
-    ast::{
-        Arg, BinOp, Expr, FlowDecl, Ident, Literal, Node, ParamDecl, Pattern, Span, Stmt, TypeExpr,
-    },
-    bind_pattern, eval_expr, run_loop,
+    Engine, EvalError, ExpressionEffect, ExpressionHost, FlowOutcome, HostFuture, PatternBindError,
+    Preflight, Source, SourceResolver, StatementHost, StatementOutcome, Value, Vm, VmEmbedding,
+    ast::{Arg, BinOp, Expr, FlowDecl, Ident, Literal, Node, ParamDecl, Span, Stmt, TypeExpr},
 };
 
 type FixtureValue = Value<(), EvalError>;
 type FixtureOutcome = FlowOutcome<(), EvalError>;
 
+struct FixtureSources;
+
+impl SourceResolver for FixtureSources {
+    type Error = &'static str;
+
+    fn resolve(&self, importer_id: &str, specifier: &str) -> Result<Source, Self::Error> {
+        match (importer_id, specifier) {
+            ("demo.at", "helper.at") => Ok(Source::new("helper.at", include_str!("helper.at"))),
+            _ => Err("unknown source"),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct FixtureHost {
-    env: Arc<Mutex<Env<FixtureValue>>>,
     effect_seen: Arc<AtomicBool>,
 }
 
 impl FixtureHost {
     fn new() -> Self {
         Self {
-            env: Arc::new(Mutex::new(Env::new())),
             effect_seen: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -56,14 +63,11 @@ impl ExpressionHost for FixtureHost {
 
     fn eval_external<'a>(
         &'a self,
-        effect: ExpressionEffect<'a>,
-        _env: &'a Env<FixtureValue>,
+        effect: ExpressionEffect<(), EvalError>,
     ) -> HostFuture<'a, FixtureValue> {
         Box::pin(async move {
             match effect {
-                ExpressionEffect::Node(Node::ToolCall { path, .. })
-                    if path.len() == 1 && path[0].name == "foreign" =>
-                {
+                ExpressionEffect::ToolCall { name, .. } if name == "foreign" => {
                     self.effect_seen.store(true, Ordering::SeqCst);
                     Value::Int(5)
                 }
@@ -79,87 +83,23 @@ impl ExpressionHost for FixtureHost {
 impl StatementHost for FixtureHost {
     type Payload = ();
     type Error = EvalError;
+    type ExprHost = Self;
 
     fn preflight(&mut self, _stmt: &Stmt, _node_id: &str) -> Preflight<EvalError> {
         Preflight::Continue
     }
 
-    fn bind_parameter(&mut self, name: String, value: FixtureValue) {
-        self.env.lock().unwrap().bind(name, value);
-    }
-
-    fn evaluate_default<'a>(&'a mut self, expr: &'a Expr) -> HostFuture<'a, FixtureValue> {
-        self.evaluate(expr, "")
-    }
-
     fn node_start(&mut self, _stmt: &Stmt, _node_id: &str, _parent: Option<&str>) {}
 
-    fn evaluate<'a>(
-        &'a mut self,
-        expr: &'a Expr,
-        _node_id: &'a str,
-    ) -> HostFuture<'a, FixtureValue> {
-        Box::pin(async move {
-            let env = self.env.lock().unwrap().clone();
-            eval_expr(expr, &env, self).await
-        })
+    fn expression_host(&self, _node_id: &str) -> Self::ExprHost {
+        self.clone()
     }
 
-    fn bind<'a>(
-        &'a mut self,
-        pattern: &'a Pattern,
-        expr: &'a Expr,
-        node_id: &'a str,
-    ) -> HostFuture<'a, FlowExecution<(), EvalError>> {
-        Box::pin(async move {
-            let value = self.evaluate(expr, node_id).await;
-            if let Value::Err(error) = value {
-                return (StatementOutcome::Err(error), None);
-            }
-            let mut env = self.env.lock().unwrap();
-            match bind_pattern(pattern, value, &mut env) {
-                Ok(()) => (StatementOutcome::Continue, None),
-                Err(error) => {
-                    let actual = match error {
-                        PatternBindError::NonStruct { actual } => actual,
-                        PatternBindError::MissingField { name } => name,
-                    };
-                    (
-                        StatementOutcome::Err(EvalError::TypeMismatch {
-                            expected: "matching pattern".into(),
-                            actual,
-                        }),
-                        None,
-                    )
-                }
-            }
-        })
-    }
-
-    fn run_body<'a>(
-        &'a mut self,
-        body: &'a [Stmt],
-        node_id: &'a str,
-    ) -> HostFuture<'a, FixtureOutcome> {
-        Box::pin(async move {
-            Engine::new(self.clone())
-                .run_statements(body, node_id, Some(node_id))
-                .await
-        })
-    }
-
-    fn run_loop<'a>(
-        &'a mut self,
-        body: &'a [Stmt],
-        node_id: &'a str,
-    ) -> HostFuture<'a, FlowExecution<(), EvalError>> {
-        Box::pin(async move {
-            let mut host = FixtureLoopHost { host: self, body };
-            match run_loop(&mut host, Some(node_id)).await {
-                LoopExit::Break => (StatementOutcome::Continue, None),
-                LoopExit::Interrupted(outcome) => (outcome, None),
-            }
-        })
+    fn pattern_error(&self, error: PatternBindError) -> EvalError {
+        EvalError::TypeMismatch {
+            expected: "matching pattern".into(),
+            actual: format!("{error:?}"),
+        }
     }
 
     fn preview(&self, _value: &FixtureValue) -> Option<String> {
@@ -176,25 +116,30 @@ impl StatementHost for FixtureHost {
     }
 }
 
-struct FixtureLoopHost<'a> {
-    host: &'a mut FixtureHost,
-    body: &'a [Stmt],
-}
+struct NoopWake;
 
-impl LoopHost for FixtureLoopHost<'_> {
-    type Value = FixtureValue;
+#[derive(Clone)]
+struct DemoHost;
+
+impl VmEmbedding for DemoHost {
+    type Payload = ();
     type Error = EvalError;
 
-    fn iteration_start(&mut self, _iteration: u64, _node_id: &str, _parent: Option<&str>) {}
-
-    fn execute_iteration<'a>(&'a mut self, node_id: &'a str) -> HostFuture<'a, FixtureOutcome> {
-        self.host.run_body(self.body, node_id)
+    fn effect<'a>(
+        &'a self,
+        effect: ExpressionEffect<Self::Payload, Self::Error>,
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
+        Box::pin(async move {
+            match effect {
+                ExpressionEffect::ToolCall { name, .. } if name == "foreign" => Value::Int(5),
+                _ => Value::Err(EvalError::TypeMismatch {
+                    expected: "foreign tool call".into(),
+                    actual: "unsupported effect".into(),
+                }),
+            }
+        })
     }
-
-    fn iteration_end(&mut self, _node_id: &str, _outcome: &FixtureOutcome, _parent: Option<&str>) {}
 }
-
-struct NoopWake;
 
 impl Wake for NoopWake {
     fn wake(self: Arc<Self>) {}
@@ -222,19 +167,11 @@ fn literal(value: i64) -> Expr {
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--demo") {
-        #[cfg(feature = "dsl-demo")]
-        {
-            if let Err(error) = run_demo() {
-                eprintln!("{error}");
-                std::process::exit(1);
-            }
-            return;
+        if let Err(error) = run_demo() {
+            eprintln!("{error}");
+            std::process::exit(1);
         }
-        #[cfg(not(feature = "dsl-demo"))]
-        {
-            eprintln!("the demo requires --features dsl-demo");
-            std::process::exit(2);
-        }
+        return;
     }
 
     let pure = FlowDecl {
@@ -370,7 +307,6 @@ fn main() {
     ));
 }
 
-#[cfg(feature = "dsl-demo")]
 fn run_demo() -> Result<(), String> {
     use std::io::{self, Write};
 
@@ -394,15 +330,12 @@ fn run_demo() -> Result<(), String> {
         .parse::<i64>()
         .map_err(|_| "input must be an integer".to_string())?;
 
-    let program = atman_dsl::parse::parse_file(include_str!("demo.at"))
-        .map_err(|error| format!("invalid demo flow: {error}"))?;
-    let flow = program
-        .flows
-        .iter()
-        .find(|flow| flow.name.name == "demo")
-        .ok_or("demo flow not found")?;
-    let mut engine = Engine::new(FixtureHost::new());
-    match block_on(engine.run_flow(flow, vec![("input".into(), Value::Int(input))])) {
+    let vm = Vm::compile(
+        Source::new("demo.at", include_str!("demo.at")),
+        &FixtureSources,
+    )
+    .map_err(|error| format!("invalid demo program: {error}"))?;
+    match block_on(vm.run("demo", vec![("input".into(), Value::Int(input))], DemoHost)) {
         StatementOutcome::Return(Value::Int(value)) => {
             println!("result: {value}");
             Ok(())

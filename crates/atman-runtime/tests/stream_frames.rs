@@ -3,7 +3,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::stream::StreamFrame;
 use atman_runtime::{Executor, Session};

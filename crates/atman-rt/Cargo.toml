@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 publish = true
-description = "Portable execution core for Atman flows"
+description = "Embeddable Atman language virtual machine"
 readme = "README.md"
 homepage = "https://atman.run"
 repository = "https://github.com/W-Mai/atman"
@@ -16,3 +16,9 @@ categories = ["development-tools"]
 [dependencies]
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+syn = { workspace = true, optional = true }
+proc-macro2 = { workspace = true, optional = true }
+
+[features]
+default = ["syntax"]
+syntax = ["dep:syn", "dep:proc-macro2"]

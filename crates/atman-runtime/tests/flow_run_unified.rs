@@ -8,7 +8,7 @@ mod common;
 
 use std::sync::Arc;
 
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::flow_authority::{
     ChildWorkspaceAuthority, EffectiveAuthority, FlowExecutionState, InvocationKind,

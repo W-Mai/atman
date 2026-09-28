@@ -6,7 +6,7 @@ fn main() -> ExitCode {
     let path = match env::args().nth(1) {
         Some(p) => p,
         None => {
-            eprintln!("usage: cargo run -p atman-dsl --example parse -- <file.at>");
+            eprintln!("usage: cargo run -p atman-rt --example parse -- <file.at>");
             return ExitCode::from(2);
         }
     };
@@ -17,10 +17,10 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match atman_dsl::parse::parse_file(&src) {
+    match atman_rt::parse_file(&src) {
         Ok(file) => {
             println!("=== ROUND-TRIP (parsed → printed) ===\n");
-            println!("{}", atman_dsl::print::print_file(&file));
+            println!("{}", atman_rt::print_file(&file));
             println!("=== AST ===\n");
             println!("{file:#?}");
             ExitCode::SUCCESS

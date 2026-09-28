@@ -763,7 +763,7 @@ pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atman_dsl::parse::parse_file;
+    use atman_rt::parse_file;
 
     #[test]
     fn agent_at_parses() {

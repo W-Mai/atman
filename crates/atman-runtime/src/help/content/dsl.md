@@ -1,6 +1,6 @@
 # Atman DSL Syntax Reference
 
-The parser and evaluator in `atman-dsl` and `atman-runtime` define the executable
+The parser in `atman-rt` and the Atman runtime define the executable
 DSL described here. Older examples using `llm { ... }` or `fetch_rule(...)` are
 obsolete. Use `llm.call(...)` and `rule.fetch(...)`.
 

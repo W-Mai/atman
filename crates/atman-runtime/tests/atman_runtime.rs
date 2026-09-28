@@ -1,4 +1,4 @@
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, model_registry};
 
 type AtmanValue = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;

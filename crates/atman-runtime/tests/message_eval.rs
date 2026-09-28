@@ -1,4 +1,4 @@
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 use atman_runtime::AtmanPayload;
 use atman_runtime::Executor;
 use atman_runtime::message::{ImageData, MessagePart, MessageRole};

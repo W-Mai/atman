@@ -28,7 +28,7 @@ async fn generate_session_name(
     if !force && meta.name_source == crate::session_meta::NameSource::User {
         return Ok(false);
     }
-    let flow = atman_dsl::parse::parse_file(crate::templates::SESSION_NAME_AT)
+    let flow = atman_rt::parse_file(crate::templates::SESSION_NAME_AT)
         .map_err(|error| anyhow::anyhow!("parsing built-in session name flow: {error}"))?;
     let input = naming_input(session);
     let mut naming_executor = executor.clone();

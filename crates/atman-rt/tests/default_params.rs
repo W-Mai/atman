@@ -1,4 +1,4 @@
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 
 #[test]
 fn parses_default_params() {
@@ -26,7 +26,7 @@ fn parses_default_params() {
 
 #[test]
 fn default_params_roundtrip() {
-    use atman_dsl::print::print_file;
+    use atman_rt::print_file;
     let src = r#"flow f(a: string, b: int = 42) -> string {
     return a
 }

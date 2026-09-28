@@ -1,9 +1,18 @@
+use alloc::{
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+use core::fmt;
+
 use syn::parse::{Parse, ParseStream};
 use syn::{
     LitBool, LitFloat, LitInt, LitStr, Result, Token, braced, bracketed, parenthesized, token,
 };
 
-use atman_rt::ast::*;
+use crate::ast::*;
 
 mod kw {
     syn::custom_keyword!(flow);
@@ -35,11 +44,11 @@ mod kw {
     syn::custom_keyword!(end);
 }
 
-fn to_span(_s: proc_macro2::Span) -> atman_rt::ast::Span {
+fn to_span(_s: proc_macro2::Span) -> crate::ast::Span {
     // proc_macro2::Span doesn't expose line/column in stable Rust.
     // syn errors still carry the original span; our Span is for
     // atman's own diagnostics and defaults to (0, 0) when parsed.
-    atman_rt::ast::Span { line: 0, column: 0 }
+    crate::ast::Span { line: 0, column: 0 }
 }
 
 fn to_ident(id: syn::Ident) -> Ident {
@@ -1022,6 +1031,23 @@ fn parse_fanout(input: ParseStream) -> Result<Node> {
     })
 }
 
-pub fn parse_file(src: &str) -> Result<File> {
-    Ok(syn::parse_str::<ParsedFile>(src)?.0)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseError {
+    message: String,
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl core::error::Error for ParseError {}
+
+pub fn parse_file(src: &str) -> core::result::Result<File, ParseError> {
+    syn::parse_str::<ParsedFile>(src)
+        .map(|parsed| parsed.0)
+        .map_err(|error| ParseError {
+            message: error.to_string(),
+        })
 }

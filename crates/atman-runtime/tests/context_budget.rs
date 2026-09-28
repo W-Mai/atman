@@ -1,6 +1,6 @@
 mod common;
 
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 use atman_runtime::eval::truncate_prompt_to_budget;
 use atman_runtime::providers::mock::MockProvider;

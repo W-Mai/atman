@@ -2,8 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use atman_dsl::parse::parse_file;
 use atman_rt::Value as CoreValue;
+use atman_rt::parse_file;
 use atman_runtime::provider::{LlmRequest, Provider, user_text_message};
 
 type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;

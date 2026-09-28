@@ -190,7 +190,6 @@ version = "1.13.2"
 dependencies = [
  "anyhow",
  "atman-daemon",
- "atman-dsl",
  "atman-proto",
  "atman-rt",
  "atman-runtime",
@@ -222,7 +221,6 @@ version = "1.13.2"
 dependencies = [
  "anyhow",
  "async-stream",
- "atman-dsl",
  "atman-proto",
  "atman-rt",
  "atman-runtime",
@@ -248,18 +246,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atman-dsl"
-version = "1.13.2"
-dependencies = [
- "anyhow",
- "atman-rt",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "atman-proto"
 version = "1.13.2"
 dependencies = [
@@ -277,7 +263,9 @@ name = "atman-rt"
 version = "1.13.2"
 dependencies = [
  "futures",
+ "proc-macro2",
  "serde",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -285,7 +273,6 @@ name = "atman-runtime"
 version = "1.13.2"
 dependencies = [
  "anyhow",
- "atman-dsl",
  "atman-rt",
  "axum",
  "base64",

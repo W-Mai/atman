@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
-use atman_dsl::parse::parse_file;
 use atman_rt::Value as CoreValue;
+use atman_rt::parse_file;
 use atman_runtime::source_program::{LinkedProgram, SourceRoots, load_program};
 use atman_runtime::{Executor, Session, ValueJson};
 
@@ -8064,7 +8064,7 @@ fn cmd_flow_lint(path: &Path) -> Result<()> {
     let program = load_program(path, &current_source_roots())?;
     let mut hit_count = 0;
     for (source_path, file) in program.iter_modules() {
-        for hit in atman_runtime::flow_lint::lint_file(file) {
+        for hit in atman_rt::lint_file(file) {
             println!(
                 "{}:{}:{}: {}",
                 source_path.unwrap_or(path).display(),

@@ -1,6 +1,6 @@
-use atman_dsl::parse::parse_file;
-use atman_dsl::print::print_file;
 use atman_rt::ast::{Arg, Expr, Literal, MessageRole, Node};
+use atman_rt::parse_file;
+use atman_rt::print_file;
 
 fn only_return_expr(src: &str) -> Expr {
     let file = parse_file(src).unwrap_or_else(|e| panic!("parse: {e}"));

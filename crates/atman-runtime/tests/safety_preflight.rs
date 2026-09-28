@@ -2,7 +2,7 @@ mod common;
 
 use std::sync::Arc;
 
-use atman_dsl::parse::parse_file;
+use atman_rt::parse_file;
 use atman_runtime::Executor;
 use atman_runtime::error::RuntimeError;
 use atman_runtime::event::{Event, EventSink};

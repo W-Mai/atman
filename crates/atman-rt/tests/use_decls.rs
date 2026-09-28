@@ -1,5 +1,5 @@
-use atman_dsl::{parse::parse_file, print::print_file};
 use atman_rt::ast::{Expr, FlowRef, Node, Stmt, UseBinding};
+use atman_rt::{parse_file, print_file};
 
 #[test]
 fn parses_use_bindings_public_flows_and_qualified_calls() {

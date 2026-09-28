@@ -1,5 +1,6 @@
 use alloc::{
     boxed::Box,
+    collections::BTreeMap,
     format,
     string::{String, ToString},
     vec::Vec,
@@ -7,8 +8,12 @@ use alloc::{
 use core::{future::Future, pin::Pin};
 
 use crate::{
-    Value,
-    ast::{Arg, Expr, FlowDecl, ParamDecl, Pattern, Stmt},
+    Env, ExpressionHost, HostValueOps, Value, ValueError,
+    ast::{Arg, Expr, FlowDecl, ParamDecl, Stmt, WatchDecl},
+    bind_pattern, eval_expr,
+    expr::{EvaluatedArg, eval_expr_with_watch},
+    pattern::PatternBindError,
+    watch::WatchRules,
 };
 
 pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -48,6 +53,26 @@ where
             return Err(CallArgumentError::Evaluation(value));
         }
         bindings.push((name, value));
+    }
+    Ok(bindings)
+}
+
+/// Binds already-evaluated arguments without delegating parameter semantics.
+pub fn bind_evaluated_call_arguments<P, E>(
+    params: &[ParamDecl],
+    args: Vec<EvaluatedArg<P, E>>,
+) -> Result<FlowArgs<P, E>, CallArgumentError<P, E>> {
+    let mut bindings = Vec::with_capacity(args.len());
+    for (index, arg) in args.into_iter().enumerate() {
+        match arg {
+            EvaluatedArg::Positional(value) => {
+                let param = params
+                    .get(index)
+                    .ok_or(CallArgumentError::TooManyPositional)?;
+                bindings.push((param.name.name.clone(), value));
+            }
+            EvaluatedArg::Named(name, value) => bindings.push((name, value)),
+        }
     }
     Ok(bindings)
 }
@@ -128,39 +153,25 @@ pub enum Preflight<E> {
     StopAfterNode { error: E, preview: String },
 }
 
-/// Supplies product-specific execution, cancellation decisions, and event sinks.
-pub trait StatementHost: Send {
-    type Payload: Clone + Send + Sync;
-    type Error: Send;
+/// Supplies external effects, cancellation decisions, and execution observations.
+/// Language bindings and control flow remain inside the engine.
+pub trait StatementHost: Send + Sync {
+    type Payload: HostValueOps + Clone + Send + Sync;
+    type Error: ValueError + Clone + Send + Sync;
+    type ExprHost: ExpressionHost<Payload = Self::Payload, Error = Self::Error> + Send;
 
     fn preflight(&mut self, stmt: &Stmt, node_id: &str) -> Preflight<Self::Error>;
-    fn bind_parameter(&mut self, name: String, value: Value<Self::Payload, Self::Error>);
-    fn evaluate_default<'a>(
-        &'a mut self,
-        expr: &'a Expr,
-    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>>;
     fn node_start(&mut self, stmt: &Stmt, node_id: &str, parent_node_id: Option<&str>);
-    fn evaluate<'a>(
-        &'a mut self,
-        expr: &'a Expr,
-        node_id: &'a str,
-    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>>;
-    fn bind<'a>(
-        &'a mut self,
-        pattern: &'a Pattern,
-        expr: &'a Expr,
-        node_id: &'a str,
-    ) -> HostFuture<'a, FlowExecution<Self::Payload, Self::Error>>;
-    fn run_body<'a>(
-        &'a mut self,
-        body: &'a [Stmt],
-        node_id: &'a str,
-    ) -> HostFuture<'a, FlowOutcome<Self::Payload, Self::Error>>;
-    fn run_loop<'a>(
-        &'a mut self,
-        body: &'a [Stmt],
-        node_id: &'a str,
-    ) -> HostFuture<'a, FlowExecution<Self::Payload, Self::Error>>;
+    fn expression_host(&self, node_id: &str) -> Self::ExprHost;
+    fn pattern_error(&self, error: PatternBindError) -> Self::Error;
+    fn iteration_start(&mut self, _iteration: u64, _node_id: &str, _parent_node_id: Option<&str>) {}
+    fn iteration_end(
+        &mut self,
+        _node_id: &str,
+        _outcome: &FlowOutcome<Self::Payload, Self::Error>,
+        _parent_node_id: Option<&str>,
+    ) {
+    }
     fn preview(&self, value: &Value<Self::Payload, Self::Error>) -> Option<String>;
     fn node_end(
         &mut self,
@@ -172,13 +183,31 @@ pub trait StatementHost: Send {
 }
 
 /// Drives the ordered statement sequence through one host implementation.
-pub struct Engine<H> {
+pub struct Engine<H: StatementHost> {
     host: H,
+    env: Env<Value<H::Payload, H::Error>>,
 }
 
 impl<H: StatementHost> Engine<H> {
     pub fn new(host: H) -> Self {
-        Self { host }
+        Self::with_env(host, Env::new())
+    }
+
+    pub fn with_env(host: H, env: Env<Value<H::Payload, H::Error>>) -> Self {
+        Self { host, env }
+    }
+
+    pub fn into_env(self) -> Env<Value<H::Payload, H::Error>> {
+        self.env
+    }
+
+    fn evaluate<'a>(
+        &'a self,
+        expr: &'a Expr,
+        node_id: &'a str,
+    ) -> HostFuture<'a, Value<H::Payload, H::Error>> {
+        let host = self.host.expression_host(node_id);
+        Box::pin(async move { eval_expr(expr, &self.env, &host).await })
     }
 
     pub async fn run_flow(
@@ -188,83 +217,167 @@ impl<H: StatementHost> Engine<H> {
     ) -> FlowOutcome<H::Payload, H::Error> {
         let provided: Vec<String> = args.iter().map(|(name, _)| name.clone()).collect();
         for (name, value) in args {
-            self.host.bind_parameter(name, value);
+            self.env.bind(name, value);
         }
         for param in &flow.params {
             if !provided.iter().any(|name| name == &param.name.name)
                 && let Some(default) = &param.default
             {
-                let value = self.host.evaluate_default(default).await;
-                self.host.bind_parameter(param.name.name.clone(), value);
+                let value = self.evaluate(default, "").await;
+                if let Value::Err(error) = value {
+                    return StatementOutcome::Err(error);
+                }
+                self.env.bind(param.name.name.clone(), value);
             }
         }
         self.run_statements(&flow.body, "", None).await
     }
 
-    pub async fn run_statements(
-        &mut self,
-        stmts: &[Stmt],
-        prefix: &str,
-        parent_node_id: Option<&str>,
-    ) -> FlowOutcome<H::Payload, H::Error> {
-        for (index, stmt) in stmts.iter().enumerate() {
-            let node_id = if prefix.is_empty() {
-                format!("{index}")
-            } else {
-                format!("{prefix}.{index}")
-            };
-            match self.host.preflight(stmt, &node_id) {
-                Preflight::Continue => {}
-                Preflight::Stop(error) => return StatementOutcome::Err(error),
-                Preflight::StopAfterNode { error, preview } => {
-                    self.host.node_start(stmt, &node_id, parent_node_id);
-                    self.host.node_end(
-                        &node_id,
-                        &StatementOutcome::Continue,
-                        parent_node_id,
-                        Some(&preview),
-                    );
-                    return StatementOutcome::Err(error);
+    pub fn run_statements<'a>(
+        &'a mut self,
+        stmts: &'a [Stmt],
+        prefix: &'a str,
+        parent_node_id: Option<&'a str>,
+    ) -> HostFuture<'a, FlowOutcome<H::Payload, H::Error>> {
+        Box::pin(async move {
+            let mut watches: BTreeMap<&str, Vec<&WatchDecl>> = BTreeMap::new();
+            for stmt in stmts {
+                if let Stmt::Watch(watch) = stmt {
+                    watches.entry(&watch.target.name).or_default().push(watch);
                 }
             }
-            self.host.node_start(stmt, &node_id, parent_node_id);
-            let (outcome, preview) = match stmt {
-                Stmt::Bind { name, value } => self.host.bind(name, value, &node_id).await,
-                Stmt::When { cond, body } => {
-                    let condition = self.host.evaluate(cond, &node_id).await;
-                    let (outcome, taken) =
-                        run_when(condition, || self.host.run_body(body, &node_id)).await;
-                    (outcome, taken.map(|taken| taken.to_string()))
+            for (index, stmt) in stmts.iter().enumerate() {
+                let node_id = if prefix.is_empty() {
+                    format!("{index}")
+                } else {
+                    format!("{prefix}.{index}")
+                };
+                match self.host.preflight(stmt, &node_id) {
+                    Preflight::Continue => {}
+                    Preflight::Stop(error) => return StatementOutcome::Err(error),
+                    Preflight::StopAfterNode { error, preview } => {
+                        self.host.node_start(stmt, &node_id, parent_node_id);
+                        self.host.node_end(
+                            &node_id,
+                            &StatementOutcome::Continue,
+                            parent_node_id,
+                            Some(&preview),
+                        );
+                        return StatementOutcome::Err(error);
+                    }
                 }
-                Stmt::Return { value } => {
-                    let value = self.host.evaluate(value, &node_id).await;
-                    match value {
-                        Value::Err(error) => (StatementOutcome::Err(error), None),
-                        value => {
-                            let preview = self.host.preview(&value);
-                            (StatementOutcome::Return(value), preview)
+                self.host.node_start(stmt, &node_id, parent_node_id);
+                let (outcome, preview) = match stmt {
+                    Stmt::Bind { name, value } => {
+                        let target = name.as_single_ident().map(|id| id.name.as_str());
+                        let watch_rules = target
+                            .and_then(|target| watches.get(target))
+                            .map(|watches| WatchRules::compile(watches));
+                        let expr_host = self.host.expression_host(&node_id);
+                        let value = eval_expr_with_watch(
+                            value,
+                            &self.env,
+                            &expr_host,
+                            watch_rules.as_ref(),
+                        )
+                        .await;
+                        match value {
+                            Value::Err(error) => (StatementOutcome::Err(error), None),
+                            value => {
+                                let preview = self.host.preview(&value);
+                                match bind_pattern(name, value, &mut self.env) {
+                                    Ok(()) => (StatementOutcome::Continue, preview),
+                                    Err(error) => (
+                                        StatementOutcome::Err(self.host.pattern_error(error)),
+                                        None,
+                                    ),
+                                }
+                            }
                         }
                     }
-                }
-                Stmt::Expr(expr) => {
-                    let value = self.host.evaluate(expr, &node_id).await;
-                    match value {
-                        Value::Err(error) => (StatementOutcome::Err(error), None),
-                        value => (StatementOutcome::Continue, self.host.preview(&value)),
+                    Stmt::When { cond, body } => {
+                        let condition = self.evaluate(cond, &node_id).await;
+                        let (outcome, taken) = run_when(condition, || {
+                            self.run_statements(body, &node_id, Some(&node_id))
+                        })
+                        .await;
+                        (outcome, taken.map(|taken| taken.to_string()))
                     }
+                    Stmt::Return { value } => {
+                        let value = self.evaluate(value, &node_id).await;
+                        match value {
+                            Value::Err(error) => (StatementOutcome::Err(error), None),
+                            value => {
+                                let preview = self.host.preview(&value);
+                                (StatementOutcome::Return(value), preview)
+                            }
+                        }
+                    }
+                    Stmt::Expr(expr) => {
+                        let value = self.evaluate(expr, &node_id).await;
+                        match value {
+                            Value::Err(error) => (StatementOutcome::Err(error), None),
+                            value => (StatementOutcome::Continue, self.host.preview(&value)),
+                        }
+                    }
+                    Stmt::Watch(_) => (StatementOutcome::Continue, None),
+                    Stmt::Loop { body } => {
+                        let mut loop_host = EngineLoopHost { engine: self, body };
+                        match run_loop(&mut loop_host, Some(&node_id)).await {
+                            LoopExit::Break => {
+                                (StatementOutcome::Continue, Some("loop end".into()))
+                            }
+                            LoopExit::Interrupted(outcome) => {
+                                (outcome, Some("loop interrupted".into()))
+                            }
+                        }
+                    }
+                    Stmt::Break => (StatementOutcome::LoopBreak, Some("break".into())),
+                    Stmt::Continue => (StatementOutcome::LoopContinue, Some("continue".into())),
+                };
+                self.host
+                    .node_end(&node_id, &outcome, parent_node_id, preview.as_deref());
+                if !matches!(outcome, StatementOutcome::Continue) {
+                    return outcome;
                 }
-                Stmt::Watch(_) => (StatementOutcome::Continue, None),
-                Stmt::Loop { body } => self.host.run_loop(body, &node_id).await,
-                Stmt::Break => (StatementOutcome::LoopBreak, Some("break".into())),
-                Stmt::Continue => (StatementOutcome::LoopContinue, Some("continue".into())),
-            };
-            self.host
-                .node_end(&node_id, &outcome, parent_node_id, preview.as_deref());
-            if !matches!(outcome, StatementOutcome::Continue) {
-                return outcome;
             }
-        }
-        StatementOutcome::Continue
+            StatementOutcome::Continue
+        })
+    }
+}
+
+struct EngineLoopHost<'e, 'b, H: StatementHost> {
+    engine: &'e mut Engine<H>,
+    body: &'b [Stmt],
+}
+
+impl<H: StatementHost> LoopHost for EngineLoopHost<'_, '_, H> {
+    type Value = Value<H::Payload, H::Error>;
+    type Error = H::Error;
+
+    fn iteration_start(&mut self, iteration: u64, node_id: &str, parent_node_id: Option<&str>) {
+        self.engine
+            .host
+            .iteration_start(iteration, node_id, parent_node_id);
+    }
+
+    fn execute_iteration<'a>(
+        &'a mut self,
+        node_id: &'a str,
+    ) -> HostFuture<'a, FlowOutcome<H::Payload, H::Error>> {
+        self.engine
+            .run_statements(self.body, node_id, Some(node_id))
+    }
+
+    fn iteration_end(
+        &mut self,
+        node_id: &str,
+        outcome: &FlowOutcome<H::Payload, H::Error>,
+        parent_node_id: Option<&str>,
+    ) {
+        self.engine
+            .host
+            .iteration_end(node_id, outcome, parent_node_id);
     }
 }
 
@@ -278,7 +391,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::ast::{Ident, Literal, Span, TypeExpr};
+    use crate::{
+        EvalError,
+        ast::{Ident, Literal, Span, TypeExpr},
+    };
 
     fn test_param(name: &str) -> ParamDecl {
         ParamDecl {
@@ -343,14 +459,38 @@ mod tests {
         stop_before: bool,
     }
 
+    #[derive(Clone)]
+    struct TestExprHost;
+
+    impl ExpressionHost for TestExprHost {
+        type Payload = ();
+        type Error = EvalError;
+
+        fn undefined_var(&self, name: String) -> EvalError {
+            EvalError::type_mismatch("defined variable", name)
+        }
+
+        fn undefined_field(&self, name: String) -> EvalError {
+            EvalError::type_mismatch("defined field", name)
+        }
+
+        fn eval_external<'b>(
+            &'b self,
+            _effect: crate::ExpressionEffect<(), EvalError>,
+        ) -> HostFuture<'b, Value<(), EvalError>> {
+            Box::pin(async { panic!("unexpected external expression") })
+        }
+    }
+
     impl StatementHost for TestHost<'_> {
         type Payload = ();
-        type Error = &'static str;
+        type Error = EvalError;
+        type ExprHost = TestExprHost;
 
         fn preflight(&mut self, _stmt: &Stmt, _node_id: &str) -> Preflight<Self::Error> {
             if self.stop_before {
                 Preflight::StopAfterNode {
-                    error: "cancelled",
+                    error: EvalError::type_mismatch("active flow", "cancelled".into()),
                     preview: "hard stop".to_string(),
                 }
             } else {
@@ -358,68 +498,26 @@ mod tests {
             }
         }
 
-        fn bind_parameter(&mut self, _name: String, _value: Value<(), &'static str>) {
-            panic!("unexpected test parameter")
-        }
-
-        fn evaluate_default<'b>(
-            &'b mut self,
-            _expr: &'b Expr,
-        ) -> HostFuture<'b, Value<(), &'static str>> {
-            Box::pin(async { panic!("unexpected test default") })
-        }
-
         fn node_start(&mut self, _stmt: &Stmt, node_id: &str, _parent_node_id: Option<&str>) {
             self.events.push(alloc::format!("start:{node_id}"));
         }
 
-        fn evaluate<'b>(
-            &'b mut self,
-            expr: &'b Expr,
-            node_id: &'b str,
-        ) -> HostFuture<'b, Value<(), &'static str>> {
-            Box::pin(async move {
-                self.events.push(alloc::format!("execute:{node_id}"));
-                match expr {
-                    Expr::Literal(Literal::Int(value)) => Value::Int(*value),
-                    _ => panic!("unexpected test expression"),
-                }
-            })
+        fn expression_host(&self, _node_id: &str) -> Self::ExprHost {
+            TestExprHost
         }
 
-        fn bind<'b>(
-            &'b mut self,
-            _pattern: &'b Pattern,
-            _expr: &'b Expr,
-            _node_id: &'b str,
-        ) -> HostFuture<'b, StatementExecution<Value<(), &'static str>, &'static str>> {
-            Box::pin(async { panic!("unexpected test binding") })
+        fn pattern_error(&self, error: PatternBindError) -> EvalError {
+            EvalError::type_mismatch("matching pattern", alloc::format!("{error:?}"))
         }
 
-        fn run_body<'b>(
-            &'b mut self,
-            _body: &'b [Stmt],
-            _node_id: &'b str,
-        ) -> HostFuture<'b, StatementOutcome<Value<(), &'static str>, &'static str>> {
-            Box::pin(async { panic!("unexpected test branch") })
-        }
-
-        fn run_loop<'b>(
-            &'b mut self,
-            _body: &'b [Stmt],
-            _node_id: &'b str,
-        ) -> HostFuture<'b, StatementExecution<Value<(), &'static str>, &'static str>> {
-            Box::pin(async { panic!("unexpected test loop") })
-        }
-
-        fn preview(&self, _value: &Value<(), &'static str>) -> Option<String> {
+        fn preview(&self, _value: &Value<(), EvalError>) -> Option<String> {
             None
         }
 
         fn node_end(
             &mut self,
             node_id: &str,
-            _outcome: &StatementOutcome<Value<(), &'static str>, Self::Error>,
+            _outcome: &StatementOutcome<Value<(), EvalError>, Self::Error>,
             _parent_node_id: Option<&str>,
             preview: Option<&str>,
         ) {
@@ -465,10 +563,8 @@ mod tests {
             events,
             vec![
                 "start:branch.0",
-                "execute:branch.0",
                 "end:branch.0:",
                 "start:branch.1",
-                "execute:branch.1",
                 "end:branch.1:",
             ]
         );
@@ -485,7 +581,9 @@ mod tests {
             let mut engine = Engine::new(host);
             run_ready(engine.run_statements(&[Stmt::Break], "", None))
         };
-        assert!(matches!(result, StatementOutcome::Err("cancelled")));
+        assert!(
+            matches!(result, StatementOutcome::Err(EvalError::TypeMismatch { actual, .. }) if actual == "cancelled")
+        );
         assert_eq!(events, vec!["start:0", "end:0:hard stop"]);
     }
 

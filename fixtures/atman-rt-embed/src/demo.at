@@ -1,4 +1,6 @@
+use "helper.at"::bonus
+
 flow demo(input: int) -> int {
     doubled = input * 2
-    return doubled + foreign()
+    return doubled + subflow(bonus) + foreign()
 }
