@@ -12,7 +12,7 @@ use atman_rt::{
     AuthorizationDelegate, CancellationDelegate, ControlDelegate, EffectDelegate, EvalError,
     ExpressionEffect, FlowCall, FlowDelegate, FlowOutcome, HostFuture, ObserverDelegate, Preflight,
     Source, SourceResolver, StatementOutcome, ToolRouter, Value, Vm, VmContext, VmDelegate,
-    VmDelegates, VmEffect, VmEvent, VmNode, VmStatus,
+    VmDelegates, VmEffect, VmEffectInvocation, VmEvent, VmNode, VmStatus,
 };
 
 struct NoSources;
@@ -74,20 +74,33 @@ impl ObserverDelegate for Observer {
     fn on_event(&self, event: VmEvent) {
         let label = match &event {
             VmEvent::AuthorizationRequested {
-                effect: VmEffect::ToolCall { name },
-                ..
+                invocation:
+                    atman_rt::VmEffectInvocation {
+                        effect: VmEffect::ToolCall { name },
+                        ..
+                    },
             } => Some(format!("authorization.request:{name}")),
             VmEvent::AuthorizationResolved {
-                effect: VmEffect::ToolCall { name },
+                invocation:
+                    atman_rt::VmEffectInvocation {
+                        effect: VmEffect::ToolCall { name },
+                        ..
+                    },
                 status,
-                ..
             } => Some(format!("authorization.{status:?}:{name}")),
             VmEvent::EffectStarted {
-                effect: VmEffect::ToolCall { name },
-                ..
+                invocation:
+                    atman_rt::VmEffectInvocation {
+                        effect: VmEffect::ToolCall { name },
+                        ..
+                    },
             } => Some(format!("effect.start:{name}")),
             VmEvent::EffectEnded {
-                effect: VmEffect::ToolCall { name },
+                invocation:
+                    atman_rt::VmEffectInvocation {
+                        effect: VmEffect::ToolCall { name },
+                        ..
+                    },
                 status,
                 ..
             } => Some(format!("effect.{status:?}:{name}")),
@@ -518,13 +531,130 @@ impl EffectDelegate for PreviewEffect {
         Box::pin(async { Value::Unit })
     }
 
-    fn preview(
+    fn node_preview(
         &self,
         _value: &Value<Self::Payload, Self::Error>,
         context: &VmContext,
     ) -> Option<String> {
         self.contexts.lock().unwrap().push(context.clone());
         Some("value".into())
+    }
+}
+
+#[derive(Clone)]
+struct AuditedEffect {
+    calls: Arc<AtomicUsize>,
+    mode: atman_rt::ToolCallMode,
+}
+
+impl EffectDelegate for AuditedEffect {
+    type Payload = ();
+    type Error = EvalError;
+    type Permit = ();
+
+    fn invoke<'a>(
+        &'a self,
+        _effect: ExpressionEffect<Self::Payload, Self::Error>,
+        _permit: Self::Permit,
+        _context: &'a VmContext,
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Value::Int(7) })
+    }
+
+    fn tool_call_mode(&self, _name: &str, _context: &VmContext) -> atman_rt::ToolCallMode {
+        self.mode
+    }
+
+    fn effect_input_preview(
+        &self,
+        effect: &ExpressionEffect<Self::Payload, Self::Error>,
+        _origin: &VmContext,
+        _execution: &VmContext,
+    ) -> Option<String> {
+        assert!(matches!(
+            effect,
+            ExpressionEffect::ToolCall { named, .. }
+                if matches!(named.as_slice(), [(name, Value::Str(secret))]
+                    if name == "secret" && secret == "super-secret")
+        ));
+        Some("input:<redacted>".into())
+    }
+
+    fn effect_result_preview(
+        &self,
+        value: &Value<Self::Payload, Self::Error>,
+        invocation: &VmEffectInvocation,
+    ) -> Option<String> {
+        assert_eq!(value.kind_name(), "int");
+        assert_eq!(
+            invocation.input_preview.as_deref(),
+            Some("input:<redacted>")
+        );
+        Some("result:7".into())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FileAuditEffect;
+
+impl EffectDelegate for FileAuditEffect {
+    type Payload = ();
+    type Error = EvalError;
+    type Permit = ();
+
+    fn invoke<'a>(
+        &'a self,
+        effect: ExpressionEffect<Self::Payload, Self::Error>,
+        _permit: Self::Permit,
+        _context: &'a VmContext,
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
+        assert!(matches!(effect, ExpressionEffect::FileRef(_)));
+        Box::pin(async { Value::Str("loaded".into()) })
+    }
+
+    fn effect_input_preview(
+        &self,
+        effect: &ExpressionEffect<Self::Payload, Self::Error>,
+        _origin: &VmContext,
+        _execution: &VmContext,
+    ) -> Option<String> {
+        assert!(matches!(
+            effect,
+            ExpressionEffect::FileRef(path) if path == "/private/super-secret.txt"
+        ));
+        Some("file:<redacted>".into())
+    }
+}
+
+#[derive(Clone)]
+struct GatedAuditedEffect {
+    calls: Arc<AtomicUsize>,
+    ready: Arc<AtomicBool>,
+}
+
+impl EffectDelegate for GatedAuditedEffect {
+    type Payload = ();
+    type Error = EvalError;
+    type Permit = ();
+
+    fn invoke<'a>(
+        &'a self,
+        _effect: ExpressionEffect<Self::Payload, Self::Error>,
+        _permit: Self::Permit,
+        _context: &'a VmContext,
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(std::future::poll_fn(move |_| {
+            self.ready
+                .load(Ordering::SeqCst)
+                .then_some(Value::Int(7))
+                .map_or(Poll::Pending, Poll::Ready)
+        }))
+    }
+
+    fn tool_call_mode(&self, _name: &str, _context: &VmContext) -> atman_rt::ToolCallMode {
+        atman_rt::ToolCallMode::Deferred
     }
 }
 
@@ -635,8 +765,11 @@ flow main() -> int {
     assert!(events.iter().any(|event| matches!(
         event,
         VmEvent::EffectStarted {
-            context,
-            effect: VmEffect::ToolCall { name },
+            invocation: atman_rt::VmEffectInvocation {
+                execution: context,
+                effect: VmEffect::ToolCall { name },
+                ..
+            },
         } if name == "parallel_tool"
             && context.drive_mode == atman_rt::FlowDriveMode::Parallel
             && context.branch_index == Some(1)
@@ -654,6 +787,282 @@ flow main() -> int {
             .filter(|event| matches!(event, VmEvent::FanoutBranchEnded { .. }))
             .count(),
         2
+    );
+}
+
+#[test]
+fn effect_phases_share_one_redacted_invocation_identity() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            r#"flow main() -> int { return audit(secret: "super-secret") }"#,
+        ),
+        &NoSources,
+    )
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let delegates = VmDelegates::new(AuditedEffect {
+        calls: Arc::clone(&calls),
+        mode: atman_rt::ToolCallMode::Immediate,
+    })
+    .with_observer(Observer {
+        trace: Arc::new(Mutex::new(Vec::new())),
+        events: Arc::clone(&events),
+    });
+
+    assert!(matches!(
+        ready(vm.run("main", vec![], delegates)),
+        StatementOutcome::Return(Value::Int(7))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let events = events.lock().unwrap();
+    let invocations = events
+        .iter()
+        .filter_map(|event| match event {
+            VmEvent::AuthorizationRequested { invocation }
+            | VmEvent::AuthorizationResolved { invocation, .. }
+            | VmEvent::EffectStarted { invocation }
+            | VmEvent::EffectEnded { invocation, .. } => Some(invocation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(invocations.len(), 4);
+    assert!(
+        invocations
+            .iter()
+            .all(|invocation| invocation.id == invocations[0].id)
+    );
+    assert_eq!(invocations[0].origin, invocations[0].execution);
+    assert_eq!(
+        invocations[0].input_preview.as_deref(),
+        Some("input:<redacted>")
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        VmEvent::EffectEnded {
+            result_preview: Some(preview),
+            ..
+        } if preview == "result:7"
+    )));
+    assert!(!format!("{events:?}").contains("super-secret"));
+}
+
+#[test]
+fn file_reference_events_do_not_expose_the_raw_path() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            r#"flow main() -> string { return @"/private/super-secret.txt" }"#,
+        ),
+        &NoSources,
+    )
+    .unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let delegates = VmDelegates::new(FileAuditEffect).with_observer(Observer {
+        trace: Arc::new(Mutex::new(Vec::new())),
+        events: Arc::clone(&events),
+    });
+
+    assert!(matches!(
+        ready(vm.run("main", vec![], delegates)),
+        StatementOutcome::Return(Value::Str(value)) if value == "loaded"
+    ));
+    let events = events.lock().unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        VmEvent::AuthorizationRequested {
+            invocation: VmEffectInvocation {
+                effect: VmEffect::FileRef,
+                input_preview: Some(preview),
+                ..
+            },
+        } if preview == "file:<redacted>"
+    )));
+    assert!(!format!("{events:?}").contains("/private/super-secret.txt"));
+}
+
+#[test]
+fn cold_effect_records_creation_origin_and_branch_execution() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            r#"
+flow main() -> int {
+    pending = audit(secret: "super-secret")
+    values = fanout [pending]
+    return values[0]
+}
+"#,
+        ),
+        &NoSources,
+    )
+    .unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let delegates = VmDelegates::new(AuditedEffect {
+        calls: Arc::new(AtomicUsize::new(0)),
+        mode: atman_rt::ToolCallMode::Deferred,
+    })
+    .with_observer(Observer {
+        trace: Arc::new(Mutex::new(Vec::new())),
+        events: Arc::clone(&events),
+    });
+
+    assert!(matches!(
+        ready(vm.run("main", vec![], delegates)),
+        StatementOutcome::Return(Value::Int(7))
+    ));
+    let events = events.lock().unwrap();
+    let invocation = events
+        .iter()
+        .find_map(|event| match event {
+            VmEvent::EffectStarted { invocation } => Some(invocation),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(invocation.origin.run_id, invocation.execution.run_id);
+    assert_eq!(invocation.origin.node_id.as_deref(), Some("0"));
+    assert_eq!(invocation.execution.node_id.as_deref(), Some("1.branch[0]"));
+    assert_eq!(invocation.origin.branch_index, None);
+    assert_eq!(invocation.execution.branch_index, Some(0));
+}
+
+#[test]
+fn repeated_await_reuses_the_cached_effect_invocation() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            r#"
+flow main() -> int {
+    pending = audit(secret: "super-secret")
+    first = pending.await
+    second = pending.await
+    return first + second
+}
+"#,
+        ),
+        &NoSources,
+    )
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let delegates = VmDelegates::new(AuditedEffect {
+        calls: Arc::clone(&calls),
+        mode: atman_rt::ToolCallMode::Deferred,
+    })
+    .with_observer(Observer {
+        trace: Arc::new(Mutex::new(Vec::new())),
+        events: Arc::clone(&events),
+    });
+
+    assert!(matches!(
+        ready(vm.run("main", vec![], delegates)),
+        StatementOutcome::Return(Value::Int(14))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, VmEvent::AuthorizationRequested { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, VmEvent::EffectEnded { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn duplicate_fanout_branches_share_one_cold_effect_invocation() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            r#"
+flow main() -> int {
+    pending = gated()
+    values = fanout [pending, pending]
+    return values[0] + values[1]
+}
+"#,
+        ),
+        &NoSources,
+    )
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let ready = Arc::new(AtomicBool::new(false));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let delegates = VmDelegates::new(GatedAuditedEffect {
+        calls: Arc::clone(&calls),
+        ready: Arc::clone(&ready),
+    })
+    .with_observer(Observer {
+        trace: Arc::new(Mutex::new(Vec::new())),
+        events: Arc::clone(&events),
+    });
+    let mut future = Box::pin(vm.run("main", vec![], delegates));
+    let mut context = Context::from_waker(Waker::noop());
+
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    ready.store(true, Ordering::SeqCst);
+    let outcome = loop {
+        if let Poll::Ready(outcome) = future.as_mut().poll(&mut context) {
+            break outcome;
+        }
+    };
+    assert!(matches!(outcome, StatementOutcome::Return(Value::Int(14))));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let events = events.lock().unwrap();
+    let invocations = events
+        .iter()
+        .filter_map(|event| match event {
+            VmEvent::AuthorizationRequested { invocation }
+            | VmEvent::AuthorizationResolved { invocation, .. }
+            | VmEvent::EffectStarted { invocation }
+            | VmEvent::EffectEnded { invocation, .. } => Some(invocation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(invocations.len(), 4);
+    assert!(
+        invocations
+            .iter()
+            .all(|invocation| invocation.id == invocations[0].id)
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, VmEvent::AuthorizationRequested { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, VmEvent::AuthorizationResolved { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, VmEvent::EffectStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, VmEvent::EffectEnded { .. }))
+            .count(),
+        1
     );
 }
 
@@ -700,16 +1109,20 @@ fn rejected_authorization_does_not_invoke_the_effect() {
     assert!(events.iter().any(|event| matches!(
         event,
         VmEvent::AuthorizationResolved {
-            effect: VmEffect::ToolCall { name },
+            invocation: atman_rt::VmEffectInvocation {
+                effect: VmEffect::ToolCall { name },
+                ..
+            },
             status: VmStatus::Err,
-            ..
         } if name == "denied"
     )));
     assert!(!events.iter().any(|event| matches!(
         event,
         VmEvent::EffectStarted {
-            effect: VmEffect::ToolCall { name },
-            ..
+            invocation: atman_rt::VmEffectInvocation {
+                effect: VmEffect::ToolCall { name },
+                ..
+            },
         } if name == "denied"
     )));
 }
@@ -842,13 +1255,22 @@ fn dropping_pending_authorization_closes_every_open_scope_as_cancelled() {
     drop(future);
 
     let events = events.lock().unwrap();
-    assert!(events.iter().any(|event| matches!(
-        event,
-        VmEvent::AuthorizationResolved {
-            status: VmStatus::Cancelled,
-            ..
-        }
-    )));
+    let requested = events
+        .iter()
+        .filter_map(|event| match event {
+            VmEvent::AuthorizationRequested { invocation } => Some(invocation.id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let resolved = events
+        .iter()
+        .filter_map(|event| match event {
+            VmEvent::AuthorizationResolved { invocation, status } => Some((invocation.id, *status)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(requested.len(), 1);
+    assert_eq!(resolved, [(requested[0], VmStatus::Cancelled)]);
     assert!(
         !events
             .iter()
@@ -903,7 +1325,12 @@ fn dropping_pending_effect_and_nested_effect_context_are_reported_by_the_vm() {
         let events = events.lock().unwrap();
         assert!(events.iter().any(|event| matches!(
             event,
-            VmEvent::EffectStarted { context, .. }
+            VmEvent::EffectStarted {
+                invocation: atman_rt::VmEffectInvocation {
+                    execution: context,
+                    ..
+                },
+            }
                 if context.node_id.as_deref() == Some("0.0")
                     && context.parent_node_id.as_deref() == Some("0")
         )));
@@ -911,6 +1338,25 @@ fn dropping_pending_effect_and_nested_effect_context_are_reported_by_the_vm() {
     drop(future);
 
     let events = events.lock().unwrap();
+    let started_id = events
+        .iter()
+        .find_map(|event| match event {
+            VmEvent::EffectStarted { invocation } => Some(invocation.id),
+            _ => None,
+        })
+        .unwrap();
+    let terminals = events
+        .iter()
+        .filter_map(|event| match event {
+            VmEvent::EffectEnded {
+                invocation,
+                status: VmStatus::Cancelled,
+                ..
+            } => Some(invocation.id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminals, [started_id]);
     assert!(events.iter().any(|event| matches!(
         event,
         VmEvent::EffectEnded {

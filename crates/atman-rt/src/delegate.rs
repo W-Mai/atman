@@ -22,6 +22,13 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VmRunId(pub usize);
 
+/// VM-local identity of one real external-effect execution attempt.
+///
+/// Creating a cold future does not allocate an identity. The identity is
+/// allocated only when the future is first driven past its result cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VmEffectInvocationId(pub usize);
+
 /// VM-owned execution context supplied to every delegate callback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VmContext {
@@ -39,7 +46,7 @@ pub struct VmContext {
 /// Portable metadata for an evaluated external effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VmEffect {
-    FileRef { path: String },
+    FileRef,
     ToolCall { name: String },
     Confirm,
     Message { role: MessageRole },
@@ -48,10 +55,24 @@ pub enum VmEffect {
     FixRestore,
 }
 
+/// Portable audit metadata for one real external-effect execution attempt.
+///
+/// Raw effect arguments and results remain behind the delegate boundary. An
+/// embedding may expose a redacted string through the dedicated preview
+/// callbacks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmEffectInvocation {
+    pub id: VmEffectInvocationId,
+    pub effect: VmEffect,
+    pub origin: VmContext,
+    pub execution: VmContext,
+    pub input_preview: Option<String>,
+}
+
 impl<P, E> From<&ExpressionEffect<P, E>> for VmEffect {
     fn from(effect: &ExpressionEffect<P, E>) -> Self {
         match effect {
-            ExpressionEffect::FileRef(path) => Self::FileRef { path: path.clone() },
+            ExpressionEffect::FileRef(_) => Self::FileRef,
             ExpressionEffect::ToolCall { name, .. } => Self::ToolCall { name: name.clone() },
             ExpressionEffect::Confirm(_) => Self::Confirm,
             ExpressionEffect::Message { role, .. } => Self::Message { role: *role },
@@ -107,23 +128,19 @@ pub enum VmEvent {
         status: VmStatus,
     },
     AuthorizationRequested {
-        context: VmContext,
-        effect: VmEffect,
+        invocation: VmEffectInvocation,
     },
     AuthorizationResolved {
-        context: VmContext,
-        effect: VmEffect,
+        invocation: VmEffectInvocation,
         status: VmStatus,
     },
     EffectStarted {
-        context: VmContext,
-        effect: VmEffect,
+        invocation: VmEffectInvocation,
     },
     EffectEnded {
-        context: VmContext,
-        effect: VmEffect,
+        invocation: VmEffectInvocation,
         status: VmStatus,
-        preview: Option<String>,
+        result_preview: Option<String>,
     },
     CancellationObserved {
         context: VmContext,
@@ -141,11 +158,11 @@ impl VmEvent {
             | Self::IterationEnded { context, .. }
             | Self::FanoutBranchStarted { context }
             | Self::FanoutBranchEnded { context, .. }
-            | Self::AuthorizationRequested { context, .. }
-            | Self::AuthorizationResolved { context, .. }
-            | Self::EffectStarted { context, .. }
-            | Self::EffectEnded { context, .. }
             | Self::CancellationObserved { context } => context,
+            Self::AuthorizationRequested { invocation }
+            | Self::AuthorizationResolved { invocation, .. }
+            | Self::EffectStarted { invocation }
+            | Self::EffectEnded { invocation, .. } => &invocation.execution,
         }
     }
 }
@@ -176,10 +193,27 @@ pub trait EffectDelegate: Clone + Send + Sync {
         ToolCallMode::Immediate
     }
 
-    fn preview(
+    fn node_preview(
         &self,
         _value: &Value<Self::Payload, Self::Error>,
         _context: &VmContext,
+    ) -> Option<String> {
+        None
+    }
+
+    fn effect_input_preview(
+        &self,
+        _effect: &ExpressionEffect<Self::Payload, Self::Error>,
+        _origin: &VmContext,
+        _execution: &VmContext,
+    ) -> Option<String> {
+        None
+    }
+
+    fn effect_result_preview(
+        &self,
+        _value: &Value<Self::Payload, Self::Error>,
+        _invocation: &VmEffectInvocation,
     ) -> Option<String> {
         None
     }

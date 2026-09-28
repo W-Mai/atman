@@ -38,6 +38,7 @@ struct DelegateState {
     flows: HashMap<String, atman_rt::ast::FlowDecl>,
     program: LinkedProgram,
     events: Option<EventSink>,
+    effect_redactor: Arc<crate::redact::Redactor>,
     safety: Option<SafetyConfig>,
 }
 
@@ -74,6 +75,10 @@ impl AtmanVmDelegate {
             turn_id: host.turn_id.clone(),
             flow_cancel: host.flow_cancel.clone(),
         };
+        let effect_redactor = host
+            .events
+            .and_then(EventSink::redactor)
+            .unwrap_or_else(|| Arc::new(crate::redact::Redactor::builtin()));
         Ok(Self {
             state: Arc::new(DelegateState {
                 tools: host.tools.clone(),
@@ -81,6 +86,7 @@ impl AtmanVmDelegate {
                 flows: host.flows.clone(),
                 program,
                 events: host.events.cloned(),
+                effect_redactor,
                 safety: host.safety.cloned(),
             }),
             binding: root,
@@ -169,6 +175,14 @@ impl AtmanVmDelegate {
                 parent_node_id: context.parent_node_id.clone(),
             });
         }
+    }
+
+    fn redact_effect_preview(&self, preview: String) -> Option<String> {
+        let preview = preview.trim();
+        if preview.is_empty() {
+            return None;
+        }
+        Some(self.state.effect_redactor.redact(preview).0)
     }
 
     fn enter_root(&self, context: &VmContext) -> (Self, AtmanVmFlowGuard) {
@@ -552,8 +566,39 @@ impl VmDelegate for AtmanVmDelegate {
         }
     }
 
-    fn preview(&self, value: &Value, _context: &VmContext) -> Option<String> {
+    fn node_preview(&self, value: &Value, _context: &VmContext) -> Option<String> {
         crate::eval::value_preview(value)
+    }
+
+    fn effect_input_preview(
+        &self,
+        effect: &ExpressionEffect<AtmanPayload, RuntimeError>,
+        _origin: &VmContext,
+        _execution: &VmContext,
+    ) -> Option<String> {
+        let preview = match effect {
+            ExpressionEffect::FileRef(path) => path.clone(),
+            ExpressionEffect::ToolCall {
+                positional, named, ..
+            }
+            | ExpressionEffect::Message {
+                positional, named, ..
+            } => crate::eval::preview_tool_args(positional, named),
+            ExpressionEffect::Confirm(value) | ExpressionEffect::FixSnapshot { target: value } => {
+                crate::eval::value_preview(value)?
+            }
+            ExpressionEffect::Call { args, .. } => crate::eval::preview_tool_args(args, &[]),
+            ExpressionEffect::FixRestore { target, .. } => crate::eval::value_preview(target)?,
+        };
+        self.redact_effect_preview(preview)
+    }
+
+    fn effect_result_preview(
+        &self,
+        value: &Value,
+        _invocation: &atman_rt::VmEffectInvocation,
+    ) -> Option<String> {
+        self.redact_effect_preview(crate::eval::value_preview(value)?)
     }
 
     fn error_status(&self, error: &RuntimeError) -> VmStatus {
@@ -617,6 +662,9 @@ impl VmDelegate for AtmanVmDelegate {
             VmEvent::FanoutBranchEnded { context, status } => {
                 self.emit_node_end(&context, status, None);
             }
+            // Tool authorization and execution already emit the product's
+            // canonical tool events. Translating these VM audit events would
+            // duplicate ToolNode/ToolUse lifecycle records.
             VmEvent::FlowStarted { .. }
             | VmEvent::FlowEnded { .. }
             | VmEvent::AuthorizationRequested { .. }
@@ -633,5 +681,94 @@ fn product_node_status(status: VmStatus) -> FlowNodeStatus {
         VmStatus::Ok => FlowNodeStatus::Ok,
         VmStatus::Err => FlowNodeStatus::Err,
         VmStatus::Cancelled => FlowNodeStatus::Cancelled,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+    use std::collections::HashMap;
+
+    use atman_rt::{VmEffect, VmEffectInvocation, VmEffectInvocationId, VmRunId};
+
+    use super::*;
+
+    fn delegate() -> (AtmanVmDelegate, VmContext) {
+        let file = atman_rt::parse_file("flow main() -> int { return 0 }").unwrap();
+        let program = crate::source_program::link_inline(file).unwrap();
+        let flow = program.entry_flow("main").unwrap();
+        let tools = ToolRegistry::new();
+        let providers = ProviderRegistry::new();
+        let flows = HashMap::new();
+        let events = EventSink::new();
+        let tool_ctx = ToolCtx::default();
+        let host = AtmanHost {
+            tools: &tools,
+            tool_ctx: Cow::Borrowed(&tool_ctx),
+            providers: &providers,
+            flows: &flows,
+            linked_program: Some(&program),
+            current_module: Some(flow.module),
+            allows_shell: false,
+            events: Some(&events),
+            turn_id: None,
+            flow_run_id: None,
+            session_runtime: None,
+            flow_cancel: tokio_util::sync::CancellationToken::new(),
+            safety: None,
+            current_node_id: None,
+            source_dir: None,
+        };
+        let delegate = AtmanVmDelegate::from_host(&host).unwrap();
+        let context = VmContext {
+            run_id: VmRunId(0),
+            parent_run_id: None,
+            source_id: "entry:inline.at".into(),
+            flow,
+            caller_node_id: None,
+            node_id: Some("tool".into()),
+            parent_node_id: None,
+            drive_mode: FlowDriveMode::Inline,
+            branch_index: None,
+        };
+        (delegate, context)
+    }
+
+    #[test]
+    fn effect_audit_previews_redact_secrets_before_entering_vm_events() {
+        let (delegate, context) = delegate();
+        let secret = "sk-abcdefghijklmnop1234567890";
+        let effect = ExpressionEffect::ToolCall {
+            name: "foreign".into(),
+            positional: vec![Value::Str(secret.into())],
+            named: Vec::new(),
+            watch_rules: None,
+        };
+        let input_preview = delegate
+            .effect_input_preview(&effect, &context, &context)
+            .unwrap();
+        assert!(!input_preview.contains(secret));
+        assert!(input_preview.contains("<REDACTED:openai_api_key>"));
+
+        let invocation = VmEffectInvocation {
+            id: VmEffectInvocationId(0),
+            effect: VmEffect::ToolCall {
+                name: "foreign".into(),
+            },
+            origin: context.clone(),
+            execution: context,
+            input_preview: Some(input_preview),
+        };
+        let result_preview = delegate
+            .effect_result_preview(&Value::Str(secret.into()), &invocation)
+            .unwrap();
+        let event = VmEvent::EffectEnded {
+            invocation,
+            status: VmStatus::Ok,
+            result_preview: Some(result_preview),
+        };
+        let debug = format!("{event:?}");
+        assert!(!debug.contains(secret));
+        assert_eq!(debug.matches("<REDACTED:openai_api_key>").count(), 2);
     }
 }

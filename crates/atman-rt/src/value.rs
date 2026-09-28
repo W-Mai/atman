@@ -2,7 +2,7 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
 use crate::{
-    Env,
+    Env, VmContext,
     ast::{Expr, Ident},
     engine::FlowArgs,
     program::FlowId,
@@ -40,6 +40,7 @@ pub struct ToolFuture<P, E> {
     pub(crate) named: Vec<(String, Value<P, E>)>,
     pub(crate) watch_rules: Option<WatchRules>,
     pub(crate) owner: Option<Arc<()>>,
+    pub(crate) audit_origin: Option<VmContext>,
     pub(crate) result: async_lock::Mutex<Option<Value<P, E>>>,
 }
 
@@ -59,6 +60,7 @@ impl<P, E> ToolFuture<P, E> {
         named: Vec<(String, Value<P, E>)>,
         watch_rules: Option<WatchRules>,
         owner: Option<Arc<()>>,
+        audit_origin: Option<VmContext>,
     ) -> Self {
         Self {
             name,
@@ -66,6 +68,7 @@ impl<P, E> ToolFuture<P, E> {
             named,
             watch_rules,
             owner,
+            audit_origin,
             result: async_lock::Mutex::new(None),
         }
     }

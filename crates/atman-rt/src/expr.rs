@@ -140,6 +140,7 @@ pub trait ExpressionHost: Sync + Clone + Send {
             named,
             watch_rules,
             None,
+            None,
         )))
     }
     fn validate_tool_future(

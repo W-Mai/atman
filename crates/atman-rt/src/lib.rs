@@ -38,7 +38,8 @@ pub use cancel::race_cancel;
 pub use delegate::{
     AllowAll, AuthorizationDelegate, CancellationDelegate, ControlDelegate, DefaultControl,
     EffectDelegate, FlowDelegate, NeverCancel, NoopFlows, NoopObserver, ObserverDelegate,
-    VmContext, VmDelegates, VmEffect, VmEvent, VmRunId, VmStatus,
+    VmContext, VmDelegates, VmEffect, VmEffectInvocation, VmEffectInvocationId, VmEvent, VmRunId,
+    VmStatus,
 };
 pub use engine::{
     CallArgumentError, Engine, ExecutionScope, FlowArgs, FlowExecution, FlowOutcome, HostFuture,

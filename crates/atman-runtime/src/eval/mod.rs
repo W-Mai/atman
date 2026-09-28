@@ -839,7 +839,7 @@ pub(super) async fn call_and_maybe_stream(
     result
 }
 
-fn preview_tool_args(positional: &[Value], named: &[(String, Value)]) -> String {
+pub(crate) fn preview_tool_args(positional: &[Value], named: &[(String, Value)]) -> String {
     let mut parts: Vec<String> = positional.iter().map(preview_tool_value).collect();
     for (k, v) in named {
         parts.push(format!("{k}={}", preview_tool_value(v)));

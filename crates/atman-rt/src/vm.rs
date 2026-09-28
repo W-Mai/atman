@@ -16,8 +16,8 @@ use crate::{
     AuthorizationDelegate, CancellationDelegate, ControlDelegate, EffectDelegate, Engine,
     ExecutionScope, ExpressionEffect, ExpressionHost, FanoutBranchStatus, FlowArgs, FlowDelegate,
     FlowOutcome, HostFuture, HostValueOps, NamedValues, ObserverDelegate, Preflight, StatementHost,
-    StatementOutcome, ToolCallMode, Value, ValueError, VmContext, VmDelegates, VmEffect, VmEvent,
-    VmNode, VmRunId, VmStatus,
+    StatementOutcome, ToolCallMode, Value, ValueError, VmContext, VmDelegates, VmEffect,
+    VmEffectInvocation, VmEffectInvocationId, VmEvent, VmNode, VmRunId, VmStatus,
     ast::{Arg, Contract, FlowRef, LifecycleEvent, Stmt},
     engine::bind_evaluated_call_arguments,
     expr::{EvaluatedArg, MAX_ACTIVE_CALLS},
@@ -94,6 +94,15 @@ pub(crate) trait VmHost: StatementHost + Clone {
     fn cancellation_error(&self) -> Option<Self::Error>;
 
     fn cancelled(&self) -> HostFuture<'_, Self::Error>;
+
+    fn context(&self) -> &VmContext;
+
+    fn eval_external_from<'a>(
+        &'a self,
+        effect: ExpressionEffect<Self::Payload, Self::Error>,
+        origin: VmContext,
+        execution: VmContext,
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>>;
 
     fn enter_child(&self, call: &FlowCall<'_>) -> Result<(Self, Self::ChildGuard), Self::Error>;
 
@@ -226,10 +235,27 @@ pub trait VmDelegate: Clone + Send + Sync {
         Self::Error::type_mismatch("valid Atman call", error.to_string())
     }
 
-    fn preview(
+    fn node_preview(
         &self,
         _value: &Value<Self::Payload, Self::Error>,
         _context: &VmContext,
+    ) -> Option<String> {
+        None
+    }
+
+    fn effect_input_preview(
+        &self,
+        _effect: &ExpressionEffect<Self::Payload, Self::Error>,
+        _origin: &VmContext,
+        _execution: &VmContext,
+    ) -> Option<String> {
+        None
+    }
+
+    fn effect_result_preview(
+        &self,
+        _value: &Value<Self::Payload, Self::Error>,
+        _invocation: &VmEffectInvocation,
     ) -> Option<String> {
         None
     }
@@ -340,12 +366,29 @@ where
         self.control.call_error(error)
     }
 
-    fn preview(
+    fn node_preview(
         &self,
         value: &Value<Self::Payload, Self::Error>,
         context: &VmContext,
     ) -> Option<String> {
-        self.effect.preview(value, context)
+        self.effect.node_preview(value, context)
+    }
+
+    fn effect_input_preview(
+        &self,
+        effect: &ExpressionEffect<Self::Payload, Self::Error>,
+        origin: &VmContext,
+        execution: &VmContext,
+    ) -> Option<String> {
+        self.effect.effect_input_preview(effect, origin, execution)
+    }
+
+    fn effect_result_preview(
+        &self,
+        value: &Value<Self::Payload, Self::Error>,
+        invocation: &VmEffectInvocation,
+    ) -> Option<String> {
+        self.effect.effect_result_preview(value, invocation)
     }
 
     fn error_status(&self, error: &Self::Error) -> VmStatus {
@@ -422,6 +465,7 @@ struct DelegateAdapter<H: VmDelegate> {
     delegate: H,
     context: VmContext,
     run_ids: Arc<AtomicUsize>,
+    effect_invocation_ids: Arc<AtomicUsize>,
 }
 
 impl<H: VmDelegate> Clone for DelegateAdapter<H> {
@@ -430,6 +474,7 @@ impl<H: VmDelegate> Clone for DelegateAdapter<H> {
             delegate: self.delegate.clone(),
             context: self.context.clone(),
             run_ids: Arc::clone(&self.run_ids),
+            effect_invocation_ids: Arc::clone(&self.effect_invocation_ids),
         }
     }
 }
@@ -441,6 +486,70 @@ impl<H: VmDelegate> DelegateAdapter<H> {
 
     fn cancellation_error(&self) -> Option<H::Error> {
         observe_cancellation(&self.delegate, &self.context)
+    }
+
+    fn eval_external_attempt<'a>(
+        &'a self,
+        effect: ExpressionEffect<H::Payload, H::Error>,
+        origin: VmContext,
+        execution: VmContext,
+    ) -> HostFuture<'a, Value<H::Payload, H::Error>> {
+        let delegate = self.delegate.clone();
+        let effect_invocation_ids = Arc::clone(&self.effect_invocation_ids);
+        Box::pin(async move {
+            if let Some(error) = observe_cancellation(&delegate, &execution) {
+                return Value::Err(error);
+            }
+            let invocation = VmEffectInvocation {
+                id: VmEffectInvocationId(effect_invocation_ids.fetch_add(1, Ordering::Relaxed)),
+                effect: VmEffect::from(&effect),
+                input_preview: delegate.effect_input_preview(&effect, &origin, &execution),
+                origin,
+                execution: execution.clone(),
+            };
+            let authorization = AuthorizationExit::start(delegate.clone(), invocation.clone());
+            let permit = match crate::race_cancel(
+                delegate.authorize(&effect, &execution),
+                wait_for_cancellation(&delegate, &execution),
+            )
+            .await
+            {
+                Ok(permit) => {
+                    if let Some(error) = observe_cancellation(&delegate, &execution) {
+                        authorization.finish(VmStatus::Cancelled);
+                        return Value::Err(error);
+                    }
+                    authorization.finish(VmStatus::Ok);
+                    permit
+                }
+                Err(error) => {
+                    let status = delegate.error_status(&error);
+                    authorization.finish(status);
+                    return Value::Err(error);
+                }
+            };
+            let effect_exit = EffectExit::start(delegate.clone(), invocation.clone());
+            let value = match crate::race_cancel(
+                async { Ok::<_, H::Error>(delegate.invoke(effect, permit, &execution).await) },
+                wait_for_cancellation(&delegate, &execution),
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    effect_exit.finish(VmStatus::Cancelled, None);
+                    return Value::Err(error);
+                }
+            };
+            if let Some(error) = observe_cancellation(&delegate, &execution) {
+                effect_exit.finish(VmStatus::Cancelled, None);
+                return Value::Err(error);
+            }
+            let status = value_status(&delegate, &value);
+            let result_preview = delegate.effect_result_preview(&value, &invocation);
+            effect_exit.finish(status, result_preview);
+            value
+        })
     }
 }
 
@@ -464,21 +573,18 @@ async fn wait_for_cancellation<H: VmDelegate>(delegate: &H, context: &VmContext)
 
 struct AuthorizationExit<H: VmDelegate> {
     delegate: H,
-    context: VmContext,
-    effect: VmEffect,
+    invocation: VmEffectInvocation,
     active: bool,
 }
 
 impl<H: VmDelegate> AuthorizationExit<H> {
-    fn start(delegate: H, context: VmContext, effect: VmEffect) -> Self {
+    fn start(delegate: H, invocation: VmEffectInvocation) -> Self {
         delegate.on_event(VmEvent::AuthorizationRequested {
-            context: context.clone(),
-            effect: effect.clone(),
+            invocation: invocation.clone(),
         });
         Self {
             delegate,
-            context,
-            effect,
+            invocation,
             active: true,
         }
     }
@@ -486,8 +592,7 @@ impl<H: VmDelegate> AuthorizationExit<H> {
     fn finish(mut self, status: VmStatus) {
         self.active = false;
         self.delegate.on_event(VmEvent::AuthorizationResolved {
-            context: self.context.clone(),
-            effect: self.effect.clone(),
+            invocation: self.invocation.clone(),
             status,
         });
     }
@@ -497,8 +602,7 @@ impl<H: VmDelegate> Drop for AuthorizationExit<H> {
     fn drop(&mut self) {
         if self.active {
             self.delegate.on_event(VmEvent::AuthorizationResolved {
-                context: self.context.clone(),
-                effect: self.effect.clone(),
+                invocation: self.invocation.clone(),
                 status: VmStatus::Cancelled,
             });
         }
@@ -507,32 +611,28 @@ impl<H: VmDelegate> Drop for AuthorizationExit<H> {
 
 struct EffectExit<H: VmDelegate> {
     delegate: H,
-    context: VmContext,
-    effect: VmEffect,
+    invocation: VmEffectInvocation,
     active: bool,
 }
 
 impl<H: VmDelegate> EffectExit<H> {
-    fn start(delegate: H, context: VmContext, effect: VmEffect) -> Self {
+    fn start(delegate: H, invocation: VmEffectInvocation) -> Self {
         delegate.on_event(VmEvent::EffectStarted {
-            context: context.clone(),
-            effect: effect.clone(),
+            invocation: invocation.clone(),
         });
         Self {
             delegate,
-            context,
-            effect,
+            invocation,
             active: true,
         }
     }
 
-    fn finish(mut self, status: VmStatus, preview: Option<String>) {
+    fn finish(mut self, status: VmStatus, result_preview: Option<String>) {
         self.active = false;
         self.delegate.on_event(VmEvent::EffectEnded {
-            context: self.context.clone(),
-            effect: self.effect.clone(),
+            invocation: self.invocation.clone(),
             status,
-            preview,
+            result_preview,
         });
     }
 }
@@ -541,10 +641,9 @@ impl<H: VmDelegate> Drop for EffectExit<H> {
     fn drop(&mut self) {
         if self.active {
             self.delegate.on_event(VmEvent::EffectEnded {
-                context: self.context.clone(),
-                effect: self.effect.clone(),
+                invocation: self.invocation.clone(),
                 status: VmStatus::Cancelled,
-                preview: None,
+                result_preview: None,
             });
         }
     }
@@ -588,6 +687,7 @@ impl<H: VmDelegate> ExpressionHost for DelegateAdapter<H> {
             delegate: self.delegate.clone(),
             context: self.context.for_branch(index),
             run_ids: Arc::clone(&self.run_ids),
+            effect_invocation_ids: Arc::clone(&self.effect_invocation_ids),
         }
     }
 
@@ -622,57 +722,8 @@ impl<H: VmDelegate> ExpressionHost for DelegateAdapter<H> {
         &'a self,
         effect: ExpressionEffect<Self::Payload, Self::Error>,
     ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
-        let delegate = self.delegate.clone();
         let context = self.context.clone();
-        Box::pin(async move {
-            if let Some(error) = observe_cancellation(&delegate, &context) {
-                return Value::Err(error);
-            }
-            let metadata = VmEffect::from(&effect);
-            let authorization =
-                AuthorizationExit::start(delegate.clone(), context.clone(), metadata.clone());
-            let permit = match crate::race_cancel(
-                delegate.authorize(&effect, &context),
-                wait_for_cancellation(&delegate, &context),
-            )
-            .await
-            {
-                Ok(permit) => {
-                    if let Some(error) = observe_cancellation(&delegate, &context) {
-                        authorization.finish(VmStatus::Cancelled);
-                        return Value::Err(error);
-                    }
-                    authorization.finish(VmStatus::Ok);
-                    permit
-                }
-                Err(error) => {
-                    let status = delegate.error_status(&error);
-                    authorization.finish(status);
-                    return Value::Err(error);
-                }
-            };
-            let invocation = EffectExit::start(delegate.clone(), context.clone(), metadata.clone());
-            let value = match crate::race_cancel(
-                async { Ok::<_, H::Error>(delegate.invoke(effect, permit, &context).await) },
-                wait_for_cancellation(&delegate, &context),
-            )
-            .await
-            {
-                Ok(value) => value,
-                Err(error) => {
-                    invocation.finish(VmStatus::Cancelled, None);
-                    return Value::Err(error);
-                }
-            };
-            if let Some(error) = observe_cancellation(&delegate, &context) {
-                invocation.finish(VmStatus::Cancelled, None);
-                return Value::Err(error);
-            }
-            let status = value_status(&delegate, &value);
-            let preview = delegate.preview(&value, &context);
-            invocation.finish(status, preview);
-            value
-        })
+        self.eval_external_attempt(effect, context.clone(), context)
     }
 }
 
@@ -781,6 +832,7 @@ impl<H: VmDelegate> StatementHost for DelegateAdapter<H> {
             delegate: self.delegate.clone(),
             context,
             run_ids: Arc::clone(&self.run_ids),
+            effect_invocation_ids: Arc::clone(&self.effect_invocation_ids),
         }
     }
 
@@ -795,7 +847,7 @@ impl<H: VmDelegate> StatementHost for DelegateAdapter<H> {
         parent_node_id: Option<&str>,
     ) -> Option<String> {
         self.delegate
-            .preview(value, &self.context.for_node(node_id, parent_node_id))
+            .node_preview(value, &self.context.for_node(node_id, parent_node_id))
     }
 
     fn iteration_start(
@@ -838,6 +890,19 @@ impl<H: VmDelegate> VmHost for DelegateAdapter<H> {
         Box::pin(wait_for_cancellation(&self.delegate, &self.context))
     }
 
+    fn context(&self) -> &VmContext {
+        &self.context
+    }
+
+    fn eval_external_from<'a>(
+        &'a self,
+        effect: ExpressionEffect<Self::Payload, Self::Error>,
+        origin: VmContext,
+        execution: VmContext,
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
+        self.eval_external_attempt(effect, origin, execution)
+    }
+
     fn enter_child(&self, call: &FlowCall<'_>) -> Result<(Self, Self::ChildGuard), Self::Error> {
         let context = VmContext {
             run_id: self.next_run_id(),
@@ -859,6 +924,7 @@ impl<H: VmDelegate> VmHost for DelegateAdapter<H> {
                 delegate: delegate.clone(),
                 context: context.clone(),
                 run_ids: Arc::clone(&self.run_ids),
+                effect_invocation_ids: Arc::clone(&self.effect_invocation_ids),
             },
             DelegateChild {
                 delegate,
@@ -958,6 +1024,7 @@ impl<H: VmDelegate> Drop for DelegateFlowExit<H> {
 pub struct Vm {
     program: Arc<LinkedProgram>,
     run_ids: Arc<AtomicUsize>,
+    effect_invocation_ids: Arc<AtomicUsize>,
 }
 
 impl Vm {
@@ -971,6 +1038,7 @@ impl Vm {
         Self {
             program,
             run_ids: Arc::new(AtomicUsize::new(1)),
+            effect_invocation_ids: Arc::new(AtomicUsize::new(1)),
         }
     }
 
@@ -1039,6 +1107,7 @@ impl Vm {
             delegate,
             context,
             run_ids: Arc::clone(&self.run_ids),
+            effect_invocation_ids: Arc::clone(&self.effect_invocation_ids),
         };
         let outcome = match adapter.cancellation_error() {
             Some(error) => StatementOutcome::Err(error),
@@ -1127,6 +1196,7 @@ impl Vm {
                 delegate: flow_delegate,
                 context,
                 run_ids: Arc::clone(&self.run_ids),
+                effect_invocation_ids: Arc::clone(&self.effect_invocation_ids),
             };
             let mut engine = Engine::new(VmStatementHost {
                 host: adapter.clone(),
@@ -1199,6 +1269,10 @@ impl<H: VmHost> StatementHost for VmStatementHost<H> {
         node_id: Option<&str>,
         parent_node_id: Option<&str>,
     ) -> Self::ExprHost {
+        let effect_context = match node_id {
+            Some(node_id) => self.host.context().for_node(node_id, parent_node_id),
+            None => self.host.context().clone(),
+        };
         VmExpressionHost {
             effect_host: self.host.expression_host(node_id, parent_node_id),
             host: self.host.clone(),
@@ -1210,6 +1284,7 @@ impl<H: VmHost> StatementHost for VmStatementHost<H> {
             parallel_active: Arc::clone(&self.parallel_active),
             await_mode: FlowDriveMode::Inline,
             branch_index: None,
+            effect_context,
         }
     }
 
@@ -1248,6 +1323,7 @@ struct VmExpressionHost<H: VmHost> {
     parallel_active: Arc<AtomicUsize>,
     await_mode: FlowDriveMode,
     branch_index: Option<usize>,
+    effect_context: VmContext,
 }
 
 impl<H: VmHost> Clone for VmExpressionHost<H> {
@@ -1263,6 +1339,7 @@ impl<H: VmHost> Clone for VmExpressionHost<H> {
             parallel_active: Arc::clone(&self.parallel_active),
             await_mode: self.await_mode,
             branch_index: self.branch_index,
+            effect_context: self.effect_context.clone(),
         }
     }
 }
@@ -1455,6 +1532,7 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
             named,
             watch_rules,
             Some(Arc::clone(&self.owner)),
+            Some(self.effect_context.clone()),
         )))
     }
 
@@ -1509,6 +1587,7 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
             parallel_active: Arc::clone(&self.parallel_active),
             await_mode: FlowDriveMode::Parallel,
             branch_index: Some(index),
+            effect_context: self.effect_context.for_branch(index),
         }
     }
 
@@ -1590,13 +1669,22 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
                 Ok(permit) => permit,
                 Err(error) => return Value::Err(error),
             };
+            let origin = future
+                .audit_origin
+                .clone()
+                .unwrap_or_else(|| self.effect_context.clone());
             let value = self
-                .eval_external(ExpressionEffect::ToolCall {
-                    name: future.name.clone(),
-                    positional: future.positional.clone(),
-                    named: future.named.clone(),
-                    watch_rules: future.watch_rules.clone(),
-                })
+                .host
+                .eval_external_from(
+                    ExpressionEffect::ToolCall {
+                        name: future.name.clone(),
+                        positional: future.positional.clone(),
+                        named: future.named.clone(),
+                        watch_rules: future.watch_rules.clone(),
+                    },
+                    origin,
+                    self.effect_context.clone(),
+                )
                 .await;
             *result = Some(value.clone());
             value
@@ -1612,6 +1700,10 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
                 Value::Err(self.host.call_error(VmCallError::FutureBoundary))
             });
         }
-        self.effect_host.eval_external(effect)
+        self.host.eval_external_from(
+            effect,
+            self.effect_context.clone(),
+            self.effect_context.clone(),
+        )
     }
 }
