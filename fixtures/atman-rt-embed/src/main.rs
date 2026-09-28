@@ -10,7 +10,7 @@ use std::{
 
 use atman_rt::{
     Engine, EvalError, ExpressionEffect, ExpressionHost, FlowOutcome, HostFuture, PatternBindError,
-    Preflight, Source, SourceResolver, StatementHost, StatementOutcome, Value, Vm, VmEmbedding,
+    Preflight, Source, SourceResolver, StatementHost, StatementOutcome, ToolRouter, Value, Vm,
     ast::{Arg, BinOp, Expr, FlowDecl, Ident, Literal, Node, ParamDecl, Span, Stmt, TypeExpr},
 };
 
@@ -117,29 +117,6 @@ impl StatementHost for FixtureHost {
 }
 
 struct NoopWake;
-
-#[derive(Clone)]
-struct DemoHost;
-
-impl VmEmbedding for DemoHost {
-    type Payload = ();
-    type Error = EvalError;
-
-    fn effect<'a>(
-        &'a self,
-        effect: ExpressionEffect<Self::Payload, Self::Error>,
-    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
-        Box::pin(async move {
-            match effect {
-                ExpressionEffect::ToolCall { name, .. } if name == "foreign" => Value::Int(5),
-                _ => Value::Err(EvalError::TypeMismatch {
-                    expected: "foreign tool call".into(),
-                    actual: "unsupported effect".into(),
-                }),
-            }
-        })
-    }
-}
 
 impl Wake for NoopWake {
     fn wake(self: Arc<Self>) {}
@@ -335,7 +312,11 @@ fn run_demo() -> Result<(), String> {
         &FixtureSources,
     )
     .map_err(|error| format!("invalid demo program: {error}"))?;
-    match block_on(vm.run("demo", vec![("input".into(), Value::Int(input))], DemoHost)) {
+    let mut tools = ToolRouter::<(), EvalError>::new();
+    tools
+        .register("foreign", |_| async { Ok(Value::Int(5)) })
+        .map_err(|error| error.to_string())?;
+    match block_on(vm.run("demo", vec![("input".into(), Value::Int(input))], tools)) {
         StatementOutcome::Return(Value::Int(value)) => {
             println!("result: {value}");
             Ok(())

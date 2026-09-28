@@ -2,7 +2,17 @@
 
 `atman-rt` is an embeddable Atman language VM. It parses and prints `.at` source, resolves `use` and `pub` flows, validates and links modules, and executes expressions, statements, cold Flow calls, list operations, fanout, routes, watch rules, cancellation, and lifecycle hooks. It does not start an async runtime or depend on Atman tools, providers, sessions, storage, the CLI, or the daemon.
 
-An embedding application calls `atman_rt::Vm::compile(Source, &resolver)` to build a VM from source text. The host implements `SourceResolver` to load imported source under its own path and trust policy, and `VmEmbedding` to dispatch evaluated external effects. `Vm::run(flow_name, args, host)` executes an entry flow; inside `.at`, `name(args)` creates a cold Flow Future, `.await` executes one call, and `fanout` drives an array of calls concurrently. The host polls the VM's returned future with its own executor. `VmEmbedding` also has optional callbacks for tool preflight before argument evaluation, cancellation, node observation, and child-flow context. A host that authorizes tools should recheck authorization when dispatching the effect. The host chooses its payload and error types through `Value<P, E>`.
+An embedding application calls `atman_rt::Vm::compile(Source, &resolver)` to build a VM from source text. The host implements `SourceResolver` to load imported source under its own path and trust policy. `Vm::run(flow_name, args, host)` executes an entry flow; inside `.at`, `name(args)` creates a cold Flow Future, `.await` executes one call, and `fanout` drives an array of calls concurrently. The host polls the VM's returned future with its own executor. The host chooses its payload and error types through `Value<P, E>`.
+
+For tools supplied by an embedding application, `ToolRouter` binds asynchronous closures by name and implements `VmEmbedding` directly. After compiling a `vm`, a host can register the `foreign()` tool used by the fixture:
+
+```rust
+let mut tools = atman_rt::ToolRouter::<(), atman_rt::EvalError>::new();
+tools.register("foreign", |_| async { Ok(atman_rt::Value::Int(5)) })?;
+let outcome = vm.run("demo", vec![("input".into(), atman_rt::Value::Int(6))], tools).await;
+```
+
+Handlers receive owned, evaluated `ToolArgs`. `args.int("input", 0)?`, `string`, `float`, and `bool` read a named argument first and otherwise use the given positional index. Registration rejects duplicate, empty, and evaluator-reserved names. Missing tools fail before their arguments run and are checked again at dispatch. Handler errors become `Value::Err`; non-tool effects return an unsupported-effect error. `ToolRouter` clones are snapshots, so registering on one clone does not alter another. Applications that need authorization, lifecycle hooks, or other effects can implement `VmEmbedding` and delegate only tool calls to `ToolRouter::dispatch`.
 
 The default `syntax` feature includes the text parser. With `default-features = false`, a host can construct a linked program from AST and execute it through `Vm::new` without the parser dependency. The VM uses `no_std` and `alloc`; `syntax` is disabled for the checked `no_std` dependency configuration.
 
@@ -12,7 +22,7 @@ The [standalone embedding fixture](https://github.com/W-Mai/atman/tree/main/fixt
 cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked
 ```
 
-The same fixture includes an interactive `.at` demo using `Vm::compile` and a `VmEmbedding` host. The demo compiles [`demo.at`](../../fixtures/atman-rt-embed/src/demo.at) with a host source resolver, links a `pub flow` from `helper.at`, prompts for an integer, invokes the host-provided `foreign()` effect, and prints the result. Pass a number after `--demo` to run it without a prompt:
+The same fixture includes an interactive `.at` demo using `Vm::compile` and `ToolRouter`. The demo compiles [`demo.at`](../../fixtures/atman-rt-embed/src/demo.at) with a host source resolver, links a `pub flow` from `helper.at`, prompts for an integer, invokes the registered `foreign()` tool, and prints the result. Pass a number after `--demo` to run it without a prompt:
 
 ```sh
 cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked -- --demo
