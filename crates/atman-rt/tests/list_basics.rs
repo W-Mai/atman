@@ -97,12 +97,10 @@ fn namespaced_length_only_accepts_lists() {
 fn empty_list_errors_name_the_called_intrinsic() {
     assert!(matches!(
         run(r#"flow main() -> int { return head([]) }"#),
-        StatementOutcome::Err(EvalError::TypeMismatch { expected, actual })
-            if expected == "non-empty list" && actual == "head: empty list"
+        StatementOutcome::Err(EvalError::EmptyList(name)) if name == "head"
     ));
     assert!(matches!(
         run(r#"flow main() -> int { return list.last([]) }"#),
-        StatementOutcome::Err(EvalError::TypeMismatch { expected, actual })
-            if expected == "non-empty list" && actual == "list.last: empty list"
+        StatementOutcome::Err(EvalError::EmptyList(name)) if name == "list.last"
     ));
 }
