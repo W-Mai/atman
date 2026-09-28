@@ -409,6 +409,7 @@ Drag across transcript text, including line-end space and short gaps between Mar
 ```
 atman/
   crates/
+    atman-macros/    # Compile-time bindings for Rust host APIs
     atman-rt/        # Complete .at language VM: syntax, linking, validation, values, flow execution
     atman-runtime/   # Atman host: effects, executor, tools, providers, sessions, memory, MCP
     atman-cli/       # Binary, REPL, slash commands, monitor, daemon client
@@ -420,7 +421,20 @@ atman/
   docs/              # Quickstart, context strategy, list combinators
 ```
 
-`atman-rt` is the complete Atman language VM. `Vm::compile(Source, &resolver)` parses and links `.at` source, including `use` and `pub` flows. A Rust host can register async tool handlers with `ToolRouter` and pass it directly to `Vm::run`; hosts needing other effects or execution callbacks can implement `VmEmbedding`. Atman's tools, providers, sessions, and storage are supplied by `atman-runtime`; another host can use `atman-rt` without that crate. `atman-runtime::ToolRegistry::register_fn` binds simple async tools with explicit tier and optional schema metadata through the existing approval and event path.
+`atman-rt` is the complete Atman language VM. `Vm::compile(Source, &resolver)` parses and links `.at` source, including `use` and `pub` flows. `#[atman_rt::tools]` generates typed tool bindings from Rust functions; a host can also register handlers manually with `ToolRouter` or implement `VmEmbedding` for other effects and callbacks. Atman's tools, providers, sessions, and storage are supplied by `atman-runtime`; another host can use `atman-rt` without that crate. `#[atman_runtime::tools]` generates tool schemas and registration with an explicit Tier through the existing approval and event path; `ToolRegistry::register_fn` remains available for manual bindings.
+
+```rust
+#[atman_runtime::tools]
+mod host_tools {
+    /// Double an integer.
+    #[tool(name = "math.double", tier = 0)]
+    pub async fn double(value: i64) -> i64 { value * 2 }
+}
+
+host_tools::register(&registry)?;
+```
+
+Product bindings require `tier` on every `#[tool]`. Tiers 1–4 also require a `cancel` value such as `#[tool(tier = 2, cancel = "atomic")]`; accepted values are `abort_safe`, `revertible`, `atomic`, and `irreversible`. Dynamic approval, preview, and provenance behavior remain on the existing `Tool` trait.
 
 `cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked` checks portable flow behavior with only `atman-rt` as an Atman dependency. `cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked -- --demo 6` compiles `.at` source, imports a public flow, invokes a host effect, and prints `result: 18`. Omit `6` to enter an integer interactively. The CI workflow runs the fixture on Linux, macOS, and Windows, runs it on Wasm/WASI, and checks the `no_std` core on `wasm32-unknown-unknown`.
 

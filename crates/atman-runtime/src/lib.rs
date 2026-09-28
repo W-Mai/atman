@@ -100,6 +100,7 @@ pub mod watch;
 pub mod workflow;
 
 pub use atman_host::AtmanHost;
+pub use atman_macros::runtime_tools as tools;
 pub use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions};
 pub use attachment_store::AttachmentStore;
 pub use context_plan::{
@@ -139,5 +140,11 @@ pub use tool::{
 };
 pub use tool_naming::{ToolNaming, from_wire, to_wire};
 pub use validate::{ValidationError, validate};
-pub use value::{AtmanPayload, ValueJson};
+pub use value::{AtmanPayload, AtmanValue as Value, ValueJson};
 pub use workflow::{NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind};
+
+/// Dependencies used by generated tool bindings.
+#[doc(hidden)]
+pub mod __private {
+    pub use serde_json;
+}

@@ -17,6 +17,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Typed tool bindings** — `#[atman_rt::tools]` and `#[atman_runtime::tools]` generate argument decoding and registration from Rust function signatures. Product bindings generate input schemas and require an explicit permission tier.
 - **Tool registration** — Embedded hosts can register async tool handlers with `atman_rt::ToolRouter`. `atman-runtime::ToolRegistry::register_fn` binds function tools with explicit tier metadata through the existing approval and event path.
 - **Natural Flow calls** — Local and `use`-bound flows use function-call syntax. `fanout` concurrently drives cold Flow Futures and returns results in source order.
 - **Reusable flow sources** — `use` binds public flows from other `.at` files by name or namespace. CLI, daemon, slash commands, and flow checks load dependencies before execution. Flow versions and snapshots include dependency contents; recorded source bundles support revision runs and multi-file diffs.

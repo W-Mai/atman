@@ -257,6 +257,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "atman-macros"
+version = "1.13.2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "atman-proto"
 version = "1.13.2"
 dependencies = [
@@ -274,6 +283,7 @@ name = "atman-rt"
 version = "1.13.2"
 dependencies = [
  "async-lock",
+ "atman-macros",
  "futures",
  "proc-macro2",
  "serde",
@@ -285,6 +295,7 @@ name = "atman-runtime"
 version = "1.13.2"
 dependencies = [
  "anyhow",
+ "atman-macros",
  "atman-rt",
  "axum",
  "base64",

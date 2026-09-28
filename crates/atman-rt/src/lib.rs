@@ -30,6 +30,8 @@ pub mod value;
 pub mod vm;
 pub mod watch;
 
+#[cfg(feature = "macros")]
+pub use atman_macros::rt_tools as tools;
 pub use cancel::race_cancel;
 pub use engine::{
     CallArgumentError, Engine, FlowArgs, FlowExecution, FlowOutcome, HostFuture, LoopExit,

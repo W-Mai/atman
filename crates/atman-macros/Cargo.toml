@@ -1,0 +1,19 @@
+[package]
+name = "atman-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = true
+description = "Tool binding macros for Atman hosts"
+homepage = "https://atman.run"
+repository = "https://github.com/W-Mai/atman"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }

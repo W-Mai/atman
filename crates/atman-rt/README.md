@@ -4,7 +4,22 @@
 
 An embedding application calls `atman_rt::Vm::compile(Source, &resolver)` to build a VM from source text. The host implements `SourceResolver` to load imported source under its own path and trust policy. `Vm::run(flow_name, args, host)` executes an entry flow; inside `.at`, `name(args)` creates a cold Flow Future, `.await` executes one call, and `fanout` drives an array of calls concurrently. The host polls the VM's returned future with its own executor. The host chooses its payload and error types through `Value<P, E>`.
 
-For tools supplied by an embedding application, `ToolRouter` binds asynchronous closures by name and implements `VmEmbedding` directly. After compiling a `vm`, a host can register the `foreign()` tool used by the fixture:
+`#[atman_rt::tools]` generates a `ToolRouter` from typed Rust functions. Parameter names and types come from the function signature, so the host does not need to decode `ToolArgs`:
+
+```rust
+#[atman_rt::tools]
+mod host_tools {
+    #[tool]
+    pub async fn foreign(value: i64) -> i64 { value }
+}
+
+let tools = host_tools::router::<(), atman_rt::EvalError>()?;
+let outcome = vm.run("demo", vec![("input".into(), atman_rt::Value::Int(6))], tools).await;
+```
+
+Tool functions may be synchronous or asynchronous and accept `i64`, `f64`, `bool`, `String`, `()`, `Option<T>`, or `Vec<T>` with one layer of wrapping. They may return those types or `Result<T, E>`; `Option<()>` and nested wrappers are rejected at compile time. Use `#[tool(name = "namespace.name")]` to set the `.at` tool name.
+
+For dynamic registrations, `ToolRouter` also binds asynchronous closures by name and implements `VmEmbedding` directly. After compiling a `vm`, a host can register a handler manually:
 
 ```rust
 let mut tools = atman_rt::ToolRouter::<(), atman_rt::EvalError>::new();
@@ -14,7 +29,7 @@ let outcome = vm.run("demo", vec![("input".into(), atman_rt::Value::Int(6))], to
 
 Handlers receive owned, evaluated `ToolArgs`. `args.int("input", 0)?`, `string`, `float`, and `bool` read a named argument first and otherwise use the given positional index. Registration rejects duplicate, empty, and evaluator-reserved names. Missing tools fail before their arguments run and are checked again at dispatch. Handler errors become `Value::Err`; non-tool effects return an unsupported-effect error. `ToolRouter` clones are snapshots, so registering on one clone does not alter another. Applications that need authorization, lifecycle hooks, or other effects can implement `VmEmbedding` and delegate only tool calls to `ToolRouter::dispatch`.
 
-The default `syntax` feature includes the text parser. With `default-features = false`, a host can construct a linked program from AST and execute it through `Vm::new` without the parser dependency. The VM uses `no_std` and `alloc`; `syntax` is disabled for the checked `no_std` dependency configuration.
+Default features enable the text parser and tool macros. With `default-features = false`, a host can construct a linked program from AST and execute it through `Vm::new` without those dependencies. The VM uses `no_std` and `alloc` in this configuration.
 
 The [standalone embedding fixture](https://github.com/W-Mai/atman/tree/main/fixtures/atman-rt-embed) runs pure flows, host effects, loops, list operations, and static and dynamic fanout without any other Atman crate dependency:
 
