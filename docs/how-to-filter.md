@@ -12,7 +12,7 @@ flow double_values(xs: list) -> list {
 }
 ```
 
-The built-in list combinators are `list.map`, `list.filter`, `list.find`, `list.any`, `list.all`, and `list.reduce`. They evaluate lambda calls sequentially.
+The built-in list operations are `list.len`, `list.is_empty`, `list.first`, `list.last`, `list.tail`, `list.concat`, `list.map`, `list.filter`, `list.find`, `list.any`, `list.all`, and `list.reduce`. Lambda calls evaluate sequentially.
 
 For example, filter non-empty strings:
 

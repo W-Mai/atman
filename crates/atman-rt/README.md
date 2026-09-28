@@ -2,6 +2,8 @@
 
 `atman-rt` is an embeddable Atman language VM. It parses and prints `.at` source, resolves `use` and `pub` flows, validates and links modules, and executes expressions, statements, cold Flow calls, list operations, fanout, routes, watch rules, cancellation, and lifecycle hooks. It does not start an async runtime or depend on Atman tools, providers, sessions, storage, the CLI, or the daemon.
 
+Portable list operations include `list.len`, `list.is_empty`, `list.first`, `list.last`, `list.tail`, `list.concat`, `list.map`, `list.filter`, `list.find`, `list.any`, `list.all`, and `list.reduce`. The existing `len`, `is_empty`, `head`, `tail`, and `concat` spellings resolve to the same core implementation.
+
 An embedding application calls `atman_rt::Vm::compile(Source, &resolver)` to build a VM from source text. The host implements `SourceResolver` to load imported source under its own path and trust policy. `Vm::run(flow_name, args, host)` executes an entry flow; inside `.at`, `name(args)` creates a cold Flow Future, `.await` executes one call, and `fanout` drives an array of calls concurrently. The host polls the VM's returned future with its own executor. The host chooses its payload and error types through `Value<P, E>`.
 
 `#[atman_rt::tools]` generates a `ToolRouter` from typed Rust functions. A synchronous Rust function runs when its `.at` call is evaluated; an `async fn` creates a cold tool future that runs only on `.await` or in `fanout`. Parameter names and types come from the function signature, so the host does not need to decode `ToolArgs`:

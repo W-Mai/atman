@@ -249,7 +249,7 @@ atman run examples/edit_and_verify.at --flow edit_and_verify \
 | Approval | `user_confirm(msg)` | Pause for human approval |
 | User input | `user_ask(prompt, schema)` | Request structured user input |
 | Fanout | `fanout [...]`, `fanout pending` | Run cold Flow calls concurrently or collect already evaluated values |
-| List | `list.map`, `list.filter`, `list.find`, `list.any`, `list.all`, `list.reduce` | Apply lambdas to list values |
+| List | `list.len`, `list.first`, `list.tail`, `list.concat`, `list.map`, `list.filter`, `list.reduce`, ... | Inspect, combine, and transform list values |
 | Composers | `retry { ... }`, `fallback { ... }` | Retry or choose fallback execution |
 
 ### Routing + lifecycle

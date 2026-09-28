@@ -68,6 +68,8 @@ The lambda forms `list.map`, `list.filter`, `list.find`, `list.any`, `list.all`,
 and `list.reduce` execute sequentially. The older registered tools such as
 `list_map` and `list_reduce` are separate APIs and are not lambda aliases.
 
+`list.len`, `list.is_empty`, `list.first`, `list.last`, `list.tail`, and `list.concat` are portable VM intrinsics. The established `len`, `is_empty`, `head`, `tail`, and `concat` spellings use the same implementation.
+
 ## Tool Calls and LLM Calls
 
 Every dotted call is a tool call. Tool names use `namespace.action` spelling.

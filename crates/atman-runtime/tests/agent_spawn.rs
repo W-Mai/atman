@@ -407,7 +407,6 @@ async fn spawned_managed_context_persists_assistant_tool_transactions() {
     tools.register(Arc::new(atman_runtime::tools::llm_call::LlmCallTool));
     tools.register(Arc::new(atman_runtime::tools::stdlib::ExtractToolUses));
     tools.register(Arc::new(atman_runtime::tools::stdlib::DispatchAll));
-    tools.register(Arc::new(atman_runtime::tools::stdlib::IsEmpty));
     tools.register(Arc::new(atman_runtime::tools::stdlib::TextConcat));
     tools.register(Arc::new(atman_runtime::tools::session::SessionPush));
     tools.register(Arc::new(Probe));

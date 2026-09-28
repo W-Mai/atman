@@ -8,6 +8,14 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ListIntrinsic {
+    Len,
+    LenOrString,
+    IsEmpty,
+    IsEmptyOrString,
+    First,
+    Last,
+    Tail,
+    Concat,
     Map,
     Filter,
     Reduce,
@@ -19,17 +27,37 @@ pub enum ListIntrinsic {
 impl ListIntrinsic {
     pub(crate) fn from_path(path: &[Ident]) -> Option<Self> {
         match path {
+            [name] => Self::from_legacy_name(&name.name),
             [namespace, name] if namespace.name == "list" => Self::from_member(&name.name),
             _ => None,
         }
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
-        Self::from_member(name.strip_prefix("list.")?)
+        name.strip_prefix("list.")
+            .and_then(Self::from_member)
+            .or_else(|| Self::from_legacy_name(name))
+    }
+
+    fn from_legacy_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "len" => Self::LenOrString,
+            "is_empty" => Self::IsEmptyOrString,
+            "head" => Self::First,
+            "tail" => Self::Tail,
+            "concat" => Self::Concat,
+            _ => return None,
+        })
     }
 
     fn from_member(name: &str) -> Option<Self> {
         Some(match name {
+            "len" => Self::Len,
+            "is_empty" => Self::IsEmpty,
+            "first" => Self::First,
+            "last" => Self::Last,
+            "tail" => Self::Tail,
+            "concat" => Self::Concat,
             "map" => Self::Map,
             "filter" => Self::Filter,
             "reduce" => Self::Reduce,
@@ -42,6 +70,14 @@ impl ListIntrinsic {
 
     pub fn name(self) -> &'static str {
         match self {
+            Self::Len => "list.len",
+            Self::LenOrString => "len",
+            Self::IsEmpty => "list.is_empty",
+            Self::IsEmptyOrString => "is_empty",
+            Self::First => "list.first",
+            Self::Last => "list.last",
+            Self::Tail => "list.tail",
+            Self::Concat => "list.concat",
             Self::Map => "list.map",
             Self::Filter => "list.filter",
             Self::Reduce => "list.reduce",
@@ -49,6 +85,20 @@ impl ListIntrinsic {
             Self::Any => "list.any",
             Self::All => "list.all",
         }
+    }
+
+    fn is_basic(self) -> bool {
+        matches!(
+            self,
+            Self::Len
+                | Self::LenOrString
+                | Self::IsEmpty
+                | Self::IsEmptyOrString
+                | Self::First
+                | Self::Last
+                | Self::Tail
+                | Self::Concat
+        )
     }
 }
 
@@ -65,6 +115,21 @@ fn positional<'a, E: ValueError>(args: &'a [Arg], index: usize, name: &str) -> R
     Err(E::missing_positional_argument(name, index))
 }
 
+fn argument<'a, E: ValueError>(
+    args: &'a [Arg],
+    index: usize,
+    parameter: &str,
+    name: &str,
+) -> Result<&'a Expr, E> {
+    args.iter()
+        .find_map(|arg| match arg {
+            Arg::Named { name, value } if name.name == parameter => Some(value),
+            _ => None,
+        })
+        .map(Ok)
+        .unwrap_or_else(|| positional(args, index, name))
+}
+
 /// Evaluates a list intrinsic while delegating external lambda effects to the host.
 pub async fn eval_list_intrinsic<'a, H: ExpressionHost>(
     intrinsic: ListIntrinsic,
@@ -72,7 +137,20 @@ pub async fn eval_list_intrinsic<'a, H: ExpressionHost>(
     env: &'a Env<Value<H::Payload, H::Error>>,
     host: &'a H,
 ) -> Value<H::Payload, H::Error> {
-    let name = intrinsic.name();
+    eval_list_intrinsic_named(intrinsic, intrinsic.name(), args, env, host).await
+}
+
+pub(crate) async fn eval_list_intrinsic_named<'a, H: ExpressionHost>(
+    intrinsic: ListIntrinsic,
+    name: &str,
+    args: &'a [Arg],
+    env: &'a Env<Value<H::Payload, H::Error>>,
+    host: &'a H,
+) -> Value<H::Payload, H::Error> {
+    if intrinsic.is_basic() {
+        return eval_basic_list_intrinsic(intrinsic, name, args, env, host).await;
+    }
+
     let list_expr = match positional::<H::Error>(args, 0, name) {
         Ok(expr) => expr,
         Err(error) => return Value::Err(error),
@@ -188,7 +266,15 @@ pub async fn eval_list_intrinsic<'a, H: ExpressionHost>(
                     return Value::Bool(false);
                 }
             }
-            ListIntrinsic::Reduce => unreachable!(),
+            ListIntrinsic::Len
+            | ListIntrinsic::LenOrString
+            | ListIntrinsic::IsEmpty
+            | ListIntrinsic::IsEmptyOrString
+            | ListIntrinsic::First
+            | ListIntrinsic::Last
+            | ListIntrinsic::Tail
+            | ListIntrinsic::Concat
+            | ListIntrinsic::Reduce => unreachable!(),
         }
     }
 
@@ -197,7 +283,107 @@ pub async fn eval_list_intrinsic<'a, H: ExpressionHost>(
         ListIntrinsic::Find => Value::Unit,
         ListIntrinsic::Any => Value::Bool(false),
         ListIntrinsic::All => Value::Bool(true),
-        ListIntrinsic::Reduce => unreachable!(),
+        ListIntrinsic::Len
+        | ListIntrinsic::LenOrString
+        | ListIntrinsic::IsEmpty
+        | ListIntrinsic::IsEmptyOrString
+        | ListIntrinsic::First
+        | ListIntrinsic::Last
+        | ListIntrinsic::Tail
+        | ListIntrinsic::Concat
+        | ListIntrinsic::Reduce => unreachable!(),
+    }
+}
+
+async fn eval_basic_list_intrinsic<'a, H: ExpressionHost>(
+    intrinsic: ListIntrinsic,
+    name: &str,
+    args: &'a [Arg],
+    env: &'a Env<Value<H::Payload, H::Error>>,
+    host: &'a H,
+) -> Value<H::Payload, H::Error> {
+    let first_parameter = if intrinsic == ListIntrinsic::Concat {
+        "left"
+    } else {
+        "items"
+    };
+    let first_expr = match argument::<H::Error>(args, 0, first_parameter, name) {
+        Ok(expr) => expr,
+        Err(error) => return Value::Err(error),
+    };
+    let first = eval_expr(first_expr, env, host).await;
+    if first.is_err() {
+        return first;
+    }
+
+    match intrinsic {
+        ListIntrinsic::Len => match first {
+            Value::List(items) => Value::Int(items.len() as i64),
+            other => Value::Err(H::Error::type_mismatch("list", other.kind_name().into())),
+        },
+        ListIntrinsic::LenOrString => match first {
+            Value::List(items) => Value::Int(items.len() as i64),
+            Value::Str(value) => Value::Int(value.chars().count() as i64),
+            other => Value::Err(H::Error::type_mismatch(
+                "list or string",
+                other.kind_name().into(),
+            )),
+        },
+        ListIntrinsic::IsEmpty => match first {
+            Value::List(items) => Value::Bool(items.is_empty()),
+            other => Value::Err(H::Error::type_mismatch("list", other.kind_name().into())),
+        },
+        ListIntrinsic::IsEmptyOrString => match first {
+            Value::List(items) => Value::Bool(items.is_empty()),
+            Value::Str(value) => Value::Bool(value.is_empty()),
+            other => Value::Err(H::Error::type_mismatch(
+                "list or string",
+                other.kind_name().into(),
+            )),
+        },
+        ListIntrinsic::First => match first {
+            Value::List(items) => items
+                .first()
+                .cloned()
+                .unwrap_or_else(|| Value::Err(H::Error::empty_list(name))),
+            other => Value::Err(H::Error::type_mismatch("list", other.kind_name().into())),
+        },
+        ListIntrinsic::Last => match first {
+            Value::List(items) => items
+                .last()
+                .cloned()
+                .unwrap_or_else(|| Value::Err(H::Error::empty_list(name))),
+            other => Value::Err(H::Error::type_mismatch("list", other.kind_name().into())),
+        },
+        ListIntrinsic::Tail => match first {
+            Value::List(items) if !items.is_empty() => Value::List(items[1..].to_vec()),
+            Value::List(_) => Value::Err(H::Error::empty_list(name)),
+            other => Value::Err(H::Error::type_mismatch("list", other.kind_name().into())),
+        },
+        ListIntrinsic::Concat => {
+            let second_expr = match argument::<H::Error>(args, 1, "right", name) {
+                Ok(expr) => expr,
+                Err(error) => return Value::Err(error),
+            };
+            let second = eval_expr(second_expr, env, host).await;
+            if second.is_err() {
+                return second;
+            }
+            let Value::List(mut left) = first else {
+                return Value::Err(H::Error::type_mismatch("list", first.kind_name().into()));
+            };
+            let Value::List(right) = second else {
+                return Value::Err(H::Error::type_mismatch("list", second.kind_name().into()));
+            };
+            left.extend(right);
+            Value::List(left)
+        }
+        ListIntrinsic::Map
+        | ListIntrinsic::Filter
+        | ListIntrinsic::Reduce
+        | ListIntrinsic::Find
+        | ListIntrinsic::Any
+        | ListIntrinsic::All => unreachable!(),
     }
 }
 

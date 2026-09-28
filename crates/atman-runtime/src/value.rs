@@ -50,6 +50,10 @@ impl atman_rt::ValueError for RuntimeError {
         Self::MissingArg(name.into())
     }
 
+    fn empty_list(name: &str) -> Self {
+        Self::ToolFailed(format!("{name}: empty list"))
+    }
+
     fn integer_div_by_zero() -> Self {
         Self::ToolFailed("integer div by zero".into())
     }

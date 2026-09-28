@@ -211,6 +211,14 @@ fn registration_rejects_reserved_and_duplicate_names_without_mutating_clones() {
         tools.register("list.map", |_| async { Ok(Value::Unit) }),
         Err(ToolRegisterError::ReservedName(_))
     ));
+    assert!(matches!(
+        tools.register("list.first", |_| async { Ok(Value::Unit) }),
+        Err(ToolRegisterError::ReservedName(_))
+    ));
+    assert!(matches!(
+        tools.register("head", |_| async { Ok(Value::Unit) }),
+        Err(ToolRegisterError::ReservedName(_))
+    ));
     tools
         .register("list", |_| async { Ok(Value::Unit) })
         .expect("bare list is not an intrinsic");

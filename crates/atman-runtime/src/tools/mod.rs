@@ -71,11 +71,6 @@ pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stub
     reg.register(Arc::new(stdlib::EstimateTokens));
     reg.register(Arc::new(stdlib::FindCompactRange));
     reg.register(Arc::new(stdlib::ReplaceMessagesRange));
-    reg.register(Arc::new(stdlib::Len));
-    reg.register(Arc::new(stdlib::Head));
-    reg.register(Arc::new(stdlib::Tail));
-    reg.register(Arc::new(stdlib::IsEmpty));
-    reg.register(Arc::new(stdlib::Concat));
     reg.register(Arc::new(stdlib::TextConcat));
     reg.register(Arc::new(final_answer::FinalAnswer));
     reg.register(Arc::new(final_answer::ExtractFinalAnswer));

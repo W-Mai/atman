@@ -26,6 +26,7 @@ impl HostValueOps for () {}
 pub trait ValueError {
     fn type_mismatch(expected: &str, actual: String) -> Self;
     fn missing_argument(name: &str) -> Self;
+    fn empty_list(name: &str) -> Self;
     fn integer_div_by_zero() -> Self;
     fn integer_mod_by_zero() -> Self;
     fn missing_positional_argument(name: &str, index: usize) -> Self;
@@ -41,6 +42,7 @@ pub enum EvalError {
     IntegerDivByZero,
     IntegerModByZero,
     MissingArgument(String),
+    EmptyList(String),
     MissingPositionalArgument {
         name: String,
         index: usize,
@@ -62,6 +64,10 @@ impl ValueError for EvalError {
 
     fn missing_argument(name: &str) -> Self {
         Self::MissingArgument(name.into())
+    }
+
+    fn empty_list(name: &str) -> Self {
+        Self::EmptyList(name.into())
     }
 
     fn integer_div_by_zero() -> Self {

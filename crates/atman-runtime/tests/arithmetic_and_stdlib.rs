@@ -162,3 +162,15 @@ flow start() -> int {
     .await;
     assert!(matches!(out, Value::Int(15)));
 }
+
+#[tokio::test]
+async fn empty_head_keeps_the_published_tool_error() {
+    let file = parse_file(r#"flow start() -> int { return head([]) }"#).unwrap();
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
+    let error = ex.run(&file, "start", vec![]).await.unwrap_err();
+    assert!(matches!(
+        error,
+        atman_runtime::RuntimeError::ToolFailed(message) if message == "head: empty list"
+    ));
+}

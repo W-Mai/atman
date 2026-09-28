@@ -6,7 +6,7 @@ use crate::{
     ValueError,
     ast::{Arg, Expr, FlowRef, MessageRole, Node},
     fanout::join_fanout_all,
-    list::{ListIntrinsic, eval_list_intrinsic},
+    list::{ListIntrinsic, eval_list_intrinsic_named},
     ops::{eval_binary, eval_literal, eval_unary},
     watch::WatchRules,
 };
@@ -326,48 +326,52 @@ pub fn eval_expr_with_watch<'a, H: ExpressionHost>(
                         eval_dynamic_fanout(source, lambda, env, host).await
                     }
                     Node::Fanout { source } => eval_fanout(source, env, host).await,
-                    Node::ToolCall { path, args } => match ListIntrinsic::from_path(path) {
-                        Some(intrinsic) => eval_list_intrinsic(intrinsic, args, env, host).await,
-                        None => {
-                            let name = path
-                                .iter()
-                                .map(|id| id.name.as_str())
-                                .collect::<Vec<_>>()
-                                .join(".");
-                            if let Some(value) = host.preflight_tool(&name) {
-                                return value;
+                    Node::ToolCall { path, args } => {
+                        let name = path
+                            .iter()
+                            .map(|id| id.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(".");
+                        match ListIntrinsic::from_path(path) {
+                            Some(intrinsic) => {
+                                eval_list_intrinsic_named(intrinsic, &name, args, env, host).await
                             }
-                            let (positional, named) = match eval_args(args, env, host).await {
-                                Ok(values) => values,
-                                Err(value) => return value,
-                            };
-                            if positional.iter().any(Value::contains_pending_call)
-                                || named.iter().any(|(_, value)| value.contains_pending_call())
-                            {
-                                return Value::Err(H::Error::type_mismatch(
-                                    "tool argument without pending calls",
-                                    "pending call".into(),
-                                ));
-                            }
-                            match host.tool_call_mode(&name) {
-                                ToolCallMode::Deferred => host.make_tool_future(
-                                    name,
-                                    positional,
-                                    named,
-                                    watch_rules.cloned(),
-                                ),
-                                ToolCallMode::Immediate => {
-                                    host.eval_external(ExpressionEffect::ToolCall {
+                            None => {
+                                if let Some(value) = host.preflight_tool(&name) {
+                                    return value;
+                                }
+                                let (positional, named) = match eval_args(args, env, host).await {
+                                    Ok(values) => values,
+                                    Err(value) => return value,
+                                };
+                                if positional.iter().any(Value::contains_pending_call)
+                                    || named.iter().any(|(_, value)| value.contains_pending_call())
+                                {
+                                    return Value::Err(H::Error::type_mismatch(
+                                        "tool argument without pending calls",
+                                        "pending call".into(),
+                                    ));
+                                }
+                                match host.tool_call_mode(&name) {
+                                    ToolCallMode::Deferred => host.make_tool_future(
                                         name,
                                         positional,
                                         named,
-                                        watch_rules: watch_rules.cloned(),
-                                    })
-                                    .await
+                                        watch_rules.cloned(),
+                                    ),
+                                    ToolCallMode::Immediate => {
+                                        host.eval_external(ExpressionEffect::ToolCall {
+                                            name,
+                                            positional,
+                                            named,
+                                            watch_rules: watch_rules.cloned(),
+                                        })
+                                        .await
+                                    }
                                 }
                             }
                         }
-                    },
+                    }
                     Node::UserConfirm { msg } => {
                         let value = eval_expr(msg, env, host).await;
                         if value.is_err() {

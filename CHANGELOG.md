@@ -17,6 +17,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Portable list basics** — `atman-rt` now evaluates `list.len`, `list.is_empty`, `list.first`, `list.last`, `list.tail`, and `list.concat` without host tools. Existing `len`, `is_empty`, `head`, `tail`, and `concat` calls use the same core implementation.
 - **Cold async tools** — Rust `async fn` bindings create deferred tool calls that start on `.await` or `fanout`; synchronous bindings continue to execute immediately. Repeated waits reuse the first result, and approval begins when a deferred call is driven.
 - **Typed tool bindings** — `#[atman_rt::tools]` and `#[atman_runtime::tools]` generate argument decoding and registration from Rust function signatures. Product bindings generate input schemas and require an explicit permission tier.
 - **Tool registration** — Embedded hosts can register async tool handlers with `atman_rt::ToolRouter`. `atman-runtime::ToolRegistry::register_fn` binds function tools with explicit tier metadata through the existing approval and event path.
