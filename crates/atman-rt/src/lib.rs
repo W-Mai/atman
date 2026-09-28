@@ -57,7 +57,9 @@ pub use lifecycle::{FlowEndFact, FlowLifecycle, FlowStartFact, StartedFlow};
 pub use lint::{LintHit, LintRule, lint_file};
 pub use list::{ListIntrinsic, eval_list_intrinsic};
 pub use node::{VmNode, VmNodeKind, format_expr_short};
-pub use ops::{EvalError, HostValueOps, ValueError, eval_binary, eval_literal, eval_unary};
+pub use ops::{
+    EvalError, HostValueOps, IntegerOperation, ValueError, eval_binary, eval_literal, eval_unary,
+};
 #[cfg(feature = "syntax")]
 pub use parse::{ParseError, parse_file};
 pub use pattern::{PatternBindError, PatternValue, bind_pattern};

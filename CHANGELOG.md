@@ -26,6 +26,10 @@ All notable changes to atman are documented in this file.
 - **Reusable flow sources** — `use` binds public flows from other `.at` files by name or namespace. CLI, daemon, slash commands, and flow checks load dependencies before execution. Flow versions and snapshots include dependency contents; recorded source bundles support revision runs and multi-file diffs.
 - **Embeddable Atman VM** — `Vm::compile` parses and links `.at` source with host-resolved imports. `VmDelegate` is the execution boundary for effects, typed authorization permits, observation, wakeable cancellation, flow scopes, and language control; `VmDelegates` composes independent callback facets. Structured effect invocations give authorization and execution phases one stable identity, preserve creation and execution contexts for cold futures, and expose only host-generated audit previews. `Vm::run`, `Vm::run_flow`, and `Vm::run_lifecycle` interrupt pending host work on cancellation and distinguish cancelled completion from an externally dropped future. Builds without the default syntax feature retain the `no_std` AST execution path with `alloc` and pointer-width atomics.
 
+### 🐛 Bug Fixes
+
+- **Integer overflow** — DSL integer addition, subtraction, multiplication, division, remainder, and negation return explicit overflow errors instead of panicking or depending on the Rust build profile. Division and remainder by zero retain their dedicated errors.
+
 ## [1.13.2] — 2026-09-25
 
 ### ✨ Features

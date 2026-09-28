@@ -5,6 +5,31 @@ use crate::{
     ast::{BinOp, Literal, UnOp},
 };
 
+/// Integer operation that could not produce an `i64` result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IntegerOperation {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
+    Negate,
+}
+
+impl IntegerOperation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "addition",
+            Self::Subtract => "subtraction",
+            Self::Multiply => "multiplication",
+            Self::Divide => "division",
+            Self::Remainder => "remainder",
+            Self::Negate => "negation",
+        }
+    }
+}
+
 /// Host-defined behavior for opaque values in flow expressions.
 pub trait HostValueOps: HostPayload {
     fn additive_text(&self) -> Option<String> {
@@ -43,6 +68,15 @@ pub trait ValueError {
     }
     fn integer_div_by_zero() -> Self;
     fn integer_mod_by_zero() -> Self;
+    fn integer_overflow(operation: IntegerOperation) -> Self
+    where
+        Self: Sized,
+    {
+        Self::type_mismatch(
+            "integer result within i64 range",
+            format!("{} overflow", operation.as_str()),
+        )
+    }
     fn missing_positional_argument(name: &str, index: usize) -> Self;
     fn invalid_lambda_arity(name: &str, expected: &str, actual: usize) -> Self;
 }
@@ -55,6 +89,9 @@ pub enum EvalError {
     },
     IntegerDivByZero,
     IntegerModByZero,
+    IntegerOverflow {
+        operation: IntegerOperation,
+    },
     MissingArgument(String),
     EmptyList(String),
     MissingPositionalArgument {
@@ -90,6 +127,10 @@ impl ValueError for EvalError {
 
     fn integer_mod_by_zero() -> Self {
         Self::IntegerModByZero
+    }
+
+    fn integer_overflow(operation: IntegerOperation) -> Self {
+        Self::IntegerOverflow { operation }
     }
 
     fn missing_positional_argument(name: &str, index: usize) -> Self {
@@ -138,7 +179,9 @@ pub fn eval_binary<P: HostValueOps, E: ValueError>(
             _ => type_mismatch("bool || bool", left, right),
         },
         BinOp::Add => match (left, right) {
-            (Value::Int(a), Value::Int(b)) => Value::Int(a + b),
+            (Value::Int(a), Value::Int(b)) => {
+                checked_integer(a.checked_add(*b), IntegerOperation::Add)
+            }
             (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
             (Value::Str(a), Value::Str(b)) => Value::Str(format!("{a}{b}")),
             (Value::Str(a), Value::Host(b)) => match b.additive_text() {
@@ -152,24 +195,32 @@ pub fn eval_binary<P: HostValueOps, E: ValueError>(
             _ => type_mismatch(P::add_expected(), left, right),
         },
         BinOp::Sub => match (left, right) {
-            (Value::Int(a), Value::Int(b)) => Value::Int(a - b),
+            (Value::Int(a), Value::Int(b)) => {
+                checked_integer(a.checked_sub(*b), IntegerOperation::Subtract)
+            }
             (Value::Float(a), Value::Float(b)) => Value::Float(a - b),
             _ => type_mismatch("int-int | float-float", left, right),
         },
         BinOp::Mul => match (left, right) {
-            (Value::Int(a), Value::Int(b)) => Value::Int(a * b),
+            (Value::Int(a), Value::Int(b)) => {
+                checked_integer(a.checked_mul(*b), IntegerOperation::Multiply)
+            }
             (Value::Float(a), Value::Float(b)) => Value::Float(a * b),
             _ => type_mismatch("int*int | float*float", left, right),
         },
         BinOp::Div => match (left, right) {
             (Value::Int(_), Value::Int(0)) => Value::Err(E::integer_div_by_zero()),
-            (Value::Int(a), Value::Int(b)) => Value::Int(a / b),
+            (Value::Int(a), Value::Int(b)) => {
+                checked_integer(a.checked_div(*b), IntegerOperation::Divide)
+            }
             (Value::Float(a), Value::Float(b)) => Value::Float(a / b),
             _ => type_mismatch("int/int | float/float", left, right),
         },
         BinOp::Mod => match (left, right) {
             (Value::Int(_), Value::Int(0)) => Value::Err(E::integer_mod_by_zero()),
-            (Value::Int(a), Value::Int(b)) => Value::Int(a % b),
+            (Value::Int(a), Value::Int(b)) => {
+                checked_integer(a.checked_rem(*b), IntegerOperation::Remainder)
+            }
             (Value::Float(a), Value::Float(b)) => Value::Float(a % b),
             _ => type_mismatch("int%int | float%float", left, right),
         },
@@ -183,10 +234,20 @@ pub fn eval_unary<P: HostValueOps, E: ValueError>(op: UnOp, value: &Value<P, E>)
             other => Value::Err(E::type_mismatch("bool", other.kind_name().into())),
         },
         UnOp::Neg => match value {
-            Value::Int(number) => Value::Int(-number),
+            Value::Int(number) => checked_integer(number.checked_neg(), IntegerOperation::Negate),
             Value::Float(number) => Value::Float(-number),
             other => Value::Err(E::type_mismatch("int or float", other.kind_name().into())),
         },
+    }
+}
+
+fn checked_integer<P, E: ValueError>(
+    result: Option<i64>,
+    operation: IntegerOperation,
+) -> Value<P, E> {
+    match result {
+        Some(value) => Value::Int(value),
+        None => Value::Err(E::integer_overflow(operation)),
     }
 }
 
@@ -232,6 +293,16 @@ fn type_mismatch<P: HostValueOps, E: ValueError>(
 mod tests {
     use super::*;
 
+    fn assert_overflow(value: Value<(), EvalError>, operation: IntegerOperation) {
+        assert_eq!(
+            match value {
+                Value::Err(EvalError::IntegerOverflow { operation }) => operation,
+                _ => panic!("expected integer overflow"),
+            },
+            operation,
+        );
+    }
+
     #[test]
     fn pure_values_evaluate_without_a_host() {
         let left = Value::<(), EvalError>::Int(8);
@@ -247,6 +318,49 @@ mod tests {
         assert!(matches!(
             eval_binary(BinOp::Eq, &left, &right),
             Value::Bool(false)
+        ));
+    }
+
+    #[test]
+    fn integer_arithmetic_reports_every_overflow_without_panicking() {
+        let max = Value::<(), EvalError>::Int(i64::MAX);
+        let min = Value::<(), EvalError>::Int(i64::MIN);
+        let one = Value::<(), EvalError>::Int(1);
+        let two = Value::<(), EvalError>::Int(2);
+        let negative_one = Value::<(), EvalError>::Int(-1);
+
+        assert_overflow(eval_binary(BinOp::Add, &max, &one), IntegerOperation::Add);
+        assert_overflow(
+            eval_binary(BinOp::Sub, &min, &one),
+            IntegerOperation::Subtract,
+        );
+        assert_overflow(
+            eval_binary(BinOp::Mul, &max, &two),
+            IntegerOperation::Multiply,
+        );
+        assert_overflow(
+            eval_binary(BinOp::Div, &min, &negative_one),
+            IntegerOperation::Divide,
+        );
+        assert_overflow(
+            eval_binary(BinOp::Mod, &min, &negative_one),
+            IntegerOperation::Remainder,
+        );
+        assert_overflow(eval_unary(UnOp::Neg, &min), IntegerOperation::Negate);
+    }
+
+    #[test]
+    fn integer_zero_divisors_keep_their_specific_errors() {
+        let value = Value::<(), EvalError>::Int(1);
+        let zero = Value::<(), EvalError>::Int(0);
+
+        assert!(matches!(
+            eval_binary(BinOp::Div, &value, &zero),
+            Value::Err(EvalError::IntegerDivByZero)
+        ));
+        assert!(matches!(
+            eval_binary(BinOp::Mod, &value, &zero),
+            Value::Err(EvalError::IntegerModByZero)
         ));
     }
 }
