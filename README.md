@@ -434,6 +434,8 @@ mod host_tools {
 host_tools::register(&registry)?;
 ```
 
+For generated bindings, a Rust `fn` returns its `.at` value immediately. A Rust `async fn` returns a cold value; use `math.double(value: 3).await` or place calls in `fanout [...]` to execute them. Approval and tool events begin when the call is driven. Manual `Tool` implementations can declare the same behavior with `call_mode()`, and `ToolDefinition::call_mode` sets it for `register_fn` bindings.
+
 Product bindings require `tier` on every `#[tool]`. Tiers 1–4 also require a `cancel` value such as `#[tool(tier = 2, cancel = "atomic")]`; accepted values are `abort_safe`, `revertible`, `atomic`, and `irreversible`. Dynamic approval, preview, and provenance behavior remain on the existing `Tool` trait.
 
 `cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked` checks portable flow behavior with only `atman-rt` as an Atman dependency. `cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked -- --demo 6` compiles `.at` source, imports a public flow, invokes a host effect, and prints `result: 18`. Omit `6` to enter an integer interactively. The CI workflow runs the fixture on Linux, macOS, and Windows, runs it on Wasm/WASI, and checks the `no_std` core on `wasm32-unknown-unknown`.

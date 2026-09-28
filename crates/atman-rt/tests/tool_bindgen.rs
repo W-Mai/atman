@@ -1,13 +1,33 @@
 use std::{
     future::Future,
     pin::pin,
+    sync::atomic::Ordering,
     task::{Context, Poll, Waker},
 };
 
-use atman_rt::{EvalError, ToolArgs, ToolRegisterError, Value};
+use atman_rt::{
+    EvalError, Source, SourceResolver, StatementOutcome, ToolArgs, ToolRegisterError, Value, Vm,
+};
 
 #[atman_rt::tools]
 mod host_tools {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub static ASYNC_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static SYNC_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[tool]
+    pub async fn async_probe() -> i64 {
+        ASYNC_CALLS.fetch_add(1, Ordering::SeqCst);
+        7
+    }
+
+    #[tool]
+    pub fn sync_probe() -> i64 {
+        SYNC_CALLS.fetch_add(1, Ordering::SeqCst);
+        3
+    }
+
     #[tool(name = "math.double")]
     pub async fn double(value: i64) -> i64 {
         value * 2
@@ -42,6 +62,16 @@ mod host_tools {
 
     pub fn helper() -> i64 {
         42
+    }
+}
+
+struct NoSources;
+
+impl SourceResolver for NoSources {
+    type Error = &'static str;
+
+    fn resolve(&self, _importer_id: &str, _specifier: &str) -> Result<Source, Self::Error> {
+        Err("source unavailable")
     }
 }
 
@@ -99,6 +129,39 @@ fn generated_router_binds_async_and_sync_functions() {
         ready(tools.dispatch("checked", args(vec![Value::Int(-1)], vec![]))),
         Value::Err(EvalError::MissingArgument(name)) if name == "nonnegative"
     ));
+}
+
+#[test]
+fn generated_router_preserves_rust_async_semantics_in_the_vm() {
+    let tools = host_tools::router::<(), EvalError>().expect("register generated tools");
+    let cold = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow main() -> int { pending = async_probe(); return sync_probe() }",
+        ),
+        &NoSources,
+    )
+    .expect("compile cold call");
+    assert!(matches!(
+        ready(cold.run("main", vec![], tools.clone())),
+        StatementOutcome::Return(Value::Int(3))
+    ));
+    assert_eq!(host_tools::ASYNC_CALLS.load(Ordering::SeqCst), 0);
+    assert_eq!(host_tools::SYNC_CALLS.load(Ordering::SeqCst), 1);
+
+    let awaited = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow main() -> int { return async_probe().await }",
+        ),
+        &NoSources,
+    )
+    .expect("compile awaited call");
+    assert!(matches!(
+        ready(awaited.run("main", vec![], tools)),
+        StatementOutcome::Return(Value::Int(7))
+    ));
+    assert_eq!(host_tools::ASYNC_CALLS.load(Ordering::SeqCst), 1);
 }
 
 #[test]

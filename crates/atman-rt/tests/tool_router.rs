@@ -1,13 +1,30 @@
 use std::{
     future::Future,
     pin::pin,
-    task::{Context, Poll, Waker},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    task::{Context, Poll, Wake, Waker},
 };
 
 use atman_rt::{
     EvalError, ExpressionEffect, Source, SourceResolver, StatementOutcome, ToolArgs,
     ToolRegisterError, ToolRouter, Value, Vm, VmEmbedding,
 };
+use futures::task::AtomicWaker;
+
+struct WakeFlag(AtomicBool);
+
+impl Wake for WakeFlag {
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
 
 struct NoSources;
 
@@ -39,13 +56,129 @@ fn registered_tool_receives_evaluated_named_and_positional_arguments() {
     .expect("compile source");
     let mut tools = ToolRouter::<(), EvalError>::new();
     tools
-        .register("add", |args| async move {
+        .register_sync("add", |args| {
             Ok(Value::Int(args.int("a", 0)? + args.int("b", 1)?))
         })
         .expect("register tool");
     assert!(matches!(
         ready(vm.run("main", vec![], tools)),
         StatementOutcome::Return(Value::Int(5))
+    ));
+}
+
+#[test]
+fn async_tool_is_cold_until_await_and_reuses_its_result() {
+    let mut tools = ToolRouter::<(), EvalError>::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    tools
+        .register("delayed", move |args| {
+            let observed = Arc::clone(&observed);
+            async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(Value::Int(args.int("value", 0)?))
+            }
+        })
+        .expect("register async tool");
+
+    let cold = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow main() -> int { pending = delayed(4); return 0 }",
+        ),
+        &NoSources,
+    )
+    .expect("compile cold call");
+    assert!(matches!(
+        ready(cold.run("main", vec![], tools.clone())),
+        StatementOutcome::Return(Value::Int(0))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let awaited = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow main() -> int { pending = delayed(4); first = pending.await; second = pending.await; return first + second }",
+        ),
+        &NoSources,
+    )
+    .expect("compile awaited call");
+    assert!(matches!(
+        ready(awaited.run("main", vec![], tools.clone())),
+        StatementOutcome::Return(Value::Int(8))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let escaped = Vm::compile(
+        Source::new("main.at", "flow main() -> int { return delayed(4) }"),
+        &NoSources,
+    )
+    .expect("compile escaped call");
+    assert!(matches!(
+        ready(escaped.run("main", vec![], tools)),
+        StatementOutcome::Err(EvalError::TypeMismatch { actual, .. }) if actual == "pending call"
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn fanout_starts_async_tools_concurrently() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow main() -> [int] { return fanout [delayed(1), delayed(2)] }",
+        ),
+        &NoSources,
+    )
+    .expect("compile fanout");
+    let started = Arc::new(AtomicUsize::new(0));
+    let waiting = Arc::new(AtomicWaker::new());
+    let mut tools = ToolRouter::<(), EvalError>::new();
+    tools
+        .register("delayed", move |args| {
+            let started = Arc::clone(&started);
+            let waiting = Arc::clone(&waiting);
+            async move {
+                if started.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                    waiting.wake();
+                }
+                std::future::poll_fn(|cx| {
+                    if started.load(Ordering::SeqCst) == 2 {
+                        return Poll::Ready(Ok(Value::Int(
+                            args.int("value", 0).expect("integer argument"),
+                        )));
+                    }
+                    waiting.register(cx.waker());
+                    if started.load(Ordering::SeqCst) == 2 {
+                        waiting.wake();
+                    }
+                    Poll::Pending
+                })
+                .await
+            }
+        })
+        .expect("register async tool");
+    let mut future = pin!(vm.run("main", vec![], tools));
+    let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+    let waker = Waker::from(Arc::clone(&wake_flag));
+    let mut context = Context::from_waker(&waker);
+    let outcome = match future.as_mut().poll(&mut context) {
+        Poll::Ready(outcome) => outcome,
+        Poll::Pending => {
+            assert!(
+                wake_flag.0.swap(false, Ordering::SeqCst),
+                "pending fanout must wake its executor when another branch starts"
+            );
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(outcome) => outcome,
+                Poll::Pending => panic!("woken fanout must complete on the next poll"),
+            }
+        }
+    };
+    assert!(matches!(
+        outcome,
+        StatementOutcome::Return(Value::List(values))
+            if matches!(&values[..], [Value::Int(1), Value::Int(2)])
     ));
 }
 

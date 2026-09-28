@@ -74,10 +74,10 @@ impl VmHost for AtmanStatementAdapter<'_> {
             }
             VmCallError::Cancelled => RuntimeError::Cancelled("flow call cancelled".into()),
             VmCallError::InvalidFutureOwner => {
-                RuntimeError::ToolFailed("flow future belongs to another invocation".into())
+                RuntimeError::ToolFailed("pending call belongs to another invocation".into())
             }
             VmCallError::FutureBoundary => {
-                RuntimeError::ToolFailed("flow future cannot cross a flow or host boundary".into())
+                RuntimeError::ToolFailed("pending call cannot cross a flow or host boundary".into())
             }
         }
     }
@@ -378,6 +378,7 @@ fn value_preview(v: &Value) -> Option<String> {
         Value::Host(AtmanPayload::EditProposal(_)) => "<edit proposal>".into(),
         Value::Lambda { .. } => "<lambda>".into(),
         Value::FlowFuture(_) => "<flow future>".into(),
+        Value::ToolFuture(_) => "<tool future>".into(),
     };
     let trimmed = raw.trim();
     if trimmed.is_empty() {

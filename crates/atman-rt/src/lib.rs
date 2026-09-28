@@ -40,7 +40,8 @@ pub use engine::{
 };
 pub use env::Env;
 pub use expr::{
-    ExpressionEffect, ExpressionHost, eval_dynamic_fanout, eval_expr, eval_fanout, is_type_name,
+    ExpressionEffect, ExpressionHost, ToolCallMode, eval_dynamic_fanout, eval_expr, eval_fanout,
+    is_type_name,
 };
 pub use fanout::join_fanout_all;
 pub use identity::{IdSource, RunId, TurnId};
@@ -58,6 +59,6 @@ pub use route::{RouteMatch, resolve_route};
 pub use status::{FlowTermination, classify_outcome, classify_result};
 pub use tool_router::{ToolArgs, ToolRegisterError, ToolRouter};
 pub use validate::{LanguageValidationError, LanguageValidationReport, validate_flow};
-pub use value::{FlowFuture, HostPayload, Value};
+pub use value::{FlowFuture, HostPayload, NamedValues, ToolFuture, Value};
 pub use vm::{FlowCall, FlowDriveMode, Vm, VmCallError, VmEmbedding, VmHost};
 pub use watch::{WatchObservation, WatchRules, WatchState, WatchWarning};

@@ -4,7 +4,7 @@
 
 An embedding application calls `atman_rt::Vm::compile(Source, &resolver)` to build a VM from source text. The host implements `SourceResolver` to load imported source under its own path and trust policy. `Vm::run(flow_name, args, host)` executes an entry flow; inside `.at`, `name(args)` creates a cold Flow Future, `.await` executes one call, and `fanout` drives an array of calls concurrently. The host polls the VM's returned future with its own executor. The host chooses its payload and error types through `Value<P, E>`.
 
-`#[atman_rt::tools]` generates a `ToolRouter` from typed Rust functions. Parameter names and types come from the function signature, so the host does not need to decode `ToolArgs`:
+`#[atman_rt::tools]` generates a `ToolRouter` from typed Rust functions. A synchronous Rust function runs when its `.at` call is evaluated; an `async fn` creates a cold tool future that runs only on `.await` or in `fanout`. Parameter names and types come from the function signature, so the host does not need to decode `ToolArgs`:
 
 ```rust
 #[atman_rt::tools]
@@ -17,9 +17,11 @@ let tools = host_tools::router::<(), atman_rt::EvalError>()?;
 let outcome = vm.run("demo", vec![("input".into(), atman_rt::Value::Int(6))], tools).await;
 ```
 
+The flow calls this tool as `foreign(value: input).await`. Building the future does not run the tool or request approval. Repeated awaits on the same future reuse its result.
+
 Tool functions may be synchronous or asynchronous and accept `i64`, `f64`, `bool`, `String`, `()`, `Option<T>`, or `Vec<T>` with one layer of wrapping. They may return those types or `Result<T, E>`; `Option<()>` and nested wrappers are rejected at compile time. Use `#[tool(name = "namespace.name")]` to set the `.at` tool name.
 
-For dynamic registrations, `ToolRouter` also binds asynchronous closures by name and implements `VmEmbedding` directly. After compiling a `vm`, a host can register a handler manually:
+For dynamic registrations, `ToolRouter::register` binds cold asynchronous closures and `ToolRouter::register_sync` binds immediate synchronous closures. The router implements `VmEmbedding` directly. After compiling a `vm`, a host can register a handler manually:
 
 ```rust
 let mut tools = atman_rt::ToolRouter::<(), atman_rt::EvalError>::new();
@@ -27,7 +29,7 @@ tools.register("foreign", |_| async { Ok(atman_rt::Value::Int(5)) })?;
 let outcome = vm.run("demo", vec![("input".into(), atman_rt::Value::Int(6))], tools).await;
 ```
 
-Handlers receive owned, evaluated `ToolArgs`. `args.int("input", 0)?`, `string`, `float`, and `bool` read a named argument first and otherwise use the given positional index. Registration rejects duplicate, empty, and evaluator-reserved names. Missing tools fail before their arguments run and are checked again at dispatch. Handler errors become `Value::Err`; non-tool effects return an unsupported-effect error. `ToolRouter` clones are snapshots, so registering on one clone does not alter another. Applications that need authorization, lifecycle hooks, or other effects can implement `VmEmbedding` and delegate only tool calls to `ToolRouter::dispatch`.
+Handlers receive owned, evaluated `ToolArgs`. `args.int("input", 0)?`, `string`, `float`, and `bool` read a named argument first and otherwise use the given positional index. Registration rejects duplicate, empty, and evaluator-reserved names. Missing tools fail before their arguments run and are checked again at dispatch. Handler errors become `Value::Err`; non-tool effects return an unsupported-effect error. `ToolRouter` clones are snapshots, so registering on one clone does not alter another. Applications that need authorization, lifecycle hooks, or other effects can implement `VmEmbedding` and delegate `tool_call_mode` and tool dispatch to the router; the VM invokes authorization on dispatch when a deferred call is driven.
 
 Default features enable the text parser and tool macros. With `default-features = false`, a host can construct a linked program from AST and execute it through `Vm::new` without those dependencies. The VM uses `no_std` and `alloc` in this configuration.
 

@@ -101,6 +101,7 @@ pub mod workflow;
 
 pub use atman_host::AtmanHost;
 pub use atman_macros::runtime_tools as tools;
+pub use atman_rt::ToolCallMode;
 pub use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions};
 pub use attachment_store::AttachmentStore;
 pub use context_plan::{

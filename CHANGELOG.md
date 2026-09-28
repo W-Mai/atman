@@ -17,6 +17,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Cold async tools** — Rust `async fn` bindings create deferred tool calls that start on `.await` or `fanout`; synchronous bindings continue to execute immediately. Repeated waits reuse the first result, and approval begins when a deferred call is driven.
 - **Typed tool bindings** — `#[atman_rt::tools]` and `#[atman_runtime::tools]` generate argument decoding and registration from Rust function signatures. Product bindings generate input schemas and require an explicit permission tier.
 - **Tool registration** — Embedded hosts can register async tool handlers with `atman_rt::ToolRouter`. `atman-runtime::ToolRegistry::register_fn` binds function tools with explicit tier metadata through the existing approval and event path.
 - **Natural Flow calls** — Local and `use`-bound flows use function-call syntax. `fanout` concurrently drives cold Flow Futures and returns results in source order.

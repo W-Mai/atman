@@ -14,14 +14,15 @@ use core::{
 
 use crate::{
     Engine, ExpressionEffect, ExpressionHost, FlowArgs, FlowOutcome, HostFuture, HostValueOps,
-    Preflight, StatementHost, StatementOutcome, Value, ValueError,
+    NamedValues, Preflight, StatementHost, StatementOutcome, ToolCallMode, Value, ValueError,
     ast::{Arg, Contract, FlowRef, LifecycleEvent, Stmt},
     engine::bind_evaluated_call_arguments,
-    expr::{EvaluatedArg, MAX_ACTIVE_FLOW_FUTURES},
+    expr::{EvaluatedArg, MAX_ACTIVE_CALLS},
     pattern::PatternBindError,
     program::{FlowId, LinkedProgram, ModuleId},
     route::RouteMatch,
-    value::FlowFuture,
+    value::{FlowFuture, ToolFuture},
+    watch::WatchRules,
 };
 
 /// Selects the child context when a cold flow call is first driven.
@@ -70,8 +71,8 @@ impl fmt::Display for VmCallError {
             Self::ControlFlowEscaped(name) => {
                 write!(f, "break or continue escaped from flow `{name}`")
             }
-            Self::InvalidFutureOwner => write!(f, "flow future belongs to another invocation"),
-            Self::FutureBoundary => write!(f, "flow future cannot cross a flow or host boundary"),
+            Self::InvalidFutureOwner => write!(f, "pending call belongs to another invocation"),
+            Self::FutureBoundary => write!(f, "pending call cannot cross a flow or host boundary"),
             Self::Cancelled => write!(f, "flow call was cancelled"),
         }
     }
@@ -150,6 +151,10 @@ pub trait VmEmbedding: Clone + Send + Sync {
         None
     }
 
+    fn tool_call_mode(&self, _name: &str) -> ToolCallMode {
+        ToolCallMode::Immediate
+    }
+
     fn call_error(&self, error: VmCallError) -> Self::Error {
         Self::Error::type_mismatch("valid Atman call", error.to_string())
     }
@@ -206,6 +211,10 @@ impl<H: VmEmbedding> ExpressionHost for EmbeddingAdapter<H> {
 
     fn preflight_tool(&self, name: &str) -> Option<Value<Self::Payload, Self::Error>> {
         self.host.preflight_tool(name)
+    }
+
+    fn tool_call_mode(&self, name: &str) -> ToolCallMode {
+        self.host.tool_call_mode(name)
     }
 
     fn eval_external<'a>(
@@ -338,7 +347,7 @@ impl Vm {
         args: FlowArgs<H::Payload, H::Error>,
         host: H,
     ) -> FlowOutcome<H::Payload, H::Error> {
-        if args.iter().any(|(_, value)| value.contains_flow_future()) {
+        if args.iter().any(|(_, value)| value.contains_pending_call()) {
             return StatementOutcome::Err(host.call_error(VmCallError::FutureBoundary));
         }
         let Some(flow) = self.program.flow(&id) else {
@@ -485,18 +494,27 @@ impl<H: VmHost> Clone for VmExpressionHost<H> {
 }
 
 impl<H: VmHost> VmExpressionHost<H> {
-    fn acquire_parallel_permit(&self) -> Option<ParallelPermit> {
+    fn acquire_parallel_permit(
+        &self,
+        mode: FlowDriveMode,
+    ) -> Result<Option<ParallelPermit>, H::Error> {
+        if mode == FlowDriveMode::Inline {
+            return Ok(None);
+        }
         loop {
             let active = self.parallel_active.load(Ordering::Acquire);
-            if active >= MAX_ACTIVE_FLOW_FUTURES {
-                return None;
+            if active >= MAX_ACTIVE_CALLS {
+                return Err(H::Error::type_mismatch(
+                    "fanout with at most 128 concurrent calls",
+                    "active call limit exceeded".into(),
+                ));
             }
             if self
                 .parallel_active
                 .compare_exchange_weak(active, active + 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                return Some(ParallelPermit(Arc::clone(&self.parallel_active)));
+                return Ok(Some(ParallelPermit(Arc::clone(&self.parallel_active))));
             }
         }
     }
@@ -531,7 +549,7 @@ impl<H: VmHost> VmExpressionHost<H> {
         };
         if bindings
             .iter()
-            .any(|(_, value)| value.contains_flow_future())
+            .any(|(_, value)| value.contains_pending_call())
         {
             return Value::Err(self.host.call_error(VmCallError::FutureBoundary));
         }
@@ -633,6 +651,36 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
         self.effect_host.preflight_tool(name)
     }
 
+    fn tool_call_mode(&self, name: &str) -> ToolCallMode {
+        self.effect_host.tool_call_mode(name)
+    }
+
+    fn make_tool_future(
+        &self,
+        name: String,
+        positional: Vec<Value<Self::Payload, Self::Error>>,
+        named: NamedValues<Self::Payload, Self::Error>,
+        watch_rules: Option<WatchRules>,
+    ) -> Value<Self::Payload, Self::Error> {
+        Value::ToolFuture(Arc::new(ToolFuture::new(
+            name,
+            positional,
+            named,
+            watch_rules,
+            Some(Arc::clone(&self.owner)),
+        )))
+    }
+
+    fn validate_tool_future(
+        &self,
+        future: &ToolFuture<Self::Payload, Self::Error>,
+    ) -> Result<(), Self::Error> {
+        future
+            .belongs_to(&self.owner)
+            .then_some(())
+            .ok_or_else(|| self.host.call_error(VmCallError::InvalidFutureOwner))
+    }
+
     fn preflight_flow(&self, name: &FlowRef, args: &[Arg]) -> Result<(), Self::Error> {
         let display_name = name.display_name();
         let id = self.program.resolve(self.module, name).ok_or_else(|| {
@@ -711,20 +759,44 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
             if let Some(value) = result.as_ref() {
                 return value.clone();
             }
-            let _permit = if mode == FlowDriveMode::Parallel {
-                match self.acquire_parallel_permit() {
-                    Some(permit) => Some(permit),
-                    None => {
-                        return Value::Err(H::Error::type_mismatch(
-                            "fanout with at most 128 concurrent flow calls",
-                            "active flow limit exceeded".into(),
-                        ));
-                    }
-                }
-            } else {
-                None
+            let _permit = match self.acquire_parallel_permit(mode) {
+                Ok(permit) => permit,
+                Err(error) => return Value::Err(error),
             };
             let value = self.call_flow_future(future, mode).await;
+            *result = Some(value.clone());
+            value
+        })
+    }
+
+    fn drive_tool_future<'a>(
+        &'a self,
+        future: &'a ToolFuture<Self::Payload, Self::Error>,
+        mode: FlowDriveMode,
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
+        Box::pin(async move {
+            if let Err(error) = self.validate_tool_future(future) {
+                return Value::Err(error);
+            }
+            if let Some(error) = self.effect_host.cancellation_error() {
+                return Value::Err(error);
+            }
+            let mut result = future.result.lock().await;
+            if let Some(value) = result.as_ref() {
+                return value.clone();
+            }
+            let _permit = match self.acquire_parallel_permit(mode) {
+                Ok(permit) => permit,
+                Err(error) => return Value::Err(error),
+            };
+            let value = self
+                .eval_external(ExpressionEffect::ToolCall {
+                    name: future.name.clone(),
+                    positional: future.positional.clone(),
+                    named: future.named.clone(),
+                    watch_rules: future.watch_rules.clone(),
+                })
+                .await;
             *result = Some(value.clone());
             value
         })
@@ -734,7 +806,7 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
         &'a self,
         effect: ExpressionEffect<Self::Payload, Self::Error>,
     ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
-        if effect.contains_flow_future() {
+        if effect.contains_pending_call() {
             return Box::pin(async move {
                 Value::Err(self.host.call_error(VmCallError::FutureBoundary))
             });

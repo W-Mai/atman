@@ -86,12 +86,23 @@ fn register_tool(tool: &ToolFn, root: &Path) -> TokenStream {
         call
     };
     let encoded = encode(&tool.result.value, quote!(__atman_result), root);
+    let register = if tool.is_async {
+        quote!(register)
+    } else {
+        quote!(register_sync)
+    };
+    let body = quote! {
+        #(#bindings)*
+        let __atman_result = #call;
+        ::core::result::Result::Ok(#encoded)
+    };
+    let handler = if tool.is_async {
+        quote!(async move { #body })
+    } else {
+        quote!({ #body })
+    };
     quote! {
-        __atman_router.register(#name, |__atman_args: #root::ToolArgs<P, E>| async move {
-            #(#bindings)*
-            let __atman_result = #call;
-            ::core::result::Result::Ok(#encoded)
-        })?;
+        __atman_router.#register(#name, |__atman_args: #root::ToolArgs<P, E>| #handler)?;
     }
 }
 

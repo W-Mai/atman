@@ -10,8 +10,8 @@ use alloc::{
 use core::{fmt, future::Future};
 
 use crate::{
-    ExpressionEffect, HostFuture, HostPayload, HostValueOps, ListIntrinsic, Value, ValueError,
-    VmEmbedding,
+    ExpressionEffect, HostFuture, HostPayload, HostValueOps, ListIntrinsic, ToolCallMode, Value,
+    ValueError, VmEmbedding,
 };
 
 /// Evaluated arguments passed to a host tool. Named arguments take precedence
@@ -97,10 +97,15 @@ impl core::error::Error for ToolRegisterError {}
 type ToolHandler<P, E> =
     dyn Fn(ToolArgs<P, E>) -> HostFuture<'static, Result<Value<P, E>, E>> + Send + Sync;
 
-/// A build-time registry of asynchronous host tool handlers.
+struct RegisteredTool<P, E> {
+    mode: ToolCallMode,
+    handler: Arc<ToolHandler<P, E>>,
+}
+
+/// A build-time registry of immediate and deferred host tool handlers.
 /// Clones share a snapshot; registering on either clone creates a new snapshot.
 pub struct ToolRouter<P, E> {
-    handlers: Arc<BTreeMap<String, Arc<ToolHandler<P, E>>>>,
+    handlers: Arc<BTreeMap<String, Arc<RegisteredTool<P, E>>>>,
 }
 
 impl<P, E> Clone for ToolRouter<P, E> {
@@ -128,6 +133,7 @@ impl<P, E> ToolRouter<P, E> {
         self.handlers.contains_key(name)
     }
 
+    /// Registers a cold asynchronous tool. Its handler runs on `.await` or `fanout`.
     pub fn register<F, Fut>(
         &mut self,
         name: impl Into<String>,
@@ -139,7 +145,37 @@ impl<P, E> ToolRouter<P, E> {
         F: Fn(ToolArgs<P, E>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Value<P, E>, E>> + Send + 'static,
     {
-        let name = name.into();
+        self.insert(name.into(), ToolCallMode::Deferred, move |args| {
+            Box::pin(handler(args))
+        })
+    }
+
+    /// Registers a synchronous tool that runs when its call expression is evaluated.
+    pub fn register_sync<F>(
+        &mut self,
+        name: impl Into<String>,
+        handler: F,
+    ) -> Result<(), ToolRegisterError>
+    where
+        P: Send + Sync + 'static,
+        E: Send + Sync + 'static,
+        F: Fn(ToolArgs<P, E>) -> Result<Value<P, E>, E> + Send + Sync + 'static,
+    {
+        self.insert(name.into(), ToolCallMode::Immediate, move |args| {
+            let result = handler(args);
+            Box::pin(async move { result })
+        })
+    }
+
+    fn insert(
+        &mut self,
+        name: String,
+        mode: ToolCallMode,
+        handler: impl Fn(ToolArgs<P, E>) -> HostFuture<'static, Result<Value<P, E>, E>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<(), ToolRegisterError> {
         if name.trim().is_empty() {
             return Err(ToolRegisterError::EmptyName);
         }
@@ -149,8 +185,13 @@ impl<P, E> ToolRouter<P, E> {
         if self.contains(&name) {
             return Err(ToolRegisterError::DuplicateName(name));
         }
-        let handler: Arc<ToolHandler<P, E>> = Arc::new(move |args| Box::pin(handler(args)));
-        Arc::make_mut(&mut self.handlers).insert(name, handler);
+        Arc::make_mut(&mut self.handlers).insert(
+            name,
+            Arc::new(RegisteredTool {
+                mode,
+                handler: Arc::new(handler),
+            }),
+        );
         Ok(())
     }
 }
@@ -161,7 +202,7 @@ impl<P: HostValueOps, E: ValueError> ToolRouter<P, E> {
         let Some(handler) = self.handlers.get(name) else {
             return Value::Err(E::type_mismatch("registered tool", name.to_string()));
         };
-        match handler(args).await {
+        match (handler.handler)(args).await {
             Ok(value) => value,
             Err(error) => Value::Err(error),
         }
@@ -179,6 +220,12 @@ where
     fn preflight_tool(&self, name: &str) -> Option<Value<P, E>> {
         (!self.contains(name))
             .then(|| Value::Err(E::type_mismatch("registered tool", name.to_string())))
+    }
+
+    fn tool_call_mode(&self, name: &str) -> ToolCallMode {
+        self.handlers
+            .get(name)
+            .map_or(ToolCallMode::Immediate, |tool| tool.mode)
     }
 
     fn effect<'a>(&'a self, effect: ExpressionEffect<P, E>) -> HostFuture<'a, Value<P, E>> {

@@ -672,6 +672,9 @@ pub trait Tool: Send + Sync {
     fn cancel_behavior(&self) -> CancelBehavior {
         CancelBehavior::AbortSafe
     }
+    fn call_mode(&self) -> atman_rt::ToolCallMode {
+        atman_rt::ToolCallMode::Immediate
+    }
     fn description(&self) -> Option<&str> {
         None
     }
@@ -699,13 +702,14 @@ pub trait Tool: Send + Sync {
     }
 }
 
-/// Metadata for a tool backed by an async function or closure.
+/// Metadata for a function-backed tool.
 pub struct ToolDefinition {
     name: String,
     tier: Tier,
     description: Option<String>,
     input_schema: serde_json::Value,
     cancel_behavior: CancelBehavior,
+    call_mode: atman_rt::ToolCallMode,
     requires_call_intent: bool,
 }
 
@@ -717,6 +721,7 @@ impl ToolDefinition {
             description: None,
             input_schema: serde_json::json!({"type": "object"}),
             cancel_behavior: CancelBehavior::AbortSafe,
+            call_mode: atman_rt::ToolCallMode::Immediate,
             requires_call_intent: true,
         }
     }
@@ -728,6 +733,7 @@ impl ToolDefinition {
             description: tool.description().map(str::to_owned),
             input_schema: tool.input_schema(),
             cancel_behavior: tool.cancel_behavior(),
+            call_mode: tool.call_mode(),
             requires_call_intent: tool.requires_call_intent(),
         }
     }
@@ -744,6 +750,12 @@ impl ToolDefinition {
 
     pub fn cancel_behavior(mut self, behavior: CancelBehavior) -> Self {
         self.cancel_behavior = behavior;
+        self
+    }
+
+    /// Controls whether an Atman call executes immediately or yields a cold future.
+    pub fn call_mode(mut self, mode: atman_rt::ToolCallMode) -> Self {
+        self.call_mode = mode;
         self
     }
 
@@ -790,6 +802,10 @@ where
 
     fn cancel_behavior(&self) -> CancelBehavior {
         self.definition.cancel_behavior
+    }
+
+    fn call_mode(&self) -> atman_rt::ToolCallMode {
+        self.definition.call_mode
     }
 
     fn requires_call_intent(&self) -> bool {
@@ -1106,6 +1122,7 @@ mod tests {
 
         let tool = registry.get("probe.double").unwrap();
         assert_eq!(tool.tier(), Tier::Two);
+        assert_eq!(tool.call_mode(), atman_rt::ToolCallMode::Immediate);
         assert_eq!(tool.cancel_behavior(), CancelBehavior::Atomic);
         assert_eq!(
             tool.approval_level(&ToolArgs::default(), &ToolCtx::default()),

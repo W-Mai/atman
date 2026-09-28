@@ -27,6 +27,13 @@ impl ExpressionHost for AtmanHost<'_> {
     type Payload = AtmanPayload;
     type Error = RuntimeError;
 
+    fn tool_call_mode(&self, name: &str) -> atman_rt::ToolCallMode {
+        self.tools
+            .get(name)
+            .map(|tool| tool.call_mode())
+            .unwrap_or(atman_rt::ToolCallMode::Immediate)
+    }
+
     fn undefined_var(&self, name: String) -> RuntimeError {
         RuntimeError::UndefinedVar(name)
     }
@@ -809,6 +816,7 @@ fn preview_tool_value(v: &Value) -> String {
         Value::Host(AtmanPayload::EditProposal(_)) => "<edit_proposal>".into(),
         Value::Lambda { .. } => "<lambda>".into(),
         Value::FlowFuture(_) => "<flow future>".into(),
+        Value::ToolFuture(_) => "<tool future>".into(),
     };
     truncate(&raw, 2000)
 }

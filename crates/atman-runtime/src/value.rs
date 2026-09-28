@@ -77,10 +77,10 @@ pub trait ValueJson {
 
 impl ValueJson for AtmanValue {
     fn to_json(&self) -> Result<serde_json::Value, RuntimeError> {
-        if self.contains_flow_future() {
+        if self.contains_pending_call() {
             return Err(RuntimeError::TypeMismatch {
                 expected: "serializable value".into(),
-                actual: "flow future".into(),
+                actual: "pending call".into(),
             });
         }
         Ok(match self {
@@ -116,6 +116,7 @@ impl ValueJson for AtmanValue {
             Value::Err(e) => serde_json::json!({ "error": e.to_string() }),
             Value::Lambda { .. } => serde_json::Value::Null,
             Value::FlowFuture(_) => unreachable!("future checked before serialization"),
+            Value::ToolFuture(_) => unreachable!("future checked before serialization"),
         })
     }
 

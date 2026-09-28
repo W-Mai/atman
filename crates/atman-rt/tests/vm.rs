@@ -369,7 +369,7 @@ fn fanout_rejects_excess_distinct_futures_before_starting_any_child() {
     let events = Arc::clone(&host.events);
     let outcome = run_ready(vm.run("main", vec![], host));
     assert!(
-        matches!(outcome, StatementOutcome::Err(EvalError::TypeMismatch { actual, .. }) if actual == "129 distinct flow futures")
+        matches!(outcome, StatementOutcome::Err(EvalError::TypeMismatch { actual, .. }) if actual == "129 distinct futures")
     );
     assert!(events.lock().unwrap().is_empty());
 }

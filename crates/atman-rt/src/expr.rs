@@ -2,7 +2,8 @@ use alloc::{boxed::Box, collections::BTreeSet, format, string::String, sync::Arc
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::{
-    Env, FlowDriveMode, FlowFuture, HostFuture, HostValueOps, Value, ValueError,
+    Env, FlowDriveMode, FlowFuture, HostFuture, HostValueOps, NamedValues, ToolFuture, Value,
+    ValueError,
     ast::{Arg, Expr, FlowRef, MessageRole, Node},
     fanout::join_fanout_all,
     list::{ListIntrinsic, eval_list_intrinsic},
@@ -11,7 +12,7 @@ use crate::{
 };
 
 impl<P: HostValueOps, E> ExpressionEffect<P, E> {
-    pub fn contains_flow_future(&self) -> bool {
+    pub fn contains_pending_call(&self) -> bool {
         match self {
             Self::FileRef(_) => false,
             Self::ToolCall {
@@ -20,16 +21,23 @@ impl<P: HostValueOps, E> ExpressionEffect<P, E> {
             | Self::Message {
                 positional, named, ..
             } => {
-                positional.iter().any(Value::contains_flow_future)
-                    || named.iter().any(|(_, value)| value.contains_flow_future())
+                positional.iter().any(Value::contains_pending_call)
+                    || named.iter().any(|(_, value)| value.contains_pending_call())
             }
             Self::Confirm(value) | Self::FixSnapshot { target: value } => {
-                value.contains_flow_future()
+                value.contains_pending_call()
             }
-            Self::Call { args, .. } => args.iter().any(Value::contains_flow_future),
-            Self::FixRestore { target, .. } => target.contains_flow_future(),
+            Self::Call { args, .. } => args.iter().any(Value::contains_pending_call),
+            Self::FixRestore { target, .. } => target.contains_pending_call(),
         }
     }
+}
+
+/// Whether a host tool call produces a result immediately or a cold future.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCallMode {
+    Immediate,
+    Deferred,
 }
 
 /// An external effect whose language expressions have already been evaluated.
@@ -104,6 +112,63 @@ pub trait ExpressionHost: Sync + Clone + Send {
     /// Return a value to reject or short-circuit a tool before its arguments run.
     fn preflight_tool(&self, _name: &str) -> Option<Value<Self::Payload, Self::Error>> {
         None
+    }
+    fn tool_call_mode(&self, _name: &str) -> ToolCallMode {
+        ToolCallMode::Immediate
+    }
+    fn make_tool_future(
+        &self,
+        name: String,
+        positional: Vec<Value<Self::Payload, Self::Error>>,
+        named: NamedValues<Self::Payload, Self::Error>,
+        watch_rules: Option<WatchRules>,
+    ) -> Value<Self::Payload, Self::Error> {
+        Value::ToolFuture(Arc::new(ToolFuture::new(
+            name,
+            positional,
+            named,
+            watch_rules,
+            None,
+        )))
+    }
+    fn validate_tool_future(
+        &self,
+        future: &ToolFuture<Self::Payload, Self::Error>,
+    ) -> Result<(), Self::Error> {
+        future.owner.is_none().then_some(()).ok_or_else(|| {
+            Self::Error::type_mismatch(
+                "tool future from current invocation",
+                "foreign future".into(),
+            )
+        })
+    }
+    fn drive_tool_future<'a>(
+        &'a self,
+        future: &'a ToolFuture<Self::Payload, Self::Error>,
+        _mode: FlowDriveMode,
+    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>> {
+        Box::pin(async move {
+            if let Err(error) = self.validate_tool_future(future) {
+                return Value::Err(error);
+            }
+            if let Some(error) = self.cancellation_error() {
+                return Value::Err(error);
+            }
+            let mut result = future.result.lock().await;
+            if let Some(value) = result.as_ref() {
+                return value.clone();
+            }
+            let value = self
+                .eval_external(ExpressionEffect::ToolCall {
+                    name: future.name.clone(),
+                    positional: future.positional.clone(),
+                    named: future.named.clone(),
+                    watch_rules: future.watch_rules.clone(),
+                })
+                .await;
+            *result = Some(value.clone());
+            value
+        })
     }
     /// Check a resolved flow call before its arguments run.
     fn preflight_flow(&self, _name: &FlowRef, _args: &[Arg]) -> Result<(), Self::Error> {
@@ -189,9 +254,16 @@ pub fn eval_expr_with_watch<'a, H: ExpressionHost>(
                         host.drive_flow_future(&future, host.await_drive_mode())
                             .await
                     }
+                    Value::ToolFuture(future) => {
+                        if let Err(error) = host.validate_tool_future(&future) {
+                            return Value::Err(error);
+                        }
+                        host.drive_tool_future(&future, host.await_drive_mode())
+                            .await
+                    }
                     Value::Err(_) => value,
                     other => Value::Err(H::Error::type_mismatch(
-                        "flow future",
+                        "flow or tool future",
                         other.kind_name().into(),
                     )),
                 }
@@ -269,13 +341,31 @@ pub fn eval_expr_with_watch<'a, H: ExpressionHost>(
                                 Ok(values) => values,
                                 Err(value) => return value,
                             };
-                            host.eval_external(ExpressionEffect::ToolCall {
-                                name,
-                                positional,
-                                named,
-                                watch_rules: watch_rules.cloned(),
-                            })
-                            .await
+                            if positional.iter().any(Value::contains_pending_call)
+                                || named.iter().any(|(_, value)| value.contains_pending_call())
+                            {
+                                return Value::Err(H::Error::type_mismatch(
+                                    "tool argument without pending calls",
+                                    "pending call".into(),
+                                ));
+                            }
+                            match host.tool_call_mode(&name) {
+                                ToolCallMode::Deferred => host.make_tool_future(
+                                    name,
+                                    positional,
+                                    named,
+                                    watch_rules.cloned(),
+                                ),
+                                ToolCallMode::Immediate => {
+                                    host.eval_external(ExpressionEffect::ToolCall {
+                                        name,
+                                        positional,
+                                        named,
+                                        watch_rules: watch_rules.cloned(),
+                                    })
+                                    .await
+                                }
+                            }
                         }
                     },
                     Node::UserConfirm { msg } => {
@@ -470,7 +560,7 @@ pub async fn eval_fanout<'a, H: ExpressionHost>(
             if let Err(error) = validate_fanout_value(value, branch_host, &mut unique) {
                 let rejected = Value::Err(error.clone());
                 for (index, (_, value)) in prepared.iter().enumerate() {
-                    let terminal = if matches!(value, Value::FlowFuture(_)) {
+                    let terminal = if is_pending_call(value) {
                         &rejected
                     } else {
                         value
@@ -529,7 +619,7 @@ pub async fn eval_fanout<'a, H: ExpressionHost>(
     .await
 }
 
-pub(crate) const MAX_ACTIVE_FLOW_FUTURES: usize = 128;
+pub(crate) const MAX_ACTIVE_CALLS: usize = 128;
 
 const BRANCH_RUNNING: u8 = 0;
 const BRANCH_OK: u8 = 1;
@@ -589,8 +679,12 @@ impl<H: ExpressionHost> Drop for FanoutBranchScope<'_, H> {
     }
 }
 
+fn is_pending_call<P, E>(value: &Value<P, E>) -> bool {
+    matches!(value, Value::FlowFuture(_) | Value::ToolFuture(_))
+}
+
 fn record_prepared_branch<P, E>(states: &[AtomicU8], index: usize, value: &Value<P, E>) {
-    if !matches!(value, Value::FlowFuture(_)) {
+    if !is_pending_call(value) {
         record_finished_branch(states, index, value);
     }
 }
@@ -609,15 +703,22 @@ fn validate_fanout_value<H: ExpressionHost>(
     host: &H,
     unique: &mut BTreeSet<usize>,
 ) -> Result<(), H::Error> {
-    let Value::FlowFuture(future) = value else {
-        return Ok(());
+    let identity = match value {
+        Value::FlowFuture(future) => {
+            host.validate_flow_future(future)?;
+            Arc::as_ptr(future) as usize
+        }
+        Value::ToolFuture(future) => {
+            host.validate_tool_future(future)?;
+            Arc::as_ptr(future) as usize
+        }
+        _ => return Ok(()),
     };
-    host.validate_flow_future(future)?;
-    unique.insert(Arc::as_ptr(future) as usize);
-    if unique.len() > MAX_ACTIVE_FLOW_FUTURES {
+    unique.insert(identity);
+    if unique.len() > MAX_ACTIVE_CALLS {
         return Err(H::Error::type_mismatch(
-            "fanout with at most 128 concurrent flow calls",
-            format!("{} distinct flow futures", unique.len()),
+            "fanout with at most 128 concurrent calls",
+            format!("{} distinct futures", unique.len()),
         ));
     }
     Ok(())
@@ -630,6 +731,10 @@ async fn drive_fanout_value<H: ExpressionHost>(
     match value {
         Value::FlowFuture(future) => {
             host.drive_flow_future(&future, FlowDriveMode::Parallel)
+                .await
+        }
+        Value::ToolFuture(future) => {
+            host.drive_tool_future(&future, FlowDriveMode::Parallel)
                 .await
         }
         other => other,

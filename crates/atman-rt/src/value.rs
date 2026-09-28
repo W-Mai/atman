@@ -1,10 +1,12 @@
 use alloc::{string::String, sync::Arc, vec::Vec};
+use core::fmt;
 
 use crate::{
     Env,
     ast::{Expr, Ident},
     engine::FlowArgs,
     program::FlowId,
+    watch::WatchRules,
 };
 
 /// A resolved flow call that has not executed its body yet.
@@ -31,10 +33,57 @@ impl<P, E> FlowFuture<P, E> {
     }
 }
 
+/// An evaluated host tool call that starts only when awaited or fanned out.
+pub struct ToolFuture<P, E> {
+    pub(crate) name: String,
+    pub(crate) positional: Vec<Value<P, E>>,
+    pub(crate) named: Vec<(String, Value<P, E>)>,
+    pub(crate) watch_rules: Option<WatchRules>,
+    pub(crate) owner: Option<Arc<()>>,
+    pub(crate) result: async_lock::Mutex<Option<Value<P, E>>>,
+}
+
+impl<P, E> fmt::Debug for ToolFuture<P, E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ToolFuture")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<P, E> ToolFuture<P, E> {
+    pub(crate) fn new(
+        name: String,
+        positional: Vec<Value<P, E>>,
+        named: Vec<(String, Value<P, E>)>,
+        watch_rules: Option<WatchRules>,
+        owner: Option<Arc<()>>,
+    ) -> Self {
+        Self {
+            name,
+            positional,
+            named,
+            watch_rules,
+            owner,
+            result: async_lock::Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn belongs_to(&self, owner: &Arc<()>) -> bool {
+        self.owner
+            .as_ref()
+            .is_none_or(|future_owner| Arc::ptr_eq(future_owner, owner))
+    }
+}
+
 /// Describes a host-owned value without requiring the core to know its shape.
 pub trait HostPayload {
     fn kind_name(&self) -> &'static str;
 }
+
+/// Named values passed to a tool after expression evaluation.
+pub type NamedValues<P, E> = Vec<(String, Value<P, E>)>;
 
 impl HostPayload for () {
     fn kind_name(&self) -> &'static str {
@@ -55,6 +104,7 @@ pub enum Value<P, E> {
     Host(P),
     Err(E),
     FlowFuture(Arc<FlowFuture<P, E>>),
+    ToolFuture(Arc<ToolFuture<P, E>>),
     Lambda {
         params: Vec<Ident>,
         body: Arc<Expr>,
@@ -79,19 +129,22 @@ impl<P: HostPayload, E> Value<P, E> {
             Self::Host(payload) => payload.kind_name(),
             Self::Err(_) => "err",
             Self::FlowFuture(_) => "flow future",
+            Self::ToolFuture(_) => "tool future",
             Self::Lambda { .. } => "lambda",
         }
     }
 
-    /// Detects a pending flow call at any depth before crossing a host boundary.
-    pub fn contains_flow_future(&self) -> bool {
+    /// Detects a pending call at any depth before crossing a host boundary.
+    pub fn contains_pending_call(&self) -> bool {
         match self {
-            Self::FlowFuture(_) => true,
-            Self::List(items) => items.iter().any(Self::contains_flow_future),
-            Self::Struct(fields) => fields.iter().any(|(_, value)| value.contains_flow_future()),
+            Self::FlowFuture(_) | Self::ToolFuture(_) => true,
+            Self::List(items) => items.iter().any(Self::contains_pending_call),
+            Self::Struct(fields) => fields
+                .iter()
+                .any(|(_, value)| value.contains_pending_call()),
             Self::Lambda { captured_env, .. } => captured_env
                 .iter()
-                .any(|(_, value)| value.contains_flow_future()),
+                .any(|(_, value)| value.contains_pending_call()),
             _ => false,
         }
     }

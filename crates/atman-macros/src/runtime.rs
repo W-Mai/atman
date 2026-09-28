@@ -58,6 +58,11 @@ fn registration(tool: &ToolFn, path: &Path) -> syn::Result<TokenStream2> {
         CancelKind::Atomic => quote!(#path::CancelBehavior::Atomic),
         CancelKind::Irreversible => quote!(#path::CancelBehavior::Irreversible),
     };
+    let call_mode = if tool.is_async {
+        quote!(.call_mode(#path::ToolCallMode::Deferred))
+    } else {
+        quote!()
+    };
     let description = if tool.docs.is_empty() {
         quote!()
     } else {
@@ -136,6 +141,7 @@ fn registration(tool: &ToolFn, path: &Path) -> syn::Result<TokenStream2> {
             #path::ToolDefinition::new(#name, #tier)
                 #description
                 .cancel_behavior(#cancel)
+                #call_mode
                 .input_schema(#path::__private::serde_json::json!({
                     "type": "object",
                     "properties": { #(#properties),* },
