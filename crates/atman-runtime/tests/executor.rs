@@ -2,6 +2,7 @@ use atman_rt::parse_file;
 type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::flow_authority::EffectiveAuthority;
 use atman_runtime::providers::mock::MockProvider;
+use atman_runtime::stream::StreamFrame;
 use atman_runtime::task_registry::{TaskFilter, TaskRegistry};
 use atman_runtime::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use atman_runtime::tools::agent_ctrl::FlowRegistry;
@@ -84,6 +85,78 @@ async fn executor_runs_flow_and_emits_start_end() {
         Some(Event::FlowEnd { status, .. }) => assert!(matches!(status, FlowStatus::Ok)),
         other => panic!("expected FlowEnd last, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn loop_iteration_terminal_previews_reach_events_and_stream() {
+    let file = parse_file(
+        r#"flow t() -> int {
+    n = 0
+    loop {
+        n = n + 1
+        when n == 1 {
+            continue
+        }
+        when n == 2 {
+            break
+        }
+    }
+    return n
+}
+"#,
+    )
+    .unwrap();
+    let executor = Executor::new();
+    let events = executor.events.clone();
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let mut frames = session.stream_subscribe();
+    let turn_id = atman_rt::TurnId::now();
+    session.begin_turn(atman_runtime::message::Message::user_text(
+        turn_id.clone(),
+        "run loop",
+    ));
+
+    let result = executor
+        .run_in_turn(&file, "t", vec![], Some(turn_id), Some(session))
+        .await
+        .unwrap();
+    assert!(matches!(result, Value::Int(2)));
+
+    let event_previews = events
+        .snapshot()
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::FlowNodeEnd {
+                node_id,
+                output_preview: Some(preview),
+                ..
+            } if node_id.contains(".iter[")
+                && node_id.ends_with(']')
+                && (preview == "continue" || preview == "break") =>
+            {
+                Some(preview)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(event_previews, ["continue", "break"]);
+
+    let stream_previews = std::iter::from_fn(|| frames.try_recv().ok())
+        .filter_map(|frame| match frame {
+            StreamFrame::FlowNodeEnd {
+                node_id,
+                output_preview: Some(preview),
+                ..
+            } if node_id.contains(".iter[")
+                && node_id.ends_with(']')
+                && (preview == "continue" || preview == "break") =>
+            {
+                Some(preview)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stream_previews, ["continue", "break"]);
 }
 
 #[tokio::test]

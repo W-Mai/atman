@@ -1,4 +1,5 @@
 use atman_rt::ast::{Arg, Expr, FlowDecl, FlowRef, Ident, Node, Stmt};
+use atman_rt::{VmNode, VmNodeKind};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -30,6 +31,53 @@ pub enum NodeKind {
     When { condition_preview: String },
     Loop,
     Return,
+}
+
+impl From<&VmNodeKind> for NodeKind {
+    fn from(kind: &VmNodeKind) -> Self {
+        match kind {
+            VmNodeKind::Llm { model } => Self::Llm {
+                model: model.clone(),
+            },
+            VmNodeKind::ToolCall { path } => Self::ToolCall { path: path.clone() },
+            VmNodeKind::Fanout => Self::Fanout,
+            VmNodeKind::UserConfirm => Self::UserConfirm,
+            VmNodeKind::FlowFuture { name } => Self::FlowFuture { name: name.clone() },
+            VmNodeKind::FlowAwait { target } => Self::FlowAwait {
+                target: target.clone(),
+            },
+            VmNodeKind::Subflow { name } => Self::Subflow { name: name.clone() },
+            VmNodeKind::Message { role } => Self::Message { role: role.clone() },
+            VmNodeKind::FixUntilTest => Self::FixUntilTest,
+            VmNodeKind::When { condition_preview } => Self::When {
+                condition_preview: condition_preview.clone(),
+            },
+            VmNodeKind::Loop => Self::Loop,
+            VmNodeKind::Return => Self::Return,
+        }
+    }
+}
+
+impl From<VmNodeKind> for NodeKind {
+    fn from(kind: VmNodeKind) -> Self {
+        Self::from(&kind)
+    }
+}
+
+impl From<&VmNode> for NodeKind {
+    fn from(node: &VmNode) -> Self {
+        Self::from(&node.kind)
+    }
+}
+
+impl From<VmNode> for NodeKind {
+    fn from(node: VmNode) -> Self {
+        Self::from(node.kind)
+    }
+}
+
+pub fn vm_node_kind_label(node: &VmNode) -> (NodeKind, String) {
+    (NodeKind::from(node), node.label.clone())
 }
 
 pub fn extract_graph(flow: &FlowDecl) -> FlowGraph {
@@ -286,6 +334,97 @@ mod tests {
     fn parse_first_flow(src: &str) -> FlowDecl {
         let file = parse_file(src).expect("parse ok");
         file.flows.into_iter().next().expect("has flow")
+    }
+
+    #[test]
+    fn maps_every_vm_node_kind_without_losing_metadata() {
+        let cases = [
+            (
+                VmNodeKind::Llm {
+                    model: Some("reasoner".into()),
+                },
+                NodeKind::Llm {
+                    model: Some("reasoner".into()),
+                },
+            ),
+            (
+                VmNodeKind::ToolCall {
+                    path: "files.read".into(),
+                },
+                NodeKind::ToolCall {
+                    path: "files.read".into(),
+                },
+            ),
+            (VmNodeKind::Fanout, NodeKind::Fanout),
+            (VmNodeKind::UserConfirm, NodeKind::UserConfirm),
+            (
+                VmNodeKind::FlowFuture {
+                    name: "background".into(),
+                },
+                NodeKind::FlowFuture {
+                    name: "background".into(),
+                },
+            ),
+            (
+                VmNodeKind::FlowAwait {
+                    target: "pending".into(),
+                },
+                NodeKind::FlowAwait {
+                    target: "pending".into(),
+                },
+            ),
+            (
+                VmNodeKind::Subflow {
+                    name: "worker".into(),
+                },
+                NodeKind::Subflow {
+                    name: "worker".into(),
+                },
+            ),
+            (
+                VmNodeKind::Message {
+                    role: "assistant".into(),
+                },
+                NodeKind::Message {
+                    role: "assistant".into(),
+                },
+            ),
+            (VmNodeKind::FixUntilTest, NodeKind::FixUntilTest),
+            (
+                VmNodeKind::When {
+                    condition_preview: "ready == true".into(),
+                },
+                NodeKind::When {
+                    condition_preview: "ready == true".into(),
+                },
+            ),
+            (VmNodeKind::Loop, NodeKind::Loop),
+            (VmNodeKind::Return, NodeKind::Return),
+        ];
+
+        for (vm_kind, expected) in cases {
+            assert_eq!(NodeKind::from(vm_kind), expected);
+        }
+    }
+
+    #[test]
+    fn maps_vm_node_and_preserves_its_label() {
+        let node = VmNode {
+            kind: VmNodeKind::Subflow {
+                name: "worker".into(),
+            },
+            label: "worker(input).await".into(),
+        };
+
+        assert_eq!(
+            vm_node_kind_label(&node),
+            (
+                NodeKind::Subflow {
+                    name: "worker".into(),
+                },
+                "worker(input).await".into(),
+            )
+        );
     }
 
     #[test]

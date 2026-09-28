@@ -605,7 +605,10 @@ pub(crate) async fn execute_direct_effect(
     }
 }
 
-fn check_tool_call(name: &str, ctx: &AtmanHost<'_>) -> Result<Option<Value>, RuntimeError> {
+pub(crate) fn check_tool_call(
+    name: &str,
+    ctx: &AtmanHost<'_>,
+) -> Result<Option<Value>, RuntimeError> {
     if ctx.flow_cancel.is_cancelled() {
         return Err(RuntimeError::Cancelled("flow cancelled by user".into()));
     }
@@ -627,7 +630,7 @@ fn check_tool_call(name: &str, ctx: &AtmanHost<'_>) -> Result<Option<Value>, Run
     Ok(None)
 }
 
-fn eval_invocation_env(args: ToolArgs, ctx: &AtmanHost<'_>) -> Value {
+pub(crate) fn eval_invocation_env(args: ToolArgs, ctx: &AtmanHost<'_>) -> Value {
     let ToolArgs { positional, named } = args;
     let [key] = positional.as_slice() else {
         return Value::Err(RuntimeError::ToolFailed(
@@ -650,6 +653,50 @@ fn eval_invocation_env(args: ToolArgs, ctx: &AtmanHost<'_>) -> Value {
         .get(key)
         .cloned()
         .unwrap_or(Value::Unit)
+}
+
+pub(crate) fn value_preview(value: &Value) -> Option<String> {
+    let raw = match value {
+        Value::Str(value) => value.clone(),
+        Value::Host(AtmanPayload::Message(message)) => {
+            let text = message.text_concat();
+            let tools = message
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    crate::message::MessagePart::ToolUse { name, .. } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            match (text.trim().is_empty(), tools.is_empty()) {
+                (false, true) => text,
+                (false, false) => format!("{text}\n\n→ tool_uses: {}", tools.join(", ")),
+                (true, false) => format!("→ tool_uses: {}", tools.join(", ")),
+                (true, true) => return None,
+            }
+        }
+        Value::Host(AtmanPayload::Path(path)) => path.display().to_string(),
+        Value::Host(AtmanPayload::EditProposal(_)) => "<edit proposal>".into(),
+        Value::Int(value) => value.to_string(),
+        Value::Float(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Err(error) => format!("err: {error}"),
+        Value::List(items) => format!("list[{}]", items.len()),
+        Value::Struct(fields) => format!(
+            "{{{}}}",
+            fields
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Unit => return None,
+        Value::Lambda { .. } => "<lambda>".into(),
+        Value::FlowFuture(_) => "<flow future>".into(),
+        Value::ToolFuture(_) => "<tool future>".into(),
+    };
+    let preview = raw.trim();
+    (!preview.is_empty()).then(|| preview.chars().take(4000).collect())
 }
 
 type DiffPreviewData = (String, Option<String>, Option<String>, Option<String>);

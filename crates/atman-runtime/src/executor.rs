@@ -399,7 +399,7 @@ impl Executor {
                         tool_ctx.agent_entry = Some(std::sync::Arc::clone(&root_entry));
                         sess.set_current_root("root".to_string());
                     }
-                    let exec_fut = exec_flow_with_linked_siblings(
+                    let result = exec_flow_with_linked_siblings(
                         flow,
                         args,
                         &self.tools,
@@ -415,13 +415,7 @@ impl Executor {
                         source.dir,
                         source.linked_program,
                         source.module,
-                    );
-                    // Child flow futures stay in this scope. Dropping exec_fut
-                    // closes their terminal events before the root FlowEnd.
-                    let result = atman_rt::race_cancel(exec_fut, async {
-                        body_flow_cancel.cancelled().await;
-                        RuntimeError::Cancelled("flow cancelled by user".into())
-                    })
+                    )
                     .await;
                     if let Err(RuntimeError::Cancelled(_)) = &result {
                         let suicide = body_task_id.as_ref().and_then(|id| {

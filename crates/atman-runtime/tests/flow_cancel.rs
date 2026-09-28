@@ -2,6 +2,8 @@ mod common;
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use atman_rt::parse_file;
 use atman_runtime::event::Observable;
@@ -13,7 +15,9 @@ use atman_runtime::provider::{
 };
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::session::Session;
+use atman_runtime::stream::StreamFrame;
 use atman_runtime::tool::BoxFut;
+use atman_runtime::tool::{Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use atman_runtime::{Executor, RuntimeError};
 type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
@@ -24,6 +28,105 @@ fn user_msg(turn_id: TurnId, text: &str) -> Message {
         turn_id,
         origin: MessageOrigin::User,
     }
+}
+
+struct ApprovalProbeTool {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Tool for ApprovalProbeTool {
+    fn name(&self) -> &str {
+        "test.approval_probe"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Two
+    }
+
+    fn requires_call_intent(&self) -> bool {
+        false
+    }
+
+    fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(Value::Int(1)) })
+    }
+}
+
+#[tokio::test]
+async fn cancelling_pending_tool_approval_finishes_the_same_invocation_once() {
+    let file = parse_file(
+        r#"flow guarded() -> int {
+    return test.approval_probe()
+}
+"#,
+    )
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor = Executor::new();
+    executor.tools.register(Arc::new(ApprovalProbeTool {
+        calls: Arc::clone(&calls),
+    }));
+    let events = executor.events.clone();
+    let session = Arc::new(Session::open_ephemeral());
+    let _permission_client = session.permission_broker().register_client();
+    let mut frames = session.stream_subscribe();
+    let turn_id = TurnId::now();
+    session.begin_turn(user_msg(turn_id.clone(), "run guarded tool"));
+
+    let run_session = Arc::clone(&session);
+    let run = tokio::spawn(async move {
+        executor
+            .run_in_turn(&file, "guarded", vec![], Some(turn_id), Some(run_session))
+            .await
+    });
+
+    let tool_use_id = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let StreamFrame::ToolUseStart { tool, id, .. } = frames.recv().await.unwrap()
+                && tool == "test.approval_probe"
+            {
+                break id;
+            }
+        }
+    })
+    .await
+    .expect("tool approval must become pending");
+    session.cancel_flow();
+
+    let result = tokio::time::timeout(Duration::from_secs(3), run)
+        .await
+        .expect("cancelled approval must wake the flow")
+        .expect("executor task must not panic");
+    assert!(matches!(result, Err(RuntimeError::Cancelled(_))));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let mut matching_done = 0;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match frames.recv().await.unwrap() {
+                StreamFrame::ToolUseDone { tool, ok, id, .. }
+                    if tool == "test.approval_probe" && id == tool_use_id =>
+                {
+                    assert!(!ok);
+                    matching_done += 1;
+                }
+                StreamFrame::FlowDone { flow_name, .. } if flow_name == "guarded" => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("cancelled flow must publish terminal frames");
+    assert_eq!(matching_done, 1);
+    assert!(events.snapshot().iter().any(|event| matches!(
+        event,
+        Event::FlowEnd {
+            flow_name,
+            status: FlowStatus::Cancelled,
+            ..
+        } if flow_name == "guarded"
+    )));
 }
 
 #[tokio::test]

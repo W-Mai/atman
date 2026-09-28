@@ -95,6 +95,7 @@ pub mod trust;
 pub mod user_input;
 pub mod validate;
 pub mod value;
+mod vm_delegate;
 pub use watch::WatchHub;
 pub mod watch;
 pub mod workflow;
