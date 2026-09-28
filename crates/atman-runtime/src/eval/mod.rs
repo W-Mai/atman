@@ -127,24 +127,6 @@ impl ExpressionHost for AtmanHost<'_> {
     ) -> BoxFut<'a, Value> {
         Box::pin(async move {
             match effect {
-                ExpressionEffect::FileRef(file) => {
-                    let path = if std::path::Path::new(&file).is_relative() {
-                        if let Some(dir) = &self.source_dir {
-                            dir.join(&file)
-                        } else {
-                            std::path::PathBuf::from(&file)
-                        }
-                    } else {
-                        std::path::PathBuf::from(&file)
-                    };
-                    match tokio::fs::read_to_string(&path).await {
-                        Ok(text) => Value::Str(text),
-                        Err(error) => Value::Err(RuntimeError::ToolFailed(format!(
-                            "@\"{}\": {error}",
-                            path.display()
-                        ))),
-                    }
-                }
                 ExpressionEffect::ToolCall {
                     name,
                     positional,
@@ -154,19 +136,7 @@ impl ExpressionHost for AtmanHost<'_> {
                     dispatch_tool_call(name, ToolArgs { positional, named }, watch_rules, self)
                         .await
                 }
-                ExpressionEffect::Confirm(value) => eval_confirm(value, self).await,
-                ExpressionEffect::Message {
-                    role,
-                    positional,
-                    named,
-                } => eval_message_node(role, positional, named, self).await,
-                ExpressionEffect::FixSnapshot { target } => fix_snapshot(target).await,
-                ExpressionEffect::FixRestore { target, pristine } => {
-                    fix_restore(target, pristine).await
-                }
-                ExpressionEffect::Call { .. } => Value::Err(RuntimeError::ToolFailed(
-                    "bare function call not supported; use namespaced tool call".into(),
-                )),
+                direct => execute_direct_effect(direct, self).await,
             }
         })
     }
@@ -295,25 +265,99 @@ pub(super) fn append_system_context(system: &mut Option<String>, parts: Vec<Stri
     }
 }
 
+pub(crate) struct AuthorizedToolInvocation {
+    tool: std::sync::Arc<dyn crate::tool::Tool>,
+    call_ctx: ToolCtx,
+    tool_use_id: String,
+    name: String,
+    args: ToolArgs,
+    diff_preview: Option<DiffPreviewData>,
+    session_runtime: Option<std::sync::Arc<crate::session::Session>>,
+    events: Option<crate::event::EventSink>,
+    turn_id: Option<crate::event::TurnId>,
+    flow_run_id: Option<crate::event::FlowRunId>,
+    terminal: ToolUseTerminal,
+}
+
+struct ToolUseTerminal {
+    stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
+    name: String,
+    tool_use_id: String,
+    armed: bool,
+}
+
+impl ToolUseTerminal {
+    fn new(
+        stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
+        name: String,
+        tool_use_id: String,
+    ) -> Self {
+        Self {
+            stream_tx,
+            name,
+            tool_use_id,
+            armed: true,
+        }
+    }
+
+    fn finish(mut self, ok: bool, preview: String) {
+        self.emit(ok, preview);
+        self.armed = false;
+    }
+
+    fn emit(&self, ok: bool, preview: String) {
+        if let Some(tx) = &self.stream_tx {
+            let _ = tx.send(crate::stream::StreamFrame::ToolUseDone {
+                tool: self.name.clone(),
+                ok,
+                preview,
+                id: self.tool_use_id.clone(),
+            });
+        }
+    }
+}
+
+impl Drop for ToolUseTerminal {
+    fn drop(&mut self) {
+        if self.armed {
+            self.emit(false, "tool invocation cancelled".into());
+        }
+    }
+}
+
 async fn dispatch_tool_call(
     name: String,
     call_args: ToolArgs,
     watch_rules: Option<crate::streaming::WatchRules>,
     ctx: &AtmanHost<'_>,
 ) -> Value {
-    match check_tool_call(&name, ctx) {
-        Ok(Some(value)) => return value,
-        Err(error) => return Value::Err(error),
-        Ok(None) => {}
-    }
     if name == "env" {
         return eval_invocation_env(call_args, ctx);
     }
-    let tool = match ctx.tools.get(&name) {
-        Some(t) => t,
-        None => return Value::Err(RuntimeError::UndefinedTool(name)),
-    };
-    let ToolArgs { positional, named } = call_args;
+    match authorize_tool_invocation(name, call_args, watch_rules, ctx).await {
+        Ok(permit) => execute_tool_invocation(permit).await,
+        Err(error) => Value::Err(error),
+    }
+}
+
+pub(crate) async fn authorize_tool_invocation(
+    name: String,
+    call_args: ToolArgs,
+    watch_rules: Option<crate::streaming::WatchRules>,
+    ctx: &AtmanHost<'_>,
+) -> Result<AuthorizedToolInvocation, RuntimeError> {
+    if ctx.flow_cancel.is_cancelled() {
+        return Err(RuntimeError::Cancelled("flow cancelled by user".into()));
+    }
+    let tool = ctx
+        .tools
+        .get(&name)
+        .ok_or_else(|| RuntimeError::UndefinedTool(name.clone()))?;
+    if matches!(tool.tier(), crate::tool::Tier::Four) && !ctx.allows_shell {
+        return Err(RuntimeError::ToolFailed(format!(
+            "tool `{name}` is Tier 4 (shell); flow contract must declare `capabilities {{ shell: true }}`"
+        )));
+    }
     let ctx_with_anchors = ctx
         .tool_ctx
         .as_ref()
@@ -405,7 +449,7 @@ async fn dispatch_tool_call(
         .map(|session| session.stream_tx())
         .or_else(|| ctx.tool_ctx.stream_tx.clone());
     let tool_call_id = uuid::Uuid::now_v7().to_string();
-    let args_preview = preview_tool_args(&positional, &named);
+    let args_preview = preview_tool_args(&call_args.positional, &call_args.named);
     if let (Some(sink), Some(run_id), Some(parent_node)) =
         (ctx.events, ctx.flow_run_id.clone(), &ctx.current_node_id)
     {
@@ -435,10 +479,10 @@ async fn dispatch_tool_call(
             id: tool_call_id.clone(),
         });
     }
-    let call_args = ToolArgs { positional, named };
     let diff_preview = prepare_diff_preview(&name, &call_args);
+    let terminal = ToolUseTerminal::new(stream_tx, name.clone(), tool_call_id.clone());
     let invocation_ctx = ctx_with_anchors.with_tool_use_id(tool_call_id.clone());
-    let outcome = match crate::approval::authorize_tool_invocation(
+    let call_ctx = match crate::approval::authorize_tool_invocation(
         &invocation_ctx,
         &tool_call_id,
         &name,
@@ -447,41 +491,67 @@ async fn dispatch_tool_call(
     )
     .await
     {
-        Err(reason) => Err(RuntimeError::ToolFailed(format!(
-            "tool `{name}` denied: {reason}"
-        ))),
-        Ok(call_ctx) => tool.call(call_args, &call_ctx).await,
+        Ok(call_ctx) => call_ctx,
+        Err(reason) => {
+            let error = RuntimeError::ToolFailed(format!("tool `{name}` denied: {reason}"));
+            terminal.finish(false, error.to_string());
+            return Err(error);
+        }
     };
-    if let Some(tx) = &stream_tx {
-        let (ok, preview) = match &outcome {
-            Ok(v) => (true, preview_tool_value(v)),
-            Err(e) => (false, format!("{e}")),
-        };
-        let _ = tx.send(crate::stream::StreamFrame::ToolUseDone {
-            tool: name.clone(),
-            ok,
-            preview,
-            id: tool_call_id.clone(),
-        });
-    }
-    if let Some(session) = ctx.session_runtime.as_ref()
+
+    Ok(AuthorizedToolInvocation {
+        tool,
+        call_ctx,
+        tool_use_id: tool_call_id,
+        name,
+        args: call_args,
+        diff_preview,
+        session_runtime: ctx.session_runtime.clone(),
+        events: ctx.events.cloned(),
+        turn_id: ctx.turn_id.clone(),
+        flow_run_id: ctx.flow_run_id.clone(),
+        terminal,
+    })
+}
+
+pub(crate) async fn execute_tool_invocation(permit: AuthorizedToolInvocation) -> Value {
+    let AuthorizedToolInvocation {
+        tool,
+        call_ctx,
+        tool_use_id,
+        name,
+        args,
+        diff_preview,
+        session_runtime,
+        events,
+        turn_id,
+        flow_run_id,
+        terminal,
+    } = permit;
+    let outcome = tool.call(args, &call_ctx).await;
+    let (ok, preview) = match &outcome {
+        Ok(value) => (true, preview_tool_value(value)),
+        Err(error) => (false, error.to_string()),
+    };
+    terminal.finish(ok, preview);
+    if let Some(session) = session_runtime.as_ref()
         && (name == "memory.todo.set" || name == "memory.todo.done")
     {
         session.refresh_todos_from_store_async().await;
     }
-    if let Some(session) = ctx.session_runtime.as_ref()
+    if let Some(session) = session_runtime.as_ref()
         && (name == "plan.write" || name == "plan.tick")
     {
         session.refresh_plans_from_store_async().await;
     }
-    if let (Some(sink), Ok(value)) = (ctx.events, &outcome) {
+    if let (Some(sink), Ok(value)) = (events.as_ref(), &outcome) {
         if let Some((title, old_content, new_content, unified_diff)) =
             complete_diff_preview(diff_preview, &name, value)
         {
             sink.emit(crate::event::Event::DiffPreview {
-                turn_id: ctx.turn_id.clone(),
-                flow_run_id: ctx.flow_run_id.clone(),
-                tool_use_id: Some(tool_call_id.clone()),
+                turn_id,
+                flow_run_id,
+                tool_use_id: Some(tool_use_id.clone()),
                 title,
                 old_content,
                 new_content,
@@ -492,6 +562,46 @@ async fn dispatch_tool_call(
     match outcome {
         Ok(v) => v,
         Err(e) => Value::Err(e),
+    }
+}
+
+pub(crate) async fn execute_direct_effect(
+    effect: ExpressionEffect<AtmanPayload, RuntimeError>,
+    ctx: &AtmanHost<'_>,
+) -> Value {
+    match effect {
+        ExpressionEffect::FileRef(file) => {
+            let path = if std::path::Path::new(&file).is_relative() {
+                if let Some(dir) = &ctx.source_dir {
+                    dir.join(&file)
+                } else {
+                    std::path::PathBuf::from(&file)
+                }
+            } else {
+                std::path::PathBuf::from(&file)
+            };
+            match tokio::fs::read_to_string(&path).await {
+                Ok(text) => Value::Str(text),
+                Err(error) => Value::Err(RuntimeError::ToolFailed(format!(
+                    "@\"{}\": {error}",
+                    path.display()
+                ))),
+            }
+        }
+        ExpressionEffect::Confirm(value) => eval_confirm(value, ctx).await,
+        ExpressionEffect::Message {
+            role,
+            positional,
+            named,
+        } => eval_message_node(role, positional, named, ctx).await,
+        ExpressionEffect::FixSnapshot { target } => fix_snapshot(target).await,
+        ExpressionEffect::FixRestore { target, pristine } => fix_restore(target, pristine).await,
+        ExpressionEffect::Call { .. } => Value::Err(RuntimeError::ToolFailed(
+            "bare function call not supported; use namespaced tool call".into(),
+        )),
+        ExpressionEffect::ToolCall { name, .. } => Value::Err(RuntimeError::ToolFailed(format!(
+            "tool `{name}` requires an authorized invocation permit"
+        ))),
     }
 }
 
@@ -1216,8 +1326,36 @@ fn char_boundary(s: &str, target: usize, round_up: bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::ToolRegistry;
+    use crate::tool::{Tier, Tool, ToolRegistry};
     use atman_rt::parse_file;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingTool {
+        calls: std::sync::Arc<AtomicUsize>,
+        authorized_calls: std::sync::Arc<AtomicUsize>,
+    }
+
+    impl Tool for CountingTool {
+        fn name(&self) -> &str {
+            "test.count"
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+
+        fn call<'a>(
+            &'a self,
+            _args: ToolArgs,
+            ctx: &'a ToolCtx,
+        ) -> BoxFut<'a, crate::tool::ToolResult> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if ctx.invocation_authorization.is_some() {
+                self.authorized_calls.fetch_add(1, Ordering::Relaxed);
+            }
+            Box::pin(async { Ok(Value::Str("called".into())) })
+        }
+    }
 
     #[test]
     fn fanout_only_classifies_runtime_cancellation_as_cancelled() {
@@ -1263,6 +1401,140 @@ mod tests {
             });
         }
         ctx
+    }
+
+    fn tool_test_host<'a>(
+        tools: &'a ToolRegistry,
+        tool_ctx: &'a ToolCtx,
+        providers: &'a crate::provider::ProviderRegistry,
+        flows: &'a std::collections::HashMap<String, atman_rt::ast::FlowDecl>,
+    ) -> AtmanHost<'a> {
+        AtmanHost {
+            tools,
+            tool_ctx: std::borrow::Cow::Borrowed(tool_ctx),
+            providers,
+            flows,
+            linked_program: None,
+            current_module: None,
+            allows_shell: false,
+            events: None,
+            turn_id: None,
+            flow_run_id: tool_ctx.flow_run_id.clone(),
+            session_runtime: None,
+            flow_cancel: tokio_util::sync::CancellationToken::new(),
+            safety: None,
+            current_node_id: Some("test-node".into()),
+            source_dir: None,
+        }
+    }
+
+    fn tool_frame_counts(
+        rx: &mut tokio::sync::broadcast::Receiver<crate::stream::StreamFrame>,
+    ) -> (usize, Vec<(bool, String)>) {
+        let mut starts = 0;
+        let mut terminals = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            match frame {
+                crate::stream::StreamFrame::ToolUseStart { tool, .. } if tool == "test.count" => {
+                    starts += 1;
+                }
+                crate::stream::StreamFrame::ToolUseDone {
+                    tool, ok, preview, ..
+                } if tool == "test.count" => terminals.push((ok, preview)),
+                _ => {}
+            }
+        }
+        (starts, terminals)
+    }
+
+    #[tokio::test]
+    async fn tool_invocation_split_executes_authorized_permit_exactly_once() {
+        let tools = ToolRegistry::new();
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let authorized_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        tools.register(std::sync::Arc::new(CountingTool {
+            calls: std::sync::Arc::clone(&calls),
+            authorized_calls: std::sync::Arc::clone(&authorized_calls),
+        }));
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let tool_ctx = authorized_eval_tool_ctx(None).with_stream_tx(tx);
+        let providers = crate::provider::ProviderRegistry::new();
+        let flows = std::collections::HashMap::new();
+        let host = tool_test_host(&tools, &tool_ctx, &providers, &flows);
+
+        let permit =
+            authorize_tool_invocation("test.count".into(), ToolArgs::default(), None, &host)
+                .await
+                .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+        assert!(matches!(
+            execute_tool_invocation(permit).await,
+            Value::Str(value) if value == "called"
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(authorized_calls.load(Ordering::Relaxed), 1);
+        let (starts, terminals) = tool_frame_counts(&mut rx);
+        assert_eq!(starts, 1);
+        assert_eq!(terminals, vec![(true, "\"called\"".into())]);
+    }
+
+    #[tokio::test]
+    async fn tool_invocation_split_closes_dropped_permit() {
+        let tools = ToolRegistry::new();
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        tools.register(std::sync::Arc::new(CountingTool {
+            calls: std::sync::Arc::clone(&calls),
+            authorized_calls: std::sync::Arc::new(AtomicUsize::new(0)),
+        }));
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let tool_ctx = authorized_eval_tool_ctx(None).with_stream_tx(tx);
+        let providers = crate::provider::ProviderRegistry::new();
+        let flows = std::collections::HashMap::new();
+        let host = tool_test_host(&tools, &tool_ctx, &providers, &flows);
+
+        let permit =
+            authorize_tool_invocation("test.count".into(), ToolArgs::default(), None, &host)
+                .await
+                .unwrap();
+        drop(permit);
+
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        let (starts, terminals) = tool_frame_counts(&mut rx);
+        assert_eq!(starts, 1);
+        assert_eq!(terminals, vec![(false, "tool invocation cancelled".into())]);
+    }
+
+    #[tokio::test]
+    async fn tool_invocation_split_closes_rejected_authorization() {
+        let tools = ToolRegistry::new();
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        tools.register(std::sync::Arc::new(CountingTool {
+            calls: std::sync::Arc::clone(&calls),
+            authorized_calls: std::sync::Arc::new(AtomicUsize::new(0)),
+        }));
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let run_id = crate::event::FlowRunId::now();
+        let tool_ctx = ToolCtx::new()
+            .with_anchors(None, Some(run_id), None)
+            .with_stream_tx(tx);
+        let providers = crate::provider::ProviderRegistry::new();
+        let flows = std::collections::HashMap::new();
+        let host = tool_test_host(&tools, &tool_ctx, &providers, &flows);
+
+        let error =
+            authorize_tool_invocation("test.count".into(), ToolArgs::default(), None, &host)
+                .await
+                .err()
+                .expect("missing permission broker must reject the invocation");
+
+        assert!(error.to_string().contains("denied"));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        let (starts, terminals) = tool_frame_counts(&mut rx);
+        assert_eq!(starts, 1);
+        assert_eq!(terminals.len(), 1);
+        assert!(!terminals[0].0);
+        assert!(terminals[0].1.contains("denied"));
     }
 
     #[test]
