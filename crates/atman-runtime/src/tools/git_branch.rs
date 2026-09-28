@@ -4,7 +4,9 @@ use git2::{BranchType, Repository};
 
 use crate::error::RuntimeError;
 use crate::git::{GitCli, has_changes};
-use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::tool::{
+    ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolDefinition, ToolRegistry, ToolResult,
+};
 use crate::value::Value;
 
 pub struct GitBranchList;
@@ -382,6 +384,18 @@ impl Tool for GitRemoteList {
     }
 }
 
+pub(super) fn register_remote_list(registry: &ToolRegistry) {
+    registry
+        .register_fn(
+            ToolDefinition::from_tool(&GitRemoteList),
+            |args, ctx| async move {
+                let tool = GitRemoteList;
+                tool.call(args, &ctx).await
+            },
+        )
+        .expect("built-in git.remote.list definition must be valid");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,7 +513,15 @@ mod tests {
         };
         let branches = futures::executor::block_on(GitBranchList.call(args.clone(), &ctx)).unwrap();
         assert!(matches!(branches, Value::List(items) if !items.is_empty()));
-        let remotes = futures::executor::block_on(GitRemoteList.call(args, &ctx)).unwrap();
+        let registry = ToolRegistry::new();
+        register_remote_list(&registry);
+        let tool = registry.get("git.remote.list").unwrap();
+        assert_eq!(tool.tier(), Tier::Zero);
+        assert_eq!(
+            serde_json::to_value(crate::tool::tool_spec(tool.as_ref())).unwrap(),
+            serde_json::to_value(crate::tool::tool_spec(&GitRemoteList)).unwrap()
+        );
+        let remotes = futures::executor::block_on(tool.call(args, &ctx)).unwrap();
         assert!(matches!(remotes, Value::List(items) if items.len() == 1));
     }
 }

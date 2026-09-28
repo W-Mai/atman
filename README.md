@@ -420,7 +420,7 @@ atman/
   docs/              # Quickstart, context strategy, list combinators
 ```
 
-`atman-rt` is the complete Atman language VM. `Vm::compile(Source, &resolver)` parses and links `.at` source, including `use` and `pub` flows. A Rust host implements `VmEmbedding` to supply external effects and optional execution callbacks, then calls `Vm::run` to execute a flow. Atman's tools, providers, sessions, and storage are supplied by `atman-runtime`; another host can use `atman-rt` without that crate.
+`atman-rt` is the complete Atman language VM. `Vm::compile(Source, &resolver)` parses and links `.at` source, including `use` and `pub` flows. A Rust host can register async tool handlers with `ToolRouter` and pass it directly to `Vm::run`; hosts needing other effects or execution callbacks can implement `VmEmbedding`. Atman's tools, providers, sessions, and storage are supplied by `atman-runtime`; another host can use `atman-rt` without that crate. `atman-runtime::ToolRegistry::register_fn` binds simple async tools with explicit tier and optional schema metadata through the existing approval and event path.
 
 `cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked` checks portable flow behavior with only `atman-rt` as an Atman dependency. `cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked -- --demo 6` compiles `.at` source, imports a public flow, invokes a host effect, and prints `result: 18`. Omit `6` to enter an integer interactively. The CI workflow runs the fixture on Linux, macOS, and Windows, runs it on Wasm/WASI, and checks the `no_std` core on `wasm32-unknown-unknown`.
 

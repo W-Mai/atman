@@ -17,6 +17,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Tool registration** — Embedded hosts can register async tool handlers with `atman_rt::ToolRouter`. `atman-runtime::ToolRegistry::register_fn` binds function tools with explicit tier metadata through the existing approval and event path.
 - **Natural Flow calls** — Local and `use`-bound flows use function-call syntax. `fanout` concurrently drives cold Flow Futures and returns results in source order.
 - **Reusable flow sources** — `use` binds public flows from other `.at` files by name or namespace. CLI, daemon, slash commands, and flow checks load dependencies before execution. Flow versions and snapshots include dependency contents; recorded source bundles support revision runs and multi-file diffs.
 - **Embeddable Atman VM** — `Vm::compile` parses and links `.at` source with host-resolved imports. A `VmEmbedding` host supplies effects and optional execution callbacks; `Vm::run` executes entry and child flows. Builds without the default syntax feature retain the `no_std` AST execution path with `alloc` and pointer-width atomics.

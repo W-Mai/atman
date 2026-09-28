@@ -133,7 +133,10 @@ pub use submission_queue::{
 pub use task_registry::{
     TaskDisplay, TaskEvent, TaskFilter, TaskId, TaskKind, TaskRegistry, TaskSnapshot, TaskStatus,
 };
-pub use tool::{CancelBehavior, Tier, Tool, ToolArgs, ToolCtx, ToolRegistry, ToolResult};
+pub use tool::{
+    CancelBehavior, RegisterError, Tier, Tool, ToolArgs, ToolCtx, ToolDefinition, ToolRegistry,
+    ToolResult,
+};
 pub use tool_naming::{ToolNaming, from_wire, to_wire};
 pub use validate::{ValidationError, validate};
 pub use value::{AtmanPayload, ValueJson};

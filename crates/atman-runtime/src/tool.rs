@@ -699,6 +699,108 @@ pub trait Tool: Send + Sync {
     }
 }
 
+/// Metadata for a tool backed by an async function or closure.
+pub struct ToolDefinition {
+    name: String,
+    tier: Tier,
+    description: Option<String>,
+    input_schema: serde_json::Value,
+    cancel_behavior: CancelBehavior,
+    requires_call_intent: bool,
+}
+
+impl ToolDefinition {
+    pub fn new(name: impl Into<String>, tier: Tier) -> Self {
+        Self {
+            name: name.into(),
+            tier,
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+            cancel_behavior: CancelBehavior::AbortSafe,
+            requires_call_intent: true,
+        }
+    }
+
+    pub(crate) fn from_tool(tool: &dyn Tool) -> Self {
+        Self {
+            name: tool.name().to_owned(),
+            tier: tool.tier(),
+            description: tool.description().map(str::to_owned),
+            input_schema: tool.input_schema(),
+            cancel_behavior: tool.cancel_behavior(),
+            requires_call_intent: tool.requires_call_intent(),
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn input_schema(mut self, schema: serde_json::Value) -> Self {
+        self.input_schema = schema;
+        self
+    }
+
+    pub fn cancel_behavior(mut self, behavior: CancelBehavior) -> Self {
+        self.cancel_behavior = behavior;
+        self
+    }
+
+    pub fn requires_call_intent(mut self, required: bool) -> Self {
+        self.requires_call_intent = required;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RegisterError {
+    #[error("tool name cannot be empty")]
+    EmptyName,
+    #[error("tool name `{0}` is reserved for an evaluator intrinsic")]
+    ReservedName(String),
+}
+
+struct FunctionTool<F, Fut> {
+    definition: ToolDefinition,
+    handler: F,
+    future: std::marker::PhantomData<fn() -> Fut>,
+}
+
+impl<F, Fut> Tool for FunctionTool<F, Fut>
+where
+    F: Fn(ToolArgs, ToolCtx) -> Fut + Send + Sync,
+    Fut: Future<Output = ToolResult> + Send + 'static,
+{
+    fn name(&self) -> &str {
+        &self.definition.name
+    }
+
+    fn tier(&self) -> Tier {
+        self.definition.tier
+    }
+
+    fn description(&self) -> Option<&str> {
+        self.definition.description.as_deref()
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        self.definition.input_schema.clone()
+    }
+
+    fn cancel_behavior(&self) -> CancelBehavior {
+        self.definition.cancel_behavior
+    }
+
+    fn requires_call_intent(&self) -> bool {
+        self.definition.requires_call_intent
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin((self.handler)(args, ctx.clone()))
+    }
+}
+
 pub fn tool_spec(tool: &dyn Tool) -> ToolSpec {
     let mut input_schema = tool.input_schema();
     if tool.requires_call_intent() {
@@ -838,6 +940,36 @@ impl ToolRegistry {
             .insert(tool.name().to_string(), tool);
     }
 
+    /// Register a function-backed tool through the same policy and dispatch path as `Tool`.
+    /// An existing tool with the same name is replaced, as with `register`.
+    pub fn register_fn<F, Fut>(
+        &self,
+        definition: ToolDefinition,
+        handler: F,
+    ) -> Result<(), RegisterError>
+    where
+        F: Fn(ToolArgs, ToolCtx) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ToolResult> + Send + 'static,
+    {
+        let name = definition.name.clone();
+        if name.trim().is_empty() {
+            return Err(RegisterError::EmptyName);
+        }
+        if crate::eval::is_evaluator_intrinsic(&name) {
+            return Err(RegisterError::ReservedName(name));
+        }
+        let mut tools = self.tools.write().unwrap();
+        let _ = tools.insert(
+            name,
+            std::sync::Arc::new(FunctionTool {
+                definition,
+                handler,
+                future: std::marker::PhantomData,
+            }),
+        );
+        Ok(())
+    }
+
     pub fn get(&self, name: &str) -> Option<std::sync::Arc<dyn Tool>> {
         self.tools.read().unwrap().get(name).cloned()
     }
@@ -946,6 +1078,84 @@ mod tests {
         assert!(registry.has("mcp.alpha.keep"));
         assert!(!registry.has("mcp.beta.remove"));
         assert!(registry.has("fs.read"));
+    }
+
+    #[test]
+    fn function_tool_preserves_metadata_and_uses_the_registry_dispatch_path() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_fn(
+                ToolDefinition::new("probe.double", Tier::Two)
+                    .description("Double an integer.")
+                    .input_schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {"value": {"type": "integer"}},
+                        "required": ["value"]
+                    }))
+                    .cancel_behavior(CancelBehavior::Atomic)
+                    .requires_call_intent(false),
+                |args, ctx| async move {
+                    assert_eq!(ctx.tool_use_id.as_deref(), Some("call-1"));
+                    let Value::Int(value) = args.named("value").unwrap() else {
+                        panic!("expected integer value");
+                    };
+                    Ok(Value::Int(*value * 2))
+                },
+            )
+            .unwrap();
+
+        let tool = registry.get("probe.double").unwrap();
+        assert_eq!(tool.tier(), Tier::Two);
+        assert_eq!(tool.cancel_behavior(), CancelBehavior::Atomic);
+        assert_eq!(
+            tool.approval_level(&ToolArgs::default(), &ToolCtx::default()),
+            ApprovalLevel::Approve
+        );
+        let spec = tool_spec(tool.as_ref());
+        assert_eq!(spec.description.as_deref(), Some("Double an integer."));
+        assert_eq!(spec.input_schema["required"], serde_json::json!(["value"]));
+        assert!(!tool_spec_supports_call_intent("probe.double", &[spec]));
+
+        let result = futures::executor::block_on(tool.call(
+            ToolArgs {
+                named: vec![("value".into(), Value::Int(21))],
+                ..ToolArgs::default()
+            },
+            &ToolCtx::new().with_tool_use_id("call-1"),
+        ))
+        .unwrap();
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn function_registration_rejects_invalid_names_and_replaces_existing_tools() {
+        let registry = ToolRegistry::new();
+        let handler = |_args, _ctx| async { Ok(Value::Unit) };
+        assert_eq!(
+            registry.register_fn(ToolDefinition::new(" ", Tier::Zero), handler),
+            Err(RegisterError::EmptyName)
+        );
+        assert_eq!(
+            registry.register_fn(ToolDefinition::new("env", Tier::Zero), handler),
+            Err(RegisterError::ReservedName("env".into()))
+        );
+        registry.register(std::sync::Arc::new(NamedTool("existing")));
+        registry
+            .register_fn(ToolDefinition::new("existing", Tier::One), handler)
+            .unwrap();
+        assert_eq!(registry.get("existing").unwrap().tier(), Tier::One);
+        registry
+            .register_fn(ToolDefinition::new("new", Tier::Zero), handler)
+            .unwrap();
+        registry
+            .register_fn(ToolDefinition::new("new", Tier::Four), handler)
+            .unwrap();
+        let tool = registry.get("new").unwrap();
+        assert_eq!(tool.tier(), Tier::Four);
+        assert!(tool_spec_supports_call_intent(
+            "new",
+            &[tool_spec(tool.as_ref())]
+        ));
     }
 
     #[test]

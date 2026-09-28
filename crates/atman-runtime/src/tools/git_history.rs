@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use crate::error::RuntimeError;
 use crate::git::GitCli;
-use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::tool::{
+    ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolDefinition, ToolRegistry, ToolResult,
+};
 use crate::value::Value;
 
 pub struct GitRestore;
@@ -208,6 +210,18 @@ impl Tool for GitTagList {
     }
 }
 
+pub(super) fn register_tag_list(registry: &ToolRegistry) {
+    registry
+        .register_fn(
+            ToolDefinition::from_tool(&GitTagList),
+            |args, ctx| async move {
+                let tool = GitTagList;
+                tool.call(args, &ctx).await
+            },
+        )
+        .expect("built-in git.tag.list definition must be valid");
+}
+
 impl Tool for GitTagCreate {
     fn name(&self) -> &str {
         "git.tag.create"
@@ -326,7 +340,15 @@ mod tests {
             ..ToolArgs::default()
         };
         GitTagCreate.call(tag_args, &ctx).await.unwrap();
-        let tags = GitTagList
+        let registry = ToolRegistry::new();
+        register_tag_list(&registry);
+        let tool = registry.get("git.tag.list").unwrap();
+        assert_eq!(tool.tier(), Tier::Zero);
+        assert_eq!(
+            serde_json::to_value(crate::tool::tool_spec(tool.as_ref())).unwrap(),
+            serde_json::to_value(crate::tool::tool_spec(&GitTagList)).unwrap()
+        );
+        let tags = tool
             .call(
                 ToolArgs {
                     named: vec![("cwd".into(), Value::Str(dir.path().display().to_string()))],

@@ -132,14 +132,14 @@ pub fn register_git_ops(reg: &ToolRegistry) {
     reg.register(Arc::new(git_ops::GitPush));
     reg.register(Arc::new(git_history::GitRestore));
     reg.register(Arc::new(git_history::GitRevert));
-    reg.register(Arc::new(git_history::GitTagList));
+    git_history::register_tag_list(reg);
     reg.register(Arc::new(git_history::GitTagCreate));
     reg.register(Arc::new(git_branch::GitBranchList));
     reg.register(Arc::new(git_branch::GitBranchCreate));
     reg.register(Arc::new(git_branch::GitBranchSwitch));
     reg.register(Arc::new(git_branch::GitBranchRename));
     reg.register(Arc::new(git_branch::GitBranchDelete));
-    reg.register(Arc::new(git_branch::GitRemoteList));
+    git_branch::register_remote_list(reg);
     reg.register(Arc::new(git_worktree::GitWorktreeAdd));
     reg.register(Arc::new(git_worktree::GitWorktreeList));
     reg.register(Arc::new(git_worktree::GitWorktreeRemove));
@@ -289,4 +289,28 @@ pub fn register_spec_memory(reg: &ToolRegistry, spec_store: Arc<crate::memory::s
         store: spec_store.clone(),
     }));
     reg.register(Arc::new(memory::MemorySpecDeviate { store: spec_store }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_tool_registration_can_replace_function_backed_tools() {
+        let registry = ToolRegistry::new();
+        register_git_ops(&registry);
+        let old_tags = registry.get("git.tag.list").unwrap();
+        let old_remotes = registry.get("git.remote.list").unwrap();
+
+        register_git_ops(&registry);
+
+        assert!(!Arc::ptr_eq(
+            &old_tags,
+            &registry.get("git.tag.list").unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            &old_remotes,
+            &registry.get("git.remote.list").unwrap()
+        ));
+    }
 }
