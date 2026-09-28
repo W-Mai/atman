@@ -9645,13 +9645,13 @@ mod tests {
         let error = parse_args(&["items=not-json".into()], flow).unwrap_err();
         assert!(error.to_string().contains("flow argument `items`"));
         let error = parse_args(&["items={}".into()], flow).unwrap_err();
-        assert!(error.to_string().contains("JSON array"));
+        assert!(format!("{error:#}").contains("JSON array"));
         let error = parse_args(&["config=[]".into()], flow).unwrap_err();
-        assert!(error.to_string().contains("JSON object"));
+        assert!(format!("{error:#}").contains("JSON object"));
         let error = parse_args(&["loose_items=plain".into()], flow).unwrap_err();
-        assert!(error.to_string().contains("JSON array"));
+        assert!(format!("{error:#}").contains("JSON array"));
         let error = parse_args(&["loose_config=plain".into()], flow).unwrap_err();
-        assert!(error.to_string().contains("JSON object"));
+        assert!(format!("{error:#}").contains("JSON object"));
     }
 
     #[test]

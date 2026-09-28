@@ -339,7 +339,7 @@ fn parse_type(input: ParseStream) -> Result<TypeExpr> {
         }
         return Ok(TypeExpr::Struct(fields));
     }
-    let id = input.parse::<syn::Ident>()?;
+    let id = <syn::Ident as syn::ext::IdentExt>::parse_any(input)?;
     Ok(TypeExpr::Named(to_ident(id)))
 }
 
@@ -1169,5 +1169,18 @@ mod tests {
         assert!(printed.contains("(fanout pending)[0]"));
         let reparsed = parse_file(&printed).unwrap();
         assert_eq!(format!("{file:#?}"), format!("{reparsed:#?}"));
+    }
+
+    #[test]
+    fn generic_struct_type_is_not_blocked_by_the_rust_keyword() {
+        let file = parse_file("flow main(value: struct) -> struct { return value }").unwrap();
+        assert!(matches!(
+            &file.flows[0].params[0].ty,
+            TypeExpr::Named(name) if name.name == "struct"
+        ));
+        assert!(matches!(
+            &file.flows[0].ret,
+            Some(TypeExpr::Named(name)) if name.name == "struct"
+        ));
     }
 }
