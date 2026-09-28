@@ -291,7 +291,7 @@ Session listings default to the current project. Use `atman session list --all` 
 - **`atman sync init <url>`** turns `<project>/.atman/` into a git repo so your memory travels across machines.
 - **`atman migrate list --from opencode`** imports opencode / kiro session transcripts into a fresh atman session.
 - **[docs/context-strategy.md](./context-strategy.md)** covers the goal / todos / sliding-window / recall / compaction layering and when to reach for each.
-- **[docs/how-to-filter.md](./how-to-filter.md)** covers the list combinators plus the pipe operator.
+- **[docs/how-to-filter.md](./how-to-filter.md)** covers list combinators, fanout, and sequential expressions.
 - **`examples/`** in the atman source tree has larger canonical flows (agent loop, hunk review, LSP-style code review, etc).
 
 Atman processes using the same preview `base_url` share one server. Projects appear after their first `preview.push`; use the left rail, or open the menu and choose **All Projects** in a narrow window, to switch between them.

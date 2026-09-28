@@ -28,8 +28,7 @@ pub use engine::{
 };
 pub use env::Env;
 pub use expr::{
-    ExpressionEffect, ExpressionHost, eval_dynamic_fanout, eval_expr, eval_static_fanout,
-    is_type_name,
+    ExpressionEffect, ExpressionHost, eval_dynamic_fanout, eval_expr, eval_fanout, is_type_name,
 };
 pub use fanout::join_fanout_all;
 pub use identity::{IdSource, RunId, TurnId};

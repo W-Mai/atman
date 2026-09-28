@@ -31,11 +31,11 @@ flow summarize_items(items: list) -> list {
     return fanout items { |item| llm.call(
         model: "smart",
         prompt: "Summarize: " + item
-    ) } collect: all
+    ) }
 }
 ```
 
-Dynamic fanout applies the lambda in source order. `collect: all` returns every result; `collect: first` returns the first source item's result without evaluating later items.
+Dynamic fanout applies the lambda sequentially in source order and returns every result.
 
 Static fanout evaluates an explicit list of expressions:
 
@@ -44,11 +44,13 @@ flow compare_files() -> list {
     return fanout [
         fs.read(path: "src/main.rs"),
         fs.read(path: "src/lib.rs")
-    ] collect: all
+    ]
 }
 ```
 
-Static fanout polls all branches concurrently and returns results in source order. `collect: first` is not yet supported for static fanout.
+Static fanout polls all branches concurrently and returns results in source order.
+
+`fanout pending` also accepts an existing list value. Its elements have already been evaluated, so use the literal form when tool calls need to start concurrently.
 
 Use `fanout` for independent work. Keep dependent operations as ordinary sequential expressions so their data flow remains explicit.
 
@@ -74,17 +76,18 @@ flow retry_until_ready() -> string {
 
 `when` bodies are ordinary statement blocks and can contain nested flow operations.
 
-## Pipe expressions
+## Sequential expressions
 
-`|>` passes the left value as the first positional argument of the call on the right:
+Use variable bindings when a later step needs an earlier result:
 
 ```atman
-flow first_item(xs: list) -> value {
-    return xs |> first()
+flow first_non_empty(xs: list) -> value {
+    filtered = list.filter(xs, |item| item != "")
+    return head(filtered)
 }
 ```
 
-Use named arguments when a tool has several parameters. The pipe form is useful when each step consumes the result of the previous step.
+The binding makes the intermediate value available for later calls without introducing a second expression operator.
 
 ## Current references
 

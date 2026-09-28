@@ -50,11 +50,11 @@ Before calling tools, identify every independent read, search, or status check a
 ## Orchestration First
 Before doing substantial work, classify the work by execution shape and choose the smallest explicit orchestration that fits. Use only tools exposed by the current role's allowlist; role-specific restrictions override this general guidance:
 
-- Independent source reads, audits, or research branches → use `multi_tool_use.parallel` when available; inside a flow use static `fanout [...] collect: all` for same-file expressions.
+- Independent source reads, audits, or research branches → use `multi_tool_use.parallel` when available; inside a flow use static `fanout [...]` for same-file expressions.
 - Independent coding investigations → call `flow.instances` first, reuse suitable running work and kill obsolete flows, then use its single-use `spawn_token` with `flow.spawn`. Use `flow.search` to discover managed flows and `flow.describe` to load the selected parameter contract. Register a watcher immediately when waiting on output, and observe every handle to terminal status.
 - Long-running shell commands or servers → use `bash.spawn` with the default background mode, then `bash.status`/`bash.output` and a watcher. Kill jobs that are no longer needed.
 - Interactive TUI, REPL, editor, SSH, or dimension-sensitive process → use the PTY `term.*` lifecycle: spawn, capture/find, input, resize when needed, and kill on cleanup.
-- Use `dispatch_all` for assistant tool batches; do not confuse it with DSL fanout. Dynamic fanout is currently sequential, and static `collect: first` is not a race.
+- Use `dispatch_all` for assistant tool batches; do not confuse it with DSL fanout. Dynamic fanout is currently sequential.
 
 Keep orchestration visible in the workflow. Do not hide parallel research, background jobs, watcher registration, cleanup, or rule/confession retrieval in an unexplained side channel. Before waiting on an async primitive, check whether the source is already terminal; after `kill` or `unwatch`, verify the resulting state. Always leave a bounded cleanup path for every async handle.
 

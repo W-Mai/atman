@@ -325,11 +325,6 @@ fn write_expr(out: &mut String, expr: &Expr, indent: usize) {
             }
             out.push(')');
         }
-        Expr::Pipe { lhs, rhs } => {
-            write_expr(out, lhs, indent);
-            out.push_str(" |> ");
-            write_expr(out, rhs, indent);
-        }
         Expr::Struct(fields) => {
             out.push_str("{ ");
             for (i, (name, value)) in fields.iter().enumerate() {
@@ -398,34 +393,26 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
             }
             out.push(')');
         }
-        Node::Fanout { items, collect } => {
-            out.push_str("fanout [\n");
-            for it in items {
-                write!(out, "{pad}").unwrap();
-                write_expr(out, it, indent + 1);
-                out.push_str(",\n");
+        Node::Fanout { source } => {
+            out.push_str("fanout ");
+            if let Expr::List(items) = source.as_ref() {
+                out.push_str("[\n");
+                for it in items {
+                    write!(out, "{pad}").unwrap();
+                    write_expr(out, it, indent + 1);
+                    out.push_str(",\n");
+                }
+                write!(out, "{outer_pad}]").unwrap();
+            } else {
+                write_expr(out, source, indent);
             }
-            let mode = match collect {
-                FanoutCollect::All => "all",
-                FanoutCollect::First => "first",
-            };
-            write!(out, "{outer_pad}] collect: {mode}").unwrap();
         }
-        Node::DynamicFanout {
-            source,
-            lambda,
-            collect,
-        } => {
+        Node::DynamicFanout { source, lambda } => {
             out.push_str("fanout ");
             write_expr(out, source, indent);
             out.push_str(" { ");
             write_expr(out, lambda, indent);
-            let mode = match collect {
-                FanoutCollect::All => "all",
-                FanoutCollect::First => "first",
-            };
-            out.push_str(" } collect: ");
-            out.push_str(mode);
+            out.push_str(" }");
         }
         Node::UserConfirm { msg } => {
             out.push_str("user_confirm(");

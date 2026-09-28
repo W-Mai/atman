@@ -97,20 +97,18 @@ fn lambda_bound_to_var() {
 }
 
 #[test]
-fn lambda_body_with_pipe() {
-    let src = r#"flow t() -> string { x = |f| f |> len() return "ok" }"#;
+fn lambda_body_with_tool_call() {
+    let src = r#"flow t() -> string { x = |f| len(f) return "ok" }"#;
     parse_file(src).expect("should parse");
 }
 
 #[test]
-fn dynamic_fanout_parses_all() {
-    let src = r#"flow t() -> string { r = fanout tasks { |t| t } collect: all return "ok" }"#;
+fn dynamic_fanout_parses() {
+    let src = r#"flow t() -> string { r = fanout tasks { |t| t } return "ok" }"#;
     let file = parse_file(src).expect("parse");
     match &file.flows[0].body[0] {
         atman_rt::ast::Stmt::Bind { value, .. } => match value {
-            Expr::Node(Node::DynamicFanout { collect, .. }) => {
-                assert!(matches!(collect, atman_rt::ast::FanoutCollect::All));
-            }
+            Expr::Node(Node::DynamicFanout { .. }) => {}
             other => panic!("expected DynamicFanout, got {other:?}"),
         },
         _ => panic!("expected bind"),
@@ -118,17 +116,69 @@ fn dynamic_fanout_parses_all() {
 }
 
 #[test]
-fn dynamic_fanout_parses_first() {
-    let src = r#"flow t() -> string { r = fanout tasks { |t| t } collect: first return "ok" }"#;
+fn static_fanout_parses() {
+    let src = r#"flow t() -> string { r = fanout [a, b] return "ok" }"#;
     let file = parse_file(src).expect("parse");
     match &file.flows[0].body[0] {
         atman_rt::ast::Stmt::Bind { value, .. } => match value {
-            Expr::Node(Node::DynamicFanout { collect, .. }) => {
-                assert!(matches!(collect, atman_rt::ast::FanoutCollect::First));
+            Expr::Node(Node::Fanout { source }) => {
+                assert!(matches!(source.as_ref(), Expr::List(items) if items.len() == 2));
             }
-            other => panic!("expected DynamicFanout, got {other:?}"),
+            other => panic!("expected Fanout, got {other:?}"),
         },
         _ => panic!("expected bind"),
+    }
+}
+
+#[test]
+fn fanout_accepts_array_variable() {
+    let expr = parse_bind_expr("fanout pending");
+    assert!(matches!(
+        expr,
+        Expr::Node(Node::Fanout { source }) if matches!(source.as_ref(), Expr::Ident(id) if id.name == "pending")
+    ));
+}
+
+#[test]
+fn fanout_keeps_outer_comparison() {
+    let compared = parse_bind_expr("fanout [a, b] == expected");
+    assert!(matches!(
+        compared,
+        Expr::Binary { left, .. } if matches!(left.as_ref(), Expr::Node(Node::Fanout { .. }))
+    ));
+}
+
+#[test]
+fn fanout_condition_keeps_when_body() {
+    let source = "flow t() -> bool { when fanout [1] == [1] { return true } return false }";
+    let file = parse_file(source).expect("when body must not become a fanout mapping");
+    assert!(matches!(
+        &file.flows[0].body[0],
+        atman_rt::ast::Stmt::When {
+            cond: Expr::Binary { left, .. },
+            body,
+        } if matches!(left.as_ref(), Expr::Node(Node::Fanout { .. })) && body.len() == 1
+    ));
+}
+
+#[test]
+fn dynamic_fanout_accepts_expression_source() {
+    let expr = parse_bind_expr("fanout left + right { |item| item }");
+    assert!(matches!(
+        expr,
+        Expr::Node(Node::DynamicFanout { source, .. })
+            if matches!(source.as_ref(), Expr::Binary { .. })
+    ));
+}
+
+#[test]
+fn fanout_rejects_collect_clause() {
+    for fanout in ["fanout [a, b]", "fanout tasks { |t| t }"] {
+        for mode in ["all", "first"] {
+            let src =
+                format!("flow t() -> string {{ r = {fanout} collect: {mode} return \"ok\" }}");
+            assert!(parse_file(&src).is_err(), "accepted removed syntax: {src}");
+        }
     }
 }
 
@@ -161,8 +211,27 @@ fn roundtrip_combinator() {
 
 #[test]
 fn roundtrip_dynamic_fanout() {
-    let src = r#"flow t() -> string { r = fanout tasks { |t| t } collect: all return "ok" }"#;
+    let src = r#"flow t() -> string { r = fanout tasks { |t| t } return "ok" }"#;
     let f1 = parse_file(src).expect("parse");
     let printed = print_file(&f1);
+    assert!(!printed.contains("collect:"));
     let _f2 = parse_file(&printed).expect("re-parse");
+}
+
+#[test]
+fn roundtrip_static_fanout() {
+    let src = r#"flow t() -> string { r = fanout [a, b] return "ok" }"#;
+    let f1 = parse_file(src).expect("parse");
+    let printed = print_file(&f1);
+    assert!(!printed.contains("collect:"));
+    let _f2 = parse_file(&printed).expect("re-parse");
+}
+
+#[test]
+fn roundtrip_array_variable_fanout() {
+    let src = r#"flow t() -> string { pending = [a, b] return to_json_string(fanout pending) }"#;
+    let file = parse_file(src).expect("parse");
+    let printed = print_file(&file);
+    assert!(printed.contains("fanout pending"), "{printed}");
+    parse_file(&printed).expect("re-parse");
 }

@@ -8,7 +8,7 @@ flow look_into(question: string) -> Report {
     findings = fanout [
         subflow(explore_module, question, "src/"),
         subflow(explore_module, question, "tests/"),
-    ] collect: all
+    ]
 
     summary = llm.call(
         model: "smart",

@@ -232,10 +232,6 @@ fn walk_expr(
                 walk_expr(a, scope, tools, errors);
             }
         }
-        Expr::Pipe { lhs, rhs } => {
-            walk_expr(lhs, scope, tools, errors);
-            walk_expr(rhs, scope, tools, errors);
-        }
         Expr::Lambda { params, body } => {
             let mut child_scope = scope.clone();
             for p in params {
@@ -291,11 +287,7 @@ fn walk_node(
             walk_expr(source, scope, tools, errors);
             walk_expr(lambda, scope, tools, errors);
         }
-        Node::Fanout { items, .. } => {
-            for item in items {
-                walk_expr(item, scope, tools, errors);
-            }
-        }
+        Node::Fanout { source } => walk_expr(source, scope, tools, errors),
         Node::UserConfirm { msg } => walk_expr(msg, scope, tools, errors),
         Node::Subflow { args, .. } => {
             for arg in args {

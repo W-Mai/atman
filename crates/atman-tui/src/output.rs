@@ -7621,7 +7621,7 @@ fn stmt_kind_glyph(kind: &atman_runtime::nodegraph::NodeKind) -> (&'static str, 
     match kind {
         NodeKind::Llm { .. } => ("✦", t.accent.into()),
         NodeKind::ToolCall { .. } => ("🔧", t.accent.into()),
-        NodeKind::Fanout { .. } => ("⇉", t.accent.into()),
+        NodeKind::Fanout => ("⇉", t.accent.into()),
         NodeKind::UserConfirm => ("?", t.accent.into()),
         NodeKind::Subflow { .. } => ("↳", t.accent.into()),
         NodeKind::Message { .. } => ("✉", t.tinted_fg.into()),

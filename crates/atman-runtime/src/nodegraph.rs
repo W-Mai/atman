@@ -1,4 +1,4 @@
-use atman_rt::ast::{Arg, Expr, FanoutCollect, FlowDecl, Ident, Node, Stmt};
+use atman_rt::ast::{Arg, Expr, FlowDecl, Ident, Node, Stmt};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -20,7 +20,7 @@ pub struct StaticNode {
 pub enum NodeKind {
     Llm { model: Option<String> },
     ToolCall { path: String },
-    Fanout { collect: FanoutMode },
+    Fanout,
     UserConfirm,
     Subflow { name: String },
     Message { role: String },
@@ -28,22 +28,6 @@ pub enum NodeKind {
     When { condition_preview: String },
     Loop,
     Return,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FanoutMode {
-    All,
-    First,
-}
-
-impl From<FanoutCollect> for FanoutMode {
-    fn from(c: FanoutCollect) -> Self {
-        match c {
-            FanoutCollect::All => FanoutMode::All,
-            FanoutCollect::First => FanoutMode::First,
-        }
-    }
 }
 
 pub fn extract_graph(flow: &FlowDecl) -> FlowGraph {
@@ -103,13 +87,8 @@ fn extract_stmt(stmt: &Stmt, prefix: &str, out: &mut Vec<StaticNode>) {
 }
 
 fn extract_expr(expr: &Expr, prefix: &str, out: &mut Vec<StaticNode>) {
-    match expr {
-        Expr::Node(node) => extract_node(node, prefix, out),
-        Expr::Pipe { lhs, rhs } => {
-            extract_expr(lhs, &format!("{prefix}.l"), out);
-            extract_expr(rhs, &format!("{prefix}.r"), out);
-        }
-        _ => {}
+    if let Expr::Node(node) = expr {
+        extract_node(node, prefix, out);
     }
 }
 
@@ -139,35 +118,24 @@ fn extract_node(node: &Node, prefix: &str, out: &mut Vec<StaticNode>) {
             let label = format!("⟶ {path_str}");
             (NodeKind::ToolCall { path: path_str }, label, Vec::new())
         }
-        Node::DynamicFanout {
-            source,
-            lambda,
-            collect,
-        } => {
+        Node::DynamicFanout { source, lambda } => {
             let mut branch_children = Vec::new();
             extract_expr(source, &format!("{prefix}.source"), &mut branch_children);
             extract_expr(lambda, &format!("{prefix}.lambda"), &mut branch_children);
-            (
-                NodeKind::Fanout {
-                    collect: (*collect).into(),
-                },
-                "fanout (dynamic)".into(),
-                branch_children,
-            )
+            (NodeKind::Fanout, "fanout (dynamic)".into(), branch_children)
         }
-        Node::Fanout { items, collect } => {
+        Node::Fanout { source } => {
             let mut branch_children = Vec::new();
-            for (i, item) in items.iter().enumerate() {
-                extract_expr(item, &format!("{prefix}.branch[{i}]"), &mut branch_children);
-            }
-            let label = format!("fanout ×{}", items.len());
-            (
-                NodeKind::Fanout {
-                    collect: (*collect).into(),
-                },
-                label,
-                branch_children,
-            )
+            let label = if let Expr::List(items) = source.as_ref() {
+                for (i, item) in items.iter().enumerate() {
+                    extract_expr(item, &format!("{prefix}.branch[{i}]"), &mut branch_children);
+                }
+                format!("fanout ×{}", items.len())
+            } else {
+                extract_expr(source, &format!("{prefix}.source"), &mut branch_children);
+                "fanout".into()
+            };
+            (NodeKind::Fanout, label, branch_children)
         }
         Node::UserConfirm { .. } => (NodeKind::UserConfirm, "user_confirm".into(), Vec::new()),
         Node::Subflow { name, args } => {
@@ -298,7 +266,7 @@ mod tests {
         let fanout = g
             .root
             .iter()
-            .find(|n| matches!(n.kind, NodeKind::Fanout { .. }))
+            .find(|n| matches!(n.kind, NodeKind::Fanout))
             .expect("has fanout");
         assert!(fanout.children.len() >= 2);
     }

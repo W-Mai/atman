@@ -118,7 +118,7 @@ pub fn node_kind_glyph(kind: &atman_runtime::nodegraph::NodeKind) -> (&'static s
     match kind {
         NodeKind::Llm { .. } => ("✦", t.accent.into()),
         NodeKind::ToolCall { .. } => ("🔧", t.heading.into()),
-        NodeKind::Fanout { .. } => ("⇉", t.accent.into()),
+        NodeKind::Fanout => ("⇉", t.accent.into()),
         NodeKind::UserConfirm => ("?", t.warn.into()),
         NodeKind::Subflow { .. } => ("↳", t.accent.into()),
         NodeKind::Message { .. } => ("✉", t.tinted_fg.into()),

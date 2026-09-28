@@ -93,7 +93,7 @@ fn generate_branches_then_fanout() {
     let src = r#"
 flow test() -> string {
     tasks = llm.generate_branches(model: "m", prompt: "break down", count: 3)
-    results = fanout tasks { |t| t + "_done" } collect: all
+    results = fanout tasks { |t| t + "_done" }
     return to_json_string(results)
 }
 "#;
@@ -111,7 +111,7 @@ fn chain_branches_fanout_map() {
 flow test() -> string {
     tasks = ["a", "b"]
     processed = list.map(
-        fanout tasks { |t| t + "!" } collect: all,
+        fanout tasks { |t| t + "!" },
         |r| r + "?"
     )
     return to_json_string(processed)

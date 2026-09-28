@@ -13,7 +13,7 @@ const REVIEW_FLOW: &str = r#"flow review_code(file: path) -> Review {
     gather = fanout [
         rule.fetch("code-review"),
         rule.fetch(query: "none"),
-    ] collect: all
+    ]
 
     primary = llm.call(
         model: "claude-opus-4.7",

@@ -100,10 +100,6 @@ fn collect_ident_refs_expr(expr: &Expr, refs: &mut HashSet<String>) {
                 collect_ident_refs_expr(a, refs);
             }
         }
-        Expr::Pipe { lhs, rhs } => {
-            collect_ident_refs_expr(lhs, refs);
-            collect_ident_refs_expr(rhs, refs);
-        }
         Expr::Annotated { expr, .. } => collect_ident_refs_expr(expr, refs),
         Expr::Lambda { params, body } => {
             for p in params {
@@ -133,11 +129,7 @@ fn collect_ident_refs_node(node: &Node, refs: &mut HashSet<String>) {
             collect_ident_refs_expr(source, refs);
             collect_ident_refs_expr(lambda, refs);
         }
-        Node::Fanout { items, .. } => {
-            for it in items {
-                collect_ident_refs_expr(it, refs);
-            }
-        }
+        Node::Fanout { source } => collect_ident_refs_expr(source, refs),
         Node::UserConfirm { msg } => collect_ident_refs_expr(msg, refs),
     }
 }
@@ -185,10 +177,6 @@ fn walk_expr_for_nodes(expr: &Expr, flow_name: &str, hits: &mut Vec<LintHit>) {
             for a in args {
                 walk_expr_for_nodes(a, flow_name, hits);
             }
-        }
-        Expr::Pipe { lhs, rhs } => {
-            walk_expr_for_nodes(lhs, flow_name, hits);
-            walk_expr_for_nodes(rhs, flow_name, hits);
         }
         Expr::Node(node) => {
             check_node(node, flow_name, hits);
@@ -248,11 +236,7 @@ fn child_exprs(node: &Node) -> Vec<&Expr> {
             out.push(source);
             out.push(lambda);
         }
-        Node::Fanout { items, .. } => {
-            for i in items {
-                out.push(i);
-            }
-        }
+        Node::Fanout { source } => out.push(source),
         Node::UserConfirm { msg } => out.push(msg),
     }
     out

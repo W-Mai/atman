@@ -3,14 +3,15 @@ use atman_runtime::{Executor, tools};
 type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 #[tokio::test]
-async fn pipe_prepends_lhs_as_first_positional_arg() {
+async fn explicit_binding_passes_result_to_tool() {
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("hello.txt");
     std::fs::write(&f, "hello world\n").unwrap();
 
     let src = format!(
         r#"flow t() -> int {{
-    n = fs.read("{}") |> len()
+    contents = fs.read("{}")
+    n = len(contents)
     return n
 }}
 "#,
@@ -28,9 +29,12 @@ async fn pipe_prepends_lhs_as_first_positional_arg() {
 }
 
 #[tokio::test]
-async fn pipe_chains_left_to_right() {
+async fn explicit_bindings_chain_tool_calls() {
     let src = r#"flow t() -> int {
-    result = [1, 2, 3] |> len() |> to_json_string() |> len()
+    items = [1, 2, 3]
+    count = len(items)
+    encoded = to_json_string(count)
+    result = len(encoded)
     return result
 }
 "#;
@@ -45,9 +49,10 @@ async fn pipe_chains_left_to_right() {
 }
 
 #[tokio::test]
-async fn pipe_with_extra_args_appends_after_lhs() {
+async fn explicit_binding_preserves_argument_order() {
     let src = r#"flow t() -> list {
-    out = [1, 2] |> concat([3, 4])
+    left = [1, 2]
+    out = concat(left, [3, 4])
     return out
 }
 "#;

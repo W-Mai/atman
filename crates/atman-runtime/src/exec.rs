@@ -400,11 +400,12 @@ fn expr_to_node_kind_label(expr: &Expr) -> (crate::nodegraph::NodeKind, String) 
                 .join(".");
             (NodeKind::ToolCall { path: p.clone() }, format!("⟶ {p}"))
         }
-        Expr::Node(Node::Fanout { items, collect }) => (
-            NodeKind::Fanout {
-                collect: (*collect).into(),
+        Expr::Node(Node::Fanout { source }) => (
+            NodeKind::Fanout,
+            match source.as_ref() {
+                Expr::List(items) => format!("fanout ×{}", items.len()),
+                _ => "fanout".into(),
             },
-            format!("fanout ×{}", items.len()),
         ),
         Expr::Node(Node::Subflow { name, .. }) => (
             NodeKind::Subflow {

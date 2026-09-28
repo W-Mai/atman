@@ -72,10 +72,6 @@ pub enum Expr {
         func: Ident,
         args: Vec<Expr>,
     },
-    Pipe {
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
-    },
     Struct(Vec<(Ident, Expr)>),
     List(Vec<Expr>),
     Node(Node),
@@ -119,13 +115,11 @@ pub enum Node {
         args: Vec<Arg>,
     },
     Fanout {
-        items: Vec<Expr>,
-        collect: FanoutCollect,
+        source: Box<Expr>,
     },
     DynamicFanout {
         source: Box<Expr>,
         lambda: Box<Expr>,
-        collect: FanoutCollect,
     },
     UserConfirm {
         msg: Box<Expr>,
@@ -181,12 +175,6 @@ impl MessageRole {
 pub enum Arg {
     Positional(Expr),
     Named { name: Ident, value: Expr },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FanoutCollect {
-    All,
-    First,
 }
 
 pub type Kwargs = Vec<(Ident, Expr)>;

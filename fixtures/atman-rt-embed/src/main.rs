@@ -13,8 +13,7 @@ use atman_rt::{
     HostFuture, LoopExit, LoopHost, PatternBindError, Preflight, StatementHost, StatementOutcome,
     Value,
     ast::{
-        Arg, BinOp, Expr, FanoutCollect, FlowDecl, Ident, Literal, Node, ParamDecl, Pattern, Span,
-        Stmt, TypeExpr,
+        Arg, BinOp, Expr, FlowDecl, Ident, Literal, Node, ParamDecl, Pattern, Span, Stmt, TypeExpr,
     },
     bind_pattern, eval_expr, run_loop,
 };
@@ -53,15 +52,6 @@ impl ExpressionHost for FixtureHost {
             expected: "defined field".into(),
             actual: name,
         }
-    }
-
-    fn eval_pipe_rhs<'a>(
-        &'a self,
-        _rhs: &'a Expr,
-        _piped: FixtureValue,
-        _env: &'a Env<FixtureValue>,
-    ) -> HostFuture<'a, FixtureValue> {
-        Box::pin(async { panic!("unexpected pipe in embedding fixture") })
     }
 
     fn eval_external<'a>(
@@ -327,7 +317,6 @@ fn main() {
                         right: Box::new(literal(1)),
                     }),
                 }),
-                collect: FanoutCollect::All,
             }),
         }],
     };
@@ -345,14 +334,13 @@ fn main() {
         contract: None,
         body: vec![Stmt::Return {
             value: Expr::Node(Node::Fanout {
-                items: vec![
+                source: Box::new(Expr::List(vec![
                     Expr::Node(Node::ToolCall {
                         path: vec![ident("foreign")],
                         args: vec![],
                     }),
                     literal(2),
-                ],
-                collect: FanoutCollect::All,
+                ])),
             }),
         }],
     };

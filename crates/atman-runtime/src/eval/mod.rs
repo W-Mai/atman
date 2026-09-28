@@ -103,24 +103,6 @@ impl ExpressionHost for AtmanHost<'_> {
         }
     }
 
-    fn unsupported_fanout_first(&self) -> RuntimeError {
-        RuntimeError::ToolFailed("fanout collect: first not yet implemented".into())
-    }
-
-    fn eval_pipe_rhs<'a>(&'a self, rhs: &'a Expr, piped: Value, env: &'a Env) -> BoxFut<'a, Value> {
-        Box::pin(async move {
-            match rhs {
-                Expr::Node(Node::ToolCall { path, args }) => {
-                    dispatch_tool_call(path, args, vec![piped], env, self).await
-                }
-                other => Value::Err(RuntimeError::ToolFailed(format!(
-                    "pipe rhs must be a tool call like `ns.tool(...)`, got {}",
-                    expr_shape(other)
-                ))),
-            }
-        })
-    }
-
     fn eval_external<'a>(
         &'a self,
         effect: ExpressionEffect<'a>,
@@ -278,28 +260,9 @@ pub(super) fn append_system_context(system: &mut Option<String>, parts: Vec<Stri
     }
 }
 
-pub(crate) fn expr_shape(e: &Expr) -> &'static str {
-    match e {
-        Expr::Literal(_) => "literal",
-        Expr::Ident(_) => "identifier",
-        Expr::FileRef(_) => "file ref",
-        Expr::Member { .. } => "member access",
-        Expr::Binary { .. } => "binary expr",
-        Expr::Unary { .. } => "unary expr",
-        Expr::Call { .. } => "bare call",
-        Expr::Pipe { .. } => "pipe expr",
-        Expr::Struct(_) => "struct literal",
-        Expr::List(_) => "list literal",
-        Expr::Node(_) => "flow node",
-        Expr::Annotated { expr, .. } => expr_shape(expr),
-        Expr::Lambda { .. } => "lambda",
-    }
-}
-
 async fn dispatch_tool_call<'a>(
     path: &'a [atman_rt::ast::Ident],
     args: &'a [Arg],
-    prefix_positional: Vec<Value>,
     env: &'a Env,
     ctx: &'a AtmanHost<'a>,
 ) -> Value {
@@ -308,7 +271,7 @@ async fn dispatch_tool_call<'a>(
     }
     let name = tool_name(path);
     if name == "env" {
-        return eval_invocation_env(args, prefix_positional, env, ctx).await;
+        return eval_invocation_env(args, env, ctx).await;
     }
     let tool = match ctx.tools.get(&name) {
         Some(t) => t,
@@ -324,7 +287,7 @@ async fn dispatch_tool_call<'a>(
             "tool `{name}` is Tier 4 (shell); flow contract must declare `capabilities {{ shell: true }}`"
         )));
     }
-    let mut positional = prefix_positional;
+    let mut positional = Vec::new();
     let mut named = Vec::new();
     for arg in args {
         match arg {
@@ -516,12 +479,8 @@ async fn dispatch_tool_call<'a>(
     }
 }
 
-async fn eval_invocation_env<'a>(
-    args: &'a [Arg],
-    mut positional: Vec<Value>,
-    env: &'a Env,
-    ctx: &'a AtmanHost<'a>,
-) -> Value {
+async fn eval_invocation_env<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a AtmanHost<'a>) -> Value {
+    let mut positional = Vec::new();
     for arg in args {
         match arg {
             Arg::Positional(expr) => {
@@ -856,9 +815,9 @@ fn truncate(s: &str, max: usize) -> String {
 
 async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a AtmanHost<'a>) -> Value {
     match node {
-        Node::ToolCall { path, args } => dispatch_tool_call(path, args, Vec::new(), env, ctx).await,
+        Node::ToolCall { path, args } => dispatch_tool_call(path, args, env, ctx).await,
         Node::DynamicFanout { .. } => unreachable!("dynamic fanout is evaluated by atman-rt"),
-        Node::Fanout { .. } => unreachable!("static fanout is evaluated by atman-rt"),
+        Node::Fanout { .. } => unreachable!("fanout is evaluated by atman-rt"),
         Node::UserConfirm { msg } => {
             let v = eval_expr(msg, env, ctx).await;
             if v.is_err() {
@@ -1899,7 +1858,7 @@ mod tests {
         env.bind("a", Value::Host(AtmanPayload::Path(pa)));
         env.bind("b", Value::Host(AtmanPayload::Path(pb)));
 
-        let src = r#"flow t() { return fanout [ fs.read(a), fs.read(b) ] collect: all }"#;
+        let src = r#"flow t() { return fanout [ fs.read(a), fs.read(b) ] }"#;
         let file = parse_file(src).unwrap();
         if let atman_rt::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &env, &ctx).await;
@@ -1915,7 +1874,7 @@ mod tests {
 
     #[tokio::test]
     async fn fanout_all_short_circuits_on_err() {
-        let src = r#"flow t() { return fanout [ 1, missing, 3 ] collect: all }"#;
+        let src = r#"flow t() { return fanout [ 1, missing, 3 ] }"#;
         let file = parse_file(src).unwrap();
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();
@@ -2273,7 +2232,7 @@ flow parent() -> Int {
 
     #[tokio::test]
     async fn fanout_emits_branch_start_end_events_with_parent_linkage() {
-        let src = r#"flow t() { return fanout [1, 2, 3] collect: all }"#;
+        let src = r#"flow t() { return fanout [1, 2, 3] }"#;
         let file = parse_file(src).unwrap();
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();

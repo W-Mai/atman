@@ -363,10 +363,6 @@ impl LinkedProgram {
                     self.check_expr(caller, arg)?;
                 }
             }
-            Expr::Pipe { lhs, rhs } => {
-                self.check_expr(caller, lhs)?;
-                self.check_expr(caller, rhs)?;
-            }
             Expr::Struct(fields) => {
                 for (_, value) in fields {
                     self.check_expr(caller, value)?;
@@ -383,11 +379,7 @@ impl LinkedProgram {
                 Node::ToolCall { args, .. } | Node::Message { args, .. } => {
                     self.check_args(caller, args)?;
                 }
-                Node::Fanout { items, .. } => {
-                    for item in items {
-                        self.check_expr(caller, item)?;
-                    }
-                }
+                Node::Fanout { source } => self.check_expr(caller, source)?,
                 Node::DynamicFanout { source, lambda, .. } => {
                     self.check_expr(caller, source)?;
                     self.check_expr(caller, lambda)?;

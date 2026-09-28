@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Pipe expressions** — The `|>` operator is removed from the DSL. Bind an intermediate value and pass it to the next call explicitly.
+- **Fanout syntax** — `fanout [expr, ...]`, `fanout pending`, and `fanout source { |item| expr }` return all results without a `collect:` clause. `collect: all` and `collect: first` are no longer parsed.
 - **Portable flow types** — Flow AST, lexical environments, `Value<P, E>`, and primitive expression operations are owned by `atman-rt`. Import core types from `atman-rt`; `atman-runtime::Value` and the old DSL AST paths are removed. Atman-specific path, message, and edit values use `AtmanPayload`.
 - **Core identity imports** — Flow and turn IDs are `atman_rt::{RunId, TurnId}<AtmanUuid>`. The `atman-runtime` crate-root `FlowRunId`, `TurnId`, `AtmanValue`, and `eval_expr` exports and the public `atman-runtime::event` ID aliases are removed.
 

@@ -12,7 +12,7 @@ flow review_code(file: path) -> Review {
     gather = fanout [
         fs.read(file),
         rule.fetch("code-review"),
-    ] collect: all
+    ]
 
     primary = llm.call(
         model: "smart",

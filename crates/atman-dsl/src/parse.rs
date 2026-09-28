@@ -9,9 +9,6 @@ mod kw {
     syn::custom_keyword!(flow);
     syn::custom_keyword!(when);
     syn::custom_keyword!(fanout);
-    syn::custom_keyword!(collect);
-    syn::custom_keyword!(all);
-    syn::custom_keyword!(first);
     syn::custom_keyword!(user_confirm);
     syn::custom_keyword!(contract);
     syn::custom_keyword!(subflow);
@@ -475,24 +472,9 @@ fn parse_expr(input: ParseStream) -> Result<Expr> {
     parse_expr_bp(input, 0)
 }
 
-const PIPE_BP: u8 = 0;
-
 fn parse_expr_bp(input: ParseStream, min_bp: u8) -> Result<Expr> {
     let mut lhs = parse_expr_primary(input)?;
     loop {
-        if peek_pipe(input) {
-            if PIPE_BP < min_bp {
-                break;
-            }
-            input.parse::<Token![|]>()?;
-            input.parse::<Token![>]>()?;
-            let rhs = parse_expr_bp(input, PIPE_BP + 1)?;
-            lhs = Expr::Pipe {
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
-            continue;
-        }
         let op = peek_binop(input);
         let Some((op, bp)) = op else { break };
         if bp < min_bp {
@@ -529,10 +511,6 @@ fn parse_annotation_suffix(input: ParseStream, lhs: Expr) -> Result<Expr> {
         }
     }
     Ok(lhs)
-}
-
-fn peek_pipe(input: ParseStream) -> bool {
-    input.peek(Token![|]) && input.peek2(Token![>]) && !input.peek(Token![||])
 }
 
 fn peek_binop(input: ParseStream) -> Option<(BinOp, u8)> {
@@ -1004,23 +982,27 @@ fn parse_fix_until_test_passes(input: ParseStream) -> Result<Node> {
 
 fn parse_fanout(input: ParseStream) -> Result<Node> {
     input.parse::<kw::fanout>()?;
-
-    // Dynamic fanout: fanout <expr> { |param| body } collect: mode
-    // Static fanout: fanout [expr, ...] collect: mode
-    // Disambiguate by checking if collect follows after the bracket list.
-    let is_static_fanout = if input.peek(token::Bracket) {
-        let ahead = input.fork();
-        let _ = parse_expr(&ahead);
-        ahead.peek(kw::collect)
+    // Mapping owns its source expression; plain fanout leaves outer operators to its caller.
+    let ahead = input.fork();
+    let _ = parse_expr(&ahead)?;
+    let mapping = if ahead.peek(token::Brace) {
+        let body;
+        braced!(body in ahead);
+        let head = body.fork();
+        head.parse::<Token![|]>().is_ok()
+            && head.parse::<syn::Ident>().is_ok()
+            && head.parse::<Token![|]>().is_ok()
     } else {
         false
     };
-
-    if !is_static_fanout {
-        let source = parse_expr(input)?;
+    let source = if mapping {
+        parse_expr(input)?
+    } else {
+        parse_expr_primary(input)?
+    };
+    if mapping {
         let body_content;
         braced!(body_content in input);
-        // Parse |param|
         body_content.parse::<Token![|]>()?;
         let param = to_ident(body_content.parse::<syn::Ident>()?);
         body_content.parse::<Token![|]>()?;
@@ -1029,47 +1011,15 @@ fn parse_fanout(input: ParseStream) -> Result<Node> {
             params: vec![param],
             body: Box::new(body),
         };
-        input.parse::<kw::collect>()?;
-        input.parse::<Token![:]>()?;
-        let collect = if input.peek(kw::all) {
-            input.parse::<kw::all>()?;
-            FanoutCollect::All
-        } else if input.peek(kw::first) {
-            input.parse::<kw::first>()?;
-            FanoutCollect::First
-        } else {
-            return Err(input.error("expected `all` or `first` after `collect:`"));
-        };
         return Ok(Node::DynamicFanout {
             source: Box::new(source),
             lambda: Box::new(lambda),
-            collect,
         });
     }
 
-    // Static fanout: fanout [expr, ...] collect: mode
-    let content;
-    bracketed!(content in input);
-    let mut items = Vec::new();
-    while !content.is_empty() {
-        items.push(parse_expr(&content)?);
-        if content.is_empty() {
-            break;
-        }
-        content.parse::<Token![,]>()?;
-    }
-    input.parse::<kw::collect>()?;
-    input.parse::<Token![:]>()?;
-    let collect = if input.peek(kw::all) {
-        input.parse::<kw::all>()?;
-        FanoutCollect::All
-    } else if input.peek(kw::first) {
-        input.parse::<kw::first>()?;
-        FanoutCollect::First
-    } else {
-        return Err(input.error("expected `all` or `first` after `collect:`"));
-    };
-    Ok(Node::Fanout { items, collect })
+    Ok(Node::Fanout {
+        source: Box::new(source),
+    })
 }
 
 pub fn parse_file(src: &str) -> Result<File> {

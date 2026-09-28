@@ -240,15 +240,6 @@ mod tests {
             }
         }
 
-        fn eval_pipe_rhs<'a>(
-            &'a self,
-            _rhs: &'a Expr,
-            _piped: Value<(), EvalError>,
-            _env: &'a Env<Value<(), EvalError>>,
-        ) -> HostFuture<'a, Value<(), EvalError>> {
-            Box::pin(async { unreachable!() })
-        }
-
         fn eval_external<'a>(
             &'a self,
             _effect: ExpressionEffect<'a>,

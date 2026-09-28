@@ -248,7 +248,7 @@ atman run examples/edit_and_verify.at --flow edit_and_verify \
 | Subflow | `subflow(name, args)` | Spawn a child flow with isolated scope |
 | Approval | `user_confirm(msg)` | Pause for human approval |
 | User input | `user_ask(prompt, schema)` | Request structured user input |
-| Fanout | `fanout [...] collect: all` | Run independent expressions concurrently |
+| Fanout | `fanout [...]`, `fanout pending` | Evaluate literal branches concurrently or collect an array value |
 | List | `list.map`, `list.filter`, `list.find`, `list.any`, `list.all`, `list.reduce` | Apply lambdas to list values |
 | Composers | `retry { ... }`, `fallback { ... }` | Retry or choose fallback execution |
 

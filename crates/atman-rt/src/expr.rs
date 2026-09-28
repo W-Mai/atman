@@ -2,7 +2,7 @@ use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 
 use crate::{
     Env, HostFuture, HostValueOps, Value, ValueError,
-    ast::{Expr, FanoutCollect, Ident, Node},
+    ast::{Expr, Ident, Node},
     fanout::join_fanout_all,
     list::{ListIntrinsic, eval_list_intrinsic},
     ops::{eval_binary, eval_literal, eval_unary},
@@ -55,15 +55,6 @@ pub trait ExpressionHost: Sync {
         eval_expr(expr, env, self)
     }
     fn fanout_branch_end(&self, _index: usize, _value: &Value<Self::Payload, Self::Error>) {}
-    fn unsupported_fanout_first(&self) -> Self::Error {
-        Self::Error::type_mismatch("fanout collect: all", "first".into())
-    }
-    fn eval_pipe_rhs<'a>(
-        &'a self,
-        rhs: &'a Expr,
-        piped: Value<Self::Payload, Self::Error>,
-        env: &'a Env<Value<Self::Payload, Self::Error>>,
-    ) -> HostFuture<'a, Value<Self::Payload, Self::Error>>;
     fn eval_external<'a>(
         &'a self,
         effect: ExpressionEffect<'a>,
@@ -148,14 +139,10 @@ pub fn eval_expr<'a, H: ExpressionHost>(
                     return Value::Err(error);
                 }
                 match node {
-                    Node::DynamicFanout {
-                        source,
-                        lambda,
-                        collect,
-                    } => eval_dynamic_fanout(source, lambda, collect, env, host).await,
-                    Node::Fanout { items, collect } => {
-                        eval_static_fanout(items, collect, env, host).await
+                    Node::DynamicFanout { source, lambda } => {
+                        eval_dynamic_fanout(source, lambda, env, host).await
                     }
+                    Node::Fanout { source } => eval_fanout(source, env, host).await,
                     Node::ToolCall { path, args } => match ListIntrinsic::from_path(path) {
                         Some(intrinsic) => eval_list_intrinsic(intrinsic, args, env, host).await,
                         None => host.eval_external(ExpressionEffect::Node(node), env).await,
@@ -166,13 +153,6 @@ pub fn eval_expr<'a, H: ExpressionHost>(
             Expr::Call { func, args } => {
                 host.eval_external(ExpressionEffect::Call { func, args }, env)
                     .await
-            }
-            Expr::Pipe { lhs, rhs } => {
-                let piped = eval_expr(lhs, env, host).await;
-                if piped.is_err() {
-                    return piped;
-                }
-                host.eval_pipe_rhs(rhs, piped, env).await
             }
             Expr::Annotated { expr, annotation } => match annotation_type_name(expr) {
                 Some(type_name) => Value::Struct(vec![
@@ -185,26 +165,38 @@ pub fn eval_expr<'a, H: ExpressionHost>(
     })
 }
 
-/// Evaluates static fanout while the host supplies branch context and events.
-pub async fn eval_static_fanout<'a, H: ExpressionHost>(
-    items: &'a [Expr],
-    collect: &'a FanoutCollect,
+/// Evaluates a list source, polling literal branches concurrently.
+pub async fn eval_fanout<'a, H: ExpressionHost>(
+    source: &'a Expr,
     env: &'a Env<Value<H::Payload, H::Error>>,
     host: &'a H,
 ) -> Value<H::Payload, H::Error> {
-    if matches!(collect, FanoutCollect::First) {
-        return Value::Err(host.unsupported_fanout_first());
+    if let Expr::List(items) = source {
+        for index in 0..items.len() {
+            host.fanout_branch_start(index);
+        }
+        let branches = items
+            .iter()
+            .enumerate()
+            .map(|(index, expr)| host.eval_fanout_branch(expr, env, index));
+        return join_fanout_all(branches, |index, value| {
+            host.fanout_branch_end(index, value)
+        })
+        .await;
     }
-    for index in 0..items.len() {
+
+    let values = match eval_expr(source, env, host).await {
+        Value::List(values) => values,
+        error @ Value::Err(_) => return error,
+        other => return Value::Err(H::Error::type_mismatch("list", other.kind_name().into())),
+    };
+    for index in 0..values.len() {
         host.fanout_branch_start(index);
     }
-    let branches = items
-        .iter()
-        .enumerate()
-        .map(|(index, expr)| host.eval_fanout_branch(expr, env, index));
-    join_fanout_all(branches, |index, value| {
-        host.fanout_branch_end(index, value)
-    })
+    join_fanout_all(
+        values.into_iter().map(core::future::ready),
+        |index, value| host.fanout_branch_end(index, value),
+    )
     .await
 }
 
@@ -212,7 +204,6 @@ pub async fn eval_static_fanout<'a, H: ExpressionHost>(
 pub async fn eval_dynamic_fanout<'a, H: ExpressionHost>(
     source: &'a Expr,
     lambda: &'a Expr,
-    collect: &'a FanoutCollect,
     env: &'a Env<Value<H::Payload, H::Error>>,
     host: &'a H,
 ) -> Value<H::Payload, H::Error> {
@@ -244,16 +235,9 @@ pub async fn eval_dynamic_fanout<'a, H: ExpressionHost>(
         if let Value::Err(error) = &result {
             return Value::Err(error.clone());
         }
-        if matches!(collect, FanoutCollect::First) {
-            return result;
-        }
         results.push(result);
     }
-
-    match collect {
-        FanoutCollect::All => Value::List(results),
-        FanoutCollect::First => results.into_iter().next().unwrap_or(Value::Unit),
-    }
+    Value::List(results)
 }
 
 #[cfg(test)]
@@ -300,20 +284,6 @@ mod tests {
             self.cancelled.then(|| EvalError::TypeMismatch {
                 expected: "active flow".into(),
                 actual: "cancelled".into(),
-            })
-        }
-
-        fn eval_pipe_rhs<'a>(
-            &'a self,
-            _rhs: &'a Expr,
-            piped: Value<(), EvalError>,
-            _env: &'a Env<Value<(), EvalError>>,
-        ) -> HostFuture<'a, Value<(), EvalError>> {
-            Box::pin(async move {
-                match piped {
-                    Value::Int(value) => Value::Int(value + 1),
-                    _ => panic!("pipe left side must be evaluated before host dispatch"),
-                }
             })
         }
 
@@ -401,33 +371,6 @@ mod tests {
     }
 
     #[test]
-    fn pipe_evaluates_left_once_and_stops_on_error() {
-        let mut env = Env::new();
-        env.bind("x", Value::<(), EvalError>::Int(7));
-        let rhs = Box::new(Expr::Node(Node::ToolCall {
-            path: vec![],
-            args: vec![],
-        }));
-        let pipe = Expr::Pipe {
-            lhs: Box::new(Expr::Ident(Ident::new("x", Span::default()))),
-            rhs: rhs.clone(),
-        };
-        assert!(matches!(
-            run_ready(eval_expr(&pipe, &env, &ACTIVE_HOST)),
-            Value::Int(8)
-        ));
-
-        let missing = Expr::Pipe {
-            lhs: Box::new(Expr::Ident(Ident::new("missing", Span::default()))),
-            rhs,
-        };
-        assert!(matches!(
-            run_ready(eval_expr(&missing, &env, &ACTIVE_HOST)),
-            Value::Err(EvalError::TypeMismatch { actual, .. }) if actual == "missing"
-        ));
-    }
-
-    #[test]
     fn dynamic_fanout_evaluates_lambda_with_captured_environment() {
         let source = Expr::List(vec![
             Expr::Literal(Literal::Int(1)),
@@ -444,39 +387,22 @@ mod tests {
         let mut env = Env::new();
         env.bind("offset", Value::<(), EvalError>::Int(10));
 
-        let all = run_ready(eval_dynamic_fanout(
-            &source,
-            &lambda,
-            &FanoutCollect::All,
-            &env,
-            &ACTIVE_HOST,
-        ));
+        let all = run_ready(eval_dynamic_fanout(&source, &lambda, &env, &ACTIVE_HOST));
         assert!(
             matches!(all, Value::List(items) if matches!(&items[..], [Value::Int(11), Value::Int(12)]))
         );
-        assert!(matches!(
-            run_ready(eval_dynamic_fanout(
-                &source,
-                &lambda,
-                &FanoutCollect::First,
-                &env,
-                &ACTIVE_HOST,
-            )),
-            Value::Int(11)
-        ));
     }
 
     #[test]
     fn static_fanout_dispatches_without_external_node_handling() {
         let expr = Expr::Node(Node::Fanout {
-            items: vec![
+            source: Box::new(Expr::List(vec![
                 Expr::Literal(Literal::Int(1)),
                 Expr::Node(Node::ToolCall {
                     path: vec![],
                     args: vec![],
                 }),
-            ],
-            collect: FanoutCollect::All,
+            ])),
         });
         assert!(matches!(
             run_ready(eval_expr(&expr, &Env::new(), &ACTIVE_HOST)),

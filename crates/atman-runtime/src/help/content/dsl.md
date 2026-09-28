@@ -48,7 +48,7 @@ not converge.
 | `[a, b]` | List |
 | `{ field: value }` | Ordered struct of string/value fields |
 | `record.field` | Struct member access |
-| `|>`, `||`, `&&`, comparisons, arithmetic | Pipe, boolean, comparison, and arithmetic operators |
+| `||`, `&&`, comparisons, arithmetic | Boolean, comparison, and arithmetic operators |
 
 There is no map literal distinct from a struct and no `items[0]`/`map[key]` index
 syntax. Use `head`, `tail`, `len`, list combinators, destructuring, or a tool that
@@ -140,14 +140,14 @@ the parent flow.
 
 | Need | Use | Important limitation |
 |---|---|---|
-| Run a fixed set of same-file expressions concurrently | `fanout [a, b] collect: all` | Preserves input order; any branch error fails the fanout. |
-| Run one expression per item | `fanout source { |item| expr } collect: all` | Current evaluator is sequential despite the name. |
-| Race fixed fanout branches | Not available | Static `collect: first` parses but is not implemented. |
+| Run a fixed set of same-file expressions concurrently | `fanout [a, b]` | Preserves input order; any branch error fails the fanout. |
+| Collect an existing array | `fanout pending` | Array elements are already evaluated; earlier tool calls cannot become concurrent. |
+| Run one expression per item | `fanout source { |item| expr }` | Current evaluator is sequential despite the name. |
 | Batch assistant tool calls | `dispatch_all(tool_uses)` | Auto-approved calls can run in parallel; approval-gated calls are serialized after approval. |
 | Run independent external coding workers | `flow.instances()` then `flow.spawn(spawn_token: inventory.spawn_token, async: true)` | Inspect and clean up the session inventory before spending the single-use token; the spawn returns a handle immediately. |
 
-Use static `fanout ... collect: all` for real DSL-level concurrency. Do not call
-dynamic fanout parallel, and do not use static `collect: first` in production flows.
+Use static `fanout [...]` for DSL-level concurrency. Dynamic fanout currently
+evaluates its items sequentially.
 
 ## Background Bash and PTY Terminal
 
@@ -273,7 +273,7 @@ flow orchestrate(user_prompt: string) -> string {
     research = fanout [
         subflow(research_worker, user_prompt, "runtime"),
         subflow(research_worker, user_prompt, "tests"),
-    ] collect: all
+    ]
     test_result = bash.spawn(
         cmd: "cargo test --workspace",
         block: true,

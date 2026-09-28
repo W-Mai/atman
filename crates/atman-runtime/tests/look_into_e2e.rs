@@ -28,7 +28,7 @@ async fn look_into_fanout_subflow_synthesizes_via_mock_providers() {
     findings = fanout [
         subflow(explore_module, question, "src/"),
         subflow(explore_module, question, "tests/"),
-    ] collect: all
+    ]
 
     summary = llm.call(
         model: "claude-opus-4.7",

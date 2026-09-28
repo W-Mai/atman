@@ -364,47 +364,48 @@ fn reduce_string_build() {
 fn fanout_basic() {
     assert_eq!(
         run_str(
-            r#"flow test() -> string { return to_json_string(fanout ["a", "b", "c"] { |t| t + "!" } collect: all) }"#
+            r#"flow test() -> string { return to_json_string(fanout ["a", "b", "c"] { |t| t + "!" }) }"#
         ),
         "[\n  \"a!\",\n  \"b!\",\n  \"c!\"\n]"
     );
 }
 
 #[test]
-fn fanout_first() {
+fn fanout_empty() {
     assert_eq!(
-        run_str(
-            r#"flow test() -> string { return fanout ["a", "b", "c"] { |t| t } collect: first }"#
-        ),
-        "a"
-    );
-}
-
-#[test]
-fn fanout_empty_all() {
-    assert_eq!(
-        run_str(
-            r#"flow test() -> string { return to_json_string(fanout [] { |t| t } collect: all) }"#
-        ),
+        run_str(r#"flow test() -> string { return to_json_string(fanout [] { |t| t }) }"#),
         "[]"
     );
 }
 
 #[test]
-fn fanout_empty_first() {
-    match run(
-        r#"flow test() -> string { return to_json_string(fanout [] { |t| t } collect: first) }"#,
-    ) {
-        Value::Str(s) => assert_eq!(s, "null"),
-        other => panic!("expected null, got {other:?}"),
-    }
+fn fanout_accepts_array_variable() {
+    assert_eq!(
+        run_str(
+            r#"flow test() -> string { pending = [1, 2, 3] return to_json_string(fanout pending) }"#
+        ),
+        "[\n  1,\n  2,\n  3\n]"
+    );
+    assert_eq!(
+        run_str(
+            r#"flow test() -> string { pending = [1, 2, 3] return to_json_string(len(fanout pending)) }"#
+        ),
+        "3"
+    );
+}
+
+#[test]
+fn fanout_rejects_non_array_source() {
+    let error = run_result(r#"flow test() { pending = 7 return fanout pending }"#)
+        .expect_err("non-array source must fail");
+    assert!(error.to_string().contains("list"), "{error}");
 }
 
 #[test]
 fn fanout_closure_capture() {
     assert_eq!(
         run_str(
-            r#"flow test() -> string { prefix = "done_" return to_json_string(fanout ["a", "b"] { |t| prefix + t } collect: all) }"#
+            r#"flow test() -> string { prefix = "done_" return to_json_string(fanout ["a", "b"] { |t| prefix + t }) }"#
         ),
         "[\n  \"done_a\",\n  \"done_b\"\n]"
     );
@@ -414,7 +415,7 @@ fn fanout_closure_capture() {
 fn fanout_chain_map() {
     assert_eq!(
         run_str(
-            r#"flow test() -> string { return to_json_string(list.map(fanout ["a", "b"] { |t| t + "!" } collect: all, |r| r + "?")) }"#
+            r#"flow test() -> string { return to_json_string(list.map(fanout ["a", "b"] { |t| t + "!" }, |r| r + "?")) }"#
         ),
         "[\n  \"a!?\",\n  \"b!?\"\n]"
     );
