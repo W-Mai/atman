@@ -274,6 +274,50 @@ flow main(input: int) -> int {
 }
 
 #[test]
+fn vm_enforces_types_at_root_and_driven_child_boundaries() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            r#"
+flow child(value: int) -> int { return value }
+flow broken() -> int { return "wrong" }
+flow main(input: int) -> int { return input }
+flow call_bad_argument() -> int { return child(value: "wrong").await }
+flow call_bad_return() -> int { return broken().await }
+"#,
+        ),
+        &TestSources,
+    )
+    .expect("compile typed flows");
+
+    assert!(matches!(
+        run_ready(vm.run(
+            "main",
+            vec![("input".into(), Value::Str("wrong".into()))],
+            TestHost::default(),
+        )),
+        StatementOutcome::Err(EvalError::TypeMismatch { expected, actual })
+            if expected == "parameter `input`: int"
+                && actual == "parameter `input`: string"
+    ));
+    assert!(matches!(
+        run_ready(vm.run("main", vec![], TestHost::default())),
+        StatementOutcome::Err(EvalError::MissingArgument(name)) if name == "input"
+    ));
+    assert!(matches!(
+        run_ready(vm.run("call_bad_argument", vec![], TestHost::default())),
+        StatementOutcome::Err(EvalError::TypeMismatch { expected, actual })
+            if expected == "parameter `value`: int"
+                && actual == "parameter `value`: string"
+    ));
+    assert!(matches!(
+        run_ready(vm.run("call_bad_return", vec![], TestHost::default())),
+        StatementOutcome::Err(EvalError::TypeMismatch { expected, actual })
+            if expected == "return value: int" && actual == "return value: string"
+    ));
+}
+
+#[test]
 fn lifecycle_runs_all_matching_bodies_after_an_error() {
     let vm = Vm::compile(
         Source::new(

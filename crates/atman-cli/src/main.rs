@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use atman_rt::Value as CoreValue;
+use atman_rt::ast::{FlowDecl, TypeExpr};
 use atman_rt::parse_file;
 use atman_runtime::source_program::{LinkedProgram, SourceRoots, load_program};
 use atman_runtime::{Executor, Session, ValueJson};
@@ -738,7 +739,12 @@ async fn cmd_run_loaded(
         }
     };
 
-    let args = parse_args(&raw_args)?;
+    let flow = parsed
+        .flows
+        .iter()
+        .find(|flow| flow.name.name == flow_name)
+        .with_context(|| format!("no flow named `{flow_name}` in {}", file.display()))?;
+    let args = parse_args(&raw_args, flow)?;
     let invocation_env = match reasoning {
         Some(value) => {
             let selection: atman_runtime::provider::ReasoningSelection = value
@@ -1459,13 +1465,16 @@ fn resolve_slash_command_from(
     let mut kv: Vec<(String, Value)> = Vec::new();
     let tokens = split_quoted_args(rest_raw);
 
-    let single_string_param = params.len() == 1
+    let single_positional_param = params.len() == 1
         && !rest_raw.is_empty()
         && !tokens
             .iter()
             .any(|t| t.contains('=') && !t.starts_with('='));
-    if single_string_param {
-        kv.push((params[0].clone(), Value::Str(rest_raw.to_string())));
+    if single_positional_param {
+        kv.push((
+            params[0].clone(),
+            decode_flow_argument(flow, &params[0], rest_raw)?,
+        ));
         let source_dir = path.parent().map(|p| p.to_path_buf());
         return Ok((program, flow_name, kv, source_dir));
     }
@@ -1473,11 +1482,11 @@ fn resolve_slash_command_from(
     let mut positional_index = 0usize;
     for tok in tokens {
         if let Some((k, v)) = tok.split_once('=') {
-            kv.push((k.to_string(), Value::Str(v.to_string())));
+            kv.push((k.to_string(), decode_flow_argument(flow, k, v)?));
         } else if positional_index < params.len() {
             kv.push((
                 params[positional_index].clone(),
-                Value::Str(tok.to_string()),
+                decode_flow_argument(flow, &params[positional_index], &tok)?,
             ));
             positional_index += 1;
         } else {
@@ -8405,15 +8414,92 @@ fn latest_session(root: &std::path::Path) -> Result<Option<String>> {
     Ok(best.map(|(_, n)| n))
 }
 
-fn parse_args(raw: &[String]) -> Result<Vec<(String, Value)>> {
+fn parse_args(raw: &[String], flow: &FlowDecl) -> Result<Vec<(String, Value)>> {
     let mut out = Vec::with_capacity(raw.len());
     for arg in raw {
         let (name, value) = arg
             .split_once('=')
             .with_context(|| format!("expected `name=value`, got `{arg}`"))?;
-        out.push((name.to_string(), Value::Str(value.to_string())));
+        out.push((name.to_string(), decode_flow_argument(flow, name, value)?));
     }
     Ok(out)
+}
+
+fn decode_flow_argument(flow: &FlowDecl, name: &str, raw: &str) -> Result<Value> {
+    let Some(param) = flow.params.iter().find(|param| param.name.name == name) else {
+        return Ok(Value::Str(raw.to_string()));
+    };
+    decode_flow_argument_type(raw, &param.ty)
+        .with_context(|| format!("invalid value for flow argument `{name}`"))
+}
+
+fn decode_flow_argument_type(raw: &str, ty: &TypeExpr) -> Result<Value> {
+    match ty {
+        TypeExpr::Named(name) if name.name.eq_ignore_ascii_case("int") => raw
+            .parse::<i64>()
+            .map(Value::Int)
+            .with_context(|| format!("expected int, got `{raw}`")),
+        TypeExpr::Named(name) if name.name.eq_ignore_ascii_case("float") => raw
+            .parse::<f64>()
+            .map(Value::Float)
+            .with_context(|| format!("expected float, got `{raw}`")),
+        TypeExpr::Named(name) if name.name.eq_ignore_ascii_case("bool") => raw
+            .parse::<bool>()
+            .map(Value::Bool)
+            .with_context(|| format!("expected bool, got `{raw}`")),
+        TypeExpr::Named(name) if name.name.eq_ignore_ascii_case("unit") => match raw {
+            "" | "()" | "null" => Ok(Value::Unit),
+            _ => bail!("expected unit as `()`, `null`, or an empty value, got `{raw}`"),
+        },
+        TypeExpr::Named(name) if name.name.eq_ignore_ascii_case("string") => {
+            Ok(Value::Str(raw.to_string()))
+        }
+        TypeExpr::Named(name) if name.name.eq_ignore_ascii_case("path") => Ok(Value::Host(
+            atman_runtime::AtmanPayload::Path(PathBuf::from(raw)),
+        )),
+        TypeExpr::List(_) => decode_json_list_argument(raw),
+        TypeExpr::Struct(_) => decode_json_struct_argument(raw),
+        TypeExpr::Named(name) if name.name.eq_ignore_ascii_case("list") => {
+            decode_json_list_argument(raw)
+        }
+        TypeExpr::Named(name) if name.name.eq_ignore_ascii_case("struct") => {
+            decode_json_struct_argument(raw)
+        }
+        TypeExpr::Named(name)
+            if name.name.eq_ignore_ascii_case("value")
+                || name.name.eq_ignore_ascii_case("any")
+                || name
+                    .name
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_uppercase) =>
+        {
+            Ok(decode_json_argument(raw).unwrap_or_else(|| Value::Str(raw.to_string())))
+        }
+        TypeExpr::Named(_) => Ok(Value::Str(raw.to_string())),
+    }
+}
+
+fn decode_json_argument(raw: &str) -> Option<Value> {
+    serde_json::from_str(raw).ok().map(Value::from_json)
+}
+
+fn decode_json_list_argument(raw: &str) -> Result<Value> {
+    let value: serde_json::Value =
+        serde_json::from_str(raw).with_context(|| format!("expected a JSON array, got `{raw}`"))?;
+    if !value.is_array() {
+        bail!("expected a JSON array, got `{raw}`");
+    }
+    Ok(Value::from_json(value))
+}
+
+fn decode_json_struct_argument(raw: &str) -> Result<Value> {
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .with_context(|| format!("expected a JSON object, got `{raw}`"))?;
+    if !value.is_object() {
+        bail!("expected a JSON object, got `{raw}`");
+    }
+    Ok(Value::from_json(value))
 }
 
 fn render_value(v: &Value) -> String {
@@ -9505,6 +9591,85 @@ mod tests {
     }
 
     #[test]
+    fn flow_arguments_decode_from_declared_types() {
+        let file = parse_file(
+            r#"flow typed(count: int, ratio: float, ready: bool, label: string, file: path, items: [int], config: { enabled: bool }, payload: value, review: Review) {}"#,
+        )
+        .unwrap();
+        let flow = &file.flows[0];
+        let raw = [
+            "count=7",
+            "ratio=1.5",
+            "ready=true",
+            "label=007",
+            "file=src/main.rs",
+            "items=[1,2]",
+            r#"config={"enabled":true}"#,
+            r#"payload={"id":3}"#,
+            "review=plain text",
+        ]
+        .map(String::from);
+
+        let values = parse_args(&raw, flow).unwrap();
+        assert!(matches!(&values[0].1, Value::Int(7)));
+        assert!(matches!(&values[1].1, Value::Float(value) if *value == 1.5));
+        assert!(matches!(&values[2].1, Value::Bool(true)));
+        assert!(matches!(&values[3].1, Value::Str(value) if value == "007"));
+        assert!(matches!(
+            &values[4].1,
+            Value::Host(atman_runtime::AtmanPayload::Path(path))
+                if path == Path::new("src/main.rs")
+        ));
+        assert!(
+            matches!(&values[5].1, Value::List(items) if matches!(&items[..], [Value::Int(1), Value::Int(2)]))
+        );
+        assert!(
+            matches!(&values[6].1, Value::Struct(fields) if matches!(&fields[..], [(name, Value::Bool(true))] if name == "enabled"))
+        );
+        assert!(
+            matches!(&values[7].1, Value::Struct(fields) if matches!(&fields[..], [(name, Value::Int(3))] if name == "id"))
+        );
+        assert!(matches!(&values[8].1, Value::Str(value) if value == "plain text"));
+    }
+
+    #[test]
+    fn flow_argument_decoder_rejects_invalid_scalars_and_containers() {
+        let file = parse_file(
+            "flow typed(count: int, items: [int], config: { enabled: bool }, loose_items: list, loose_config: struct) {}",
+        )
+        .unwrap();
+        let flow = &file.flows[0];
+
+        let error = parse_args(&["count=many".into()], flow).unwrap_err();
+        assert!(error.to_string().contains("flow argument `count`"));
+        let error = parse_args(&["items=not-json".into()], flow).unwrap_err();
+        assert!(error.to_string().contains("flow argument `items`"));
+        let error = parse_args(&["items={}".into()], flow).unwrap_err();
+        assert!(error.to_string().contains("JSON array"));
+        let error = parse_args(&["config=[]".into()], flow).unwrap_err();
+        assert!(error.to_string().contains("JSON object"));
+        let error = parse_args(&["loose_items=plain".into()], flow).unwrap_err();
+        assert!(error.to_string().contains("JSON array"));
+        let error = parse_args(&["loose_config=plain".into()], flow).unwrap_err();
+        assert!(error.to_string().contains("JSON object"));
+    }
+
+    #[test]
+    fn open_flow_argument_types_preserve_plain_text() {
+        let file =
+            parse_file("flow typed(payload: value, anything: any, review: Review) {}").unwrap();
+        let flow = &file.flows[0];
+        let raw = ["payload=plain", "anything=also plain", "review=review text"].map(String::from);
+
+        let values = parse_args(&raw, flow).unwrap();
+        assert!(
+            values
+                .iter()
+                .all(|(_, value)| matches!(value, Value::Str(_)))
+        );
+    }
+
+    #[test]
     fn slash_command_prefers_project_source_over_user_source() {
         let root = tempfile::tempdir().unwrap();
         let config = root.path().join("config");
@@ -9532,6 +9697,63 @@ mod tests {
         assert_eq!(args[0].0, "input");
         assert!(matches!(&args[0].1, Value::Str(value) if value == "inspect this"));
         assert_eq!(source_dir, Some(project_commands));
+    }
+
+    #[test]
+    fn slash_command_decodes_positional_and_named_arguments() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config");
+        let project = root.path().join("project");
+        let commands = project.join(".atman/commands");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::write(
+            commands.join("inspect.at"),
+            "flow inspect(count: int, ready: bool, file: path, payload: value) -> value { return payload }\n",
+        )
+        .unwrap();
+
+        let (_, _, args, _) = resolve_slash_command_from(
+            r#"/inspect 7 ready=true file=src/main.rs payload='{"id":3}'"#,
+            &config,
+            Some(&project),
+        )
+        .unwrap();
+
+        assert!(matches!(&args[0].1, Value::Int(7)));
+        assert!(matches!(&args[1].1, Value::Bool(true)));
+        assert!(matches!(
+            &args[2].1,
+            Value::Host(atman_runtime::AtmanPayload::Path(path))
+                if path == Path::new("src/main.rs")
+        ));
+        assert!(
+            matches!(&args[3].1, Value::Struct(fields) if matches!(&fields[..], [(name, Value::Int(3))] if name == "id"))
+        );
+    }
+
+    #[test]
+    fn slash_command_keeps_single_string_argument_spacing() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config");
+        let project = root.path().join("project");
+        let commands = project.join(".atman/commands");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::write(
+            commands.join("review.at"),
+            "flow review(input: string) -> string { return input }\n",
+        )
+        .unwrap();
+
+        let (_, _, args, _) =
+            resolve_slash_command_from("/review inspect   this carefully", &config, Some(&project))
+                .unwrap();
+        assert!(matches!(
+            &args[..],
+            [(name, Value::Str(value))]
+                if name == "input" && value == "inspect   this carefully"
+        ));
     }
 
     #[tokio::test]

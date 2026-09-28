@@ -123,6 +123,8 @@ flow review(input: string) -> string {
 
 `use "./lib/text.at"::normalize` resolves beside the file containing the declaration. Use `::{normalize, tokenize as words}` to bind several public flows, or `use "./lib/text.at" as text` and call `text.normalize(input).await`. A Flow call such as `normalize(input)` creates a cold Future; `.await` executes one call, while `fanout [normalize(a), normalize(b)]` runs both and returns ordered results. `project:` reads from `<project>/.atman/lib/`; `user:` reads from `~/.config/atman/lib/`. Only flows declared in the entry file can be selected with `--flow` or exposed as slash commands.
 
+Flow parameters, defaults, and return values are checked when a flow runs. Scalar, list, inline struct, and host payload annotations are enforced recursively; `value` and `any` are dynamic. PascalCase schema markers remain descriptive until named type declarations are available. `atman run` and slash commands decode integer, float, boolean, path, and JSON collection arguments from the selected flow signature.
+
 ### The managed agent loop
 
 `atman init` writes managed `commands/agent.at` and `commands/spec.at` templates. The agent first loads relevant rules and past confessions, then runs `llm.call`, retries, compaction, and tool dispatch; a candidate final response is checked before the loop exits. Requirements uncertainty stays in the normal conversation, where the agent thinks through the ambiguity and asks a focused question. It may suggest the opt-in spec workflow but does not automatically start it for new projects, non-trivial work, architecture changes, or uncertain requirements. See [`examples/agent.at`](examples/agent.at) for a smaller standalone agent-loop example.

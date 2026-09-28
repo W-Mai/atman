@@ -13,6 +13,7 @@ use crate::{
     bind_pattern, eval_expr,
     expr::{EvaluatedArg, eval_expr_with_watch},
     pattern::PatternBindError,
+    value::validate_value_type,
     watch::WatchRules,
 };
 
@@ -289,20 +290,72 @@ impl<H: StatementHost> Engine<H> {
     ) -> FlowOutcome<H::Payload, H::Error> {
         let provided: Vec<String> = args.iter().map(|(name, _)| name.clone()).collect();
         for (name, value) in args {
+            let value = match value {
+                Value::Err(error) => return StatementOutcome::Err(error),
+                value => value,
+            };
+            if value.contains_pending_call() {
+                return StatementOutcome::Err(H::Error::type_mismatch(
+                    "resolved flow argument",
+                    "pending call".into(),
+                ));
+            }
+            if let Some(param) = flow.params.iter().find(|param| param.name.name == name)
+                && let Err(error) = validate_value_type(
+                    &value,
+                    &param.ty,
+                    &format!("parameter `{}`", param.name.name),
+                )
+            {
+                return StatementOutcome::Err(H::Error::type_mismatch(
+                    &error.expected,
+                    error.actual,
+                ));
+            }
             self.env.bind(name, value);
         }
         for param in &flow.params {
-            if !provided.iter().any(|name| name == &param.name.name)
-                && let Some(default) = &param.default
-            {
-                let value = self.evaluate(default, None, None).await;
-                if let Value::Err(error) = value {
-                    return StatementOutcome::Err(error);
+            if !provided.iter().any(|name| name == &param.name.name) {
+                let Some(default) = &param.default else {
+                    return StatementOutcome::Err(H::Error::missing_argument(&param.name.name));
+                };
+                let value = match self.evaluate(default, None, None).await {
+                    Value::Err(error) => return StatementOutcome::Err(error),
+                    value => value,
+                };
+                if value.contains_pending_call() {
+                    return StatementOutcome::Err(H::Error::type_mismatch(
+                        "resolved flow argument",
+                        "pending call".into(),
+                    ));
+                }
+                if let Err(error) = validate_value_type(
+                    &value,
+                    &param.ty,
+                    &format!("parameter `{}`", param.name.name),
+                ) {
+                    return StatementOutcome::Err(H::Error::type_mismatch(
+                        &error.expected,
+                        error.actual,
+                    ));
                 }
                 self.env.bind(param.name.name.clone(), value);
             }
         }
-        self.run_statements(&flow.body, "", None).await
+        let outcome = self.run_statements(&flow.body, "", None).await;
+        let Some(return_type) = &flow.ret else {
+            return outcome;
+        };
+        let implicit_unit = Value::Unit;
+        let returned = match &outcome {
+            StatementOutcome::Return(value) => value,
+            StatementOutcome::Continue => &implicit_unit,
+            _ => return outcome,
+        };
+        if let Err(error) = validate_value_type(returned, return_type, "return value") {
+            return StatementOutcome::Err(H::Error::type_mismatch(&error.expected, error.actual));
+        }
+        outcome
     }
 
     pub fn run_statements<'a>(
@@ -712,6 +765,117 @@ mod tests {
                 "end:branch.1:",
             ]
         );
+    }
+
+    fn engine_for_type_tests() -> Engine<TestHost> {
+        Engine::new(TestHost {
+            events: Arc::new(Mutex::new(Vec::new())),
+            stop_before: false,
+            pending_external: false,
+        })
+    }
+
+    fn typed_flow(params: Vec<ParamDecl>, ret: Option<TypeExpr>, body: Vec<Stmt>) -> FlowDecl {
+        FlowDecl {
+            name: Ident::new("typed", Span::default()),
+            params,
+            ret,
+            contract: None,
+            body,
+        }
+    }
+
+    #[test]
+    fn flow_boundary_checks_parameters_defaults_and_missing_arguments() {
+        let param = test_param("count");
+        let flow = typed_flow(
+            vec![param.clone()],
+            Some(TypeExpr::Named(Ident::new("Int", Span::default()))),
+            vec![Stmt::Return {
+                value: Expr::Ident(param.name.clone()),
+            }],
+        );
+        let mismatch = run_ready(
+            engine_for_type_tests()
+                .run_flow(&flow, vec![("count".into(), Value::Str("one".into()))]),
+        );
+        assert!(matches!(
+            mismatch,
+            StatementOutcome::Err(EvalError::TypeMismatch { expected, actual })
+                if expected == "parameter `count`: Int"
+                    && actual == "parameter `count`: string"
+        ));
+
+        let missing = run_ready(engine_for_type_tests().run_flow(&flow, Vec::new()));
+        assert!(matches!(
+            missing,
+            StatementOutcome::Err(EvalError::MissingArgument(name)) if name == "count"
+        ));
+
+        let mut default_param = param;
+        default_param.default = Some(Expr::Literal(Literal::Str("one".into())));
+        let bad_default = typed_flow(
+            vec![default_param],
+            None,
+            vec![Stmt::Return {
+                value: Expr::Literal(Literal::Int(1)),
+            }],
+        );
+        let mismatch = run_ready(engine_for_type_tests().run_flow(&bad_default, Vec::new()));
+        assert!(matches!(
+            mismatch,
+            StatementOutcome::Err(EvalError::TypeMismatch { expected, actual })
+                if expected == "parameter `count`: Int"
+                    && actual == "parameter `count`: string"
+        ));
+    }
+
+    #[test]
+    fn flow_boundary_checks_explicit_and_implicit_returns() {
+        let list_type = TypeExpr::List(alloc::boxed::Box::new(TypeExpr::Named(Ident::new(
+            "int",
+            Span::default(),
+        ))));
+        let bad_return = typed_flow(
+            Vec::new(),
+            Some(list_type),
+            vec![Stmt::Return {
+                value: Expr::List(vec![
+                    Expr::Literal(Literal::Int(1)),
+                    Expr::Literal(Literal::Str("two".into())),
+                ]),
+            }],
+        );
+        let mismatch = run_ready(engine_for_type_tests().run_flow(&bad_return, Vec::new()));
+        assert!(matches!(
+            mismatch,
+            StatementOutcome::Err(EvalError::TypeMismatch { expected, actual })
+                if expected == "return value: [int]" && actual == "return value[1]: string"
+        ));
+
+        let fallthrough = typed_flow(
+            Vec::new(),
+            Some(TypeExpr::Named(Ident::new("int", Span::default()))),
+            Vec::new(),
+        );
+        let mismatch = run_ready(engine_for_type_tests().run_flow(&fallthrough, Vec::new()));
+        assert!(matches!(
+            mismatch,
+            StatementOutcome::Err(EvalError::TypeMismatch { expected, actual })
+                if expected == "return value: int" && actual == "return value: unit"
+        ));
+
+        let schema_marker = typed_flow(
+            Vec::new(),
+            Some(TypeExpr::Named(Ident::new("Review", Span::default()))),
+            vec![Stmt::Return {
+                value: Expr::Literal(Literal::Str("review".into())),
+            }],
+        );
+        assert!(matches!(
+            run_ready(engine_for_type_tests().run_flow(&schema_marker, Vec::new())),
+            StatementOutcome::Return(Value::Str(value)) if value == "review"
+        ));
     }
 
     #[test]

@@ -8,6 +8,10 @@ List indexing uses zero-based `items[index]` syntax. Negative and out-of-range i
 
 An embedding application calls `atman_rt::Vm::compile(Source, &resolver)` to build a VM from source text. The host implements `SourceResolver` to load imported source under its own path and trust policy. `Vm::run(flow_name, args, delegates)` executes an entry flow, `Vm::run_flow` executes a resolved flow identity, and `Vm::run_lifecycle` executes matching lifecycle bodies. Inside `.at`, `name(args)` creates a cold Flow Future, `.await` executes one call, and `fanout` drives an array of calls concurrently. The host polls the VM's returned future with its own executor. The host chooses its payload and error types through `Value<P, E>`.
 
+Flow parameter and return annotations are checked whenever a flow body is driven. `unit`, `bool`, `int`, `float`, `string`, `list`, and `struct` match their corresponding values; `[T]` checks every item, and `{ field: T }` requires each declared field while allowing additional fields. A named host type matches `HostPayload::kind_name()`. `value` and `any` accept any resolved value. PascalCase names such as `Review` remain schema markers until the language has named type declarations, so they do not provide a runtime type guarantee. Missing required parameters, incompatible defaults, and incompatible explicit or implicit returns fail before the value crosses the flow boundary.
+
+Integer `+`, `-`, `*`, `/`, `%`, and unary `-` use checked `i64` arithmetic. Overflow returns `ValueError::integer_overflow`; division and remainder by zero keep their dedicated errors. Debug and release builds therefore use the same integer semantics.
+
 `#[atman_rt::tools]` generates a `ToolRouter` from typed Rust functions. A synchronous Rust function runs when its `.at` call is evaluated; an `async fn` creates a cold tool future that runs only on `.await` or in `fanout`. Parameter names and types come from the function signature, so the host does not need to decode `ToolArgs`:
 
 ```rust
