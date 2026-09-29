@@ -6,14 +6,14 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::{fmt, hint::spin_loop, marker::PhantomData};
+use core::{fmt, marker::PhantomData};
 
 use crate::{
     HostPayload, Value,
     catalog::{ResourceSpec, TypeSpec},
     resource::{
-        ErasedHandle, ResourceError, ResourcePayload, ResourceReadGuard, ResourceRegistry,
-        ResourceType,
+        ErasedHandle, PendingResource, ResourceError, ResourcePayload, ResourceReadGuard,
+        ResourceRegistry, ResourceType,
     },
     tool_router::{ToolRegisterError, ToolRouter},
 };
@@ -283,25 +283,56 @@ impl From<ResourceError> for BindingError {
 #[derive(Default)]
 struct OutputTransaction {
     depth: usize,
-    resources: Vec<ErasedHandle>,
+    resources: Vec<PendingResource>,
 }
 
 /// Context shared by the parameters and result of one generated binding.
 /// Resource-backed bindings extend this value with their registry.
 pub struct Context<P, E> {
     resources: Option<Arc<ResourceRegistry>>,
-    output: async_lock::Mutex<OutputTransaction>,
+    output: OutputTransaction,
     marker: PhantomData<fn() -> (P, E)>,
+}
+
+struct OutputScope<'a, P, E> {
+    context: &'a mut Context<P, E>,
+    checkpoint: usize,
+    completed: bool,
+}
+
+impl<'a, P, E> OutputScope<'a, P, E> {
+    fn new(context: &'a mut Context<P, E>) -> Self {
+        let checkpoint = context.output.resources.len();
+        context.output.depth += 1;
+        Self {
+            context,
+            checkpoint,
+            completed: false,
+        }
+    }
+
+    fn finish(&mut self, success: bool) -> Result<(), BindingError> {
+        self.completed = true;
+        self.context.finish_output_scope(self.checkpoint, success)
+    }
+}
+
+impl<P, E> Drop for OutputScope<'_, P, E> {
+    fn drop(&mut self) {
+        if !self.completed {
+            let _ = self.context.finish_output_scope(self.checkpoint, false);
+        }
+    }
 }
 
 impl<P, E> Context<P, E> {
     pub const fn value_only() -> Self {
         Self {
             resources: None,
-            output: async_lock::Mutex::new(OutputTransaction {
+            output: OutputTransaction {
                 depth: 0,
                 resources: Vec::new(),
-            }),
+            },
             marker: PhantomData,
         }
     }
@@ -309,7 +340,7 @@ impl<P, E> Context<P, E> {
     pub fn with_resources(resources: Arc<ResourceRegistry>) -> Self {
         Self {
             resources: Some(resources),
-            output: async_lock::Mutex::new(OutputTransaction::default()),
+            output: OutputTransaction::default(),
             marker: PhantomData,
         }
     }
@@ -319,7 +350,7 @@ impl<P, E> Context<P, E> {
     pub fn for_call(&self) -> Self {
         Self {
             resources: self.resources.clone(),
-            output: async_lock::Mutex::new(OutputTransaction::default()),
+            output: OutputTransaction::default(),
             marker: PhantomData,
         }
     }
@@ -340,64 +371,63 @@ impl<P, E> Context<P, E> {
     /// successful outermost scope commits its handles to the returned value.
     #[doc(hidden)]
     pub fn output_transaction<T>(
-        &self,
-        encode: impl FnOnce() -> Result<T, BindingError>,
+        &mut self,
+        encode: impl FnOnce(&mut Self) -> Result<T, BindingError>,
     ) -> Result<T, BindingError> {
-        let checkpoint = {
-            let mut output = self.lock_output();
-            let checkpoint = output.resources.len();
-            output.depth += 1;
-            checkpoint
-        };
-
-        let result = encode();
-        let rollback = {
-            let mut output = self.lock_output();
-            debug_assert!(output.depth > 0);
-            output.depth -= 1;
-            if result.is_err() {
-                output.resources.split_off(checkpoint)
-            } else {
-                if output.depth == 0 {
-                    output.resources.clear();
-                }
-                Vec::new()
-            }
-        };
-        self.rollback_output_resources(rollback);
+        let mut scope = OutputScope::new(self);
+        let result = encode(&mut *scope.context);
+        scope.finish(result.is_ok())?;
         result
     }
 
-    /// Adds one newly inserted handle to the active output transaction.
+    /// Encodes one resource whose handle becomes live only when the outer output commits.
     #[doc(hidden)]
-    pub fn record_output_resource(&self, handle: ErasedHandle) {
-        let mut output = self.lock_output();
-        debug_assert!(output.depth > 0);
-        output.resources.push(handle);
+    pub fn encode_resource<T>(&mut self, value: T) -> Result<Value<P, E>, BindingError>
+    where
+        T: ResourceType + Send + Sync,
+        P: ResourcePayload,
+    {
+        self.output_transaction(|context| {
+            let resources = context
+                .resources
+                .as_ref()
+                .ok_or_else(BindingError::resource_context_unavailable)?;
+            let (handle, pending) = resources.insert_pending(value)?;
+            context.output.resources.push(pending);
+            Ok(Value::Host(P::from_resource(handle.erased())))
+        })
     }
 
-    fn lock_output(&self) -> async_lock::MutexGuard<'_, OutputTransaction> {
-        loop {
-            if let Some(output) = self.output.try_lock() {
-                return output;
+    fn finish_output_scope(
+        &mut self,
+        checkpoint: usize,
+        success: bool,
+    ) -> Result<(), BindingError> {
+        debug_assert!(self.output.depth > 0);
+        debug_assert!(checkpoint <= self.output.resources.len());
+        if success && self.output.depth == 1 {
+            if let Err(error) = PendingResource::commit_all(&mut self.output.resources) {
+                self.output.depth = 0;
+                let rollback = core::mem::take(&mut self.output.resources);
+                self.rollback_output_resources(rollback);
+                return Err(error.into());
             }
-            spin_loop();
+            self.output.depth = 0;
+            self.output.resources.clear();
+            return Ok(());
         }
+
+        self.output.depth -= 1;
+        if !success {
+            let rollback = self.output.resources.split_off(checkpoint);
+            self.rollback_output_resources(rollback);
+        }
+        Ok(())
     }
 
-    fn rollback_output_resources(&self, mut handles: Vec<ErasedHandle>) {
-        let Some(resources) = self.resources.as_deref() else {
-            debug_assert!(handles.is_empty());
-            return;
-        };
-        while let Some(handle) = handles.pop() {
-            loop {
-                match resources.release(handle) {
-                    Ok(()) | Err(ResourceError::StaleResource) => break,
-                    Err(ResourceError::RegistryBusy | ResourceError::ResourceBusy) => spin_loop(),
-                    Err(error) => unreachable!("invalid output transaction handle: {error}"),
-                }
-            }
+    fn rollback_output_resources(&self, mut resources: Vec<PendingResource>) {
+        while let Some(resource) = resources.pop() {
+            resource.rollback();
         }
     }
 }
@@ -430,7 +460,7 @@ pub trait Input<P, E>: Sized {
 pub trait Output<P, E>: Sized {
     fn output_type() -> TypeSpec;
 
-    fn encode_output(self, context: &Context<P, E>) -> Result<Value<P, E>, BindingError>;
+    fn encode_output(self, context: &mut Context<P, E>) -> Result<Value<P, E>, BindingError>;
 }
 
 /// Marks values that can be represented distinctly from `Option::None`.
@@ -497,7 +527,10 @@ macro_rules! direct_binding {
                 $spec
             }
 
-            fn encode_output(self, _context: &Context<P, E>) -> Result<Value<P, E>, BindingError> {
+            fn encode_output(
+                self,
+                _context: &mut Context<P, E>,
+            ) -> Result<Value<P, E>, BindingError> {
                 Ok(Value::$variant(self))
             }
         }
@@ -546,7 +579,7 @@ impl<P, E> Output<P, E> for () {
         TypeSpec::Unit
     }
 
-    fn encode_output(self, _context: &Context<P, E>) -> Result<Value<P, E>, BindingError> {
+    fn encode_output(self, _context: &mut Context<P, E>) -> Result<Value<P, E>, BindingError> {
         Ok(Value::Unit)
     }
 }
@@ -591,7 +624,10 @@ macro_rules! checked_integer_binding {
                 }
             }
 
-            fn encode_output(self, _context: &Context<P, E>) -> Result<Value<P, E>, BindingError> {
+            fn encode_output(
+                self,
+                _context: &mut Context<P, E>,
+            ) -> Result<Value<P, E>, BindingError> {
                 i64::try_from(self).map(Value::Int).map_err(|_| {
                     BindingError::numeric_out_of_range(
                         <Self as Output<P, E>>::output_type(),
@@ -648,7 +684,7 @@ impl<P, E> Output<P, E> for f32 {
         TypeSpec::Float { bits: 32 }
     }
 
-    fn encode_output(self, _context: &Context<P, E>) -> Result<Value<P, E>, BindingError> {
+    fn encode_output(self, _context: &mut Context<P, E>) -> Result<Value<P, E>, BindingError> {
         Ok(Value::Float(self as f64))
     }
 }
@@ -690,8 +726,8 @@ impl<P, E, T: Output<P, E>> Output<P, E> for Vec<T> {
         TypeSpec::List(Box::new(T::output_type()))
     }
 
-    fn encode_output(self, context: &Context<P, E>) -> Result<Value<P, E>, BindingError> {
-        context.output_transaction(|| {
+    fn encode_output(self, context: &mut Context<P, E>) -> Result<Value<P, E>, BindingError> {
+        context.output_transaction(|context| {
             self.into_iter()
                 .enumerate()
                 .map(|(index, value)| {
@@ -736,8 +772,8 @@ where
         TypeSpec::Option(Box::new(T::output_type()))
     }
 
-    fn encode_output(self, context: &Context<P, E>) -> Result<Value<P, E>, BindingError> {
-        context.output_transaction(|| match self {
+    fn encode_output(self, context: &mut Context<P, E>) -> Result<Value<P, E>, BindingError> {
+        context.output_transaction(|context| match self {
             Some(value) => value.encode_output(context),
             None => Ok(Value::Unit),
         })
@@ -790,10 +826,7 @@ mod tests {
         assert!(
             u8::decode_input(Some(TestValue::Int(-1)), &Context::<(), ()>::value_only()).is_err()
         );
-        assert!(
-            u64::MAX
-                .encode_output(&Context::<(), ()>::value_only())
-                .is_err()
-        );
+        let mut context = Context::<(), ()>::value_only();
+        assert!(u64::MAX.encode_output(&mut context).is_err());
     }
 }

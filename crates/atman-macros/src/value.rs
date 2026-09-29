@@ -259,12 +259,15 @@ fn expand_struct(item: &DeriveInput, data: &DataStruct, root: &Path) -> syn::Res
 
             fn encode_output(
                 self,
-                __atman_context: &#root::binding::Context<__AtmanValueP, __AtmanValueE>,
+                __atman_context: &mut #root::binding::Context<
+                    __AtmanValueP,
+                    __AtmanValueE,
+                >,
             ) -> ::core::result::Result<
                 #root::Value<__AtmanValueP, __AtmanValueE>,
                 #root::binding::BindingError,
             > {
-                __atman_context.output_transaction(|| {
+                __atman_context.output_transaction(|__atman_context| {
                     let Self { #(#output_bindings,)* } = self;
                     let mut __atman_fields: #root::__private::Vec<(
                         #root::__private::String,
@@ -420,7 +423,7 @@ fn expand_enum(item: &DeriveInput, data: &DataEnum, root: &Path) -> syn::Result<
 
             fn encode_output(
                 self,
-                _context: &#root::binding::Context<__AtmanValueP, __AtmanValueE>,
+                _context: &mut #root::binding::Context<__AtmanValueP, __AtmanValueE>,
             ) -> ::core::result::Result<
                 #root::Value<__AtmanValueP, __AtmanValueE>,
                 #root::binding::BindingError,

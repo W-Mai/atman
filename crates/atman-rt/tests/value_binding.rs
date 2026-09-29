@@ -31,7 +31,7 @@ type TestValue = Value<(), ()>;
 
 #[test]
 fn generated_struct_codec_round_trips_nested_values() {
-    let context = Context::<(), ()>::value_only();
+    let mut context = Context::<(), ()>::value_only();
     let sprite = Sprite {
         position: Vec2 { x: 1.5, y: -2.0 },
         label: None,
@@ -39,7 +39,7 @@ fn generated_struct_codec_round_trips_nested_values() {
         mode: BlendMode::Multiply,
     };
 
-    let encoded = sprite.encode_output(&context).unwrap();
+    let encoded = sprite.encode_output(&mut context).unwrap();
     let decoded = Sprite::decode_input(Some(encoded), &context).unwrap();
 
     assert_eq!(

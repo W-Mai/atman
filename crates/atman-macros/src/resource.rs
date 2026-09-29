@@ -56,20 +56,15 @@ fn expand_inner(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream
 
             fn encode_output(
                 self,
-                __atman_context: &#root::binding::Context<__AtmanResourceP, __AtmanResourceE>,
+                __atman_context: &mut #root::binding::Context<
+                    __AtmanResourceP,
+                    __AtmanResourceE,
+                >,
             ) -> ::core::result::Result<
                 #root::Value<__AtmanResourceP, __AtmanResourceE>,
                 #root::binding::BindingError,
             > {
-                __atman_context.output_transaction(|| {
-                    let __atman_handle = __atman_context.resources()?.insert(self)?;
-                    __atman_context.record_output_resource(__atman_handle.erased());
-                    ::core::result::Result::Ok(#root::Value::Host(
-                        <__AtmanResourceP as #root::resource::ResourcePayload>::from_resource(
-                            __atman_handle.erased(),
-                        ),
-                    ))
-                })
+                __atman_context.encode_resource(self)
             }
         }
 

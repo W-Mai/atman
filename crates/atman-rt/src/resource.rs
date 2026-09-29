@@ -1,7 +1,7 @@
 //! Typed generational handles for host-owned resources.
 
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
-use async_lock::{RwLock, RwLockReadGuardArc};
+use async_lock::{RwLock, RwLockReadGuardArc, RwLockWriteGuardArc};
 use core::{
     any::{Any, TypeId},
     fmt,
@@ -291,6 +291,135 @@ impl RegistryState {
     }
 }
 
+/// One resource whose handle is reserved but cannot be resolved until its output commits.
+pub(crate) struct PendingResource {
+    registry: Arc<ResourceRegistry>,
+    handle: ErasedHandle,
+    slot: Arc<RwLock<SlotState>>,
+    value: Option<Box<dyn Any + Send + Sync>>,
+    finished: bool,
+}
+
+impl PendingResource {
+    pub(crate) fn commit_all(resources: &mut [Self]) -> Result<(), ResourceError> {
+        let Some(registry) = resources
+            .first()
+            .map(|resource| Arc::clone(&resource.registry))
+        else {
+            return Ok(());
+        };
+        // Registry state guards never escape public methods, so a pending transaction cannot
+        // wait on a caller-owned state guard here.
+        let state = loop {
+            if let Some(state) = registry.state.try_write() {
+                break state;
+            }
+            core::hint::spin_loop();
+        };
+        let mut slots = Vec::with_capacity(resources.len());
+        for resource in resources.iter() {
+            if resource.finished || resource.value.is_none() {
+                return Err(ResourceError::StaleResource);
+            }
+            resource.validate_registration(&registry, &state)?;
+            slots.push(resource.lock_pending_slot()?);
+        }
+        for (resource, slot) in resources.iter_mut().zip(slots.iter_mut()) {
+            slot.value = resource.value.take();
+            resource.finished = true;
+        }
+        drop(slots);
+        drop(state);
+        Ok(())
+    }
+
+    pub(crate) fn rollback(mut self) {
+        self.rollback_inner();
+    }
+
+    fn lock_pending_slot(&self) -> Result<RwLockWriteGuardArc<SlotState>, ResourceError> {
+        // A pending slot contains no value, so public APIs cannot return an owned guard for it.
+        let slot = loop {
+            if let Some(slot) = self.slot.try_write_arc() {
+                break slot;
+            }
+            core::hint::spin_loop();
+        };
+        validate_pending_slot(self.registry.id, self.handle, &slot)?;
+        Ok(slot)
+    }
+
+    fn validate_registration(
+        &self,
+        registry: &Arc<ResourceRegistry>,
+        state: &RegistryState,
+    ) -> Result<(), ResourceError> {
+        if !Arc::ptr_eq(registry, &self.registry) || self.handle.registry != registry.id {
+            return Err(ResourceError::ForeignResource);
+        }
+        let slot = state
+            .slots
+            .get(self.handle.slot as usize)
+            .ok_or(ResourceError::StaleResource)?;
+        if !Arc::ptr_eq(slot, &self.slot) {
+            return Err(ResourceError::StaleResource);
+        }
+        Ok(())
+    }
+
+    fn rollback_inner(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let value = self.value.take();
+        let mut state = loop {
+            if let Some(state) = self.registry.state.try_write() {
+                break state;
+            }
+            core::hint::spin_loop();
+        };
+        if self.validate_registration(&self.registry, &state).is_err() {
+            drop(state);
+            drop(value);
+            return;
+        }
+        let mut slot = loop {
+            if let Some(slot) = self.slot.try_write_arc() {
+                break slot;
+            }
+            core::hint::spin_loop();
+        };
+        let reusable_generation =
+            if validate_pending_slot(self.registry.id, self.handle, &slot).is_ok() {
+                slot.type_id = None;
+                if let Some(next_generation) = slot.generation.checked_add(1) {
+                    slot.generation = next_generation;
+                    Some(next_generation)
+                } else {
+                    slot.retired = true;
+                    None
+                }
+            } else {
+                None
+            };
+        if let Some(generation) = reusable_generation {
+            debug_assert_eq!(slot.generation, generation);
+            debug_assert!(!state.free.contains(&self.handle.slot));
+            state.free.push(self.handle.slot);
+        }
+        drop(slot);
+        drop(state);
+        drop(value);
+    }
+}
+
+impl Drop for PendingResource {
+    fn drop(&mut self) {
+        self.rollback_inner();
+    }
+}
+
 /// Owns host resources and resolves typed generational handles without blocking.
 pub struct ResourceRegistry {
     id: RegistryId,
@@ -322,10 +451,42 @@ impl ResourceRegistry {
     where
         T: ResourceType + Send + Sync,
     {
+        self.insert_slot(Some(Box::new(value)))
+            .map(|(handle, _)| handle)
+    }
+
+    pub(crate) fn insert_pending<T>(
+        self: &Arc<Self>,
+        value: T,
+    ) -> Result<(Handle<T>, PendingResource), ResourceError>
+    where
+        T: ResourceType + Send + Sync,
+    {
+        let value: Box<dyn Any + Send + Sync> = Box::new(value);
+        let (handle, slot) = self.insert_slot::<T>(None)?;
+        Ok((
+            handle,
+            PendingResource {
+                registry: Arc::clone(self),
+                handle: handle.erased(),
+                slot,
+                value: Some(value),
+                finished: false,
+            },
+        ))
+    }
+
+    fn insert_slot<T>(
+        &self,
+        mut value: Option<Box<dyn Any + Send + Sync>>,
+    ) -> Result<(Handle<T>, Arc<RwLock<SlotState>>), ResourceError>
+    where
+        T: ResourceType + Send + Sync,
+    {
         let mut state = self.state.try_write().ok_or(ResourceError::RegistryBusy)?;
         let type_id = T::type_id();
 
-        let raw = if let Some(slot_index) = state.free.pop() {
+        let (raw, slot) = if let Some(slot_index) = state.free.pop() {
             let Some(slot) = state.slots.get(slot_index as usize).cloned() else {
                 return Err(ResourceError::StaleResource);
             };
@@ -336,41 +497,49 @@ impl ResourceRegistry {
             if slot_state.registry != self.id
                 || slot_state.slot != slot_index
                 || slot_state.retired
+                || slot_state.type_id.is_some()
                 || slot_state.value.is_some()
             {
                 return Err(ResourceError::StaleResource);
             }
             slot_state.type_id = Some(type_id);
-            slot_state.value = Some(Box::new(value));
-            ErasedHandle {
+            slot_state.value = value.take();
+            let raw = ErasedHandle {
                 registry: self.id,
                 slot: slot_index,
                 generation: slot_state.generation,
                 type_id,
-            }
+            };
+            drop(slot_state);
+            (raw, slot)
         } else {
             let slot_index =
                 u32::try_from(state.slots.len()).map_err(|_| ResourceError::CapacityExhausted)?;
-            state.slots.push(Arc::new(RwLock::new(SlotState {
+            let slot = Arc::new(RwLock::new(SlotState {
                 registry: self.id,
                 slot: slot_index,
                 generation: 0,
                 type_id: Some(type_id),
-                value: Some(Box::new(value)),
+                value,
                 retired: false,
-            })));
-            ErasedHandle {
+            }));
+            let raw = ErasedHandle {
                 registry: self.id,
                 slot: slot_index,
                 generation: 0,
                 type_id,
-            }
+            };
+            state.slots.push(Arc::clone(&slot));
+            (raw, slot)
         };
 
-        Ok(Handle {
-            raw,
-            marker: PhantomData,
-        })
+        Ok((
+            Handle {
+                raw,
+                marker: PhantomData,
+            },
+            slot,
+        ))
     }
 
     /// Tries to acquire a shared owned guard for a typed resource.
@@ -437,6 +606,27 @@ impl ResourceRegistry {
         drop(value);
         Ok(())
     }
+}
+
+fn validate_pending_slot(
+    registry: RegistryId,
+    handle: ErasedHandle,
+    slot: &SlotState,
+) -> Result<(), ResourceError> {
+    if handle.registry != registry || slot.registry != registry {
+        return Err(ResourceError::ForeignResource);
+    }
+    if handle.slot != slot.slot
+        || handle.generation != slot.generation
+        || slot.retired
+        || slot.value.is_some()
+    {
+        return Err(ResourceError::StaleResource);
+    }
+    if handle.type_id != slot.type_id.ok_or(ResourceError::StaleResource)? {
+        return Err(ResourceError::ResourceTypeMismatch);
+    }
+    Ok(())
 }
 
 fn validate_erased_slot(
