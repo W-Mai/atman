@@ -9,12 +9,23 @@ use std::{
 };
 
 use atman_rt::{
-    EvalError, ToolArgs, ToolRegisterError, ToolRouter, Value,
+    EvalError, Source, SourceResolver, StatementOutcome, ToolArgs, ToolRegisterError, ToolRouter,
+    Value, Vm, VmDelegates,
     binding::Factory,
     resource::{ResourceRegistry, WithResources},
 };
 
 type Payload = WithResources<()>;
+
+struct NoSources;
+
+impl SourceResolver for NoSources {
+    type Error = &'static str;
+
+    fn resolve(&self, _importer_id: &str, _specifier: &str) -> Result<Source, Self::Error> {
+        Err("source unavailable")
+    }
+}
 
 #[atman_rt::resource]
 struct SharedResource {
@@ -127,6 +138,37 @@ fn router_clones_keep_one_resource_lineage_across_later_mounts() {
     consumer.mount(Consumer.into_atman_binding()).unwrap();
 
     assert_make_inspect_release(&producer, &consumer, &drops);
+}
+
+#[test]
+fn flow_error_keeps_committed_resources_until_the_router_lineage_drops() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRouter::<Payload, EvalError>::new();
+    tools
+        .mount(
+            Producer {
+                drops: Arc::clone(&drops),
+            }
+            .into_atman_binding(),
+        )
+        .unwrap();
+
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow main() { resource = producer.make(value: 42) return 1 / 0 }",
+        ),
+        &NoSources,
+    )
+    .unwrap();
+    assert!(matches!(
+        ready(vm.run("main", vec![], VmDelegates::new(tools.clone()))),
+        StatementOutcome::Err(_)
+    ));
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+    drop(tools);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
 struct CaptureFactory {
