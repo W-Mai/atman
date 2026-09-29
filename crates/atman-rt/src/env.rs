@@ -1,4 +1,4 @@
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{collections::BTreeSet, string::String, sync::Arc, vec::Vec};
 
 #[derive(Debug)]
 pub struct Env<V> {
@@ -79,12 +79,44 @@ impl<V> Env<V> {
             .into_iter()
             .flat_map(|inner| inner.bindings.iter().map(|(k, v)| (k.as_str(), v)))
     }
+
+    /// Iterate over the bindings visible through lookup, excluding shadowed values.
+    ///
+    /// Bindings from the current frame precede bindings inherited from parent frames.
+    /// Declaration order is preserved within each frame.
+    pub fn iter_visible(&self) -> impl Iterator<Item = (&str, &V)> {
+        let mut visible = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut inner = &*self.inner;
+
+        loop {
+            let frame_start = visible.len();
+            for (name, value) in inner.bindings.iter().rev() {
+                if seen.insert(name.as_str()) {
+                    visible.push((name.as_str(), value));
+                }
+            }
+            visible[frame_start..].reverse();
+
+            match &inner.parent {
+                Some(parent) => inner = parent,
+                None => break,
+            }
+        }
+
+        visible.into_iter()
+    }
 }
 
 impl<V: Clone> Env<V> {
     pub fn bind(&mut self, name: impl Into<String>, value: V) {
+        let name = name.into();
         let inner = Arc::make_mut(&mut self.inner);
-        inner.bindings.push((name.into(), value));
+        if let Some((_, current)) = inner.bindings.iter_mut().find(|(bound, _)| bound == &name) {
+            *current = value;
+        } else {
+            inner.bindings.push((name, value));
+        }
     }
 }
 
@@ -106,11 +138,14 @@ mod tests {
     }
 
     #[test]
-    fn later_binding_shadows_earlier() {
+    fn repeated_binding_reuses_current_frame_slot() {
         let mut env = Env::new();
-        env.bind("x", 1);
-        env.bind("x", 2);
-        assert!(matches!(env.lookup("x"), Some(&2)));
+        for value in 0..10_000 {
+            env.bind("x", value);
+        }
+
+        assert!(matches!(env.lookup("x"), Some(&9_999)));
+        assert_eq!(env.iter().count(), 1);
     }
 
     #[test]
@@ -127,8 +162,32 @@ mod tests {
         let mut env = Env::new();
         env.bind("a", 1);
         env.bind("b", 2);
+        env.bind("a", 3);
         let names: Vec<_> = env.iter().map(|(k, _)| k).collect();
         assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn visible_iteration_excludes_shadowed_parent_bindings() {
+        let mut parent = Env::new();
+        parent.bind("parent", 1);
+        parent.bind("shared", 2);
+
+        let mut child = parent.child();
+        child.bind("shared", 3);
+        child.bind("child", 4);
+
+        let visible: Vec<_> = child
+            .iter_visible()
+            .map(|(name, value)| (name, *value))
+            .collect();
+        assert_eq!(visible, vec![("shared", 3), ("child", 4), ("parent", 1)]);
+
+        let physical: Vec<_> = child.iter().map(|(name, value)| (name, *value)).collect();
+        assert_eq!(
+            physical,
+            vec![("shared", 3), ("child", 4), ("parent", 1), ("shared", 2)]
+        );
     }
 
     #[test]
@@ -159,5 +218,42 @@ mod tests {
         // Mutating original after clone should not affect clone (COW)
         env.bind("y", 2);
         assert!(cloned.lookup("y").is_none());
+    }
+
+    #[test]
+    fn rebinding_preserves_cloned_snapshot() {
+        let mut env = Env::new();
+        env.bind("x", 1);
+        let snapshot = env.clone();
+
+        env.bind("x", 2);
+
+        assert!(matches!(env.lookup("x"), Some(&2)));
+        assert!(matches!(snapshot.lookup("x"), Some(&1)));
+    }
+
+    #[test]
+    fn rebinding_drops_replaced_value_immediately() {
+        use alloc::rc::Rc;
+        use core::cell::Cell;
+
+        #[derive(Clone)]
+        struct DropCounter(Rc<Cell<usize>>);
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let drops = Rc::new(Cell::new(0));
+        {
+            let mut env = Env::new();
+            env.bind("value", DropCounter(Rc::clone(&drops)));
+            env.bind("value", DropCounter(Rc::clone(&drops)));
+            assert_eq!(drops.get(), 1);
+            assert_eq!(env.iter().count(), 1);
+        }
+        assert_eq!(drops.get(), 2);
     }
 }

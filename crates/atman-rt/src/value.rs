@@ -310,7 +310,7 @@ impl<P: HostPayload, E> Value<P, E> {
                 .iter()
                 .any(|(_, value)| value.contains_pending_call()),
             Self::Lambda { captured_env, .. } => captured_env
-                .iter()
+                .iter_visible()
                 .any(|(_, value)| value.contains_pending_call()),
             _ => false,
         }
@@ -368,6 +368,30 @@ mod tests {
         let record = Value::Struct(vec![("item".into(), item)]);
         assert_eq!(record.field("item").unwrap().kind_name(), "foreign");
         assert!(!record.is_err());
+    }
+
+    #[test]
+    fn lambda_pending_detection_ignores_shadowed_parent_values() {
+        let pending = Value::ToolFuture(Arc::new(ToolFuture::new(
+            "pending".into(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        )));
+        let mut parent = Env::<Value<(), ()>>::new();
+        parent.bind("state", pending);
+
+        let mut captured_env = parent.child();
+        captured_env.bind("state", Value::Int(1));
+        let lambda = Value::Lambda {
+            params: Vec::new(),
+            body: Arc::new(Expr::Literal(crate::ast::Literal::Bool(true))),
+            captured_env,
+        };
+
+        assert!(!lambda.contains_pending_call());
     }
 
     fn named(name: &str) -> TypeExpr {
