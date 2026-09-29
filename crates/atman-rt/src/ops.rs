@@ -51,6 +51,12 @@ impl HostValueOps for () {}
 pub trait ValueError {
     fn type_mismatch(expected: &str, actual: String) -> Self;
     fn missing_argument(name: &str) -> Self;
+    fn binding_error(error: crate::binding::BindingError) -> Self
+    where
+        Self: Sized,
+    {
+        Self::type_mismatch("valid host binding value", format!("{error}"))
+    }
     fn empty_list(name: &str) -> Self
     where
         Self: Sized,

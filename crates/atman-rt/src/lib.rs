@@ -5,7 +5,9 @@
 extern crate alloc;
 
 pub mod ast;
+pub mod binding;
 pub mod cancel;
+pub mod catalog;
 mod cooperate;
 pub mod delegate;
 pub mod engine;
@@ -34,7 +36,7 @@ pub mod vm;
 pub mod watch;
 
 #[cfg(feature = "macros")]
-pub use atman_macros::rt_tools as tools;
+pub use atman_macros::{rt_tools as tools, value};
 pub use cancel::race_cancel;
 pub use delegate::{
     AllowAll, AuthorizationDelegate, CancellationDelegate, ControlDelegate, DefaultControl,
@@ -77,3 +79,8 @@ pub use vm::{
     VmRunOptions,
 };
 pub use watch::{WatchObservation, WatchRules, WatchState, WatchWarning};
+
+#[doc(hidden)]
+pub mod __private {
+    pub use alloc::{string::String, vec::Vec};
+}

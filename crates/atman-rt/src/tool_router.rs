@@ -33,6 +33,16 @@ impl<P, E> ToolArgs<P, E> {
             .find(|(key, _)| key == name)
             .map(|(_, value)| value)
     }
+
+    /// Consumes one argument while preserving named-over-positional precedence.
+    pub fn take(&mut self, name: &str, position: usize) -> Option<Value<P, E>> {
+        if let Some(index) = self.named.iter().position(|(key, _)| key == name) {
+            return Some(self.named.remove(index).1);
+        }
+        self.positional
+            .get_mut(position)
+            .map(|value| core::mem::replace(value, Value::Unit))
+    }
 }
 
 impl<P: HostPayload, E: ValueError> ToolArgs<P, E> {
