@@ -27,6 +27,7 @@ pub mod pattern;
 pub mod print;
 pub mod program;
 pub mod redirect;
+pub mod resource;
 pub mod route;
 pub mod status;
 pub mod tool_router;
@@ -36,7 +37,7 @@ pub mod vm;
 pub mod watch;
 
 #[cfg(feature = "macros")]
-pub use atman_macros::{rt_tools as tools, value};
+pub use atman_macros::{resource, rt_tools as tools, value};
 pub use cancel::race_cancel;
 pub use delegate::{
     AllowAll, AuthorizationDelegate, CancellationDelegate, ControlDelegate, DefaultControl,

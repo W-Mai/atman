@@ -3,11 +3,16 @@
 use alloc::{
     boxed::Box,
     string::{String, ToString},
+    sync::Arc,
     vec::Vec,
 };
 use core::{fmt, marker::PhantomData};
 
-use crate::{HostPayload, Value, catalog::TypeSpec};
+use crate::{
+    HostPayload, Value,
+    catalog::TypeSpec,
+    resource::{ResourceError, ResourceRegistry},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValuePathSegment {
@@ -79,6 +84,7 @@ pub enum BindingErrorKind {
     ResourceTypeMismatch,
     ResourceBusy,
     ResourceRegistryBusy,
+    ResourceContextUnavailable,
     ResourceIdentityExhausted,
     ResourceCapacityExhausted,
 }
@@ -141,6 +147,10 @@ impl BindingError {
 
     pub fn resource_registry_busy() -> Self {
         Self::new(BindingErrorKind::ResourceRegistryBusy)
+    }
+
+    pub fn resource_context_unavailable() -> Self {
+        Self::new(BindingErrorKind::ResourceContextUnavailable)
     }
 
     pub fn resource_identity_exhausted() -> Self {
@@ -226,6 +236,9 @@ impl fmt::Display for BindingError {
             BindingErrorKind::ResourceRegistryBusy => {
                 write!(formatter, "{}: resource registry is busy", self.path)
             }
+            BindingErrorKind::ResourceContextUnavailable => {
+                formatter.write_str("resource binding context is unavailable")
+            }
             BindingErrorKind::ResourceIdentityExhausted => {
                 formatter.write_str("resource registry identity space is exhausted")
             }
@@ -238,18 +251,57 @@ impl fmt::Display for BindingError {
 
 impl core::error::Error for BindingError {}
 
+impl From<ResourceError> for BindingError {
+    fn from(error: ResourceError) -> Self {
+        match error {
+            ResourceError::IdentityExhausted => Self::resource_identity_exhausted(),
+            ResourceError::CapacityExhausted => Self::resource_capacity_exhausted(),
+            ResourceError::RegistryBusy => Self::resource_registry_busy(),
+            ResourceError::ForeignResource => Self::foreign_resource(),
+            ResourceError::StaleResource => Self::stale_resource(),
+            ResourceError::ResourceTypeMismatch => Self::resource_type_mismatch(),
+            ResourceError::ResourceBusy => Self::resource_busy(),
+        }
+    }
+}
+
 /// Context shared by the parameters and result of one generated binding.
 /// Resource-backed bindings extend this value with their registry.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone)]
 pub struct Context<P, E> {
+    resources: Option<Arc<ResourceRegistry>>,
     marker: PhantomData<fn() -> (P, E)>,
 }
 
 impl<P, E> Context<P, E> {
     pub const fn value_only() -> Self {
         Self {
+            resources: None,
             marker: PhantomData,
         }
+    }
+
+    pub fn with_resources(resources: Arc<ResourceRegistry>) -> Self {
+        Self {
+            resources: Some(resources),
+            marker: PhantomData,
+        }
+    }
+
+    pub fn resources(&self) -> Result<&ResourceRegistry, BindingError> {
+        self.resources
+            .as_deref()
+            .ok_or_else(BindingError::resource_context_unavailable)
+    }
+
+    pub fn shared_resources(&self) -> Option<&Arc<ResourceRegistry>> {
+        self.resources.as_ref()
+    }
+}
+
+impl<P, E> Default for Context<P, E> {
+    fn default() -> Self {
+        Self::value_only()
     }
 }
 

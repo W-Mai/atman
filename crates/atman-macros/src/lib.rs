@@ -1,6 +1,7 @@
 //! Attribute macros for binding Rust functions as Atman tools.
 
 mod common;
+mod resource;
 mod rt;
 mod runtime;
 mod value;
@@ -27,4 +28,12 @@ pub fn value(
     item: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     value::expand(attr, item)
+}
+
+#[proc_macro_attribute]
+pub fn resource(
+    attr: proc_macro::TokenStream,
+    item: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    resource::expand(attr, item)
 }
