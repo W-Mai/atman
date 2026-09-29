@@ -1,5 +1,7 @@
 //! Embeddable Atman language VM, including source compilation and flow execution.
 //! Embedding requires an allocator, pointer-width atomics, and a host future executor.
+//!
+//! `#[atman_rt::value]`, `#[atman_rt::resource]`, and `#[atman_rt::tools]` generate structural value codecs, opaque host resource handles, stateful tool bindings, and portable tool catalogs. [`ToolRouter::mount`] installs one generated binding's handler and catalog entries atomically while router clones share one resource lineage. [`Vm::validate_tools`] performs optional post-link validation before execution.
 #![no_std]
 
 extern crate alloc;

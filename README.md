@@ -432,11 +432,15 @@ atman/
     atman-daemon/    # Daemon binary, Unix socket, HTTP+SSE, session pool
     atman-tui/       # Terminal UI — themes, workflow panel, diff preview, input
   examples/          # canonical .at flow examples
-  fixtures/atman-rt-embed/  # standalone runtime embedding check
+  fixtures/atman-rt-embed/      # standalone runtime embedding check
+  fixtures/atman-rt-host-demo/  # portable owner-thread host binding check
+  fixtures/atman-rt-mirui/      # mirui headless owner-thread binding check
   docs/              # Quickstart, context strategy, list combinators
 ```
 
-`atman-rt` is the complete Atman language VM. `Vm::compile(Source, &resolver)` parses and links `.at` source, including `use` and `pub` flows. `#[atman_rt::tools]` generates typed tool bindings from Rust functions; a host can also register handlers manually with `ToolRouter` and compose authorization, observation, cancellation, flow lifecycle, and language-control callbacks with `VmDelegates`. Atman's tools, providers, sessions, and storage are supplied by `atman-runtime`; another host can use `atman-rt` without that crate. `#[atman_runtime::tools]` generates tool schemas and registration with an explicit Tier through the existing approval and event path; `ToolRegistry::register_fn` remains available for manual bindings.
+`atman-rt` is the complete Atman language VM. `Vm::compile(Source, &resolver)` parses and links `.at` source, including `use` and `pub` flows. `#[atman_rt::value]` generates codecs and portable type descriptions for named-field structs and fieldless enums, while `#[atman_rt::resource]` exposes opaque typed generational handles. `#[atman_rt::tools(namespace = "...")]` on a concrete host impl generates stateful tools plus `<namespace>.release`; bindings mounted through one `ToolRouter` clone lineage share a resource registry, so one binding can borrow or release a resource created by another. `ToolRouter::mount` installs the generated handler and catalog batch atomically, `ToolRouter::catalog` projects its signatures, and `Vm::validate_tools` optionally checks linked `.at` calls before execution. A host can also register handlers manually with `ToolRouter` and compose authorization, observation, cancellation, flow lifecycle, and language-control callbacks with `VmDelegates`. Atman's tools, providers, sessions, and storage are supplied by `atman-runtime`; another host can use `atman-rt` without that crate. `#[atman_runtime::tools]` generates tool schemas and registration with an explicit Tier through the existing approval and event path; `ToolRegistry::register_fn` remains available for manual bindings.
+
+Thread-affine UI or graphics objects remain on their owner thread by storing only a command proxy and opaque lease in the VM-side resource registry. A successful generated release invalidates every handle copy and drops that lease, allowing destruction to return through the owner-thread bridge; an active shared borrow reports the resource as busy.
 
 ```rust
 #[atman_runtime::tools]
@@ -455,9 +459,16 @@ Product bindings require `tier` on every `#[tool]`. Tiers 1–4 also require a `
 
 `cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked` checks portable flow behavior with only `atman-rt` as an Atman dependency. `cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked -- --demo 6` compiles `.at` source, imports a public flow, invokes a host effect, and prints `result: 18`. Omit `6` to enter an integer interactively. The CI workflow runs the fixture on Linux, macOS, and Windows, runs it on Wasm/WASI, and checks the `no_std` core on `wasm32-unknown-unknown`.
 
+The portable fake graphics fixture and the mirui headless fixture use `atman-rt` as their only Atman crate dependency. They run the VM on a worker while all UI state, rendering, and destruction remain on the owner thread:
+
+```sh
+env CARGO_TARGET_DIR=target cargo run --manifest-path fixtures/atman-rt-host-demo/Cargo.toml --locked
+env CARGO_TARGET_DIR=target cargo run --manifest-path fixtures/atman-rt-mirui/Cargo.toml --locked
+```
+
 The default `syntax` feature enables source compilation. With `default-features = false`, the VM executes a program built from Atman AST without the parser dependency. Both modes require an allocator, pointer-width atomics for `Arc`-backed environments and lambda captures, and a host that polls returned futures. `riscv32imc-unknown-none-elf` lacks pointer-width atomics and is not currently supported.
 
-The [atman-rt embedding guide](crates/atman-rt/README.md) describes the VM API and standalone fixture.
+The [atman-rt embedding guide](crates/atman-rt/README.md) describes the VM API, generated host bindings, resource lifecycle, validation, and fixtures.
 
 Language: Rust (edition 2024, MSRV 1.85). License: MIT OR Apache-2.0.
 
