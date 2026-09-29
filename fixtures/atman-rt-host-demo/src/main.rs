@@ -120,7 +120,8 @@ enum Command {
     Load {
         caller: ThreadId,
         name: String,
-        reply: oneshot::Sender<Result<u64, EvalError>>,
+        lease_proxy: GraphicsProxy,
+        reply: oneshot::Sender<Result<TextureLease, EvalError>>,
     },
     Frame {
         caller: ThreadId,
@@ -135,6 +136,10 @@ enum Command {
     Release {
         caller: ThreadId,
         texture: u64,
+    },
+    CancelAfterLoad {
+        caller: ThreadId,
+        name: String,
     },
 }
 
@@ -153,10 +158,29 @@ impl GraphicsProxy {
 struct TextureLease {
     id: u64,
     proxy: GraphicsProxy,
+    armed: bool,
+}
+
+impl TextureLease {
+    fn new(id: u64, proxy: GraphicsProxy) -> Self {
+        Self {
+            id,
+            proxy,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) -> u64 {
+        self.armed = false;
+        self.id
+    }
 }
 
 impl Drop for TextureLease {
     fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
         let _ = self.proxy.commands.send(Command::Release {
             caller: thread::current().id(),
             texture: self.id,
@@ -173,17 +197,23 @@ impl GraphicsHost {
     /// Loads one owner-thread texture and returns its VM-side lease.
     #[tool]
     async fn load(&self, name: String) -> Result<TextureLease, EvalError> {
-        let (reply, response) = oneshot::channel();
+        let cancel_after_load = (name == "cancelled-owner-reply").then(|| name.clone());
+        let (reply, response) = oneshot::channel::<Result<TextureLease, EvalError>>();
         self.proxy.send(Command::Load {
             caller: thread::current().id(),
             name,
+            lease_proxy: self.proxy.clone(),
             reply,
         })?;
-        let id = response.await.map_err(|_| broken_bridge())??;
-        Ok(TextureLease {
-            id,
-            proxy: self.proxy.clone(),
-        })
+        let lease = response.await.map_err(|_| broken_bridge())??;
+        if let Some(name) = cancel_after_load {
+            self.proxy.send(Command::CancelAfterLoad {
+                caller: thread::current().id(),
+                name,
+            })?;
+            std::future::pending::<()>().await;
+        }
+        Ok(lease)
     }
 
     /// Advances the owner-thread frame clock.
@@ -236,7 +266,6 @@ enum AuditEvent {
     },
     Release(u64),
     PendingLoad(String),
-    LateReplyRejected,
 }
 
 struct FakeWorld {
@@ -246,7 +275,6 @@ struct FakeWorld {
     textures: BTreeMap<u64, FakeTexture>,
     audit: Vec<AuditEvent>,
     cancellation: Arc<CancellationSignal>,
-    pending_reply: Option<oneshot::Sender<Result<u64, EvalError>>>,
 }
 
 impl FakeWorld {
@@ -258,7 +286,6 @@ impl FakeWorld {
             textures: BTreeMap::new(),
             audit: Vec::new(),
             cancellation,
-            pending_reply: None,
         }
     }
 
@@ -270,23 +297,20 @@ impl FakeWorld {
             Command::Load { caller, .. }
             | Command::Frame { caller, .. }
             | Command::Draw { caller, .. }
-            | Command::Release { caller, .. } => *caller,
+            | Command::Release { caller, .. }
+            | Command::CancelAfterLoad { caller, .. } => *caller,
         };
         if caller == self.owner {
             return Err("VM command unexpectedly originated on the owner thread".into());
         }
 
         match command {
-            Command::Load { name, reply, .. } => {
-                if name == "cancelled-owner-reply" {
-                    if self.pending_reply.is_some() {
-                        return Err("multiple owner replies were left pending".into());
-                    }
-                    self.pending_reply = Some(reply);
-                    self.audit.push(AuditEvent::PendingLoad(name));
-                    self.cancellation.cancel();
-                    return Ok(());
-                }
+            Command::Load {
+                name,
+                lease_proxy,
+                reply,
+                ..
+            } => {
                 let id = self.next_texture;
                 self.next_texture += 1;
                 self.textures.insert(
@@ -297,9 +321,10 @@ impl FakeWorld {
                     },
                 );
                 self.audit.push(AuditEvent::Load { texture: id, name });
-                reply
-                    .send(Ok(id))
-                    .map_err(|_| "load reply receiver closed".to_string())?;
+                let lease = TextureLease::new(id, lease_proxy);
+                if let Err(Ok(lease)) = reply.send(Ok(lease)) {
+                    self.release_texture(lease.disarm())?;
+                }
             }
             Command::Frame { reply, .. } => {
                 self.frame += 1;
@@ -332,28 +357,25 @@ impl FakeWorld {
                 });
             }
             Command::Release { texture, .. } => {
-                let released = self
-                    .textures
-                    .remove(&texture)
-                    .ok_or_else(|| format!("texture {texture} released twice"))?;
-                if released.name == "checkerboard" && released.pixels[..3] != [1, 2, 3] {
-                    return Err("checkerboard was released before all frames were drawn".into());
-                }
-                self.audit.push(AuditEvent::Release(texture));
+                self.release_texture(texture)?;
+            }
+            Command::CancelAfterLoad { name, .. } => {
+                self.audit.push(AuditEvent::PendingLoad(name));
+                self.cancellation.cancel();
             }
         }
         Ok(())
     }
 
-    fn verify_late_reply_is_rejected(&mut self) -> Result<(), String> {
-        let reply = self
-            .pending_reply
-            .take()
-            .ok_or_else(|| "owner never observed the cancellable load".to_string())?;
-        if reply.send(Ok(self.next_texture)).is_ok() {
-            return Err("late owner reply reached a cancelled VM effect".into());
+    fn release_texture(&mut self, texture: u64) -> Result<(), String> {
+        let released = self
+            .textures
+            .remove(&texture)
+            .ok_or_else(|| format!("texture {texture} released twice"))?;
+        if released.name == "checkerboard" && released.pixels[..3] != [1, 2, 3] {
+            return Err("checkerboard was released before all frames were drawn".into());
         }
-        self.audit.push(AuditEvent::LateReplyRejected);
+        self.audit.push(AuditEvent::Release(texture));
         Ok(())
     }
 }
@@ -445,7 +467,6 @@ fn run_demo() -> Result<(WorkerReport, Vec<AuditEvent>), String> {
     let report = worker
         .join()
         .map_err(|_| "VM worker panicked".to_string())??;
-    world.verify_late_reply_is_rejected()?;
 
     if report.cold_result != 1 || report.rendered_frames != 3 || !report.cancelled_wait {
         return Err(format!("unexpected VM report: {report:?}"));
@@ -489,8 +510,12 @@ fn run_demo() -> Result<(WorkerReport, Vec<AuditEvent>), String> {
             name: "stale-probe".into(),
         },
         AuditEvent::Release(2),
+        AuditEvent::Load {
+            texture: 3,
+            name: "cancelled-owner-reply".into(),
+        },
         AuditEvent::PendingLoad("cancelled-owner-reply".into()),
-        AuditEvent::LateReplyRejected,
+        AuditEvent::Release(3),
     ];
     if world.audit != expected {
         return Err(format!("unexpected owner audit: {:?}", world.audit));
@@ -501,7 +526,7 @@ fn run_demo() -> Result<(WorkerReport, Vec<AuditEvent>), String> {
 fn main() {
     match run_demo() {
         Ok((report, audit)) => println!(
-            "owner-thread bridge ok: {} frames, {} owner audit events, cold async stayed idle, owner wait cancelled with late reply rejected, {}",
+            "owner-thread bridge ok: {} frames, {} owner audit events, cold async stayed idle, cancellation released its owner resource, {}",
             report.rendered_frames,
             audit.len(),
             report.stale_error
@@ -524,7 +549,82 @@ mod tests {
         assert_eq!(report.rendered_frames, 3);
         assert!(report.stale_error.contains("stale"));
         assert!(report.cancelled_wait);
-        assert_eq!(audit.len(), 12);
-        assert_eq!(audit.last(), Some(&AuditEvent::LateReplyRejected));
+        assert_eq!(audit.len(), 13);
+        assert_eq!(audit.last(), Some(&AuditEvent::Release(3)));
+    }
+
+    #[test]
+    fn closed_resource_reply_is_removed_without_queuing_release() {
+        let (commands, receiver) = mpsc::channel();
+        let cancellation = Arc::new(CancellationSignal::default());
+        let mut world = FakeWorld::new(cancellation);
+        let (reply, response) = oneshot::channel::<Result<TextureLease, EvalError>>();
+        drop(response);
+
+        world
+            .handle(Command::Load {
+                caller: another_thread_id(),
+                name: "closed-reply".into(),
+                lease_proxy: GraphicsProxy { commands },
+                reply,
+            })
+            .unwrap();
+
+        assert!(world.textures.is_empty());
+        assert_eq!(
+            world.audit,
+            [
+                AuditEvent::Load {
+                    texture: 1,
+                    name: "closed-reply".into(),
+                },
+                AuditEvent::Release(1),
+            ]
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn unread_resource_reply_releases_owner_map_once() {
+        let (commands, receiver) = mpsc::channel();
+        let cancellation = Arc::new(CancellationSignal::default());
+        let mut world = FakeWorld::new(cancellation);
+        let (reply, response) = oneshot::channel::<Result<TextureLease, EvalError>>();
+
+        world
+            .handle(Command::Load {
+                caller: another_thread_id(),
+                name: "unread-reply".into(),
+                lease_proxy: GraphicsProxy { commands },
+                reply,
+            })
+            .unwrap();
+        assert_eq!(world.textures.len(), 1);
+
+        thread::spawn(move || drop(response)).join().unwrap();
+        world.handle(receiver.recv().unwrap()).unwrap();
+
+        assert!(world.textures.is_empty());
+        assert_eq!(
+            world.audit,
+            [
+                AuditEvent::Load {
+                    texture: 1,
+                    name: "unread-reply".into(),
+                },
+                AuditEvent::Release(1),
+            ]
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    fn another_thread_id() -> ThreadId {
+        thread::spawn(|| thread::current().id()).join().unwrap()
     }
 }

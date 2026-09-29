@@ -66,7 +66,8 @@ enum Command {
     Load {
         caller: ThreadId,
         name: String,
-        reply: oneshot::Sender<Result<u64, EvalError>>,
+        lease_proxy: UiProxy,
+        reply: oneshot::Sender<Result<SurfaceLease, EvalError>>,
     },
     Frame {
         caller: ThreadId,
@@ -98,10 +99,29 @@ impl UiProxy {
 struct SurfaceLease {
     id: u64,
     proxy: UiProxy,
+    armed: bool,
+}
+
+impl SurfaceLease {
+    fn new(id: u64, proxy: UiProxy) -> Self {
+        Self {
+            id,
+            proxy,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) -> u64 {
+        self.armed = false;
+        self.id
+    }
 }
 
 impl Drop for SurfaceLease {
     fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
         let _ = self.proxy.commands.send(Command::Release {
             caller: thread::current().id(),
             surface: self.id,
@@ -122,13 +142,10 @@ impl UiHost {
         self.proxy.send(Command::Load {
             caller: thread::current().id(),
             name,
+            lease_proxy: self.proxy.clone(),
             reply,
         })?;
-        let id = response.await.map_err(|_| broken_bridge())??;
-        Ok(SurfaceLease {
-            id,
-            proxy: self.proxy.clone(),
-        })
+        response.await.map_err(|_| broken_bridge())?
     }
 
     /// Advances the owner-thread frame counter.
@@ -207,7 +224,12 @@ impl MiruiOwner {
         }
 
         match command {
-            Command::Load { name, reply, .. } => {
+            Command::Load {
+                name,
+                lease_proxy,
+                reply,
+                ..
+            } => {
                 if name != "root-surface" {
                     reply
                         .send(Err(EvalError::TypeMismatch {
@@ -224,9 +246,10 @@ impl MiruiOwner {
                 let id = self.next_resource;
                 self.next_resource += 1;
                 self.resources.insert(id, entity);
-                reply
-                    .send(Ok(id))
-                    .map_err(|_| "load reply receiver closed".to_string())?;
+                let lease = SurfaceLease::new(id, lease_proxy);
+                if let Err(Ok(lease)) = reply.send(Ok(lease)) {
+                    self.release_surface(lease.disarm())?;
+                }
             }
             Command::Frame { reply, .. } => {
                 self.frame += 1;
@@ -263,11 +286,16 @@ impl MiruiOwner {
                 self.frame_pixels.push(framebuffer_hash(&mut self.app));
             }
             Command::Release { surface, .. } => {
-                self.resources
-                    .remove(&surface)
-                    .ok_or_else(|| format!("surface {surface} released twice"))?;
+                self.release_surface(surface)?;
             }
         }
+        Ok(())
+    }
+
+    fn release_surface(&mut self, surface: u64) -> Result<(), String> {
+        self.resources
+            .remove(&surface)
+            .ok_or_else(|| format!("surface {surface} released twice"))?;
         Ok(())
     }
 }
@@ -356,5 +384,56 @@ mod tests {
         assert_eq!(hashes.len(), 3);
         assert_ne!(hashes[0], hashes[1]);
         assert_ne!(hashes[1], hashes[2]);
+    }
+
+    #[test]
+    fn cancelled_surface_replies_release_owner_map_once() {
+        let mut owner = MiruiOwner::new().unwrap();
+        let caller = another_thread_id();
+
+        let (closed_commands, closed_receiver) = mpsc::channel();
+        let (closed_reply, closed_response) = oneshot::channel::<Result<SurfaceLease, EvalError>>();
+        drop(closed_response);
+        owner
+            .handle(Command::Load {
+                caller,
+                name: "root-surface".into(),
+                lease_proxy: UiProxy {
+                    commands: closed_commands,
+                },
+                reply: closed_reply,
+            })
+            .unwrap();
+        assert!(owner.resources.is_empty());
+        assert!(matches!(
+            closed_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+
+        let (unread_commands, unread_receiver) = mpsc::channel();
+        let (unread_reply, unread_response) = oneshot::channel::<Result<SurfaceLease, EvalError>>();
+        owner
+            .handle(Command::Load {
+                caller,
+                name: "root-surface".into(),
+                lease_proxy: UiProxy {
+                    commands: unread_commands,
+                },
+                reply: unread_reply,
+            })
+            .unwrap();
+        assert_eq!(owner.resources.len(), 1);
+
+        thread::spawn(move || drop(unread_response)).join().unwrap();
+        owner.handle(unread_receiver.recv().unwrap()).unwrap();
+        assert!(owner.resources.is_empty());
+        assert!(matches!(
+            unread_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    fn another_thread_id() -> ThreadId {
+        thread::spawn(|| thread::current().id()).join().unwrap()
     }
 }
