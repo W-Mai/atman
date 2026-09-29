@@ -1,9 +1,9 @@
-use proc_macro2::{TokenStream, TokenTree};
+use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
     Attribute, Expr, FnArg, GenericArgument, Ident, ImplItem, ImplItemFn, Item, ItemFn, ItemImpl,
-    ItemMod, Lit, Meta, Pat, Path, PathArguments, ReturnType, Token, Type, ext::IdentExt,
-    parse::Parser, parse_quote, punctuated::Punctuated,
+    ItemMod, Lit, Meta, MetaList, Pat, Path, PathArguments, ReturnType, Token, Type, ext::IdentExt,
+    parse::Parser, parse_quote, punctuated::Punctuated, visit::Visit,
 };
 
 pub(crate) struct ParsedModule {
@@ -82,6 +82,13 @@ pub(crate) fn parse_module(attr: TokenStream, mut item: ItemMod) -> syn::Result<
         let Item::Fn(function) = item else {
             continue;
         };
+        if attributes_introduce(&function.attrs, "tool")? {
+            return Err(conditional_tool_error(
+                &function.sig.ident,
+                "function",
+                "module",
+            ));
+        }
         let Some(tool_attr_index) = function
             .attrs
             .iter()
@@ -245,6 +252,9 @@ pub(crate) fn parse_impl(attr: TokenStream, mut item: ItemImpl) -> syn::Result<P
         let ImplItem::Fn(method) = impl_item else {
             continue;
         };
+        if attributes_introduce(&method.attrs, "tool")? {
+            return Err(conditional_tool_error(&method.sig.ident, "method", "impl"));
+        }
         let Some(tool_attr_index) = method
             .attrs
             .iter()
@@ -644,16 +654,66 @@ fn reject_conditional_tool(
 ) -> syn::Result<()> {
     if attributes
         .iter()
-        .any(|attribute| attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr"))
+        .any(|attribute| attribute.path().is_ident("cfg"))
+        || attributes_introduce(attributes, "cfg")?
     {
-        return Err(syn::Error::new_spanned(
-            ident,
-            format!(
-                "conditional #[tool] {kind}s are not supported; place the condition on the containing #[tools] {container}"
-            ),
-        ));
+        return Err(conditional_tool_error(ident, kind, container));
     }
     Ok(())
+}
+
+fn conditional_tool_error(ident: &Ident, kind: &str, container: &str) -> syn::Error {
+    syn::Error::new_spanned(
+        ident,
+        format!(
+            "conditional #[tool] {kind}s are not supported; place the condition on the containing #[tools] {container}"
+        ),
+    )
+}
+
+fn attributes_introduce(attributes: &[Attribute], target: &str) -> syn::Result<bool> {
+    for attribute in attributes {
+        if !attribute.path().is_ident("cfg_attr") {
+            continue;
+        }
+        let Meta::List(list) = &attribute.meta else {
+            return Err(syn::Error::new_spanned(
+                attribute,
+                "cfg_attr must contain a predicate and at least one attribute",
+            ));
+        };
+        if cfg_attr_introduces(list, target)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn cfg_attr_introduces(list: &MetaList, target: &str) -> syn::Result<bool> {
+    let arguments = Punctuated::<Meta, Token![,]>::parse_terminated.parse2(list.tokens.clone())?;
+    if arguments.len() < 2 {
+        return Err(syn::Error::new_spanned(
+            list,
+            "cfg_attr must contain a predicate and at least one attribute",
+        ));
+    }
+    for attribute in arguments.iter().skip(1) {
+        if attribute.path().is_ident(target) {
+            return Ok(true);
+        }
+        if attribute.path().is_ident("cfg_attr") {
+            let Meta::List(nested) = attribute else {
+                return Err(syn::Error::new_spanned(
+                    attribute,
+                    "nested cfg_attr must contain a predicate and at least one attribute",
+                ));
+            };
+            if cfg_attr_introduces(nested, target)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn validate_return_type(output: &ReturnType, kind: &str) -> syn::Result<()> {
@@ -664,7 +724,9 @@ fn validate_return_type(output: &ReturnType, kind: &str) -> syn::Result<()> {
 }
 
 fn validate_generated_binding_type(ty: &Type, kind: &str) -> syn::Result<()> {
-    if type_contains_token_ident(ty, "Self") {
+    let mut visitor = GeneratedBindingTypeVisitor::default();
+    visitor.visit_type(ty);
+    if visitor.contains_self {
         return Err(syn::Error::new_spanned(
             ty,
             format!(
@@ -672,7 +734,7 @@ fn validate_generated_binding_type(ty: &Type, kind: &str) -> syn::Result<()> {
             ),
         ));
     }
-    if type_contains_token_ident(ty, "impl") {
+    if visitor.contains_impl_trait {
         return Err(syn::Error::new_spanned(
             ty,
             format!(
@@ -683,16 +745,24 @@ fn validate_generated_binding_type(ty: &Type, kind: &str) -> syn::Result<()> {
     Ok(())
 }
 
-fn type_contains_token_ident(ty: &Type, needle: &str) -> bool {
-    fn stream_contains_ident(tokens: TokenStream, needle: &str) -> bool {
-        tokens.into_iter().any(|token| match token {
-            TokenTree::Ident(ident) => ident == needle,
-            TokenTree::Group(group) => stream_contains_ident(group.stream(), needle),
-            TokenTree::Punct(_) | TokenTree::Literal(_) => false,
-        })
+#[derive(Default)]
+struct GeneratedBindingTypeVisitor {
+    contains_self: bool,
+    contains_impl_trait: bool,
+}
+
+impl<'ast> Visit<'ast> for GeneratedBindingTypeVisitor {
+    fn visit_path(&mut self, path: &'ast Path) {
+        if path.segments.iter().any(|segment| segment.ident == "Self") {
+            self.contains_self = true;
+        }
+        syn::visit::visit_path(self, path);
     }
 
-    stream_contains_ident(quote!(#ty), needle)
+    fn visit_type_impl_trait(&mut self, ty: &'ast syn::TypeImplTrait) {
+        self.contains_impl_trait = true;
+        syn::visit::visit_type_impl_trait(self, ty);
+    }
 }
 
 fn rust_name(ident: &Ident) -> String {
@@ -731,15 +801,42 @@ mod tests {
         };
         assert!(error.to_string().contains("conditional #[tool] functions"));
 
-        let item: ItemImpl = parse_quote! {
+        let unrelated_cfg_attr: ItemImpl = parse_quote! {
             impl Host {
                 #[cfg_attr(feature = "demo", allow(dead_code))]
                 #[tool]
                 fn ping(&self) {}
             }
         };
-        let error = match parse_impl(quote!(namespace = "demo"), item) {
+        assert_eq!(
+            parse_impl(quote!(namespace = "demo"), unrelated_cfg_attr)
+                .unwrap()
+                .tools
+                .len(),
+            1
+        );
+
+        let conditional_attr: ItemImpl = parse_quote! {
+            impl Host {
+                #[cfg_attr(feature = "demo", tool)]
+                fn ping(&self) {}
+            }
+        };
+        let error = match parse_impl(quote!(namespace = "demo"), conditional_attr) {
             Ok(_) => panic!("conditional impl tool must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("conditional #[tool] methods"));
+
+        let conditional_cfg: ItemImpl = parse_quote! {
+            impl Host {
+                #[cfg_attr(feature = "demo", cfg(target_os = "none"))]
+                #[tool]
+                fn ping(&self) {}
+            }
+        };
+        let error = match parse_impl(quote!(namespace = "demo"), conditional_cfg) {
+            Ok(_) => panic!("conditionally removed impl tool must be rejected"),
             Err(error) => error,
         };
         assert!(error.to_string().contains("conditional #[tool] methods"));
@@ -788,5 +885,8 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("cannot contain `impl Trait`"));
+
+        let macro_type: Type = parse_quote!(concrete_type!(Self, impl));
+        assert!(validate_generated_binding_type(&macro_type, "tool parameter").is_ok());
     }
 }
