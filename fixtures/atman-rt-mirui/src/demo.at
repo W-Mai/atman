@@ -1,12 +1,116 @@
-flow render_frames() -> int {
-    surface = ui.load("root-surface").await
-    count = 0
-    loop {
-        frame = ui.frame().await
-        ui.draw(surface, frame)
-        count = count + 1
-        when count == 3 { break }
+flow configure_dashboard(surface: any) -> int {
+    ui.configure(
+        surface: surface,
+        title: "ATMAN SCRIPTED RUNTIME",
+        subtitle: "AT SOURCE / GENERATED BINDINGS / OWNER-THREAD RENDER",
+    )
+    ui.status(surface: surface, text: "RUN / READY", tone: "active")
+    ui.metric(surface: surface, slot: 1, label: "SCRIPT FRAME", value: "00 / 03")
+    ui.metric(surface: surface, slot: 2, label: "CONTROL FLOW", value: "LIST + LOOP")
+    ui.metric(surface: surface, slot: 3, label: "RESOURCE LEASE", value: "ACQUIRED")
+    ui.boundary(
+        surface: surface,
+        state: "COMMANDS QUEUED",
+        note: "The script owns sequencing and content. Rust retains thread-affine UI state.",
+    )
+    return 0
+}
+
+flow apply_stage(
+    surface: any,
+    index: int,
+    stages: [{
+        position: int,
+        label: string,
+        frame_value: string,
+        lease_value: string,
+        detail: string,
+        boundary_state: string,
+        boundary_note: string,
+        accent: string,
+        progress: float,
+    }],
+) -> int {
+    stage = stages[index]
+    ui.status(surface: surface, text: "RUN / " + stage.label, tone: "active")
+    ui.metric(surface: surface, slot: 1, label: "SCRIPT FRAME", value: stage.frame_value)
+    ui.metric(surface: surface, slot: 3, label: "RESOURCE LEASE", value: stage.lease_value)
+    ui.stage(
+        surface: surface,
+        index: stage.position,
+        label: stage.label,
+        detail: stage.detail,
+        accent: stage.accent,
+        progress: stage.progress,
+    )
+    ui.boundary(
+        surface: surface,
+        state: stage.boundary_state,
+        note: stage.boundary_note,
+    )
+    when index == 1 {
+        ui.metric(surface: surface, slot: 2, label: "CONTROL FLOW", value: "WHEN BRANCH")
     }
-    ui.release(surface)
-    return count
+    yield
+    return ui.present().await
+}
+
+flow render_frames() -> int {
+    surface = ui.load(name: "runtime-canvas").await
+    configure_dashboard(surface: surface).await
+
+    stages = [
+        {
+            position: 1,
+            label: "ACQUIRE",
+            frame_value: "01 / 03",
+            lease_value: "ACQUIRED",
+            detail: "The VM received an opaque resource lease from the mirui owner thread.",
+            boundary_state: "LEASE RESOLVED",
+            boundary_note: "Only a typed handle crosses into the worker; mirui entities stay with their owner.",
+            accent: "sage",
+            progress: 0.33,
+        },
+        {
+            position: 2,
+            label: "MUTATE",
+            frame_value: "02 / 03",
+            lease_value: "HELD BY VM",
+            detail: "The script selected this record by index and changed retained UI state.",
+            boundary_state: "STATE MUTATED",
+            boundary_note: "Ordered channel commands preserve each mutation before the render barrier.",
+            accent: "steel",
+            progress: 0.67,
+        },
+        {
+            position: 3,
+            label: "PRESENT",
+            frame_value: "03 / 03",
+            lease_value: "RELEASING",
+            detail: "The awaited present committed the script-defined scene to the SDL surface.",
+            boundary_state: "FRAME PRESENTED",
+            boundary_note: "The async barrier provides frame pacing without moving UI state into the VM.",
+            accent: "mauve",
+            progress: 1.0,
+        },
+    ]
+
+    index = 0
+    last_frame = 0
+    loop {
+        last_frame = apply_stage(surface: surface, index: index, stages: stages).await
+        index = index + 1
+        when index == list.len(items: stages) { break }
+    }
+
+    ui.status(surface: surface, text: "RUN / COMPLETE", tone: "success")
+    ui.metric(surface: surface, slot: 3, label: "RESOURCE LEASE", value: "RELEASED")
+    ui.boundary(
+        surface: surface,
+        state: "OWNER MAP CLEAN",
+        note: "The script released its lease; retained UI resources remain owner-thread bound.",
+    )
+    yield
+    ui.release(resource: surface)
+    return last_frame
 }

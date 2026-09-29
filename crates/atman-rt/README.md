@@ -146,11 +146,12 @@ cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked -- --demo 
 
 The second command prints `result: 18`.
 
-The [portable owner-thread fixture](https://github.com/W-Mai/atman/tree/main/fixtures/atman-rt-host-demo) verifies stateful bindings, cold async tools, three ordered frames, explicit release, stale-handle rejection, cleanup when async resource creation is cancelled before publication, and owner-thread destruction using a fake graphics host. The [mirui headless fixture](https://github.com/W-Mai/atman/tree/main/fixtures/atman-rt-mirui) keeps `mirui::App::headless`, its ECS entities, and its software framebuffer on the main thread while the VM runs on a worker. `atman-rt` is the only Atman crate dependency in both fixtures; the second fixture also depends on `mirui = 0.46.3` with default features disabled and `std` enabled:
+The [portable owner-thread fixture](https://github.com/W-Mai/atman/tree/main/fixtures/atman-rt-host-demo) verifies stateful bindings, cold async tools, three ordered frames, explicit release, stale-handle rejection, cleanup when async resource creation is cancelled before publication, and owner-thread destruction using a fake graphics host. The [mirui SDL fixture](https://github.com/W-Mai/atman/tree/main/fixtures/atman-rt-mirui) keeps mirui entities and SDL rendering on the main thread while a worker VM uses generated bindings to apply structured `.at` records to a retained dashboard. The script controls child flows, indexed lists, loop termination, a conditional branch, `yield`, immediate UI mutations, deferred frame presentation, and resource release. `atman-rt` is the only Atman crate dependency in both fixtures; the mirui fixture uses its headless framebuffer when default features are disabled:
 
 ```sh
 env CARGO_TARGET_DIR=target cargo run --manifest-path fixtures/atman-rt-host-demo/Cargo.toml --locked
 env CARGO_TARGET_DIR=target cargo run --manifest-path fixtures/atman-rt-mirui/Cargo.toml --locked
+env CARGO_TARGET_DIR=target cargo test --manifest-path fixtures/atman-rt-mirui/Cargo.toml --no-default-features --locked
 ```
 
 `atman_rt::parse_file` parses `.at` source and `atman_rt::print_file` prints an AST. `Engine`, `StatementHost`, and `ExpressionHost` remain available for lower-level integration; `Vm` handles source linking and flow calls for the normal embedding path.

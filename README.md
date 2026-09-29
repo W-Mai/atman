@@ -434,7 +434,7 @@ atman/
   examples/          # canonical .at flow examples
   fixtures/atman-rt-embed/      # standalone runtime embedding check
   fixtures/atman-rt-host-demo/  # portable owner-thread host binding check
-  fixtures/atman-rt-mirui/      # mirui headless owner-thread binding check
+  fixtures/atman-rt-mirui/      # scripted mirui SDL demo + headless binding check
   docs/              # Quickstart, context strategy, list combinators
 ```
 
@@ -459,11 +459,12 @@ Product bindings require `tier` on every `#[tool]`. Tiers 1–4 also require a `
 
 `cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked` checks portable flow behavior with only `atman-rt` as an Atman dependency. `cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked -- --demo 6` compiles `.at` source, imports a public flow, invokes a host effect, and prints `result: 18`. Omit `6` to enter an integer interactively. The CI workflow runs the fixture on Linux, macOS, and Windows, runs it on Wasm/WASI, and checks the `no_std` core on `wasm32-unknown-unknown`.
 
-The portable fake graphics fixture and the mirui headless fixture use `atman-rt` as their only Atman crate dependency. They run the VM on a worker while all UI state, rendering, and destruction remain on the owner thread:
+The portable fake graphics fixture and the mirui SDL fixture use `atman-rt` as their only Atman crate dependency. Both run the VM on a worker while UI state, rendering, and destruction remain on the owner thread. The mirui demo lets structured `.at` data control the visible title, metrics, stage content, palette phase, loop, conditional branch, `yield`, deferred present barrier, and resource release; `--no-default-features` runs its display-independent framebuffer checks.
 
 ```sh
 env CARGO_TARGET_DIR=target cargo run --manifest-path fixtures/atman-rt-host-demo/Cargo.toml --locked
 env CARGO_TARGET_DIR=target cargo run --manifest-path fixtures/atman-rt-mirui/Cargo.toml --locked
+env CARGO_TARGET_DIR=target cargo test --manifest-path fixtures/atman-rt-mirui/Cargo.toml --no-default-features --locked
 ```
 
 The default `syntax` feature enables source compilation. With `default-features = false`, the VM executes a program built from Atman AST without the parser dependency. Both modes require an allocator, pointer-width atomics for `Arc`-backed environments and lambda captures, and a host that polls returned futures. `riscv32imc-unknown-none-elf` lacks pointer-width atomics and is not currently supported.
