@@ -10,8 +10,11 @@ use core::{fmt, marker::PhantomData};
 
 use crate::{
     HostPayload, Value,
-    catalog::TypeSpec,
-    resource::{ResourceError, ResourceRegistry},
+    catalog::{ResourceSpec, TypeSpec},
+    resource::{
+        ErasedHandle, ResourceError, ResourcePayload, ResourceReadGuard, ResourceRegistry,
+        ResourceType,
+    },
     tool_router::{ToolRegisterError, ToolRouter},
 };
 
@@ -333,6 +336,37 @@ pub trait Output<P, E>: Sized {
 /// Marks values that can be represented distinctly from `Option::None`.
 #[doc(hidden)]
 pub trait PresentValue {}
+
+pub fn decode_resource_handle<P, E>(
+    value: Option<Value<P, E>>,
+    _context: &Context<P, E>,
+) -> Result<ErasedHandle, BindingError>
+where
+    P: ResourcePayload,
+{
+    let expected = || TypeSpec::Resource(ResourceSpec { name: None });
+    match value {
+        Some(Value::Host(payload)) => payload
+            .as_resource()
+            .copied()
+            .ok_or_else(|| BindingError::type_mismatch(expected(), payload.kind_name())),
+        Some(other) => Err(BindingError::type_mismatch(expected(), other.kind_name())),
+        None => Err(BindingError::missing_value()),
+    }
+}
+
+pub fn borrow_resource<T, P, E>(
+    value: Option<Value<P, E>>,
+    context: &Context<P, E>,
+) -> Result<ResourceReadGuard<T>, BindingError>
+where
+    T: ResourceType + Send + Sync,
+    P: ResourcePayload,
+{
+    let handle = decode_resource_handle(value, context)?;
+    let typed = handle.typed::<T>()?;
+    context.resources()?.try_borrow(typed).map_err(Into::into)
+}
 
 macro_rules! direct_binding {
     ($type:ty, $variant:ident, $spec:expr, $kind:literal) => {

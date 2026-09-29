@@ -1,8 +1,10 @@
 use proc_macro2::TokenStream;
-use quote::quote;
-use syn::{Ident, Item, Path, parse_quote};
+use quote::{format_ident, quote};
+use syn::{ImplItem, Item, ItemImpl, ItemMod, Path, parse_quote};
 
-use crate::common::{Mode, ParsedModule, ToolFn, ValueType, parse_module};
+use crate::rt_parse::{
+    ImplParamKind, ImplTool, ModuleTool, ParsedImpl, ParsedModule, parse_impl, parse_module,
+};
 
 pub(crate) fn expand(
     attr: proc_macro::TokenStream,
@@ -15,12 +17,23 @@ pub(crate) fn expand(
 }
 
 fn expand_inner(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
+    match syn::parse2::<Item>(item.clone())? {
+        Item::Mod(item_mod) => expand_module(attr, item_mod),
+        Item::Impl(item_impl) => expand_stateful_impl(attr, item_impl),
+        other => Err(syn::Error::new_spanned(
+            other,
+            "tools requires an inline module or a concrete inherent impl",
+        )),
+    }
+}
+
+fn expand_module(attr: TokenStream, item: ItemMod) -> syn::Result<TokenStream> {
     let ParsedModule {
         mut item,
         tools,
-        crate_path,
-    } = parse_module(attr, item, Mode::Rt)?;
-    let registrations = tools.iter().map(|tool| register_tool(tool, &crate_path));
+        root,
+    } = parse_module(attr, item)?;
+    let registrations = tools.iter().map(|tool| register_tool(tool, &root));
     let error_bounds = tools.iter().filter_map(|tool| {
         tool.result
             .error
@@ -28,13 +41,13 @@ fn expand_inner(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream
             .map(|error| quote!(E: ::core::convert::From<#error>,))
     });
     let router: Item = parse_quote! {
-        pub fn router<P, E>() -> ::core::result::Result<#crate_path::ToolRouter<P, E>, #crate_path::ToolRegisterError>
+        pub fn router<P, E>() -> ::core::result::Result<#root::ToolRouter<P, E>, #root::ToolRegisterError>
         where
-            P: #crate_path::HostPayload + ::core::marker::Send + ::core::marker::Sync + 'static,
-            E: #crate_path::ValueError + ::core::marker::Send + ::core::marker::Sync + 'static,
+            P: #root::HostPayload + ::core::marker::Send + ::core::marker::Sync + 'static,
+            E: #root::ValueError + ::core::marker::Send + ::core::marker::Sync + 'static,
             #(#error_bounds)*
         {
-            let mut __atman_router = #crate_path::ToolRouter::<P, E>::new();
+            let mut __atman_router = #root::ToolRouter::<P, E>::new();
             #(#registrations)*
             ::core::result::Result::Ok(__atman_router)
         }
@@ -47,168 +60,436 @@ fn expand_inner(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream
     Ok(quote!(#item))
 }
 
-fn register_tool(tool: &ToolFn, root: &Path) -> TokenStream {
-    let name = &tool.name;
-    let function = &tool.ident;
-    let mut bindings = Vec::new();
-    let mut arguments: Vec<&Ident> = Vec::new();
-    for (index, param) in tool.params.iter().enumerate() {
-        let ident = &param.ident;
-        let argument_name = ident.to_string().trim_start_matches("r#").to_owned();
-        let raw =
-            quote!(__atman_args.named(#argument_name).or_else(|| __atman_args.positional(#index)));
-        let binding = if matches!(param.ty, ValueType::Option(_)) {
-            let value = decode(&param.ty, quote!(__atman_value), root);
-            quote! {
-                let #ident = match #raw {
-                    ::core::option::Option::Some(__atman_value) => (#value)?,
-                    ::core::option::Option::None => ::core::option::Option::None,
-                };
+fn expand_stateful_impl(attr: TokenStream, item: ItemImpl) -> syn::Result<TokenStream> {
+    let ParsedImpl {
+        mut item,
+        tools,
+        root,
+        namespace,
+        self_ty,
+        factory_ident,
+    } = parse_impl(attr, item)?;
+
+    let into_binding: ImplItem = parse_quote! {
+        #[doc(hidden)]
+        pub fn into_atman_binding(self) -> #factory_ident {
+            #factory_ident { __atman_host: self }
+        }
+    };
+    item.items.push(into_binding);
+
+    let input_bounds = tools.iter().flat_map(|tool| {
+        tool.params.iter().map(|param| match &param.kind {
+            ImplParamKind::Owned(ty) => {
+                quote!(#ty: #root::binding::Input<__AtmanBindingP, __AtmanBindingE>,)
             }
-        } else {
-            let value = decode(&param.ty, quote!(__atman_value), root);
-            quote! {
-                let __atman_value = __atman_args.get(#argument_name, #index)?;
-                let #ident = (#value)?;
+            ImplParamKind::SharedResource(ty) => quote!(
+                #ty: #root::resource::ResourceType
+                    + ::core::marker::Send
+                    + ::core::marker::Sync
+                    + 'static,
+            ),
+        })
+    });
+    let output_bounds = tools.iter().map(|tool| {
+        let ty = &tool.result.value;
+        quote!(#ty: #root::binding::Output<__AtmanBindingP, __AtmanBindingE>,)
+    });
+    let error_bounds = tools.iter().filter_map(|tool| {
+        tool.result
+            .error
+            .as_ref()
+            .map(|error| quote!(__AtmanBindingE: ::core::convert::From<#error>,))
+    });
+    let registrations = tools
+        .iter()
+        .map(|tool| register_stateful_tool(tool, &namespace, &root));
+    let release = register_release_tool(&namespace, &root);
+
+    Ok(quote! {
+        #item
+
+        #[doc(hidden)]
+        pub struct #factory_ident {
+            __atman_host: #self_ty,
+        }
+
+        impl<__AtmanBindingP, __AtmanBindingE>
+            #root::binding::Factory<__AtmanBindingP, __AtmanBindingE> for #factory_ident
+        where
+            #self_ty: ::core::marker::Send + ::core::marker::Sync + 'static,
+            __AtmanBindingP: #root::resource::ResourcePayload
+                + ::core::clone::Clone
+                + ::core::marker::Send
+                + ::core::marker::Sync
+                + 'static,
+            __AtmanBindingE: #root::ValueError
+                + ::core::clone::Clone
+                + ::core::marker::Send
+                + ::core::marker::Sync
+                + 'static,
+            #(#input_bounds)*
+            #(#output_bounds)*
+            #(#error_bounds)*
+        {
+            fn build(
+                self,
+            ) -> ::core::result::Result<
+                #root::ToolRouter<__AtmanBindingP, __AtmanBindingE>,
+                #root::ToolRegisterError,
+            > {
+                let mut __atman_router =
+                    #root::ToolRouter::<__AtmanBindingP, __AtmanBindingE>::new();
+                let __atman_host = #root::__private::Arc::new(self.__atman_host);
+                let __atman_resources = #root::__private::Arc::new(
+                    #root::resource::ResourceRegistry::new()?,
+                );
+                let __atman_context = #root::__private::Arc::new(
+                    #root::binding::Context::with_resources(__atman_resources),
+                );
+
+                #(#registrations)*
+                #release
+
+                ::core::result::Result::Ok(__atman_router)
             }
-        };
-        bindings.push(binding);
-        arguments.push(ident);
-    }
-    let call = if tool.is_async {
-        quote!(#function(#(#arguments),*).await)
+        }
+    })
+}
+
+fn register_stateful_tool(tool: &ImplTool, namespace: &str, root: &Path) -> TokenStream {
+    let method = &tool.ident;
+    let full_name = format!("{namespace}.{}", tool.leaf_name);
+    let description = &tool.docs;
+    let result_ty = &tool.result.value;
+    let mode = if tool.is_async {
+        quote!(#root::ToolCallMode::Deferred)
     } else {
-        quote!(#function(#(#arguments),*))
+        quote!(#root::ToolCallMode::Immediate)
+    };
+    let register = if tool.is_async {
+        quote!(register_with_spec)
+    } else {
+        quote!(register_sync_with_spec)
+    };
+
+    let param_specs = tool.params.iter().enumerate().map(|(position, param)| {
+        let name = &param.name;
+        match &param.kind {
+            ImplParamKind::Owned(ty) => quote! {
+                __atman_params.push(#root::catalog::ToolParamSpec {
+                    name: #root::__private::String::from(#name),
+                    position: #position,
+                    required: <#ty as #root::binding::Input<
+                        __AtmanBindingP,
+                        __AtmanBindingE,
+                    >>::REQUIRED,
+                    ty: <#ty as #root::binding::Input<
+                        __AtmanBindingP,
+                        __AtmanBindingE,
+                    >>::input_type(),
+                });
+            },
+            ImplParamKind::SharedResource(ty) => quote! {
+                __atman_params.push(#root::catalog::ToolParamSpec {
+                    name: #root::__private::String::from(#name),
+                    position: #position,
+                    required: true,
+                    ty: #root::catalog::TypeSpec::Resource(#root::catalog::ResourceSpec {
+                        name: ::core::option::Option::Some(#root::__private::String::from(
+                            <#ty as #root::resource::ResourceType>::TYPE_NAME,
+                        )),
+                    }),
+                });
+            },
+        }
+    });
+
+    let slots = tool
+        .params
+        .iter()
+        .enumerate()
+        .map(|(position, _)| format_ident!("__atman_argument_{position}"))
+        .collect::<Vec<_>>();
+    let bindings = tool
+        .params
+        .iter()
+        .enumerate()
+        .zip(&slots)
+        .map(|((position, param), slot)| {
+            let name = &param.name;
+            match &param.kind {
+                ImplParamKind::Owned(ty) => quote! {
+                    let #slot = <#ty as #root::binding::Input<
+                        __AtmanBindingP,
+                        __AtmanBindingE,
+                    >>::decode_input(
+                        __atman_args.take(#name, #position),
+                        __atman_call_context.as_ref(),
+                    )
+                    .map_err(|__atman_error| {
+                        <__AtmanBindingE as #root::ValueError>::binding_error(
+                            __atman_error.at_argument(#name),
+                        )
+                    })?;
+                },
+                ImplParamKind::SharedResource(ty) => quote! {
+                    let #slot = #root::binding::borrow_resource::<
+                        #ty,
+                        __AtmanBindingP,
+                        __AtmanBindingE,
+                    >(
+                        __atman_args.take(#name, #position),
+                        __atman_call_context.as_ref(),
+                    )
+                    .map_err(|__atman_error| {
+                        <__AtmanBindingE as #root::ValueError>::binding_error(
+                            __atman_error.at_argument(#name),
+                        )
+                    })?;
+                },
+            }
+        });
+    let call_args = tool.params.iter().zip(&slots).map(|(param, slot)| {
+        if matches!(param.kind, ImplParamKind::SharedResource(_)) {
+            quote!(&*#slot)
+        } else {
+            quote!(#slot)
+        }
+    });
+    let call = if tool.is_async {
+        quote!(__atman_call_host.#method(#(#call_args),*).await)
+    } else {
+        quote!(__atman_call_host.#method(#(#call_args),*))
+    };
+    let call = if tool.result.error.is_some() {
+        quote!((#call).map_err(::core::convert::Into::<__AtmanBindingE>::into)?)
+    } else {
+        call
+    };
+    let handler_body = quote! {
+        #(#bindings)*
+        let __atman_result = #call;
+        <#result_ty as #root::binding::Output<
+            __AtmanBindingP,
+            __AtmanBindingE,
+        >>::encode_output(__atman_result, __atman_call_context.as_ref())
+        .map_err(|__atman_error| {
+            <__AtmanBindingE as #root::ValueError>::binding_error(
+                __atman_error.at_argument("return"),
+            )
+        })
+    };
+    let handler = if tool.is_async {
+        quote! {
+            move |mut __atman_args: #root::ToolArgs<
+                __AtmanBindingP,
+                __AtmanBindingE,
+            >| {
+                let __atman_call_host =
+                    #root::__private::Arc::clone(&__atman_tool_host);
+                let __atman_call_context =
+                    #root::__private::Arc::clone(&__atman_tool_context);
+                async move { #handler_body }
+            }
+        }
+    } else {
+        quote! {
+            move |mut __atman_args: #root::ToolArgs<
+                __AtmanBindingP,
+                __AtmanBindingE,
+            >| {
+                let __atman_call_host = &__atman_tool_host;
+                let __atman_call_context = &__atman_tool_context;
+                #handler_body
+            }
+        }
+    };
+
+    quote! {
+        {
+            let mut __atman_params: #root::__private::Vec<#root::catalog::ToolParamSpec> =
+                #root::__private::Vec::new();
+            #(#param_specs)*
+            let __atman_spec = #root::catalog::ToolSpec {
+                name: #root::__private::String::from(#full_name),
+                namespace: #root::__private::String::from(#namespace),
+                description: #root::__private::String::from(#description),
+                mode: #mode,
+                params: __atman_params,
+                result: <#result_ty as #root::binding::Output<
+                    __AtmanBindingP,
+                    __AtmanBindingE,
+                >>::output_type(),
+            };
+            let __atman_tool_host = #root::__private::Arc::clone(&__atman_host);
+            let __atman_tool_context = #root::__private::Arc::clone(&__atman_context);
+            __atman_router.#register(__atman_spec, #handler)?;
+        }
+    }
+}
+
+fn register_release_tool(namespace: &str, root: &Path) -> TokenStream {
+    let full_name = format!("{namespace}.release");
+    quote! {
+        {
+            let mut __atman_params: #root::__private::Vec<#root::catalog::ToolParamSpec> =
+                #root::__private::Vec::new();
+            __atman_params.push(#root::catalog::ToolParamSpec {
+                name: #root::__private::String::from("resource"),
+                position: 0,
+                required: true,
+                ty: #root::catalog::TypeSpec::Resource(#root::catalog::ResourceSpec {
+                    name: ::core::option::Option::None,
+                }),
+            });
+            let __atman_spec = #root::catalog::ToolSpec {
+                name: #root::__private::String::from(#full_name),
+                namespace: #root::__private::String::from(#namespace),
+                description: #root::__private::String::from("Release a host resource."),
+                mode: #root::ToolCallMode::Immediate,
+                params: __atman_params,
+                result: #root::catalog::TypeSpec::Unit,
+            };
+            let __atman_release_context =
+                #root::__private::Arc::clone(&__atman_context);
+            __atman_router.register_sync_with_spec(
+                __atman_spec,
+                move |mut __atman_args: #root::ToolArgs<
+                    __AtmanBindingP,
+                    __AtmanBindingE,
+                >| {
+                    let __atman_handle = #root::binding::decode_resource_handle(
+                        __atman_args.take("resource", 0),
+                        __atman_release_context.as_ref(),
+                    )
+                    .map_err(|__atman_error| {
+                        <__AtmanBindingE as #root::ValueError>::binding_error(
+                            __atman_error.at_argument("resource"),
+                        )
+                    })?;
+                    __atman_release_context
+                        .resources()
+                        .and_then(|__atman_resources| {
+                            __atman_resources
+                                .release(__atman_handle)
+                                .map_err(::core::convert::Into::into)
+                        })
+                        .map_err(|__atman_error: #root::binding::BindingError| {
+                            <__AtmanBindingE as #root::ValueError>::binding_error(
+                                __atman_error.at_argument("resource"),
+                            )
+                        })?;
+                    ::core::result::Result::Ok(#root::Value::Unit)
+                },
+            )?;
+        }
+    }
+}
+
+fn register_tool(tool: &ModuleTool, root: &Path) -> TokenStream {
+    let name = &tool.name;
+    let namespace = name.rsplit_once('.').map_or("", |(namespace, _)| namespace);
+    let description = &tool.docs;
+    let function = &tool.ident;
+    let result_ty = &tool.result.value;
+    let mode = if tool.is_async {
+        quote!(#root::ToolCallMode::Deferred)
+    } else {
+        quote!(#root::ToolCallMode::Immediate)
+    };
+    let register = if tool.is_async {
+        quote!(register_with_spec)
+    } else {
+        quote!(register_sync_with_spec)
+    };
+    let param_specs = tool.params.iter().enumerate().map(|(position, param)| {
+        let parameter_name = param.ident.to_string();
+        let parameter_name = parameter_name.trim_start_matches("r#");
+        let ty = &param.ty;
+        quote! {
+            __atman_params.push(#root::catalog::ToolParamSpec {
+                name: #root::__private::String::from(#parameter_name),
+                position: #position,
+                required: <#ty as #root::binding::Input<P, E>>::REQUIRED,
+                ty: <#ty as #root::binding::Input<P, E>>::input_type(),
+            });
+        }
+    });
+    let slots = tool
+        .params
+        .iter()
+        .enumerate()
+        .map(|(position, _)| format_ident!("__atman_argument_{position}"))
+        .collect::<Vec<_>>();
+    let bindings = tool
+        .params
+        .iter()
+        .enumerate()
+        .zip(&slots)
+        .map(|((position, param), slot)| {
+            let parameter_name = param.ident.to_string();
+            let parameter_name = parameter_name.trim_start_matches("r#");
+            let ty = &param.ty;
+            quote! {
+                let #slot = <#ty as #root::binding::Input<P, E>>::decode_input(
+                    __atman_args.take(#parameter_name, #position),
+                    &__atman_context,
+                )
+                .map_err(|__atman_error| {
+                    <E as #root::ValueError>::binding_error(
+                        __atman_error.at_argument(#parameter_name),
+                    )
+                })?;
+            }
+        });
+    let call = if tool.is_async {
+        quote!(#function(#(#slots),*).await)
+    } else {
+        quote!(#function(#(#slots),*))
     };
     let call = if tool.result.error.is_some() {
         quote!((#call).map_err(::core::convert::Into::<E>::into)?)
     } else {
         call
     };
-    let encoded = encode(&tool.result.value, quote!(__atman_result), root);
-    let register = if tool.is_async {
-        quote!(register)
-    } else {
-        quote!(register_sync)
-    };
     let body = quote! {
+        let __atman_context = #root::binding::Context::<P, E>::value_only();
         #(#bindings)*
         let __atman_result = #call;
-        ::core::result::Result::Ok(#encoded)
+        <#result_ty as #root::binding::Output<P, E>>::encode_output(
+            __atman_result,
+            &__atman_context,
+        )
+        .map_err(|__atman_error| {
+            <E as #root::ValueError>::binding_error(
+                __atman_error.at_argument("return"),
+            )
+        })
     };
     let handler = if tool.is_async {
-        quote!(async move { #body })
+        quote! {
+            |mut __atman_args: #root::ToolArgs<P, E>| async move { #body }
+        }
     } else {
-        quote!({ #body })
+        quote! {
+            |mut __atman_args: #root::ToolArgs<P, E>| { #body }
+        }
     };
     quote! {
-        __atman_router.#register(#name, |__atman_args: #root::ToolArgs<P, E>| #handler)?;
-    }
-}
-
-fn decode(ty: &ValueType, value: TokenStream, root: &Path) -> TokenStream {
-    let mismatch = |expected: &str| {
-        quote! {
-            ::core::result::Result::Err(<E as #root::ValueError>::type_mismatch(
-                #expected,
-                __atman_other.kind_name().into(),
-            ))
+        {
+            let mut __atman_params: #root::__private::Vec<#root::catalog::ToolParamSpec> =
+                #root::__private::Vec::new();
+            #(#param_specs)*
+            let __atman_spec = #root::catalog::ToolSpec {
+                name: #root::__private::String::from(#name),
+                namespace: #root::__private::String::from(#namespace),
+                description: #root::__private::String::from(#description),
+                mode: #mode,
+                params: __atman_params,
+                result: <#result_ty as #root::binding::Output<P, E>>::output_type(),
+            };
+            __atman_router.#register(__atman_spec, #handler)?;
         }
-    };
-    match ty {
-        ValueType::Unit => {
-            let error = mismatch("unit");
-            quote! {
-                match #value {
-                    #root::Value::Unit => ::core::result::Result::Ok(()),
-                    __atman_other => #error,
-                }
-            }
-        }
-        ValueType::Int => {
-            let error = mismatch("int");
-            quote! {
-                match #value {
-                    #root::Value::Int(__atman_number) => ::core::result::Result::Ok(*__atman_number),
-                    __atman_other => #error,
-                }
-            }
-        }
-        ValueType::Float => {
-            let error = mismatch("float");
-            quote! {
-                match #value {
-                    #root::Value::Float(__atman_number) => ::core::result::Result::Ok(*__atman_number),
-                    __atman_other => #error,
-                }
-            }
-        }
-        ValueType::Bool => {
-            let error = mismatch("bool");
-            quote! {
-                match #value {
-                    #root::Value::Bool(__atman_boolean) => ::core::result::Result::Ok(*__atman_boolean),
-                    __atman_other => #error,
-                }
-            }
-        }
-        ValueType::String => {
-            let error = mismatch("string");
-            quote! {
-                match #value {
-                    #root::Value::Str(__atman_text) => ::core::result::Result::Ok(__atman_text.clone()),
-                    __atman_other => #error,
-                }
-            }
-        }
-        ValueType::Option(inner) => {
-            let inner = decode(inner, quote!(__atman_present), root);
-            quote! {
-                match #value {
-                    #root::Value::Unit => ::core::result::Result::Ok(::core::option::Option::None),
-                    __atman_present => ::core::result::Result::Ok(::core::option::Option::Some((#inner)?)),
-                }
-            }
-        }
-        ValueType::Vec(inner) => {
-            let inner = decode(inner, quote!(__atman_item), root);
-            let error = mismatch("list");
-            quote! {
-                match #value {
-                    #root::Value::List(__atman_items) => __atman_items
-                        .iter()
-                        .map(|__atman_item| #inner)
-                        .collect::<::core::result::Result<_, E>>(),
-                    __atman_other => #error,
-                }
-            }
-        }
-        ValueType::ToolCtx => unreachable!("ToolCtx is forbidden in RT mode"),
-    }
-}
-
-fn encode(ty: &ValueType, value: TokenStream, root: &Path) -> TokenStream {
-    match ty {
-        ValueType::Unit => quote!({ let _ = #value; #root::Value::Unit }),
-        ValueType::Int => quote!(#root::Value::Int(#value)),
-        ValueType::Float => quote!(#root::Value::Float(#value)),
-        ValueType::Bool => quote!(#root::Value::Bool(#value)),
-        ValueType::String => quote!(#root::Value::Str(#value)),
-        ValueType::Option(inner) => {
-            let inner = encode(inner, quote!(__atman_present), root);
-            quote! {
-                match #value {
-                    ::core::option::Option::Some(__atman_present) => #inner,
-                    ::core::option::Option::None => #root::Value::Unit,
-                }
-            }
-        }
-        ValueType::Vec(inner) => {
-            let inner = encode(inner, quote!(__atman_item), root);
-            quote! {
-                #root::Value::List(#value.into_iter().map(|__atman_item| #inner).collect())
-            }
-        }
-        ValueType::ToolCtx => unreachable!("ToolCtx is forbidden as a return type"),
     }
 }

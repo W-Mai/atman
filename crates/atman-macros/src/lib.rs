@@ -3,6 +3,7 @@
 mod common;
 mod resource;
 mod rt;
+mod rt_parse;
 mod runtime;
 mod value;
 

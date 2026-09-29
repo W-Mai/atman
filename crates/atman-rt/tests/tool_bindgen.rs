@@ -10,8 +10,15 @@ use atman_rt::{
     VmDelegates,
 };
 
+#[atman_rt::value]
+struct Offset {
+    x: i32,
+    y: i32,
+}
+
 #[atman_rt::tools]
 mod host_tools {
+    use super::Offset;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub static ASYNC_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -59,6 +66,14 @@ mod host_tools {
     #[tool]
     fn maybe(flag: bool) -> Option<String> {
         flag.then_some("present".to_owned())
+    }
+
+    #[tool]
+    fn shift(offset: Offset, amount: i32) -> Offset {
+        Offset {
+            x: offset.x + amount,
+            y: offset.y + amount,
+        }
     }
 
     pub fn helper() -> i64 {
@@ -190,11 +205,14 @@ fn generated_router_decodes_optional_lists_and_basic_types() {
     assert!(matches!(
         call(vec![("numbers", Value::List(vec![Value::Str("bad".into())]))]),
         Value::Err(EvalError::TypeMismatch { expected, actual })
-            if expected == "int" && actual == "string"
+            if expected == "valid host binding value"
+                && actual.starts_with("numbers[0]: expected Int")
+                && actual.ends_with("found string")
     ));
     assert!(matches!(
         ready(tools.dispatch("add_optional", args(vec![], vec![]))),
-        Value::Err(EvalError::MissingArgument(name)) if name == "numbers"
+        Value::Err(EvalError::TypeMismatch { expected, actual })
+            if expected == "valid host binding value" && actual == "numbers: missing value"
     ));
 
     assert!(matches!(
@@ -211,6 +229,26 @@ fn generated_router_decodes_optional_lists_and_basic_types() {
     assert!(matches!(
         ready(tools.dispatch("maybe", args(vec![Value::Bool(true)], vec![]))),
         Value::Str(text) if text == "present"
+    ));
+    assert!(matches!(
+        ready(tools.dispatch(
+            "shift",
+            args(
+                vec![
+                    Value::Struct(vec![
+                        ("x".into(), Value::Int(2)),
+                        ("y".into(), Value::Int(3)),
+                    ]),
+                    Value::Int(4),
+                ],
+                vec![],
+            ),
+        )),
+        Value::Struct(fields)
+            if matches!(
+                &fields[..],
+                [(x, Value::Int(6)), (y, Value::Int(7))] if x == "x" && y == "y"
+            )
     ));
 }
 

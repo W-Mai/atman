@@ -21,7 +21,7 @@ fn generated_resource_output_inserts_and_resolves_the_owned_value() {
     let TypeSpec::Resource(spec) = <Texture as Output<Payload, ()>>::output_type() else {
         panic!("texture must have a resource type")
     };
-    assert_eq!(spec.name, "Texture");
+    assert_eq!(spec.name.as_deref(), Some("Texture"));
     assert_eq!(Texture::TYPE_NAME, "Texture");
 
     let Value::Host(payload) = Texture(42).encode_output(&context).unwrap() else {

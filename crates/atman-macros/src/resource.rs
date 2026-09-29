@@ -48,7 +48,9 @@ fn expand_inner(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream
         {
             fn output_type() -> #root::catalog::TypeSpec {
                 #root::catalog::TypeSpec::Resource(#root::catalog::ResourceSpec {
-                    name: <Self as #root::resource::ResourceType>::TYPE_NAME.into(),
+                    name: ::core::option::Option::Some(
+                        <Self as #root::resource::ResourceType>::TYPE_NAME.into(),
+                    ),
                 })
             }
 
@@ -67,6 +69,8 @@ fn expand_inner(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream
                 ))
             }
         }
+
+        impl #root::binding::PresentValue for #ident {}
     })
 }
 

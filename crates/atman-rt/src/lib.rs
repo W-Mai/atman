@@ -85,5 +85,5 @@ pub use watch::{WatchObservation, WatchRules, WatchState, WatchWarning};
 
 #[doc(hidden)]
 pub mod __private {
-    pub use alloc::{string::String, vec::Vec};
+    pub use alloc::{string::String, sync::Arc, vec::Vec};
 }

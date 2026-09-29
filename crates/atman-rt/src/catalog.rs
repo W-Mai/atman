@@ -34,7 +34,7 @@ impl fmt::Display for TypeSpec {
             Self::Option(item) => write!(formatter, "option<{item}>"),
             Self::Struct(spec) => formatter.write_str(&spec.name),
             Self::Enum(spec) => formatter.write_str(&spec.name),
-            Self::Resource(spec) => formatter.write_str(&spec.name),
+            Self::Resource(spec) => formatter.write_str(spec.name.as_deref().unwrap_or("resource")),
         }
     }
 }
@@ -63,7 +63,8 @@ pub struct EnumSpec {
 /// An opaque nominal host resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceSpec {
-    pub name: String,
+    /// A nominal Rust resource name. `None` accepts any resource handle.
+    pub name: Option<String>,
 }
 
 /// One parameter accepted by a host tool.
