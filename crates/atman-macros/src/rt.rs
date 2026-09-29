@@ -270,10 +270,11 @@ fn register_stateful_tool(tool: &ImplTool, namespace: &str, root: &Path) -> Toke
     let handler_body = quote! {
         #(#bindings)*
         let __atman_result = #call;
-        <#result_ty as #root::binding::Output<
-            __AtmanBindingP,
-            __AtmanBindingE,
-        >>::encode_output(__atman_result, __atman_call_context.as_ref())
+        let __atman_output_context = __atman_call_context.for_call();
+        __atman_output_context.output_transaction(|| <#result_ty as #root::binding::Output<
+                __AtmanBindingP,
+                __AtmanBindingE,
+            >>::encode_output(__atman_result, &__atman_output_context))
         .map_err(|__atman_error| {
             <__AtmanBindingE as #root::ValueError>::binding_error(
                 __atman_error.at_argument("return"),
@@ -457,9 +458,11 @@ fn register_tool(tool: &ModuleTool, root: &Path) -> TokenStream {
         let __atman_context = #root::binding::Context::<P, E>::value_only();
         #(#bindings)*
         let __atman_result = #call;
-        <#result_ty as #root::binding::Output<P, E>>::encode_output(
-            __atman_result,
-            &__atman_context,
+        __atman_context.output_transaction(||
+            <#result_ty as #root::binding::Output<P, E>>::encode_output(
+                __atman_result,
+                &__atman_context,
+            )
         )
         .map_err(|__atman_error| {
             <E as #root::ValueError>::binding_error(

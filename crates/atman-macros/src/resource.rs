@@ -61,12 +61,15 @@ fn expand_inner(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream
                 #root::Value<__AtmanResourceP, __AtmanResourceE>,
                 #root::binding::BindingError,
             > {
-                let __atman_handle = __atman_context.resources()?.insert(self)?;
-                ::core::result::Result::Ok(#root::Value::Host(
-                    <__AtmanResourceP as #root::resource::ResourcePayload>::from_resource(
-                        __atman_handle.erased(),
-                    ),
-                ))
+                __atman_context.output_transaction(|| {
+                    let __atman_handle = __atman_context.resources()?.insert(self)?;
+                    __atman_context.record_output_resource(__atman_handle.erased());
+                    ::core::result::Result::Ok(#root::Value::Host(
+                        <__AtmanResourceP as #root::resource::ResourcePayload>::from_resource(
+                            __atman_handle.erased(),
+                        ),
+                    ))
+                })
             }
         }
 

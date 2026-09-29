@@ -6,7 +6,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::{fmt, marker::PhantomData};
+use core::{fmt, hint::spin_loop, marker::PhantomData};
 
 use crate::{
     HostPayload, Value,
@@ -274,11 +274,17 @@ impl From<ResourceError> for BindingError {
     }
 }
 
+#[derive(Default)]
+struct OutputTransaction {
+    depth: usize,
+    resources: Vec<ErasedHandle>,
+}
+
 /// Context shared by the parameters and result of one generated binding.
 /// Resource-backed bindings extend this value with their registry.
-#[derive(Clone)]
 pub struct Context<P, E> {
     resources: Option<Arc<ResourceRegistry>>,
+    output: async_lock::Mutex<OutputTransaction>,
     marker: PhantomData<fn() -> (P, E)>,
 }
 
@@ -286,6 +292,10 @@ impl<P, E> Context<P, E> {
     pub const fn value_only() -> Self {
         Self {
             resources: None,
+            output: async_lock::Mutex::new(OutputTransaction {
+                depth: 0,
+                resources: Vec::new(),
+            }),
             marker: PhantomData,
         }
     }
@@ -293,6 +303,17 @@ impl<P, E> Context<P, E> {
     pub fn with_resources(resources: Arc<ResourceRegistry>) -> Self {
         Self {
             resources: Some(resources),
+            output: async_lock::Mutex::new(OutputTransaction::default()),
+            marker: PhantomData,
+        }
+    }
+
+    /// Creates an isolated context for one generated handler invocation.
+    #[doc(hidden)]
+    pub fn for_call(&self) -> Self {
+        Self {
+            resources: self.resources.clone(),
+            output: async_lock::Mutex::new(OutputTransaction::default()),
             marker: PhantomData,
         }
     }
@@ -305,6 +326,79 @@ impl<P, E> Context<P, E> {
 
     pub fn shared_resources(&self) -> Option<&Arc<ResourceRegistry>> {
         self.resources.as_ref()
+    }
+
+    /// Runs one possibly nested output encoding scope.
+    ///
+    /// Resource handles inserted by a failed scope are released in reverse insertion order. A
+    /// successful outermost scope commits its handles to the returned value.
+    #[doc(hidden)]
+    pub fn output_transaction<T>(
+        &self,
+        encode: impl FnOnce() -> Result<T, BindingError>,
+    ) -> Result<T, BindingError> {
+        let checkpoint = {
+            let mut output = self.lock_output();
+            let checkpoint = output.resources.len();
+            output.depth += 1;
+            checkpoint
+        };
+
+        let result = encode();
+        let rollback = {
+            let mut output = self.lock_output();
+            debug_assert!(output.depth > 0);
+            output.depth -= 1;
+            if result.is_err() {
+                output.resources.split_off(checkpoint)
+            } else {
+                if output.depth == 0 {
+                    output.resources.clear();
+                }
+                Vec::new()
+            }
+        };
+        self.rollback_output_resources(rollback);
+        result
+    }
+
+    /// Adds one newly inserted handle to the active output transaction.
+    #[doc(hidden)]
+    pub fn record_output_resource(&self, handle: ErasedHandle) {
+        let mut output = self.lock_output();
+        debug_assert!(output.depth > 0);
+        output.resources.push(handle);
+    }
+
+    fn lock_output(&self) -> async_lock::MutexGuard<'_, OutputTransaction> {
+        loop {
+            if let Some(output) = self.output.try_lock() {
+                return output;
+            }
+            spin_loop();
+        }
+    }
+
+    fn rollback_output_resources(&self, mut handles: Vec<ErasedHandle>) {
+        let Some(resources) = self.resources.as_deref() else {
+            debug_assert!(handles.is_empty());
+            return;
+        };
+        while let Some(handle) = handles.pop() {
+            loop {
+                match resources.release(handle) {
+                    Ok(()) | Err(ResourceError::StaleResource) => break,
+                    Err(ResourceError::RegistryBusy | ResourceError::ResourceBusy) => spin_loop(),
+                    Err(error) => unreachable!("invalid output transaction handle: {error}"),
+                }
+            }
+        }
+    }
+}
+
+impl<P, E> Clone for Context<P, E> {
+    fn clone(&self) -> Self {
+        self.for_call()
     }
 }
 
@@ -591,15 +685,17 @@ impl<P, E, T: Output<P, E>> Output<P, E> for Vec<T> {
     }
 
     fn encode_output(self, context: &Context<P, E>) -> Result<Value<P, E>, BindingError> {
-        self.into_iter()
-            .enumerate()
-            .map(|(index, value)| {
-                value
-                    .encode_output(context)
-                    .map_err(|error| error.at_index(index))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::List)
+        context.output_transaction(|| {
+            self.into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    value
+                        .encode_output(context)
+                        .map_err(|error| error.at_index(index))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::List)
+        })
     }
 }
 
@@ -635,10 +731,10 @@ where
     }
 
     fn encode_output(self, context: &Context<P, E>) -> Result<Value<P, E>, BindingError> {
-        match self {
+        context.output_transaction(|| match self {
             Some(value) => value.encode_output(context),
             None => Ok(Value::Unit),
-        }
+        })
     }
 }
 

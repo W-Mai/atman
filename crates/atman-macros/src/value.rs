@@ -264,13 +264,15 @@ fn expand_struct(item: &DeriveInput, data: &DataStruct, root: &Path) -> syn::Res
                 #root::Value<__AtmanValueP, __AtmanValueE>,
                 #root::binding::BindingError,
             > {
-                let Self { #(#output_bindings,)* } = self;
-                let mut __atman_fields: #root::__private::Vec<(
-                    #root::__private::String,
-                    #root::Value<__AtmanValueP, __AtmanValueE>,
-                )> = #root::__private::Vec::new();
-                #(#encoded_fields)*
-                ::core::result::Result::Ok(#root::Value::Struct(__atman_fields))
+                __atman_context.output_transaction(|| {
+                    let Self { #(#output_bindings,)* } = self;
+                    let mut __atman_fields: #root::__private::Vec<(
+                        #root::__private::String,
+                        #root::Value<__AtmanValueP, __AtmanValueE>,
+                    )> = #root::__private::Vec::new();
+                    #(#encoded_fields)*
+                    ::core::result::Result::Ok(#root::Value::Struct(__atman_fields))
+                })
             }
         }
 

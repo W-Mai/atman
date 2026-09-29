@@ -1,8 +1,16 @@
-use std::sync::Arc;
+use std::{
+    future::Future,
+    pin::pin,
+    sync::{
+        Arc, Barrier, Condvar, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    task::{Context as TaskContext, Poll, Waker},
+};
 
 use atman_rt::{
-    HostPayload, HostValueOps, Value,
-    binding::{BindingErrorKind, Context, Output},
+    EvalError, HostPayload, HostValueOps, ToolArgs, ToolRouter, Value,
+    binding::{BindingError, BindingErrorKind, Context, Output},
     catalog::TypeSpec,
     resource::{ResourcePayload, ResourceRegistry, ResourceType, WithResources},
 };
@@ -11,7 +19,78 @@ use atman_rt::{
 #[derive(Debug)]
 struct Texture(u32);
 
+#[atman_rt::resource]
+struct DropCounter {
+    id: u32,
+    drops: Arc<AtomicUsize>,
+}
+
+impl Drop for DropCounter {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+enum FallibleResource {
+    Resource(DropCounter),
+    Fail,
+}
+
+impl<P, E> Output<P, E> for FallibleResource
+where
+    P: ResourcePayload,
+{
+    fn output_type() -> TypeSpec {
+        <DropCounter as Output<P, E>>::output_type()
+    }
+
+    fn encode_output(self, context: &Context<P, E>) -> Result<Value<P, E>, BindingError> {
+        match self {
+            Self::Resource(resource) => resource.encode_output(context),
+            Self::Fail => Err(BindingError::missing_value()),
+        }
+    }
+}
+
+#[atman_rt::value]
+struct NestedOutput {
+    first: DropCounter,
+    nested: Vec<Vec<FallibleResource>>,
+}
+
 type Payload = WithResources<()>;
+
+fn drop_counter(id: u32, drops: &Arc<AtomicUsize>) -> DropCounter {
+    DropCounter {
+        id,
+        drops: Arc::clone(drops),
+    }
+}
+
+fn resource_handle(value: &Value<Payload, EvalError>) -> atman_rt::resource::ErasedHandle {
+    let Value::Host(payload) = value else {
+        panic!("resource output must use the host payload")
+    };
+    *payload.as_resource().expect("resource handle")
+}
+
+fn ready<F: Future>(future: F) -> F::Output {
+    let mut future = pin!(future);
+    match future
+        .as_mut()
+        .poll(&mut TaskContext::from_waker(Waker::noop()))
+    {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("test tool should complete synchronously"),
+    }
+}
+
+fn args(positional: Vec<Value<Payload, EvalError>>) -> ToolArgs<Payload, EvalError> {
+    ToolArgs {
+        positional,
+        named: Vec::new(),
+    }
+}
 
 #[test]
 fn generated_resource_output_inserts_and_resolves_the_owned_value() {
@@ -60,4 +139,190 @@ fn resource_payload_equality_uses_complete_handle_identity() {
     let next_generation = Payload::from_resource(reused.erased());
     assert!(!same.equals(&next_generation));
     assert!(!same.equals(&Payload::Custom(())));
+}
+
+#[test]
+fn successful_resource_list_keeps_every_handle_live() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let resources = Arc::new(ResourceRegistry::new().unwrap());
+    let context = Context::<Payload, EvalError>::with_resources(Arc::clone(&resources));
+
+    let Value::List(values) = vec![drop_counter(1, &drops), drop_counter(2, &drops)]
+        .encode_output(&context)
+        .unwrap()
+    else {
+        panic!("resource list must encode as a list")
+    };
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+    let handles = values.iter().map(resource_handle).collect::<Vec<_>>();
+    assert_eq!(
+        resources
+            .try_borrow(handles[0].typed::<DropCounter>().unwrap())
+            .unwrap()
+            .id,
+        1
+    );
+    assert_eq!(
+        resources
+            .try_borrow(handles[1].typed::<DropCounter>().unwrap())
+            .unwrap()
+            .id,
+        2
+    );
+
+    for handle in handles {
+        resources.release(handle).unwrap();
+    }
+    assert_eq!(drops.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn failed_resource_list_rolls_back_every_inserted_resource() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let resources = Arc::new(ResourceRegistry::new().unwrap());
+    let context = Context::<Payload, EvalError>::with_resources(resources);
+
+    let error = vec![
+        FallibleResource::Resource(drop_counter(1, &drops)),
+        FallibleResource::Resource(drop_counter(2, &drops)),
+        FallibleResource::Fail,
+    ]
+    .encode_output(&context)
+    .unwrap_err();
+
+    assert_eq!(error.path().to_string(), "[2]");
+    assert_eq!(drops.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn nested_output_failure_rolls_back_outer_and_inner_resources() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let resources = Arc::new(ResourceRegistry::new().unwrap());
+    let context = Context::<Payload, EvalError>::with_resources(resources);
+
+    let error = NestedOutput {
+        first: drop_counter(1, &drops),
+        nested: vec![
+            vec![FallibleResource::Resource(drop_counter(2, &drops))],
+            vec![
+                FallibleResource::Resource(drop_counter(3, &drops)),
+                FallibleResource::Fail,
+            ],
+        ],
+    }
+    .encode_output(&context)
+    .unwrap_err();
+
+    assert_eq!(error.path().to_string(), "nested[1][1]");
+    assert_eq!(drops.load(Ordering::SeqCst), 3);
+}
+
+struct ConcurrentOutput {
+    fail: bool,
+    coordination: Arc<Coordination>,
+    drops: Arc<AtomicUsize>,
+}
+
+struct Coordination {
+    first_inserted: Mutex<bool>,
+    first_inserted_changed: Condvar,
+    both_inserted: Barrier,
+}
+
+impl Coordination {
+    fn new() -> Self {
+        Self {
+            first_inserted: Mutex::new(false),
+            first_inserted_changed: Condvar::new(),
+            both_inserted: Barrier::new(2),
+        }
+    }
+}
+
+impl<P, E> Output<P, E> for ConcurrentOutput
+where
+    P: ResourcePayload,
+{
+    fn output_type() -> TypeSpec {
+        <DropCounter as Output<P, E>>::output_type()
+    }
+
+    fn encode_output(self, context: &Context<P, E>) -> Result<Value<P, E>, BindingError> {
+        if !self.fail {
+            let mut first_inserted = self.coordination.first_inserted.lock().unwrap();
+            while !*first_inserted {
+                first_inserted = self
+                    .coordination
+                    .first_inserted_changed
+                    .wait(first_inserted)
+                    .unwrap();
+            }
+        }
+
+        let encoded = drop_counter(u32::from(self.fail), &self.drops).encode_output(context)?;
+        if self.fail {
+            *self.coordination.first_inserted.lock().unwrap() = true;
+            self.coordination.first_inserted_changed.notify_one();
+        }
+        self.coordination.both_inserted.wait();
+
+        if self.fail {
+            Err(BindingError::missing_value())
+        } else {
+            Ok(encoded)
+        }
+    }
+}
+
+struct ConcurrentHost {
+    coordination: Arc<Coordination>,
+    drops: Arc<AtomicUsize>,
+}
+
+#[atman_rt::tools(namespace = "rollback")]
+impl ConcurrentHost {
+    #[tool]
+    fn produce(&self, fail: bool) -> ConcurrentOutput {
+        ConcurrentOutput {
+            fail,
+            coordination: Arc::clone(&self.coordination),
+            drops: Arc::clone(&self.drops),
+        }
+    }
+}
+
+#[test]
+fn concurrent_handlers_isolate_output_transactions() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRouter::<Payload, EvalError>::new();
+    tools
+        .mount(
+            ConcurrentHost {
+                coordination: Arc::new(Coordination::new()),
+                drops: Arc::clone(&drops),
+            }
+            .into_atman_binding(),
+        )
+        .unwrap();
+
+    let failing_tools = tools.clone();
+    let failing = std::thread::spawn(move || {
+        ready(failing_tools.dispatch("rollback.produce", args(vec![Value::Bool(true)])))
+    });
+    let successful_tools = tools.clone();
+    let successful = std::thread::spawn(move || {
+        ready(successful_tools.dispatch("rollback.produce", args(vec![Value::Bool(false)])))
+    });
+
+    assert!(matches!(failing.join().unwrap(), Value::Err(_)));
+    let live = successful.join().unwrap();
+    assert!(matches!(live, Value::Host(_)));
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(
+        ready(tools.dispatch("rollback.release", args(vec![live]))),
+        Value::Unit
+    ));
+    assert_eq!(drops.load(Ordering::SeqCst), 2);
 }
