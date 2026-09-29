@@ -1265,6 +1265,14 @@ impl Vm {
         &self.program
     }
 
+    /// Validates all linked host tool calls against an explicit host catalog.
+    pub fn validate_tools(
+        &self,
+        catalog: &crate::catalog::ToolCatalog,
+    ) -> Result<(), crate::tool_validate::ToolValidationReport> {
+        crate::tool_validate::validate_tools(&self.program, catalog)
+    }
+
     pub fn route(&self, input: &str) -> Option<RouteMatch> {
         self.program.route(input)
     }

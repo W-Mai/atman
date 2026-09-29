@@ -31,6 +31,7 @@ pub mod resource;
 pub mod route;
 pub mod status;
 pub mod tool_router;
+pub mod tool_validate;
 pub mod validate;
 pub mod value;
 pub mod vm;
@@ -73,6 +74,7 @@ pub use redirect::{RedirectOutcome, run_redirects};
 pub use route::{RouteMatch, resolve_route};
 pub use status::{FlowTermination, classify_outcome, classify_result};
 pub use tool_router::{ToolArgs, ToolRegisterError, ToolRouter};
+pub use tool_validate::{ToolValidationError, ToolValidationReport, validate_tools};
 pub use validate::{LanguageValidationError, LanguageValidationReport, validate_flow};
 pub use value::{FlowFuture, HostPayload, NamedValues, ToolFuture, Value};
 pub use vm::{
