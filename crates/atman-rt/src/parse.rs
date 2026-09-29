@@ -362,6 +362,10 @@ fn parse_stmt(input: ParseStream) -> Result<Stmt> {
         let value = parse_expr(input)?;
         return Ok(Stmt::Return { value });
     }
+    if input.peek(Token![yield]) {
+        input.parse::<Token![yield]>()?;
+        return Ok(Stmt::Yield);
+    }
     if input.peek(kw::watch) {
         return Ok(Stmt::Watch(parse_watch(input)?));
     }
@@ -1182,5 +1186,41 @@ mod tests {
             &file.flows[0].ret,
             Some(TypeExpr::Named(name)) if name.name == "struct"
         ));
+    }
+
+    #[test]
+    fn yield_statement_parses_prints_and_preserves_keyword_segments() {
+        let source = r#"flow main() {
+    yield
+    when true {
+        yield
+        scheduler.yield(yield: 1)
+    }
+}"#;
+        let file = parse_file(source).unwrap();
+        assert!(matches!(&file.flows[0].body[0], Stmt::Yield));
+        let Stmt::When { body, .. } = &file.flows[0].body[1] else {
+            panic!("expected when statement");
+        };
+        assert!(matches!(&body[0], Stmt::Yield));
+        assert!(matches!(
+            &body[1],
+            Stmt::Expr(Expr::Node(Node::ToolCall { path, args }))
+                if path.iter().map(|part| part.name.as_str()).collect::<Vec<_>>()
+                    == ["scheduler", "yield"]
+                    && matches!(
+                        args.as_slice(),
+                        [Arg::Named { name, value: Expr::Literal(Literal::Int(1)) }]
+                            if name.name == "yield"
+                    )
+        ));
+
+        let printed = crate::print_file(&file);
+        assert_eq!(
+            printed,
+            "flow main() {\n    yield\n    when true {\n        yield\n        scheduler.yield(yield: 1)\n    }\n}\n"
+        );
+        let reparsed = parse_file(&printed).unwrap();
+        assert_eq!(format!("{file:#?}"), format!("{reparsed:#?}"));
     }
 }

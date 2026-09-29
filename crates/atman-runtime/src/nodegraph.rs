@@ -30,6 +30,7 @@ pub enum NodeKind {
     FixUntilTest,
     When { condition_preview: String },
     Loop,
+    Yield,
     Return,
 }
 
@@ -53,6 +54,7 @@ impl From<&VmNodeKind> for NodeKind {
                 condition_preview: condition_preview.clone(),
             },
             VmNodeKind::Loop => Self::Loop,
+            VmNodeKind::Yield => Self::Yield,
             VmNodeKind::Return => Self::Return,
         }
     }
@@ -131,6 +133,12 @@ fn extract_stmt(stmt: &Stmt, prefix: &str, out: &mut Vec<StaticNode>) {
                 children: inner,
             });
         }
+        Stmt::Yield => out.push(StaticNode {
+            node_id: prefix.to_string(),
+            kind: NodeKind::Yield,
+            label: "yield".into(),
+            children: Vec::new(),
+        }),
         Stmt::Break => {}
         Stmt::Continue => {}
     }
@@ -399,6 +407,7 @@ mod tests {
                 },
             ),
             (VmNodeKind::Loop, NodeKind::Loop),
+            (VmNodeKind::Yield, NodeKind::Yield),
             (VmNodeKind::Return, NodeKind::Return),
         ];
 
@@ -425,6 +434,16 @@ mod tests {
                 "worker(input).await".into(),
             )
         );
+    }
+
+    #[test]
+    fn extracts_yield_as_a_distinct_static_node() {
+        let flow = parse_first_flow("flow main() { yield }");
+        let graph = extract_graph(&flow);
+
+        assert_eq!(graph.root.len(), 1);
+        assert_eq!(graph.root[0].kind, NodeKind::Yield);
+        assert_eq!(graph.root[0].label, "yield");
     }
 
     #[test]

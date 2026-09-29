@@ -257,6 +257,195 @@ fn metered_run_reports_executed_language_operations() {
 }
 
 #[test]
+fn source_yield_self_wakes_and_resumes_with_the_next_statement() {
+    let vm = Vm::compile(
+        Source::new("main.at", "flow main() -> int { yield return foreign() }"),
+        &TestSources,
+    )
+    .expect("compile source");
+    let host = TestHost::default();
+    let events = Arc::clone(&host.events);
+    let future = vm.run("main", vec![], host);
+    let mut future = pin!(future);
+    let wakes = Arc::new(WakeCounter::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut context = Context::from_waker(&waker);
+
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+    assert!(events.lock().unwrap().is_empty());
+
+    let Poll::Ready(outcome) = future.as_mut().poll(&mut context) else {
+        panic!("flow must resume after the source yield");
+    };
+    assert!(matches!(outcome, StatementOutcome::Return(Value::Int(3))));
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+    assert_eq!(*events.lock().unwrap(), ["foreign"]);
+}
+
+#[test]
+fn source_yield_resumes_nested_when_loop_before_return() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow main() -> int { when true { loop { yield break } } return 7 }",
+        ),
+        &TestSources,
+    )
+    .expect("compile source");
+    let future = vm.run("main", vec![], TestHost::default());
+    let mut future = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    let Poll::Ready(outcome) = future.as_mut().poll(&mut context) else {
+        panic!("nested control flow must resume after the source yield");
+    };
+    assert!(matches!(outcome, StatementOutcome::Return(Value::Int(7))));
+}
+
+#[test]
+fn fanout_children_resume_after_source_yield_in_source_order() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow child(value: int) -> int { yield return value }\nflow main() -> [int] { return fanout [child(1), child(2)] }",
+        ),
+        &TestSources,
+    )
+    .expect("compile source");
+    let future = vm.run("main", vec![], TestHost::default());
+    let mut future = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    let Poll::Ready(outcome) = future.as_mut().poll(&mut context) else {
+        panic!("fanout children must resume after their source yields");
+    };
+    assert!(matches!(
+        outcome,
+        StatementOutcome::Return(Value::List(values))
+            if matches!(values.as_slice(), [Value::Int(1), Value::Int(2)])
+    ));
+}
+
+#[test]
+fn source_yield_counts_as_one_operation_without_an_interval_epoch() {
+    let vm = Vm::compile(
+        Source::new("main.at", "flow main() -> int { yield return foreign() }"),
+        &TestSources,
+    )
+    .expect("compile source");
+
+    let execution = run_until_ready(vm.run_with_options(
+        "main",
+        vec![],
+        TestHost::default(),
+        VmRunOptions::measure(),
+    ));
+
+    assert!(matches!(
+        execution.output(),
+        StatementOutcome::Return(Value::Int(3))
+    ));
+    assert_eq!(execution.operations(), 3);
+    assert_eq!(execution.cooperative_yields(), 0);
+}
+
+#[test]
+fn source_yield_and_interval_produce_independent_consecutive_pending_polls() {
+    let vm = Vm::compile(
+        Source::new("main.at", "flow main() { 1 yield }"),
+        &TestSources,
+    )
+    .expect("compile source");
+    let future = vm.run_with_options(
+        "main",
+        vec![],
+        TestHost::default(),
+        VmRunOptions::measure().with_yield_interval(NonZeroUsize::new(2).unwrap()),
+    );
+    let mut future = pin!(future);
+    let wakes = Arc::new(WakeCounter::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut context = Context::from_waker(&waker);
+
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 2);
+
+    let Poll::Ready(execution) = future.as_mut().poll(&mut context) else {
+        panic!("flow must finish after the interval and source yields");
+    };
+    assert!(matches!(execution.output(), StatementOutcome::Continue));
+    assert_eq!(execution.operations(), 3);
+    assert_eq!(execution.cooperative_yields(), 1);
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn operation_limit_is_preserved_across_a_source_yield() {
+    let vm = Vm::compile(
+        Source::new("main.at", "flow main() -> int { yield return foreign() }"),
+        &TestSources,
+    )
+    .expect("compile source");
+    let host = TestHost::default();
+    let events = Arc::clone(&host.events);
+    let future = vm.run_with_options(
+        "main",
+        vec![],
+        host,
+        VmRunOptions::limited(NonZeroUsize::new(1).unwrap()),
+    );
+    let mut future = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    let Poll::Ready(execution) = future.as_mut().poll(&mut context) else {
+        panic!("operation limit must stop the statement after the source yield");
+    };
+
+    assert!(matches!(
+        execution.output(),
+        StatementOutcome::Err(EvalError::TypeMismatch { actual, .. })
+            if actual == "operation limit of 1 exceeded"
+    ));
+    assert_eq!(execution.operations(), 1);
+    assert_eq!(execution.cooperative_yields(), 0);
+    assert!(events.lock().unwrap().is_empty());
+}
+
+#[test]
+fn cancellation_wins_when_a_source_yield_resumes() {
+    let vm = Vm::compile(
+        Source::new("main.at", "flow main() -> int { yield return foreign() }"),
+        &TestSources,
+    )
+    .expect("compile source");
+    let host = TestHost::default();
+    let cancelled = Arc::clone(&host.cancelled);
+    let events = Arc::clone(&host.events);
+    let future = vm.run("main", vec![], host);
+    let mut future = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    cancelled.store(true, Ordering::SeqCst);
+    let Poll::Ready(outcome) = future.as_mut().poll(&mut context) else {
+        panic!("cancellation must win when the source yield resumes");
+    };
+
+    assert!(matches!(
+        outcome,
+        StatementOutcome::Err(EvalError::TypeMismatch { actual, .. }) if actual == "cancelled"
+    ));
+    assert!(events.lock().unwrap().is_empty());
+}
+
+#[test]
 fn explicit_yield_interval_returns_pending_between_operation_quanta() {
     let vm = Vm::compile(
         Source::new(

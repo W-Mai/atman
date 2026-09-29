@@ -294,6 +294,7 @@ fn main() {
             Stmt::Loop {
                 body: vec![Stmt::Break],
             },
+            Stmt::Yield,
             Stmt::Return { value: literal(1) },
         ],
     };

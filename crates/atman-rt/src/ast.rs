@@ -245,6 +245,7 @@ pub enum Stmt {
     Loop { body: Vec<Stmt> },
     Break,
     Continue,
+    Yield,
 }
 
 #[derive(Debug, Clone)]

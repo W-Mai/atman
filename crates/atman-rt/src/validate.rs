@@ -130,7 +130,7 @@ fn walk_stmts(
                 }
             }
             Stmt::Loop { body } => walk_stmts(body, scope, kinds, report),
-            Stmt::Break | Stmt::Continue => {}
+            Stmt::Break | Stmt::Continue | Stmt::Yield => {}
         }
     }
 }

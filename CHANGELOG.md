@@ -28,6 +28,7 @@ All notable changes to atman are documented in this file.
 - **Runtime flow contracts** — Flow execution validates required parameters, defaults, nested list and struct values, host payload kinds, and explicit or implicit returns at the shared body boundary. Error messages identify the mismatched parameter, index, or field. `value` and `any` remain dynamic, while PascalCase schema markers retain their descriptive behavior.
 - **Typed CLI flow arguments** — `atman run` and slash commands decode integer, float, boolean, path, and JSON collection arguments from the selected flow declaration before entering the VM.
 - **Explicit VM execution control** — Embedded hosts can measure statement, expression, and loop-iteration operations, apply a host-selected per-invocation limit, and request cooperative executor yields at an explicit operation interval. Existing execution entry points remain uncontrolled, while child flows and fanout branches share the explicitly created counter and yield epochs.
+- **Language-level yield** — `.at` flows can use a standalone `yield` statement to self-wake and return control to the host executor once before continuing with the next statement. Yield remains portable across executors, consumes one metered operation, and is visible as its own workflow node.
 
 ### 🐛 Bug Fixes
 

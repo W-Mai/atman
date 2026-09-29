@@ -555,7 +555,7 @@ impl LinkedProgram {
                         }
                     }
                 }
-                Stmt::Break | Stmt::Continue => {}
+                Stmt::Break | Stmt::Continue | Stmt::Yield => {}
             }
         }
         Ok(())
@@ -772,7 +772,7 @@ impl LinkedProgram {
                         }
                     }
                 }
-                Stmt::Break | Stmt::Continue => {}
+                Stmt::Break | Stmt::Continue | Stmt::Yield => {}
             }
         }
         Ok(())

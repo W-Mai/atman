@@ -2,6 +2,7 @@ use "helper.at"::bonus
 
 flow demo(input: int) -> int {
     doubled = input * 2
+    yield
     values = [doubled, bonus().await, foreign().await]
     return values[0] + values[1] + values[2]
 }

@@ -35,6 +35,7 @@ impl VmNode {
             Stmt::Loop { .. } => Self::new(VmNodeKind::Loop, "loop"),
             Stmt::Break => Self::new(VmNodeKind::Return, "break"),
             Stmt::Continue => Self::new(VmNodeKind::Return, "continue"),
+            Stmt::Yield => Self::new(VmNodeKind::Yield, "yield"),
         }
     }
 
@@ -149,6 +150,7 @@ pub enum VmNodeKind {
     FixUntilTest,
     When { condition_preview: String },
     Loop,
+    Yield,
     Return,
 }
 
@@ -432,6 +434,10 @@ mod tests {
                 value: flow_call("hidden")
             }),
             VmNode::new(VmNodeKind::Return, "return")
+        );
+        assert_eq!(
+            VmNode::from_stmt(&Stmt::Yield),
+            VmNode::new(VmNodeKind::Yield, "yield")
         );
     }
 }

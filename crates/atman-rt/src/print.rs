@@ -204,6 +204,9 @@ fn write_stmt(out: &mut String, stmt: &Stmt, indent: usize) {
         Stmt::Continue => {
             out.push_str("continue\n");
         }
+        Stmt::Yield => {
+            writeln!(out, "{pad}yield").unwrap();
+        }
     }
 }
 

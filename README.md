@@ -151,6 +151,18 @@ flow run_agent(user_prompt: string) -> string {
 }
 ```
 
+Use `yield` inside long-running language work to return control to the host executor once. The VM self-wakes and resumes at the following statement; no tool registration or `.await` is required:
+
+```atman
+loop {
+    when list.is_empty(items) {
+        break
+    }
+    items = list.tail(items)
+    yield
+}
+```
+
 `invocation.user_message` maps a string parameter to the initial user message of an isolated `flow.spawn` context. CLI and daemon root turns record their input before flow execution, so the declaration does not append a second root message.
 
 Run the managed flow through the default route after `atman init`, or run the example explicitly:
@@ -251,6 +263,7 @@ atman run examples/edit_and_verify.at --flow edit_and_verify \
 | Approval | `user_confirm(msg)` | Pause for human approval |
 | User input | `user_ask(prompt, schema)` | Request structured user input |
 | Fanout | `fanout [...]`, `fanout pending` | Run cold Flow calls concurrently or collect already evaluated values |
+| Yield | `yield` | Return control to the host executor once, then resume at the next statement |
 | List | `items[index]`, `list.len`, `list.first`, `list.concat`, `list.map`, `list.filter`, ... | Index, inspect, combine, and transform list values |
 | Composers | `retry { ... }`, `fallback { ... }` | Retry or choose fallback execution |
 

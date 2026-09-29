@@ -71,6 +71,8 @@ impl VmRunOptions {
     ///
     /// The VM self-wakes the task. A run that finishes at the interval boundary
     /// does not yield because it never enters another operation checkpoint.
+    /// Source-level `yield` statements are independent scheduling points and do
+    /// not complete or increment these host-controlled epochs.
     pub const fn with_yield_interval(mut self, yield_interval: NonZeroUsize) -> Self {
         self.yield_interval = Some(yield_interval);
         self
@@ -87,9 +89,11 @@ impl VmRunOptions {
 
 /// Measurements collected by an explicitly controlled VM run.
 ///
-/// Cooperative yields count invocation-wide epochs. Concurrent branches can
-/// observe the same epoch, so this is not a count of branch-level `Pending`
-/// results and is not derived solely from [`Self::operations`].
+/// Cooperative yields count invocation-wide epochs installed by
+/// [`VmRunOptions::with_yield_interval`]. Concurrent branches can observe the
+/// same epoch, so this is not a count of branch-level `Pending` results and is
+/// not derived solely from [`Self::operations`]. Source-level `yield` statements
+/// are excluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmExecutionStats {
     operations: usize,
@@ -101,6 +105,7 @@ impl VmExecutionStats {
         self.operations
     }
 
+    /// Returns host-controlled yield epochs; source-level `yield` is excluded.
     pub const fn cooperative_yields(self) -> usize {
         self.cooperative_yields
     }
@@ -121,6 +126,7 @@ impl<T> VmExecution<T> {
         self.stats.operations
     }
 
+    /// Returns host-controlled yield epochs; source-level `yield` is excluded.
     pub const fn cooperative_yields(&self) -> usize {
         self.stats.cooperative_yields
     }

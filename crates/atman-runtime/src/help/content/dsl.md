@@ -29,8 +29,9 @@ flow example(input: string) -> string {
 }
 ```
 
-Supported statements are bindings, struct destructuring, `when`, `return`, bare
-expressions, `watch`, unconditional `loop`, `break`, and `continue`.
+Supported statements are bindings, struct destructuring, `when`, `return`, bare expressions, `watch`, unconditional `loop`, `break`, `continue`, and `yield`.
+
+`yield` self-wakes the VM task, returns `Pending` once, and resumes at the following statement on the next poll. It provides a scheduling point without a tool call or `.await`, and it does not terminate the surrounding loop.
 
 There is no `if`, `else`, `for`, or `while`. Use `when`, a bounded recursive
 Flow call, or `loop` with an explicit `break`. Every unconditional loop needs a

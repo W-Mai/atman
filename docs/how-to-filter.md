@@ -76,6 +76,20 @@ flow retry_until_ready() -> string {
 
 `when` bodies are ordinary statement blocks and can contain nested flow operations.
 
+Add `yield` to long-running loops when the flow should explicitly give the host executor a scheduling point. The VM self-wakes, returns `Pending` once, and resumes at the following statement. This does not require a tool call or `.await`:
+
+```atman
+flow consume(items: list) {
+    loop {
+        when list.is_empty(items) {
+            break
+        }
+        items = list.tail(items)
+        yield
+    }
+}
+```
+
 ## Sequential expressions
 
 Use variable bindings when a later step needs an earlier result:

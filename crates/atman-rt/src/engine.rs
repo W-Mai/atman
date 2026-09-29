@@ -496,6 +496,10 @@ impl<H: StatementHost> Engine<H> {
                             ),
                         }
                     }
+                    Stmt::Yield => {
+                        crate::cooperate::yield_once().await;
+                        (StatementOutcome::Continue, None)
+                    }
                     Stmt::Watch(_) => (StatementOutcome::Continue, None),
                     Stmt::Loop { body } => {
                         let mut loop_host = EngineLoopHost { engine: self, body };

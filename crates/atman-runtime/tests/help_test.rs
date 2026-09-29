@@ -96,6 +96,7 @@ fn dsl_topic_contains_key_syntax() {
     assert!(content.contains("llm.call("));
     assert!(content.contains("fanout"));
     assert!(content.contains("contract"));
+    assert!(content.contains("`yield`"));
 }
 
 #[test]

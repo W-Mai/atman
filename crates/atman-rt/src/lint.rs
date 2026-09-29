@@ -75,6 +75,7 @@ fn collect_ident_refs_stmts(stmts: &[Stmt], refs: &mut BTreeSet<String>) {
             Stmt::Loop { body } => collect_ident_refs_stmts(body, refs),
             Stmt::Break => {}
             Stmt::Continue => {}
+            Stmt::Yield => {}
         }
     }
 }
@@ -176,6 +177,7 @@ fn walk_stmts_for_nodes(stmts: &[Stmt], flow_name: &str, hits: &mut Vec<LintHit>
             }
             Stmt::Break => {}
             Stmt::Continue => {}
+            Stmt::Yield => {}
         }
     }
 }
