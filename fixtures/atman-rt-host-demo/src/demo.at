@@ -1,0 +1,23 @@
+flow cold_async() -> int {
+    pending = demo.load("never-driven")
+    return 1
+}
+
+flow render_frames() -> int {
+    texture = demo.load("checkerboard").await
+    index = 0
+    loop {
+        frame = demo.frame().await
+        demo.draw(texture, frame, index)
+        index = index + 1
+        when index == 3 { break }
+    }
+    demo.release(texture)
+    return index
+}
+
+flow stale_handle() {
+    texture = demo.load("stale-probe").await
+    demo.release(texture)
+    demo.draw(texture, 0, 0)
+}

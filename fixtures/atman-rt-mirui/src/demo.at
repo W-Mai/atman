@@ -1,0 +1,12 @@
+flow render_frames() -> int {
+    surface = ui.load("root-surface").await
+    count = 0
+    loop {
+        frame = ui.frame().await
+        ui.draw(surface, frame)
+        count = count + 1
+        when count == 3 { break }
+    }
+    ui.release(surface)
+    return count
+}

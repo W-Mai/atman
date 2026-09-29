@@ -1,0 +1,12 @@
+[package]
+name = "atman-rt-mirui"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+atman-rt = { path = "../../crates/atman-rt" }
+mirui = { version = "=0.46.3", default-features = false, features = ["std"] }
+
+[workspace]
+resolver = "3"
