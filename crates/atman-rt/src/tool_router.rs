@@ -12,6 +12,9 @@ use core::{fmt, future::Future};
 use crate::{
     EffectDelegate, ExpressionEffect, HostFuture, HostPayload, HostValueOps, ListIntrinsic,
     ToolCallMode, Value, ValueError, VmContext,
+    binding::Factory,
+    catalog::{CatalogEntry, ToolCatalog, ToolSpec},
+    resource::ResourceError,
 };
 
 /// Evaluated arguments passed to a host tool. Named arguments take precedence
@@ -90,6 +93,12 @@ pub enum ToolRegisterError {
     EmptyName,
     ReservedName(String),
     DuplicateName(String),
+    ModeMismatch {
+        name: String,
+        expected: ToolCallMode,
+        actual: ToolCallMode,
+    },
+    Resource(ResourceError),
 }
 
 impl fmt::Display for ToolRegisterError {
@@ -98,17 +107,40 @@ impl fmt::Display for ToolRegisterError {
             Self::EmptyName => f.write_str("tool name cannot be empty"),
             Self::ReservedName(name) => write!(f, "tool name `{name}` is reserved"),
             Self::DuplicateName(name) => write!(f, "tool name `{name}` is already registered"),
+            Self::ModeMismatch {
+                name,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "tool `{name}` mode mismatch: expected {expected:?}, found {actual:?}"
+            ),
+            Self::Resource(error) => write!(f, "failed to create tool resources: {error}"),
         }
     }
 }
 
-impl core::error::Error for ToolRegisterError {}
+impl core::error::Error for ToolRegisterError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Resource(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<ResourceError> for ToolRegisterError {
+    fn from(error: ResourceError) -> Self {
+        Self::Resource(error)
+    }
+}
 
 type ToolHandler<P, E> =
     dyn Fn(ToolArgs<P, E>) -> HostFuture<'static, Result<Value<P, E>, E>> + Send + Sync;
 
 struct RegisteredTool<P, E> {
     mode: ToolCallMode,
+    spec: Option<ToolSpec>,
     handler: Arc<ToolHandler<P, E>>,
 }
 
@@ -143,6 +175,43 @@ impl<P, E> ToolRouter<P, E> {
         self.handlers.contains_key(name)
     }
 
+    /// Returns a stable-order projection of every registered tool.
+    pub fn catalog(&self) -> ToolCatalog {
+        ToolCatalog::new(
+            self.handlers
+                .iter()
+                .map(|(name, tool)| CatalogEntry {
+                    name: name.clone(),
+                    mode: tool.mode,
+                    spec: tool.spec.clone(),
+                })
+                .collect(),
+        )
+    }
+
+    /// Atomically adds all tools built by one generated binding factory.
+    pub fn mount<F>(&mut self, factory: F) -> Result<(), ToolRegisterError>
+    where
+        F: Factory<P, E>,
+    {
+        let mounted = factory.build()?;
+        if let Some(name) = mounted
+            .handlers
+            .keys()
+            .find(|name| self.handlers.contains_key(name.as_str()))
+        {
+            return Err(ToolRegisterError::DuplicateName(name.clone()));
+        }
+
+        Arc::make_mut(&mut self.handlers).extend(
+            mounted
+                .handlers
+                .iter()
+                .map(|(name, tool)| (name.clone(), Arc::clone(tool))),
+        );
+        Ok(())
+    }
+
     /// Registers a cold asynchronous tool. Its handler runs on `.await` or `fanout`.
     pub fn register<F, Fut>(
         &mut self,
@@ -155,7 +224,24 @@ impl<P, E> ToolRouter<P, E> {
         F: Fn(ToolArgs<P, E>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Value<P, E>, E>> + Send + 'static,
     {
-        self.insert(name.into(), ToolCallMode::Deferred, move |args| {
+        self.insert(name.into(), ToolCallMode::Deferred, None, move |args| {
+            Box::pin(handler(args))
+        })
+    }
+
+    /// Registers a cold asynchronous tool with its portable signature.
+    pub fn register_with_spec<F, Fut>(
+        &mut self,
+        spec: ToolSpec,
+        handler: F,
+    ) -> Result<(), ToolRegisterError>
+    where
+        P: 'static,
+        E: 'static,
+        F: Fn(ToolArgs<P, E>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Value<P, E>, E>> + Send + 'static,
+    {
+        self.insert_spec(spec, ToolCallMode::Deferred, move |args| {
             Box::pin(handler(args))
         })
     }
@@ -171,16 +257,54 @@ impl<P, E> ToolRouter<P, E> {
         E: Send + Sync + 'static,
         F: Fn(ToolArgs<P, E>) -> Result<Value<P, E>, E> + Send + Sync + 'static,
     {
-        self.insert(name.into(), ToolCallMode::Immediate, move |args| {
+        self.insert(name.into(), ToolCallMode::Immediate, None, move |args| {
             let result = handler(args);
             Box::pin(async move { result })
         })
+    }
+
+    /// Registers a synchronous tool with its portable signature.
+    pub fn register_sync_with_spec<F>(
+        &mut self,
+        spec: ToolSpec,
+        handler: F,
+    ) -> Result<(), ToolRegisterError>
+    where
+        P: Send + Sync + 'static,
+        E: Send + Sync + 'static,
+        F: Fn(ToolArgs<P, E>) -> Result<Value<P, E>, E> + Send + Sync + 'static,
+    {
+        self.insert_spec(spec, ToolCallMode::Immediate, move |args| {
+            let result = handler(args);
+            Box::pin(async move { result })
+        })
+    }
+
+    fn insert_spec(
+        &mut self,
+        spec: ToolSpec,
+        mode: ToolCallMode,
+        handler: impl Fn(ToolArgs<P, E>) -> HostFuture<'static, Result<Value<P, E>, E>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<(), ToolRegisterError> {
+        if spec.mode != mode {
+            return Err(ToolRegisterError::ModeMismatch {
+                name: spec.name,
+                expected: mode,
+                actual: spec.mode,
+            });
+        }
+        let name = spec.name.clone();
+        self.insert(name, mode, Some(spec), handler)
     }
 
     fn insert(
         &mut self,
         name: String,
         mode: ToolCallMode,
+        spec: Option<ToolSpec>,
         handler: impl Fn(ToolArgs<P, E>) -> HostFuture<'static, Result<Value<P, E>, E>>
         + Send
         + Sync
@@ -199,6 +323,7 @@ impl<P, E> ToolRouter<P, E> {
             name,
             Arc::new(RegisteredTool {
                 mode,
+                spec,
                 handler: Arc::new(handler),
             }),
         );

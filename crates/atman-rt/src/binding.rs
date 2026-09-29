@@ -12,7 +12,13 @@ use crate::{
     HostPayload, Value,
     catalog::TypeSpec,
     resource::{ResourceError, ResourceRegistry},
+    tool_router::{ToolRegisterError, ToolRouter},
 };
+
+/// Builds one generated group of host tool bindings for a target router.
+pub trait Factory<P, E>: Sized {
+    fn build(self) -> Result<ToolRouter<P, E>, ToolRegisterError>;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValuePathSegment {

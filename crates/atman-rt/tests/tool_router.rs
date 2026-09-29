@@ -12,6 +12,8 @@ use atman_rt::{
     EffectDelegate, EvalError, ExpressionEffect, FlowDriveMode, Source, SourceResolver,
     StatementOutcome, ToolArgs, ToolRegisterError, ToolRouter, Value, Vm, VmContext, VmDelegates,
     VmRunId,
+    binding::Factory,
+    catalog::{ToolSpec, TypeSpec},
     program::{FlowId, ModuleId},
 };
 use futures::task::AtomicWaker;
@@ -63,6 +65,40 @@ fn context() -> VmContext {
         parent_node_id: None,
         drive_mode: FlowDriveMode::Inline,
         branch_index: None,
+    }
+}
+
+fn tool_spec(name: &str, mode: atman_rt::ToolCallMode) -> ToolSpec {
+    ToolSpec {
+        name: name.into(),
+        namespace: "test".into(),
+        description: "test tool".into(),
+        mode,
+        params: vec![],
+        result: TypeSpec::Unit,
+    }
+}
+
+struct TestFactory {
+    names: &'static [&'static str],
+    calls: Arc<AtomicUsize>,
+}
+
+impl<P, E> Factory<P, E> for TestFactory
+where
+    P: Send + Sync + 'static,
+    E: Send + Sync + 'static,
+{
+    fn build(self) -> Result<ToolRouter<P, E>, ToolRegisterError> {
+        let mut router = ToolRouter::new();
+        for name in self.names {
+            let calls = Arc::clone(&self.calls);
+            router.register_sync(*name, move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Value::Unit)
+            })?;
+        }
+        Ok(router)
     }
 }
 
@@ -282,4 +318,88 @@ fn handler_errors_and_non_tool_effects_remain_explicit() {
         )),
         Value::Err(EvalError::TypeMismatch { actual, .. }) if actual == "file reference"
     ));
+}
+
+#[test]
+fn catalog_projects_manual_and_spec_registrations_from_the_same_entries() {
+    let mut tools = ToolRouter::<(), EvalError>::new();
+    tools
+        .register_sync("manual", |_| Ok(Value::Unit))
+        .expect("register manual tool");
+    tools
+        .register_with_spec(
+            tool_spec("generated", atman_rt::ToolCallMode::Deferred),
+            |_| async { Ok(Value::Unit) },
+        )
+        .expect("register generated tool");
+
+    let catalog = tools.catalog();
+    let generated = catalog.lookup("generated").expect("generated entry");
+    assert_eq!(generated.name, "generated");
+    assert_eq!(generated.mode, atman_rt::ToolCallMode::Deferred);
+    assert_eq!(generated.spec.as_ref().unwrap().name, "generated");
+    assert!(catalog.lookup("manual").unwrap().spec.is_none());
+
+    assert!(matches!(
+        tools.register_with_spec(
+            tool_spec("wrong", atman_rt::ToolCallMode::Immediate),
+            |_| async { Ok(Value::Unit) }
+        ),
+        Err(ToolRegisterError::ModeMismatch {
+            name,
+            expected: atman_rt::ToolCallMode::Deferred,
+            actual: atman_rt::ToolCallMode::Immediate,
+        }) if name == "wrong"
+    ));
+    assert!(!tools.contains("wrong"));
+}
+
+#[test]
+fn mount_is_atomic_and_preserves_copy_on_write_snapshots() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRouter::<(), EvalError>::new();
+    tools
+        .register_sync("taken", |_| Ok(Value::Int(1)))
+        .expect("register target tool");
+    let old = tools.clone();
+
+    assert!(matches!(
+        tools.mount(TestFactory {
+            names: &["added", "taken"],
+            calls: Arc::clone(&calls),
+        }),
+        Err(ToolRegisterError::DuplicateName(name)) if name == "taken"
+    ));
+    assert_eq!(tools.catalog(), old.catalog());
+    assert!(!tools.contains("added"));
+
+    tools
+        .mount(TestFactory {
+            names: &["mounted"],
+            calls: Arc::clone(&calls),
+        })
+        .expect("mount binding with P and E inferred from the target router");
+    assert!(!old.contains("mounted"));
+    let mounted_clone = tools.clone();
+    assert!(matches!(
+        ready(tools.dispatch(
+            "mounted",
+            ToolArgs {
+                positional: vec![],
+                named: vec![],
+            }
+        )),
+        Value::Unit
+    ));
+    assert!(matches!(
+        ready(mounted_clone.dispatch(
+            "mounted",
+            ToolArgs {
+                positional: vec![],
+                named: vec![],
+            }
+        )),
+        Value::Unit
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
