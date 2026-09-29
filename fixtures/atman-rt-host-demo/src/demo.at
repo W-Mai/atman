@@ -21,3 +21,7 @@ flow stale_handle() {
     demo.release(texture)
     demo.draw(texture, 0, 0)
 }
+
+flow cancelled_owner_reply() {
+    demo.load("cancelled-owner-reply").await
+}

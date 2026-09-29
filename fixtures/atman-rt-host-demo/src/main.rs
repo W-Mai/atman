@@ -1,9 +1,12 @@
+mod oneshot;
+
 use std::{
     collections::BTreeMap,
     future::Future,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     task::{Context, Poll, Wake, Waker},
@@ -11,8 +14,8 @@ use std::{
 };
 
 use atman_rt::{
-    EvalError, Source, SourceResolver, StatementOutcome, ToolRouter, Value, Vm, VmDelegates,
-    resource::WithResources,
+    CancellationDelegate, EvalError, HostFuture, Source, SourceResolver, StatementOutcome,
+    ToolRouter, Value, Vm, VmContext, VmDelegates, resource::WithResources,
 };
 
 type Payload = WithResources<()>;
@@ -27,33 +30,101 @@ impl SourceResolver for NoSources {
     }
 }
 
-struct NoopWake;
+struct ThreadWake(thread::Thread);
 
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
+impl Wake for ThreadWake {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
+    }
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
+    let waker = Waker::from(Arc::new(ThreadWake(thread::current())));
     let mut context = Context::from_waker(&waker);
     let mut future = Box::pin(future);
     loop {
         match Pin::as_mut(&mut future).poll(&mut context) {
             Poll::Ready(value) => return value,
-            Poll::Pending => thread::yield_now(),
+            Poll::Pending => thread::park(),
         }
     }
+}
+
+#[derive(Default)]
+struct CancellationSignal {
+    cancelled: AtomicBool,
+    waiter: Mutex<Option<Waker>>,
+}
+
+impl CancellationSignal {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        let waiter = self.waiter.lock().unwrap().take();
+        if let Some(waiter) = waiter {
+            waiter.wake();
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WakeableCancellation {
+    signal: Arc<CancellationSignal>,
+}
+
+impl CancellationDelegate<EvalError> for WakeableCancellation {
+    fn cancellation_error(&self, _context: &VmContext) -> Option<EvalError> {
+        self.signal
+            .cancelled
+            .load(Ordering::SeqCst)
+            .then(cancelled_error)
+    }
+
+    fn cancelled<'a>(&'a self, _context: &'a VmContext) -> HostFuture<'a, EvalError> {
+        Box::pin(std::future::poll_fn(move |context| {
+            if self.signal.cancelled.load(Ordering::SeqCst) {
+                return Poll::Ready(cancelled_error());
+            }
+            let mut waiter = self.signal.waiter.lock().unwrap();
+            if self.signal.cancelled.load(Ordering::SeqCst) {
+                Poll::Ready(cancelled_error())
+            } else {
+                if !waiter
+                    .as_ref()
+                    .is_some_and(|waiter| waiter.will_wake(context.waker()))
+                {
+                    *waiter = Some(context.waker().clone());
+                }
+                Poll::Pending
+            }
+        }))
+    }
+
+    fn is_cancellation(&self, error: &EvalError) -> bool {
+        is_fixture_cancellation(error)
+    }
+}
+
+fn cancelled_error() -> EvalError {
+    EvalError::MissingArgument("owner reply cancelled".into())
+}
+
+fn is_fixture_cancellation(error: &EvalError) -> bool {
+    matches!(error, EvalError::MissingArgument(message) if message == "owner reply cancelled")
 }
 
 enum Command {
     Load {
         caller: ThreadId,
         name: String,
-        reply: Sender<Result<u64, EvalError>>,
+        reply: oneshot::Sender<Result<u64, EvalError>>,
     },
     Frame {
         caller: ThreadId,
-        reply: Sender<i64>,
+        reply: oneshot::Sender<i64>,
     },
     Draw {
         caller: ThreadId,
@@ -102,13 +173,13 @@ impl GraphicsHost {
     /// Loads one owner-thread texture and returns its VM-side lease.
     #[tool]
     async fn load(&self, name: String) -> Result<TextureLease, EvalError> {
-        let (reply, response) = mpsc::channel();
+        let (reply, response) = oneshot::channel();
         self.proxy.send(Command::Load {
             caller: thread::current().id(),
             name,
             reply,
         })?;
-        let id = response.recv().map_err(|_| broken_bridge())??;
+        let id = response.await.map_err(|_| broken_bridge())??;
         Ok(TextureLease {
             id,
             proxy: self.proxy.clone(),
@@ -118,12 +189,12 @@ impl GraphicsHost {
     /// Advances the owner-thread frame clock.
     #[tool]
     async fn frame(&self) -> Result<i64, EvalError> {
-        let (reply, response) = mpsc::channel();
+        let (reply, response) = oneshot::channel();
         self.proxy.send(Command::Frame {
             caller: thread::current().id(),
             reply,
         })?;
-        response.recv().map_err(|_| broken_bridge())
+        response.await.map_err(|_| broken_bridge())
     }
 
     /// Queues one ordered draw against a borrowed resource.
@@ -164,6 +235,8 @@ enum AuditEvent {
         index: i64,
     },
     Release(u64),
+    PendingLoad(String),
+    LateReplyRejected,
 }
 
 struct FakeWorld {
@@ -172,16 +245,20 @@ struct FakeWorld {
     frame: i64,
     textures: BTreeMap<u64, FakeTexture>,
     audit: Vec<AuditEvent>,
+    cancellation: Arc<CancellationSignal>,
+    pending_reply: Option<oneshot::Sender<Result<u64, EvalError>>>,
 }
 
 impl FakeWorld {
-    fn new() -> Self {
+    fn new(cancellation: Arc<CancellationSignal>) -> Self {
         Self {
             owner: thread::current().id(),
             next_texture: 1,
             frame: 0,
             textures: BTreeMap::new(),
             audit: Vec::new(),
+            cancellation,
+            pending_reply: None,
         }
     }
 
@@ -201,6 +278,15 @@ impl FakeWorld {
 
         match command {
             Command::Load { name, reply, .. } => {
+                if name == "cancelled-owner-reply" {
+                    if self.pending_reply.is_some() {
+                        return Err("multiple owner replies were left pending".into());
+                    }
+                    self.pending_reply = Some(reply);
+                    self.audit.push(AuditEvent::PendingLoad(name));
+                    self.cancellation.cancel();
+                    return Ok(());
+                }
                 let id = self.next_texture;
                 self.next_texture += 1;
                 self.textures.insert(
@@ -258,6 +344,18 @@ impl FakeWorld {
         }
         Ok(())
     }
+
+    fn verify_late_reply_is_rejected(&mut self) -> Result<(), String> {
+        let reply = self
+            .pending_reply
+            .take()
+            .ok_or_else(|| "owner never observed the cancellable load".to_string())?;
+        if reply.send(Ok(self.next_texture)).is_ok() {
+            return Err("late owner reply reached a cancelled VM effect".into());
+        }
+        self.audit.push(AuditEvent::LateReplyRejected);
+        Ok(())
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -265,9 +363,13 @@ struct WorkerReport {
     cold_result: i64,
     rendered_frames: i64,
     stale_error: String,
+    cancelled_wait: bool,
 }
 
-fn vm_worker(commands: Sender<Command>) -> Result<WorkerReport, String> {
+fn vm_worker(
+    commands: Sender<Command>,
+    cancellation: Arc<CancellationSignal>,
+) -> Result<WorkerReport, String> {
     let vm = Vm::compile(Source::new("demo.at", include_str!("demo.at")), &NoSources)
         .map_err(|error| format!("invalid fixture program: {error}"))?;
     let host = GraphicsHost {
@@ -298,36 +400,54 @@ fn vm_worker(commands: Sender<Command>) -> Result<WorkerReport, String> {
             }
             _ => return Err("render_frames did not return".into()),
         };
-    let stale_error = match block_on(vm.run("stale_handle", vec![], VmDelegates::new(tools))) {
-        StatementOutcome::Err(error) => format!("{error:?}"),
-        StatementOutcome::Return(_) => return Err("stale_handle unexpectedly returned".into()),
-        _ => return Err("stale_handle did not fail".into()),
-    };
+    let stale_error =
+        match block_on(vm.run("stale_handle", vec![], VmDelegates::new(tools.clone()))) {
+            StatementOutcome::Err(error) => format!("{error:?}"),
+            StatementOutcome::Return(_) => return Err("stale_handle unexpectedly returned".into()),
+            _ => return Err("stale_handle did not fail".into()),
+        };
     if !stale_error.contains("stale") {
         return Err(format!(
             "stale handle diagnostic was not preserved: {stale_error}"
         ));
     }
+    let cancelled_wait = match block_on(vm.run(
+        "cancelled_owner_reply",
+        vec![],
+        VmDelegates::new(tools).with_cancellation(WakeableCancellation {
+            signal: cancellation,
+        }),
+    )) {
+        StatementOutcome::Err(error) if is_fixture_cancellation(&error) => true,
+        StatementOutcome::Err(error) => {
+            return Err(format!("cancelled_owner_reply failed: {error:?}"));
+        }
+        _ => return Err("cancelled_owner_reply was not cancelled".into()),
+    };
 
     Ok(WorkerReport {
         cold_result,
         rendered_frames,
         stale_error,
+        cancelled_wait,
     })
 }
 
 fn run_demo() -> Result<(WorkerReport, Vec<AuditEvent>), String> {
     let (commands, receiver): (Sender<Command>, Receiver<Command>) = mpsc::channel();
-    let worker = thread::spawn(move || vm_worker(commands));
-    let mut world = FakeWorld::new();
+    let cancellation = Arc::new(CancellationSignal::default());
+    let worker_cancellation = Arc::clone(&cancellation);
+    let worker = thread::spawn(move || vm_worker(commands, worker_cancellation));
+    let mut world = FakeWorld::new(cancellation);
     while let Ok(command) = receiver.recv() {
         world.handle(command)?;
     }
     let report = worker
         .join()
         .map_err(|_| "VM worker panicked".to_string())??;
+    world.verify_late_reply_is_rejected()?;
 
-    if report.cold_result != 1 || report.rendered_frames != 3 {
+    if report.cold_result != 1 || report.rendered_frames != 3 || !report.cancelled_wait {
         return Err(format!("unexpected VM report: {report:?}"));
     }
     if world
@@ -369,6 +489,8 @@ fn run_demo() -> Result<(WorkerReport, Vec<AuditEvent>), String> {
             name: "stale-probe".into(),
         },
         AuditEvent::Release(2),
+        AuditEvent::PendingLoad("cancelled-owner-reply".into()),
+        AuditEvent::LateReplyRejected,
     ];
     if world.audit != expected {
         return Err(format!("unexpected owner audit: {:?}", world.audit));
@@ -379,7 +501,7 @@ fn run_demo() -> Result<(WorkerReport, Vec<AuditEvent>), String> {
 fn main() {
     match run_demo() {
         Ok((report, audit)) => println!(
-            "owner-thread bridge ok: {} frames, {} commands, cold async stayed idle, {}",
+            "owner-thread bridge ok: {} frames, {} owner audit events, cold async stayed idle, owner wait cancelled with late reply rejected, {}",
             report.rendered_frames,
             audit.len(),
             report.stale_error
@@ -396,11 +518,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exercises_owner_thread_resources_and_cold_tools() {
+    fn exercises_owner_thread_resources_cancellation_and_cold_tools() {
         let (report, audit) = run_demo().unwrap();
         assert_eq!(report.cold_result, 1);
         assert_eq!(report.rendered_frames, 3);
         assert!(report.stale_error.contains("stale"));
-        assert_eq!(audit.len(), 10);
+        assert!(report.cancelled_wait);
+        assert_eq!(audit.len(), 12);
+        assert_eq!(audit.last(), Some(&AuditEvent::LateReplyRejected));
     }
 }

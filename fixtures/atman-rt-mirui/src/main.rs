@@ -1,3 +1,5 @@
+mod oneshot;
+
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -36,20 +38,26 @@ impl SourceResolver for NoSources {
     }
 }
 
-struct NoopWake;
+struct ThreadWake(thread::Thread);
 
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
+impl Wake for ThreadWake {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
+    }
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
+    let waker = Waker::from(Arc::new(ThreadWake(thread::current())));
     let mut context = Context::from_waker(&waker);
     let mut future = Box::pin(future);
     loop {
         match Pin::as_mut(&mut future).poll(&mut context) {
             Poll::Ready(value) => return value,
-            Poll::Pending => thread::yield_now(),
+            Poll::Pending => thread::park(),
         }
     }
 }
@@ -58,11 +66,11 @@ enum Command {
     Load {
         caller: ThreadId,
         name: String,
-        reply: Sender<Result<u64, EvalError>>,
+        reply: oneshot::Sender<Result<u64, EvalError>>,
     },
     Frame {
         caller: ThreadId,
-        reply: Sender<i64>,
+        reply: oneshot::Sender<i64>,
     },
     Draw {
         caller: ThreadId,
@@ -110,13 +118,13 @@ impl UiHost {
     /// Acquires a proxy lease for a main-thread mirui entity.
     #[tool]
     async fn load(&self, name: String) -> Result<SurfaceLease, EvalError> {
-        let (reply, response) = mpsc::channel();
+        let (reply, response) = oneshot::channel();
         self.proxy.send(Command::Load {
             caller: thread::current().id(),
             name,
             reply,
         })?;
-        let id = response.recv().map_err(|_| broken_bridge())??;
+        let id = response.await.map_err(|_| broken_bridge())??;
         Ok(SurfaceLease {
             id,
             proxy: self.proxy.clone(),
@@ -126,12 +134,12 @@ impl UiHost {
     /// Advances the owner-thread frame counter.
     #[tool]
     async fn frame(&self) -> Result<i64, EvalError> {
-        let (reply, response) = mpsc::channel();
+        let (reply, response) = oneshot::channel();
         self.proxy.send(Command::Frame {
             caller: thread::current().id(),
             reply,
         })?;
-        response.recv().map_err(|_| broken_bridge())
+        response.await.map_err(|_| broken_bridge())
     }
 
     /// Changes the leased entity and renders the headless framebuffer.

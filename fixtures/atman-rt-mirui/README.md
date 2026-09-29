@@ -4,6 +4,8 @@ This standalone workspace connects a generated `atman-rt` stateful tool binding 
 
 `mirui::App::headless`, its ECS `Entity`, and the software framebuffer remain on the main thread. The VM runs on a worker thread and retains only a `Send` command proxy plus an opaque surface lease ID.
 
+Reply-bearing commands use a std-only wakeable oneshot `Future`. Polling registers the VM worker's waker, an owner reply unparks that worker, and the executor parks again while no future can make progress. The async tools do not block inside their futures.
+
 ```text
 VM worker: ui.load/frame/draw/release -> command channel -> main thread: App::headless
 ```
