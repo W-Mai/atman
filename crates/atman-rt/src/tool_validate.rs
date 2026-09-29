@@ -220,11 +220,7 @@ impl Walker<'_, '_, '_> {
                 self.walk_args(args);
             }
             Node::FlowCall { args, .. } | Node::Message { args, .. } => self.walk_args(args),
-            Node::Fanout { source } => {
-                self.validate_fanout_source(source);
-                self.walk_expr(source);
-            }
-            Node::UserConfirm { msg: source } => {
+            Node::Fanout { source } | Node::UserConfirm { msg: source } => {
                 self.walk_expr(source);
             }
             Node::DynamicFanout { source, lambda } => {
@@ -236,35 +232,6 @@ impl Walker<'_, '_, '_> {
                     self.walk_expr(value);
                 }
             }
-        }
-    }
-
-    fn validate_fanout_source(&mut self, source: &Expr) {
-        if let Expr::List(branches) = source {
-            for branch in branches {
-                self.validate_fanout_branch(branch);
-            }
-        } else {
-            self.validate_fanout_branch(source);
-        }
-    }
-
-    fn validate_fanout_branch(&mut self, branch: &Expr) {
-        let Expr::Node(Node::ToolCall { path, .. }) = branch else {
-            return;
-        };
-        if ListIntrinsic::from_path(path).is_some() {
-            return;
-        }
-
-        let name = tool_name(path);
-        if let Some(entry) = self.catalog.lookup(&name)
-            && entry.mode == ToolCallMode::Immediate
-        {
-            self.push_error(
-                tool_span(path),
-                format!("immediate tool `{name}` cannot be used directly in `fanout`"),
-            );
         }
     }
 
@@ -630,7 +597,7 @@ mod tests {
     use crate::{
         ast::{Contract, ContractBlock, File, FlowDecl, Ident, LifecycleDecl, ParamDecl, TypeExpr},
         catalog::{CatalogEntry, FieldSpec, StructSpec, ToolParamSpec},
-        program::{ModuleId, ModuleInput, Source, SourceResolver},
+        program::{ModuleId, ModuleInput},
     };
 
     fn ident(name: &str) -> Ident {
@@ -656,20 +623,6 @@ mod tests {
             ModuleId(0),
         )
         .unwrap()
-    }
-
-    struct NoSources;
-
-    impl SourceResolver for NoSources {
-        type Error = &'static str;
-
-        fn resolve(&self, _importer_id: &str, _specifier: &str) -> Result<Source, Self::Error> {
-            Err("source unavailable")
-        }
-    }
-
-    fn compile(source: &str) -> LinkedProgram {
-        LinkedProgram::compile(Source::new("entry.at", source), &NoSources).unwrap()
     }
 
     #[test]
@@ -877,45 +830,31 @@ mod tests {
     }
 
     #[test]
-    fn static_fanout_rejects_direct_immediate_tool_branches_and_sources() {
+    fn fanout_accepts_immediate_values_and_list_sources() {
         let catalog = ToolCatalog::new(vec![CatalogEntry {
             name: "sync_tool".to_string(),
             mode: ToolCallMode::Immediate,
             spec: None,
         }]);
-        let program = compile("flow main() { fanout [sync_tool()] fanout sync_tool() }");
-
-        let report = validate_tools(&program, &catalog).unwrap_err();
-        assert_eq!(report.errors.len(), 2);
-        assert!(report.errors.iter().all(|error| {
-            error.message == "immediate tool `sync_tool` cannot be used directly in `fanout`"
-        }));
-    }
-
-    #[test]
-    fn static_fanout_allows_immediate_calls_nested_in_deferred_tool_arguments() {
-        let catalog = ToolCatalog::new(vec![
-            CatalogEntry {
-                name: "deferred_tool".to_string(),
-                mode: ToolCallMode::Deferred,
-                spec: None,
-            },
-            CatalogEntry {
-                name: "sync_tool".to_string(),
-                mode: ToolCallMode::Immediate,
-                spec: None,
-            },
-        ]);
-        let program = compile("flow main() { fanout [deferred_tool(sync_tool())] }");
+        let program = linked(File {
+            flows: vec![FlowDecl {
+                name: ident("main"),
+                params: vec![],
+                ret: None,
+                contract: None,
+                body: vec![
+                    Stmt::Expr(Expr::Node(Node::Fanout {
+                        source: Box::new(Expr::List(vec![call("sync_tool", vec![])])),
+                    })),
+                    Stmt::Expr(Expr::Node(Node::Fanout {
+                        source: Box::new(call("sync_tool", vec![])),
+                    })),
+                ],
+            }],
+            ..File::default()
+        });
 
         assert!(validate_tools(&program, &catalog).is_ok());
-    }
-
-    #[test]
-    fn static_fanout_allows_linked_flows_and_list_intrinsics() {
-        let program = compile("flow child() {} flow main() { fanout [child(), list.len([])] }");
-
-        assert!(validate_tools(&program, &ToolCatalog::default()).is_ok());
     }
 
     #[test]
