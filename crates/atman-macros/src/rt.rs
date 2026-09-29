@@ -134,6 +134,9 @@ fn expand_stateful_impl(attr: TokenStream, item: ItemImpl) -> syn::Result<TokenS
         {
             fn build(
                 self,
+                __atman_resources: #root::__private::Arc<
+                    #root::resource::ResourceRegistry,
+                >,
             ) -> ::core::result::Result<
                 #root::ToolRouter<__AtmanBindingP, __AtmanBindingE>,
                 #root::ToolRegisterError,
@@ -141,9 +144,6 @@ fn expand_stateful_impl(attr: TokenStream, item: ItemImpl) -> syn::Result<TokenS
                 let mut __atman_router =
                     #root::ToolRouter::<__AtmanBindingP, __AtmanBindingE>::new();
                 let __atman_host = #root::__private::Arc::new(self.__atman_host);
-                let __atman_resources = #root::__private::Arc::new(
-                    #root::resource::ResourceRegistry::new()?,
-                );
                 let __atman_context = #root::__private::Arc::new(
                     #root::binding::Context::with_resources(__atman_resources),
                 );

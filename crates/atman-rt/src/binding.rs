@@ -18,9 +18,15 @@ use crate::{
     tool_router::{ToolRegisterError, ToolRouter},
 };
 
-/// Builds one generated group of host tool bindings for a target router.
+/// Generated binding protocol used by [`ToolRouter::mount`].
+///
+/// `build` may construct handler and catalog entries and capture the supplied registry in those
+/// handlers. It must not dispatch or execute tools, insert or release resources, or otherwise mutate
+/// registry resources while the binding is being built. This keeps a failed mount free of resource
+/// side effects.
 pub trait Factory<P, E>: Sized {
-    fn build(self) -> Result<ToolRouter<P, E>, ToolRegisterError>;
+    fn build(self, resources: Arc<ResourceRegistry>)
+    -> Result<ToolRouter<P, E>, ToolRegisterError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

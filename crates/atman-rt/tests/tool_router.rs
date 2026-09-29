@@ -89,7 +89,10 @@ where
     P: Send + Sync + 'static,
     E: Send + Sync + 'static,
 {
-    fn build(self) -> Result<ToolRouter<P, E>, ToolRegisterError> {
+    fn build(
+        self,
+        _resources: Arc<atman_rt::resource::ResourceRegistry>,
+    ) -> Result<ToolRouter<P, E>, ToolRegisterError> {
         let mut router = ToolRouter::new();
         for name in self.names {
             let calls = Arc::clone(&self.calls);

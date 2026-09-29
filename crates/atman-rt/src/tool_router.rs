@@ -4,7 +4,7 @@ use alloc::{
     boxed::Box,
     collections::BTreeMap,
     string::{String, ToString},
-    sync::Arc,
+    sync::{Arc, Weak},
     vec::Vec,
 };
 use core::{fmt, future::Future};
@@ -14,7 +14,7 @@ use crate::{
     ToolCallMode, Value, ValueError, VmContext,
     binding::Factory,
     catalog::{CatalogEntry, ToolCatalog, ToolSpec},
-    resource::ResourceError,
+    resource::{ResourceError, ResourceRegistry},
 };
 
 /// Evaluated arguments passed to a host tool. Named arguments take precedence
@@ -93,6 +93,7 @@ pub enum ToolRegisterError {
     EmptyName,
     ReservedName(String),
     DuplicateName(String),
+    MountInProgress,
     ModeMismatch {
         name: String,
         expected: ToolCallMode,
@@ -107,6 +108,9 @@ impl fmt::Display for ToolRegisterError {
             Self::EmptyName => f.write_str("tool name cannot be empty"),
             Self::ReservedName(name) => write!(f, "tool name `{name}` is reserved"),
             Self::DuplicateName(name) => write!(f, "tool name `{name}` is already registered"),
+            Self::MountInProgress => {
+                f.write_str("another binding mount is already in progress for this router lineage")
+            }
             Self::ModeMismatch {
                 name,
                 expected,
@@ -145,15 +149,20 @@ struct RegisteredTool<P, E> {
 }
 
 /// A build-time registry of immediate and deferred host tool handlers.
-/// Clones share a snapshot; registering on either clone creates a new snapshot.
+/// Clones share a resource lineage and one handler snapshot. Registering on either clone creates a
+/// new handler snapshot.
 pub struct ToolRouter<P, E> {
     handlers: Arc<BTreeMap<String, Arc<RegisteredTool<P, E>>>>,
+    resource_lineage: Arc<async_lock::Mutex<Weak<ResourceRegistry>>>,
+    mounted_resources: Option<Arc<ResourceRegistry>>,
 }
 
 impl<P, E> Clone for ToolRouter<P, E> {
     fn clone(&self) -> Self {
         Self {
             handlers: Arc::clone(&self.handlers),
+            resource_lineage: Arc::clone(&self.resource_lineage),
+            mounted_resources: self.mounted_resources.clone(),
         }
     }
 }
@@ -168,6 +177,8 @@ impl<P, E> ToolRouter<P, E> {
     pub fn new() -> Self {
         Self {
             handlers: Arc::new(BTreeMap::new()),
+            resource_lineage: Arc::new(async_lock::Mutex::new(Weak::new())),
+            mounted_resources: None,
         }
     }
 
@@ -189,12 +200,35 @@ impl<P, E> ToolRouter<P, E> {
         )
     }
 
-    /// Atomically adds all tools built by one generated binding factory.
+    /// Atomically installs all handler and catalog entries built by one generated binding factory.
+    /// The factory's shared resource registry joins this router lineage only after installation
+    /// succeeds.
     pub fn mount<F>(&mut self, factory: F) -> Result<(), ToolRegisterError>
     where
         F: Factory<P, E>,
     {
-        let mounted = factory.build()?;
+        if let Some(resources) = &self.mounted_resources {
+            let mounted = factory.build(Arc::clone(resources))?;
+            return self.commit_mount(mounted);
+        }
+
+        let lineage = Arc::clone(&self.resource_lineage);
+        let mut registered = lineage
+            .try_lock()
+            .ok_or(ToolRegisterError::MountInProgress)?;
+        let resources = if let Some(resources) = registered.upgrade() {
+            resources
+        } else {
+            Arc::new(ResourceRegistry::new()?)
+        };
+        let mounted = factory.build(Arc::clone(&resources))?;
+        self.commit_mount(mounted)?;
+        *registered = Arc::downgrade(&resources);
+        self.mounted_resources = Some(resources);
+        Ok(())
+    }
+
+    fn commit_mount(&mut self, mounted: Self) -> Result<(), ToolRegisterError> {
         if let Some(name) = mounted
             .handlers
             .keys()
