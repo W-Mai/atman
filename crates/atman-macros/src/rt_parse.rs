@@ -203,7 +203,7 @@ fn parse_module_tool(function: &ItemFn, attr: &Attribute) -> syn::Result<ModuleT
 
     Ok(ModuleTool {
         ident: function.sig.ident.clone(),
-        name: parse_tool_name(&function.sig.ident, attr)?,
+        name: parse_tool_name(&function.sig.ident, attr, DottedNameStart::Root)?,
         params,
         result,
         is_async: function.sig.asyncness.is_some(),
@@ -305,7 +305,12 @@ fn parse_options(attr: TokenStream, item: &ItemImpl) -> syn::Result<(String, Pat
                         "namespace must be a string",
                     ));
                 };
-                validate_dotted_name(literal.value().as_str(), literal, "namespace")?;
+                validate_dotted_name(
+                    literal.value().as_str(),
+                    literal,
+                    "namespace",
+                    DottedNameStart::Root,
+                )?;
                 namespace = Some(literal.value());
             }
             Meta::NameValue(value) if value.path.is_ident("crate_path") => {
@@ -368,7 +373,7 @@ fn concrete_type_ident(ty: &Type) -> syn::Result<&Ident> {
 }
 
 fn parse_tool(method: &ImplItemFn, attr: &Attribute) -> syn::Result<ImplTool> {
-    let leaf_name = parse_tool_name(&method.sig.ident, attr)?;
+    let leaf_name = parse_tool_name(&method.sig.ident, attr, DottedNameStart::Member)?;
     if leaf_name == "release" {
         return Err(syn::Error::new_spanned(
             attr,
@@ -495,7 +500,7 @@ fn validate_receiver(input: &FnArg) -> syn::Result<()> {
     Ok(())
 }
 
-fn parse_tool_name(ident: &Ident, attr: &Attribute) -> syn::Result<String> {
+fn parse_tool_name(ident: &Ident, attr: &Attribute, start: DottedNameStart) -> syn::Result<String> {
     let options = match &attr.meta {
         Meta::Path(_) => Punctuated::new(),
         Meta::List(_) => attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?,
@@ -525,7 +530,7 @@ fn parse_tool_name(ident: &Ident, attr: &Attribute) -> syn::Result<String> {
                         "tool name must be a string",
                     ));
                 };
-                validate_dotted_name(literal.value().as_str(), literal, "tool name")?;
+                validate_dotted_name(literal.value().as_str(), literal, "tool name", start)?;
                 name = Some(literal.value());
             }
             other => {
@@ -536,7 +541,12 @@ fn parse_tool_name(ident: &Ident, attr: &Attribute) -> syn::Result<String> {
             }
         }
     }
-    Ok(name.unwrap_or_else(|| rust_name(ident)))
+    if let Some(name) = name {
+        return Ok(name);
+    }
+    let name = rust_name(ident);
+    validate_dotted_name(&name, ident, "tool name", start)?;
+    Ok(name)
 }
 
 fn parse_return(output: &ReturnType) -> syn::Result<ImplReturn> {
@@ -614,22 +624,60 @@ fn docs(attributes: &[Attribute]) -> String {
         .join("\n")
 }
 
-fn validate_dotted_name(value: &str, span: impl quote::ToTokens, kind: &str) -> syn::Result<()> {
-    if value.is_empty()
-        || value.starts_with('.')
-        || value.ends_with('.')
-        || value.split('.').any(|segment| {
-            segment.is_empty()
-                || segment.starts_with("r#")
-                || Ident::parse_any.parse_str(segment).is_err()
-        })
+#[derive(Clone, Copy)]
+enum DottedNameStart {
+    Root,
+    Member,
+}
+
+fn validate_dotted_name(
+    value: &str,
+    span: impl quote::ToTokens,
+    kind: &str,
+    start: DottedNameStart,
+) -> syn::Result<()> {
+    let mut segments = value.split('.');
+    let first = segments.next().unwrap_or_default();
+    if first.is_empty()
+        || first.starts_with("r#")
+        || match start {
+            DottedNameStart::Root => {
+                syn::parse_str::<Ident>(first).is_err() || is_reserved_atman_tool_root(first)
+            }
+            DottedNameStart::Member => Ident::parse_any.parse_str(first).is_err(),
+        }
     {
+        return Err(syn::Error::new_spanned(
+            span,
+            format!("{kind} must start with an identifier accepted as an Atman tool call path"),
+        ));
+    }
+    if segments.any(|segment| {
+        segment.is_empty()
+            || segment.starts_with("r#")
+            || Ident::parse_any.parse_str(segment).is_err()
+    }) {
         return Err(syn::Error::new_spanned(
             span,
             format!("{kind} must be a dot-separated identifier path"),
         ));
     }
     Ok(())
+}
+
+fn is_reserved_atman_tool_root(value: &str) -> bool {
+    matches!(
+        value,
+        "when"
+            | "watch"
+            | "fanout"
+            | "user_confirm"
+            | "user_msg"
+            | "assistant_msg"
+            | "system_msg"
+            | "tool_result"
+            | "fix_until_test_passes"
+    )
 }
 
 fn peel_type(mut ty: &Type) -> &Type {
@@ -888,5 +936,57 @@ mod tests {
 
         let macro_type: Type = parse_quote!(concrete_type!(Self, impl));
         assert!(validate_generated_binding_type(&macro_type, "tool parameter").is_ok());
+    }
+
+    #[test]
+    fn generated_tool_paths_reject_keyword_roots_and_accept_keyword_members() {
+        for reserved in ["loop", "when", "fanout"] {
+            let keyword_namespace: ItemImpl = parse_quote! {
+                impl Host {
+                    #[tool]
+                    fn ping(&self) {}
+                }
+            };
+            let error = match parse_impl(quote!(namespace = #reserved), keyword_namespace) {
+                Ok(_) => panic!("reserved namespace root must be rejected"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("Atman tool call path"));
+        }
+
+        let expression_name: ItemImpl = parse_quote! {
+            impl Host {
+                #[tool]
+                fn ping(&self) {}
+            }
+        };
+        assert_eq!(
+            parse_impl(quote!(namespace = "flow"), expression_name)
+                .unwrap()
+                .namespace,
+            "flow"
+        );
+
+        let keyword_member: ItemImpl = parse_quote! {
+            impl Host {
+                #[tool(name = "fanout.loop")]
+                fn ping(&self) {}
+            }
+        };
+        let parsed = parse_impl(quote!(namespace = "gfx.loop"), keyword_member).unwrap();
+        assert_eq!(parsed.namespace, "gfx.loop");
+        assert_eq!(parsed.tools[0].leaf_name, "fanout.loop");
+
+        let keyword_module_tool: ItemMod = parse_quote! {
+            mod demo {
+                #[tool]
+                fn r#fanout() {}
+            }
+        };
+        let error = match parse_module(TokenStream::new(), keyword_module_tool) {
+            Ok(_) => panic!("module tool keyword root must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("Atman tool call path"));
     }
 }

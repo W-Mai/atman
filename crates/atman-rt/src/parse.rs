@@ -1223,4 +1223,25 @@ mod tests {
         let reparsed = parse_file(&printed).unwrap();
         assert_eq!(format!("{file:#?}"), format!("{reparsed:#?}"));
     }
+
+    #[test]
+    fn tool_paths_reject_keyword_roots_and_accept_keyword_members() {
+        assert!(parse_file("flow main() { loop.host() }").is_err());
+        assert!(parse_file("flow main() { when.host() }").is_err());
+        assert!(parse_file("flow main() { fanout.host() }").is_err());
+
+        let file = parse_file("flow main() { host.loop() flow.host() }").unwrap();
+        assert!(matches!(
+            &file.flows[0].body[0],
+            Stmt::Expr(Expr::Node(Node::ToolCall { path, .. }))
+                if path.iter().map(|part| part.name.as_str()).collect::<Vec<_>>()
+                    == ["host", "loop"]
+        ));
+        assert!(matches!(
+            &file.flows[0].body[1],
+            Stmt::Expr(Expr::Node(Node::ToolCall { path, .. }))
+                if path.iter().map(|part| part.name.as_str()).collect::<Vec<_>>()
+                    == ["flow", "host"]
+        ));
+    }
 }
