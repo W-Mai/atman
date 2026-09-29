@@ -1,4 +1,4 @@
-use proc_macro2::TokenStream;
+use proc_macro2::{TokenStream, TokenTree};
 use quote::{format_ident, quote};
 use syn::{
     Attribute, Expr, FnArg, GenericArgument, Ident, ImplItem, ImplItemFn, Item, ItemFn, ItemImpl,
@@ -89,6 +89,7 @@ pub(crate) fn parse_module(attr: TokenStream, mut item: ItemMod) -> syn::Result<
         else {
             continue;
         };
+        reject_conditional_tool(&function.attrs, &function.sig.ident, "function", "module")?;
         let tool_attr = function.attrs.remove(tool_attr_index);
         if function
             .attrs
@@ -177,12 +178,14 @@ fn parse_module_tool(function: &ItemFn, attr: &Attribute) -> syn::Result<ModuleT
                 "module tool parameters must be owned values",
             ));
         }
+        validate_generated_binding_type(&input.ty, "tool parameter")?;
         params.push(ModuleParam {
             ident: pattern.ident.clone(),
             ty: input.ty.as_ref().clone(),
         });
     }
 
+    validate_return_type(&function.sig.output, "tool return type")?;
     let result = parse_return(&function.sig.output)?;
     if type_contains_reference(&result.value) {
         return Err(syn::Error::new_spanned(
@@ -249,6 +252,7 @@ pub(crate) fn parse_impl(attr: TokenStream, mut item: ItemImpl) -> syn::Result<P
         else {
             continue;
         };
+        reject_conditional_tool(&method.attrs, &method.sig.ident, "method", "impl")?;
         let tool_attr = method.attrs.remove(tool_attr_index);
         if method.attrs.iter().any(|attr| attr.path().is_ident("tool")) {
             return Err(syn::Error::new_spanned(
@@ -405,6 +409,7 @@ fn parse_tool(method: &ImplItemFn, attr: &Attribute) -> syn::Result<ImplTool> {
             ));
         }
         let name = rust_name(&pattern.ident);
+        validate_generated_binding_type(&input.ty, "tool parameter")?;
         let kind = match peel_type(&input.ty) {
             Type::Reference(reference) => {
                 if reference.mutability.is_some() {
@@ -438,6 +443,7 @@ fn parse_tool(method: &ImplItemFn, attr: &Attribute) -> syn::Result<ImplTool> {
         params.push(ImplParam { name, kind });
     }
 
+    validate_return_type(&method.sig.output, "tool return type")?;
     let result = parse_return(&method.sig.output)?;
     if type_contains_reference(&result.value) {
         return Err(syn::Error::new_spanned(
@@ -630,6 +636,65 @@ fn type_contains_reference(ty: &Type) -> bool {
     quote!(#ty).to_string().contains('&')
 }
 
+fn reject_conditional_tool(
+    attributes: &[Attribute],
+    ident: &Ident,
+    kind: &str,
+    container: &str,
+) -> syn::Result<()> {
+    if attributes
+        .iter()
+        .any(|attribute| attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr"))
+    {
+        return Err(syn::Error::new_spanned(
+            ident,
+            format!(
+                "conditional #[tool] {kind}s are not supported; place the condition on the containing #[tools] {container}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_return_type(output: &ReturnType, kind: &str) -> syn::Result<()> {
+    if let ReturnType::Type(_, ty) = output {
+        validate_generated_binding_type(ty, kind)?;
+    }
+    Ok(())
+}
+
+fn validate_generated_binding_type(ty: &Type, kind: &str) -> syn::Result<()> {
+    if type_contains_token_ident(ty, "Self") {
+        return Err(syn::Error::new_spanned(
+            ty,
+            format!(
+                "{kind} cannot contain `Self`; use the concrete type name in generated tool bindings"
+            ),
+        ));
+    }
+    if type_contains_token_ident(ty, "impl") {
+        return Err(syn::Error::new_spanned(
+            ty,
+            format!(
+                "{kind} cannot contain `impl Trait`; use a concrete type in generated tool bindings"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn type_contains_token_ident(ty: &Type, needle: &str) -> bool {
+    fn stream_contains_ident(tokens: TokenStream, needle: &str) -> bool {
+        tokens.into_iter().any(|token| match token {
+            TokenTree::Ident(ident) => ident == needle,
+            TokenTree::Group(group) => stream_contains_ident(group.stream(), needle),
+            TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+        })
+    }
+
+    stream_contains_ident(quote!(#ty), needle)
+}
+
 fn rust_name(ident: &Ident) -> String {
     let name = ident.to_string();
     name.strip_prefix("r#").unwrap_or(&name).to_owned()
@@ -649,5 +714,79 @@ mod tests {
 
         let qualified: Type = parse_quote!(ui::Host);
         assert!(concrete_type_ident(&qualified).is_err());
+    }
+
+    #[test]
+    fn generated_bindings_reject_conditional_tools() {
+        let module: ItemMod = parse_quote! {
+            mod demo {
+                #[cfg(feature = "demo")]
+                #[tool]
+                fn ping() {}
+            }
+        };
+        let error = match parse_module(TokenStream::new(), module) {
+            Ok(_) => panic!("conditional module tool must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("conditional #[tool] functions"));
+
+        let item: ItemImpl = parse_quote! {
+            impl Host {
+                #[cfg_attr(feature = "demo", allow(dead_code))]
+                #[tool]
+                fn ping(&self) {}
+            }
+        };
+        let error = match parse_impl(quote!(namespace = "demo"), item) {
+            Ok(_) => panic!("conditional impl tool must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("conditional #[tool] methods"));
+    }
+
+    #[test]
+    fn generated_bindings_reject_self_and_impl_trait_types() {
+        let self_type: ItemImpl = parse_quote! {
+            impl Host {
+                #[tool]
+                fn echo(&self, value: Self) -> Self {
+                    value
+                }
+            }
+        };
+        let error = match parse_impl(quote!(namespace = "demo"), self_type) {
+            Ok(_) => panic!("Self in a generated signature must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("cannot contain `Self`"));
+
+        let opaque_input: ItemMod = parse_quote! {
+            mod demo {
+                #[tool]
+                fn display(value: impl core::fmt::Display) -> String {
+                    value.to_string()
+                }
+            }
+        };
+        let error = match parse_module(TokenStream::new(), opaque_input) {
+            Ok(_) => panic!("impl Trait input must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("cannot contain `impl Trait`"));
+
+        let opaque_output: ItemImpl = parse_quote! {
+            impl Host {
+                #[tool]
+                fn display(&self) -> impl core::fmt::Display {
+                    "value"
+                }
+            }
+        };
+        let error = match parse_impl(quote!(namespace = "demo"), opaque_output) {
+            Ok(_) => panic!("impl Trait output must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("cannot contain `impl Trait`"));
     }
 }
