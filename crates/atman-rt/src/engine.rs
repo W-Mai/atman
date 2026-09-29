@@ -157,6 +157,14 @@ pub trait LoopHost: Send {
         node_id: &str,
         parent_node_id: Option<&str>,
     ) -> Self::IterationScope;
+    fn preflight_iteration(
+        &mut self,
+        _iteration: u64,
+        _node_id: &str,
+        _parent_node_id: Option<&str>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn execute_iteration<'a>(
         &'a mut self,
         node_id: &'a str,
@@ -174,6 +182,10 @@ pub async fn run_loop<H: LoopHost>(
             Some(parent) => format!("{parent}.iter[{iteration}]"),
             None => format!("iter[{iteration}]"),
         };
+        let preflight = host.preflight_iteration(iteration, &node_id, parent_node_id);
+        if let Err(error) = preflight {
+            return LoopExit::Interrupted(StatementOutcome::Err(error));
+        }
         let scope = ScopeExit::new(host.iteration_start(iteration, &node_id, parent_node_id));
         let outcome = host.execute_iteration(&node_id).await;
         let preview = match &outcome {
@@ -246,6 +258,14 @@ pub trait StatementHost: Send + Sync {
         _node_id: &str,
         _parent_node_id: Option<&str>,
     ) -> Self::IterationScope;
+    fn preflight_iteration(
+        &mut self,
+        _iteration: u64,
+        _node_id: &str,
+        _parent_node_id: Option<&str>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn preview(
         &self,
         value: &Value<Self::Payload, Self::Error>,
@@ -495,6 +515,17 @@ impl<H: StatementHost> LoopHost for EngineLoopHost<'_, '_, H> {
         self.engine
             .host
             .iteration_start(iteration, node_id, parent_node_id)
+    }
+
+    fn preflight_iteration(
+        &mut self,
+        iteration: u64,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Result<(), Self::Error> {
+        self.engine
+            .host
+            .preflight_iteration(iteration, node_id, parent_node_id)
     }
 
     fn execute_iteration<'a>(

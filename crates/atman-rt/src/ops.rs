@@ -47,7 +47,7 @@ pub trait HostValueOps: HostPayload {
 
 impl HostValueOps for () {}
 
-/// Maps portable expression errors into an embedding host's error type.
+/// Maps portable evaluation and execution errors into an embedding host's error type.
 pub trait ValueError {
     fn type_mismatch(expected: &str, actual: String) -> Self;
     fn missing_argument(name: &str) -> Self;
@@ -75,6 +75,15 @@ pub trait ValueError {
         Self::type_mismatch(
             "integer result within i64 range",
             format!("{} overflow", operation.as_str()),
+        )
+    }
+    fn operation_limit_exceeded(max_operations: usize) -> Self
+    where
+        Self: Sized,
+    {
+        Self::type_mismatch(
+            "execution within the configured operation limit",
+            format!("operation limit of {max_operations} exceeded"),
         )
     }
     fn missing_positional_argument(name: &str, index: usize) -> Self;

@@ -12,6 +12,22 @@ Flow parameter and return annotations are checked whenever a flow body is driven
 
 Integer `+`, `-`, `*`, `/`, `%`, and unary `-` use checked `i64` arithmetic. Overflow returns `ValueError::integer_overflow`; division and remainder by zero keep their dedicated errors. Debug and release builds therefore use the same integer semantics.
 
+Operation metering is explicit. `Vm::run_with_options`, `Vm::run_flow_with_options`, and `Vm::run_lifecycle_with_options` return `VmExecution<T>` with the executed operation count. One operation is one entered statement, expression AST node, or loop iteration. Root flows, child flows, and fanout branches in the same invocation share the counter; all matching bodies in one lifecycle invocation also share its counter. Time spent waiting for host futures does not consume operations. Exceeding an explicit limit maps through `ValueError::operation_limit_exceeded`, so a host can preserve its own resource-exhaustion error type. The ordinary `run` methods do not create a counter, and the crate does not set a maximum operation count, yield interval, or deadline.
+
+Use `VmRunOptions::measure()` on representative workloads before selecting a host limit. Record normal and worst expected flows, then pass the chosen non-zero limit through `VmRunOptions::limited(max)`. Keep scheduling yields and wall-clock deadlines as separate host policies; an operation count measures deterministic language progress rather than elapsed time.
+
+```rust
+let measured = vm
+    .run_with_options("demo", args.clone(), delegates.clone(), atman_rt::VmRunOptions::measure())
+    .await;
+println!("operations: {}", measured.operations());
+
+let max = core::num::NonZeroUsize::new(host_selected_limit).expect("positive host limit");
+let bounded = vm
+    .run_with_options("demo", args, delegates, atman_rt::VmRunOptions::limited(max))
+    .await;
+```
+
 `#[atman_rt::tools]` generates a `ToolRouter` from typed Rust functions. A synchronous Rust function runs when its `.at` call is evaluated; an `async fn` creates a cold tool future that runs only on `.await` or in `fanout`. Parameter names and types come from the function signature, so the host does not need to decode `ToolArgs`:
 
 ```rust

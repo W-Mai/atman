@@ -9,6 +9,7 @@ use alloc::{
 };
 use core::{
     fmt,
+    num::NonZeroUsize,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -33,6 +34,61 @@ use crate::{
 pub enum FlowDriveMode {
     Inline,
     Parallel,
+}
+
+/// Per-invocation execution controls for an explicitly metered VM run.
+///
+/// [`VmRunOptions::measure`] records operations without a limit;
+/// [`VmRunOptions::limited`] requires the host to choose an explicit limit.
+/// Regular [`Vm::run`], [`Vm::run_flow`], and [`Vm::run_lifecycle`] calls do
+/// not enable metering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmRunOptions {
+    max_operations: Option<NonZeroUsize>,
+}
+
+impl VmRunOptions {
+    /// Measures operations without applying a limit.
+    pub const fn measure() -> Self {
+        Self {
+            max_operations: None,
+        }
+    }
+
+    /// Measures operations and stops before operation `max_operations + 1`.
+    pub const fn limited(max_operations: NonZeroUsize) -> Self {
+        Self {
+            max_operations: Some(max_operations),
+        }
+    }
+
+    pub const fn max_operations(&self) -> Option<NonZeroUsize> {
+        self.max_operations
+    }
+}
+
+/// Output and operation count from an explicitly metered VM run.
+pub struct VmExecution<T> {
+    output: T,
+    operations: usize,
+}
+
+impl<T> VmExecution<T> {
+    pub fn output(&self) -> &T {
+        &self.output
+    }
+
+    pub const fn operations(&self) -> usize {
+        self.operations
+    }
+
+    pub fn into_output(self) -> T {
+        self.output
+    }
+
+    pub fn into_parts(self) -> (T, usize) {
+        (self.output, self.operations)
+    }
 }
 
 /// Information about a flow call that has already been resolved by the VM.
@@ -83,6 +139,44 @@ impl fmt::Display for VmCallError {
 }
 
 impl core::error::Error for VmCallError {}
+
+#[derive(Clone)]
+struct OperationCounter {
+    operations: Arc<AtomicUsize>,
+    max_operations: Option<NonZeroUsize>,
+}
+
+impl OperationCounter {
+    fn new(options: VmRunOptions) -> Self {
+        Self {
+            operations: Arc::new(AtomicUsize::new(0)),
+            max_operations: options.max_operations,
+        }
+    }
+
+    fn operations(&self) -> usize {
+        self.operations.load(Ordering::Relaxed)
+    }
+
+    fn charge(&self) -> Result<(), usize> {
+        loop {
+            let current = self.operations.load(Ordering::Relaxed);
+            if let Some(maximum) = self.max_operations {
+                if current >= maximum.get() {
+                    return Err(maximum.get());
+                }
+            }
+            let next = current.saturating_add(1);
+            if self
+                .operations
+                .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+}
 
 /// A product host supplies effects, execution observations, and child-flow context.
 /// Flow resolution, argument binding, and body execution are owned by the VM.
@@ -1074,7 +1168,31 @@ impl Vm {
                 delegate.call_error(VmCallError::MissingEntry(name.into())),
             );
         };
-        self.run_flow(id, args, delegate).await
+        self.run_flow_with_counter(id, args, delegate, None).await
+    }
+
+    /// Runs one entry flow with explicit operation metering and an optional limit.
+    pub async fn run_with_options<H: VmDelegate>(
+        &self,
+        name: &str,
+        args: FlowArgs<H::Payload, H::Error>,
+        delegate: H,
+        options: VmRunOptions,
+    ) -> VmExecution<FlowOutcome<H::Payload, H::Error>> {
+        let counter = OperationCounter::new(options);
+        let output = match self.program.entry_flow(name) {
+            Some(id) => {
+                self.run_flow_with_counter(id, args, delegate, Some(counter.clone()))
+                    .await
+            }
+            None => {
+                StatementOutcome::Err(delegate.call_error(VmCallError::MissingEntry(name.into())))
+            }
+        };
+        VmExecution {
+            output,
+            operations: counter.operations(),
+        }
     }
 
     /// Runs one resolved flow through the same high-level delegate contract.
@@ -1083,6 +1201,34 @@ impl Vm {
         id: FlowId,
         args: FlowArgs<H::Payload, H::Error>,
         delegate: H,
+    ) -> FlowOutcome<H::Payload, H::Error> {
+        self.run_flow_with_counter(id, args, delegate, None).await
+    }
+
+    /// Runs one resolved flow with explicit operation metering and an optional limit.
+    pub async fn run_flow_with_options<H: VmDelegate>(
+        &self,
+        id: FlowId,
+        args: FlowArgs<H::Payload, H::Error>,
+        delegate: H,
+        options: VmRunOptions,
+    ) -> VmExecution<FlowOutcome<H::Payload, H::Error>> {
+        let counter = OperationCounter::new(options);
+        let output = self
+            .run_flow_with_counter(id, args, delegate, Some(counter.clone()))
+            .await;
+        VmExecution {
+            output,
+            operations: counter.operations(),
+        }
+    }
+
+    async fn run_flow_with_counter<H: VmDelegate>(
+        &self,
+        id: FlowId,
+        args: FlowArgs<H::Payload, H::Error>,
+        delegate: H,
+        operation_counter: Option<OperationCounter>,
     ) -> FlowOutcome<H::Payload, H::Error> {
         let Some(source) = self.program.module(id.module) else {
             return StatementOutcome::Err(delegate.call_error(VmCallError::MissingFlow(id.name)));
@@ -1113,9 +1259,13 @@ impl Vm {
             Some(error) => StatementOutcome::Err(error),
             None => {
                 let run_adapter = adapter.clone();
+                let run_counter = operation_counter.clone();
                 match crate::race_cancel(
                     async {
-                        Ok::<_, H::Error>(self.run_flow_internal(id, args, run_adapter).await)
+                        Ok::<_, H::Error>(
+                            self.run_flow_internal(id, args, run_adapter, run_counter)
+                                .await,
+                        )
                     },
                     adapter.cancelled(),
                 )
@@ -1138,6 +1288,7 @@ impl Vm {
         id: FlowId,
         args: FlowArgs<H::Payload, H::Error>,
         host: H,
+        operation_counter: Option<OperationCounter>,
     ) -> FlowOutcome<H::Payload, H::Error> {
         if args.iter().any(|(_, value)| value.contains_pending_call()) {
             return StatementOutcome::Err(host.call_error(VmCallError::FutureBoundary));
@@ -1152,6 +1303,7 @@ impl Vm {
             depth: 0,
             owner: Arc::new(()),
             parallel_active: Arc::new(AtomicUsize::new(0)),
+            operation_counter,
         });
         engine.run_flow(flow, args).await
     }
@@ -1161,6 +1313,32 @@ impl Vm {
         &self,
         event: LifecycleEvent,
         delegate: H,
+    ) -> Vec<FlowOutcome<H::Payload, H::Error>> {
+        self.run_lifecycle_with_counter(event, delegate, None).await
+    }
+
+    /// Executes matching lifecycle bodies with one shared operation meter.
+    pub async fn run_lifecycle_with_options<H: VmDelegate>(
+        &self,
+        event: LifecycleEvent,
+        delegate: H,
+        options: VmRunOptions,
+    ) -> VmExecution<Vec<FlowOutcome<H::Payload, H::Error>>> {
+        let counter = OperationCounter::new(options);
+        let output = self
+            .run_lifecycle_with_counter(event, delegate, Some(counter.clone()))
+            .await;
+        VmExecution {
+            output,
+            operations: counter.operations(),
+        }
+    }
+
+    async fn run_lifecycle_with_counter<H: VmDelegate>(
+        &self,
+        event: LifecycleEvent,
+        delegate: H,
+        operation_counter: Option<OperationCounter>,
     ) -> Vec<FlowOutcome<H::Payload, H::Error>> {
         let module = self.program.entry_module();
         let source_id = self
@@ -1205,6 +1383,7 @@ impl Vm {
                 depth: 0,
                 owner: Arc::new(()),
                 parallel_active: Arc::new(AtomicUsize::new(0)),
+                operation_counter: operation_counter.clone(),
             });
             let outcome = match adapter.cancellation_error() {
                 Some(error) => StatementOutcome::Err(error),
@@ -1237,6 +1416,7 @@ struct VmStatementHost<H: VmHost> {
     depth: usize,
     owner: Arc<()>,
     parallel_active: Arc<AtomicUsize>,
+    operation_counter: Option<OperationCounter>,
 }
 
 impl<H: VmHost> StatementHost for VmStatementHost<H> {
@@ -1252,6 +1432,11 @@ impl<H: VmHost> StatementHost for VmStatementHost<H> {
         node_id: &str,
         parent_node_id: Option<&str>,
     ) -> Preflight<Self::Error> {
+        if let Some(counter) = &self.operation_counter {
+            if let Err(error) = counter.charge() {
+                return Preflight::Stop(H::Error::operation_limit_exceeded(error));
+            }
+        }
         self.host.preflight(stmt, node_id, parent_node_id)
     }
 
@@ -1285,6 +1470,7 @@ impl<H: VmHost> StatementHost for VmStatementHost<H> {
             await_mode: FlowDriveMode::Inline,
             branch_index: None,
             effect_context,
+            operation_counter: self.operation_counter.clone(),
         }
     }
 
@@ -1300,6 +1486,21 @@ impl<H: VmHost> StatementHost for VmStatementHost<H> {
     ) -> Self::IterationScope {
         self.host
             .iteration_start(iteration, node_id, parent_node_id)
+    }
+
+    fn preflight_iteration(
+        &mut self,
+        iteration: u64,
+        node_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> Result<(), Self::Error> {
+        if let Some(counter) = &self.operation_counter {
+            counter
+                .charge()
+                .map_err(H::Error::operation_limit_exceeded)?;
+        }
+        self.host
+            .preflight_iteration(iteration, node_id, parent_node_id)
     }
 
     fn preview(
@@ -1324,6 +1525,7 @@ struct VmExpressionHost<H: VmHost> {
     await_mode: FlowDriveMode,
     branch_index: Option<usize>,
     effect_context: VmContext,
+    operation_counter: Option<OperationCounter>,
 }
 
 impl<H: VmHost> Clone for VmExpressionHost<H> {
@@ -1340,6 +1542,7 @@ impl<H: VmHost> Clone for VmExpressionHost<H> {
             await_mode: self.await_mode,
             branch_index: self.branch_index,
             effect_context: self.effect_context.clone(),
+            operation_counter: self.operation_counter.clone(),
         }
     }
 }
@@ -1461,6 +1664,7 @@ impl<H: VmHost> VmExpressionHost<H> {
                 depth: self.depth + 1,
                 owner: Arc::new(()),
                 parallel_active: Arc::clone(&self.parallel_active),
+                operation_counter: self.operation_counter.clone(),
             });
             let outcome = match child_cancellation.cancellation_error() {
                 Some(error) => StatementOutcome::Err(error),
@@ -1505,6 +1709,14 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
 
     fn cancellation_error(&self) -> Option<Self::Error> {
         self.effect_host.cancellation_error()
+    }
+
+    fn preflight_expression(&self, expr: &crate::ast::Expr) -> Result<(), Self::Error> {
+        match &self.operation_counter {
+            Some(counter) => counter.charge().map_err(H::Error::operation_limit_exceeded),
+            None => Ok(()),
+        }?;
+        self.effect_host.preflight_expression(expr)
     }
 
     fn await_drive_mode(&self) -> FlowDriveMode {
@@ -1588,6 +1800,7 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
             await_mode: FlowDriveMode::Parallel,
             branch_index: Some(index),
             effect_context: self.effect_context.for_branch(index),
+            operation_counter: self.operation_counter.clone(),
         }
     }
 

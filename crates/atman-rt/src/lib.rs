@@ -71,5 +71,5 @@ pub use status::{FlowTermination, classify_outcome, classify_result};
 pub use tool_router::{ToolArgs, ToolRegisterError, ToolRouter};
 pub use validate::{LanguageValidationError, LanguageValidationReport, validate_flow};
 pub use value::{FlowFuture, HostPayload, NamedValues, ToolFuture, Value};
-pub use vm::{FlowCall, FlowDriveMode, Vm, VmCallError, VmDelegate};
+pub use vm::{FlowCall, FlowDriveMode, Vm, VmCallError, VmDelegate, VmExecution, VmRunOptions};
 pub use watch::{WatchObservation, WatchRules, WatchState, WatchWarning};

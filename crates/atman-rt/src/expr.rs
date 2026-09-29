@@ -109,6 +109,9 @@ pub trait ExpressionHost: Sync + Clone + Send {
     fn cancellation_error(&self) -> Option<Self::Error> {
         None
     }
+    fn preflight_expression(&self, _expr: &Expr) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn await_drive_mode(&self) -> FlowDriveMode {
         FlowDriveMode::Inline
     }
@@ -240,6 +243,9 @@ pub fn eval_expr_with_watch<'a, H: ExpressionHost>(
     watch_rules: Option<&'a WatchRules>,
 ) -> HostFuture<'a, Value<H::Payload, H::Error>> {
     Box::pin(async move {
+        if let Err(error) = checkpoint_expression(expr, host) {
+            return Value::Err(error);
+        }
         match expr {
             Expr::Literal(literal) => eval_literal(literal),
             Expr::Ident(id) => match env.lookup(&id.name) {
@@ -455,6 +461,10 @@ pub fn eval_expr_with_watch<'a, H: ExpressionHost>(
     })
 }
 
+fn checkpoint_expression<H: ExpressionHost>(expr: &Expr, host: &H) -> Result<(), H::Error> {
+    host.preflight_expression(expr)
+}
+
 pub async fn eval_args<'a, H: ExpressionHost>(
     args: &'a [Arg],
     env: &'a Env<Value<H::Payload, H::Error>>,
@@ -535,6 +545,14 @@ async fn eval_message_args<'a, H: ExpressionHost>(
                 if let Expr::List(items) = value
                     && items.iter().all(|item| matches!(item, Expr::FileRef(_)))
                 {
+                    if let Err(error) = checkpoint_expression(value, host) {
+                        return Err(Value::Err(error));
+                    }
+                    for item in items {
+                        if let Err(error) = checkpoint_expression(item, host) {
+                            return Err(Value::Err(error));
+                        }
+                    }
                     let paths = items
                         .iter()
                         .map(|item| match item {
@@ -570,6 +588,9 @@ pub async fn eval_fanout<'a, H: ExpressionHost>(
     host: &'a H,
 ) -> Value<H::Payload, H::Error> {
     if let Expr::List(items) = source {
+        if let Err(error) = checkpoint_expression(source, host) {
+            return Value::Err(error);
+        }
         let mut scope = FanoutBranchScope::start(host, items.len());
         let states = scope.states();
         let branches = items.iter().enumerate().map(|(index, expr)| {

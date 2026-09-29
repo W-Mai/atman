@@ -1,5 +1,6 @@
 use std::{
     future::{Future, poll_fn},
+    num::NonZeroUsize,
     pin::pin,
     sync::{
         Arc, Mutex,
@@ -10,7 +11,7 @@ use std::{
 
 use atman_rt::{
     EvalError, ExpressionEffect, FlowCall, FlowDriveMode, FlowOutcome, HostFuture, Source,
-    SourceResolver, StatementOutcome, Value, Vm, VmCallError, VmContext, VmDelegate,
+    SourceResolver, StatementOutcome, Value, Vm, VmCallError, VmContext, VmDelegate, VmRunOptions,
     ast::LifecycleEvent,
 };
 
@@ -180,6 +181,7 @@ impl VmDelegate for TestHost {
                 ExpressionEffect::ToolCall { name, .. } if name == "pending_forever" => {
                     poll_fn(|_| Poll::<TestValue>::Pending).await
                 }
+                ExpressionEffect::Message { .. } => Value::Unit,
                 _ => panic!("unexpected external effect"),
             }
         })
@@ -200,6 +202,204 @@ impl VmDelegate for TestHost {
             _ => atman_rt::VmStatus::Err,
         }
     }
+}
+
+#[test]
+fn metered_run_reports_executed_language_operations() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow main() -> int { value = 1 + 2 return value }",
+        ),
+        &TestSources,
+    )
+    .expect("compile source");
+
+    let execution = run_ready(vm.run_with_options(
+        "main",
+        vec![],
+        TestHost::default(),
+        VmRunOptions::measure(),
+    ));
+
+    assert!(matches!(
+        execution.output(),
+        StatementOutcome::Return(Value::Int(3))
+    ));
+    assert_eq!(execution.operations(), 6);
+}
+
+#[test]
+fn explicit_operation_limit_stops_before_the_next_expression() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow main() -> int { value = 1 + 2 return value }",
+        ),
+        &TestSources,
+    )
+    .expect("compile source");
+
+    let execution = run_ready(vm.run_with_options(
+        "main",
+        vec![],
+        TestHost::default(),
+        VmRunOptions::limited(NonZeroUsize::new(5).unwrap()),
+    ));
+
+    assert!(matches!(
+        execution.output(),
+        StatementOutcome::Err(EvalError::TypeMismatch { actual, .. })
+            if actual == "operation limit of 5 exceeded"
+    ));
+    assert_eq!(execution.operations(), 5);
+}
+
+#[test]
+fn explicit_operation_limit_stops_an_empty_loop() {
+    let vm = Vm::compile(
+        Source::new("main.at", "flow main() { loop {} }"),
+        &TestSources,
+    )
+    .expect("compile source");
+
+    let execution = run_ready(vm.run_with_options(
+        "main",
+        vec![],
+        TestHost::default(),
+        VmRunOptions::limited(NonZeroUsize::new(4).unwrap()),
+    ));
+
+    assert!(matches!(
+        execution.output(),
+        StatementOutcome::Err(EvalError::TypeMismatch { actual, .. })
+            if actual == "operation limit of 4 exceeded"
+    ));
+    assert_eq!(execution.operations(), 4);
+}
+
+#[test]
+fn child_flows_share_the_parent_operation_meter() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow child() -> int { return 1 }\nflow main() -> int { return child().await }",
+        ),
+        &TestSources,
+    )
+    .expect("compile source");
+
+    let execution = run_ready(vm.run_with_options(
+        "main",
+        vec![],
+        TestHost::default(),
+        VmRunOptions::measure(),
+    ));
+
+    assert!(matches!(
+        execution.output(),
+        StatementOutcome::Return(Value::Int(1))
+    ));
+    assert_eq!(execution.operations(), 5);
+}
+
+#[test]
+fn static_fanout_counts_its_list_and_branch_expressions() {
+    let vm = Vm::compile(
+        Source::new("main.at", "flow main() -> [int] { return fanout [1, 2] }"),
+        &TestSources,
+    )
+    .expect("compile source");
+
+    let execution = run_until_ready(vm.run_with_options(
+        "main",
+        vec![],
+        TestHost::default(),
+        VmRunOptions::measure(),
+    ));
+
+    assert!(matches!(
+        execution.output(),
+        StatementOutcome::Return(Value::List(values))
+            if matches!(&values[..], [Value::Int(1), Value::Int(2)])
+    ));
+    assert_eq!(execution.operations(), 5);
+}
+
+#[test]
+fn fanout_branches_share_one_explicit_operation_limit() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow child(value: int) -> int { return value }\nflow main() -> [int] { return fanout [child(1), child(2)] }",
+        ),
+        &TestSources,
+    )
+    .expect("compile source");
+
+    let execution = run_until_ready(vm.run_with_options(
+        "main",
+        vec![],
+        TestHost::default(),
+        VmRunOptions::limited(NonZeroUsize::new(10).unwrap()),
+    ));
+
+    assert!(matches!(
+        execution.output(),
+        StatementOutcome::Err(EvalError::TypeMismatch { actual, .. })
+            if actual == "operation limit of 10 exceeded"
+    ));
+    assert_eq!(execution.operations(), 10);
+}
+
+#[test]
+fn message_attachment_fast_path_counts_source_expressions() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            r#"flow main() { return user_msg("describe", attachments: [@"pic.png", @"other.jpg"]) }"#,
+        ),
+        &TestSources,
+    )
+    .expect("compile source");
+
+    let execution = run_ready(vm.run_with_options(
+        "main",
+        vec![],
+        TestHost::default(),
+        VmRunOptions::measure(),
+    ));
+
+    assert!(matches!(
+        execution.output(),
+        StatementOutcome::Return(Value::Unit)
+    ));
+    assert_eq!(execution.operations(), 6);
+}
+
+#[test]
+fn operation_meter_resets_for_each_explicit_run() {
+    let vm = Vm::compile(
+        Source::new("main.at", "flow main() -> int { return 1 }"),
+        &TestSources,
+    )
+    .expect("compile source");
+
+    let first = run_ready(vm.run_with_options(
+        "main",
+        vec![],
+        TestHost::default(),
+        VmRunOptions::measure(),
+    ));
+    let second = run_ready(vm.run_with_options(
+        "main",
+        vec![],
+        TestHost::default(),
+        VmRunOptions::measure(),
+    ));
+
+    assert_eq!(first.operations(), 2);
+    assert_eq!(second.operations(), 2);
 }
 
 #[test]
@@ -340,6 +540,32 @@ flow main() -> int { return 0 }
     assert!(matches!(outcomes[1], StatementOutcome::Err(_)));
     assert!(matches!(outcomes[2], StatementOutcome::Continue));
     assert_eq!(*events.lock().unwrap(), ["foreign", "fail", "foreign"]);
+}
+
+#[test]
+fn lifecycle_bodies_share_the_explicit_invocation_limit() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            "on turn.start { 1 }\non turn.start { 2 }\nflow main() -> int { return 0 }",
+        ),
+        &TestSources,
+    )
+    .expect("compile lifecycle source");
+
+    let execution = run_ready(vm.run_lifecycle_with_options(
+        LifecycleEvent::TurnStart,
+        TestHost::default(),
+        VmRunOptions::limited(NonZeroUsize::new(3).unwrap()),
+    ));
+
+    assert!(matches!(execution.output()[0], StatementOutcome::Continue));
+    assert!(matches!(
+        &execution.output()[1],
+        StatementOutcome::Err(EvalError::TypeMismatch { actual, .. })
+            if actual == "operation limit of 3 exceeded"
+    ));
+    assert_eq!(execution.operations(), 3);
 }
 
 #[test]
