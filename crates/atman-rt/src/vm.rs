@@ -40,11 +40,14 @@ pub enum FlowDriveMode {
 ///
 /// [`VmRunOptions::measure`] records operations without a limit;
 /// [`VmRunOptions::limited`] requires the host to choose an explicit limit.
+/// [`VmRunOptions::with_yield_interval`] requires an explicit cooperative
+/// scheduling interval. No control is enabled implicitly.
 /// Regular [`Vm::run`], [`Vm::run_flow`], and [`Vm::run_lifecycle`] calls do
 /// not enable metering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmRunOptions {
     max_operations: Option<NonZeroUsize>,
+    yield_interval: Option<NonZeroUsize>,
 }
 
 impl VmRunOptions {
@@ -52,6 +55,7 @@ impl VmRunOptions {
     pub const fn measure() -> Self {
         Self {
             max_operations: None,
+            yield_interval: None,
         }
     }
 
@@ -59,18 +63,53 @@ impl VmRunOptions {
     pub const fn limited(max_operations: NonZeroUsize) -> Self {
         Self {
             max_operations: Some(max_operations),
+            yield_interval: None,
         }
+    }
+
+    /// Returns `Pending` once before the next operation after each completed interval.
+    ///
+    /// The VM self-wakes the task. A run that finishes at the interval boundary
+    /// does not yield because it never enters another operation checkpoint.
+    pub const fn with_yield_interval(mut self, yield_interval: NonZeroUsize) -> Self {
+        self.yield_interval = Some(yield_interval);
+        self
     }
 
     pub const fn max_operations(&self) -> Option<NonZeroUsize> {
         self.max_operations
     }
+
+    pub const fn yield_interval(&self) -> Option<NonZeroUsize> {
+        self.yield_interval
+    }
 }
 
-/// Output and operation count from an explicitly metered VM run.
+/// Measurements collected by an explicitly controlled VM run.
+///
+/// Cooperative yields count invocation-wide epochs. Concurrent branches can
+/// observe the same epoch, so this is not a count of branch-level `Pending`
+/// results and is not derived solely from [`Self::operations`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmExecutionStats {
+    operations: usize,
+    cooperative_yields: usize,
+}
+
+impl VmExecutionStats {
+    pub const fn operations(self) -> usize {
+        self.operations
+    }
+
+    pub const fn cooperative_yields(self) -> usize {
+        self.cooperative_yields
+    }
+}
+
+/// Output and execution measurements from an explicitly controlled VM run.
 pub struct VmExecution<T> {
     output: T,
-    operations: usize,
+    stats: VmExecutionStats,
 }
 
 impl<T> VmExecution<T> {
@@ -79,15 +118,23 @@ impl<T> VmExecution<T> {
     }
 
     pub const fn operations(&self) -> usize {
-        self.operations
+        self.stats.operations
+    }
+
+    pub const fn cooperative_yields(&self) -> usize {
+        self.stats.cooperative_yields
+    }
+
+    pub const fn stats(&self) -> VmExecutionStats {
+        self.stats
     }
 
     pub fn into_output(self) -> T {
         self.output
     }
 
-    pub fn into_parts(self) -> (T, usize) {
-        (self.output, self.operations)
+    pub fn into_parts(self) -> (T, VmExecutionStats) {
+        (self.output, self.stats)
     }
 }
 
@@ -143,19 +190,32 @@ impl core::error::Error for VmCallError {}
 #[derive(Clone)]
 struct OperationCounter {
     operations: Arc<AtomicUsize>,
+    cooperative_yields: Arc<AtomicUsize>,
+    active_yield_token: Arc<AtomicUsize>,
+    next_yield_at: Arc<AtomicUsize>,
     max_operations: Option<NonZeroUsize>,
+    yield_interval: Option<NonZeroUsize>,
 }
 
 impl OperationCounter {
     fn new(options: VmRunOptions) -> Self {
         Self {
             operations: Arc::new(AtomicUsize::new(0)),
+            cooperative_yields: Arc::new(AtomicUsize::new(0)),
+            active_yield_token: Arc::new(AtomicUsize::new(0)),
+            next_yield_at: Arc::new(AtomicUsize::new(
+                options.yield_interval.map_or(0, NonZeroUsize::get),
+            )),
             max_operations: options.max_operations,
+            yield_interval: options.yield_interval,
         }
     }
 
-    fn operations(&self) -> usize {
-        self.operations.load(Ordering::Relaxed)
+    fn stats(&self) -> VmExecutionStats {
+        VmExecutionStats {
+            operations: self.operations.load(Ordering::Relaxed),
+            cooperative_yields: self.cooperative_yields.load(Ordering::Relaxed),
+        }
     }
 
     fn charge(&self) -> Result<(), usize> {
@@ -175,6 +235,53 @@ impl OperationCounter {
                 return Ok(());
             }
         }
+    }
+
+    fn cooperative_yield_token(&self) -> Option<usize> {
+        let interval = self.yield_interval?;
+        let operations = self.operations.load(Ordering::Acquire);
+        if self
+            .max_operations
+            .is_some_and(|maximum| operations >= maximum.get())
+        {
+            return None;
+        }
+        let active = self.active_yield_token.load(Ordering::Acquire);
+        if active != 0 {
+            return Some(active);
+        }
+        let next_yield_at = self.next_yield_at.load(Ordering::Acquire);
+        if next_yield_at == 0 || operations < next_yield_at {
+            return None;
+        }
+        if self
+            .active_yield_token
+            .compare_exchange(0, next_yield_at, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return NonZeroUsize::new(self.active_yield_token.load(Ordering::Acquire))
+                .map(NonZeroUsize::get);
+        }
+
+        let operations = self.operations.load(Ordering::Acquire);
+        let next_boundary = operations
+            .checked_div(interval.get())
+            .and_then(|completed| completed.checked_add(1))
+            .and_then(|next| next.checked_mul(interval.get()))
+            .unwrap_or(0);
+        self.next_yield_at.store(next_boundary, Ordering::Release);
+        let _ =
+            self.cooperative_yields
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    Some(count.saturating_add(1))
+                });
+        Some(next_yield_at)
+    }
+
+    fn complete_cooperative_yield(&self, token: usize) {
+        let _ =
+            self.active_yield_token
+                .compare_exchange(token, 0, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 
@@ -1171,7 +1278,7 @@ impl Vm {
         self.run_flow_with_counter(id, args, delegate, None).await
     }
 
-    /// Runs one entry flow with explicit operation metering and an optional limit.
+    /// Runs one entry flow with explicit metering, limit, and cooperative yield controls.
     pub async fn run_with_options<H: VmDelegate>(
         &self,
         name: &str,
@@ -1191,7 +1298,7 @@ impl Vm {
         };
         VmExecution {
             output,
-            operations: counter.operations(),
+            stats: counter.stats(),
         }
     }
 
@@ -1205,7 +1312,7 @@ impl Vm {
         self.run_flow_with_counter(id, args, delegate, None).await
     }
 
-    /// Runs one resolved flow with explicit operation metering and an optional limit.
+    /// Runs one resolved flow with explicit metering, limit, and cooperative yield controls.
     pub async fn run_flow_with_options<H: VmDelegate>(
         &self,
         id: FlowId,
@@ -1219,7 +1326,7 @@ impl Vm {
             .await;
         VmExecution {
             output,
-            operations: counter.operations(),
+            stats: counter.stats(),
         }
     }
 
@@ -1317,7 +1424,7 @@ impl Vm {
         self.run_lifecycle_with_counter(event, delegate, None).await
     }
 
-    /// Executes matching lifecycle bodies with one shared operation meter.
+    /// Executes matching lifecycle bodies with shared metering, limit, and yield controls.
     pub async fn run_lifecycle_with_options<H: VmDelegate>(
         &self,
         event: LifecycleEvent,
@@ -1330,7 +1437,7 @@ impl Vm {
             .await;
         VmExecution {
             output,
-            operations: counter.operations(),
+            stats: counter.stats(),
         }
     }
 
@@ -1501,6 +1608,18 @@ impl<H: VmHost> StatementHost for VmStatementHost<H> {
         }
         self.host
             .preflight_iteration(iteration, node_id, parent_node_id)
+    }
+
+    fn cooperative_yield_token(&mut self) -> Option<usize> {
+        self.operation_counter
+            .as_ref()
+            .and_then(OperationCounter::cooperative_yield_token)
+    }
+
+    fn complete_cooperative_yield(&mut self, token: usize) {
+        if let Some(counter) = &self.operation_counter {
+            counter.complete_cooperative_yield(token);
+        }
     }
 
     fn preview(
@@ -1719,6 +1838,18 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
         self.effect_host.preflight_expression(expr)
     }
 
+    fn cooperative_yield_token(&self) -> Option<usize> {
+        self.operation_counter
+            .as_ref()
+            .and_then(OperationCounter::cooperative_yield_token)
+    }
+
+    fn complete_cooperative_yield(&self, token: usize) {
+        if let Some(counter) = &self.operation_counter {
+            counter.complete_cooperative_yield(token);
+        }
+    }
+
     fn await_drive_mode(&self) -> FlowDriveMode {
         self.await_mode
     }
@@ -1918,5 +2049,49 @@ impl<H: VmHost> ExpressionHost for VmExpressionHost<H> {
             self.effect_context.clone(),
             self.effect_context.clone(),
         )
+    }
+}
+
+#[cfg(test)]
+mod operation_counter_tests {
+    use super::*;
+
+    #[test]
+    fn operation_limit_suppresses_a_yield_on_the_same_boundary() {
+        let boundary = NonZeroUsize::new(3).unwrap();
+        let counter =
+            OperationCounter::new(VmRunOptions::limited(boundary).with_yield_interval(boundary));
+
+        for _ in 0..boundary.get() {
+            counter.charge().unwrap();
+        }
+
+        assert_eq!(counter.cooperative_yield_token(), None);
+        assert_eq!(counter.charge(), Err(boundary.get()));
+        assert_eq!(counter.stats().cooperative_yields(), 0);
+    }
+
+    #[test]
+    fn operation_limit_suppresses_an_active_fanout_epoch() {
+        let counter = OperationCounter::new(
+            VmRunOptions::limited(NonZeroUsize::new(3).unwrap())
+                .with_yield_interval(NonZeroUsize::new(1).unwrap()),
+        );
+
+        counter.charge().unwrap();
+        let old_token = counter.cooperative_yield_token().unwrap();
+        let stale_waiter_token = counter.cooperative_yield_token().unwrap();
+        counter.complete_cooperative_yield(old_token);
+        counter.charge().unwrap();
+        let active_token = counter.cooperative_yield_token().unwrap();
+        assert_ne!(old_token, active_token);
+
+        counter.complete_cooperative_yield(stale_waiter_token);
+        assert_eq!(counter.cooperative_yield_token(), Some(active_token));
+        counter.charge().unwrap();
+
+        assert_eq!(counter.cooperative_yield_token(), None);
+        assert_eq!(counter.charge(), Err(3));
+        assert_eq!(counter.stats().cooperative_yields(), 2);
     }
 }

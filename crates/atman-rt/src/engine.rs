@@ -165,6 +165,14 @@ pub trait LoopHost: Send {
     ) -> Result<(), Self::Error> {
         Ok(())
     }
+    /// Internal scheduling hook. The returned token is opaque to the engine.
+    #[doc(hidden)]
+    fn cooperative_yield_token(&mut self) -> Option<usize> {
+        None
+    }
+    /// Completes only the token observed before the matching yield.
+    #[doc(hidden)]
+    fn complete_cooperative_yield(&mut self, _token: usize) {}
     fn execute_iteration<'a>(
         &'a mut self,
         node_id: &'a str,
@@ -182,6 +190,10 @@ pub async fn run_loop<H: LoopHost>(
             Some(parent) => format!("{parent}.iter[{iteration}]"),
             None => format!("iter[{iteration}]"),
         };
+        if let Some(token) = host.cooperative_yield_token() {
+            crate::cooperate::yield_once().await;
+            host.complete_cooperative_yield(token);
+        }
         let preflight = host.preflight_iteration(iteration, &node_id, parent_node_id);
         if let Err(error) = preflight {
             return LoopExit::Interrupted(StatementOutcome::Err(error));
@@ -266,6 +278,14 @@ pub trait StatementHost: Send + Sync {
     ) -> Result<(), Self::Error> {
         Ok(())
     }
+    /// Internal scheduling hook. The returned token is opaque to the engine.
+    #[doc(hidden)]
+    fn cooperative_yield_token(&mut self) -> Option<usize> {
+        None
+    }
+    /// Completes only the token observed before the matching yield.
+    #[doc(hidden)]
+    fn complete_cooperative_yield(&mut self, _token: usize) {}
     fn preview(
         &self,
         value: &Value<Self::Payload, Self::Error>,
@@ -397,7 +417,12 @@ impl<H: StatementHost> Engine<H> {
                 } else {
                     format!("{prefix}.{index}")
                 };
-                match self.host.preflight(stmt, &node_id, parent_node_id) {
+                if let Some(token) = self.host.cooperative_yield_token() {
+                    crate::cooperate::yield_once().await;
+                    self.host.complete_cooperative_yield(token);
+                }
+                let preflight = self.host.preflight(stmt, &node_id, parent_node_id);
+                match preflight {
                     Preflight::Continue => {}
                     Preflight::Stop(error) => return StatementOutcome::Err(error),
                     Preflight::StopAfterNode { error, preview } => {
@@ -526,6 +551,14 @@ impl<H: StatementHost> LoopHost for EngineLoopHost<'_, '_, H> {
         self.engine
             .host
             .preflight_iteration(iteration, node_id, parent_node_id)
+    }
+
+    fn cooperative_yield_token(&mut self) -> Option<usize> {
+        self.engine.host.cooperative_yield_token()
+    }
+
+    fn complete_cooperative_yield(&mut self, token: usize) {
+        self.engine.host.complete_cooperative_yield(token);
     }
 
     fn execute_iteration<'a>(

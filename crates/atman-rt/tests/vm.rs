@@ -4,9 +4,9 @@ use std::{
     pin::pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    task::{Context, Poll, Waker},
+    task::{Context, Poll, Wake, Waker},
 };
 
 use atman_rt::{
@@ -16,6 +16,19 @@ use atman_rt::{
 };
 
 type TestValue = Value<(), EvalError>;
+
+#[derive(Default)]
+struct WakeCounter(AtomicUsize);
+
+impl Wake for WakeCounter {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 fn run_ready<F: Future>(future: F) -> F::Output {
     let mut future = pin!(future);
@@ -134,6 +147,19 @@ impl VmDelegate for TestHost {
             })
     }
 
+    fn cancelled<'a>(&'a self, _context: &'a VmContext) -> HostFuture<'a, Self::Error> {
+        Box::pin(poll_fn(move |_| {
+            if self.cancelled.load(Ordering::SeqCst) {
+                Poll::Ready(EvalError::TypeMismatch {
+                    expected: "running flow".into(),
+                    actual: "cancelled".into(),
+                })
+            } else {
+                Poll::Pending
+            }
+        }))
+    }
+
     fn preflight_tool(&self, name: &str, _context: &VmContext) -> Option<TestValue> {
         (name == "blocked").then(|| {
             Value::Err(EvalError::TypeMismatch {
@@ -227,6 +253,111 @@ fn metered_run_reports_executed_language_operations() {
         StatementOutcome::Return(Value::Int(3))
     ));
     assert_eq!(execution.operations(), 6);
+    assert_eq!(execution.cooperative_yields(), 0);
+}
+
+#[test]
+fn explicit_yield_interval_returns_pending_between_operation_quanta() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow main() -> int { value = 1 + 2 return value }",
+        ),
+        &TestSources,
+    )
+    .expect("compile source");
+    let future = vm.run_with_options(
+        "main",
+        vec![],
+        TestHost::default(),
+        VmRunOptions::measure().with_yield_interval(NonZeroUsize::new(2).unwrap()),
+    );
+    let mut future = pin!(future);
+    let wakes = Arc::new(WakeCounter::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut context = Context::from_waker(&waker);
+
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 2);
+    let Poll::Ready(execution) = future.as_mut().poll(&mut context) else {
+        panic!("flow must finish after both cooperative yields");
+    };
+
+    assert!(matches!(
+        execution.output(),
+        StatementOutcome::Return(Value::Int(3))
+    ));
+    assert_eq!(execution.operations(), 6);
+    assert_eq!(execution.cooperative_yields(), 2);
+}
+
+#[test]
+fn explicit_yield_interval_cooperates_inside_an_empty_loop() {
+    let vm = Vm::compile(
+        Source::new("main.at", "flow main() { loop {} }"),
+        &TestSources,
+    )
+    .expect("compile source");
+    let future = vm.run_with_options(
+        "main",
+        vec![],
+        TestHost::default(),
+        VmRunOptions::limited(NonZeroUsize::new(5).unwrap())
+            .with_yield_interval(NonZeroUsize::new(2).unwrap()),
+    );
+    let mut future = pin!(future);
+    let wakes = Arc::new(WakeCounter::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut context = Context::from_waker(&waker);
+
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    let Poll::Ready(execution) = future.as_mut().poll(&mut context) else {
+        panic!("operation limit must stop the loop after both cooperative yields");
+    };
+
+    assert!(matches!(
+        execution.output(),
+        StatementOutcome::Err(EvalError::TypeMismatch { actual, .. })
+            if actual == "operation limit of 5 exceeded"
+    ));
+    assert_eq!(execution.operations(), 5);
+    assert_eq!(execution.cooperative_yields(), 2);
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn cancellation_is_observed_after_a_cooperative_yield() {
+    let vm = Vm::compile(
+        Source::new("main.at", "flow main() { loop {} }"),
+        &TestSources,
+    )
+    .expect("compile source");
+    let host = TestHost::default();
+    let cancelled = Arc::clone(&host.cancelled);
+    let future = vm.run_with_options(
+        "main",
+        vec![],
+        host,
+        VmRunOptions::measure().with_yield_interval(NonZeroUsize::new(2).unwrap()),
+    );
+    let mut future = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    cancelled.store(true, Ordering::SeqCst);
+    let Poll::Ready(execution) = future.as_mut().poll(&mut context) else {
+        panic!("cancellation must win when the executor polls the VM again");
+    };
+
+    assert!(matches!(
+        execution.output(),
+        StatementOutcome::Err(EvalError::TypeMismatch { actual, .. }) if actual == "cancelled"
+    ));
+    assert_eq!(execution.operations(), 2);
+    assert_eq!(execution.cooperative_yields(), 1);
 }
 
 #[test]
@@ -324,6 +455,68 @@ fn static_fanout_counts_its_list_and_branch_expressions() {
             if matches!(&values[..], [Value::Int(1), Value::Int(2)])
     ));
     assert_eq!(execution.operations(), 5);
+}
+
+#[test]
+fn fanout_branches_share_one_cooperative_yield_epoch() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow main() -> [int] { return fanout [1, 2, 3] }",
+        ),
+        &TestSources,
+    )
+    .expect("compile source");
+
+    let execution = run_until_ready(vm.run_with_options(
+        "main",
+        vec![],
+        TestHost::default(),
+        VmRunOptions::measure().with_yield_interval(NonZeroUsize::new(3).unwrap()),
+    ));
+
+    assert!(matches!(
+        execution.output(),
+        StatementOutcome::Return(Value::List(values))
+            if matches!(&values[..], [Value::Int(1), Value::Int(2), Value::Int(3)])
+    ));
+    assert_eq!(execution.operations(), 6);
+    assert_eq!(execution.cooperative_yields(), 1);
+}
+
+#[test]
+fn short_fanout_branch_progresses_beside_an_infinite_branch() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow spin() { loop {} }\nflow short() -> int { return 7 }\nflow main() { fanout [spin(), short()] }",
+        ),
+        &TestSources,
+    )
+    .expect("compile source");
+    let host = TestHost::default();
+    let events = Arc::clone(&host.events);
+    let future = vm.run_with_options(
+        "main",
+        vec![],
+        host,
+        VmRunOptions::measure().with_yield_interval(NonZeroUsize::new(1).unwrap()),
+    );
+    let mut future = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+
+    for _ in 0..32 {
+        assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+        if events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event.starts_with("exit:short:true"))
+        {
+            return;
+        }
+    }
+    panic!("short branch was starved by the infinite branch");
 }
 
 #[test]

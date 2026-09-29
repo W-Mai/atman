@@ -12,9 +12,11 @@ Flow parameter and return annotations are checked whenever a flow body is driven
 
 Integer `+`, `-`, `*`, `/`, `%`, and unary `-` use checked `i64` arithmetic. Overflow returns `ValueError::integer_overflow`; division and remainder by zero keep their dedicated errors. Debug and release builds therefore use the same integer semantics.
 
-Operation metering is explicit. `Vm::run_with_options`, `Vm::run_flow_with_options`, and `Vm::run_lifecycle_with_options` return `VmExecution<T>` with the executed operation count. One operation is one entered statement, expression AST node, or loop iteration. Root flows, child flows, and fanout branches in the same invocation share the counter; all matching bodies in one lifecycle invocation also share its counter. Time spent waiting for host futures does not consume operations. Exceeding an explicit limit maps through `ValueError::operation_limit_exceeded`, so a host can preserve its own resource-exhaustion error type. The ordinary `run` methods do not create a counter, and the crate does not set a maximum operation count, yield interval, or deadline.
+Operation control is explicit. `Vm::run_with_options`, `Vm::run_flow_with_options`, and `Vm::run_lifecycle_with_options` return `VmExecution<T>` with execution statistics. One operation is one entered statement, expression AST node, or loop iteration. Root flows, child flows, and fanout branches in the same invocation share the counter; all matching bodies in one lifecycle invocation also share its counter. Time spent waiting for host futures does not consume operations. Exceeding an explicit limit maps through `ValueError::operation_limit_exceeded`, so a host can preserve its own resource-exhaustion error type. The ordinary `run` methods do not create a counter, and the crate does not set a maximum operation count, yield interval, or deadline.
 
-Use `VmRunOptions::measure()` on representative workloads before selecting a host limit. Record normal and worst expected flows, then pass the chosen non-zero limit through `VmRunOptions::limited(max)`. Keep scheduling yields and wall-clock deadlines as separate host policies; an operation count measures deterministic language progress rather than elapsed time.
+`VmRunOptions::with_yield_interval` adds cooperative scheduling to an explicitly controlled run. After an interval of completed operations, a remaining language checkpoint self-wakes the task and returns `Pending` once before it starts the next operation. A flow that finishes exactly at an interval does not yield. Operation limits remain exact and do not yield at a limit that already prevents the next operation. In concurrent fanout, the interval is a scheduling target rather than a hard per-poll operation cap: branches already waiting on an older epoch may each advance one operation so a long early branch cannot starve later branches, and the overshoot therefore depends on the number of simultaneous waiters. `cooperative_yields()` counts installed invocation-wide yield epochs rather than the number of branches that returned `Pending`; it is not derived solely from the final operation count. Wall-clock deadlines remain a host cancellation or timeout policy.
+
+Use `VmRunOptions::measure()` on representative workloads before selecting a host limit or yield interval. Record normal and worst expected flows, then pass each chosen non-zero value explicitly.
 
 ```rust
 let measured = vm
@@ -23,9 +25,17 @@ let measured = vm
 println!("operations: {}", measured.operations());
 
 let max = core::num::NonZeroUsize::new(host_selected_limit).expect("positive host limit");
+let yield_interval = core::num::NonZeroUsize::new(host_selected_yield_interval)
+    .expect("positive host yield interval");
 let bounded = vm
-    .run_with_options("demo", args, delegates, atman_rt::VmRunOptions::limited(max))
+    .run_with_options(
+        "demo",
+        args,
+        delegates,
+        atman_rt::VmRunOptions::limited(max).with_yield_interval(yield_interval),
+    )
     .await;
+println!("cooperative yields: {}", bounded.cooperative_yields());
 ```
 
 `#[atman_rt::tools]` generates a `ToolRouter` from typed Rust functions. A synchronous Rust function runs when its `.at` call is evaluated; an `async fn` creates a cold tool future that runs only on `.await` or in `fanout`. Parameter names and types come from the function signature, so the host does not need to decode `ToolArgs`:

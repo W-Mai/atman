@@ -112,6 +112,14 @@ pub trait ExpressionHost: Sync + Clone + Send {
     fn preflight_expression(&self, _expr: &Expr) -> Result<(), Self::Error> {
         Ok(())
     }
+    /// Internal scheduling hook. The returned token is opaque to the evaluator.
+    #[doc(hidden)]
+    fn cooperative_yield_token(&self) -> Option<usize> {
+        None
+    }
+    /// Completes only the token observed before the matching yield.
+    #[doc(hidden)]
+    fn complete_cooperative_yield(&self, _token: usize) {}
     fn await_drive_mode(&self) -> FlowDriveMode {
         FlowDriveMode::Inline
     }
@@ -243,7 +251,7 @@ pub fn eval_expr_with_watch<'a, H: ExpressionHost>(
     watch_rules: Option<&'a WatchRules>,
 ) -> HostFuture<'a, Value<H::Payload, H::Error>> {
     Box::pin(async move {
-        if let Err(error) = checkpoint_expression(expr, host) {
+        if let Err(error) = checkpoint_expression(expr, host).await {
             return Value::Err(error);
         }
         match expr {
@@ -461,7 +469,11 @@ pub fn eval_expr_with_watch<'a, H: ExpressionHost>(
     })
 }
 
-fn checkpoint_expression<H: ExpressionHost>(expr: &Expr, host: &H) -> Result<(), H::Error> {
+async fn checkpoint_expression<H: ExpressionHost>(expr: &Expr, host: &H) -> Result<(), H::Error> {
+    if let Some(token) = host.cooperative_yield_token() {
+        crate::cooperate::yield_once().await;
+        host.complete_cooperative_yield(token);
+    }
     host.preflight_expression(expr)
 }
 
@@ -545,11 +557,11 @@ async fn eval_message_args<'a, H: ExpressionHost>(
                 if let Expr::List(items) = value
                     && items.iter().all(|item| matches!(item, Expr::FileRef(_)))
                 {
-                    if let Err(error) = checkpoint_expression(value, host) {
+                    if let Err(error) = checkpoint_expression(value, host).await {
                         return Err(Value::Err(error));
                     }
                     for item in items {
-                        if let Err(error) = checkpoint_expression(item, host) {
+                        if let Err(error) = checkpoint_expression(item, host).await {
                             return Err(Value::Err(error));
                         }
                     }
@@ -588,7 +600,7 @@ pub async fn eval_fanout<'a, H: ExpressionHost>(
     host: &'a H,
 ) -> Value<H::Payload, H::Error> {
     if let Expr::List(items) = source {
-        if let Err(error) = checkpoint_expression(source, host) {
+        if let Err(error) = checkpoint_expression(source, host).await {
             return Value::Err(error);
         }
         let mut scope = FanoutBranchScope::start(host, items.len());
