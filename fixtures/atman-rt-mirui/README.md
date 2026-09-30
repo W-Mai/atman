@@ -22,7 +22,7 @@ The SDL window remains open after the scripted run completes. Press Esc or close
 The fixture verifies:
 
 - `ui.load` returns a typed VM resource lease without moving a mirui object to the worker.
-- Structured `.at` data controls three distinct retained UI frames through generated bindings.
+- Structured `.at` data controls the retained UI frame sequence through generated bindings.
 - Synchronous mutations execute in command order before the deferred present barrier replies.
 - The framebuffer hash changes on every presented frame.
 - Explicit and cancellation-path release remove the owner-side lease exactly once.

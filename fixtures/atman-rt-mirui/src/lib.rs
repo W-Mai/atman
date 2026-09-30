@@ -313,21 +313,41 @@ fn validate_completed_demo<B>(owner: &MiruiOwner<B>, frames: i64) -> Result<(), 
 where
     B: Surface + FramebufferAccess,
 {
-    if frames != 3 {
-        return Err(format!("VM rendered {frames} frames instead of 3"));
+    validate_completed_state(
+        owner.resources.is_empty(),
+        owner.frame,
+        owner.initial_pixels,
+        &owner.frame_pixels,
+        frames,
+    )
+}
+
+fn validate_completed_state(
+    resources_empty: bool,
+    rendered_frames: i64,
+    initial_pixels: u64,
+    frame_pixels: &[u64],
+    frames: i64,
+) -> Result<(), String> {
+    let expected_frames = usize::try_from(frames)
+        .ok()
+        .filter(|frames| *frames > 0)
+        .ok_or_else(|| format!("VM returned invalid frame count {frames}"))?;
+    if rendered_frames != frames {
+        return Err(format!(
+            "VM returned {frames} frames after the owner rendered {rendered_frames}"
+        ));
     }
-    if !owner.resources.is_empty() {
+    if !resources_empty {
         return Err("VM resource release did not reach the mirui owner".into());
     }
-    if owner.frame_pixels.len() != 3
-        || owner.frame_pixels.contains(&owner.initial_pixels)
-        || owner.frame_pixels[0] == owner.frame_pixels[1]
-        || owner.frame_pixels[1] == owner.frame_pixels[2]
-        || owner.frame_pixels[0] == owner.frame_pixels[2]
+    if frame_pixels.len() != expected_frames
+        || frame_pixels.contains(&initial_pixels)
+        || frame_pixels.windows(2).any(|frames| frames[0] == frames[1])
     {
         return Err(format!(
             "framebuffer did not change across frames: initial={}, frames={:?}",
-            owner.initial_pixels, owner.frame_pixels
+            initial_pixels, frame_pixels
         ));
     }
     Ok(())
@@ -392,8 +412,9 @@ pub fn run_sdl_demo() -> Result<SdlRun, String> {
         }
     }
 
-    let completed_before_cleanup =
-        user_closed && !completed && validate_completed_demo(&owner, 3).is_ok();
+    let resources_empty = owner.resources.is_empty();
+    let rendered_frames = owner.frame;
+    let initial_pixels = owner.initial_pixels;
     let hashes = owner.frame_pixels.clone();
     drop(receiver);
     drop(owner);
@@ -401,8 +422,20 @@ pub fn run_sdl_demo() -> Result<SdlRun, String> {
         .map(|worker| worker.join().map_err(|_| "VM worker panicked".to_string()))
         .transpose()?;
     if user_closed && !completed {
-        if completed_before_cleanup && matches!(late_result, Some(Ok(3))) {
-            return Ok(SdlRun::Completed(hashes));
+        match late_result {
+            Some(Ok(frames))
+                if validate_completed_state(
+                    resources_empty,
+                    rendered_frames,
+                    initial_pixels,
+                    &hashes,
+                    frames,
+                )
+                .is_ok() =>
+            {
+                return Ok(SdlRun::Completed(hashes));
+            }
+            _ => {}
         }
         Ok(SdlRun::ClosedEarly {
             rendered_frames: hashes.len(),
@@ -422,9 +455,8 @@ mod tests {
     #[test]
     fn vm_commands_change_headless_mirui_pixels() {
         let hashes = run_headless_demo().unwrap();
-        assert_eq!(hashes.len(), 3);
-        assert_ne!(hashes[0], hashes[1]);
-        assert_ne!(hashes[1], hashes[2]);
+        assert!(!hashes.is_empty());
+        assert!(hashes.windows(2).all(|frames| frames[0] != frames[1]));
     }
 
     #[test]

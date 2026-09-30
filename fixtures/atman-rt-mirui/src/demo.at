@@ -98,9 +98,9 @@ flow render_frames() -> int {
     index = 0
     last_frame = 0
     loop {
-        last_frame = apply_stage(surface: surface, index: index, stages: stages).await
+        last_frame = apply_stage(surface: surface, index: index % list.len(items: stages), stages: stages).await
         index = index + 1
-        when index == list.len(items: stages) { break }
+        when index == list.len(items: stages) * 10 { break }
     }
 
     ui.status(surface: surface, text: "RUN / COMPLETE", tone: "success")
