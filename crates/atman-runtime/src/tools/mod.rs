@@ -7,6 +7,7 @@ pub mod anchor;
 pub mod anchor_fs;
 pub mod bash_bg;
 pub mod context;
+pub mod dispatch;
 pub mod final_answer;
 pub mod flow_check;
 pub mod flow_list;
@@ -75,8 +76,8 @@ pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stub
     reg.register(Arc::new(final_answer::FinalAnswer));
     reg.register(Arc::new(final_answer::ExtractFinalAnswer));
     reg.register(Arc::new(final_answer::FinalizeResponse));
-    reg.register(Arc::new(stdlib::ExtractToolUses));
-    reg.register(Arc::new(stdlib::DispatchAll));
+    reg.register(Arc::new(dispatch::ExtractToolUses));
+    reg.register(Arc::new(dispatch::DispatchAll));
     reg.register(Arc::new(context::ContextRecordAppend));
     reg.register(Arc::new(permission::PermissionList));
     reg.register(Arc::new(permission::PermissionGet));

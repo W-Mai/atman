@@ -9,6 +9,7 @@ pub enum ResourceKey {
     Path(PathBuf),
     TerminalHandle(String),
     ProcessHandle(String),
+    Flow(String),
     Repository(PathBuf),
     Session(String),
     McpServer(String),
@@ -170,10 +171,6 @@ impl SchedulingGraph {
         self.states.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.states.is_empty()
-    }
-
     pub fn is_complete(&self) -> bool {
         self.states
             .iter()
@@ -249,16 +246,14 @@ impl SchedulingGraph {
         self.states.get(index).copied()
     }
 
+    #[cfg(test)]
     pub fn successors(&self, index: usize) -> Option<&[usize]> {
         self.successors.get(index).map(Vec::as_slice)
     }
 
+    #[cfg(test)]
     pub fn predecessor_count(&self, index: usize) -> Option<usize> {
         self.predecessor_counts.get(index).copied()
-    }
-
-    pub fn remaining_predecessor_count(&self, index: usize) -> Option<usize> {
-        self.remaining_predecessors.get(index).copied()
     }
 
     fn state_at(&self, index: usize) -> Result<ScheduleNodeState, SchedulingGraphError> {
