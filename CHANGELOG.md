@@ -36,6 +36,7 @@ All notable changes to atman are documented in this file.
 ### 🐛 Bug Fixes
 
 - **Terminal output synchronization** — `term.spawn`, `term.input`, and `term.resize` perform bounded reader/parser synchronization before returning, so immediate capture and find calls read the latest processed screen without fixed sleeps. Terminal input flushes writes, supports control-key combinations, and rejects unsupported keys instead of silently dropping them.
+- **Terminal text search** — Terminal search preserves blank cells and maps UTF-8 matches back to terminal columns, keeping text coordinates aligned for CJK content and mouse input. Empty search patterns fail explicitly.
 - **Integer overflow** — DSL integer addition, subtraction, multiplication, division, remainder, and negation return explicit overflow errors instead of panicking or depending on the Rust build profile. Division and remainder by zero retain their dedicated errors.
 
 ## [1.13.2] — 2026-09-25

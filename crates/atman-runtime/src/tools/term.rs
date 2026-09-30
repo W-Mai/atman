@@ -983,16 +983,48 @@ fn cell_text(screen: &TerminalScreen, row: u16, col: u16) -> String {
 
 fn find_pattern_on_screen(screen: &TerminalScreen, pattern: &str) -> Option<(u16, u16)> {
     for r in 0..screen.rows {
-        let row_text: String = (0..screen.cols)
-            .map(|c| cell_text(screen, r, c))
-            .collect::<String>()
-            .trim_end()
-            .to_string();
-        if let Some(pos) = row_text.find(pattern) {
-            return Some((r, pos as u16));
+        if let Some(col) = find_pattern_columns(screen, r, pattern).into_iter().next() {
+            return Some((r, col));
         }
     }
     None
+}
+
+fn find_pattern_columns(screen: &TerminalScreen, row: u16, pattern: &str) -> Vec<u16> {
+    if pattern.is_empty() {
+        return Vec::new();
+    }
+
+    let mut text = String::new();
+    let mut byte_columns = Vec::new();
+    for col in 0..screen.cols {
+        let cell = cell_ref(screen, row, col);
+        if cell.wide_continuation {
+            continue;
+        }
+        let cell_text = if cell.chars.is_empty() {
+            " "
+        } else {
+            cell.chars.as_str()
+        };
+        text.push_str(cell_text);
+        byte_columns.resize(text.len(), col);
+    }
+
+    let text = text.trim_end();
+    let mut matches = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let Some(relative) = text[start..].find(pattern) else {
+            break;
+        };
+        let byte_offset = start + relative;
+        if let Some(col) = byte_columns.get(byte_offset) {
+            matches.push(*col);
+        }
+        start = byte_offset + pattern.len();
+    }
+    matches
 }
 
 impl crate::watch::Watchable for TermEntry {
@@ -1601,7 +1633,7 @@ impl Tool for TermFind {
             "type": "object",
             "properties": {
                 "handle": {"type": "string"},
-                "pattern": {"type": "string", "description": "Substring to search for. Omit for style-only search."},
+                "pattern": {"type": "string", "minLength": 1, "description": "Non-empty substring to search for. Omit for style-only search."},
                 "style": {
                     "type": "object",
                     "properties": {
@@ -1628,7 +1660,7 @@ impl Tool for TermFind {
     ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
-            let pattern = extract_optional_string(&args, "pattern");
+            let pattern = extract_find_pattern(&args)?;
             let style_filter = parse_style_filter(&args)?;
             if pattern.is_none() && style_filter.is_none() {
                 return Err(RuntimeError::ToolFailed(
@@ -1652,37 +1684,19 @@ impl Tool for TermFind {
             for r in start_row..end_row {
                 let row_cells: Vec<&TerminalCell> =
                     (0..screen.cols).map(|c| cell_ref(&screen, r, c)).collect();
-                let row_text: String = row_cells
-                    .iter()
-                    .map(|c| {
-                        if c.wide_continuation {
-                            ""
-                        } else {
-                            c.chars.as_str()
-                        }
-                    })
-                    .collect::<String>();
-                let row_text_trimmed = row_text.trim_end();
-
                 if let Some(ref pat) = pattern {
-                    let mut start = 0;
-                    while let Some(pos) = row_text_trimmed[start..].find(pat) {
-                        let abs_col = start + pos;
+                    for abs_col in find_pattern_columns(&screen, r, pat) {
                         let style_ok = style_filter
                             .as_ref()
-                            .map(|sf| sf.matches(row_cells.get(abs_col).copied()))
+                            .map(|sf| sf.matches(row_cells.get(abs_col as usize).copied()))
                             .unwrap_or(true);
                         if style_ok {
                             let matched_text = pat.clone();
                             matches.push(Value::Struct(vec![
                                 ("row".into(), Value::Int(r as i64)),
-                                ("col".into(), Value::Int(abs_col as i64)),
+                                ("col".into(), Value::Int(i64::from(abs_col))),
                                 ("text".into(), Value::Str(matched_text)),
                             ]));
-                        }
-                        start += pos + pat.len();
-                        if start >= row_text_trimmed.len() {
-                            break;
                         }
                     }
                 } else if let Some(ref sf) = style_filter {
@@ -1719,6 +1733,20 @@ impl Tool for TermFind {
                 ("count".into(), Value::Int(count)),
             ]))
         })
+    }
+}
+
+fn extract_find_pattern(args: &crate::tool::ToolArgs) -> Result<Option<String>, RuntimeError> {
+    match args.named("pattern") {
+        None | Some(Value::Unit) => Ok(None),
+        Some(Value::Str(pattern)) if pattern.is_empty() => Err(RuntimeError::ToolFailed(
+            "term.find: `pattern` must not be empty".into(),
+        )),
+        Some(Value::Str(pattern)) => Ok(Some(pattern.clone())),
+        Some(other) => Err(RuntimeError::ToolFailed(format!(
+            "term.find: `pattern` must be a string, got {}",
+            other.kind_name()
+        ))),
     }
 }
 
@@ -3101,6 +3129,27 @@ mod tests {
     fn find_pattern_returns_none_when_absent() {
         let screen = make_screen(1, 5, "hello");
         assert!(find_pattern_on_screen(&screen, "xyz").is_none());
+    }
+
+    #[test]
+    fn find_pattern_preserves_blank_and_wide_terminal_columns() {
+        let screen = make_screen(1, 10, "  你x");
+        assert_eq!(find_pattern_columns(&screen, 0, "你"), vec![2]);
+        assert_eq!(find_pattern_columns(&screen, 0, "x"), vec![4]);
+        assert_eq!(find_pattern_columns(&screen, 0, "  你"), vec![0]);
+    }
+
+    #[test]
+    fn find_pattern_rejects_empty_input() {
+        let args = ToolArgs {
+            named: vec![("pattern".into(), Value::Str(String::new()))],
+            ..ToolArgs::default()
+        };
+        let error = extract_find_pattern(&args).unwrap_err().to_string();
+        assert!(error.contains("must not be empty"));
+
+        let screen = make_screen(1, 5, "hello");
+        assert!(find_pattern_on_screen(&screen, "").is_none());
     }
 
     #[test]
