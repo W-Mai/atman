@@ -1,6 +1,7 @@
 use crate::error::RuntimeError;
 use crate::message::{Message, MessageRole};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::tool_schedule::{ResourceAccess, ResourceKey, SchedulingClaims};
 use crate::value::AtmanPayload;
 use crate::value::Value;
 
@@ -35,6 +36,14 @@ impl Tool for SessionPush {
             },
             "required": ["message"]
         })
+    }
+
+    fn scheduling_claims(
+        &self,
+        _args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        Ok(session_scheduling_claim(ctx))
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -81,6 +90,15 @@ impl Tool for SessionPush {
             Ok(Value::Unit)
         })
     }
+}
+
+pub(crate) fn session_scheduling_claim(ctx: &ToolCtx) -> SchedulingClaims {
+    let Some(session_id) = ctx.session_id.as_ref().filter(|id| !id.is_empty()) else {
+        return SchedulingClaims::opaque();
+    };
+    SchedulingClaims::declared([ResourceAccess::exclusive(ResourceKey::Session(
+        session_id.clone(),
+    ))])
 }
 
 pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(), RuntimeError> {
@@ -170,6 +188,26 @@ fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_push_claims_the_current_session_exclusively() {
+        let ctx = ToolCtx::new().with_session_id("session-a");
+        let claims = SessionPush
+            .scheduling_claims(&ToolArgs::default(), &ctx)
+            .unwrap();
+        assert_eq!(
+            claims.accesses,
+            vec![ResourceAccess::exclusive(ResourceKey::Session(
+                "session-a".into()
+            ))]
+        );
+        assert!(
+            SessionPush
+                .scheduling_claims(&ToolArgs::default(), &ToolCtx::new())
+                .unwrap()
+                .is_opaque()
+        );
+    }
 
     #[test]
     fn spawned_context_does_not_rewrite_messages_outside_compaction() {

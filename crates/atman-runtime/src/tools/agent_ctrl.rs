@@ -5,6 +5,7 @@ use crate::git_workspace::{
 };
 use crate::message::Message;
 use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::tool_schedule::{AccessMode, ResourceAccess, ResourceKey, SchedulingClaims};
 use crate::value::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -1362,6 +1363,13 @@ impl Tool for AgentStatus {
             "required": ["handle"]
         })
     }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        flow_handle_scheduling_claim(args, ctx, AccessMode::Read)
+    }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
@@ -1422,6 +1430,13 @@ impl Tool for AgentOutput {
             },
             "required": ["handle"]
         })
+    }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        flow_handle_scheduling_claim(args, ctx, AccessMode::Read)
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
@@ -1486,6 +1501,13 @@ impl Tool for AgentKill {
             "required": ["handle"]
         })
     }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        flow_handle_scheduling_claim(args, ctx, AccessMode::Exclusive)
+    }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
@@ -1532,6 +1554,13 @@ impl Tool for FlowInterject {
             },
             "required": ["handle", "text"]
         })
+    }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        flow_handle_scheduling_claim(args, ctx, AccessMode::Exclusive)
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
@@ -1589,6 +1618,21 @@ fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, Run
             actual: other.kind_name().into(),
         }),
     }
+}
+
+fn flow_handle_scheduling_claim(
+    args: &ToolArgs,
+    ctx: &ToolCtx,
+    mode: AccessMode,
+) -> Result<SchedulingClaims, RuntimeError> {
+    let handle = extract_string(args, "handle", 0)?;
+    let Some(session_id) = ctx.session_id.as_deref().filter(|id| !id.is_empty()) else {
+        return Ok(SchedulingClaims::opaque());
+    };
+    Ok(SchedulingClaims::declared([ResourceAccess::new(
+        ResourceKey::Flow(format!("{session_id}:{handle}")),
+        mode,
+    )]))
 }
 
 async fn run_prepared_flow_agent(
@@ -2043,9 +2087,10 @@ fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentSpawn, FlowRegistry, FlowRunStatus, child_flow_start, emit_child_flow_end,
-        emit_flow_agent_start, extract_flow_version, inherited_context_snapshot,
-        prepare_flow_agent, resolve_flow_arguments, terminal_then_emit,
+        AgentKill, AgentOutput, AgentSpawn, AgentStatus, FlowInterject, FlowRegistry,
+        FlowRunStatus, child_flow_start, emit_child_flow_end, emit_flow_agent_start,
+        extract_flow_version, inherited_context_snapshot, prepare_flow_agent,
+        resolve_flow_arguments, terminal_then_emit,
     };
     use crate::event::{Event, EventSink, FlowRunId, FlowStatus};
     use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
@@ -2055,6 +2100,37 @@ mod tests {
     use crate::{InvocationEnv, value::Value};
     use std::cell::Cell;
     use std::sync::Arc;
+
+    #[test]
+    fn flow_claims_are_scoped_by_session_and_handle() {
+        let args = ToolArgs {
+            named: vec![("handle".into(), Value::Str("root".into()))],
+            ..ToolArgs::default()
+        };
+        let first_ctx = ToolCtx::new().with_session_id("session_a");
+        let second_ctx = ToolCtx::new().with_session_id("session_b");
+
+        let status = AgentStatus.scheduling_claims(&args, &first_ctx).unwrap();
+        let output = AgentOutput.scheduling_claims(&args, &first_ctx).unwrap();
+        let kill = AgentKill.scheduling_claims(&args, &first_ctx).unwrap();
+        let interject = FlowInterject.scheduling_claims(&args, &second_ctx).unwrap();
+
+        assert_eq!(
+            status.accesses,
+            vec![crate::tool_schedule::ResourceAccess::read(
+                crate::tool_schedule::ResourceKey::Flow("session_a:root".into())
+            )]
+        );
+        assert!(!status.conflicts_with(&output));
+        assert!(status.conflicts_with(&kill));
+        assert!(!kill.conflicts_with(&interject));
+        assert!(
+            AgentStatus
+                .scheduling_claims(&args, &ToolCtx::new())
+                .unwrap()
+                .is_opaque()
+        );
+    }
 
     #[test]
     fn spawned_flow_facts_preserve_event_and_stream_identity() {

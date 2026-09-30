@@ -691,6 +691,7 @@ use std::path::Path;
 
 use crate::sandbox::PtySpawnResult;
 use crate::tool::{Tier, Tool};
+use crate::tool_schedule::{AccessMode, ResourceAccess, ResourceKey, SchedulingClaims};
 use crate::value::Value;
 
 fn extract_string(
@@ -710,6 +711,27 @@ fn extract_string(
         return Ok(s.clone());
     }
     Err(RuntimeError::MissingArg(format!("term: {name}")))
+}
+
+fn terminal_handle_scheduling_claim(
+    args: &crate::tool::ToolArgs,
+    ctx: &crate::tool::ToolCtx,
+    mode: AccessMode,
+) -> Result<SchedulingClaims, RuntimeError> {
+    let raw = extract_string(args, "handle", 0)?;
+    let Some(handle) = TermHandle::parse(&raw) else {
+        return Ok(SchedulingClaims::opaque());
+    };
+    let Some(session_id) = ctx.session_id.as_deref().filter(|id| !id.is_empty()) else {
+        return Ok(SchedulingClaims::opaque());
+    };
+    if handle.session_id != session_id {
+        return Ok(SchedulingClaims::opaque());
+    }
+    Ok(SchedulingClaims::declared([ResourceAccess::new(
+        ResourceKey::TerminalHandle(handle.to_string()),
+        mode,
+    )]))
 }
 
 fn extract_optional_string(args: &crate::tool::ToolArgs, name: &str) -> Option<String> {
@@ -1200,6 +1222,15 @@ impl Tool for TermInput {
             "required": ["handle"]
         })
     }
+
+    fn scheduling_claims(
+        &self,
+        args: &crate::tool::ToolArgs,
+        ctx: &crate::tool::ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        terminal_handle_scheduling_claim(args, ctx, AccessMode::Exclusive)
+    }
+
     fn call<'a>(
         &'a self,
         args: crate::tool::ToolArgs,
@@ -1474,6 +1505,15 @@ impl Tool for TermCapture {
             "required": ["handle"]
         })
     }
+
+    fn scheduling_claims(
+        &self,
+        args: &crate::tool::ToolArgs,
+        ctx: &crate::tool::ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        terminal_handle_scheduling_claim(args, ctx, AccessMode::Read)
+    }
+
     fn call<'a>(
         &'a self,
         args: crate::tool::ToolArgs,
@@ -1653,6 +1693,15 @@ impl Tool for TermFind {
             "required": ["handle"]
         })
     }
+
+    fn scheduling_claims(
+        &self,
+        args: &crate::tool::ToolArgs,
+        ctx: &crate::tool::ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        terminal_handle_scheduling_claim(args, ctx, AccessMode::Read)
+    }
+
     fn call<'a>(
         &'a self,
         args: crate::tool::ToolArgs,
@@ -1944,6 +1993,15 @@ impl Tool for TermResize {
             "required": ["handle", "rows", "cols"]
         })
     }
+
+    fn scheduling_claims(
+        &self,
+        args: &crate::tool::ToolArgs,
+        ctx: &crate::tool::ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        terminal_handle_scheduling_claim(args, ctx, AccessMode::Exclusive)
+    }
+
     fn call<'a>(
         &'a self,
         args: crate::tool::ToolArgs,
@@ -1995,6 +2053,15 @@ impl Tool for TermKill {
             "required": ["handle"]
         })
     }
+
+    fn scheduling_claims(
+        &self,
+        args: &crate::tool::ToolArgs,
+        ctx: &crate::tool::ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        terminal_handle_scheduling_claim(args, ctx, AccessMode::Exclusive)
+    }
+
     fn call<'a>(
         &'a self,
         args: crate::tool::ToolArgs,
@@ -2077,6 +2144,37 @@ mod tests {
     use super::*;
     use crate::tool::{ToolArgs, ToolCtx};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn terminal_claims_use_session_owned_canonical_handles() {
+        let ctx = ToolCtx::new().with_session_id("session_a");
+        let args = ToolArgs {
+            positional: vec![Value::Str("term_session_a_7".into())],
+            ..ToolArgs::default()
+        };
+
+        let capture = TermCapture.scheduling_claims(&args, &ctx).unwrap();
+        let input = TermInput.scheduling_claims(&args, &ctx).unwrap();
+
+        assert_eq!(
+            capture.accesses,
+            vec![ResourceAccess::read(ResourceKey::TerminalHandle(
+                "term_session_a_7".into()
+            ))]
+        );
+        assert!(capture.conflicts_with(&input));
+
+        let foreign = ToolArgs {
+            positional: vec![Value::Str("term_session_b_7".into())],
+            ..ToolArgs::default()
+        };
+        assert!(
+            TermCapture
+                .scheduling_claims(&foreign, &ctx)
+                .unwrap()
+                .is_opaque()
+        );
+    }
 
     #[derive(Debug)]
     struct RecordingChild {

@@ -4,6 +4,7 @@ use crate::stream::StreamFrame;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::AtmanPayload;
 use crate::value::Value;
+use crate::{AccessMode, ResourceAccess, ResourceKey, SchedulingClaims};
 
 pub struct GitDiff;
 
@@ -41,20 +42,24 @@ impl Tool for GitInit {
         crate::tools::git_ops::git_mutation_provenance(args, ctx)
     }
 
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        Ok(SchedulingClaims::declared([ResourceAccess::new(
+            ResourceKey::Path(crate::tools::git_ops::resolve_git_cwd(
+                args,
+                ctx,
+                "git.init cwd",
+            )?),
+            AccessMode::Exclusive,
+        )]))
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let explicit = match args.named("cwd") {
-                Some(Value::Host(AtmanPayload::Path(path))) => Some(path.as_path()),
-                Some(Value::Str(path)) => Some(std::path::Path::new(path)),
-                Some(other) => {
-                    return Err(RuntimeError::TypeMismatch {
-                        expected: "string".into(),
-                        actual: other.kind_name().into(),
-                    });
-                }
-                None => None,
-            };
-            let path = ctx.resolve_cwd(explicit)?;
+            let path = crate::tools::git_ops::resolve_git_cwd(&args, ctx, "git.init cwd")?;
             crate::fs_access::authorize_write(ctx, &path, self.name(), true).await?;
             let bare = match args.named("bare") {
                 Some(Value::Bool(bare)) => *bare,
@@ -125,15 +130,19 @@ impl Tool for GitDiff {
         })
     }
 
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        crate::tools::git_ops::git_read_scheduling_claims(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let range = extract_string(&args, "range", 0)?;
             let paths = extract_string_list(&args, "paths", 1).unwrap_or_default();
-            let explicit = args.named("cwd").and_then(|value| match value {
-                Value::Str(path) => Some(std::path::Path::new(path)),
-                _ => None,
-            });
-            let cwd = ctx.resolve_cwd(explicit)?;
+            let cwd = crate::tools::git_ops::resolve_git_cwd(&args, ctx, "git.diff cwd")?;
             let out = git::diff_range(&cwd, &range, &paths)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.diff: {e}")))?;
             if let Some(tx) = &ctx.stream_tx {

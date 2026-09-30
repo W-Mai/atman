@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::RuntimeError;
 use crate::task_registry::{TaskDisplay, TaskKind, TaskRegistry, TaskStatus};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::tool_schedule::{AccessMode, ResourceAccess, ResourceKey, SchedulingClaims};
 use crate::value::Value;
 
 const DEFAULT_SPAWN_TIMEOUT_MS: u64 = 1_800_000;
@@ -1223,6 +1224,14 @@ impl Tool for BashStatus {
         })
     }
 
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        process_handle_scheduling_claim(args, ctx, AccessMode::Read)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
@@ -1260,6 +1269,14 @@ impl Tool for BashOutput {
             },
             "required": ["handle"]
         })
+    }
+
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        process_handle_scheduling_claim(args, ctx, AccessMode::Read)
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -1312,6 +1329,14 @@ impl Tool for BashKill {
             },
             "required": ["handle"]
         })
+    }
+
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        process_handle_scheduling_claim(args, ctx, AccessMode::Exclusive)
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -1379,6 +1404,27 @@ fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, Run
     }
 }
 
+fn process_handle_scheduling_claim(
+    args: &ToolArgs,
+    ctx: &ToolCtx,
+    mode: AccessMode,
+) -> Result<SchedulingClaims, RuntimeError> {
+    let raw = extract_string(args, "handle", 0)?;
+    let Some(handle) = BgHandle::parse(&raw) else {
+        return Ok(SchedulingClaims::opaque());
+    };
+    let Some(session_id) = ctx.session_id.as_deref().filter(|id| !id.is_empty()) else {
+        return Ok(SchedulingClaims::opaque());
+    };
+    if handle.session_id != session_id {
+        return Ok(SchedulingClaims::opaque());
+    }
+    Ok(SchedulingClaims::declared([ResourceAccess::new(
+        ResourceKey::ProcessHandle(handle.to_string()),
+        mode,
+    )]))
+}
+
 fn extract_optional_int(args: &ToolArgs, name: &str) -> Option<i64> {
     match args.named(name)? {
         Value::Int(n) => Some(*n),
@@ -1408,6 +1454,37 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
+
+    #[test]
+    fn background_claims_use_session_owned_canonical_handles() {
+        let ctx = ToolCtx::new().with_session_id("session_a");
+        let args = ToolArgs {
+            named: vec![("handle".into(), Value::Str("bg_session_a_9".into()))],
+            ..ToolArgs::default()
+        };
+
+        let output = BashOutput.scheduling_claims(&args, &ctx).unwrap();
+        let kill = BashKill.scheduling_claims(&args, &ctx).unwrap();
+
+        assert_eq!(
+            output.accesses,
+            vec![ResourceAccess::read(ResourceKey::ProcessHandle(
+                "bg_session_a_9".into()
+            ))]
+        );
+        assert!(output.conflicts_with(&kill));
+
+        let invalid = ToolArgs {
+            named: vec![("handle".into(), Value::Str("process-9".into()))],
+            ..ToolArgs::default()
+        };
+        assert!(
+            BashStatus
+                .scheduling_claims(&invalid, &ctx)
+                .unwrap()
+                .is_opaque()
+        );
+    }
 
     #[derive(Clone, Copy)]
     enum StrictLaunch {

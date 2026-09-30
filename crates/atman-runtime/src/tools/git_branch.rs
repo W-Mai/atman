@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use git2::{BranchType, Repository};
 
+use crate::SchedulingClaims;
 use crate::error::RuntimeError;
 use crate::git::{GitCli, has_changes};
 use crate::tool::{
@@ -15,14 +16,6 @@ pub struct GitBranchSwitch;
 pub struct GitBranchRename;
 pub struct GitBranchDelete;
 pub struct GitRemoteList;
-
-fn cwd(args: &ToolArgs, ctx: &ToolCtx) -> Result<PathBuf, RuntimeError> {
-    let explicit = args.named("cwd").and_then(|value| match value {
-        Value::Str(path) => Some(std::path::Path::new(path)),
-        _ => None,
-    });
-    ctx.resolve_cwd(explicit)
-}
 
 fn string_arg<'a>(args: &'a ToolArgs, name: &str) -> Result<&'a str, RuntimeError> {
     match args.named(name) {
@@ -58,7 +51,7 @@ fn bool_arg(args: &ToolArgs, name: &str, default: bool) -> Result<bool, RuntimeE
 }
 
 fn repo(args: &ToolArgs, ctx: &ToolCtx, tool: &str) -> Result<(PathBuf, Repository), RuntimeError> {
-    let cwd = cwd(args, ctx)?;
+    let cwd = crate::tools::git_ops::resolve_git_cwd(args, ctx, tool)?;
     let repository = Repository::open(&cwd)
         .map_err(|error| RuntimeError::ToolFailed(format!("{tool}: {error}")))?;
     Ok((cwd, repository))
@@ -69,7 +62,7 @@ async fn repo_mut(
     ctx: &ToolCtx,
     tool: &str,
 ) -> Result<(PathBuf, Repository), RuntimeError> {
-    let cwd = cwd(args, ctx)?;
+    let cwd = crate::tools::git_ops::resolve_git_cwd(args, ctx, tool)?;
     crate::fs_access::authorize_write(ctx, &cwd, tool, true).await?;
     let repository = Repository::open(&cwd)
         .map_err(|error| RuntimeError::ToolFailed(format!("{tool}: {error}")))?;
@@ -110,6 +103,13 @@ impl Tool for GitBranchList {
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"cwd":{"type":"string"}}})
+    }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        crate::tools::git_ops::git_read_scheduling_claims(args, ctx)
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
@@ -159,6 +159,13 @@ impl Tool for GitBranchCreate {
         ctx: &ToolCtx,
     ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
         crate::tools::git_ops::git_mutation_provenance(args, ctx)
+    }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        crate::tools::git_ops::git_mutation_scheduling_claims(args, ctx)
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -210,6 +217,13 @@ impl Tool for GitBranchSwitch {
     ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
         crate::tools::git_ops::git_mutation_provenance(args, ctx)
     }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        crate::tools::git_ops::git_mutation_scheduling_claims(args, ctx)
+    }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
@@ -259,6 +273,13 @@ impl Tool for GitBranchRename {
     ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
         crate::tools::git_ops::git_mutation_provenance(args, ctx)
     }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        crate::tools::git_ops::git_mutation_scheduling_claims(args, ctx)
+    }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
@@ -301,6 +322,13 @@ impl Tool for GitBranchDelete {
         ctx: &ToolCtx,
     ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
         crate::tools::git_ops::git_mutation_provenance(args, ctx)
+    }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        crate::tools::git_ops::git_mutation_scheduling_claims(args, ctx)
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -346,6 +374,13 @@ impl Tool for GitRemoteList {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"cwd":{"type":"string"}}})
     }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        crate::tools::git_ops::git_read_scheduling_claims(args, ctx)
+    }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let (_, repository) = repo(&args, ctx, self.name())?;
@@ -387,7 +422,8 @@ impl Tool for GitRemoteList {
 pub(super) fn register_remote_list(registry: &ToolRegistry) {
     registry
         .register_fn(
-            ToolDefinition::from_tool(&GitRemoteList),
+            ToolDefinition::from_tool(&GitRemoteList)
+                .scheduling_claims_with(crate::tools::git_ops::git_read_scheduling_claims),
             |args, ctx| async move {
                 let tool = GitRemoteList;
                 tool.call(args, &ctx).await
@@ -425,6 +461,26 @@ mod tests {
         run(dir.path(), &["add", "."]);
         run(dir.path(), &["commit", "-qm", "initial"]);
         dir
+    }
+
+    #[test]
+    fn function_backed_remote_list_preserves_scheduling_claims() {
+        let dir = repo();
+        let registry = ToolRegistry::new();
+        register_remote_list(&registry);
+        let claims = registry
+            .get("git.remote.list")
+            .unwrap()
+            .scheduling_claims(
+                &ToolArgs {
+                    named: vec![("cwd".into(), Value::Str(dir.path().display().to_string()))],
+                    ..ToolArgs::default()
+                },
+                &ToolCtx::default(),
+            )
+            .unwrap();
+
+        assert!(!claims.is_opaque());
     }
 
     #[test]

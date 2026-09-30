@@ -4,6 +4,7 @@ use std::time::Duration;
 use crate::error::RuntimeError;
 use crate::mcp::{McpServerState, McpServerStatus};
 use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::tool_schedule::SchedulingClaims;
 use crate::value::Value;
 
 pub const CONTROL_TOOL_NAMES: &[&str] = &["mcp.status", "mcp.tools", "mcp.await", "mcp.call"];
@@ -371,6 +372,15 @@ impl Tool for McpCall {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"server":{"type":"string"},"tool":{"type":"string"},"input":{"type":"object","default":{}}},"required":["server","tool"],"additionalProperties":false})
     }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        _ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        Ok(crate::mcp::mcp_server_scheduling_claim(&string_arg(
+            args, "server",
+        )?))
+    }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let (target, target_args) = call_target(&args)?;
@@ -395,6 +405,22 @@ impl Tool for McpCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_call_claims_the_explicit_server_without_parsing_qualified_names() {
+        let args = ToolArgs {
+            named: vec![
+                ("server".into(), Value::Str("team.tools".into())),
+                ("tool".into(), Value::Str("files.read".into())),
+            ],
+            ..ToolArgs::default()
+        };
+        let claims = McpCall.scheduling_claims(&args, &ToolCtx::new()).unwrap();
+        assert_eq!(
+            claims,
+            crate::mcp::mcp_server_scheduling_claim("team.tools")
+        );
+    }
 
     #[tokio::test]
     async fn wildcard_skips_failed_server() {

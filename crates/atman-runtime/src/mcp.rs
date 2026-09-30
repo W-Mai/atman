@@ -1272,6 +1272,14 @@ pub struct McpToolAdapter {
     description: Option<String>,
 }
 
+pub(crate) fn mcp_server_scheduling_claim(server: &str) -> crate::tool_schedule::SchedulingClaims {
+    crate::tool_schedule::SchedulingClaims::declared([
+        crate::tool_schedule::ResourceAccess::exclusive(
+            crate::tool_schedule::ResourceKey::McpServer(server.to_owned()),
+        ),
+    ])
+}
+
 impl McpToolAdapter {
     pub fn new(
         client: Arc<McpClient>,
@@ -1313,6 +1321,14 @@ impl crate::tool::Tool for McpToolAdapter {
 
     fn description(&self) -> Option<&str> {
         self.description.as_deref()
+    }
+
+    fn scheduling_claims(
+        &self,
+        _args: &crate::tool::ToolArgs,
+        _ctx: &crate::tool::ToolCtx,
+    ) -> Result<crate::tool_schedule::SchedulingClaims, RuntimeError> {
+        Ok(mcp_server_scheduling_claim(&self.client.name))
     }
 
     fn call<'a>(
@@ -1717,6 +1733,42 @@ mod tests {
         fn kind(&self) -> &'static str {
             "test"
         }
+    }
+
+    #[tokio::test]
+    async fn dynamic_adapter_and_mcp_call_share_the_exact_server_claim() {
+        use crate::tool::Tool as _;
+
+        let client = Arc::new(
+            McpClient::connect_with_transport(
+                "team.tools",
+                Arc::new(MutableToolTransport::new("files.read")),
+            )
+            .await
+            .unwrap(),
+        );
+        let adapter =
+            McpToolAdapter::new(client, "files.read", crate::tool::Tier::Zero, None, None);
+        let wrapper_args = crate::tool::ToolArgs {
+            named: vec![
+                (
+                    "server".into(),
+                    crate::value::Value::Str("team.tools".into()),
+                ),
+                ("tool".into(), crate::value::Value::Str("files.read".into())),
+            ],
+            ..crate::tool::ToolArgs::default()
+        };
+        let ctx = crate::tool::ToolCtx::new();
+
+        assert_eq!(
+            adapter
+                .scheduling_claims(&crate::tool::ToolArgs::default(), &ctx)
+                .unwrap(),
+            crate::tools::mcp::McpCall
+                .scheduling_claims(&wrapper_args, &ctx)
+                .unwrap()
+        );
     }
 
     #[tokio::test]

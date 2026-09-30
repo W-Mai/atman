@@ -10,6 +10,7 @@ use crate::error::RuntimeError;
 use crate::stream::StreamFrame;
 use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
+use crate::{AccessMode, ResourceAccess, ResourceKey, SchedulingClaims};
 
 pub struct GitStatus;
 
@@ -40,12 +41,20 @@ impl Tool for GitLog {
         })
     }
 
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        git_read_scheduling_claims(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let limit = extract_optional_int(&args, "limit")
                 .unwrap_or(20)
                 .clamp(1, 100) as usize;
-            let cwd = extract_cwd(&args, ctx, "git.log cwd")?;
+            let cwd = resolve_git_cwd(&args, ctx, "git.log cwd")?;
             let repo = Repository::open(&cwd)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.log: {e}")))?;
             let mut revwalk = repo
@@ -123,10 +132,18 @@ impl Tool for GitShow {
         })
     }
 
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        git_read_scheduling_claims(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let sha = extract_string(&args, "sha", 0)?;
-            let cwd = extract_cwd(&args, ctx, "git.show cwd")?;
+            let cwd = resolve_git_cwd(&args, ctx, "git.show cwd")?;
             let repo = Repository::open(&cwd)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.show: {e}")))?;
             let object = repo
@@ -183,9 +200,17 @@ impl Tool for GitStatus {
         })
     }
 
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        git_read_scheduling_claims(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let cwd = extract_cwd(&args, ctx, "git.status cwd")?;
+            let cwd = resolve_git_cwd(&args, ctx, "git.status cwd")?;
             let repo = Repository::open(&cwd)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.status: {e}")))?;
             let mut opts = StatusOptions::new();
@@ -256,10 +281,18 @@ impl Tool for GitAdd {
         git_mutation_provenance(args, ctx)
     }
 
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        git_mutation_scheduling_claims(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let paths = extract_string_list(&args, "paths")?;
-            let cwd = extract_cwd(&args, ctx, "git.add cwd")?;
+            let cwd = resolve_git_cwd(&args, ctx, "git.add cwd")?;
             crate::fs_access::authorize_write(ctx, &cwd, self.name(), true).await?;
             let repo = Repository::open(&cwd)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.add: {e}")))?;
@@ -317,11 +350,19 @@ impl Tool for GitCommit {
         git_mutation_provenance(args, ctx)
     }
 
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        git_mutation_scheduling_claims(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let message = extract_string(&args, "message", 0)?;
             let amend = extract_optional_bool(&args, "amend").unwrap_or(false);
-            let cwd = extract_cwd(&args, ctx, "git.commit cwd")?;
+            let cwd = resolve_git_cwd(&args, ctx, "git.commit cwd")?;
             crate::fs_access::authorize_write(ctx, &cwd, self.name(), true).await?;
             let repo = Repository::open(&cwd)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.commit: {e}")))?;
@@ -377,12 +418,20 @@ impl Tool for GitBranch {
         git_mutation_provenance(args, ctx)
     }
 
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        git_mutation_scheduling_claims(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let name = extract_string(&args, "name", 0)?;
             let create = extract_optional_bool(&args, "create").unwrap_or(true);
             let checkout = extract_optional_bool(&args, "checkout").unwrap_or(true);
-            let cwd = extract_cwd(&args, ctx, "git.branch cwd")?;
+            let cwd = resolve_git_cwd(&args, ctx, "git.branch cwd")?;
             crate::fs_access::authorize_write(ctx, &cwd, self.name(), true).await?;
             let repo = Repository::open(&cwd)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.branch: {e}")))?;
@@ -438,11 +487,19 @@ impl Tool for GitFetch {
         git_mutation_provenance(args, ctx).map(|p| p.with_network())
     }
 
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        git_mutation_scheduling_claims(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let remote =
                 extract_optional_string(&args, "remote").unwrap_or_else(|| "origin".into());
-            let cwd = extract_cwd(&args, ctx, "git.fetch cwd")?;
+            let cwd = resolve_git_cwd(&args, ctx, "git.fetch cwd")?;
             crate::fs_access::authorize_write(ctx, &cwd, self.name(), true).await?;
             let prune = extract_optional_bool(&args, "prune").unwrap_or(false);
             let cli = crate::git::GitCli::at(&cwd);
@@ -498,11 +555,19 @@ impl Tool for GitPush {
         git_mutation_provenance(args, ctx).map(|p| p.with_network())
     }
 
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        git_mutation_scheduling_claims(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let remote =
                 extract_optional_string(&args, "remote").unwrap_or_else(|| "origin".into());
-            let cwd = extract_cwd(&args, ctx, "git.push cwd")?;
+            let cwd = resolve_git_cwd(&args, ctx, "git.push cwd")?;
             crate::fs_access::authorize_write(ctx, &cwd, self.name(), true).await?;
             let branch = match extract_optional_string(&args, "branch") {
                 Some(branch) => branch,
@@ -556,7 +621,7 @@ impl Tool for GitPush {
 /// Provenance for the git tools that mutate a repository. `cwd` is their only
 /// path-shaped argument (a sha, remote, branch, or pathspec is not a filesystem
 /// target the resolver can classify), and it resolves through the same resolver
-/// `extract_cwd` uses so the gate classifies the repository the command will
+/// `resolve_git_cwd` uses so the gate classifies the repository the command will
 /// actually run against.
 pub(crate) fn git_mutation_provenance(
     args: &ToolArgs,
@@ -566,6 +631,63 @@ pub(crate) fn git_mutation_provenance(
     Ok(crate::permission::ResourceProvenance::for_ctx(ctx)
         .with_cwd(ctx, explicit.as_deref())?
         .with_risk(crate::trust::RiskKind::RepositoryMutation))
+}
+
+pub(crate) fn git_read_scheduling_claims(
+    args: &ToolArgs,
+    ctx: &ToolCtx,
+) -> Result<SchedulingClaims, RuntimeError> {
+    git_scheduling_claims(args, ctx, AccessMode::Read)
+}
+
+pub(crate) fn git_mutation_scheduling_claims(
+    args: &ToolArgs,
+    ctx: &ToolCtx,
+) -> Result<SchedulingClaims, RuntimeError> {
+    git_scheduling_claims(args, ctx, AccessMode::Exclusive)
+}
+
+fn git_scheduling_claims(
+    args: &ToolArgs,
+    ctx: &ToolCtx,
+    mode: AccessMode,
+) -> Result<SchedulingClaims, RuntimeError> {
+    let cwd = resolve_git_cwd(args, ctx, "git scheduling cwd")?;
+    let Ok(repository) = Repository::discover(&cwd) else {
+        return Ok(SchedulingClaims::opaque());
+    };
+    let git_dir = crate::fs_access::canonicalize_stable(repository.path());
+    let Some(common_dir) = git_common_dir(&git_dir) else {
+        return Ok(SchedulingClaims::opaque());
+    };
+    let mut accesses = vec![ResourceAccess::new(
+        ResourceKey::Repository(common_dir),
+        mode,
+    )];
+    if let Some(workdir) = repository.workdir() {
+        accesses.push(ResourceAccess::new(
+            ResourceKey::Path(crate::fs_access::canonicalize_stable(workdir)),
+            mode,
+        ));
+    }
+    Ok(SchedulingClaims::declared(accesses))
+}
+
+fn git_common_dir(git_dir: &std::path::Path) -> Option<PathBuf> {
+    match std::fs::read_to_string(git_dir.join("commondir")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(git_dir.to_path_buf()),
+        Err(_) => None,
+        Ok(relative) => {
+            let relative = relative.trim();
+            if relative.is_empty() {
+                return None;
+            }
+            let common_dir = git_dir.join(relative);
+            common_dir
+                .is_dir()
+                .then(|| crate::fs_access::canonicalize_stable(&common_dir))
+        }
+    }
 }
 
 fn cwd_path_arg(args: &ToolArgs) -> Result<Option<PathBuf>, RuntimeError> {
@@ -580,7 +702,11 @@ fn cwd_path_arg(args: &ToolArgs) -> Result<Option<PathBuf>, RuntimeError> {
     }
 }
 
-fn extract_cwd(args: &ToolArgs, ctx: &ToolCtx, label: &str) -> Result<PathBuf, RuntimeError> {
+pub(crate) fn resolve_git_cwd(
+    args: &ToolArgs,
+    ctx: &ToolCtx,
+    label: &str,
+) -> Result<PathBuf, RuntimeError> {
     let explicit = match args.named("cwd") {
         Some(Value::Host(AtmanPayload::Path(p))) => Some(p.as_path()),
         Some(Value::Str(s)) => Some(std::path::Path::new(s)),
@@ -840,6 +966,46 @@ mod tests {
         let args = ToolArgs::default();
         assert!(GitPush.invocation_provenance(&args, &ctx).unwrap().network);
         assert!(GitFetch.invocation_provenance(&args, &ctx).unwrap().network);
+    }
+
+    #[test]
+    fn repository_claims_link_git_metadata_and_worktree_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        let args = ToolArgs {
+            named: vec![(
+                "cwd".into(),
+                Value::Host(AtmanPayload::Path(dir.path().to_path_buf())),
+            )],
+            ..ToolArgs::default()
+        };
+        let ctx = ToolCtx::default();
+        let read = git_read_scheduling_claims(&args, &ctx).unwrap();
+        let mutation = git_mutation_scheduling_claims(&args, &ctx).unwrap();
+        let file_write = SchedulingClaims::declared([ResourceAccess::write(ResourceKey::Path(
+            crate::fs_access::canonicalize_stable(&dir.path().join("src/lib.rs")),
+        ))]);
+
+        assert!(!read.is_opaque());
+        assert!(read.conflicts_with(&mutation));
+        assert!(read.conflicts_with(&file_write));
+    }
+
+    #[test]
+    fn common_git_dir_rejects_unusable_worktree_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git/worktrees/feature");
+        let common_dir = dir.path().join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+
+        assert_eq!(
+            git_common_dir(&git_dir),
+            Some(crate::fs_access::canonicalize_stable(&common_dir))
+        );
+
+        std::fs::write(git_dir.join("commondir"), "\n").unwrap();
+        assert_eq!(git_common_dir(&git_dir), None);
     }
 
     fn have_git() -> bool {

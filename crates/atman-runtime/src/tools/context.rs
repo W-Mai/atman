@@ -1,5 +1,6 @@
 use crate::error::RuntimeError;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::tool_schedule::SchedulingClaims;
 use crate::value::Value;
 
 const RETRIEVED_RECORD_PREFIXES: [&str; 2] = ["agent.rule.", "agent.mistake."];
@@ -37,6 +38,14 @@ impl Tool for ContextRecordAppend {
             },
             "required": ["key", "content"]
         })
+    }
+
+    fn scheduling_claims(
+        &self,
+        _args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        Ok(crate::tools::session::session_scheduling_claim(ctx))
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -127,6 +136,19 @@ fn append_context_records(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_record_and_session_push_share_the_session_claim() {
+        let ctx = ToolCtx::new().with_session_id("session-a");
+        let context_claim = ContextRecordAppend
+            .scheduling_claims(&ToolArgs::default(), &ctx)
+            .unwrap();
+        let session_claim = crate::tools::session::SessionPush
+            .scheduling_claims(&ToolArgs::default(), &ctx)
+            .unwrap();
+        assert_eq!(context_claim, session_claim);
+        assert!(context_claim.conflicts_with(&session_claim));
+    }
 
     fn args(key: &str, content: &str) -> ToolArgs {
         ToolArgs {

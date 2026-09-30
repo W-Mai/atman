@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::SchedulingClaims;
 use crate::error::RuntimeError;
 use crate::git::GitCli;
 use crate::tool::{
@@ -12,16 +13,8 @@ pub struct GitRevert;
 pub struct GitTagList;
 pub struct GitTagCreate;
 
-fn cwd(args: &ToolArgs, ctx: &ToolCtx) -> Result<PathBuf, RuntimeError> {
-    let explicit = args.named("cwd").and_then(|value| match value {
-        Value::Str(path) => Some(std::path::Path::new(path)),
-        _ => None,
-    });
-    ctx.resolve_cwd(explicit)
-}
-
 async fn cwd_mut(args: &ToolArgs, ctx: &ToolCtx, tool: &str) -> Result<PathBuf, RuntimeError> {
-    let cwd = cwd(args, ctx)?;
+    let cwd = crate::tools::git_ops::resolve_git_cwd(args, ctx, tool)?;
     crate::fs_access::authorize_write(ctx, &cwd, tool, true).await?;
     Ok(cwd)
 }
@@ -81,6 +74,13 @@ impl Tool for GitRestore {
         ctx: &ToolCtx,
     ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
         crate::tools::git_ops::git_mutation_provenance(args, ctx)
+    }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        crate::tools::git_ops::git_mutation_scheduling_claims(args, ctx)
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -161,6 +161,13 @@ impl Tool for GitRevert {
     ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
         crate::tools::git_ops::git_mutation_provenance(args, ctx)
     }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        crate::tools::git_ops::git_mutation_scheduling_claims(args, ctx)
+    }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
@@ -194,11 +201,22 @@ impl Tool for GitTagList {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"cwd":{"type":"string"}}})
     }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        crate::tools::git_ops::git_read_scheduling_claims(args, ctx)
+    }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let output = GitCli::at(cwd(&args, ctx)?)
-                .run(&["tag", "--list", "--format=%(refname:short)"])
-                .map_err(|e| RuntimeError::ToolFailed(format!("git.tag.list: {e}")))?;
+            let output = GitCli::at(crate::tools::git_ops::resolve_git_cwd(
+                &args,
+                ctx,
+                self.name(),
+            )?)
+            .run(&["tag", "--list", "--format=%(refname:short)"])
+            .map_err(|e| RuntimeError::ToolFailed(format!("git.tag.list: {e}")))?;
             Ok(Value::List(
                 output
                     .lines()
@@ -213,7 +231,8 @@ impl Tool for GitTagList {
 pub(super) fn register_tag_list(registry: &ToolRegistry) {
     registry
         .register_fn(
-            ToolDefinition::from_tool(&GitTagList),
+            ToolDefinition::from_tool(&GitTagList)
+                .scheduling_claims_with(crate::tools::git_ops::git_read_scheduling_claims),
             |args, ctx| async move {
                 let tool = GitTagList;
                 tool.call(args, &ctx).await
@@ -244,6 +263,13 @@ impl Tool for GitTagCreate {
         ctx: &ToolCtx,
     ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
         crate::tools::git_ops::git_mutation_provenance(args, ctx)
+    }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        crate::tools::git_ops::git_mutation_scheduling_claims(args, ctx)
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -310,6 +336,26 @@ mod tests {
         run(dir.path(), &["add", "."]);
         run(dir.path(), &["commit", "-qm", "initial"]);
         dir
+    }
+
+    #[test]
+    fn function_backed_tag_list_preserves_scheduling_claims() {
+        let dir = repo();
+        let registry = ToolRegistry::new();
+        register_tag_list(&registry);
+        let claims = registry
+            .get("git.tag.list")
+            .unwrap()
+            .scheduling_claims(
+                &ToolArgs {
+                    named: vec![("cwd".into(), Value::Str(dir.path().display().to_string()))],
+                    ..ToolArgs::default()
+                },
+                &ToolCtx::default(),
+            )
+            .unwrap();
+
+        assert!(!claims.is_opaque());
     }
 
     #[tokio::test]

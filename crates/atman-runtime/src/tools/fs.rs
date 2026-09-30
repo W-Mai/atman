@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crate::error::RuntimeError;
 use crate::stream::StreamFrame;
 use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::tool_schedule::{AccessMode, ResourceAccess, ResourceKey, SchedulingClaims};
 use crate::value::Value;
 
 pub struct FsRead;
@@ -38,6 +39,14 @@ impl Tool for FsRead {
             },
             "required": ["path"]
         })
+    }
+
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        path_scheduling_claim(args, ctx, AccessMode::Read)
     }
 
     fn invocation_provenance(
@@ -274,6 +283,14 @@ impl Tool for FsWrite {
         })
     }
 
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        path_scheduling_claim(args, ctx, AccessMode::Write)
+    }
+
     fn invocation_provenance(
         &self,
         args: &ToolArgs,
@@ -386,6 +403,14 @@ impl Tool for FsEdit {
             },
             "required": ["path", "old_string", "new_string"]
         })
+    }
+
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        path_scheduling_claim(args, ctx, AccessMode::Write)
     }
 
     fn invocation_provenance(
@@ -684,6 +709,14 @@ impl Tool for FsList {
         })
     }
 
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        path_scheduling_claim(args, ctx, AccessMode::Read)
+    }
+
     fn invocation_provenance(
         &self,
         args: &ToolArgs,
@@ -731,6 +764,18 @@ fn extract_path(args: &ToolArgs, name: &str, pos: usize) -> Result<PathBuf, Runt
             actual: other.kind_name().into(),
         }),
     }
+}
+
+fn path_scheduling_claim(
+    args: &ToolArgs,
+    ctx: &ToolCtx,
+    mode: AccessMode,
+) -> Result<SchedulingClaims, RuntimeError> {
+    let path = ctx.resolve_path(&extract_path(args, "path", 0)?)?;
+    Ok(SchedulingClaims::declared([ResourceAccess::new(
+        ResourceKey::Path(path),
+        mode,
+    )]))
 }
 
 fn path_in_workspace(path: &std::path::Path) -> bool {
@@ -796,6 +841,17 @@ impl Tool for FsGrep {
             },
             "required": ["pattern"]
         })
+    }
+
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        let root = ctx.resolve_cwd(grep_root(args)?.as_deref())?;
+        Ok(SchedulingClaims::declared([ResourceAccess::read(
+            ResourceKey::Path(root),
+        )]))
     }
 
     fn invocation_provenance(
@@ -898,6 +954,41 @@ async fn fs_grep_impl(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn scheduling_claims_normalize_paths_and_preserve_directory_conflicts() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nested.txt");
+        let ctx = ToolCtx::new();
+        let path_args = ToolArgs {
+            named: vec![("path".into(), Value::Host(AtmanPayload::Path(path.clone())))],
+            ..ToolArgs::default()
+        };
+        let grep_args = ToolArgs {
+            named: vec![
+                ("pattern".into(), Value::Str("needle".into())),
+                (
+                    "path".into(),
+                    Value::Host(AtmanPayload::Path(dir.path().to_path_buf())),
+                ),
+            ],
+            ..ToolArgs::default()
+        };
+
+        let read = FsRead.scheduling_claims(&path_args, &ctx).unwrap();
+        let write = FsWrite.scheduling_claims(&path_args, &ctx).unwrap();
+        let grep = FsGrep.scheduling_claims(&grep_args, &ctx).unwrap();
+
+        assert_eq!(
+            read.accesses,
+            vec![ResourceAccess::read(ResourceKey::Path(
+                ctx.resolve_path(&path).unwrap()
+            ))]
+        );
+        assert!(!read.conflicts_with(&read));
+        assert!(read.conflicts_with(&write));
+        assert!(grep.conflicts_with(&write));
+    }
 
     #[test]
     fn new_file_preview_marks_every_content_line_as_an_insertion() {
