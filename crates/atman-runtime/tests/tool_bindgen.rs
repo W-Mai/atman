@@ -10,11 +10,29 @@ mod host_tools {
 
     use atman_runtime::{RuntimeError, ToolCtx};
 
+    pub fn double_scheduling_claims(
+        args: &atman_runtime::ToolArgs,
+        _ctx: &ToolCtx,
+    ) -> Result<atman_runtime::SchedulingClaims, RuntimeError> {
+        let value = args
+            .named("value")
+            .ok_or_else(|| RuntimeError::MissingArg("value".into()))?;
+        Ok(atman_runtime::SchedulingClaims::declared([
+            atman_runtime::ResourceAccess::read(atman_runtime::ResourceKey::Named(format!(
+                "double:{value:?}"
+            ))),
+        ]))
+    }
+
     pub static DEFERRED_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static IMMEDIATE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
     /// Doubles an integer.
-    #[tool(name = "math.double", tier = 0)]
+    #[tool(
+        name = "math.double",
+        tier = 0,
+        scheduling_claims = double_scheduling_claims
+    )]
     pub async fn double(value: i64) -> i64 {
         value * 2
     }
@@ -57,6 +75,27 @@ async fn generated_tools_use_registry_metadata_and_dispatch() {
     let double = registry.get("math.double").unwrap();
     assert_eq!(double.tier(), Tier::Zero);
     assert_eq!(double.call_mode(), ToolCallMode::Deferred);
+    assert!(matches!(
+        double
+            .scheduling_claims(
+                &ToolArgs {
+                    named: vec![("value".into(), Value::Int(21))],
+                    ..ToolArgs::default()
+                },
+                &ToolCtx::default()
+            )
+            .unwrap()
+            .policy,
+        atman_runtime::SchedulingPolicy::Declared
+    ));
+    assert!(
+        registry
+            .get("probe.deferred")
+            .unwrap()
+            .scheduling_claims(&ToolArgs::default(), &ToolCtx::default())
+            .unwrap()
+            .is_opaque()
+    );
     assert_eq!(
         double.approval_level(&ToolArgs::default(), &ToolCtx::default()),
         ApprovalLevel::Auto

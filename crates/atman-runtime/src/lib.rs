@@ -90,6 +90,7 @@ pub mod task_registry;
 pub mod templates;
 pub mod tool;
 pub mod tool_naming;
+mod tool_schedule;
 pub mod tools;
 pub mod trust;
 pub mod user_input;
@@ -141,6 +142,9 @@ pub use tool::{
     ToolResult,
 };
 pub use tool_naming::{ToolNaming, from_wire, to_wire};
+pub use tool_schedule::{
+    AccessMode, ResourceAccess, ResourceKey, SchedulingClaims, SchedulingPolicy,
+};
 pub use validate::{ValidationError, validate};
 pub use value::{AtmanPayload, AtmanValue as Value, ValueJson};
 pub use workflow::{NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind};

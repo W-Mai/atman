@@ -26,6 +26,7 @@ pub(crate) struct ToolFn {
     pub docs: String,
     pub tier: Option<u8>,
     pub cancel: Option<CancelKind>,
+    pub scheduling_claims: Option<syn::ExprPath>,
 }
 
 pub(crate) struct ToolParam {
@@ -163,6 +164,7 @@ fn parse_tool(function: &ItemFn, attr: &Attribute, mode: Mode) -> syn::Result<To
     let mut name = None;
     let mut tier = None;
     let mut cancel = None;
+    let mut scheduling_claims = None;
     for option in options {
         match option {
             Meta::NameValue(value) if value.path.is_ident("name") => {
@@ -237,12 +239,31 @@ fn parse_tool(function: &ItemFn, attr: &Attribute, mode: Mode) -> syn::Result<To
                     }
                 });
             }
+            Meta::NameValue(value)
+                if value.path.is_ident("scheduling_claims") && mode == Mode::Runtime =>
+            {
+                if scheduling_claims.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        value,
+                        "duplicate scheduling_claims",
+                    ));
+                }
+                let Expr::Path(path) = &value.value else {
+                    return Err(syn::Error::new_spanned(
+                        &value.value,
+                        "scheduling_claims must be a Rust path",
+                    ));
+                };
+                scheduling_claims = Some(path.clone());
+            }
             other => {
                 return Err(syn::Error::new_spanned(
                     other,
                     match mode {
                         Mode::Rt => "unsupported tool option; expected name = \"...\"",
-                        Mode::Runtime => "unsupported tool option; expected name, tier, or cancel",
+                        Mode::Runtime => {
+                            "unsupported tool option; expected name, tier, cancel, or scheduling_claims"
+                        }
                     },
                 ));
             }
@@ -355,6 +376,7 @@ fn parse_tool(function: &ItemFn, attr: &Attribute, mode: Mode) -> syn::Result<To
         docs,
         tier,
         cancel,
+        scheduling_claims,
     })
 }
 

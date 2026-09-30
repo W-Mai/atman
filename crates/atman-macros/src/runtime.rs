@@ -63,6 +63,11 @@ fn registration(tool: &ToolFn, path: &Path) -> syn::Result<TokenStream2> {
     } else {
         quote!()
     };
+    let scheduling_claims = tool
+        .scheduling_claims
+        .as_ref()
+        .map(|claims| quote!(.scheduling_claims_with(#claims)))
+        .unwrap_or_default();
     let description = if tool.docs.is_empty() {
         quote!()
     } else {
@@ -142,6 +147,7 @@ fn registration(tool: &ToolFn, path: &Path) -> syn::Result<TokenStream2> {
                 #description
                 .cancel_behavior(#cancel)
                 #call_mode
+                #scheduling_claims
                 .input_schema(#path::__private::serde_json::json!({
                     "type": "object",
                     "properties": { #(#properties),* },

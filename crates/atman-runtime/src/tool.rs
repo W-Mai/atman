@@ -666,6 +666,13 @@ pub trait Tool: Send + Sync {
     fn invocation_plane(&self) -> InvocationPlane {
         InvocationPlane::Ordinary
     }
+    fn scheduling_claims(
+        &self,
+        _args: &ToolArgs,
+        _ctx: &ToolCtx,
+    ) -> Result<crate::tool_schedule::SchedulingClaims, RuntimeError> {
+        Ok(crate::tool_schedule::SchedulingClaims::opaque())
+    }
     fn approval_level(&self, _args: &ToolArgs, _ctx: &ToolCtx) -> ApprovalLevel {
         ApprovalLevel::from_tier(self.tier())
     }
@@ -711,7 +718,14 @@ pub struct ToolDefinition {
     cancel_behavior: CancelBehavior,
     call_mode: atman_rt::ToolCallMode,
     requires_call_intent: bool,
+    scheduling_claims: SchedulingClaimsFn,
 }
+
+type SchedulingClaimsFn = std::sync::Arc<
+    dyn Fn(&ToolArgs, &ToolCtx) -> Result<crate::tool_schedule::SchedulingClaims, RuntimeError>
+        + Send
+        + Sync,
+>;
 
 impl ToolDefinition {
     pub fn new(name: impl Into<String>, tier: Tier) -> Self {
@@ -723,6 +737,9 @@ impl ToolDefinition {
             cancel_behavior: CancelBehavior::AbortSafe,
             call_mode: atman_rt::ToolCallMode::Immediate,
             requires_call_intent: true,
+            scheduling_claims: std::sync::Arc::new(|_, _| {
+                Ok(crate::tool_schedule::SchedulingClaims::opaque())
+            }),
         }
     }
 
@@ -735,6 +752,9 @@ impl ToolDefinition {
             cancel_behavior: tool.cancel_behavior(),
             call_mode: tool.call_mode(),
             requires_call_intent: tool.requires_call_intent(),
+            scheduling_claims: std::sync::Arc::new(|_, _| {
+                Ok(crate::tool_schedule::SchedulingClaims::opaque())
+            }),
         }
     }
 
@@ -762,6 +782,21 @@ impl ToolDefinition {
     pub fn requires_call_intent(mut self, required: bool) -> Self {
         self.requires_call_intent = required;
         self
+    }
+
+    pub fn scheduling_claims_with<F>(mut self, claims: F) -> Self
+    where
+        F: Fn(&ToolArgs, &ToolCtx) -> Result<crate::tool_schedule::SchedulingClaims, RuntimeError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.scheduling_claims = std::sync::Arc::new(claims);
+        self
+    }
+
+    pub fn scheduling_claims(self, claims: crate::tool_schedule::SchedulingClaims) -> Self {
+        self.scheduling_claims_with(move |_, _| Ok(claims.clone()))
     }
 }
 
@@ -810,6 +845,14 @@ where
 
     fn requires_call_intent(&self) -> bool {
         self.definition.requires_call_intent
+    }
+
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::tool_schedule::SchedulingClaims, RuntimeError> {
+        (self.definition.scheduling_claims)(args, ctx)
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
