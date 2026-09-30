@@ -2,8 +2,11 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -13,6 +16,9 @@ use crate::error::RuntimeError;
 pub const DEFAULT_ROWS: u16 = 24;
 pub const DEFAULT_COLS: u16 = 80;
 const STREAM_CHANNEL_CAPACITY: usize = 256;
+const DEFAULT_OUTPUT_WAIT: Duration = Duration::from_millis(300);
+const OUTPUT_QUIET_WINDOW: Duration = Duration::from_millis(25);
+const MAX_OUTPUT_WAIT_MS: i64 = 5_000;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct TermHandle {
@@ -231,6 +237,8 @@ pub struct TermEntry {
     pub writer: Mutex<Box<dyn std::io::Write + Send>>,
     pub state: Arc<Mutex<TermState>>,
     pub stream_tx: broadcast::Sender<TermStreamEvent>,
+    output_revision: Arc<AtomicU64>,
+    action_gate: tokio::sync::Mutex<()>,
     pub log_path: PathBuf,
     pub reader_task: Mutex<Option<JoinHandle<()>>>,
     pub child: Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
@@ -468,6 +476,7 @@ impl TermRegistry {
             started_at: now_ms(),
         }));
         let (stream_tx, _stream_rx) = broadcast::channel(STREAM_CHANNEL_CAPACITY);
+        let output_revision = Arc::new(AtomicU64::new(0));
         let log_file = match open_log(&log_path) {
             Ok(file) => file,
             Err(error) => {
@@ -492,6 +501,8 @@ impl TermRegistry {
             writer: Mutex::new(writer),
             state: state.clone(),
             stream_tx: stream_tx.clone(),
+            output_revision: output_revision.clone(),
+            action_gate: tokio::sync::Mutex::new(()),
             log_path: log_path.clone(),
             reader_task: Mutex::new(None),
             child: Mutex::new(Some(child)),
@@ -527,6 +538,7 @@ impl TermRegistry {
                 reader,
                 parser,
                 state,
+                output_revision,
                 stream_tx,
                 log_file,
                 tui_stream_tx,
@@ -558,6 +570,7 @@ fn run_reader_loop(
     mut reader: Box<dyn std::io::Read + Send>,
     parser: Arc<Mutex<vt100::Parser>>,
     state: Arc<Mutex<TermState>>,
+    output_revision: Arc<AtomicU64>,
     stream_tx: broadcast::Sender<TermStreamEvent>,
     mut log_file: std::fs::File,
     tui_stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
@@ -583,6 +596,7 @@ fn run_reader_loop(
                     p.process(chunk);
                     snapshot_screen(&p)
                 };
+                output_revision.fetch_add(1, Ordering::Release);
                 let screen_changed = last_screen.as_ref() != Some(&screen);
                 let st = state.lock().expect("state poisoned").clone();
                 let _ = stream_tx.send(TermStreamEvent::Chunk {
@@ -718,6 +732,60 @@ fn extract_optional_int(args: &crate::tool::ToolArgs, name: &str) -> Option<i64>
     })
 }
 
+fn output_wait_duration(args: &crate::tool::ToolArgs) -> Result<Duration, RuntimeError> {
+    match args.named("wait_ms") {
+        None | Some(Value::Unit) => Ok(DEFAULT_OUTPUT_WAIT),
+        Some(Value::Int(millis)) if (0..=MAX_OUTPUT_WAIT_MS).contains(millis) => {
+            Ok(Duration::from_millis(*millis as u64))
+        }
+        Some(Value::Int(_)) => Err(RuntimeError::ToolFailed(format!(
+            "term: `wait_ms` must be between 0 and {MAX_OUTPUT_WAIT_MS}"
+        ))),
+        Some(other) => Err(RuntimeError::ToolFailed(format!(
+            "term: `wait_ms` must be an integer, got {}",
+            other.kind_name()
+        ))),
+    }
+}
+
+async fn settle_terminal_output(
+    entry: &TermEntry,
+    rx: &mut broadcast::Receiver<TermStreamEvent>,
+    baseline: u64,
+    max_wait: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + max_wait;
+    let revision = entry.output_revision.load(Ordering::Acquire);
+    let mut observed = revision > baseline;
+
+    if max_wait.is_zero() || !entry.current_state().is_running() {
+        return;
+    }
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let wait = if observed {
+            remaining.min(OUTPUT_QUIET_WINDOW)
+        } else {
+            remaining
+        };
+        match tokio::time::timeout(wait, rx.recv()).await {
+            Ok(Ok(TermStreamEvent::Chunk { .. }))
+            | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+                observed |= entry.output_revision.load(Ordering::Acquire) > baseline;
+            }
+            Ok(Ok(TermStreamEvent::Exited { .. }))
+            | Ok(Err(broadcast::error::RecvError::Closed)) => {
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+}
+
 pub struct TermSpawn;
 
 impl Tool for TermSpawn {
@@ -729,7 +797,7 @@ impl Tool for TermSpawn {
     }
     fn description(&self) -> Option<&str> {
         Some(
-            "Spawn a PTY-backed interactive terminal. Supports TUI apps (vim, top, ssh, codex).\nReturns handle + state + dimensions. Does NOT return screen content — use\nterm.capture to read the screen.\n\nTypical flow:\n1. term.spawn(cmd: \"your command\", rows: 24, cols: 80)\n2. term.input(handle: \"...\", text: \"ls -la\") or key: \"enter\"\n3. term.capture(handle: \"...\") — returns screen as text by default\n4. Repeat 2-3 as needed\n5. term.kill(handle: \"...\")",
+            "Spawn a PTY-backed interactive terminal. Supports TUI apps (vim, top, ssh, codex).\nReturns handle, state, dimensions, and an initial screen snapshot after a bounded\nfirst-output synchronization. Use term.capture to read later screen state.\n\nTypical flow:\n1. term.spawn(cmd: \"your command\", rows: 24, cols: 80)\n2. term.input(handle: \"...\", text: \"ls -la\") or key: \"enter\"\n3. term.capture(handle: \"...\") — returns screen as text by default\n4. Repeat 2-3 as needed\n5. term.kill(handle: \"...\")",
         )
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -740,7 +808,8 @@ impl Tool for TermSpawn {
                 "rows": {"type": "integer", "default": 24},
                 "cols": {"type": "integer", "default": 80},
                 "cwd": {"type": "string"},
-                "env": {"type": "object"}
+                "env": {"type": "object"},
+                "wait_ms": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 300, "description": "Maximum time to synchronize the first PTY output with the screen parser. This does not wait for command completion."}
             }
         })
     }
@@ -768,6 +837,7 @@ async fn spawn_impl(
     args: crate::tool::ToolArgs,
     ctx: &crate::tool::ToolCtx,
 ) -> crate::tool::ToolResult {
+    let output_wait = output_wait_duration(&args)?;
     let cmd_str = extract_optional_string(&args, "cmd");
     let rows = extract_optional_int(&args, "rows")
         .map(|v| v as u16)
@@ -860,6 +930,8 @@ async fn spawn_impl(
         ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
     )?;
 
+    let mut output_rx = entry.stream_tx.subscribe();
+    settle_terminal_output(&entry, &mut output_rx, 0, output_wait).await;
     let state = entry.current_state();
     let text = {
         let parser = entry.parser.lock().expect("parser poisoned");
@@ -1064,7 +1136,7 @@ impl Tool for TermInput {
     }
     fn description(&self) -> Option<&str> {
         Some(
-            "Send input to a terminal's PTY. Use `text` for literal text, `key` for\nspecial keys (enter, tab, esc, backspace, up, down, left, right, ctrl+c,\nctrl+d, ctrl+z), or `mouse` for mouse events. Use key: \"enter\" to\nsubmit a command, not text: \"\\r\". Mouse actions: click, double_click,\nlong_press, drag, press, release, move, scroll_up, scroll_down.\nUse term.find to locate text on screen before clicking.",
+            "Send input to a terminal's PTY. Use `text` for literal text, `key` for\nnamed keys or control-key combinations, or `mouse` for mouse events. The call\nflushes the PTY writer and performs a bounded, best-effort reader/parser\nsynchronization before returning. This does not prove which action produced the\nobserved output or that a command completed; use watch for delayed results. Use\nkey: \"enter\" to submit a command, not text: \"\\r\". Mouse actions: click,\ndouble_click, long_press, drag, press, release, move, scroll_up, scroll_down.\nUse term.find to locate text on screen before clicking.",
         )
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -1073,7 +1145,8 @@ impl Tool for TermInput {
             "properties": {
                 "handle": {"type": "string"},
                 "text": {"type": "string", "description": "Literal text to write. Do NOT use \\r or \\n here — use key:\"enter\" instead."},
-                "key": {"type": "string", "enum": ["enter", "tab", "esc", "backspace", "up", "down", "left", "right", "ctrl+c", "ctrl+d", "ctrl+z"]},
+                "key": {"type": "string", "description": "Named key (enter, tab, esc, backspace, or an arrow key), or ctrl+ followed by one ASCII letter/control symbol."},
+                "wait_ms": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 300, "description": "Maximum time to let the PTY reader and screen parser catch up after writing input. This does not wait for command completion."},
                 "mouse": {
                     "type": "object",
                     "properties": {
@@ -1105,6 +1178,7 @@ impl Tool for TermInput {
             let text = extract_optional_string(&args, "text").unwrap_or_default();
             let key = extract_optional_string(&args, "key");
             let mouse = args.named("mouse");
+            let output_wait = output_wait_duration(&args)?;
             let registry = ctx.term_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("term.input: registry not available".into())
             })?;
@@ -1115,7 +1189,7 @@ impl Tool for TermInput {
             let mut steps: Vec<(Vec<u8>, std::time::Duration)> = Vec::new();
             let mut first = text.into_bytes();
             if let Some(k) = &key {
-                first.extend_from_slice(&key_to_bytes(k));
+                first.extend_from_slice(&key_to_bytes(k)?);
             }
             if !first.is_empty() {
                 steps.push((first, std::time::Duration::ZERO));
@@ -1129,12 +1203,17 @@ impl Tool for TermInput {
                 ));
             }
 
+            let _action = entry.action_gate.lock().await;
+            let mut output_rx = entry.stream_tx.subscribe();
+            let baseline = entry.output_revision.load(Ordering::Acquire);
             let mut total = 0usize;
             for (payload, delay) in steps {
                 if !payload.is_empty() {
                     let mut w = entry.writer.lock().expect("writer poisoned");
                     w.write_all(&payload)
                         .map_err(|e| RuntimeError::ToolFailed(format!("term.input write: {e}")))?;
+                    w.flush()
+                        .map_err(|e| RuntimeError::ToolFailed(format!("term.input flush: {e}")))?;
                     total += payload.len();
                     drop(w);
                 }
@@ -1142,6 +1221,7 @@ impl Tool for TermInput {
                     tokio::time::sleep(delay).await;
                 }
             }
+            settle_terminal_output(&entry, &mut output_rx, baseline, output_wait).await;
             Ok(Value::Struct(vec![
                 ("ok".into(), Value::Bool(true)),
                 ("bytes_written".into(), Value::Int(total as i64)),
@@ -1150,8 +1230,9 @@ impl Tool for TermInput {
     }
 }
 
-fn key_to_bytes(key: &str) -> Vec<u8> {
-    match key {
+fn key_to_bytes(key: &str) -> Result<Vec<u8>, RuntimeError> {
+    let normalized = key.trim().to_ascii_lowercase();
+    let bytes = match normalized.as_str() {
         "enter" => vec![b'\r'],
         "tab" => vec![b'\t'],
         "esc" => vec![0x1b],
@@ -1160,10 +1241,30 @@ fn key_to_bytes(key: &str) -> Vec<u8> {
         "down" => vec![0x1b, b'[', b'B'],
         "right" => vec![0x1b, b'[', b'C'],
         "left" => vec![0x1b, b'[', b'D'],
-        "ctrl+c" => vec![0x03],
-        "ctrl+d" => vec![0x04],
-        "ctrl+z" => vec![0x1a],
-        _ => Vec::new(),
+        _ => match control_key_byte(&normalized) {
+            Some(byte) => vec![byte],
+            None => {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "term.input: unsupported key `{key}`"
+                )));
+            }
+        },
+    };
+    Ok(bytes)
+}
+
+fn control_key_byte(key: &str) -> Option<u8> {
+    let chord = key.strip_prefix("ctrl+")?;
+    if chord == "space" {
+        return Some(0x00);
+    }
+    let [byte] = chord.as_bytes() else {
+        return None;
+    };
+    match byte {
+        b'a'..=b'z' | b'@' | b'[' | b'\\' | b']' | b'^' | b'_' => Some(byte & 0x1f),
+        b'?' => Some(0x7f),
+        _ => None,
     }
 }
 
@@ -1799,7 +1900,9 @@ impl Tool for TermResize {
         Tier::Four
     }
     fn description(&self) -> Option<&str> {
-        Some("Resize a terminal's PTY dimensions. Sends SIGWINCH to the child process.")
+        Some(
+            "Resize a terminal's PTY dimensions and send SIGWINCH to the child process. Performs a bounded, best-effort reader/parser synchronization before returning; it does not guarantee that the child redrew its screen.",
+        )
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1807,7 +1910,8 @@ impl Tool for TermResize {
             "properties": {
                 "handle": {"type": "string"},
                 "rows": {"type": "integer"},
-                "cols": {"type": "integer"}
+                "cols": {"type": "integer"},
+                "wait_ms": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 300, "description": "Maximum time to let the PTY reader and screen parser catch up after resizing."}
             },
             "required": ["handle", "rows", "cols"]
         })
@@ -1825,12 +1929,17 @@ impl Tool for TermResize {
             let cols = extract_optional_int(&args, "cols")
                 .ok_or_else(|| RuntimeError::MissingArg("cols".into()))?
                 as u16;
+            let output_wait = output_wait_duration(&args)?;
             let registry = ctx.term_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("term.resize: registry not available".into())
             })?;
             let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
             let entry = registry.lookup(&handle, &session_id)?;
+            let _action = entry.action_gate.lock().await;
+            let mut output_rx = entry.stream_tx.subscribe();
+            let baseline = entry.output_revision.load(Ordering::Acquire);
             entry.resize(rows, cols)?;
+            settle_terminal_output(&entry, &mut output_rx, baseline, output_wait).await;
             Ok(Value::Struct(vec![
                 ("ok".into(), Value::Bool(true)),
                 ("rows".into(), Value::Int(rows as i64)),
@@ -2682,6 +2791,59 @@ mod tests {
         assert_eq!(screen.cells[4].chars, "o");
     }
 
+    #[test]
+    fn key_encoding_supports_ascii_control_chords() {
+        for letter in b'a'..=b'z' {
+            let key = format!("ctrl+{}", char::from(letter));
+            assert_eq!(key_to_bytes(&key).unwrap(), vec![letter - b'a' + 1]);
+        }
+        assert_eq!(key_to_bytes(" Ctrl+U ").unwrap(), vec![0x15]);
+        assert_eq!(key_to_bytes("ctrl+space").unwrap(), vec![0x00]);
+        assert_eq!(key_to_bytes("ctrl+@").unwrap(), vec![0x00]);
+        assert_eq!(key_to_bytes("ctrl+[").unwrap(), vec![0x1b]);
+        assert_eq!(key_to_bytes("ctrl+\\").unwrap(), vec![0x1c]);
+        assert_eq!(key_to_bytes("ctrl+]").unwrap(), vec![0x1d]);
+        assert_eq!(key_to_bytes("ctrl+^").unwrap(), vec![0x1e]);
+        assert_eq!(key_to_bytes("ctrl+_").unwrap(), vec![0x1f]);
+        assert_eq!(key_to_bytes("ctrl+?").unwrap(), vec![0x7f]);
+    }
+
+    #[test]
+    fn key_encoding_rejects_unknown_chords() {
+        let error = key_to_bytes("ctrl+enter").unwrap_err().to_string();
+        assert!(error.contains("unsupported key `ctrl+enter`"));
+    }
+
+    #[test]
+    fn output_wait_duration_validates_type_and_range() {
+        assert_eq!(
+            output_wait_duration(&ToolArgs::default()).unwrap(),
+            DEFAULT_OUTPUT_WAIT
+        );
+        for millis in [0, MAX_OUTPUT_WAIT_MS] {
+            let args = ToolArgs {
+                named: vec![("wait_ms".into(), Value::Int(millis))],
+                ..ToolArgs::default()
+            };
+            assert_eq!(
+                output_wait_duration(&args).unwrap(),
+                Duration::from_millis(millis as u64)
+            );
+        }
+        for value in [Value::Int(-1), Value::Int(MAX_OUTPUT_WAIT_MS + 1)] {
+            let args = ToolArgs {
+                named: vec![("wait_ms".into(), value)],
+                ..ToolArgs::default()
+            };
+            assert!(output_wait_duration(&args).is_err());
+        }
+        let args = ToolArgs {
+            named: vec![("wait_ms".into(), Value::Str("300".into()))],
+            ..ToolArgs::default()
+        };
+        assert!(output_wait_duration(&args).is_err());
+    }
+
     #[tokio::test]
     async fn capture_spills_text_to_output_store_with_byte_continuation() {
         const ROWS: u16 = 4096;
@@ -2714,6 +2876,8 @@ mod tests {
                 started_at: 0,
             })),
             stream_tx: broadcast::channel(STREAM_CHANNEL_CAPACITY).0,
+            output_revision: Arc::new(AtomicU64::new(0)),
+            action_gate: tokio::sync::Mutex::new(()),
             log_path: std::env::temp_dir().join("term_capture_budget.log"),
             reader_task: Mutex::new(None),
             child: Mutex::new(None),
@@ -2892,6 +3056,8 @@ mod tests {
                 started_at: 0,
             })),
             stream_tx: broadcast::channel(STREAM_CHANNEL_CAPACITY).0,
+            output_revision: Arc::new(AtomicU64::new(0)),
+            action_gate: tokio::sync::Mutex::new(()),
             log_path: std::env::temp_dir().join("term_test_dummy.log"),
             reader_task: Mutex::new(None),
             child: Mutex::new(None),

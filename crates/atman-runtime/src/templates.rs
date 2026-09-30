@@ -92,7 +92,7 @@ Use `form.ask` whenever you need a user decision, clarification, selection, or f
 bash.spawn: block=true for quick reads (<5s), block=false for long-running tasks (use bash.status → bash.output → bash.kill).
 term.spawn/input/capture/kill for interactive TUIs. Capture only needed rows.
 Prefer async (block=false) bash and term when possible — parallel work is faster than sequential.
-`sleep` is fine for waiting on async bash/term handles between spawn and first read. Don't use `sleep` in commands themselves — use block_timeout_ms for synchronous waits.
+term.spawn/input/resize perform bounded, best-effort PTY reader/parser synchronization before capture/find. They do not prove command completion; use watch(pattern) for delayed results instead of sleeping or polling. Use block_timeout_ms for synchronous bash waits.
 Don't leave dangling processes.
 
 ## Flows & Sub-agents

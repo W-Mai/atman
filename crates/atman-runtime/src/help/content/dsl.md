@@ -180,6 +180,8 @@ REPLs, editors, or commands whose behavior depends on terminal dimensions. Use
 `term.input`, `term.capture`, `term.resize`, and `term.kill` as one lifecycle.
 Use `term.find` before mouse input when text or style location matters.
 
+`term.spawn`, `term.input`, and `term.resize` perform a bounded, best-effort reader/parser synchronization before returning. A following `term.capture` or `term.find` reads the latest processed screen, but the synchronization does not prove which action produced the observed output or that a command completed; use a watcher for delayed output. `term.input(key:)` accepts named keys and control-key combinations.
+
 The `watch` tool is separate from the DSL `watch reply { ... }` declaration. It
 monitors bash, terminal, or agent handles by pattern and can be paired with
 `wait_for_watcher`. Register watchers immediately after spawning, check status
