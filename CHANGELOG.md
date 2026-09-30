@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-09-30
+
 ### ⚠️ Breaking Changes
 
 - **Flow call syntax** — `subflow(name, args)` is removed. Call a bound Flow with `name(args).await`; `name(args)` alone creates a cold Future that runs when awaited or passed to `fanout`.

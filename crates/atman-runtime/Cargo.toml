@@ -14,8 +14,8 @@ categories = ["development-tools", "asynchronous"]
 
 [dependencies]
 axum.workspace = true
-atman-rt         = { path = "../atman-rt", version = "1.13.2" }
-atman-macros = { path = "../atman-macros", version = "1.13.2" }
+atman-rt         = { path = "../atman-rt", version = "1.14.0" }
+atman-macros = { path = "../atman-macros", version = "1.14.0" }
 anyhow.workspace   = true
 documented = "0.10"
 sha2 = "0.10"
