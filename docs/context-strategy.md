@@ -136,6 +136,8 @@ tool definitions. `dispatch_all` claims the matching flow-scoped entry before co
 the global registry; unexposed, renamed, duplicate-ID, cross-flow, and replayed calls are
 returned as tool errors without execution.
 
+Within one assistant response, `dispatch_all` treats calls as a candidate parallel frontier. Each tool resolves structured resource claims once from `ToolArgs` and `ToolCtx`; independent calls can run concurrently, conflicting calls retain source order, and permission-control calls split authorization epochs. Primary results and supplemental model messages remain in original call order. Calls whose arguments or correctness depend on an earlier result belong in a later model response or an `.at` flow using variables and `.await`; `fanout` is reserved for independent branches.
+
 History recall is separate from automatic prompt assembly:
 
 - `memory.history.search` searches persisted session messages through FTS5.

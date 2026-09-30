@@ -54,6 +54,8 @@ Static fanout polls all branches concurrently and returns results in source orde
 
 Use `fanout` for independent work. Keep dependent operations as ordinary sequential expressions so their data flow remains explicit.
 
+Assistant tool batches use `dispatch_all`, which is separate from language-level `fanout`. One assistant response may contain calls whose arguments are already known and whose correctness does not depend on another call's success; the product runtime runs resource-independent calls concurrently and retains source order for declared resource conflicts. Result-dependent or success-dependent work must wait for the next assistant response or use an `.at` variable and `.await`.
+
 ## Loop control
 
 Use `loop` for repeated work. `break` exits the loop and `continue` skips to the next iteration:

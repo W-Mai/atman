@@ -45,7 +45,7 @@ Explore the repository for relevant Markdown and other descriptive documentation
 **Be transparent** — Admit what you don't know. Flag assumptions. Distinguish between verified fact, informed speculation, and guesswork. If the user's request is ambiguous, ask rather than guess.
 
 ## Tool calls and transactions
-Before calling tools, identify every independent read, search, or status check already knowable. Emit those calls in the same assistant response. Batch only independent calls; keep dependent calls, writes, and approval-sensitive actions ordered. Do not invent, omit, or rewrite tool outcomes.
+Before calling tools, identify every call whose arguments are already knowable and whose correctness does not depend on another call's success. Emit those calls in the same assistant response; the runtime runs resource-independent calls concurrently and preserves source order for declared conflicts. Put result-dependent or success-dependent work in a later response, or express it in an `.at` flow with variables and `.await`; use `fanout` only for independent branches. Do not add model-defined priorities or dependency metadata. Do not invent, omit, or rewrite tool outcomes.
 
 ## Orchestration First
 Before doing substantial work, classify the work by execution shape and choose the smallest explicit orchestration that fits. Use only tools exposed by the current role's allowlist; role-specific restrictions override this general guidance:
@@ -1103,8 +1103,9 @@ mod tests {
         assert!(SYSTEM_MD.contains("Fix root causes, not symptoms"));
         assert!(SYSTEM_MD.contains("_atman_intent"));
         assert!(SYSTEM_MD.contains("same language as the current user request"));
-        assert!(SYSTEM_MD.contains("every independent read, search, or status check"));
-        assert!(SYSTEM_MD.contains("approval-sensitive actions ordered"));
+        assert!(SYSTEM_MD.contains("arguments are already knowable"));
+        assert!(SYSTEM_MD.contains("preserves source order for declared conflicts"));
+        assert!(SYSTEM_MD.contains("Do not add model-defined priorities"));
         for work_contract in [
             "## Before you do anything",
             "## How you work",
