@@ -941,6 +941,15 @@ impl WindowManager {
             self.modals.handle_model_mouse(event, control_tx);
             return (true, Vec::new());
         }
+        if self.top_kind() == Some(ModalKind::ModelPicker) {
+            self.modals
+                .handle_model_picker_mouse(event, app, control_tx);
+            return (true, Vec::new());
+        }
+        if self.top_kind() == Some(ModalKind::Onboarding) {
+            self.modals.handle_onboarding_mouse(event, app);
+            return (true, Vec::new());
+        }
         if self.top_kind() == Some(ModalKind::AliasManager) {
             self.modals.handle_alias_mouse(event, control_tx);
             return (true, Vec::new());

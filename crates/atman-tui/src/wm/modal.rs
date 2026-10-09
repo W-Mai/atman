@@ -270,28 +270,7 @@ impl ModalManager {
             ModalKind::ModelPicker => {
                 if self.model_picker.open {
                     self.model_picker.handle_key(action);
-                    if let Some(request) = self.model_picker.take_switch_request() {
-                        let dispatched = tx.is_some_and(|tx| {
-                            tx.send(crate::TuiControl::SwitchModel {
-                                request_id: request.request_id,
-                                model: request.model.clone(),
-                            })
-                            .is_ok()
-                        });
-                        if !dispatched {
-                            self.model_picker.finish_switch(
-                                request.request_id,
-                                &request.model,
-                                false,
-                            );
-                            app.push_toast(
-                                "model switch is unavailable".to_string(),
-                                crate::app::NoteLevel::Error,
-                                std::time::Duration::from_secs(5),
-                                crate::app::ToastPosition::TopRight,
-                            );
-                        }
-                    }
+                    self.dispatch_model_switch(app, tx);
                 }
                 (true, None)
             }
@@ -321,39 +300,8 @@ impl ModalManager {
             }
             ModalKind::Onboarding => {
                 if self.onboarding_open {
-                    match self.onboarding.handle_key(action) {
-                        crate::onboarding::OnboardingEvent::None => {}
-                        crate::onboarding::OnboardingEvent::OpenProviderManager => {
-                            self.provider_manager.open_add();
-                        }
-                        crate::onboarding::OnboardingEvent::OpenModelManager => {
-                            self.model_manager.open();
-                        }
-                        crate::onboarding::OnboardingEvent::Completed => {
-                            self.onboarding_open = false;
-                            app.onboarding_skipped = true;
-                            app.hints_dismissed = false;
-                            app.save_ui_state();
-                            app.push_toast(
-                                "Setup complete — smart model configured".to_string(),
-                                crate::app::NoteLevel::Success,
-                                std::time::Duration::from_secs(4),
-                                crate::app::ToastPosition::TopRight,
-                            );
-                        }
-                        crate::onboarding::OnboardingEvent::Skipped => {
-                            self.onboarding_open = false;
-                            app.onboarding_skipped = true;
-                            app.save_ui_state();
-                            app.push_toast(
-                                "You can configure atman in ~/.config/atman/config.toml"
-                                    .to_string(),
-                                crate::app::NoteLevel::Warn,
-                                std::time::Duration::from_secs(5),
-                                crate::app::ToastPosition::TopRight,
-                            );
-                        }
-                    }
+                    let event = self.onboarding.handle_key(action);
+                    self.dispatch_onboarding_event(event, app);
                 }
                 (true, None)
             }
@@ -433,6 +381,89 @@ impl ModalManager {
                 (result.is_some(), result)
             }
         }
+    }
+
+    fn dispatch_model_switch(
+        &mut self,
+        app: &mut crate::app::AppState,
+        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        if let Some(request) = self.model_picker.take_switch_request() {
+            let dispatched = tx.is_some_and(|tx| {
+                tx.send(crate::TuiControl::SwitchModel {
+                    request_id: request.request_id,
+                    model: request.model.clone(),
+                })
+                .is_ok()
+            });
+            if !dispatched {
+                self.model_picker
+                    .finish_switch(request.request_id, &request.model, false);
+                app.push_toast(
+                    "model switch is unavailable".to_string(),
+                    crate::app::NoteLevel::Error,
+                    std::time::Duration::from_secs(5),
+                    crate::app::ToastPosition::TopRight,
+                );
+            }
+        }
+    }
+
+    pub(super) fn handle_model_picker_mouse(
+        &mut self,
+        event: &crossterm::event::MouseEvent,
+        app: &mut crate::app::AppState,
+        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        self.model_picker.handle_mouse(event);
+        self.dispatch_model_switch(app, tx);
+    }
+
+    fn dispatch_onboarding_event(
+        &mut self,
+        event: crate::onboarding::OnboardingEvent,
+        app: &mut crate::app::AppState,
+    ) {
+        use crate::onboarding::OnboardingEvent;
+        match event {
+            OnboardingEvent::None => {}
+            OnboardingEvent::OpenProviderManager => self.provider_manager.open_add(),
+            OnboardingEvent::OpenModelManager => self.model_manager.open(),
+            OnboardingEvent::Completed | OnboardingEvent::Skipped => {
+                self.onboarding_open = false;
+                app.onboarding_skipped = true;
+                if event == OnboardingEvent::Completed {
+                    app.hints_dismissed = false;
+                }
+                app.save_ui_state();
+                let (message, level) = if event == OnboardingEvent::Completed {
+                    (
+                        "Setup complete — smart model configured",
+                        crate::app::NoteLevel::Success,
+                    )
+                } else {
+                    (
+                        "You can configure atman in ~/.config/atman/config.toml",
+                        crate::app::NoteLevel::Warn,
+                    )
+                };
+                app.push_toast(
+                    message,
+                    level,
+                    std::time::Duration::from_secs(5),
+                    crate::app::ToastPosition::TopRight,
+                );
+            }
+        }
+    }
+
+    pub(super) fn handle_onboarding_mouse(
+        &mut self,
+        event: &crossterm::event::MouseEvent,
+        app: &mut crate::app::AppState,
+    ) {
+        let event = self.onboarding.handle_mouse(event);
+        self.dispatch_onboarding_event(event, app);
     }
 
     pub(super) fn handle_provider_mouse(
@@ -619,8 +650,8 @@ impl ModalManager {
                 }
             }
             ModalKind::ModelPicker => {
-                let w = canvas.width.saturating_sub(4).clamp(48, 74);
-                let h = canvas.height.saturating_sub(2).clamp(10, 22);
+                let w = canvas.width.saturating_sub(4).min(84);
+                let h = canvas.height.saturating_sub(2).min(34);
                 center_rect(canvas, w, h)
             }
             ModalKind::ModelManager => {

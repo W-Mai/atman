@@ -164,8 +164,8 @@ impl ModelBrowser {
                     self.move_to_edge(true);
                 }
             }
-            KeyAction::Home => self.move_to_edge(false),
-            KeyAction::End => self.move_to_edge(true),
+            KeyAction::Home | KeyAction::CursorHome => self.move_to_edge(false),
+            KeyAction::End | KeyAction::CursorEnd => self.move_to_edge(true),
             KeyAction::Submit => return BrowserAction::Selected,
             KeyAction::Escape => return BrowserAction::Cancelled,
             _ => return BrowserAction::Consumed,
