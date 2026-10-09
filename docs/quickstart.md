@@ -207,6 +207,8 @@ A `form.ask` uses `↑`/`↓` to select choices and `Tab`/`Shift+Tab` to move to
 
 Press `Ctrl+L`, choose **All Projects** from `Ctrl+P`, or run `:projects` to open Project Hub. Use the arrows to select a project, `Enter` to inspect its sessions, `P` to pin or unpin it, and `X` twice to archive it. An archived project can be restored with `X` or deleted with `Delete`/`Backspace` twice. Delete removes Atman-owned sessions, goals, plans, tasks, confessions, specs, previews, and indexes while preserving the source directory, Git repository, and hand-written `.atman` configuration, commands, skills, flows, and rules. The same actions are clickable. A missing project path still allows stored sessions to open; workspace tools report the unavailable path when used.
 
+Command Palette and Search History keep long queries in a horizontal input viewport. Click the query to position its cursor. In Search History, click a result to update its preview; the mouse wheel navigates results or scrolls the preview according to the pointer's location. The query field remains visible in small terminals.
+
 Choose **Set Project Storage Scope** from `Ctrl+P` or run `:storage` to select where new sessions for the current project store Atman data. `global` uses the central Atman data directory; `local` uses `<project>/.atman`. `:storage global` and `:storage local` apply the choice directly. The setting is saved in the project's `.atman/config.toml` and takes effect for new sessions.
 
 ## 6. Anchor the agent on a session goal

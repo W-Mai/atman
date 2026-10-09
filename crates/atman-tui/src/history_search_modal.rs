@@ -3,6 +3,7 @@ use crate::wm::modal::ModalAction;
 use crate::UiState;
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -61,6 +62,9 @@ pub struct HistorySearchModal {
     pub results_rect: Option<Rect>,
     pub last_input_rect: Option<Rect>,
     query_scroll: usize,
+    results_content_rect: Option<Rect>,
+    results_offset: usize,
+    hovered_result: Option<usize>,
     pub input_focused: bool,
 }
 
@@ -87,6 +91,10 @@ impl HistorySearchModal {
         self.preview_scroll = 0;
         self.preview_rect = None;
         self.results_rect = None;
+        self.results_content_rect = None;
+        self.results_offset = 0;
+        self.hovered_result = None;
+        self.last_input_rect = None;
         self.input_focused = true;
         self.query_scroll = 0;
     }
@@ -137,16 +145,53 @@ impl HistorySearchModal {
     }
 
     pub fn click_result(&self, col: u16, row: u16) -> Option<usize> {
-        let r = self.results_rect?;
-        if col < r.x || col >= r.x + r.width || row <= r.y || row >= r.y + r.height {
+        let r = self.results_content_rect?;
+        if !r.contains((col, row).into()) {
             return None;
         }
-        let idx = (row - r.y - 1) as usize;
+        let idx = self.results_offset + (row - r.y) as usize;
         if idx < self.results.len() {
             Some(idx)
         } else {
             None
         }
+    }
+
+    /// Returns whether the selected result changed and its preview needs refreshing.
+    pub fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        let previous = self.selected;
+        match event.kind {
+            MouseEventKind::Moved => {
+                self.hovered_result = self.click_result(event.column, event.row);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(rect) = self.last_input_rect
+                    && rect.contains((event.column, event.row).into())
+                {
+                    let col = self.query_scroll + usize::from(event.column - rect.x);
+                    self.editor
+                        .set_cursor_by_display(0, col.min(u16::MAX as usize) as u16);
+                    self.input_focused = true;
+                } else if let Some(index) = self.click_result(event.column, event.row) {
+                    self.selected = index;
+                    self.input_focused = false;
+                    if previous != index {
+                        self.preview_scroll = 0;
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let up = event.kind == MouseEventKind::ScrollUp;
+                match self.hit_test(event.column, event.row) {
+                    Some(HistoryArea::Preview) => self.scroll_preview(up, 3),
+                    Some(HistoryArea::Results) if up => self.move_up(),
+                    Some(HistoryArea::Results) => self.move_down(),
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+        self.selected != previous
     }
 
     pub fn selected_hit(&self) -> Option<&HistoryHit> {
@@ -159,6 +204,9 @@ impl HistorySearchModal {
         self.last_query = query;
         self.error = None;
         self.preview_lines.clear();
+        self.results_content_rect = None;
+        self.results_offset = 0;
+        self.hovered_result = None;
     }
 
     pub fn set_error(&mut self, msg: String) {
@@ -307,20 +355,25 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
             width: area.width,
             height: 1,
         };
+        let (results_height, preview_height) = if content_h >= 17 {
+            (6, 8)
+        } else {
+            let available = content_h.saturating_sub(3);
+            let results = if available >= 6 {
+                available / 2
+            } else {
+                available
+            };
+            (results, available.saturating_sub(results))
+        };
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
-                Constraint::Min(6),
-                Constraint::Min(8),
+                Constraint::Min(results_height),
+                Constraint::Min(preview_height),
             ])
             .split(content_area);
-        self.last_input_rect = Some(Rect {
-            x: rows[0].x,
-            y: rows[0].y.saturating_add(2),
-            width: rows[0].width,
-            height: 1,
-        });
         render_query_row(f, rows[0], self);
         render_results_row(f, rows[1], self);
         render_preview_row(f, rows[2], self);
@@ -379,14 +432,16 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
         if !self.input_focused {
             return None;
         }
-        self.last_input_rect.filter(|r| r.width > 0).map(|r| {
-            let before_cursor = &self.editor.buf()[..self.editor.cursor()];
-            let col = crate::width::width(before_cursor).saturating_sub(self.query_scroll);
-            (
-                r.x + col.min(r.width.saturating_sub(1) as usize) as u16,
-                r.y,
-            )
-        })
+        self.last_input_rect
+            .filter(|r| r.width > 0 && r.height > 0)
+            .map(|r| {
+                let before_cursor = &self.editor.buf()[..self.editor.cursor()];
+                let col = crate::width::width(before_cursor).saturating_sub(self.query_scroll);
+                (
+                    r.x + col.min(r.width.saturating_sub(1) as usize) as u16,
+                    r.y,
+                )
+            })
     }
 
     fn title(&self) -> Line<'static> {
@@ -469,8 +524,13 @@ fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySearc
         &t,
     );
     let inner = section_inner(rect);
+    modal.last_input_rect = Some(inner);
     let cursor_col = crate::width::width(&modal.editor.buf()[..modal.editor.cursor()]);
-    modal.query_scroll = cursor_col.saturating_sub(inner.width.saturating_sub(1) as usize);
+    if cursor_col < modal.query_scroll {
+        modal.query_scroll = cursor_col;
+    } else if cursor_col >= modal.query_scroll + inner.width as usize {
+        modal.query_scroll = cursor_col.saturating_sub(inner.width.saturating_sub(1) as usize);
+    }
     let text = crate::width::trim_display_offset(
         modal.editor.buf(),
         modal.query_scroll,
@@ -480,7 +540,11 @@ fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySearc
     f.render_widget(para, inner);
 }
 
-fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {
+fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySearchModal) {
+    modal.results_content_rect = None;
+    if rect.height == 0 || rect.width == 0 {
+        return;
+    }
     let t = crate::theme::theme();
     crate::wm::shell::render_section_header(
         f,
@@ -552,7 +616,8 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
     let items: Vec<ListItem<'static>> = modal
         .results
         .iter()
-        .map(|hit| {
+        .enumerate()
+        .map(|(index, hit)| {
             let sid_short: String = hit.session_id.chars().take(8).collect();
             let ts_short: String = chrono::DateTime::parse_from_rfc3339(&hit.ts)
                 .ok()
@@ -584,19 +649,26 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
                 ),
             ];
             spans.extend(highlight_snippet(&snippet, &modal.last_query));
-            ListItem::new(Line::from(spans))
+            let item = ListItem::new(Line::from(spans));
+            if modal.hovered_result == Some(index) {
+                item.style(Style::default().bg(t.work_hover_bg.into()))
+            } else {
+                item
+            }
         })
         .collect();
     let list = List::new(items)
         .highlight_style(
             Style::default()
-                .bg(crate::theme::theme().subtle_fg.into())
+                .bg(t.work_hover_bg.into())
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");
-    let mut state = ListState::default();
+    let mut state = ListState::default().with_offset(modal.results_offset);
     state.select(Some(modal.selected));
     f.render_stateful_widget(list, inner, &mut state);
+    modal.results_content_rect = Some(inner);
+    modal.results_offset = state.offset();
 }
 
 fn highlight_snippet(snippet: &str, query: &str) -> Vec<Span<'static>> {
@@ -627,6 +699,9 @@ fn highlight_snippet(snippet: &str, query: &str) -> Vec<Span<'static>> {
 }
 
 fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySearchModal) {
+    if rect.height == 0 || rect.width == 0 {
+        return;
+    }
     let t = crate::theme::theme();
     crate::wm::shell::render_section_header(
         f,
@@ -688,9 +763,52 @@ mod tests {
         terminal
             .draw(|frame| render_query_row(frame, Rect::new(2, 1, 8, 3), &mut modal))
             .unwrap();
-        modal.last_input_rect = Some(Rect::new(2, 3, 8, 1));
         assert_eq!(modal.query_scroll, 5);
         assert_eq!(modal.cursor_position(), Some((9, 3)));
+        assert!(!modal.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }));
+        assert_eq!(modal.editor.cursor(), 6);
+        assert_eq!(modal.cursor_position(), Some((3, 3)));
+
+        terminal
+            .draw(|frame| render_query_row(frame, Rect::new(2, 1, 1, 2), &mut modal))
+            .unwrap();
+        assert_eq!(modal.cursor_position(), None);
+    }
+
+    #[test]
+    fn narrow_layout_keeps_the_query_and_a_result_visible() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut modal = HistorySearchModal::default();
+        modal.open();
+        modal.editor.replace_with("needle");
+        modal.set_results(vec![hit("session", 1, "result")], String::new());
+        let app = crate::app::AppState::default();
+        let theme = crate::theme::theme();
+        let mut terminal = Terminal::new(TestBackend::new(40, 18)).unwrap();
+        for height in [7, 10, 14] {
+            let area = Rect::new(2, 2, 36, height);
+            terminal
+                .draw(|frame| modal.render_content(frame, area, &app, &theme))
+                .unwrap();
+            let query = modal.last_input_rect.unwrap();
+            assert!(query.height >= 1);
+            assert!(area.contains(modal.cursor_position().unwrap().into()));
+            let text: String = (query.x..query.right())
+                .map(|x| terminal.backend().buffer()[(x, query.y)].symbol())
+                .collect();
+            assert!(text.contains("needle"), "query must remain visible: {text}");
+            let results = modal.results_content_rect.unwrap();
+            assert!(results.height >= 1);
+            assert!(results.y >= query.bottom());
+            assert!(results.bottom() <= area.bottom());
+            assert_eq!(modal.click_result(results.x, results.y), Some(0));
+        }
     }
 
     fn hit(sid: &str, seq: u64, snippet: &str) -> HistoryHit {
@@ -774,22 +892,33 @@ mod tests {
 
     #[test]
     fn click_result_maps_row_to_index() {
+        use ratatui::{Terminal, backend::TestBackend};
+
         let mut m = HistorySearchModal::default();
-        m.set_results(
-            vec![hit("a", 1, "x"), hit("b", 2, "y"), hit("c", 3, "z")],
-            "q".into(),
-        );
-        m.results_rect = Some(Rect {
-            x: 10,
-            y: 5,
-            width: 80,
-            height: 10,
-        });
-        assert_eq!(m.click_result(10, 6), Some(0));
-        assert_eq!(m.click_result(10, 7), Some(1));
-        assert_eq!(m.click_result(10, 8), Some(2));
-        assert_eq!(m.click_result(10, 5), None, "border row should not select");
-        assert_eq!(m.click_result(10, 9), None, "past last result");
-        assert_eq!(m.click_result(5, 6), None, "outside rect");
+        m.set_results((0..20).map(|i| hit("a", i, "result")).collect(), "q".into());
+        let mut terminal = Terminal::new(TestBackend::new(100, 15)).unwrap();
+        let section = Rect::new(10, 5, 80, 6);
+        terminal
+            .draw(|frame| render_results_row(frame, section, &mut m))
+            .unwrap();
+        assert_eq!(m.click_result(10, 5), None, "header should not select");
+        assert_eq!(m.click_result(10, 6), None, "spacer should not select");
+        assert_eq!(m.click_result(10, 7), Some(0));
+        assert_eq!(m.click_result(10, 10), Some(3));
+        assert_eq!(m.click_result(10, 11), None, "outside viewport");
+
+        m.selected = 19;
+        terminal
+            .draw(|frame| render_results_row(frame, section, &mut m))
+            .unwrap();
+        assert_eq!(m.click_result(10, 7), Some(16));
+        assert_eq!(m.click_result(89, 10), Some(19));
+        assert!(m.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 7,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }));
+        assert_eq!(m.selected_hit().unwrap().seq, 16);
     }
 }

@@ -248,41 +248,13 @@ pub(crate) async fn run_frames(
                             }
                         }
                         Some(Ok(CtEvent::Mouse(me)))
-                            if app.wm.modals.history_search.open =>
+                            if {
+                                app.wm.sync_modals();
+                                app.wm.top_kind() == Some(crate::wm::modal::ModalKind::HistorySearch)
+                            } =>
                         {
-                            match me.kind {
-                                MouseEventKind::ScrollUp => {
-                                    if let Some(crate::history_search_modal::HistoryArea::Preview) =
-                                        app.wm.modals.history_search.hit_test(me.column, me.row)
-                                    {
-                                        app.wm.modals.history_search.scroll_preview(true, 3);
-                                    } else {
-                                        app.wm.modals.history_search.move_up();
-                                        crate::history_search_modal::refresh_history_preview(&mut app);
-                                    }
-                                }
-                                MouseEventKind::ScrollDown => {
-                                    if let Some(crate::history_search_modal::HistoryArea::Preview) =
-                                        app.wm.modals.history_search.hit_test(me.column, me.row)
-                                    {
-                                        app.wm.modals.history_search.scroll_preview(false, 3);
-                                    } else {
-                                        app.wm.modals.history_search.move_down();
-                                        crate::history_search_modal::refresh_history_preview(&mut app);
-                                    }
-                                }
-                                MouseEventKind::Down(MouseButton::Left) => {
-                                    if let Some(idx) =
-                                        app.wm.modals.history_search.click_result(me.column, me.row)
-                                    {
-                                        if app.wm.modals.history_search.selected != idx {
-                                            app.wm.modals.history_search.selected = idx;
-                                            app.wm.modals.history_search.preview_scroll = 0;
-                                            crate::history_search_modal::refresh_history_preview(&mut app);
-                                        }
-                                    }
-                                }
-                                _ => {}
+                            if app.wm.modals.history_search.handle_mouse(&me) {
+                                crate::history_search_modal::refresh_history_preview(&mut app);
                             }
                             interrupt_prompt = None;
                         }

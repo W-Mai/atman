@@ -243,6 +243,7 @@ pub struct CommandPalette {
     /// Display items include group headers. Only Entry variants are selectable.
     display: Vec<PaletteItem>,
     pub last_input_rect: Option<Rect>,
+    input_scroll: usize,
     last_list_rect: Option<Rect>,
     last_list_offset: usize,
     hovered: Option<usize>,
@@ -265,6 +266,8 @@ impl CommandPalette {
     pub fn open(&mut self) {
         self.open = true;
         self.input.clear();
+        self.input_scroll = 0;
+        self.last_input_rect = None;
         self.selected = 0;
         self.refresh();
     }
@@ -275,6 +278,7 @@ impl CommandPalette {
         self.filtered.clear();
         self.display.clear();
         self.last_list_rect = None;
+        self.last_input_rect = None;
         self.hovered = None;
     }
 
@@ -332,6 +336,16 @@ impl CommandPalette {
             MouseEventKind::ScrollUp => self.move_up(),
             MouseEventKind::ScrollDown => self.move_down(),
             MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left) => {
+                if event.kind == MouseEventKind::Down(MouseButton::Left)
+                    && let Some(rect) = self.last_input_rect
+                    && rect.contains((event.column, event.row).into())
+                {
+                    let col = self.input_scroll + usize::from(event.column - rect.x);
+                    self.input
+                        .set_cursor_by_display(0, col.min(u16::MAX as usize) as u16);
+                    self.hovered = None;
+                    return None;
+                }
                 let hovered = self.last_list_rect.and_then(|rect| {
                     let inside = event.column >= rect.x
                         && event.column < rect.x.saturating_add(rect.width)
@@ -419,6 +433,8 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
         _app: &crate::app::AppState,
         t: &crate::theme::Theme,
     ) {
+        self.last_input_rect = None;
+        self.last_list_rect = None;
         if area.height == 0 {
             return;
         }
@@ -428,18 +444,39 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
             width: area.width,
             height: 1,
         };
-        self.last_input_rect = Some(input_rect);
-        let hint_line = Line::from(vec![
-            Span::styled("▸ ", Style::default().fg(t.subtle_fg.into())),
-            Span::styled(
-                self.input.buf().to_string(),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" _", Style::default().fg(t.accent.into())),
-        ]);
-        f.render_widget(Paragraph::new(hint_line), input_rect);
-        let cursor_x = input_rect.x + 2 + self.input.cursor_display_col() as u16;
-        f.set_cursor_position((cursor_x, input_rect.y));
+        let prefix_width = input_rect.width.min(2);
+        f.render_widget(
+            Paragraph::new("▸ ").style(Style::default().fg(t.subtle_fg.into())),
+            Rect {
+                width: prefix_width,
+                ..input_rect
+            },
+        );
+        let value_rect = Rect {
+            x: input_rect.x + prefix_width,
+            width: input_rect.width.saturating_sub(prefix_width),
+            ..input_rect
+        };
+        self.last_input_rect = Some(value_rect);
+        let cursor_col = self.input.cursor_display_col();
+        if cursor_col < self.input_scroll {
+            self.input_scroll = cursor_col;
+        } else if cursor_col >= self.input_scroll + value_rect.width as usize {
+            self.input_scroll =
+                cursor_col.saturating_sub(value_rect.width.saturating_sub(1) as usize);
+        }
+        f.render_widget(
+            Paragraph::new(crate::width::trim_display_offset(
+                self.input.buf(),
+                self.input_scroll,
+                value_rect.width as usize,
+            ))
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+            value_rect,
+        );
+        if let Some(cursor) = self.cursor_position() {
+            f.set_cursor_position(cursor);
+        }
         let list_rect = Rect {
             x: area.x,
             y: area.y.saturating_add(1),
@@ -532,7 +569,17 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
 
     fn cursor_position(&self) -> Option<(u16, u16)> {
         self.last_input_rect
-            .map(|r| (r.x + 2 + self.input.cursor_display_col() as u16, r.y))
+            .filter(|r| r.width > 0 && r.height > 0)
+            .map(|r| {
+                let col = self
+                    .input
+                    .cursor_display_col()
+                    .saturating_sub(self.input_scroll);
+                (
+                    r.x + col.min(r.width.saturating_sub(1) as usize) as u16,
+                    r.y,
+                )
+            })
     }
 
     fn title(&self) -> Line<'static> {
@@ -554,6 +601,47 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wm::modal::ModalOverlay;
+
+    #[test]
+    fn query_viewport_keeps_cursor_and_mouse_in_rendered_columns() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut palette = CommandPalette::new();
+        palette.open();
+        palette.input.replace_with("abc你好def");
+        let app = crate::app::AppState::default();
+        let theme = crate::theme::theme();
+        let mut terminal = Terminal::new(TestBackend::new(20, 10)).unwrap();
+        let area = Rect::new(2, 1, 8, 6);
+        terminal
+            .draw(|frame| palette.render_content(frame, area, &app, &theme))
+            .unwrap();
+        let rect = palette.last_input_rect.unwrap();
+        assert_eq!(rect, Rect::new(4, 1, 6, 1));
+        assert_eq!(palette.input_scroll, 5);
+        assert_eq!(palette.cursor_position(), Some((9, 1)));
+        palette.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert_eq!(palette.input.cursor(), "abc你".len());
+        assert_eq!(palette.cursor_position(), Some((4, 1)));
+        assert_eq!(palette.input.buf(), "abc你好def");
+
+        for width in 0..=3 {
+            terminal
+                .draw(|frame| palette.render_content(frame, Rect { width, ..area }, &app, &theme))
+                .unwrap();
+            if let Some(cursor) = palette.cursor_position() {
+                assert!(palette.last_input_rect.unwrap().contains(cursor.into()));
+            } else {
+                assert!(width <= 2);
+            }
+        }
+    }
 
     #[test]
     fn open_populates_full_filtered_list() {
