@@ -1839,9 +1839,10 @@ async fn suggest_confession_organization(
     } else {
         model
     };
+    let call_config = atman_runtime::model_registry::model_call_config(&model);
     let provider = executor
         .providers
-        .resolve(&model)
+        .resolve_call(&call_config)?
         .with_context(|| format!("Model {model} is unavailable for organization"))?;
     let known = rows
         .iter()
@@ -1867,7 +1868,7 @@ async fn suggest_confession_organization(
             serde_json::to_string(&inputs)?
         );
         let request = LlmRequest {
-            model: atman_runtime::model_registry::api_model_id(&model),
+            model: call_config.api_model.clone(),
             messages: vec![user_text_message(prompt)],
             system: None,
             input: Value::Unit,
@@ -2645,6 +2646,17 @@ async fn cmd_repl_once(
                         tokio::spawn(async move {
                             let (msg, ok) = test_provider_endpoint(&name, &entry).await;
                             let _ = tx.send(atman_tui::TuiCommand::ProviderTestResult((msg, ok)));
+                        });
+                    }
+                    atman_tui::TuiControl::TestModel(request) => {
+                        let tx = cmd_tx_for_models.clone();
+                        let providers = providers_for_ctrl.clone();
+                        tokio::spawn(async move {
+                            let result = test_model_endpoint(&providers, &request).await;
+                            let _ = tx.send(atman_tui::TuiCommand::ModelTestResult {
+                                request_id: request.request_id,
+                                result,
+                            });
                         });
                     }
                     atman_tui::TuiControl::TermResize { handle, rows, cols } => {
@@ -4162,6 +4174,8 @@ async fn execute_provider_mutation(
             api_key_env,
             base_url,
             max_tokens,
+            api,
+            max_tools,
             reasoning_format,
             enabled,
             create,
@@ -4179,14 +4193,14 @@ async fn execute_provider_mutation(
                 )
             };
             let update = atman_runtime::config_hub::ProviderConfigUpdate {
-                api: None,
-                max_tools: None,
                 name: &name,
                 kind: &kind,
                 api_key: (!api_key.is_empty()).then_some(api_key.as_str()),
                 api_key_env: (!api_key_env.is_empty()).then_some(api_key_env.as_str()),
                 base_url: (!base_url.is_empty()).then_some(base_url.as_str()),
                 max_tokens,
+                api,
+                max_tools,
                 reasoning_format,
                 prompt_cache_key: None,
                 enabled,
@@ -4218,10 +4232,10 @@ fn execute_model_mutation(
             context_budget,
             reasoning,
             max_tokens,
+            api,
             enabled,
         } => {
             hub.upsert_model(atman_runtime::model_registry::ModelConfigUpdate {
-                api: None,
                 old_name: old_name.as_deref(),
                 name,
                 model,
@@ -4231,6 +4245,7 @@ fn execute_model_mutation(
                 capabilities: None,
                 image_detail: None,
                 max_tokens: *max_tokens,
+                api: *api,
                 enabled: *enabled,
             })?;
             Ok(atman_tui::ModelMutationSuccess::Saved { name: name.clone() })
@@ -5518,9 +5533,10 @@ async fn handle_suggest(
     }
 
     let model = load_suggest_model();
+    let call_config = atman_runtime::model_registry::model_call_config(&model);
     let provider = executor
         .providers
-        .resolve(&model)
+        .resolve_call(&call_config)?
         .with_context(|| format!("no provider resolves model `{model}` — configure one first"))?;
 
     reporter.info(format!(
@@ -5537,7 +5553,13 @@ async fn handle_suggest(
         }
         buf
     });
-    let reply = suggest::generate_suggestion(provider, &model, &transcript, Some(token_tx)).await?;
+    let reply = suggest::generate_suggestion(
+        provider,
+        &call_config.api_model,
+        &transcript,
+        Some(token_tx),
+    )
+    .await?;
     let streamed = stream_task.await.unwrap_or_default();
     if !streamed.is_empty() {
         reporter.info(format!("---\n{streamed}\n---"));
@@ -8903,6 +8925,60 @@ fn cmd_mcp_add_interactive() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn test_model_endpoint(
+    registry: &atman_runtime::provider::ProviderRegistry,
+    draft: &atman_tui::ModelTestRequest,
+) -> Result<String, String> {
+    use atman_runtime::provider::LlmRequest;
+    let snapshot = atman_runtime::model_registry::draft_model_call_config(
+        draft.identity.as_deref(),
+        &draft.provider,
+        &draft.model,
+        draft.api,
+        draft.max_tokens,
+    );
+    let reasoning = snapshot.resolve_reasoning(&draft.reasoning)?;
+    let provider = registry
+        .resolve_call(&snapshot)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Provider {} is unavailable", draft.provider))?;
+    let endpoint = atman_runtime::model_registry::all_provider_entries()
+        .into_iter()
+        .find(|(name, _)| name == &draft.provider)
+        .and_then(|(_, entry)| entry.api_endpoint(draft.api))
+        .unwrap_or_else(|| "provider-managed endpoint".into());
+    let request = LlmRequest {
+        model: draft.model.clone(),
+        messages: vec![atman_runtime::provider::user_text_message(
+            "Reply with OK. Do not call any tools.",
+        )],
+        system: None,
+        input: atman_rt::Value::Unit,
+        schema: None,
+        cache_prompt: false,
+        prompt_cache_key: None,
+        tools: vec![atman_runtime::tool::ToolSpec {
+            name: "connection_probe".into(),
+            description: Some("A test-only function with no external effects.".into()),
+            input_schema: serde_json::json!({"type":"object","properties":{},"additionalProperties":false}),
+        }],
+        reasoning: reasoning.clone(),
+        stall_timeout_secs: 0,
+    };
+    let observable = provider.call_streaming(request);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), observable.output).await;
+    observable.cancel.cancel();
+    let label = format!(
+        "{} / {} · {endpoint} · reasoning {}",
+        draft.provider, draft.model, reasoning
+    );
+    match result {
+        Ok(Ok(_)) => Ok(format!("{label}: request accepted; no tools executed")),
+        Ok(Err(error)) => Err(format!("{label}: {error}")),
+        Err(_) => Err(format!("{label}: timed out after 60s")),
+    }
+}
+
 async fn test_provider_endpoint(
     name: &str,
     entry: &atman_runtime::model_registry::ProviderEntry,
@@ -8931,7 +9007,7 @@ async fn test_provider_endpoint(
     )
     .await
     {
-        Ok(Ok(msg)) => (msg, true),
+        Ok(Ok(msg)) => (format!("Directory connection: {msg}"), true),
         Ok(Err(msg)) => (format!("\"{name}\" {msg}"), false),
         Err(_) => (format!("\"{name}\" timed out after 15s"), false),
     }
@@ -8940,6 +9016,76 @@ async fn test_provider_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_test_uses_live_provider_limit_instead_of_planning_limit() {
+        use atman_runtime::model_registry::{ModelEntry, ProviderConfig, ProviderEntry};
+        let _lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                atman_runtime::model_registry::set_provider_config(Default::default());
+            }
+        }
+        let _reset = Reset;
+        let provider_entry = ProviderEntry {
+            name: "gateway".into(),
+            kind: "anthropic".into(),
+            api_key: Some("test-key".into()),
+            base_url: Some("https://gateway.example".into()),
+            max_tokens: Some(16_384),
+            ..Default::default()
+        };
+        atman_runtime::model_registry::set_provider_config(ProviderConfig {
+            providers: std::collections::HashMap::from([(
+                "gateway".into(),
+                provider_entry.clone(),
+            )]),
+            models: std::collections::HashMap::from([(
+                "draft".into(),
+                ModelEntry {
+                    model: "vendor/model".into(),
+                    provider: Some("gateway".into()),
+                    max_tokens: Some(32_768),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        });
+        let registry = atman_runtime::provider::ProviderRegistry::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            registry.register(
+                atman_runtime::config_provider::build_config_provider(
+                    "config:gateway",
+                    &provider_entry,
+                )
+                .unwrap(),
+            );
+            let result = test_model_endpoint(
+                &registry,
+                &atman_tui::ModelTestRequest {
+                    request_id: 1,
+                    identity: Some("draft".into()),
+                    provider: "gateway".into(),
+                    model: "vendor/model".into(),
+                    api: None,
+                    reasoning: atman_runtime::provider::ReasoningSelection::BudgetTokens {
+                        tokens: 20_000,
+                    },
+                    max_tokens: Some(32_768),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(result.contains("max_tokens (16384)"), "{result}");
+        });
+    }
     use atman_runtime::fs_access::FsAccessMode;
 
     fn create_recent_session(
@@ -9396,6 +9542,8 @@ mod tests {
             api_key_env: String::new(),
             base_url: "http://localhost/v1".into(),
             max_tokens: Some(16_384),
+            api: None,
+            max_tools: None,
             reasoning_format: "reasoning-effort".into(),
             enabled: true,
             create: true,
@@ -9434,6 +9582,8 @@ mod tests {
             api_key_env: String::new(),
             base_url: "http://localhost/v1".into(),
             max_tokens: Some(16_384),
+            api: None,
+            max_tools: None,
             reasoning_format: "reasoning-effort".into(),
             enabled: false,
             create: false,
@@ -9456,14 +9606,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
         hub.upsert_provider(atman_runtime::config_hub::ProviderConfigUpdate {
-            api: None,
-            max_tools: None,
             name: "gateway",
             kind: "openai-compat",
             api_key: Some("test-key"),
             api_key_env: None,
             base_url: Some("http://localhost/v1"),
             max_tokens: None,
+            api: None,
+            max_tools: None,
             reasoning_format: None,
             prompt_cache_key: None,
             enabled: true,
@@ -9471,7 +9621,6 @@ mod tests {
         .unwrap();
         for (name, enabled) in [("old", true), ("new", true), ("disabled", false)] {
             hub.upsert_model(atman_runtime::model_registry::ModelConfigUpdate {
-                api: None,
                 old_name: None,
                 name,
                 model: name,
@@ -9481,6 +9630,7 @@ mod tests {
                 capabilities: None,
                 image_detail: None,
                 max_tokens: None,
+                api: None,
                 enabled,
             })
             .unwrap();

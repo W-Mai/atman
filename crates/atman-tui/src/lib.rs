@@ -176,6 +176,7 @@ pub enum TuiControl {
         name: String,
         entry: atman_runtime::model_registry::ProviderEntry,
     },
+    TestModel(ModelTestRequest),
     TermResize {
         handle: String,
         rows: u16,
@@ -276,6 +277,10 @@ pub enum TuiCommand {
         result: Result<ModelMutationSuccess, String>,
     },
     ProviderTestResult((String, bool)),
+    ModelTestResult {
+        request_id: u64,
+        result: Result<String, String>,
+    },
     McpTestResult {
         name: String,
         message: String,
@@ -382,6 +387,8 @@ pub enum ProviderMutation {
         api_key_env: String,
         base_url: String,
         max_tokens: Option<u32>,
+        api: Option<atman_runtime::provider::OpenAiApi>,
+        max_tools: Option<usize>,
         reasoning_format: String,
         enabled: bool,
         create: bool,
@@ -433,6 +440,7 @@ pub enum ModelMutation {
         context_budget: u64,
         reasoning: atman_runtime::provider::ReasoningSelection,
         max_tokens: Option<u32>,
+        api: Option<atman_runtime::provider::OpenAiApi>,
         enabled: bool,
     },
     Remove {
@@ -444,6 +452,18 @@ pub enum ModelMutation {
 pub enum ModelMutationSuccess {
     Saved { name: String },
     Removed { name: String },
+}
+
+/// Tests a model draft without saving it or executing returned tool calls.
+#[derive(Debug, Clone)]
+pub struct ModelTestRequest {
+    pub request_id: u64,
+    pub identity: Option<String>,
+    pub provider: String,
+    pub model: String,
+    pub api: Option<atman_runtime::provider::OpenAiApi>,
+    pub reasoning: atman_runtime::provider::ReasoningSelection,
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

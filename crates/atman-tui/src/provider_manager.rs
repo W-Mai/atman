@@ -113,6 +113,11 @@ pub struct ProviderManager {
     form_field: usize,
     editing_provider: Option<String>,
     form_max_tokens: Option<u32>,
+    form_api: Option<atman_runtime::provider::OpenAiApi>,
+    form_max_tools: Option<usize>,
+    form_hits: Vec<(usize, Rect, usize)>,
+    selector_hits: Vec<(usize, Rect, Rect)>,
+    hovered_field: Option<usize>,
     show_confirm: bool,
     confirm_kind: Option<ConfirmKind>,
     confirm_provider_id: Option<String>,
@@ -189,6 +194,7 @@ impl ProviderManager {
                 self.commit_form(control_tx);
             }
             MouseEventKind::Down(MouseButton::Left) if hit(self.test_btn_rect, point) => {
+                self.form_field = 7;
                 self.test_form(control_tx);
             }
             MouseEventKind::Down(button) if hit(self.list_rect, point) => {
@@ -199,7 +205,60 @@ impl ProviderManager {
                     self.request_confirm(ConfirmKind::Delete);
                 }
             }
-            MouseEventKind::Moved if hit(self.test_btn_rect, point) => self.form_field = 7,
+            MouseEventKind::Moved => {
+                self.hovered_field = self
+                    .form_hits
+                    .iter()
+                    .find(|(_, rect, _)| hit(Some(*rect), point))
+                    .map(|(field, _, _)| *field);
+            }
+            MouseEventKind::Down(MouseButton::Left)
+                if self.selector_hits.iter().any(|(_, left, right)| {
+                    hit(Some(*left), point) || hit(Some(*right), point)
+                }) =>
+            {
+                let (field, left, _) = self
+                    .selector_hits
+                    .iter()
+                    .find(|(_, left, right)| hit(Some(*left), point) || hit(Some(*right), point))
+                    .copied()
+                    .unwrap();
+                self.form_field = field;
+                let action = if hit(Some(left), point) {
+                    KeyAction::CursorLeft
+                } else {
+                    KeyAction::CursorRight
+                };
+                self.handle_add_key(&action, control_tx);
+            }
+            MouseEventKind::Down(MouseButton::Left) if self.in_form => {
+                if let Some((field, rect, offset)) = self
+                    .form_hits
+                    .iter()
+                    .find(|(_, rect, _)| hit(Some(*rect), point))
+                    .copied()
+                {
+                    if field == 0 && self.editing_provider.is_some() {
+                        return;
+                    }
+                    self.form_field = field;
+                    if matches!(field, 1 | 5 | 6 | 8) {
+                        let action = if me.column < rect.x + rect.width / 2 {
+                            KeyAction::CursorLeft
+                        } else {
+                            KeyAction::CursorRight
+                        };
+                        self.handle_add_key(&action, control_tx);
+                    } else if let Some(editor) = self.form_editor_mut() {
+                        editor.set_cursor_by_display(
+                            0,
+                            me.column
+                                .saturating_sub(rect.x + 2)
+                                .saturating_add(offset as u16),
+                        );
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -351,6 +410,8 @@ impl ProviderManager {
         self.in_form = true;
         self.form_field = 1;
         self.form_max_tokens = entry.max_tokens;
+        self.form_api = entry.api;
+        self.form_max_tools = entry.max_tools;
         let mut name_ed = InputEditor::default();
         name_ed.insert_str(name);
         self.name_editor = name_ed;
@@ -516,6 +577,8 @@ impl ProviderManager {
                                 api_key_env: entry.api_key_env.unwrap_or_default(),
                                 base_url: entry.base_url.unwrap_or_default(),
                                 max_tokens: entry.max_tokens,
+                                api: entry.api,
+                                max_tools: entry.max_tools,
                                 reasoning_format: entry
                                     .reasoning_format
                                     .unwrap_or_else(|| {
@@ -696,10 +759,64 @@ impl ProviderManager {
         }
     }
 
+    fn api_visible(&self) -> bool {
+        matches!(
+            self.provider_type_editor.buf().trim(),
+            "openai" | "openai-compat"
+        )
+    }
+
+    fn selected_api(&self) -> Option<atman_runtime::provider::OpenAiApi> {
+        self.api_visible()
+            .then(|| self.form_api.unwrap_or_default())
+    }
+
+    // Rendering, keyboard navigation and mouse hit regions share this order.
+    fn form_fields(&self) -> Vec<usize> {
+        let mut fields = Vec::new();
+        if self.editing_provider.is_none() {
+            fields.push(0);
+        }
+        fields.push(1);
+        if self.api_visible() {
+            fields.push(8);
+        }
+        fields.extend([2, 3, 4]);
+        if self.selected_api() == Some(atman_runtime::provider::OpenAiApi::ChatCompletions) {
+            fields.push(5);
+        }
+        fields.extend([6, 7]);
+        fields
+    }
+
+    fn form_editor_mut(&mut self) -> Option<&mut InputEditor> {
+        match self.form_field {
+            0 if self.editing_provider.is_none() => Some(&mut self.name_editor),
+            2 => Some(&mut self.api_key_editor),
+            3 => Some(&mut self.api_key_env_editor),
+            4 => Some(&mut self.base_url_editor),
+            _ => None,
+        }
+    }
+
+    fn form_endpoint(&self) -> String {
+        let entry = atman_runtime::model_registry::ProviderEntry {
+            kind: self.provider_type_editor.buf().trim().into(),
+            base_url: non_empty(self.base_url_editor.buf()),
+            api: self.selected_api(),
+            ..Default::default()
+        };
+        entry
+            .api_endpoint(None)
+            .unwrap_or_else(|| "Protocol-defined endpoint".into())
+    }
+
     fn open_custom_form(&mut self) {
         self.in_form = true;
         self.form_field = 0;
         self.form_max_tokens = None;
+        self.form_api = None;
+        self.form_max_tools = None;
         self.name_editor = InputEditor::default();
         self.api_key_editor = InputEditor::default();
         self.base_url_editor = InputEditor::default();
@@ -726,6 +843,11 @@ impl ProviderManager {
         let mut pt_ed = InputEditor::default();
         pt_ed.insert_str(preset.provider_type);
         self.provider_type_editor = pt_ed;
+        self.form_api = Some(if preset.provider_type == "openai" {
+            atman_runtime::provider::OpenAiApi::Responses
+        } else {
+            atman_runtime::provider::OpenAiApi::ChatCompletions
+        });
         let mut url_ed = InputEditor::default();
         url_ed.insert_str(preset.base_url);
         self.base_url_editor = url_ed;
@@ -756,14 +878,14 @@ impl ProviderManager {
             }
         };
         let entry = atman_runtime::model_registry::ProviderEntry {
-            api: None,
-            max_tools: None,
             name: name.clone(),
             kind,
             api_key: non_empty(self.api_key_editor.buf()),
             api_key_env: non_empty(self.api_key_env_editor.buf()),
             base_url: non_empty(self.base_url_editor.buf()),
             max_tokens: self.form_max_tokens,
+            api: self.selected_api(),
+            max_tools: self.form_max_tools,
             reasoning_format,
             prompt_cache_key: None,
             enabled: Some(true),
@@ -801,55 +923,21 @@ impl ProviderManager {
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
         if self.in_form {
-            if self.form_field == 7 {
-                match action {
-                    KeyAction::Escape | KeyAction::Submit => {
-                        return self.commit_form(control_tx);
-                    }
-                    KeyAction::Char('t') => self.test_form(control_tx),
-                    KeyAction::Tab | KeyAction::HistoryDown => {
-                        self.form_field = if self.editing_provider.is_some() {
-                            1
-                        } else {
-                            0
-                        };
-                    }
-                    KeyAction::BackTab | KeyAction::HistoryUp => {
-                        self.form_field = 6;
-                    }
-                    _ => {}
-                }
-                return None;
-            }
-            let name_locked = self.editing_provider.is_some();
-            let editor = match self.form_field {
-                0 => &mut self.name_editor,
-                1 => &mut self.provider_type_editor,
-                2 => &mut self.api_key_editor,
-                3 => &mut self.api_key_env_editor,
-                4 => &mut self.base_url_editor,
-                5 => &mut self.reasoning_format_editor,
-                _ => &mut self.enabled_editor,
-            };
+            let fields = self.form_fields();
+            let index = fields
+                .iter()
+                .position(|field| *field == self.form_field)
+                .unwrap_or(0);
             match action {
-                KeyAction::Escape | KeyAction::Submit => {
-                    return self.commit_form(control_tx);
-                }
+                KeyAction::Escape => return self.commit_form(control_tx),
+                KeyAction::Submit if self.form_field == 7 => self.test_form(control_tx),
+                KeyAction::Submit => return self.commit_form(control_tx),
+                KeyAction::Char('t') if self.form_field == 7 => self.test_form(control_tx),
                 KeyAction::Tab | KeyAction::HistoryDown => {
-                    self.form_field = (self.form_field + 1) % 8;
-                    if name_locked && self.form_field == 0 {
-                        self.form_field = 1;
-                    }
+                    self.form_field = fields[(index + 1) % fields.len()]
                 }
                 KeyAction::BackTab | KeyAction::HistoryUp => {
-                    self.form_field = if self.form_field == 0 {
-                        7
-                    } else {
-                        self.form_field - 1
-                    };
-                    if name_locked && self.form_field == 0 {
-                        self.form_field = 7;
-                    }
+                    self.form_field = fields[(index + fields.len() - 1) % fields.len()]
                 }
                 KeyAction::CursorLeft | KeyAction::CursorRight if self.form_field == 1 => {
                     let direction =
@@ -865,55 +953,43 @@ impl ProviderManager {
                         direction,
                     );
                     self.provider_type_editor.replace_with(types[selected]);
-                    let default =
-                        atman_runtime::providers::openai::OpenAiReasoningFormat::for_provider_kind(
-                            types[selected],
-                        );
-                    self.reasoning_format_editor.replace_with(default.as_str());
                     self.kind_selected = selected;
+                    if !self.api_visible() {
+                        self.form_api = None;
+                    }
                 }
-                KeyAction::Backspace if self.form_field == 1 => {}
-                KeyAction::Char(_) if self.form_field == 1 => {}
+                KeyAction::CursorLeft | KeyAction::CursorRight if self.form_field == 8 => {
+                    self.form_api = Some(match self.form_api.unwrap_or_default() {
+                        atman_runtime::provider::OpenAiApi::ChatCompletions => {
+                            atman_runtime::provider::OpenAiApi::Responses
+                        }
+                        atman_runtime::provider::OpenAiApi::Responses => {
+                            atman_runtime::provider::OpenAiApi::ChatCompletions
+                        }
+                    });
+                }
                 KeyAction::CursorLeft | KeyAction::CursorRight if self.form_field == 5 => {
-                    let current = self.reasoning_format_editor.buf().trim();
-                    let next = if current == REASONING_FORMATS[0] {
+                    let next = if self.reasoning_format_editor.buf().trim() == REASONING_FORMATS[0]
+                    {
                         REASONING_FORMATS[1]
                     } else {
                         REASONING_FORMATS[0]
                     };
                     self.reasoning_format_editor.replace_with(next);
                 }
-                KeyAction::Backspace | KeyAction::Char(_) if self.form_field == 5 => {}
-                KeyAction::CursorLeft if self.form_field == 6 => {
-                    let current = self.enabled_editor.buf().trim();
-                    let new = if current == "true" { "false" } else { "true" };
-                    let mut ed = InputEditor::default();
-                    ed.insert_str(new);
-                    self.enabled_editor = ed;
+                KeyAction::CursorLeft | KeyAction::CursorRight if self.form_field == 6 => {
+                    let next = if self.enabled_editor.buf().trim() == "true" {
+                        "false"
+                    } else {
+                        "true"
+                    };
+                    self.enabled_editor.replace_with(next);
                 }
-                KeyAction::CursorRight if self.form_field == 6 => {
-                    let current = self.enabled_editor.buf().trim();
-                    let new = if current == "true" { "false" } else { "true" };
-                    let mut ed = InputEditor::default();
-                    ed.insert_str(new);
-                    self.enabled_editor = ed;
-                }
-                KeyAction::Backspace if self.form_field == 6 => {}
-                KeyAction::Char(_) if self.form_field == 6 => {}
-                KeyAction::DeleteWordBackward
-                | KeyAction::Backspace
-                | KeyAction::Delete
-                | KeyAction::CursorLeft
-                | KeyAction::CursorRight
-                | KeyAction::CursorHome
-                | KeyAction::CursorEnd
-                | KeyAction::Char(_)
-                | KeyAction::Newline => {
-                    if !name_locked || self.form_field != 0 {
+                _ => {
+                    if let Some(editor) = self.form_editor_mut() {
                         editor.handle_key(action);
                     }
                 }
-                _ => {}
             }
         } else if self.name_focused {
             match action {
@@ -1015,6 +1091,8 @@ impl ProviderManager {
                 api_key_env,
                 base_url,
                 max_tokens: self.form_max_tokens,
+                api: self.selected_api(),
+                max_tools: self.form_max_tools,
                 reasoning_format,
                 enabled,
                 create,
@@ -1230,6 +1308,23 @@ fn render_model_detail(
                 Span::styled(p.detail.clone(), val_style),
             ]));
         }
+        if let Some((_, entry)) = atman_runtime::model_registry::all_provider_entries()
+            .into_iter()
+            .find(|(name, _)| name == &p.name)
+        {
+            if let Some(api) = entry.effective_api(None) {
+                lines.push(Line::from(vec![
+                    Span::styled(" API:    ", label_style),
+                    Span::styled(api.to_string(), val_style),
+                ]));
+            }
+            if let Some(endpoint) = entry.api_endpoint(None) {
+                lines.push(Line::from(vec![
+                    Span::styled(" Endpoint: ", label_style),
+                    Span::styled(endpoint, val_style),
+                ]));
+            }
+        }
 
         let provider_key = match &p.source {
             ProviderSource::AuthStore { id } => id.as_str(),
@@ -1286,7 +1381,17 @@ fn render_add_dialog(
     mgr: &mut ProviderManager,
     theme: &crate::theme::Theme,
 ) {
-    crate::wm::shell::render_section_header(f, area, Line::from("Add Provider"), theme);
+    crate::wm::shell::render_section_header(
+        f,
+        area,
+        Line::from(
+            mgr.editing_provider
+                .as_ref()
+                .map(|name| format!("Edit Provider · {name}"))
+                .unwrap_or_else(|| "Add Provider".into()),
+        ),
+        theme,
+    );
     let inner = Rect {
         x: area.x,
         y: area.y + 2,
@@ -1296,183 +1401,150 @@ fn render_add_dialog(
     let mut lines = vec![];
     let mut cursor_pos: Option<(u16, u16)> = None;
     if mgr.in_form {
-        let fields: [(&str, &str); 7] = [
-            ("Name", mgr.name_editor.buf()),
-            ("Type", mgr.provider_type_editor.buf()),
-            ("API Key", mgr.api_key_editor.buf()),
-            ("API Key Env", mgr.api_key_env_editor.buf()),
-            ("Base URL", mgr.base_url_editor.buf()),
-            ("Reasoning wire", mgr.reasoning_format_editor.buf()),
-            ("Enabled", mgr.enabled_editor.buf()),
-        ];
-        let mut y = inner.y;
-        for (i, (label, val)) in fields.iter().enumerate() {
-            if y >= inner.bottom() {
-                break;
-            }
-            let active = i == mgr.form_field;
-            let style = if active {
-                Style::default()
-                    .fg(theme.accent.into())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.tinted_fg.into())
-            };
-            let display_val = if *label == "API Key" && !val.is_empty() && !active {
-                "•".repeat(val.len().min(20))
-            } else {
-                (*val).to_string()
-            };
-            let toggle_hint = matches!(*label, "Type" | "Reasoning wire" | "Enabled") && active;
-            let display = if toggle_hint {
-                format!("{display_val}  ← →")
-            } else {
-                display_val.clone()
-            };
-            if *label == "API Key" && inner.bottom().saturating_sub(y) >= 3 {
-                let label_rect = Rect {
-                    x: inner.x,
-                    y,
-                    width: inner.width,
-                    height: 1,
-                };
-                f.render_widget(
-                    Paragraph::new(Line::from(Span::styled(" API Key:", style))),
-                    label_rect,
-                );
-                y = y.saturating_add(1);
-                let value_rect = Rect {
-                    x: inner.x,
-                    y,
-                    width: inner.width,
-                    height: 1,
-                };
-                f.render_widget(
-                    Paragraph::new(Line::from(Span::styled(
-                        format!("  {display_val}"),
-                        Style::default().fg(theme.tinted_fg.into()),
-                    ))),
-                    value_rect,
-                );
-                if active {
-                    let cursor_w = mgr.api_key_editor.cursor_display_col();
-                    cursor_pos = Some((inner.x + 2 + cursor_w.min(inner.width as usize) as u16, y));
-                }
-                y = y.saturating_add(1);
-                let underline = "─".repeat(inner.width as usize);
-                f.render_widget(
-                    Paragraph::new(Line::from(Span::styled(
-                        underline,
-                        Style::default().fg(if active {
-                            theme.accent.into()
-                        } else {
-                            theme.border.into()
-                        }),
-                    ))),
-                    Rect {
-                        x: inner.x,
-                        y,
-                        width: inner.width,
-                        height: 1,
-                    },
-                );
-                y = y.saturating_add(1);
-                continue;
-            }
-
-            let label_rect = Rect {
-                x: inner.x,
-                y,
-                width: inner.width,
-                height: 1,
-            };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(format!(" {label}:"), style))),
-                label_rect,
-            );
-            y = y.saturating_add(1);
-            if y >= inner.bottom() {
-                break;
-            }
-            let value_rect = Rect {
-                x: inner.x,
-                y,
-                width: inner.width,
-                height: 1,
-            };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    format!("  {display}"),
-                    Style::default().fg(theme.tinted_fg.into()),
-                ))),
-                value_rect,
-            );
-            if active && !toggle_hint {
-                let cursor_w = match i {
-                    0 => mgr.name_editor.cursor_display_col(),
-                    2 => mgr.api_key_editor.cursor_display_col(),
-                    3 => mgr.api_key_env_editor.cursor_display_col(),
-                    4 => mgr.base_url_editor.cursor_display_col(),
-                    _ => 0,
-                } as u16;
-                cursor_pos = Some((inner.x + 2 + cursor_w, y));
-            }
-            y = y.saturating_add(1);
+        let fields = mgr.form_fields();
+        if !fields.contains(&mgr.form_field) {
+            mgr.form_field = fields[0];
         }
-        y = y.saturating_add(1);
-        if y < inner.bottom() {
-            let test_active = mgr.form_field == 7;
-            let test_style = if test_active {
-                Style::default()
-                    .fg(theme.modal_bg.into())
-                    .bg(theme.accent.into())
-                    .add_modifier(Modifier::BOLD)
+        mgr.form_hits.clear();
+        let available = inner.height.saturating_sub(4) as usize / 2;
+        let selected = fields
+            .iter()
+            .position(|field| *field == mgr.form_field)
+            .unwrap_or(0);
+        let start = selected.saturating_sub(available.saturating_sub(1));
+        for (row, field) in fields
+            .iter()
+            .skip(start)
+            .take(available)
+            .copied()
+            .enumerate()
+        {
+            let active = field == mgr.form_field;
+            let (label, value, cursor) = match field {
+                0 => (
+                    "Name",
+                    mgr.name_editor.buf().to_owned(),
+                    Some(mgr.name_editor.cursor_display_col()),
+                ),
+                1 => ("Type", mgr.provider_type_editor.buf().to_owned(), None),
+                2 => (
+                    "API Key",
+                    if active {
+                        mgr.api_key_editor.buf().to_owned()
+                    } else {
+                        "•".repeat(mgr.api_key_editor.buf().len().min(20))
+                    },
+                    Some(mgr.api_key_editor.cursor_display_col()),
+                ),
+                3 => (
+                    "API Key Env",
+                    mgr.api_key_env_editor.buf().to_owned(),
+                    Some(mgr.api_key_env_editor.cursor_display_col()),
+                ),
+                4 => (
+                    "Base URL",
+                    mgr.base_url_editor.buf().to_owned(),
+                    Some(mgr.base_url_editor.cursor_display_col()),
+                ),
+                5 => (
+                    "Chat reasoning format",
+                    mgr.reasoning_format_editor.buf().to_owned(),
+                    None,
+                ),
+                6 => ("Enabled", mgr.enabled_editor.buf().to_owned(), None),
+                7 => (
+                    "Test connection",
+                    "Enter / click · checks directory and credentials".into(),
+                    None,
+                ),
+                8 => ("API", mgr.form_api.unwrap_or_default().to_string(), None),
+                _ => continue,
+            };
+            let rect = Rect {
+                y: inner.y + row as u16 * 2,
+                height: 2,
+                ..inner
+            };
+            let width = rect.width.saturating_sub(4) as usize;
+            let offset = if active {
+                cursor
+                    .unwrap_or_default()
+                    .saturating_sub(width.saturating_sub(1))
             } else {
-                Style::default()
-                    .fg(theme.tinted_fg.into())
-                    .bg(theme.border.into())
+                0
             };
-            let hint = if test_active {
-                "  ← Enter to test"
+            mgr.form_hits.push((field, rect, offset));
+            if field == 7 {
+                mgr.test_btn_rect = Some(rect);
+            }
+            let bg = if mgr.hovered_field == Some(field) {
+                theme.work_hover_bg.into()
             } else {
-                ""
+                theme.modal_bg.into()
             };
-            let test_btn = Rect {
-                x: inner.x + 1,
-                y,
-                width: 6,
-                height: 1,
-            };
-            mgr.test_btn_rect = Some(test_btn);
+            let style = Style::default().bg(bg).fg(if active {
+                theme.accent.into()
+            } else {
+                theme.tinted_fg.into()
+            });
+            let shown = crate::width::trim_display_offset(&value, offset, width);
             f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::raw(" "),
-                    Span::styled(" Test ", test_style),
-                    Span::raw(hint),
-                ])),
+                Paragraph::new(vec![
+                    Line::from(Span::styled(format!(" {label}"), style)),
+                    Line::from(Span::styled(
+                        format!("  {shown}"),
+                        Style::default().bg(bg).fg(theme.tinted_fg.into()),
+                    )),
+                ])
+                .style(Style::default().bg(bg)),
+                rect,
+            );
+            if active && matches!(field, 1 | 5 | 6 | 8) && rect.width >= 8 {
+                let left = Rect::new(rect.right() - 5, rect.y, 2, 1);
+                let right = Rect::new(rect.right() - 2, rect.y, 2, 1);
+                f.render_widget(Paragraph::new("←").style(style), left);
+                f.render_widget(Paragraph::new("→").style(style), right);
+                mgr.selector_hits.push((field, left, right));
+            }
+            if active && let Some(cursor) = cursor {
+                cursor_pos = Some((
+                    (rect.x
+                        + 2
+                        + cursor.saturating_sub(offset).min(width.saturating_sub(1)) as u16)
+                        .min(rect.right().saturating_sub(1)),
+                    rect.y + 1,
+                ));
+            }
+        }
+        if inner.height >= 4 {
+            mgr.save_rect = Some(Rect {
+                y: inner.bottom() - 1,
+                height: 1,
+                ..inner
+            });
+            let api_hint =
+                if mgr.selected_api() == Some(atman_runtime::provider::OpenAiApi::Responses) {
+                    format!(
+                        "Protocol-defined reasoning · saved Chat format: {}",
+                        mgr.reasoning_format_editor.buf()
+                    )
+                } else {
+                    "".into()
+                };
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(format!(" Endpoint: {}", mgr.form_endpoint())),
+                    Line::from(format!(" {api_hint}")),
+                    Line::from(" Tab / Shift+Tab: field · Enter: save / test · Esc: save"),
+                ])
+                .style(Style::default().fg(theme.subtle_fg.into())),
                 Rect {
-                    x: inner.x,
-                    y,
-                    width: inner.width,
-                    height: 1,
+                    y: inner.bottom() - 3,
+                    height: 3,
+                    ..inner
                 },
             );
         }
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                crate::directional_selector::footer_help(
-                    "Tab/Shift+Tab cycle · t:test",
-                    "Enter/Esc:save",
-                ),
-                Style::default().fg(theme.subtle_fg.into()),
-            ))),
-            Rect {
-                x: inner.x,
-                y: inner.bottom().saturating_sub(1),
-                width: inner.width,
-                height: 1,
-            },
-        );
     } else if mgr.name_focused {
         lines.push(Line::from("Name:"));
         lines.push(Line::from(Span::styled(
@@ -1619,6 +1691,12 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
         t: &crate::theme::Theme,
     ) {
         self.test_btn_rect = None;
+        self.save_rect = None;
+        self.list_rect = None;
+        self.confirm_yes_rect = None;
+        self.confirm_no_rect = None;
+        self.form_hits.clear();
+        self.selector_hits.clear();
         if area.height < 4 {
             return;
         }
@@ -1679,7 +1757,7 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
         );
         let help = self.pending_help().unwrap_or(match self.focus {
             ProviderFocus::ProviderList => {
-                "n:add  e:enable/disable  d:delete  r:refresh  t:test  m:manage models  Enter:edit/logout  Esc:close"
+                "n:add  e:enable/disable  d:delete  r:refresh  t:test connection  m:manage models  Enter:edit/logout  Esc:close"
             }
         });
         let footer = Paragraph::new(Line::from(Span::styled(
@@ -2155,6 +2233,7 @@ mod tests {
         populate_config_form(&mut manager, None);
         manager.test_btn_rect = Some(Rect::new(4, 3, 6, 1));
         let app = crate::app::AppState::new("session".into(), None);
+        manager.list_rect = Some(Rect::new(0, 0, 40, 20));
         let theme = crate::theme::theme();
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 3)).unwrap();
@@ -2172,6 +2251,62 @@ mod tests {
             .unwrap();
 
         assert!(manager.test_btn_rect.is_none());
+        assert!(manager.list_rect.is_none());
+    }
+
+    #[test]
+    fn api_controls_share_visible_focus_and_mouse_order_without_losing_chat_format() {
+        let mut manager = ProviderManager::default();
+        populate_config_form(&mut manager, None);
+        manager.form_field = 8;
+        manager.handle_add_key(&KeyAction::CursorRight, None);
+        assert_eq!(
+            manager.selected_api(),
+            Some(atman_runtime::provider::OpenAiApi::Responses)
+        );
+        assert!(!manager.form_fields().contains(&5));
+        assert_eq!(manager.reasoning_format_editor.buf(), "thinking-toggle");
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+        let app = crate::app::AppState::new("session".into(), None);
+        let theme = crate::theme::theme();
+        terminal
+            .draw(|frame| {
+                <ProviderManager as crate::wm::modal::ModalOverlay>::render_content(
+                    &mut manager,
+                    frame,
+                    frame.area(),
+                    &app,
+                    &theme,
+                );
+            })
+            .unwrap();
+        assert!(!manager.form_hits.iter().any(|(field, _, _)| *field == 5));
+        let (_, rect, _) = manager
+            .form_hits
+            .iter()
+            .find(|(field, _, _)| *field == 8)
+            .copied()
+            .unwrap();
+        manager.handle_mouse(
+            &crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: rect.right() - 1,
+                row: rect.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            None,
+        );
+        assert_eq!(
+            manager.selected_api(),
+            Some(atman_runtime::provider::OpenAiApi::ChatCompletions)
+        );
+        assert!(manager.form_fields().contains(&5));
+        assert_eq!(manager.reasoning_format_editor.buf(), "thinking-toggle");
+        manager.provider_type_editor.replace_with("anthropic");
+        assert!(!manager.form_fields().contains(&8));
+        assert!(!manager.form_fields().contains(&5));
     }
 
     #[test]
@@ -2661,6 +2796,8 @@ mod tests {
                     api_key_env: String::new(),
                     base_url: "https://gateway.example/v1".into(),
                     max_tokens: None,
+                    api: None,
+                    max_tools: None,
                     reasoning_format: "thinking-toggle".into(),
                     enabled: true,
                     create: true,
@@ -2678,6 +2815,8 @@ mod tests {
                     api_key_env: String::new(),
                     base_url: "https://gateway.example/v1".into(),
                     max_tokens: None,
+                    api: None,
+                    max_tools: None,
                     reasoning_format: "thinking-toggle".into(),
                     enabled: true,
                     create: false,

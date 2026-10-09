@@ -12,6 +12,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Protocol settings and model tests** — Provider settings expose API selection separately from Chat reasoning format; model settings support inheritance and overrides. Test connection checks discovery, while Test model uses the draft's resolved protocol and reasoning without executing tools. Dynamic fields share keyboard and mouse navigation.
 - **Provider API selection** — API-key connections support Chat Completions and Responses with provider defaults and per-model overrides. Responses preserves protocol state across local history replay and shares request encoding, streaming, usage, and cache projection with Codex.
 - **Request tool limits** — Providers can declare `max_tools`; oversized requests fail locally without truncating the tool catalog. The official OpenAI Chat Completions endpoint defaults to 128 tools.
 - **MCP discovery** — Managed agents use fixed MCP discovery and call tools. Catalog search and cursor pagination load tool details on demand; explicit selectors still expose native definitions.

@@ -474,7 +474,7 @@ impl ModalManager {
                     std::time::Duration::from_secs(2),
                 ),
                 crate::provider_manager::ProviderFeedback::TestStarted => (
-                    "testing endpoint…",
+                    "testing directory connection…",
                     crate::app::NoteLevel::Info,
                     std::time::Duration::from_secs(5),
                 ),

@@ -1839,6 +1839,15 @@ pub(crate) async fn run_frames(
                                 app::ToastPosition::TopRight,
                             );
                         }
+                        TuiCommand::ModelTestResult { request_id, result } => {
+                            if app.wm.modals.model_manager.resolve_test(request_id, &result) {
+                                let (message, level) = match result {
+                                    Ok(message) => (message, app::NoteLevel::Success),
+                                    Err(message) => (message, app::NoteLevel::Error),
+                                };
+                                app.app.push_toast(message, level, std::time::Duration::from_secs(8), app::ToastPosition::TopRight);
+                            }
+                        }
                         TuiCommand::McpTestResult { name, message, ok } => {
                             let level = if ok {
                                 app::NoteLevel::Success
@@ -4295,6 +4304,8 @@ mod tests {
             api_key_env: String::new(),
             base_url: "https://gateway.example/v1".into(),
             max_tokens: None,
+            api: None,
+            max_tools: None,
             reasoning_format: "thinking-toggle".into(),
             enabled: true,
             create,

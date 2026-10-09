@@ -35,6 +35,13 @@ pub struct ModelManager {
     context_budget_editor: InputEditor,
     thinking_editor: InputEditor,
     max_tokens_editor: InputEditor,
+    form_api: Option<atman_runtime::provider::OpenAiApi>,
+    form_hits: Vec<(usize, Rect, usize)>,
+    selector_hits: Vec<(usize, Rect, Rect)>,
+    hovered_field: Option<usize>,
+    test_rect: Option<Rect>,
+    pending_test: Option<u64>,
+    test_result: Option<(String, bool)>,
     next_request_id: u64,
     pending: Option<crate::ModelMutationRequest>,
     confirm_delete: Option<String>,
@@ -62,10 +69,14 @@ impl ModelManager {
         self.open = false;
         self.show_form = false;
         self.confirm_delete = None;
+        self.pending_test = None;
+        self.test_result = None;
     }
 
     pub fn has_text_focus(&self) -> bool {
-        self.show_form && matches!(self.form_field, 0 | 1 | 3 | 5)
+        self.show_form
+            && self.pending_test.is_none()
+            && matches!(self.form_field, 0 | 1 | 3 | 4 | 5)
     }
 
     pub fn handle_mouse(
@@ -74,7 +85,7 @@ impl ModelManager {
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
         use crossterm::event::{MouseButton, MouseEventKind};
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.pending_test.is_some() {
             return;
         }
         let point = (event.column, event.row);
@@ -85,8 +96,71 @@ impl ModelManager {
             MouseEventKind::Down(MouseButton::Left) if rect_hit(self.confirm_no_rect, point) => {
                 self.handle_key(&KeyAction::Escape, control_tx);
             }
+            MouseEventKind::Down(MouseButton::Left) if rect_hit(self.test_rect, point) => {
+                self.form_field = 7;
+                self.test_model(control_tx);
+            }
+            MouseEventKind::Down(MouseButton::Left)
+                if self.selector_hits.iter().any(|(_, left, right)| {
+                    rect_hit(Some(*left), point) || rect_hit(Some(*right), point)
+                }) =>
+            {
+                let (field, left, _) = self
+                    .selector_hits
+                    .iter()
+                    .find(|(_, left, right)| {
+                        rect_hit(Some(*left), point) || rect_hit(Some(*right), point)
+                    })
+                    .copied()
+                    .unwrap();
+                self.form_field = field;
+                let action = if rect_hit(Some(left), point) {
+                    KeyAction::CursorLeft
+                } else {
+                    KeyAction::CursorRight
+                };
+                self.handle_form_key(&action, control_tx);
+            }
+            MouseEventKind::Moved => {
+                self.hovered_field = self
+                    .form_hits
+                    .iter()
+                    .find(|(_, rect, _)| rect_hit(Some(*rect), point))
+                    .map(|(field, _, _)| *field);
+            }
+            MouseEventKind::Down(MouseButton::Left)
+                if self.show_form
+                    && self
+                        .form_hits
+                        .iter()
+                        .any(|(_, rect, _)| rect_hit(Some(*rect), point)) =>
+            {
+                let (field, rect, offset) = self
+                    .form_hits
+                    .iter()
+                    .find(|(_, rect, _)| rect_hit(Some(*rect), point))
+                    .copied()
+                    .unwrap();
+                self.form_field = field;
+                if matches!(field, 2 | 6) {
+                    let action = if event.column < rect.x + rect.width / 2 {
+                        KeyAction::CursorLeft
+                    } else {
+                        KeyAction::CursorRight
+                    };
+                    self.handle_form_key(&action, control_tx);
+                } else if let Some(editor) = self.form_editor_mut() {
+                    editor.set_cursor_by_display(
+                        0,
+                        event
+                            .column
+                            .saturating_sub(rect.x + 18)
+                            .saturating_add(offset as u16),
+                    );
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) if rect_hit(self.save_rect, point) => {
-                self.handle_key(&KeyAction::Submit, control_tx);
+                self.commit_form(control_tx);
             }
             MouseEventKind::Down(button) if rect_hit(self.list_rect, point) => {
                 let rect = self.list_rect.expect("matched list rect");
@@ -275,33 +349,146 @@ impl ModelManager {
             .unwrap_or("")
     }
 
-    fn reasoning_choices(&self) -> Vec<String> {
-        let selections = self
-            .editing
-            .as_deref()
-            .filter(|model| {
-                atman_runtime::model_registry::model_entry(model)
-                    .and_then(|entry| entry.provider)
-                    .as_deref()
-                    == Some(self.selected_provider.as_str())
-            })
-            .map(atman_runtime::model_registry::reasoning_selections_for_model)
-            .unwrap_or_else(|| {
-                atman_runtime::model_registry::reasoning_selections_for_provider(
-                    &self.selected_provider,
-                    &atman_runtime::provider::ModelCapabilities::default(),
-                )
-            });
-        selections
+    fn provider_entry(&self) -> Option<atman_runtime::model_registry::ProviderEntry> {
+        atman_runtime::model_registry::all_provider_entries()
             .into_iter()
-            .map(|selection| selection.to_string())
-            .collect()
+            .find(|(name, _)| name == &self.selected_provider)
+            .map(|(_, entry)| entry)
+    }
+
+    fn api_visible(&self) -> bool {
+        self.provider_entry()
+            .is_some_and(|entry| entry.supports_api_selection())
+    }
+
+    fn api_label(&self) -> String {
+        if let Some(api) = self.form_api {
+            return api.to_string();
+        }
+        format!(
+            "Inherit ({})",
+            self.provider_entry()
+                .and_then(|entry| entry.effective_api(None))
+                .unwrap_or_default()
+        )
+    }
+
+    fn reasoning_choices(&self) -> Vec<String> {
+        atman_runtime::model_registry::reasoning_selections_for_model_draft(
+            self.editing.as_deref(),
+            &self.selected_provider,
+            if self.model_editor.buf().trim().is_empty() {
+                self.name_editor.buf().trim()
+            } else {
+                self.model_editor.buf().trim()
+            },
+            self.form_api,
+            self.max_tokens_editor.buf().trim().parse().ok(),
+        )
+        .into_iter()
+        .map(|selection| selection.to_string())
+        .collect()
+    }
+
+    fn form_fields(&self) -> Vec<usize> {
+        let mut fields = vec![0, 1];
+        if self.locked_provider.is_none() {
+            fields.push(2);
+        }
+        if self.api_visible() {
+            fields.push(6);
+        }
+        fields.extend([3, 4, 5, 7]);
+        fields
+    }
+
+    fn form_editor_mut(&mut self) -> Option<&mut InputEditor> {
+        match self.form_field {
+            0 => Some(&mut self.name_editor),
+            1 => Some(&mut self.model_editor),
+            3 => Some(&mut self.context_budget_editor),
+            4 => Some(&mut self.thinking_editor),
+            5 => Some(&mut self.max_tokens_editor),
+            _ => None,
+        }
+    }
+
+    fn test_model(
+        &mut self,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        if self.pending_test.is_some() {
+            return;
+        }
+        let model = self.model_editor.buf().trim();
+        let model = if model.is_empty() {
+            self.name_editor.buf().trim()
+        } else {
+            model
+        };
+        if model.is_empty() || self.selected_provider.is_empty() {
+            atman_runtime::notify!(error, "Select a provider and model before testing");
+            return;
+        }
+        let Some(reasoning) = parse_reasoning(self.thinking_editor.buf()) else {
+            atman_runtime::notify!(error, "Reasoning value is invalid");
+            return;
+        };
+        let max_tokens = if self.max_tokens_editor.buf().trim().is_empty() {
+            None
+        } else {
+            match self.max_tokens_editor.buf().trim().parse::<u32>() {
+                Ok(value) if value > 0 => Some(value),
+                _ => {
+                    atman_runtime::notify!(error, "Max Tokens must be a positive integer");
+                    return;
+                }
+            }
+        };
+        let Some(tx) = control_tx else {
+            atman_runtime::notify!(error, "Model test is unavailable");
+            return;
+        };
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        let request = crate::ModelTestRequest {
+            request_id: self.next_request_id,
+            identity: self.editing.clone(),
+            provider: self.selected_provider.clone(),
+            model: model.into(),
+            api: self.form_api,
+            reasoning,
+            max_tokens,
+        };
+        if tx.send(crate::TuiControl::TestModel(request)).is_err() {
+            atman_runtime::notify!(error, "Model test is unavailable");
+            return;
+        }
+        self.pending_test = Some(self.next_request_id);
+        self.test_result = None;
+    }
+
+    pub(crate) fn resolve_test(
+        &mut self,
+        request_id: u64,
+        result: &Result<String, String>,
+    ) -> bool {
+        if self.pending_test != Some(request_id) {
+            return false;
+        }
+        self.pending_test = None;
+        self.test_result = Some(match result {
+            Ok(message) => (message.clone(), true),
+            Err(message) => (message.clone(), false),
+        });
+        true
     }
 
     fn open_form(&mut self) {
         self.show_form = true;
         self.form_field = 0;
         self.editing = None;
+        self.form_api = None;
+        self.test_result = None;
         self.selected_provider = self.current_provider().to_string();
         self.name_editor = InputEditor::default();
         self.model_editor = InputEditor::default();
@@ -327,6 +514,8 @@ impl ModelManager {
         self.show_form = true;
         self.form_field = 0;
         self.editing = Some(model.slug.clone());
+        self.form_api = entry.api;
+        self.test_result = None;
         self.selected_provider = provider;
         self.name_editor = InputEditor::default();
         self.name_editor.insert_str(&model.slug);
@@ -353,6 +542,12 @@ impl ModelManager {
         action: &KeyAction,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
+        if self.pending_test.is_some() {
+            if matches!(action, KeyAction::Escape) {
+                self.close();
+            }
+            return;
+        }
         if self.pending.is_some() {
             return;
         }
@@ -420,7 +615,7 @@ impl ModelManager {
     }
 
     pub fn paste(&mut self, text: &str) {
-        if !self.show_form || self.form_field == 2 {
+        if self.pending_test.is_some() || !self.show_form || matches!(self.form_field, 2 | 6 | 7) {
             return;
         }
         let editor = match self.form_field {
@@ -439,78 +634,94 @@ impl ModelManager {
         action: &KeyAction,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
+        if self.pending_test.is_some() {
+            return;
+        }
+        let fields = self.form_fields();
+        let index = fields
+            .iter()
+            .position(|field| *field == self.form_field)
+            .unwrap_or(0);
         match action {
+            KeyAction::Submit if self.form_field == 7 => self.test_model(control_tx),
             KeyAction::Escape | KeyAction::Submit => self.commit_form(control_tx),
-            KeyAction::Tab | KeyAction::HistoryDown => self.form_field = (self.form_field + 1) % 6,
-            KeyAction::BackTab | KeyAction::HistoryUp => {
-                self.form_field = if self.form_field == 0 {
-                    5
-                } else {
-                    self.form_field - 1
-                };
+            KeyAction::Tab | KeyAction::HistoryDown => {
+                self.form_field = fields[(index + 1) % fields.len()]
             }
-            KeyAction::CursorLeft | KeyAction::CursorRight if matches!(self.form_field, 2 | 4) => {
+            KeyAction::BackTab | KeyAction::HistoryUp => {
+                self.form_field = fields[(index + fields.len() - 1) % fields.len()]
+            }
+            KeyAction::CursorLeft | KeyAction::CursorRight
+                if matches!(self.form_field, 2 | 4 | 6) =>
+            {
                 let Some(direction) =
                     crate::directional_selector::SelectorDirection::from_key(action)
                 else {
                     return;
                 };
-                if self.form_field == 2 {
-                    if self.locked_provider.is_some() {
-                        return;
+                match self.form_field {
+                    2 => {
+                        if self.locked_provider.is_some() {
+                            return;
+                        }
+                        let providers: Vec<_> = self
+                            .groups
+                            .iter()
+                            .map(|group| group.provider_name.clone())
+                            .collect();
+                        let mut selected = providers
+                            .iter()
+                            .position(|provider| *provider == self.selected_provider)
+                            .unwrap_or(0);
+                        if crate::directional_selector::move_wrapped(
+                            &mut selected,
+                            providers.len(),
+                            direction,
+                        ) {
+                            self.selected_provider = providers[selected].clone();
+                            if !self.api_visible() {
+                                self.form_api = None;
+                            }
+                        }
                     }
-                    let providers: Vec<&str> = self
-                        .groups
-                        .iter()
-                        .map(|group| group.provider_name.as_str())
-                        .collect();
-                    let mut selected = providers
-                        .iter()
-                        .position(|provider| *provider == self.selected_provider)
-                        .unwrap_or(0);
-                    if crate::directional_selector::move_wrapped(
-                        &mut selected,
-                        providers.len(),
-                        direction,
-                    ) {
-                        self.selected_provider = providers[selected].to_string();
+                    6 => {
+                        let choices = [
+                            None,
+                            Some(atman_runtime::provider::OpenAiApi::ChatCompletions),
+                            Some(atman_runtime::provider::OpenAiApi::Responses),
+                        ];
+                        let mut selected = choices
+                            .iter()
+                            .position(|value| *value == self.form_api)
+                            .unwrap_or(0);
+                        crate::directional_selector::move_wrapped(
+                            &mut selected,
+                            choices.len(),
+                            direction,
+                        );
+                        self.form_api = choices[selected];
                     }
-                } else {
-                    let choices = self.reasoning_choices();
-                    let mut selected = choices
-                        .iter()
-                        .position(|choice| choice == self.thinking_editor.buf().trim())
-                        .unwrap_or(0);
-                    crate::directional_selector::move_wrapped(
-                        &mut selected,
-                        choices.len(),
-                        direction,
-                    );
-                    self.thinking_editor.replace_with(&choices[selected]);
+                    _ => {
+                        let choices = self.reasoning_choices();
+                        let mut selected = choices
+                            .iter()
+                            .position(|choice| choice == self.thinking_editor.buf().trim())
+                            .unwrap_or(0);
+                        if crate::directional_selector::move_wrapped(
+                            &mut selected,
+                            choices.len(),
+                            direction,
+                        ) {
+                            self.thinking_editor.replace_with(&choices[selected]);
+                        }
+                    }
                 }
             }
-            KeyAction::CursorLeft
-            | KeyAction::CursorRight
-            | KeyAction::CursorHome
-            | KeyAction::CursorEnd
-            | KeyAction::Backspace
-            | KeyAction::Delete
-            | KeyAction::DeleteWordBackward
-            | KeyAction::Char(_)
-            | KeyAction::Newline
-                if matches!(self.form_field, 0 | 1 | 3 | 4 | 5) =>
-            {
-                let editor = match self.form_field {
-                    0 => &mut self.name_editor,
-                    1 => &mut self.model_editor,
-                    3 => &mut self.context_budget_editor,
-                    4 => &mut self.thinking_editor,
-                    5 => &mut self.max_tokens_editor,
-                    _ => unreachable!(),
-                };
-                editor.handle_key(action);
+            _ => {
+                if let Some(editor) = self.form_editor_mut() {
+                    editor.handle_key(action);
+                }
             }
-            _ => {}
         }
     }
 
@@ -559,6 +770,7 @@ impl ModelManager {
                 context_budget,
                 reasoning,
                 max_tokens,
+                api: self.form_api,
                 enabled: true,
             },
             control_tx,
@@ -581,6 +793,9 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
         t: &crate::theme::Theme,
     ) {
         self.list_rect = None;
+        self.test_rect = None;
+        self.form_hits.clear();
+        self.selector_hits.clear();
         self.save_rect = None;
         self.confirm_yes_rect = None;
         self.confirm_no_rect = None;
@@ -715,6 +930,34 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
             ]));
             let slug = m.slug.clone();
             let entries = atman_runtime::model_registry::all_model_entries();
+            if let Some((_, provider)) = atman_runtime::model_registry::all_provider_entries()
+                .into_iter()
+                .find(|(name, _)| name == self.current_provider())
+            {
+                let api = entries
+                    .iter()
+                    .find(|(name, _)| *name == slug)
+                    .and_then(|(_, entry)| entry.api);
+                if let Some(effective) = provider.effective_api(api) {
+                    detail_lines.push(Line::from(vec![
+                        Span::styled(" API:      ", label),
+                        Span::styled(
+                            if api.is_some() {
+                                effective.to_string()
+                            } else {
+                                format!("Inherit ({effective})")
+                            },
+                            val,
+                        ),
+                    ]));
+                }
+                if let Some(endpoint) = provider.api_endpoint(api) {
+                    detail_lines.push(Line::from(vec![
+                        Span::styled(" Endpoint: ", label),
+                        Span::styled(endpoint, val),
+                    ]));
+                }
+            }
             if let Some((_, e)) = entries.iter().find(|(n, _)| *n == slug) {
                 if e.model != slug && !e.model.is_empty() {
                     let model_id = e.model.clone();
@@ -807,73 +1050,163 @@ impl ModelManager {
             width: area.width,
             height: area.height.saturating_sub(2).saturating_sub(1),
         };
-        let fields: [(&str, String); 6] = [
-            ("Name", self.name_editor.buf().to_string()),
-            ("Model ID", self.model_editor.buf().to_string()),
-            ("Provider", self.selected_provider.clone()),
-            (
-                "Context Budget",
-                self.context_budget_editor.buf().to_string(),
-            ),
-            ("Reasoning", self.thinking_editor.buf().to_string()),
-            ("Max Tokens", self.max_tokens_editor.buf().to_string()),
-        ];
-        let label_style = Style::default().fg(t.meta_fg.into());
-        let mut cursor_pos: Option<(u16, u16)> = None;
-        let mut y = inner.y;
-        for (i, (label, val)) in fields.iter().enumerate() {
-            if y >= inner.bottom() {
-                break;
-            }
-            let active = i == self.form_field;
-            let val_style = if matches!(i, 2 | 4) {
-                crate::directional_selector::value_style(t, active)
-            } else if active {
-                Style::default().fg(t.accent.into())
-            } else {
-                Style::default()
+        let fields = self.form_fields();
+        if !fields.contains(&self.form_field) {
+            self.form_field = fields[0];
+        }
+        let selected = fields
+            .iter()
+            .position(|field| *field == self.form_field)
+            .unwrap_or(0);
+        let available = inner.height.saturating_sub(5) as usize;
+        let start = selected.saturating_sub(available.saturating_sub(1));
+        let mut cursor_pos = None;
+        for (row, field) in fields
+            .iter()
+            .skip(start)
+            .take(available)
+            .copied()
+            .enumerate()
+        {
+            let active = field == self.form_field;
+            let (label, value, cursor) = match field {
+                0 => (
+                    "Name",
+                    self.name_editor.buf().to_owned(),
+                    Some(self.name_editor.cursor_display_col()),
+                ),
+                1 => (
+                    "Model ID",
+                    self.model_editor.buf().to_owned(),
+                    Some(self.model_editor.cursor_display_col()),
+                ),
+                2 => ("Provider", self.selected_provider.clone(), None),
+                3 => (
+                    "Context Budget",
+                    self.context_budget_editor.buf().to_owned(),
+                    Some(self.context_budget_editor.cursor_display_col()),
+                ),
+                4 => (
+                    "Reasoning",
+                    self.thinking_editor.buf().to_owned(),
+                    Some(self.thinking_editor.cursor_display_col()),
+                ),
+                5 => (
+                    "Max Tokens",
+                    self.max_tokens_editor.buf().to_owned(),
+                    Some(self.max_tokens_editor.cursor_display_col()),
+                ),
+                6 => ("API", self.api_label(), None),
+                7 => (
+                    "Test model",
+                    if self.pending_test.is_some() {
+                        "Testing…".into()
+                    } else {
+                        "Enter / click · sends a model request".into()
+                    },
+                    None,
+                ),
+                _ => continue,
             };
+            let rect = Rect {
+                y: inner.y + row as u16,
+                height: 1,
+                ..inner
+            };
+            let has_arrows = active && matches!(field, 2 | 4 | 6) && rect.width >= 25;
+            let width = rect.width.saturating_sub(if has_arrows { 25 } else { 19 }) as usize;
+            let offset = if active {
+                cursor
+                    .unwrap_or_default()
+                    .saturating_sub(width.saturating_sub(1))
+            } else {
+                0
+            };
+            self.form_hits.push((field, rect, offset));
+            if field == 7 {
+                self.test_rect = Some(rect);
+            }
+            let bg = if self.hovered_field == Some(field) {
+                t.work_hover_bg.into()
+            } else {
+                t.modal_bg.into()
+            };
+            let style = if matches!(field, 2 | 4 | 6) {
+                crate::directional_selector::value_style(t, active).bg(bg)
+            } else {
+                Style::default().bg(bg).fg(if active {
+                    t.accent.into()
+                } else {
+                    t.tinted_fg.into()
+                })
+            };
+            let shown = crate::width::trim_display_offset(&value, offset, width);
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(format!(" {label:<16}"), label_style),
-                    Span::styled(val.as_str(), val_style),
-                ])),
-                Rect { y, ..inner },
+                    Span::styled(
+                        format!(" {label:<17}"),
+                        Style::default().fg(t.meta_fg.into()),
+                    ),
+                    Span::styled(shown, style),
+                ]))
+                .style(Style::default().bg(bg)),
+                rect,
             );
-            if active && !matches!(i, 2 | 4) {
-                let prefix = format!(" {label:<16}");
-                let prefix_w = crate::width::width(&prefix) as u16;
-                let cursor_w = match i {
-                    0 => self.name_editor.cursor_display_col(),
-                    1 => self.model_editor.cursor_display_col(),
-                    3 => self.context_budget_editor.cursor_display_col(),
-                    4 => self.thinking_editor.cursor_display_col(),
-                    5 => self.max_tokens_editor.cursor_display_col(),
-                    _ => 0,
-                } as u16;
-                cursor_pos = Some((inner.x + prefix_w + cursor_w, y));
+            if has_arrows {
+                let left = Rect::new(rect.right() - 5, rect.y, 2, 1);
+                let right = Rect::new(rect.right() - 2, rect.y, 2, 1);
+                f.render_widget(Paragraph::new("←").style(style), left);
+                f.render_widget(Paragraph::new("→").style(style), right);
+                self.selector_hits.push((field, left, right));
             }
-            y += 1;
+            if active
+                && self.pending_test.is_none()
+                && let Some(cursor) = cursor
+            {
+                cursor_pos = Some((
+                    (rect.x
+                        + 18
+                        + cursor.saturating_sub(offset).min(width.saturating_sub(1)) as u16)
+                        .min(rect.right().saturating_sub(1)),
+                    rect.y,
+                ));
+            }
         }
-        y += 1;
-        if y < inner.bottom() {
-            self.save_rect = Some(Rect {
-                x: inner.x,
-                y,
-                width: inner.width,
-                height: 1,
-            });
-            let help = if matches!(self.form_field, 2 | 4) {
-                crate::directional_selector::footer_help(" Tab: next field", "Enter/Esc: save")
-            } else {
-                " Tab: next field  Enter/Esc: save".to_string()
-            };
+        if inner.height >= 5 {
+            let endpoint = self
+                .provider_entry()
+                .and_then(|entry| entry.api_endpoint(self.form_api))
+                .unwrap_or_else(|| "Provider-managed endpoint".into());
+            let result = self
+                .test_result
+                .as_ref()
+                .map(|(message, _)| message.as_str())
+                .unwrap_or("Test validates API, reasoning and tool schema; no tools are executed.");
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    help,
-                    Style::default().fg(t.meta_fg.into()),
-                ))),
-                Rect { y, ..inner },
+                Paragraph::new(vec![
+                    Line::from(format!(" {} · {endpoint}", self.selected_provider)),
+                    Line::from(format!(" {result}")),
+                ])
+                .style(Style::default().fg(t.meta_fg.into())),
+                Rect {
+                    y: inner.bottom() - 4,
+                    height: 2,
+                    ..inner
+                },
+            );
+            self.save_rect = Some(Rect {
+                y: inner.bottom() - 1,
+                height: 1,
+                ..inner
+            });
+            f.render_widget(
+                Paragraph::new(if self.pending_test.is_some() {
+                    " Testing model… inputs locked · Esc: close without saving"
+                } else {
+                    " Tab / Shift+Tab: field · ← →: select · Enter: save / test · Esc: save"
+                })
+                .style(Style::default().fg(t.meta_fg.into())),
+                self.save_rect.unwrap(),
             );
         }
         if let Some((x, y)) = cursor_pos {
@@ -938,14 +1271,124 @@ mod tests {
             show_form: true,
             ..Default::default()
         };
-        for field in [0, 1, 3, 5] {
+        for field in [0, 1, 3, 4, 5] {
             manager.form_field = field;
             assert!(manager.has_text_focus());
         }
-        for field in [2, 4] {
+        for field in [2, 6, 7] {
             manager.form_field = field;
             assert!(!manager.has_text_focus());
         }
+    }
+
+    #[test]
+    fn model_test_sends_a_draft_and_accepts_only_its_matching_result() {
+        let mut manager = ModelManager::default();
+        manager.open_form();
+        manager.name_editor.replace_with("demo");
+        manager.model_editor.replace_with("vendor/model");
+        manager.selected_provider = "gateway".into();
+        manager.form_api = Some(atman_runtime::provider::OpenAiApi::Responses);
+        manager.thinking_editor.replace_with("high");
+        manager.form_field = 7;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        manager.handle_form_key(&KeyAction::Submit, Some(&tx));
+        let crate::TuiControl::TestModel(request) = rx.try_recv().unwrap() else {
+            panic!("expected model test");
+        };
+        assert_eq!(request.model, "vendor/model");
+        assert_eq!(request.api, manager.form_api);
+        assert!(manager.pending.is_none());
+        manager.form_field = 1;
+        manager.handle_key(&KeyAction::Char('x'), Some(&tx));
+        assert_eq!(manager.model_editor.buf(), "vendor/model");
+        assert!(!manager.resolve_test(request.request_id + 1, &Ok("wrong".into())));
+        assert!(manager.resolve_test(request.request_id, &Err("rejected".into())));
+        assert!(manager.show_form);
+        assert_eq!(manager.thinking_editor.buf(), "high");
+        manager.form_field = 7;
+        manager.save_rect = Some(Rect::new(0, 10, 80, 1));
+        manager.handle_mouse(
+            &crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 1,
+                row: 10,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            Some(&tx),
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(crate::TuiControl::MutateModel(_))
+        ));
+    }
+
+    #[test]
+    fn rendered_reasoning_arrows_select_and_text_region_places_the_cursor() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut manager = ModelManager::default();
+        manager.open_form();
+        manager.selected_provider = "unknown".into();
+        manager.form_field = 4;
+        manager.thinking_editor.replace_with("default");
+        let app = crate::app::AppState::new("session".into(), None);
+        let theme = crate::theme::theme();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                <ModelManager as crate::wm::modal::ModalOverlay>::render_content(
+                    &mut manager,
+                    frame,
+                    frame.area(),
+                    &app,
+                    &theme,
+                )
+            })
+            .unwrap();
+        let (_, left, right) = manager
+            .selector_hits
+            .iter()
+            .find(|(field, _, _)| *field == 4)
+            .copied()
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(right.x, right.y)].symbol(),
+            "→"
+        );
+        assert_eq!(terminal.backend().buffer()[(left.x, left.y)].symbol(), "←");
+        let click = |rect: Rect| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        manager.handle_mouse(&click(right), None);
+        assert_eq!(manager.thinking_editor.buf(), "off");
+        manager.handle_mouse(&click(left), None);
+        assert_eq!(manager.thinking_editor.buf(), "default");
+        let (_, field, _) = manager
+            .form_hits
+            .iter()
+            .find(|(field, _, _)| *field == 4)
+            .copied()
+            .unwrap();
+        manager.handle_mouse(&click(Rect::new(field.x + 19, field.y, 1, 1)), None);
+        assert_eq!(manager.thinking_editor.cursor(), 1);
+        assert_eq!(manager.thinking_editor.buf(), "default");
+    }
+
+    #[test]
+    fn reasoning_retains_custom_text_entry_and_paste() {
+        let mut manager = ModelManager::default();
+        manager.open_form();
+        manager.form_field = 4;
+        manager.thinking_editor.replace_with("budget:");
+        manager.paste("8192");
+        manager.handle_form_key(&KeyAction::Backspace, None);
+        manager.handle_form_key(&KeyAction::Char('4'), None);
+        assert_eq!(manager.thinking_editor.buf(), "budget:8194");
+        assert!(manager.has_text_focus());
     }
 
     #[test]
