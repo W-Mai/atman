@@ -12,6 +12,8 @@ use crate::provider::{
 use crate::providers::classify_attachment_error;
 use crate::tool::BoxFut;
 
+pub(crate) const DEFAULT_MAX_TOKENS: u32 = 16384;
+
 pub struct AnthropicProvider {
     name: String,
     api_key: String,
@@ -29,7 +31,7 @@ impl AnthropicProvider {
             api_key: api_key.into(),
             base_url: "https://api.anthropic.com".into(),
             client: reqwest::Client::new(),
-            max_tokens: 16384,
+            max_tokens: DEFAULT_MAX_TOKENS,
             max_tools: None,
             anthropic_version: "2023-06-01".into(),
         }

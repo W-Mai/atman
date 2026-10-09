@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Provider resolution** — Explicit provider selection takes precedence over matching model names. API overrides resolve consistently on cold and warm configuration loads. Resolved reasoning defaults obey model capabilities and provider output limits; Responses accepts supported reasoning modes.
 - **MCP readiness isolation** — Status queries and readiness waits respect request scopes. Waiting for one server no longer serializes unrelated tool calls.
 - **Permanent request errors** — Default retries stop on authentication failures, invalid requests, and unsupported schemas. Explicit `retry_classified` selections retain control over other error categories.
 - **MCP proxy execution** — Proxy calls enforce the originating request's target scope and use the target's permissions, scheduling, and audit identity. Arguments are validated against the original JSON Schema before transport; invalid schemas and external schema references fail only the affected tool.

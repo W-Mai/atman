@@ -271,7 +271,10 @@ impl ReasoningWireProfile {
         max_tokens: Option<u32>,
     ) -> Result<(), String> {
         if selection.execution_mode().is_some()
-            && !matches!(self, Self::CodexResponses | Self::Unknown)
+            && !matches!(
+                self,
+                Self::OpenAiResponses | Self::CodexResponses | Self::Unknown
+            )
         {
             return Err(match self {
                 Self::AnthropicMessages => {
@@ -280,10 +283,7 @@ impl ReasoningWireProfile {
                 Self::OpenAiOfficial | Self::CompatibleThinking => {
                     "Chat Completions does not support reasoning execution mode".into()
                 }
-                Self::OpenAiResponses => {
-                    "Responses does not support reasoning execution mode".into()
-                }
-                Self::CodexResponses | Self::Unknown => unreachable!(),
+                Self::OpenAiResponses | Self::CodexResponses | Self::Unknown => unreachable!(),
             });
         }
 
@@ -930,9 +930,7 @@ impl ProviderRegistry {
         let model = config.requested();
         let provider = {
             let providers = self.providers.read().unwrap();
-            if let Some(provider) = providers.get(model) {
-                Some(provider.clone())
-            } else if let Some(provider_name) = config.provider() {
+            if let Some(provider_name) = config.provider() {
                 if let Some(provider) = providers.get(provider_name) {
                     Some(provider.clone())
                 } else if crate::model_registry::is_provider_enabled(provider_name) {
@@ -941,9 +939,13 @@ impl ProviderRegistry {
                     None
                 }
             } else {
-                model
-                    .split_once('/')
-                    .and_then(|(prefix, _)| providers.get(prefix))
+                providers
+                    .get(model)
+                    .or_else(|| {
+                        model
+                            .split_once('/')
+                            .and_then(|(prefix, _)| providers.get(prefix))
+                    })
                     .cloned()
             }
         };
@@ -1230,15 +1232,28 @@ mod tests {
 
         let registry = ProviderRegistry::new();
         registry.register(Arc::new(MockProvider::new("gateway")));
+        registry.register(Arc::new(MockProvider::new("gateway/model")));
         registry.register(Arc::new(MockProvider::new("config:target")));
 
         let provider = registry
             .resolve("gateway/model")
             .expect("explicit model provider should resolve");
         assert_eq!(provider.name(), "config:target");
+        let draft = crate::model_registry::draft_model_call_config(
+            None,
+            "target",
+            "gateway/model",
+            None,
+            None,
+        );
+        assert_eq!(
+            registry.resolve_call(&draft).unwrap().unwrap().name(),
+            "config:target"
+        );
 
         let registry_without_target = ProviderRegistry::new();
         registry_without_target.register(Arc::new(MockProvider::new("gateway")));
+        registry_without_target.register(Arc::new(MockProvider::new("gateway/model")));
         assert!(registry_without_target.resolve("gateway/model").is_none());
         crate::model_registry::set_provider_config(Default::default());
     }
@@ -1359,7 +1374,7 @@ mod tests {
                     },
                     None
                 )
-                .is_err()
+                .is_ok()
         );
     }
 }

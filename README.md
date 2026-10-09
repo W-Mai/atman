@@ -415,7 +415,9 @@ Reasoning values include `default`, `off`, `auto`, `minimal`, `low`, `medium`, `
 
 OpenAI and OpenAI-compatible providers accept `api = "chat-completions"` or `api = "responses"`. Models inherit the provider API unless their own `api` overrides it. Omitting both fields preserves Chat Completions. Set `base_url` to the connection root, such as `https://gateway.example/v1`; the selected API determines the endpoint. Anthropic connections use Messages, and Codex login uses Responses.
 
-For Chat Completions, OpenAI-compatible providers default to `reasoning_format = "thinking-toggle"`, which represents default/off/auto. Select `reasoning-effort` when the gateway accepts exact effort values. Responses encodes effort using its own protocol and does not send the Chat thinking toggle. Changing API does not lower the selected effort; unsupported combinations produce a configuration error.
+For Chat Completions, OpenAI-compatible providers default to `reasoning_format = "thinking-toggle"`, which represents default/off/auto. Select `reasoning-effort` when the gateway accepts exact effort values. Responses encodes effort and execution mode using its own protocol and does not send the Chat thinking toggle. Values such as `high@pro` remain subject to the model's capabilities, including when resolved from `auto`. Changing API does not lower the selected effort; unsupported combinations produce a configuration error.
+
+Provider `max_tokens` controls the request's output limit. Model `max_tokens` reserves output capacity for context planning; it does not override that request limit. Explicit thinking budgets must fit both limits when configured.
 
 The provider manager separates **API** from **Chat reasoning format**. Model settings expose **Inherit**, **Chat Completions**, and **Responses**. **Test connection** checks discovery and authentication; **Test model** sends a small request with the draft API, reasoning selection, and a tool definition. It does not execute an external tool.
 

@@ -209,7 +209,7 @@ struct ProviderCatalog {
     models: BTreeMap<String, CatalogModelEntry>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct RegistryState {
     config: ConfigLayer,
     preset_models: BTreeMap<ModelIdentity, PresetModelEntry>,
@@ -607,12 +607,17 @@ fn prepare_config_layer(config: ConfigLayer) -> Result<PreparedConfigLayer, Cata
     let presets = build_preset_models(&config);
     let transaction = REGISTRY_TRANSACTION_LOCK.lock().unwrap();
     let state = REGISTRY_STATE.read().unwrap();
+    let candidate = RegistryState {
+        config: config.clone(),
+        preset_models: presets.clone(),
+        ..state.clone()
+    };
     for (name, entry) in &config.values.models {
         if entry.api.is_none() {
             continue;
         }
         let provider = entry.provider.as_deref().map(str::to_owned).or_else(|| {
-            resolved_model_in_state(&state, name).and_then(|model| model.entry.provider)
+            resolved_model_in_state(&candidate, name).and_then(|model| model.entry.provider)
         });
         let supported = provider
             .as_deref()
@@ -950,6 +955,16 @@ struct ResolvedModel {
     entry: ModelEntry,
     capability_knowledge: ResolvedCapabilityKnowledge,
     wire_profile: ReasoningWireProfile,
+    request_max_tokens: Option<u32>,
+}
+
+impl ResolvedModel {
+    fn reasoning_max_tokens(&self) -> Option<u32> {
+        match (self.entry.max_tokens, self.request_max_tokens) {
+            (Some(model), Some(request)) => Some(model.min(request)),
+            (model, request) => model.or(request),
+        }
+    }
 }
 
 fn profile_from_provider_entry(entry: &ProviderEntry) -> ReasoningWireProfile {
@@ -997,6 +1012,17 @@ fn model_profile_in_state(state: &RegistryState, entry: &ModelEntry) -> Reasonin
     }
 }
 
+fn request_output_limit_in_state(state: &RegistryState, entry: &ModelEntry) -> Option<u32> {
+    let provider = state
+        .config
+        .values
+        .providers
+        .get(entry.provider.as_deref()?)?;
+    provider.max_tokens.or_else(|| {
+        (provider.kind == "anthropic").then_some(crate::providers::anthropic::DEFAULT_MAX_TOKENS)
+    })
+}
+
 fn catalog_model_to_resolved(
     catalog: &ProviderCatalog,
     model: &CatalogModelEntry,
@@ -1039,6 +1065,7 @@ fn catalog_model_to_resolved(
             input_modalities: field_knowledge,
         },
         wire_profile: catalog.descriptor.wire_profile,
+        request_max_tokens: None,
     }
 }
 
@@ -1055,6 +1082,7 @@ fn model_entry_to_resolved(
     legacy_capabilities: bool,
 ) -> ResolvedModel {
     let wire_profile = model_profile_in_state(state, &entry);
+    let request_max_tokens = request_output_limit_in_state(state, &entry);
     let unknown_or_legacy = if legacy_capabilities {
         CapabilityFieldKnowledge::Legacy
     } else {
@@ -1082,6 +1110,7 @@ fn model_entry_to_resolved(
             },
         },
         wire_profile,
+        request_max_tokens,
     }
 }
 
@@ -1160,6 +1189,7 @@ fn overlay_model_entry(
     ResolvedModel {
         key,
         identity: base.identity.clone(),
+        request_max_tokens: request_output_limit_in_state(state, &entry),
         entry,
         capability_knowledge,
         wire_profile,
@@ -1195,6 +1225,7 @@ fn base_models_in_state(state: &RegistryState) -> BTreeMap<ModelIdentity, Resolv
                 .contains_key(&catalog.descriptor.provider_key)
             {
                 model.wire_profile = model_profile_in_state(state, &model.entry);
+                model.request_max_tokens = request_output_limit_in_state(state, &model.entry);
             }
             if let Some(identity) = model.identity.clone() {
                 bases.insert(identity, model);
@@ -1652,7 +1683,7 @@ pub fn reasoning_selection_uses_legacy_capabilities(
     };
     if model
         .wire_profile
-        .validate(selection, model.entry.max_tokens)
+        .validate(selection, model.reasoning_max_tokens())
         .is_err()
     {
         return false;
@@ -1673,13 +1704,13 @@ pub fn reasoning_selection_uses_legacy_capabilities(
             ))
 }
 
-fn resolve_reasoning_for_resolved(
+fn validate_reasoning_for_resolved(
     model: &ResolvedModel,
     selection: &ReasoningSelection,
-) -> Result<ReasoningSelection, String> {
+) -> Result<(), String> {
     model
         .wire_profile
-        .validate(selection, model.entry.max_tokens)?;
+        .validate(selection, model.reasoning_max_tokens())?;
     if let ReasoningSelection::Effort { effort, .. } = selection
         && !matches!(effort, ReasoningEffort::None)
     {
@@ -1754,6 +1785,14 @@ fn resolve_reasoning_for_resolved(
             _ => {}
         }
     }
+    Ok(())
+}
+
+fn resolve_reasoning_for_resolved(
+    model: &ResolvedModel,
+    selection: &ReasoningSelection,
+) -> Result<ReasoningSelection, String> {
+    validate_reasoning_for_resolved(model, selection)?;
     let info = model_info_from_resolved(model);
     let profile = model.wire_profile;
     let resolved = resolve_reasoning(selection, &info.capabilities)?;
@@ -1770,7 +1809,7 @@ fn resolve_reasoning_for_resolved(
     } else {
         resolved
     };
-    profile.validate(&resolved, info.max_output_tokens)?;
+    validate_reasoning_for_resolved(model, &resolved)?;
     Ok(resolved)
 }
 
@@ -3022,6 +3061,174 @@ model = "reasoning"
             assert!(prepare_config_text(config).is_err());
         }
         assert!(parse_config("[providers.other]\nkind='openai-compat'\napi='auto'").is_none());
+    }
+
+    #[test]
+    fn api_override_validation_uses_the_candidate_config_on_cold_and_warm_loads() {
+        let _registry = isolated_registry();
+        let config = r#"
+[providers.gateway]
+kind = "openai"
+base_url = "https://api.openai.com/v1"
+[models."gateway:gpt-4o"]
+model = "gpt-4o"
+api = "responses"
+"#;
+        reload_from_text(config).unwrap();
+        let cold = model_call_config("gateway:gpt-4o");
+        assert_eq!(cold.provider(), Some("gateway"));
+        assert_eq!(cold.api, Some(OpenAiApi::Responses));
+        reload_from_text(config).unwrap();
+        let warm = model_call_config("gateway:gpt-4o");
+        assert_eq!(cold.provider(), warm.provider());
+        assert_eq!(cold.api, warm.api);
+
+        let removed_provider =
+            config.replace("https://api.openai.com/v1", "https://gateway.example/v1");
+        assert!(prepare_config_text(&removed_provider).is_err());
+    }
+
+    #[test]
+    fn responses_modes_and_auto_defaults_obey_advertised_capabilities() {
+        let _registry = isolated_registry();
+        reload_from_text(
+            r#"
+[providers.gateway]
+kind = "openai-compat"
+api = "responses"
+[models.supported]
+provider = "gateway"
+model = "vendor/supported"
+reasoning_efforts = ["high"]
+default_reasoning_effort = "high"
+reasoning_modes = ["standard", "pro"]
+default_reasoning_mode = "pro"
+[models.invalid_mode]
+provider = "gateway"
+model = "vendor/invalid-mode"
+reasoning_modes = ["standard"]
+default_reasoning_mode = "pro"
+[models.invalid_effort]
+provider = "gateway"
+model = "vendor/invalid-effort"
+reasoning_efforts = ["low"]
+default_reasoning_effort = "high"
+[models.unsupported]
+provider = "gateway"
+model = "vendor/unsupported"
+reasoning_modes = []
+[models.unknown]
+provider = "gateway"
+model = "vendor/unknown"
+"#,
+        )
+        .unwrap();
+        let pro = ReasoningSelection::Effort {
+            effort: ReasoningEffort::High,
+            execution_mode: Some(ReasoningExecutionMode::Pro),
+        };
+        let auto = ReasoningSelection::Auto {
+            execution_mode: None,
+        };
+        let supported = model_call_config("supported");
+        assert_eq!(supported.resolve_reasoning(&pro).unwrap(), pro);
+        assert_eq!(supported.resolve_reasoning(&auto).unwrap(), pro);
+        assert!(
+            model_call_config("invalid_mode")
+                .resolve_reasoning(&pro)
+                .is_err()
+        );
+        assert!(
+            model_call_config("invalid_mode")
+                .resolve_reasoning(&auto)
+                .is_err()
+        );
+        assert!(
+            model_call_config("invalid_effort")
+                .resolve_reasoning(&auto)
+                .is_err()
+        );
+        assert!(
+            model_call_config("unsupported")
+                .resolve_reasoning(&pro)
+                .is_err()
+        );
+        assert!(
+            reasoning_selections_for_model("unknown")
+                .iter()
+                .all(|choice| choice.execution_mode().is_none())
+        );
+    }
+
+    #[test]
+    fn reasoning_budget_obeys_provider_output_limit_without_changing_model_reserve() {
+        let _registry = isolated_registry();
+        let config = r#"
+[providers.explicit]
+kind = "anthropic"
+max_tokens = 8192
+[providers.default]
+kind = "anthropic"
+[models.explicit]
+provider = "explicit"
+model = "vendor/model"
+max_tokens = 32768
+[models.default]
+provider = "default"
+model = "vendor/model"
+max_tokens = 32768
+[models.smaller_model]
+provider = "explicit"
+model = "vendor/smaller-model"
+max_tokens = 4096
+"#;
+        reload_from_text(config).unwrap();
+        let snapshot = model_call_config("explicit");
+        assert_eq!(snapshot.info.max_output_tokens, Some(32768));
+        assert!(
+            snapshot
+                .resolve_reasoning(&ReasoningSelection::BudgetTokens { tokens: 4096 })
+                .is_ok()
+        );
+        assert!(
+            snapshot
+                .resolve_reasoning(&ReasoningSelection::BudgetTokens { tokens: 8192 })
+                .unwrap_err()
+                .contains("8192")
+        );
+        assert!(
+            model_call_config("default")
+                .resolve_reasoning(&ReasoningSelection::BudgetTokens { tokens: 16384 })
+                .is_err()
+        );
+        assert!(
+            model_call_config("smaller_model")
+                .resolve_reasoning(&ReasoningSelection::BudgetTokens { tokens: 4096 })
+                .is_err()
+        );
+        let draft = draft_model_call_config(
+            Some("explicit"),
+            "explicit",
+            "vendor/model",
+            None,
+            Some(65536),
+        );
+        assert!(
+            draft
+                .resolve_reasoning(&ReasoningSelection::BudgetTokens { tokens: 8192 })
+                .is_err()
+        );
+        reload_from_text(&config.replace("max_tokens = 8192", "max_tokens = 16384")).unwrap();
+        assert!(
+            model_call_config("explicit")
+                .resolve_reasoning(&ReasoningSelection::BudgetTokens { tokens: 8192 })
+                .is_ok()
+        );
+        assert!(
+            snapshot
+                .resolve_reasoning(&ReasoningSelection::BudgetTokens { tokens: 8192 })
+                .is_err()
+        );
     }
 
     fn descriptor(
