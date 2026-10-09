@@ -516,10 +516,19 @@ pub struct McpEditor {
     pub error: Option<String>,
     mode: McpEditorMode,
     cursor_position: Option<(u16, u16)>,
+    field_hits: Vec<(usize, crate::settings_form::FieldHit)>,
+    hovered: Option<usize>,
+    cancel_rect: Option<Rect>,
+    save_rect: Option<Rect>,
+    info_rect: Option<Rect>,
+    info_scroll: usize,
+    info_max_scroll: usize,
 }
 
 const TRANSPORT_OPTIONS: [&str; 3] = ["stdio", "http", "sse"];
 const TIER_OPTIONS: [u8; 3] = [1, 2, 3];
+const MCP_CANCEL: usize = MCP_ADD_FIELDS;
+const MCP_SAVE: usize = MCP_ADD_FIELDS + 1;
 
 impl Default for McpEditor {
     fn default() -> Self {
@@ -536,6 +545,13 @@ impl Default for McpEditor {
             error: None,
             mode: McpEditorMode::Add,
             cursor_position: None,
+            field_hits: Vec::new(),
+            hovered: None,
+            cancel_rect: None,
+            save_rect: None,
+            info_rect: None,
+            info_scroll: 0,
+            info_max_scroll: 0,
         }
     }
 }
@@ -611,6 +627,118 @@ impl McpEditor {
             3 => Some(&mut self.args),
             4 => Some(&mut self.env),
             _ => None,
+        }
+    }
+
+    fn clear_error(&mut self) {
+        self.error = None;
+        self.info_scroll = 0;
+    }
+
+    pub fn handle_mouse(
+        &mut self,
+        event: &crossterm::event::MouseEvent,
+        app: &mut crate::app::AppState,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        use crate::keys::KeyAction;
+        use crate::wm::modal::ModalOverlay;
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let point = ratatui::layout::Position::new(event.column, event.row);
+        let hit = |rect: Option<Rect>| rect.is_some_and(|rect| rect.contains(point));
+        match event.kind {
+            MouseEventKind::Moved => {
+                self.hovered = if hit(self.cancel_rect) {
+                    Some(MCP_CANCEL)
+                } else if hit(self.save_rect) {
+                    Some(MCP_SAVE)
+                } else {
+                    self.field_hits
+                        .iter()
+                        .find(|(_, field)| field.record.contains(point))
+                        .map(|(index, _)| *index)
+                };
+            }
+            MouseEventKind::Down(MouseButton::Left) if hit(self.cancel_rect) => {
+                self.handle_key(&KeyAction::Escape, app, tx);
+            }
+            MouseEventKind::Down(MouseButton::Left) if hit(self.save_rect) => {
+                self.handle_key(&KeyAction::Submit, app, tx);
+            }
+            MouseEventKind::ScrollUp if hit(self.info_rect) => {
+                self.info_scroll = self.info_scroll.saturating_sub(1);
+            }
+            MouseEventKind::ScrollDown if hit(self.info_rect) => {
+                self.info_scroll = self.info_scroll.saturating_add(1).min(self.info_max_scroll);
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if self
+                    .field_hits
+                    .iter()
+                    .any(|(_, field)| field.record.contains(point)) =>
+            {
+                self.handle_key(
+                    &if matches!(event.kind, MouseEventKind::ScrollUp) {
+                        KeyAction::HistoryUp
+                    } else {
+                        KeyAction::HistoryDown
+                    },
+                    app,
+                    tx,
+                );
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some((index, field_hit)) = self
+                    .field_hits
+                    .iter()
+                    .find(|(_, field)| field.record.contains(point))
+                    .copied()
+                else {
+                    return;
+                };
+                self.field = index;
+                if let Some((left, right)) = field_hit.arrows
+                    && (left.contains(point) || right.contains(point))
+                {
+                    self.handle_key(
+                        &if left.contains(point) {
+                            KeyAction::CursorLeft
+                        } else {
+                            KeyAction::CursorRight
+                        },
+                        app,
+                        tx,
+                    );
+                } else if field_hit.value.contains(point) {
+                    if matches!(index, 1 | 5) {
+                        self.handle_key(
+                            &if event.column < field_hit.value.x + field_hit.value.width / 2 {
+                                KeyAction::CursorLeft
+                            } else {
+                                KeyAction::CursorRight
+                            },
+                            app,
+                            tx,
+                        );
+                    } else if let Some(editor) = self.current_editor() {
+                        let column =
+                            usize::from(event.column - field_hit.value.x) + field_hit.offset;
+                        let mut display_column = 0;
+                        let mut byte = 0;
+                        for (grapheme, columns) in width::graphemes(editor.buf()) {
+                            let columns = if grapheme == "\n" { 3 } else { columns };
+                            if display_column + columns > column {
+                                break;
+                            }
+                            display_column += columns;
+                            byte += grapheme.len();
+                        }
+                        editor.set_cursor(byte);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -691,162 +819,158 @@ impl McpEditor {
 }
 
 fn render_mcp_editor(f: &mut ratatui::Frame, area: Rect, form: &mut McpEditor) {
+    use crate::settings_form::{Action, Field, FormLayout, render_action, render_field};
+
     let t = theme();
-    use ratatui::widgets::{Block, Clear};
-
-    f.render_widget(Clear, area);
-    f.render_widget(
-        Block::default().style(Style::default().bg(t.modal_bg.into())),
-        area,
-    );
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        format!(" {}", form.mode_label()),
-        Style::default()
-            .fg(t.accent.into())
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(""));
-
-    let label_style = |active: bool| {
-        if active {
-            Style::default()
-                .fg(t.accent.into())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(t.tinted_fg.into())
+    let surface = crate::wm::shell::surface_bg(&t);
+    let layout = FormLayout::new(area, MCP_ADD_FIELDS, form.field);
+    form.field_hits.clear();
+    form.cursor_position = None;
+    for &(index, rect) in &layout.fields {
+        let (label, value, placeholder, cursor) = match index {
+            1 => (
+                "Transport",
+                TRANSPORT_OPTIONS[form.transport_idx].to_owned(),
+                "",
+                None,
+            ),
+            5 => (
+                "Approval tier",
+                TIER_OPTIONS[form.tier_idx].to_string(),
+                "",
+                None,
+            ),
+            _ => {
+                let (label, editor, placeholder) = match index {
+                    0 => ("Name", &form.name, "server name"),
+                    2 if form.transport_idx == 0 => ("Command", &form.command, "executable path"),
+                    2 => ("URL", &form.url, "https://server.example/mcp"),
+                    3 => ("Arguments", &form.args, "optional arguments"),
+                    4 => ("Environment", &form.env, "KEY=value"),
+                    _ => continue,
+                };
+                let value = editor.buf().replace('\n', " · ");
+                let cursor = width::width(&editor.buf()[..editor.cursor()].replace('\n', " · "));
+                (label, value, placeholder, Some(cursor))
+            }
+        };
+        let hit = render_field(
+            f,
+            rect,
+            &Field {
+                label,
+                value: &value,
+                placeholder,
+                focused: index == form.field,
+                hovered: form.hovered == Some(index),
+                cursor,
+                selector: matches!(index, 1 | 5),
+                locked: false,
+            },
+            &t,
+        );
+        if index == form.field && hit.value.width > 0 && hit.value.height > 0 {
+            form.cursor_position = cursor.map(|cursor| {
+                (
+                    hit.value.x
+                        + cursor
+                            .saturating_sub(hit.offset)
+                            .min(usize::from(hit.value.width - 1)) as u16,
+                    hit.value.y,
+                )
+            });
         }
-    };
+        form.field_hits.push((index, hit));
+    }
+    if let (Some((first, _)), Some((last, _))) = (layout.fields.first(), layout.fields.last())
+        && layout.fields.len() < MCP_ADD_FIELDS
+    {
+        f.render_widget(
+            Paragraph::new(format!(
+                " Fields {}–{} / {} · Tab or scroll",
+                first + 1,
+                last + 1,
+                MCP_ADD_FIELDS
+            ))
+            .style(Style::default().fg(t.meta_fg.into()).bg(surface)),
+            layout.scroll,
+        );
+    }
 
-    let val_style = Style::default().fg(t.tinted_fg.into());
-    let value_width = area.width.saturating_sub(2) as usize;
-    let mut cursor_offset = 0;
-    let display_value = |editor: &crate::input::InputEditor, active: bool, env: bool| {
-        let value = if env {
-            editor.buf().replace('\n', " · ")
-        } else {
-            editor.buf().to_owned()
-        };
-        let prefix = if env {
-            editor.buf()[..editor.cursor()].replace('\n', " · ")
-        } else {
-            editor.buf()[..editor.cursor()].to_owned()
-        };
-        let offset = if active {
-            width::width(&prefix).saturating_sub(value_width.saturating_sub(1))
-        } else {
-            0
-        };
-        (
-            width::trim_display_offset(&value, offset, value_width),
-            offset,
+    let info = form.error.as_deref().unwrap_or(if form.field == 4 {
+        "One KEY=value per line · Shift+Enter: newline"
+    } else {
+        "Changes take effect after saving."
+    });
+    let lines = width::word_wrap(info, usize::from(layout.info.width).max(1));
+    form.info_rect = (layout.info.height > 0).then_some(layout.info);
+    form.info_max_scroll = if layout.info.height > 0 {
+        lines.len().saturating_sub(usize::from(layout.info.height))
+    } else {
+        0
+    };
+    form.info_scroll = form.info_scroll.min(form.info_max_scroll);
+    f.render_widget(
+        Paragraph::new(
+            lines
+                .iter()
+                .skip(form.info_scroll)
+                .take(usize::from(layout.info.height))
+                .cloned()
+                .map(Line::from)
+                .collect::<Vec<_>>(),
         )
+        .style(
+            Style::default()
+                .fg(if form.error.is_some() {
+                    t.error.into()
+                } else {
+                    t.meta_fg.into()
+                })
+                .bg(surface),
+        ),
+        layout.info,
+    );
+    form.cancel_rect = (layout.test.width > 0 && layout.test.height > 0).then_some(layout.test);
+    form.save_rect = (layout.save.width > 0 && layout.save.height > 0).then_some(layout.save);
+    render_action(
+        f,
+        layout.test,
+        &Action {
+            label: "Cancel",
+            shortcut: "Esc",
+            hovered: form.hovered == Some(MCP_CANCEL),
+            ..Action::default()
+        },
+        &t,
+    );
+    render_action(
+        f,
+        layout.save,
+        &Action {
+            label: "Save",
+            shortcut: "Enter",
+            hovered: form.hovered == Some(MCP_SAVE),
+            ..Action::default()
+        },
+        &t,
+    );
+    let help = if form.info_max_scroll > 0 {
+        format!(
+            "{}–{}/{} · PgUp/PgDn: details",
+            form.info_scroll + 1,
+            (form.info_scroll + usize::from(layout.info.height)).min(lines.len()),
+            lines.len()
+        )
+    } else if layout.help.width < 56 {
+        "Tab field · ←→ select".to_owned()
+    } else {
+        "Tab / Shift+Tab: field · ← / →: select".to_owned()
     };
-
-    let active = form.field == 0;
-    lines.push(Line::from(Span::styled(" Name:", label_style(active))));
-    let (shown, offset) = display_value(&form.name, active, false);
-    if active {
-        cursor_offset = offset;
-    }
-    lines.push(Line::from(Span::styled(format!("  {shown}"), val_style)));
-
-    let active = form.field == 1;
-    lines.push(Line::from(Span::styled(" Transport:", label_style(active))));
-    let transport_str = TRANSPORT_OPTIONS
-        .iter()
-        .enumerate()
-        .map(|(i, opt)| {
-            if i == form.transport_idx {
-                format!("(●){opt}")
-            } else {
-                format!("( ){opt}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("  ");
-    lines.push(Line::from(Span::styled(
-        format!("  {transport_str}"),
-        val_style,
-    )));
-
-    let is_stdio = form.transport_idx == 0;
-    let active = form.field == 2;
-    let label = if is_stdio { " Command:" } else { " URL:" };
-    lines.push(Line::from(Span::styled(label, label_style(active))));
-    let val = if is_stdio { &form.command } else { &form.url };
-    let (shown, offset) = display_value(val, active, false);
-    if active {
-        cursor_offset = offset;
-    }
-    lines.push(Line::from(Span::styled(format!("  {shown}"), val_style)));
-
-    let active = form.field == 3;
-    lines.push(Line::from(Span::styled(" Args:", label_style(active))));
-    let (shown, offset) = display_value(&form.args, active, false);
-    if active {
-        cursor_offset = offset;
-    }
-    lines.push(Line::from(Span::styled(format!("  {shown}"), val_style)));
-
-    let active = form.field == 4;
-    lines.push(Line::from(Span::styled(" Env:", label_style(active))));
-    let (shown, offset) = display_value(&form.env, active, true);
-    if active {
-        cursor_offset = offset;
-    }
-    lines.push(Line::from(Span::styled(format!("  {shown}"), val_style)));
-
-    // Field 5: Tier
-    let active = form.field == 5;
-    lines.push(Line::from(Span::styled(" Tier:", label_style(active))));
-    let tier_str = TIER_OPTIONS
-        .iter()
-        .enumerate()
-        .map(|(i, &t_val)| {
-            if i == form.tier_idx {
-                format!("(●){t_val}")
-            } else {
-                format!("( ){t_val}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("  ");
-    lines.push(Line::from(Span::styled(format!("  {tier_str}"), val_style)));
-
-    lines.push(Line::from(""));
-
-    if let Some(err) = &form.error {
-        lines.push(Line::from(Span::styled(
-            format!(" ⚠ {err}"),
-            Style::default().fg(t.error.into()),
-        )));
-        lines.push(Line::from(""));
-    }
-
-    lines.push(Line::from(Span::styled(
-        " ←→ edit/select · ↑↓/Tab fields · Enter/Esc save",
-        Style::default().fg(t.subtle_fg.into()),
-    )));
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
-
-    let field = form.field;
-    let cursor_y = area.y.saturating_add(match field {
-        0 => 3,
-        2 => 7,
-        3 => 9,
-        4 => 11,
-        _ => 0,
-    });
-    form.cursor_position = form.current_editor().and_then(|editor| {
-        let prefix = editor.buf()[..editor.cursor()].replace('\n', " · ");
-        let col = width::width(&prefix).saturating_sub(cursor_offset) as u16;
-        let x = area.x.saturating_add(2).saturating_add(col);
-        (x < area.right() && cursor_y < area.bottom()).then_some((x, cursor_y))
-    });
+    f.render_widget(
+        Paragraph::new(help).style(Style::default().fg(t.meta_fg.into()).bg(surface)),
+        layout.help,
+    );
 }
 
 impl crate::wm::modal::ModalOverlay for McpEditor {
@@ -867,9 +991,9 @@ impl crate::wm::modal::ModalOverlay for McpEditor {
         tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<crate::wm::modal::ModalAction> {
         use crate::keys::KeyAction;
-        self.error = None;
         match action {
-            KeyAction::Submit | KeyAction::Escape => match self.save() {
+            KeyAction::Escape => self.open = false,
+            KeyAction::Submit => match self.save() {
                 Ok(message) => {
                     self.open = false;
                     if let Some(tx) = tx {
@@ -882,26 +1006,50 @@ impl crate::wm::modal::ModalOverlay for McpEditor {
                         crate::app::ToastPosition::TopRight,
                     );
                 }
-                Err(error) => self.error = Some(error),
+                Err(error) => {
+                    self.error = Some(error);
+                    self.info_scroll = 0;
+                }
             },
             KeyAction::Tab | KeyAction::HistoryDown => self.next_field(),
             KeyAction::BackTab | KeyAction::HistoryUp => self.prev_field(),
+            KeyAction::PageUp => {
+                self.info_scroll = self.info_scroll.saturating_sub(
+                    self.info_rect
+                        .map_or(1, |rect| usize::from(rect.height).max(1)),
+                );
+            }
+            KeyAction::PageDown => {
+                self.info_scroll = self
+                    .info_scroll
+                    .saturating_add(
+                        self.info_rect
+                            .map_or(1, |rect| usize::from(rect.height).max(1)),
+                    )
+                    .min(self.info_max_scroll);
+            }
             KeyAction::CursorLeft if self.field == 1 => {
                 self.transport_idx = self.transport_idx.saturating_sub(1);
+                self.clear_error();
             }
             KeyAction::CursorRight if self.field == 1 => {
                 self.transport_idx = (self.transport_idx + 1).min(TRANSPORT_OPTIONS.len() - 1);
+                self.clear_error();
             }
             KeyAction::CursorLeft if self.field == 5 => {
                 self.tier_idx = self.tier_idx.saturating_sub(1);
+                self.clear_error();
             }
             KeyAction::CursorRight if self.field == 5 => {
                 self.tier_idx = (self.tier_idx + 1).min(TIER_OPTIONS.len() - 1);
+                self.clear_error();
             }
             KeyAction::Newline if self.field != 4 => {}
             _ => {
-                if let Some(editor) = self.current_editor() {
-                    editor.handle_key(action);
+                if let Some(editor) = self.current_editor()
+                    && editor.handle_key(action)
+                {
+                    self.clear_error();
                 }
             }
         }
@@ -933,7 +1081,7 @@ impl crate::wm::modal::ModalOverlay for McpEditor {
                 editor.paste_single_line(text);
             }
         }
-        self.error = None;
+        self.clear_error();
     }
 }
 
@@ -997,14 +1145,169 @@ mod tests {
         terminal
             .draw(|frame| render_mcp_editor(frame, area, &mut editor))
             .unwrap();
-        assert_eq!(editor.cursor_position, Some((21, 12)));
+        let value = editor
+            .field_hits
+            .iter()
+            .find(|(field, _)| *field == 4)
+            .unwrap()
+            .1
+            .value;
+        assert_eq!(editor.cursor_position, Some((value.right() - 1, value.y)));
 
         editor.field = 0;
         editor.name.replace_with("a-very-long-server-name");
         terminal
             .draw(|frame| render_mcp_editor(frame, area, &mut editor))
             .unwrap();
-        assert_eq!(editor.cursor_position, Some((21, 4)));
+        let value = editor
+            .field_hits
+            .iter()
+            .find(|(field, _)| *field == 0)
+            .unwrap()
+            .1
+            .value;
+        assert_eq!(editor.cursor_position, Some((value.right() - 1, value.y)));
+    }
+
+    #[test]
+    fn editor_mouse_and_cursor_share_rendered_field_geometry() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let mouse = |kind, x, y| MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        for width in [40, 96] {
+            let mut editor = McpEditor::default();
+            editor.open_add();
+            editor.field = 4;
+            editor.env.replace_with("A=界\nB=🙂value");
+            let mut app = crate::app::AppState::new("session".into(), None);
+            let mut terminal = ratatui::Terminal::new(TestBackend::new(width, 32)).unwrap();
+            terminal
+                .draw(|frame| render_mcp_editor(frame, frame.area(), &mut editor))
+                .unwrap();
+            let hit = editor
+                .field_hits
+                .iter()
+                .find(|(field, _)| *field == 4)
+                .unwrap()
+                .1;
+            editor.handle_mouse(
+                &mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    hit.value.x + 7,
+                    hit.value.y,
+                ),
+                &mut app,
+                None,
+            );
+            assert_eq!(editor.env.cursor(), "A=界\n".len());
+            let cursor = editor.env.cursor();
+            editor.handle_mouse(
+                &mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    hit.record.x + 1,
+                    hit.record.y,
+                ),
+                &mut app,
+                None,
+            );
+            assert_eq!(editor.env.cursor(), cursor);
+            editor.handle_mouse(
+                &mouse(
+                    MouseEventKind::Moved,
+                    hit.record.right() - 1,
+                    hit.record.bottom() - 1,
+                ),
+                &mut app,
+                None,
+            );
+            assert_eq!(editor.hovered, Some(4));
+            editor.field = 1;
+            terminal
+                .draw(|frame| render_mcp_editor(frame, frame.area(), &mut editor))
+                .unwrap();
+            let hit = editor
+                .field_hits
+                .iter()
+                .find(|(field, _)| *field == 1)
+                .unwrap()
+                .1;
+            let (_, right) = hit.arrows.unwrap();
+            editor.handle_mouse(
+                &mouse(MouseEventKind::Down(MouseButton::Left), right.x, right.y),
+                &mut app,
+                None,
+            );
+            assert_eq!(editor.transport_idx, 1);
+            assert_eq!(editor.field, 1);
+            assert!(
+                !editor
+                    .cancel_rect
+                    .unwrap()
+                    .intersects(editor.save_rect.unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn editor_cancel_does_not_save_or_reload_and_errors_remain_scrollable() {
+        use crate::keys::KeyAction;
+        use crate::wm::modal::ModalOverlay;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let mut editor = McpEditor::default();
+        editor.open_add();
+        let mut app = crate::app::AppState::new("session".into(), None);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        editor.handle_key(&KeyAction::Submit, &mut app, Some(&tx));
+        assert!(editor.open);
+        assert_eq!(editor.error.as_deref(), Some("name is required"));
+        editor.handle_key(&KeyAction::Escape, &mut app, Some(&tx));
+        assert!(!editor.open);
+        assert!(rx.try_recv().is_err());
+
+        editor.open_add();
+        editor.error = Some(
+            "Required configuration contains a very long invalid environment entry. ".repeat(10),
+        );
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(40, 18)).unwrap();
+        terminal
+            .draw(|frame| render_mcp_editor(frame, frame.area(), &mut editor))
+            .unwrap();
+        assert!(editor.info_max_scroll > 0);
+        editor.handle_key(&KeyAction::PageDown, &mut app, None);
+        assert!(editor.info_scroll > 0);
+        assert!(editor.error.is_some());
+        let info = editor.info_rect.unwrap();
+        let before = editor.info_scroll;
+        editor.handle_mouse(
+            &MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: info.x,
+                row: info.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut app,
+            None,
+        );
+        assert_eq!(editor.info_scroll, before - 1);
+        let cancel = editor.cancel_rect.unwrap();
+        editor.handle_mouse(
+            &MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: cancel.x,
+                row: cancel.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut app,
+            Some(&tx),
+        );
+        assert!(!editor.open);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

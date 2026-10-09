@@ -940,10 +940,14 @@ impl WindowManager {
             return (true, Vec::new());
         }
         if self.top_kind() == Some(ModalKind::McpEditor) {
+            self.modals.mcp_editor.handle_mouse(event, app, control_tx);
             return (true, Vec::new());
         }
         if self.top_kind() == Some(ModalKind::SessionSwitcher) {
             self.modals.handle_session_switcher_mouse(event);
+            return (true, Vec::new());
+        }
+        if self.top_kind().is_some() {
             return (true, Vec::new());
         }
         let Some(id) = self
@@ -2006,6 +2010,34 @@ mod tests {
 
         assert!(consumed);
         assert!(commands.is_empty());
+        assert_eq!(wm.panels[0].scroll, 0);
+    }
+
+    #[test]
+    fn modal_without_mouse_controls_still_blocks_the_underlying_panel() {
+        let mut wm = WindowManager::default();
+        let id = wm.open(
+            "mouse",
+            ContentKey::Task("mouse".into()),
+            task_content("mouse"),
+            "mouse",
+            canvas(),
+        );
+        let consumed_count = Arc::new(AtomicUsize::new(0));
+        let panel = wm.panels.iter_mut().find(|panel| panel.id == id).unwrap();
+        panel.content = Some(Box::new(MouseConsumingContent(consumed_count.clone())));
+        let event = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: panel.rect.x.saturating_add(3),
+            row: panel.rect.y.saturating_add(3),
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        wm.modals.model_picker.open = true;
+        let mut app = crate::app::AppState::default();
+        let (consumed, commands) = wm.dispatch_mouse(&event, &mut app, None);
+        assert!(consumed);
+        assert!(commands.is_empty());
+        assert_eq!(consumed_count.load(Ordering::Relaxed), 0);
         assert_eq!(wm.panels[0].scroll, 0);
     }
 

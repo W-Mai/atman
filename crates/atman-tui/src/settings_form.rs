@@ -117,7 +117,13 @@ fn record_background(t: &Theme, focused: bool, hovered: bool) -> Color {
     }
 }
 
-fn render_record(f: &mut Frame, rect: Rect, focused: bool, hovered: bool, t: &Theme) -> Color {
+pub(crate) fn render_record(
+    f: &mut Frame,
+    rect: Rect,
+    focused: bool,
+    hovered: bool,
+    t: &Theme,
+) -> Color {
     let bg = record_background(t, focused, hovered);
     f.render_widget(Block::default().style(Style::default().bg(bg)), rect);
     if focused && rect.width > 0 {

@@ -102,6 +102,8 @@ Use a connection root in `base_url`; do not append `/responses` or `/chat/comple
 
 Provider and model forms use `Tab` / `Shift+Tab` to move between fields and the Test button; selector arrows also accept mouse clicks. Click a text value to place its cursor. Test and Save remain separate buttons below the fields. `Enter` tests when Test is focused and saves while editing a field; `Esc` saves, except during a pending model test, when it cancels and closes without saving. Scroll long model diagnostics with the mouse wheel over the details area, or `PgUp` / `PgDn` while Test is focused.
 
+The alias manager provides New, Edit, and Delete buttons. In an alias form, `Tab` / `Shift+Tab` switches between the name and model list; click the name to position the cursor or click a model to select it. Arrow keys, the mouse wheel, and `PgUp` / `PgDn` navigate the list. Editing preserves the saved target, including a target absent from the current catalog, until another model is selected. Save, `Enter`, or `Esc` saves a valid form.
+
 The default OpenAI API endpoint and Codex enable stable prompt-cache routing by default. Custom OpenAI base URLs and OpenAI-compatible gateways leave it disabled unless `prompt_cache_key = true` is configured explicitly. Changing the API changes the cache projection; provider usage reports remain authoritative for cache hits.
 
 Set `max_tools = 128` in a provider table when that endpoint limits the total number of request tool definitions to 128. The count includes built-in tools and native MCP tools. The official OpenAI Chat Completions endpoint applies this limit by default; other endpoints require an explicit limit. A request exceeding the limit fails locally with the actual count, before sending its conversation history. MCP broker calls do not add target definitions to the request.
@@ -276,6 +278,8 @@ flow review(input: string) -> string {
 Run the entry flow with `atman run .atman/commands/review.at --flow review input=hello`. A relative specifier such as `use "./lib/text.at"::normalize` resolves beside its declaring file. `use "user:text.at"::normalize` reads from `~/.config/atman/lib/`. A named `use` makes only the selected public flow callable in the current file; the shared file's private helper flows remain available to its own flows. Calling `normalize(input)` creates a cold Future; `.await` executes it, and `fanout [normalize(a), normalize(b)]` runs both calls concurrently.
 
 ### MCP discovery and calls
+
+The MCP Add/Edit form uses `Tab` / `Shift+Tab` or vertical arrows to switch fields. Click a text value to position the cursor; click selector arrows to change transport or approval tier. Save / `Enter` applies the draft, while Cancel / `Esc` closes without saving. Environment entries use one `KEY=value` per line; `Shift+Enter` adds a line. Scroll long validation details with the mouse wheel over the message, or `PgUp` / `PgDn`.
 
 The managed agent exposes `mcp.status`, `mcp.tools`, `mcp.await`, and `mcp.call`. The request's MCP definitions stay fixed as the catalog grows. Tool descriptions and schemas are retrieved as tool results, so discovery does not replace the model's existing tool prefix.
 

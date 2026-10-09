@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Alias and MCP settings** — Padded records, separate action buttons, and shared field geometry support mouse selection, cursor placement, scrolling, and narrow terminals. Alias edits retain the saved model until another model is selected. MCP forms provide Cancel without saving and scrollable validation details.
 - **Provider and model forms** — Padded fields share the modal surface, focus marker, and subdued hover colors. Test and Save use separate buttons. Responsive layout keeps actions visible in small terminals, aligns mouse cursors with rendered text, and makes wrapped model diagnostics scrollable.
 - **HTTP MCP transport** — Requests advertise JSON and SSE support and preserve configured headers across connection entry points. Incremental SSE parsing delivers matching results without waiting for EOF. Negotiated sessions and protocol versions persist across calls; session expiration reinitializes once, while ambiguous failures do not replay tool execution.
 - **Provider form state** — Saving locks pasted input, model edits clear stale test feedback, and closing a model test cancels its request. Scrolled provider rows target the visible record, and empty base URLs can retain the configured default.

@@ -609,12 +609,12 @@ impl ModalManager {
             }
             ModalKind::AliasManager => {
                 if self.alias_manager.show_form {
-                    let w = canvas.width.saturating_sub(4).clamp(60, 84);
-                    let h = canvas.height.saturating_sub(2).clamp(14, 24);
+                    let w = canvas.width.saturating_sub(4).min(96);
+                    let h = canvas.height.saturating_sub(2).min(40);
                     center_rect(canvas, w, h)
                 } else {
-                    let w = canvas.width.saturating_sub(4).clamp(40, 60);
-                    let h = canvas.height.saturating_sub(2).clamp(8, 20);
+                    let w = canvas.width.saturating_sub(4).min(84);
+                    let h = canvas.height.saturating_sub(2).min(32);
                     center_rect(canvas, w, h)
                 }
             }
@@ -635,8 +635,8 @@ impl ModalManager {
                 center_rect(canvas, w, h)
             }
             ModalKind::McpEditor => {
-                let w = canvas.width.saturating_sub(4).clamp(50, 60);
-                let h = canvas.height.saturating_sub(2).clamp(18, 22);
+                let w = canvas.width.saturating_sub(4).min(96);
+                let h = canvas.height.saturating_sub(2).min(40);
                 center_rect(canvas, w, h)
             }
             ModalKind::Onboarding => {
@@ -1144,6 +1144,8 @@ fn session_switcher_height(list_height: u16, max_height: u16) -> u16 {
 }
 
 fn center_rect(canvas: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(canvas.width);
+    let h = h.min(canvas.height);
     Rect {
         x: canvas.x + canvas.width.saturating_sub(w) / 2,
         y: canvas.y + canvas.height.saturating_sub(h) / 2,
@@ -1163,10 +1165,40 @@ mod tests {
         manager.model_manager.show_form = true;
         for (width, height) in [(40, 14), (80, 30), (140, 60)] {
             let canvas = Rect::new(3, 2, width, height);
-            for kind in [ModalKind::ProviderManager, ModalKind::ModelManager] {
+            for kind in [
+                ModalKind::ProviderManager,
+                ModalKind::ModelManager,
+                ModalKind::AliasManager,
+                ModalKind::McpEditor,
+            ] {
                 let rect = manager.compute_rect(kind, canvas);
                 assert_eq!(rect.intersection(canvas), rect);
                 assert!(rect.width <= 96 && rect.height <= 44);
+            }
+        }
+    }
+
+    #[test]
+    fn modal_geometry_never_exceeds_the_terminal_canvas() {
+        for canvas in [
+            Rect::new(3, 2, 1, 1),
+            Rect::new(3, 2, 40, 14),
+            Rect::new(3, 2, 80, 30),
+        ] {
+            for kind in [
+                ModalKind::Palette,
+                ModalKind::Form,
+                ModalKind::CompactReview,
+                ModalKind::SessionSwitcher,
+                ModalKind::HistorySearch,
+                ModalKind::AliasManager,
+                ModalKind::ModelPicker,
+                ModalKind::Onboarding,
+                ModalKind::ThemePicker,
+                ModalKind::TrustModePicker,
+            ] {
+                let rect = ModalManager::default().compute_rect(kind, canvas);
+                assert_eq!(rect.intersection(canvas), rect, "{kind:?}");
             }
         }
     }
