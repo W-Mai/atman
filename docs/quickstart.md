@@ -205,6 +205,8 @@ While a flow is running you can:
 
 A `form.ask` uses `↑`/`↓` to select choices and `Tab`/`Shift+Tab` to move to the next or previous question. A form that times out can still be answered while it remains open. The answer is recorded with the original question and added to the next task-facing `llm.call` as user context; it does not start or interrupt a flow by itself.
 
+Form choices are clickable across their padded rows, including wrapped options. Clicking a multi-select option toggles it; clicking a text answer positions the cursor. Use the mouse wheel to scroll long questions. Review the final Yes/No confirmation before submitting all answers.
+
 Press `Ctrl+L`, choose **All Projects** from `Ctrl+P`, or run `:projects` to open Project Hub. Use the arrows to select a project, `Enter` to inspect its sessions, `P` to pin or unpin it, and `X` twice to archive it. An archived project can be restored with `X` or deleted with `Delete`/`Backspace` twice. Delete removes Atman-owned sessions, goals, plans, tasks, confessions, specs, previews, and indexes while preserving the source directory, Git repository, and hand-written `.atman` configuration, commands, skills, flows, and rules. The same actions are clickable. A missing project path still allows stored sessions to open; workspace tools report the unavailable path when used.
 
 Command Palette and Search History keep long queries in a horizontal input viewport. Click the query to position its cursor. In Search History, click a result to update its preview; the mouse wheel navigates results or scrolls the preview according to the pointer's location. The query field remains visible in small terminals.

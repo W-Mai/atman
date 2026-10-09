@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Form choice geometry** — Padded choices use wrapped row positions for selection, scrolling, and mouse input. Confirmation buttons remain aligned with multi-line prompts, text answers support cursor placement, and view transitions discard stale click targets before final confirmation.
 - **Search panel interaction** — History results keep their visible row identity after scrolling, query fields support mouse cursor placement, and long palette queries stay inside the input viewport. Small terminals retain the history query field, and covered history panels no longer intercept mouse events.
 - **Alias and MCP settings** — Padded records, separate action buttons, and shared field geometry support mouse selection, cursor placement, scrolling, and narrow terminals. Alias edits retain the saved model until another model is selected. MCP forms provide Cancel without saving and scrollable validation details.
 - **Provider and model forms** — Padded fields share the modal surface, focus marker, and subdued hover colors. Test and Save use separate buttons. Responsive layout keeps actions visible in small terminals, aligns mouse cursors with rendered text, and makes wrapped model diagnostics scrollable.

@@ -1396,6 +1396,27 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         assert!(wm.dispatch_mouse(&click, &mut app, Some(&tx)).0);
         assert!(wm.dispatch_mouse(&click, &mut app, Some(&tx)).0);
+        assert!(rx.try_recv().is_err());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                crate::wm::modal::ModalOverlay::render_content(
+                    &mut wm.modals.form_modal,
+                    frame,
+                    frame.area(),
+                    &app,
+                    &crate::theme::theme(),
+                );
+            })
+            .unwrap();
+        let yes = wm.modals.form_modal.yes_rect.unwrap();
+        let click = MouseEvent {
+            column: yes.x + 2,
+            row: yes.y + 1,
+            ..click
+        };
+        assert!(wm.dispatch_mouse(&click, &mut app, Some(&tx)).0);
         assert!(matches!(
             rx.try_recv(),
             Ok(crate::TuiControl::FormSubmit {

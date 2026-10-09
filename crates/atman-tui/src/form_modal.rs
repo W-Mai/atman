@@ -40,6 +40,8 @@ pub struct FormModal {
     pub no_rect: Option<Rect>,
     pub scroll: u16,
     follow_cursor: bool,
+    option_hits: Vec<(usize, Rect)>,
+    hovered_option: Option<usize>,
 }
 
 impl FormModal {
@@ -57,6 +59,8 @@ impl FormModal {
         self.no_rect = None;
         self.scroll = 0;
         self.follow_cursor = true;
+        self.option_hits.clear();
+        self.hovered_option = None;
         self.reset_question_state();
     }
 
@@ -75,6 +79,8 @@ impl FormModal {
         self.no_rect = None;
         self.scroll = 0;
         self.follow_cursor = false;
+        self.option_hits.clear();
+        self.hovered_option = None;
     }
 
     pub fn active_form_id(&self) -> Option<&str> {
@@ -90,6 +96,14 @@ impl FormModal {
             .get(self.current_index)
             .map(|q| &q.kind)
             .or_else(|| self.pending.as_ref().map(|p| &p.kind))
+    }
+
+    fn clear_geometry(&mut self) {
+        self.last_input_rect = None;
+        self.yes_rect = None;
+        self.no_rect = None;
+        self.option_hits.clear();
+        self.hovered_option = None;
     }
 
     fn reset_question_state(&mut self) {
@@ -199,6 +213,7 @@ impl FormModal {
         self.reset_question_state();
         self.scroll = 0;
         self.follow_cursor = true;
+        self.clear_geometry();
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
@@ -216,6 +231,7 @@ impl FormModal {
             self.confirm_focus =
                 (self.confirm_focus as isize + delta).rem_euclid(len as isize) as usize;
             self.error = None;
+            self.follow_cursor = true;
         }
     }
 
@@ -239,9 +255,9 @@ impl FormModal {
             }
             self.phase = FormPhase::FinalConfirm;
             self.confirm_focus = 0;
-            self.last_input_rect = None;
+            self.clear_geometry();
             self.scroll = 0;
-            self.follow_cursor = false;
+            self.follow_cursor = true;
             return SubmitOutcome::None;
         }
         if self.confirm_focus == 1 {
@@ -282,7 +298,59 @@ impl FormModal {
         event: &MouseEvent,
         tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
-        if !self.open || event.kind != MouseEventKind::Down(MouseButton::Left) {
+        if !self.open {
+            return;
+        }
+        let point = (event.column, event.row).into();
+        let option = self
+            .option_hits
+            .iter()
+            .find_map(|(index, rect)| rect.contains(point).then_some(*index));
+        match event.kind {
+            MouseEventKind::Moved => {
+                self.hovered_option = option;
+                return;
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                self.scroll = if event.kind == MouseEventKind::ScrollUp {
+                    self.scroll.saturating_sub(3)
+                } else {
+                    self.scroll.saturating_add(3)
+                };
+                self.follow_cursor = false;
+                return;
+            }
+            MouseEventKind::Down(MouseButton::Left) => {}
+            _ => return,
+        }
+        if let Some(index) = option
+            && matches!(
+                self.current_kind(),
+                Some(FormKind::SingleSelect { .. } | FormKind::MultiSelect { .. })
+            )
+            && self.phase == FormPhase::Editing
+        {
+            self.confirm_focus = index;
+            self.toggle_current();
+            self.error = None;
+            return;
+        }
+        if let Some(rect) = self.last_input_rect
+            && rect.contains(point)
+            && let Some(kind) = self.current_kind()
+        {
+            let prompt_rows = visual_line_count(kind.prompt(), rect.width as usize) + 1;
+            let row = (event.row - rect.y) as usize + self.scroll as usize;
+            if let Some(input_row) = row.checked_sub(prompt_rows) {
+                let cursor = crate::input::cursor_from_wrapped(
+                    self.text_editor.buf(),
+                    input_row,
+                    (event.column - rect.x) as usize,
+                    rect.width as usize,
+                );
+                self.text_editor.set_cursor(cursor);
+                self.follow_cursor = true;
+            }
             return;
         }
         let choice = if self
@@ -331,15 +399,20 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         let Some(kind) = self.current_kind().cloned() else {
             return;
         };
+        let gutter = u16::from(
+            !matches!(kind, FormKind::Text { .. }) || self.phase == FormPhase::FinalConfirm,
+        )
+        .min(area.width / 2);
         let inner = Rect {
-            x: area.x,
+            x: area.x + gutter,
             y: area.y.saturating_add(2),
-            width: area.width,
+            width: area.width.saturating_sub(gutter * 2),
             height: area.height.saturating_sub(3),
         };
         self.yes_rect = None;
         self.no_rect = None;
         self.last_input_rect = None;
+        self.option_hits.clear();
         let total = self.questions().len().max(1);
         let filled = (area.width as usize * (self.current_index + 1).min(total)) / total;
         let progress_line = Line::from(
@@ -365,7 +438,15 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 height: 1,
             },
         );
-        let hint = if self.phase == FormPhase::FinalConfirm {
+        let hint = if area.width < 60 {
+            if self.phase == FormPhase::FinalConfirm {
+                "↑↓ choose · Enter · Esc reject"
+            } else if matches!(kind, FormKind::MultiSelect { .. }) {
+                "↑↓ · Space toggle · Tab · Enter"
+            } else {
+                "↑↓ · Tab question · Enter next"
+            }
+        } else if self.phase == FormPhase::FinalConfirm {
             " ↑↓ · choose  enter/y · confirm  n/esc · reject  shift+tab · back "
         } else {
             hint_for(&kind)
@@ -403,9 +484,23 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             prompt_lines
         };
         let mut text_height = None;
+        let mut option_rows = Vec::new();
+        let row_count = |lines: &[Line<'_>]| -> usize {
+            lines
+                .iter()
+                .map(|line| visual_line_count(&line.to_string(), inner.width as usize))
+                .sum()
+        };
+        let mut next_option_row = row_count(&lines);
+        let mut push_option = |lines: &mut Vec<Line<'static>>, index, line: Line<'static>| {
+            let start = next_option_row;
+            next_option_row += visual_line_count(&line.to_string(), inner.width as usize) + 2;
+            lines.push(Line::default());
+            lines.push(line);
+            lines.push(Line::default());
+            option_rows.push((index, start, next_option_row));
+        };
         if self.phase == FormPhase::FinalConfirm {
-            self.yes_rect = Some(Rect::new(inner.x + 2, inner.y + 1, 7, 1));
-            self.no_rect = Some(Rect::new(inner.x + 2, inner.y + 2, 6, 1));
             let yes = if self.confirm_focus == 0 {
                 "[ Yes ]"
             } else {
@@ -416,13 +511,12 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             } else {
                 "  No  "
             };
-            lines.push(Line::from(format!("  {yes}")));
-            lines.push(Line::from(format!("  {no}")));
+            for (index, text) in [yes, no].into_iter().enumerate() {
+                push_option(&mut lines, index, Line::from(format!("  {text}")));
+            }
         } else {
             match &kind {
                 FormKind::Confirm { .. } => {
-                    self.yes_rect = Some(Rect::new(inner.x + 2, inner.y + 2, 7, 1));
-                    self.no_rect = Some(Rect::new(inner.x + 2, inner.y + 3, 6, 1));
                     let yes = if self.confirm_focus == 0 {
                         "[ Yes ]"
                     } else {
@@ -433,37 +527,38 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                     } else {
                         "  No  "
                     };
-                    lines.push(Line::from(format!("  {yes}")));
-                    lines.push(Line::from(format!("  {no}")));
+                    for (index, text) in [yes, no].into_iter().enumerate() {
+                        push_option(&mut lines, index, Line::from(format!("  {text}")));
+                    }
                 }
                 FormKind::SingleSelect { options, .. } | FormKind::MultiSelect { options, .. } => {
                     let is_multi =
                         matches!(self.current_kind(), Some(FormKind::MultiSelect { .. }));
                     for (i, label) in options.iter().enumerate() {
-                        lines.push(Line::from(Span::styled(
-                            format!(
-                                " {}{}{}",
-                                if i == self.confirm_focus {
-                                    "▶ "
+                        push_option(
+                            &mut lines,
+                            i,
+                            Line::from(Span::styled(
+                                format!(
+                                    "  {}{}",
+                                    if is_multi
+                                        && self.multi_selected.get(i).copied().unwrap_or(false)
+                                    {
+                                        "[✓] "
+                                    } else if is_multi {
+                                        "[ ] "
+                                    } else {
+                                        ""
+                                    },
+                                    label
+                                ),
+                                Style::default().fg(if i == self.confirm_focus {
+                                    t.accent.into()
                                 } else {
-                                    "  "
-                                },
-                                if is_multi && self.multi_selected.get(i).copied().unwrap_or(false)
-                                {
-                                    "[✓] "
-                                } else if is_multi {
-                                    "[ ] "
-                                } else {
-                                    ""
-                                },
-                                label
-                            ),
-                            Style::default().fg(if i == self.confirm_focus {
-                                t.accent.into()
-                            } else {
-                                t.tinted_fg.into()
-                            }),
-                        )));
+                                    t.tinted_fg.into()
+                                }),
+                            )),
+                        );
                     }
                 }
                 FormKind::Text { placeholder, .. } => {
@@ -506,9 +601,22 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 + text_height
                 + usize::from(self.error.is_some())
         } else {
-            lines.len()
+            row_count(&lines)
         } as u16;
         self.scroll = self.scroll.min(height.saturating_sub(inner.height));
+        if self.follow_cursor && inner.height > 0 && !option_rows.is_empty() {
+            if let Some((_, start, end)) = option_rows
+                .iter()
+                .find(|(index, _, _)| *index == self.confirm_focus)
+            {
+                if *start < self.scroll as usize {
+                    self.scroll = *start as u16;
+                } else if *end > self.scroll as usize + inner.height as usize {
+                    self.scroll = end.saturating_sub(inner.height as usize) as u16;
+                }
+            }
+            self.follow_cursor = false;
+        }
         if self.follow_cursor && self.last_input_rect.is_some() && inner.height > 0 {
             let (input_row, _) = wrapped_cursor_position(
                 self.text_editor.buf(),
@@ -531,6 +639,45 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 .scroll((self.scroll, 0)),
             inner,
         );
+        for (index, start, end) in option_rows {
+            let visible_start = start.max(self.scroll as usize);
+            let visible_end = end.min(self.scroll as usize + inner.height as usize);
+            if visible_start >= visible_end {
+                continue;
+            }
+            let rect = Rect::new(
+                inner.x - gutter,
+                inner.y + (visible_start - self.scroll as usize) as u16,
+                inner.width + gutter * 2,
+                (visible_end - visible_start) as u16,
+            );
+            let bg = crate::theme::ThemeColor::new(crate::wm::shell::surface_bg(t));
+            let bg = if index == self.confirm_focus {
+                bg.lerp(t.accent, 0.12)
+            } else if self.hovered_option == Some(index) {
+                bg.lerp(t.work_hover_bg, 0.45)
+            } else {
+                crate::wm::shell::surface_bg(t)
+            };
+            for y in rect.y..rect.bottom() {
+                for x in rect.x..rect.right() {
+                    f.buffer_mut()[(x, y)].set_bg(bg);
+                }
+                if index == self.confirm_focus && rect.width > 0 {
+                    f.buffer_mut()[(rect.x, y)]
+                        .set_symbol("▌")
+                        .set_fg(t.accent.into());
+                }
+            }
+            self.option_hits.push((index, rect));
+            if self.phase == FormPhase::FinalConfirm || matches!(kind, FormKind::Confirm { .. }) {
+                if index == 0 {
+                    self.yes_rect = Some(rect);
+                } else {
+                    self.no_rect = Some(rect);
+                }
+            }
+        }
     }
 
     fn handle_key(
@@ -564,7 +711,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 self.current_index = self.questions().len().saturating_sub(1);
                 self.confirm_focus = self.draft_focus(self.current_index);
                 self.reset_question_state();
-                self.last_input_rect = None;
+                self.clear_geometry();
                 self.scroll = 0;
                 self.follow_cursor = true;
                 None
@@ -577,12 +724,14 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 if self.phase == FormPhase::FinalConfirm =>
             {
                 self.confirm_focus = 0;
+                self.follow_cursor = true;
                 None
             }
             KeyAction::HistoryDown | KeyAction::Char('j')
                 if self.phase == FormPhase::FinalConfirm =>
             {
                 self.confirm_focus = 1;
+                self.follow_cursor = true;
                 None
             }
             KeyAction::HistoryUp
@@ -749,12 +898,16 @@ fn questions(form: &PendingForm) -> Vec<FormQuestion> {
 
 pub fn estimate_height(kind: &FormKind, width: u16) -> u16 {
     let width = width.max(1) as usize;
-    let prompt = crate::width::width(kind.prompt()).max(1).div_ceil(width) as u16;
+    let prompt = visual_line_count(kind.prompt(), width) as u16;
     prompt
         + match kind {
-            FormKind::Confirm { .. } => 3,
+            FormKind::Confirm { .. } => 7,
             FormKind::SingleSelect { options, .. } | FormKind::MultiSelect { options, .. } => {
-                options.len() as u16 + 2
+                options
+                    .iter()
+                    .map(|option| visual_line_count(&format!("  [ ] {option}"), width) + 2)
+                    .sum::<usize>() as u16
+                    + 2
             }
             FormKind::Text { multiline, .. } => {
                 if *multiline {
@@ -1083,6 +1236,87 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_options_and_mouse_hits_share_the_visible_rows() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
+        let area = Rect::new(2, 1, 18, 14);
+        let app = crate::app::AppState::default();
+        let draw = |terminal: &mut Terminal<TestBackend>, modal: &mut FormModal| {
+            terminal
+                .draw(|frame| modal.render_content(frame, area, &app, &crate::theme::theme()))
+                .unwrap();
+        };
+        for prompt in [
+            "line one\nline two",
+            "A long prompt that wraps across several rows in the form",
+        ] {
+            let mut modal = FormModal::default();
+            modal.attach_test(mk_questions(vec![FormKind::Confirm {
+                prompt: prompt.into(),
+            }]));
+            draw(&mut terminal, &mut modal);
+            let yes = modal.yes_rect.unwrap();
+            let row = (yes.y..yes.bottom())
+                .find(|&y| {
+                    (yes.x..yes.right())
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains("Yes")
+                })
+                .expect("the Yes hit region must contain its rendered label");
+            assert!(
+                !modal
+                    .no_rect
+                    .is_some_and(|no| no.contains((yes.x + 3, row).into()))
+            );
+            modal.handle_mouse(
+                &MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: yes.x + 3,
+                    row,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                None,
+            );
+            assert_eq!(
+                modal.draft_answers[0],
+                Some(FormAnswer::Confirmed { value: true })
+            );
+        }
+        let mut modal = FormModal::default();
+        modal.attach_test(mk_questions(vec![FormKind::MultiSelect {
+            prompt: "Choose".into(),
+            options: (0..8)
+                .map(|i| format!("Choice {i} wraps into multiple lines"))
+                .collect(),
+            min: None,
+            max: None,
+        }]));
+        for _ in 0..6 {
+            modal.move_cursor(1);
+        }
+        draw(&mut terminal, &mut modal);
+        assert!(modal.scroll > 0);
+        let hit = modal
+            .option_hits
+            .iter()
+            .find(|(index, _)| *index == 6)
+            .unwrap()
+            .1;
+        modal.handle_mouse(
+            &MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: hit.x + 1,
+                row: hit.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            None,
+        );
+        assert!(modal.multi_selected[6]);
+        assert_eq!(modal.multi_selected.iter().filter(|&&v| v).count(), 1);
+    }
+
+    #[test]
     fn mouse_yes_submits_confirm_form() {
         let mut modal = FormModal::default();
         modal.attach_test(mk_questions(vec![FormKind::Confirm {
@@ -1099,6 +1333,29 @@ mod tests {
         modal.handle_mouse(&click, Some(&tx));
         assert_eq!(modal.phase, FormPhase::FinalConfirm);
         assert!(rx.try_recv().is_err());
+        modal.handle_mouse(&click, Some(&tx));
+        assert!(
+            modal.open,
+            "a stale click must not submit an unseen confirmation"
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                modal.render_content(
+                    frame,
+                    frame.area(),
+                    &crate::app::AppState::default(),
+                    &crate::theme::theme(),
+                )
+            })
+            .unwrap();
+        let yes = modal.yes_rect.unwrap();
+        let click = MouseEvent {
+            column: yes.x + 2,
+            row: yes.y + 1,
+            ..click
+        };
         modal.handle_mouse(&click, Some(&tx));
         assert!(!modal.open);
         assert!(matches!(
