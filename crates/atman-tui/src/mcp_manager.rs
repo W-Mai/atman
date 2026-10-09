@@ -3,17 +3,20 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::settings_form::{Action, render_action, render_record};
 use crate::theme::theme;
 use crate::width;
 use crate::wm::WmHitmap;
+use crate::wm::component::McpPanelAction;
 use std::collections::HashSet;
 
-/// Indent + name column + space = 3 + 22 + 1 = 26 chars before description.
-const TOOL_DESC_OFFSET: usize = 26;
+const SERVER_RECORD_HEIGHT: usize = 4;
 
 pub struct McpBrowserState<'a> {
     pub tab: McpBrowserTab,
     pub content_revision: u64,
+    pub hovered_action: Option<McpPanelAction>,
+    pub remove_armed: Option<&'a str>,
     pub resources: &'a std::collections::HashMap<String, Vec<atman_runtime::mcp::McpResource>>,
     pub prompts: &'a std::collections::HashMap<String, Vec<atman_runtime::mcp::McpPrompt>>,
 }
@@ -30,13 +33,15 @@ struct McpProjectionKey {
 #[derive(Debug, Clone)]
 enum McpProjectedRow {
     Static(Line<'static>),
-    Server(usize),
+    Server { index: usize, line: usize },
 }
 
 #[derive(Debug, Default)]
 pub struct McpPanelProjection {
     key: Option<McpProjectionKey>,
     rows: Vec<McpProjectedRow>,
+    selected_name: Option<String>,
+    viewport: Option<(u16, u16)>,
     #[cfg(test)]
     rebuild_count: u64,
     #[cfg(test)]
@@ -87,6 +92,37 @@ impl McpPanelProjection {
     fn total_rows(&self) -> u32 {
         u32::try_from(self.rows.len()).unwrap_or(u32::MAX)
     }
+
+    fn follow_selection(
+        &mut self,
+        selected: usize,
+        servers: &[atman_runtime::mcp::McpServerStatus],
+        area: Rect,
+        scroll: &mut u32,
+    ) {
+        let name = servers.get(selected).map(|server| server.name.as_str());
+        let viewport = (area.width, area.height);
+        if self.selected_name.as_deref() == name && self.viewport == Some(viewport) {
+            return;
+        }
+        self.selected_name = name.map(str::to_owned);
+        self.viewport = Some(viewport);
+        if let Some(start) = self.rows.iter().position(
+            |row| matches!(row, McpProjectedRow::Server { index, line: 0 } if *index == selected),
+        ) {
+            let start = u32::try_from(start).unwrap_or(u32::MAX);
+            let visible_height = (SERVER_RECORD_HEIGHT as u32).min(u32::from(area.height));
+            if start < *scroll {
+                *scroll = start;
+            } else if start.saturating_add(visible_height)
+                > scroll.saturating_add(area.height.into())
+            {
+                *scroll = start
+                    .saturating_add(visible_height)
+                    .saturating_sub(area.height.into());
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -104,76 +140,236 @@ pub fn render_panel(
     projection: &mut McpPanelProjection,
 ) {
     let t = theme();
-    projection.update(area.width, servers, expanded, browser);
-
-    let content_area = Rect {
-        height: area.height.saturating_sub(1),
-        ..area
+    let width = area.width.saturating_sub(2).min(96);
+    let inset_y = u16::from(area.height >= 22);
+    let area = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + inset_y,
+        width,
+        area.height.saturating_sub(inset_y * 2),
+    );
+    let armed = servers
+        .get(selected)
+        .is_some_and(|server| browser.remove_armed == Some(server.name.as_str()));
+    let columns: u16 = if armed {
+        2
+    } else if width >= 90 {
+        6
+    } else if width >= 28 {
+        3
+    } else {
+        2
     };
-    let help_area = Rect {
-        y: content_area.bottom(),
-        height: area.height.min(1),
-        ..area
-    };
+    let action_rows = if armed { 1 } else { 6 / columns };
+    let action_height = (action_rows * 4 - 1).min(area.height.saturating_sub(1));
+    let help_height = u16::from(area.height > action_height);
+    let header_height = 2.min(area.height.saturating_sub(action_height + help_height));
+    let gap = u16::from(area.height > action_height + help_height + header_height + 4);
+    let content_area = Rect::new(
+        area.x,
+        area.y + header_height,
+        area.width,
+        area.height
+            .saturating_sub(action_height + help_height + header_height + gap),
+    );
+    let actions_area = Rect::new(
+        area.x,
+        content_area.bottom() + gap,
+        area.width,
+        action_height,
+    );
+    let help_area = Rect::new(area.x, actions_area.bottom(), area.width, help_height);
+    projection.update(content_area.width, servers, expanded, browser);
+    *scroll = clamp_scroll(*scroll, projection.total_rows(), content_area.height);
+    projection.follow_selection(selected, servers, content_area, scroll);
     *scroll = clamp_scroll(*scroll, projection.total_rows(), content_area.height);
 
-    let start = usize::try_from(*scroll).unwrap_or(usize::MAX);
+    let (ok, total) = atman_runtime::mcp::mcp_counts(servers);
+    let status = if area.width < 58 {
+        format!(
+            "{} · Tab · {}–{}/{}",
+            browser.tab.label(),
+            scroll.saturating_add(1),
+            scroll
+                .saturating_add(content_area.height.into())
+                .min(projection.total_rows()),
+            projection.total_rows(),
+        )
+    } else if projection.total_rows() > content_area.height.into() {
+        format!(
+            "{} · {}–{}/{} · PgUp/PgDn",
+            browser.tab.label(),
+            scroll.saturating_add(1),
+            scroll
+                .saturating_add(content_area.height.into())
+                .min(projection.total_rows()),
+            projection.total_rows(),
+        )
+    } else {
+        format!("{} · Enter expand · Tab section", browser.tab.label())
+    };
+    let header = if armed {
+        let name = servers
+            .get(selected)
+            .map(|server| server.name.as_str())
+            .unwrap_or_default();
+        vec![
+            Line::from(Span::styled(
+                width::truncate(&format!("  Remove {name}?"), area.width as usize),
+                Style::default().fg(t.warn.into()),
+            )),
+            Line::from(Span::styled(
+                "  Enter confirm · Esc cancel",
+                Style::default().fg(t.subtle_fg.into()),
+            )),
+        ]
+    } else {
+        vec![
+            Line::from(Span::styled(
+                if area.width < 58 {
+                    format!("  Servers {ok}/{total} · ↑↓ select")
+                } else {
+                    format!("  Servers · {ok}/{total} connected")
+                },
+                Style::default()
+                    .fg(t.tinted_fg.into())
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                width::truncate(&format!("  {status}"), area.width as usize),
+                Style::default().fg(t.subtle_fg.into()),
+            )),
+        ]
+    };
+    f.render_widget(
+        Paragraph::new(header),
+        Rect::new(area.x, area.y, area.width, header_height),
+    );
+
+    let start = usize::try_from(*scroll)
+        .unwrap_or(usize::MAX)
+        .min(projection.rows.len());
     let end = start
         .saturating_add(content_area.height as usize)
         .min(projection.rows.len());
-    let mut visible = Vec::with_capacity(end.saturating_sub(start));
-    for (visible_y, row) in projection.rows[start.min(end)..end].iter().enumerate() {
-        match row {
-            McpProjectedRow::Static(line) => visible.push(line.clone()),
-            McpProjectedRow::Server(index) => {
-                let Some(server) = servers.get(*index) else {
-                    continue;
-                };
-                visible.push(server_line(
-                    server,
-                    *index == selected,
-                    hovered.as_deref() == Some(&server.name),
-                    expanded.contains(&server.name),
-                    &t,
-                ));
-                hitmap_out.mcp_row_rects.push((
-                    window_id,
-                    server.name.clone(),
-                    Rect {
-                        x: content_area.x,
-                        y: content_area.y.saturating_add(visible_y as u16),
-                        width: content_area.width,
-                        height: 1,
-                    },
-                ));
+    let mut cursor = start;
+    while cursor < end {
+        let y = content_area.y + (cursor - start) as u16;
+        match &projection.rows[cursor] {
+            McpProjectedRow::Static(line) => {
+                f.render_widget(
+                    Paragraph::new(line.clone()),
+                    Rect::new(content_area.x, y, content_area.width, 1),
+                );
+                cursor += 1;
+            }
+            McpProjectedRow::Server { index, line } => {
+                let index = *index;
+                let offset = *line;
+                let height = (SERVER_RECORD_HEIGHT - offset).min(end - cursor);
+                let rect = Rect::new(content_area.x, y, content_area.width, height as u16);
+                if let Some(server) = servers.get(index) {
+                    let bg = render_record(
+                        f,
+                        rect,
+                        index == selected,
+                        hovered.as_deref() == Some(server.name.as_str()),
+                        &t,
+                    );
+                    let lines =
+                        server_lines(server, expanded.contains(&server.name), rect.width, &t);
+                    let visible = if content_area.height == 1 {
+                        vec![lines[1].clone()]
+                    } else {
+                        lines.into_iter().skip(offset).take(height).collect()
+                    };
+                    // The record owns its selection gutter; text never paints over it.
+                    f.render_widget(
+                        Paragraph::new(visible).style(Style::default().bg(bg)),
+                        Rect::new(
+                            rect.x + 1.min(rect.width),
+                            rect.y,
+                            rect.width.saturating_sub(1),
+                            rect.height,
+                        ),
+                    );
+                    hitmap_out
+                        .mcp_row_rects
+                        .push((window_id, server.name.clone(), rect));
+                }
+                cursor += height;
             }
         }
     }
-    f.render_widget(Paragraph::new(visible), content_area);
+
+    let has_selection = servers.get(selected).is_some();
+    let actions: &[(McpPanelAction, &str, &str)] = if armed {
+        &[
+            (McpPanelAction::Remove, "Confirm", "Enter"),
+            (McpPanelAction::CancelRemove, "Cancel", "Esc"),
+        ]
+    } else {
+        &[
+            (McpPanelAction::Add, "Add", "a"),
+            (McpPanelAction::Edit, "Edit", "e"),
+            (McpPanelAction::Test, "Test", "t"),
+            (McpPanelAction::Toggle, "Toggle", "d"),
+            (McpPanelAction::Remove, "Remove", "r"),
+            (McpPanelAction::NextTab, "Section", "Tab"),
+        ]
+    };
+    for (index, &(action, label, shortcut)) in actions.iter().enumerate() {
+        let col = index as u16 % columns;
+        let row = index as u16 / columns;
+        let left = actions_area.x + actions_area.width * col / columns;
+        let right = actions_area.x + actions_area.width * (col + 1) / columns;
+        let rect = Rect::new(
+            left,
+            actions_area.y + row * 4,
+            right.saturating_sub(left + u16::from(col + 1 < columns)),
+            3.min(actions_area.height.saturating_sub(row * 4)),
+        );
+        if rect.height == 0 {
+            continue;
+        }
+        let disabled = action != McpPanelAction::Add && !has_selection;
+        let (label, shortcut) = match action {
+            McpPanelAction::Remove if armed => {
+                ("Confirm", if rect.width >= 16 { "Enter" } else { "↵" })
+            }
+            McpPanelAction::Toggle if rect.width < 11 => ("Mode", "d"),
+            McpPanelAction::Remove if rect.width < 11 => ("Del", "r"),
+            McpPanelAction::NextTab if rect.width < 14 => ("View", "⇥"),
+            _ => (label, shortcut),
+        };
+        render_action(
+            f,
+            rect,
+            &Action {
+                label,
+                shortcut,
+                hovered: browser.hovered_action == Some(action),
+                disabled,
+                ..Default::default()
+            },
+            &t,
+        );
+        if !disabled {
+            hitmap_out.mcp_action_rects.push((window_id, action, rect));
+        }
+    }
+    let help = if armed {
+        "  Enter confirm · Esc cancel"
+    } else if area.width < 58 {
+        "  Enter expand · Esc close"
+    } else {
+        "  ↑↓ select · Enter expand · Tab section · Wheel / PgUp / PgDn scroll · Esc close"
+    };
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            " [a] Add  [e] Edit  [Enter] expand  [Tab] switch  [↑↓] navigate  [t] test  [r] remove  [d] toggle  [Esc] close",
-            Style::default().fg(t.subtle_fg.into()),
-        ))),
+        Paragraph::new(width::truncate(help, help_area.width as usize))
+            .style(Style::default().fg(t.subtle_fg.into())),
         help_area,
     );
-    hitmap_out.mcp_action_rects.push((
-        window_id,
-        crate::wm::component::McpPanelAction::Add,
-        Rect::new(help_area.x + 1, help_area.y, 7.min(help_area.width), 1),
-    ));
-    if help_area.width > 9 {
-        hitmap_out.mcp_action_rects.push((
-            window_id,
-            crate::wm::component::McpPanelAction::Edit,
-            Rect::new(
-                help_area.x + 10,
-                help_area.y,
-                8.min(help_area.width - 10),
-                1,
-            ),
-        ));
-    }
 }
 
 fn clamp_scroll(scroll: u32, total_rows: u32, viewport_height: u16) -> u32 {
@@ -187,282 +383,205 @@ fn build_projected_rows(
     browser: &McpBrowserState<'_>,
     wrap_count: &mut u64,
 ) -> Vec<McpProjectedRow> {
+    use atman_runtime::mcp::McpServerState;
     let t = theme();
     let mut rows = Vec::new();
-    let (ok, total) = atman_runtime::mcp::mcp_counts(servers);
-    rows.push(McpProjectedRow::Static(Line::from(vec![
-        Span::styled(
-            " MCP Servers",
-            Style::default()
-                .fg(t.accent.into())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!("({ok}/{total} connected)"),
-            Style::default().fg(t.subtle_fg.into()),
-        ),
-    ])));
-    rows.push(McpProjectedRow::Static(Line::from("")));
-
     if servers.is_empty() {
-        for line in [
-            Line::from(Span::styled(
-                " No MCP servers configured.",
-                Style::default().fg(t.subtle_fg.into()),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                " Add servers via CLI:",
-                Style::default().fg(t.subtle_fg.into()),
-            )),
-            Line::from(Span::styled(
-                "   atman mcp add",
-                Style::default().fg(t.tinted_fg.into()),
-            )),
-            Line::from(Span::styled(
-                "   atman mcp add --template filesystem",
-                Style::default().fg(t.tinted_fg.into()),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                " Or edit ~/.config/atman/mcp_servers.json",
-                Style::default().fg(t.subtle_fg.into()),
-            )),
-        ] {
-            rows.push(McpProjectedRow::Static(line));
-        }
+        push_wrapped(
+            &mut rows,
+            "No MCP servers configured.\n\nUse Add to connect a server.",
+            width,
+            t.subtle_fg.into(),
+        );
         return rows;
     }
-
-    rows.push(McpProjectedRow::Static(Line::from(Span::styled(
-        " St  Name              Transport  Tools  Detail",
-        Style::default()
-            .fg(t.subtle_fg.into())
-            .add_modifier(Modifier::BOLD),
-    ))));
-    rows.push(McpProjectedRow::Static(Line::from(Span::styled(
-        " ──  ────────────────  ─────────  ─────  ──────────────",
-        Style::default().fg(t.subtle_fg.into()),
-    ))));
-
-    let desc_width = (width as usize).saturating_sub(TOOL_DESC_OFFSET).max(10);
     for (index, server) in servers.iter().enumerate() {
-        rows.push(McpProjectedRow::Server(index));
+        rows.extend((0..SERVER_RECORD_HEIGHT).map(|line| McpProjectedRow::Server { index, line }));
         if !expanded.contains(&server.name) {
             continue;
         }
-        let atman_runtime::mcp::McpServerState::Connected { tools, .. } = &server.state else {
-            continue;
-        };
-
-        let tab_label = |tab: McpBrowserTab| {
-            if tab == browser.tab {
-                format!("[●]{}", tab.label())
-            } else {
-                format!("[ ]{}", tab.label())
-            }
-        };
-        rows.push(McpProjectedRow::Static(Line::from(Span::styled(
-            format!(
-                " Tab: {}  {}  {}",
-                tab_label(McpBrowserTab::Tools),
-                tab_label(McpBrowserTab::Resources),
-                tab_label(McpBrowserTab::Prompts),
-            ),
-            Style::default().fg(t.subtle_fg.into()),
-        ))));
-
-        match browser.tab {
-            McpBrowserTab::Tools => {
-                if tools.is_empty() {
-                    rows.push(McpProjectedRow::Static(Line::from(Span::styled(
-                        "   (no tools exposed)",
-                        Style::default().fg(t.subtle_fg.into()),
-                    ))));
-                } else {
-                    rows.push(McpProjectedRow::Static(Line::from(vec![
-                        Span::styled("   ", Style::default().bg(t.code_bg.into())),
-                        Span::styled(
-                            format!("{:<22} Description", "Tool"),
-                            Style::default()
-                                .fg(t.subtle_fg.into())
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ])));
-                    rows.push(McpProjectedRow::Static(Line::from(Span::styled(
-                        "   ────────────────────  ──────────────────────────────",
-                        Style::default().fg(t.subtle_fg.into()),
-                    ))));
-                    for tool in tools {
-                        let name = width::truncate(&tool.name, 22);
-                        let wrapped =
-                            width::word_wrap(tool.description.as_deref().unwrap_or(""), desc_width);
-                        *wrap_count = wrap_count.wrapping_add(1);
-                        for (line_index, description) in wrapped.into_iter().enumerate() {
-                            rows.push(McpProjectedRow::Static(Line::from(vec![
-                                Span::styled("   ", Style::default().bg(t.code_bg.into())),
-                                Span::styled(
-                                    if line_index == 0 {
-                                        width::pad_right(&name, 22)
-                                    } else {
-                                        " ".repeat(22)
-                                    },
-                                    Style::default().fg(t.tinted_fg.into()),
-                                ),
-                                Span::styled(description, Style::default().fg(t.subtle_fg.into())),
-                            ])));
+        match &server.state {
+            McpServerState::Connected { tools, .. } => {
+                push_wrapped(&mut rows, browser.tab.label(), width, t.subtle_fg.into());
+                rows.push(McpProjectedRow::Static(Line::default()));
+                match browser.tab {
+                    McpBrowserTab::Tools => {
+                        if tools.is_empty() {
+                            push_wrapped(&mut rows, "No tools exposed.", width, t.subtle_fg.into());
+                        }
+                        for tool in tools {
+                            push_named_description(
+                                &mut rows,
+                                &tool.name,
+                                tool.description.as_deref(),
+                                width,
+                                &t,
+                                wrap_count,
+                            );
                         }
                     }
+                    McpBrowserTab::Resources => match browser.resources.get(&server.name) {
+                        None => {
+                            push_wrapped(&mut rows, "Loading resources…", width, t.subtle_fg.into())
+                        }
+                        Some(resources) if resources.is_empty() => {
+                            push_wrapped(&mut rows, "No resources.", width, t.subtle_fg.into())
+                        }
+                        Some(resources) => {
+                            for resource in resources {
+                                push_named_description(
+                                    &mut rows,
+                                    &resource.name,
+                                    resource.description.as_deref(),
+                                    width,
+                                    &t,
+                                    wrap_count,
+                                );
+                            }
+                        }
+                    },
+                    McpBrowserTab::Prompts => match browser.prompts.get(&server.name) {
+                        None => {
+                            push_wrapped(&mut rows, "Loading prompts…", width, t.subtle_fg.into())
+                        }
+                        Some(prompts) if prompts.is_empty() => {
+                            push_wrapped(&mut rows, "No prompts.", width, t.subtle_fg.into())
+                        }
+                        Some(prompts) => {
+                            for prompt in prompts {
+                                push_named_description(
+                                    &mut rows,
+                                    &prompt.name,
+                                    prompt.description.as_deref(),
+                                    width,
+                                    &t,
+                                    wrap_count,
+                                );
+                            }
+                        }
+                    },
                 }
             }
-            McpBrowserTab::Resources => match browser.resources.get(&server.name) {
-                None => rows.push(McpProjectedRow::Static(Line::from(Span::styled(
-                    "   loading…",
-                    Style::default().fg(t.subtle_fg.into()),
-                )))),
-                Some(resources) if resources.is_empty() => {
-                    rows.push(McpProjectedRow::Static(Line::from(Span::styled(
-                        "   (no resources)",
-                        Style::default().fg(t.subtle_fg.into()),
-                    ))));
-                }
-                Some(resources) => {
-                    for resource in resources {
-                        rows.push(McpProjectedRow::Static(named_description_line(
-                            &resource.name,
-                            resource.description.as_deref().unwrap_or(""),
-                            &t,
-                        )));
-                    }
-                }
-            },
-            McpBrowserTab::Prompts => match browser.prompts.get(&server.name) {
-                None => rows.push(McpProjectedRow::Static(Line::from(Span::styled(
-                    "   loading…",
-                    Style::default().fg(t.subtle_fg.into()),
-                )))),
-                Some(prompts) if prompts.is_empty() => {
-                    rows.push(McpProjectedRow::Static(Line::from(Span::styled(
-                        "   (no prompts)",
-                        Style::default().fg(t.subtle_fg.into()),
-                    ))));
-                }
-                Some(prompts) => {
-                    for prompt in prompts {
-                        rows.push(McpProjectedRow::Static(named_description_line(
-                            &prompt.name,
-                            prompt.description.as_deref().unwrap_or(""),
-                            &t,
-                        )));
-                    }
-                }
-            },
+            McpServerState::Error { message }
+            | McpServerState::Timeout { message }
+            | McpServerState::Disconnected { message } => {
+                let (_, color, _) = server_display(server, &t);
+                push_wrapped(&mut rows, message, width, color);
+                *wrap_count = wrap_count.wrapping_add(1);
+            }
+            McpServerState::Disabled => push_wrapped(
+                &mut rows,
+                "Disabled. Toggle to enable this server.",
+                width,
+                t.subtle_fg.into(),
+            ),
+            McpServerState::Pending => {
+                push_wrapped(&mut rows, "Waiting to connect.", width, t.subtle_fg.into())
+            }
+            McpServerState::Connecting => push_wrapped(
+                &mut rows,
+                "Connection in progress.",
+                width,
+                t.subtle_fg.into(),
+            ),
         }
-        rows.push(McpProjectedRow::Static(Line::from("")));
+        rows.push(McpProjectedRow::Static(Line::default()));
     }
     rows
 }
 
-fn named_description_line(name: &str, description: &str, t: &crate::theme::Theme) -> Line<'static> {
-    let name = width::truncate(name, 22);
-    Line::from(vec![
-        Span::styled("   ", Style::default().bg(t.code_bg.into())),
-        Span::styled(
-            width::pad_right(&name, 22),
-            Style::default().fg(t.tinted_fg.into()),
-        ),
-        Span::styled(
-            description.to_string(),
-            Style::default().fg(t.subtle_fg.into()),
-        ),
-    ])
+fn push_wrapped(
+    rows: &mut Vec<McpProjectedRow>,
+    text: &str,
+    width: u16,
+    color: ratatui::style::Color,
+) {
+    let inset = 4.min(width.saturating_sub(1));
+    let available = width.saturating_sub(inset + 2).max(1) as usize;
+    rows.extend(width::word_wrap(text, available).into_iter().map(|line| {
+        McpProjectedRow::Static(Line::from(Span::styled(
+            format!("{}{line}", " ".repeat(inset as usize)),
+            Style::default().fg(color),
+        )))
+    }));
 }
 
-fn server_line(
-    server: &atman_runtime::mcp::McpServerStatus,
-    selected: bool,
-    hovered: bool,
-    expanded: bool,
+fn push_named_description(
+    rows: &mut Vec<McpProjectedRow>,
+    name: &str,
+    description: Option<&str>,
+    width: u16,
     t: &crate::theme::Theme,
-) -> Line<'static> {
+    wrap_count: &mut u64,
+) {
+    push_wrapped(rows, name, width, t.tinted_fg.into());
+    if let Some(description) = description.filter(|value| !value.is_empty()) {
+        push_wrapped(rows, description, width, t.subtle_fg.into());
+    }
+    rows.push(McpProjectedRow::Static(Line::default()));
+    *wrap_count = wrap_count.wrapping_add(1);
+}
+
+fn server_lines(
+    server: &atman_runtime::mcp::McpServerStatus,
+    expanded: bool,
+    width: u16,
+    t: &crate::theme::Theme,
+) -> Vec<Line<'static>> {
     let transport = match server.transport {
         atman_runtime::mcp::TransportKind::Stdio => "stdio",
         atman_runtime::mcp::TransportKind::Http => "http",
         atman_runtime::mcp::TransportKind::Sse => "sse",
     };
-    let (status_glyph, status_color, tools, detail) = server_display(server, t);
-    let bg = if selected {
-        t.highlight_bg.into()
-    } else if hovered {
-        t.user_msg_bg.into()
-    } else {
-        t.code_bg.into()
-    };
-    let detail = if expanded && server.is_ok() {
-        "expanded".to_string()
-    } else {
-        detail
-    };
-    Line::from(vec![
-        Span::styled(
-            format!(" {status_glyph} "),
-            Style::default().fg(status_color).bg(bg),
-        ),
-        Span::styled(
-            width::pad_right(&width::truncate(&server.name, 18), 18),
-            Style::default().fg(t.tinted_fg.into()).bg(bg),
-        ),
-        Span::styled(
-            format!("{transport:<10}"),
-            Style::default().fg(t.subtle_fg.into()).bg(bg),
-        ),
-        Span::styled(
-            format!("{tools:<6}"),
-            Style::default().fg(t.subtle_fg.into()).bg(bg),
-        ),
-        Span::styled(
-            format!("{} {detail}", if expanded { "▼" } else { "▶" }),
-            Style::default().fg(t.subtle_fg.into()).bg(bg),
-        ),
-    ])
+    let (glyph, color, detail) = server_display(server, t);
+    let name_width = width.saturating_sub(9) as usize;
+    vec![
+        Line::default(),
+        Line::from(vec![
+            Span::styled(format!(" {glyph} "), Style::default().fg(color)),
+            Span::styled(
+                width::pad_right(&width::truncate(&server.name, name_width), name_width),
+                Style::default()
+                    .fg(t.tinted_fg.into())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if expanded { "  ▾" } else { "  ▸" },
+                Style::default().fg(t.subtle_fg.into()),
+            ),
+        ]),
+        Line::from(Span::styled(
+            width::truncate(
+                &format!("   {transport} · {detail}"),
+                width.saturating_sub(3) as usize,
+            ),
+            Style::default().fg(t.subtle_fg.into()),
+        )),
+        Line::default(),
+    ]
 }
 
 fn server_display(
     s: &atman_runtime::mcp::McpServerStatus,
     t: &crate::theme::Theme,
-) -> (&'static str, ratatui::style::Color, String, String) {
+) -> (&'static str, ratatui::style::Color, String) {
+    use atman_runtime::mcp::McpServerState;
     match &s.state {
-        atman_runtime::mcp::McpServerState::Connected { tool_count, .. } => (
-            "●",
-            t.success.into(),
-            tool_count.to_string(),
-            format!("{} tools", tool_count),
-        ),
-        atman_runtime::mcp::McpServerState::Connecting => {
-            ("◐", t.warn.into(), "—".into(), "connecting...".into())
+        McpServerState::Connected { tool_count, .. } => {
+            ("●", t.success.into(), format!("{tool_count} tools"))
         }
-        atman_runtime::mcp::McpServerState::Disabled => {
-            ("◌", t.subtle_fg.into(), "—".into(), "disabled".into())
-        }
-        atman_runtime::mcp::McpServerState::Error { message } => (
-            "✗",
-            t.error.into(),
-            "—".into(),
-            format!("error: {}", width::truncate(message, 24)),
-        ),
-        atman_runtime::mcp::McpServerState::Disconnected { message } => (
+        McpServerState::Connecting => ("◐", t.warn.into(), "connecting…".into()),
+        McpServerState::Disabled => ("◌", t.subtle_fg.into(), "disabled".into()),
+        McpServerState::Error { .. } => ("✗", t.error.into(), "error · expand for details".into()),
+        McpServerState::Disconnected { .. } => (
             "○",
             t.subtle_fg.into(),
-            "—".into(),
-            width::truncate(message, 24),
+            "disconnected · expand for details".into(),
         ),
-        atman_runtime::mcp::McpServerState::Timeout { message } => {
-            ("⏱", t.warn.into(), "—".into(), width::truncate(message, 24))
+        McpServerState::Timeout { .. } => {
+            ("⏱", t.warn.into(), "timed out · expand for details".into())
         }
-        atman_runtime::mcp::McpServerState::Pending => {
-            ("·", t.subtle_fg.into(), "—".into(), "pending".into())
-        }
+        McpServerState::Pending => ("·", t.subtle_fg.into(), "pending".into()),
     }
 }
 
@@ -1336,7 +1455,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_exposes_add_and_edit_mouse_actions() {
+    fn panel_records_and_actions_share_padded_hit_geometry() {
         let servers = vec![connected_server("server", Vec::new())];
         let expanded = HashSet::new();
         let resources = HashMap::new();
@@ -1360,6 +1479,8 @@ mod tests {
                     &McpBrowserState {
                         tab: McpBrowserTab::Tools,
                         content_revision: 0,
+                        hovered_action: None,
+                        remove_armed: None,
                         resources: &resources,
                         prompts: &prompts,
                     },
@@ -1369,14 +1490,62 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(hitmap.mcp_action_rects.len(), 2);
+        assert_eq!(hitmap.mcp_action_rects.len(), 6);
+        for (index, (_, _, rect)) in hitmap.mcp_action_rects.iter().enumerate() {
+            assert_eq!(rect.height, 3);
+            assert!(
+                hitmap.mcp_action_rects[index + 1..]
+                    .iter()
+                    .all(|(_, _, other)| !rect.intersects(*other))
+            );
+        }
+        let record = hitmap.mcp_row_rects[0].2;
+        assert_eq!(record.height, SERVER_RECORD_HEIGHT as u16);
+        for row in record.y..record.bottom() {
+            assert_eq!(terminal.backend().buffer()[(record.x, row)].symbol(), "▌");
+            assert_eq!(
+                terminal.backend().buffer()[(record.right() - 1, row)].bg,
+                terminal.backend().buffer()[(record.x + 1, record.y)].bg
+            );
+        }
+        hitmap = WmHitmap::default();
+        terminal
+            .draw(|frame| {
+                render_panel(
+                    frame,
+                    frame.area(),
+                    &mut scroll,
+                    &servers,
+                    &expanded,
+                    0,
+                    &None,
+                    &mut hitmap,
+                    &McpBrowserState {
+                        tab: McpBrowserTab::Tools,
+                        content_revision: 0,
+                        hovered_action: None,
+                        remove_armed: Some("server"),
+                        resources: &resources,
+                        prompts: &prompts,
+                    },
+                    crate::wm::WindowId(1),
+                    &mut projection,
+                );
+            })
+            .unwrap();
         assert_eq!(
-            hitmap.mcp_action_rects[0].1,
-            crate::wm::component::McpPanelAction::Add
+            hitmap
+                .mcp_action_rects
+                .iter()
+                .map(|(_, action, _)| *action)
+                .collect::<Vec<_>>(),
+            [McpPanelAction::Remove, McpPanelAction::CancelRemove]
         );
-        assert_eq!(
-            hitmap.mcp_action_rects[1].1,
-            crate::wm::component::McpPanelAction::Edit
+        assert!(
+            hitmap
+                .mcp_action_rects
+                .iter()
+                .all(|(_, _, rect)| rect.height == 3)
         );
     }
 
@@ -1388,6 +1557,83 @@ mod tests {
                 tool_count: tools.len(),
                 tools,
             },
+        }
+    }
+
+    #[test]
+    fn narrow_panel_keeps_a_complete_record_and_readable_action_shortcuts() {
+        let servers = vec![connected_server("server", Vec::new())];
+        let resources = HashMap::new();
+        let prompts = HashMap::new();
+        let mut projection = McpPanelProjection::default();
+        let mut scroll = 0;
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(40, 18)).unwrap();
+        for armed in [None, Some("server")] {
+            let mut hitmap = WmHitmap::default();
+            terminal
+                .draw(|frame| {
+                    render_panel(
+                        frame,
+                        Rect::new(4, 2, 32, 14),
+                        &mut scroll,
+                        &servers,
+                        &HashSet::new(),
+                        0,
+                        &None,
+                        &mut hitmap,
+                        &McpBrowserState {
+                            tab: McpBrowserTab::Tools,
+                            content_revision: 0,
+                            hovered_action: None,
+                            remove_armed: armed,
+                            resources: &resources,
+                            prompts: &prompts,
+                        },
+                        crate::wm::WindowId(1),
+                        &mut projection,
+                    );
+                })
+                .unwrap();
+            assert_eq!(
+                hitmap.mcp_row_rects[0].2.height,
+                SERVER_RECORD_HEIGHT as u16
+            );
+            let labels = hitmap
+                .mcp_action_rects
+                .iter()
+                .map(|(_, _, rect)| {
+                    assert_eq!(rect.height, 3);
+                    (rect.x..rect.right())
+                        .map(|x| terminal.backend().buffer()[(x, rect.y + 1)].symbol())
+                        .collect::<String>()
+                        .trim()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>();
+            if armed.is_some() {
+                assert_eq!(labels, ["Confirm  ↵", "Cancel  Esc"]);
+                let help = (0..40)
+                    .map(|x| terminal.backend().buffer()[(x, 15)].symbol())
+                    .collect::<String>();
+                assert!(help.contains("Enter confirm · Esc cancel"));
+                assert!(!help.contains("expand"));
+            } else {
+                assert_eq!(
+                    labels,
+                    [
+                        "Add  a",
+                        "Edit  e",
+                        "Test  t",
+                        "Mode  d",
+                        "Del  r",
+                        "View  ⇥"
+                    ]
+                );
+                assert_eq!(
+                    hitmap.mcp_action_rects[0].2.bottom() + 1,
+                    hitmap.mcp_action_rects[3].2.y
+                );
+            }
         }
     }
 
@@ -1436,8 +1682,8 @@ mod tests {
         let mut projection = McpPanelProjection::default();
         for (tab, expected_rows) in [
             (McpBrowserTab::Tools, 8),
-            (McpBrowserTab::Resources, 9),
-            (McpBrowserTab::Prompts, 10),
+            (McpBrowserTab::Resources, 11),
+            (McpBrowserTab::Prompts, 13),
         ] {
             projection.update(
                 80,
@@ -1446,6 +1692,8 @@ mod tests {
                 &McpBrowserState {
                     tab,
                     content_revision: 1,
+                    hovered_action: None,
+                    remove_armed: None,
                     resources: &resources,
                     prompts: &prompts,
                 },
@@ -1475,19 +1723,21 @@ mod tests {
         let browser = McpBrowserState {
             tab: McpBrowserTab::Tools,
             content_revision: 7,
+            hovered_action: None,
+            remove_armed: None,
             resources: &resources,
             prompts: &prompts,
         };
         let mut projection = McpPanelProjection::default();
 
-        projection.update(52, &servers, &expanded, &browser);
+        projection.update(50, &servers, &expanded, &browser);
         assert_eq!(projection.rebuild_count, 1);
         assert_eq!(projection.wrap_count, 2);
-        projection.update(52, &servers, &expanded, &browser);
+        projection.update(50, &servers, &expanded, &browser);
         assert_eq!(projection.rebuild_count, 1);
         assert_eq!(projection.wrap_count, 2);
 
-        let backend = TestBackend::new(52, 8);
+        let backend = TestBackend::new(52, 18);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let mut hitmap = WmHitmap::default();
         let mut scroll = 3;
@@ -1529,13 +1779,15 @@ mod tests {
         let browser = McpBrowserState {
             tab: McpBrowserTab::Tools,
             content_revision: 1,
+            hovered_action: None,
+            remove_armed: None,
             resources: &resources,
             prompts: &prompts,
         };
         let mut projection = McpPanelProjection::default();
         let mut hitmap = WmHitmap::default();
         let mut scroll = u32::MAX;
-        let backend = TestBackend::new(60, 6);
+        let backend = TestBackend::new(60, 18);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
@@ -1555,11 +1807,86 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(projection.total_rows(), 16);
-        assert_eq!(scroll, 11);
-        assert_eq!(hitmap.mcp_row_rects.len(), 5);
-        assert_eq!(hitmap.mcp_row_rects.first().unwrap().1, "server-7");
+        assert_eq!(projection.total_rows(), 48);
+        assert_eq!(scroll, 41);
+        assert_eq!(hitmap.mcp_row_rects.len(), 2);
+        assert_eq!(hitmap.mcp_row_rects.first().unwrap().1, "server-10");
         assert_eq!(hitmap.mcp_row_rects.last().unwrap().1, "server-11");
+    }
+
+    #[test]
+    fn selection_follows_navigation_and_resize_without_overriding_manual_scroll() {
+        let servers = (0..12)
+            .map(|index| connected_server(&format!("server-{index}"), Vec::new()))
+            .collect::<Vec<_>>();
+        let resources = HashMap::new();
+        let prompts = HashMap::new();
+        let mut projection = McpPanelProjection::default();
+        projection.update(
+            40,
+            &servers,
+            &HashSet::new(),
+            &McpBrowserState {
+                tab: McpBrowserTab::Tools,
+                content_revision: 0,
+                hovered_action: None,
+                remove_armed: None,
+                resources: &resources,
+                prompts: &prompts,
+            },
+        );
+        let area = Rect::new(0, 0, 40, 8);
+        let mut scroll = 0;
+        projection.follow_selection(9, &servers, area, &mut scroll);
+        assert_eq!(scroll, 32);
+        scroll = 12;
+        projection.follow_selection(9, &servers, area, &mut scroll);
+        assert_eq!(scroll, 12);
+        projection.follow_selection(10, &servers, area, &mut scroll);
+        assert_eq!(scroll, 36);
+        projection.follow_selection(10, &servers, Rect::new(0, 0, 40, 4), &mut scroll);
+        assert_eq!(scroll, 40);
+    }
+
+    #[test]
+    fn expanded_diagnostics_and_descriptions_wrap_without_losing_content() {
+        let servers = vec![McpServerStatus {
+            name: "failed".into(),
+            transport: TransportKind::Http,
+            state: McpServerState::Error { message: "Cannot connect to configured endpoint. 检查服务器配置和网络连接。 Final detail remains readable.".into() },
+        }];
+        let resources = HashMap::new();
+        let prompts = HashMap::new();
+        let browser = McpBrowserState {
+            tab: McpBrowserTab::Tools,
+            content_revision: 0,
+            hovered_action: None,
+            remove_armed: None,
+            resources: &resources,
+            prompts: &prompts,
+        };
+        let mut projection = McpPanelProjection::default();
+        projection.update(34, &servers, &HashSet::from(["failed".into()]), &browser);
+        let text = projection
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                McpProjectedRow::Static(line) => {
+                    assert!(line.width() <= 34);
+                    Some(line.to_string())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let McpServerState::Error { message } = &servers[0].state else {
+            unreachable!();
+        };
+        assert_eq!(
+            text.split_whitespace().collect::<String>(),
+            message.split_whitespace().collect::<String>()
+        );
+        assert!(projection.total_rows() > SERVER_RECORD_HEIGHT as u32);
     }
 
     #[test]
@@ -1597,6 +1924,8 @@ mod tests {
         let browser = McpBrowserState {
             tab: McpBrowserTab::Tools,
             content_revision: 1,
+            hovered_action: None,
+            remove_armed: None,
             resources: &resources,
             prompts: &prompts,
         };

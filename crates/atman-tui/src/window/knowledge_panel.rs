@@ -1446,6 +1446,8 @@ mod tests {
             content_revision: 0,
             resources: &resources,
             prompts: &prompts,
+            hovered_action: None,
+            remove_armed: None,
         };
         for (width, height) in [(100, 36), (55, 16)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();

@@ -62,7 +62,7 @@ pub fn render_shell(
             Style::default().fg(t.heading.into()).bg(panel_bg),
         ),
         Span::styled(
-            crate::width::truncate(&title_text, panel.rect.width as usize - 6),
+            crate::width::truncate(&title_text, panel.rect.width.saturating_sub(6) as usize),
             Style::default().fg(t.tinted_fg.into()).bg(panel_bg),
         ),
     ]);

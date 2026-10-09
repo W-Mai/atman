@@ -747,6 +747,8 @@ mod tests {
         let browser = crate::mcp_manager::McpBrowserState {
             tab: crate::mcp_manager::McpBrowserTab::default(),
             content_revision: 0,
+            hovered_action: None,
+            remove_armed: None,
             resources: &resources,
             prompts: &prompts,
         };

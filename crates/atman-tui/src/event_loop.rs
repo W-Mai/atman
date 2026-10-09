@@ -14,7 +14,7 @@ use crate::app;
 use crate::app::AppState;
 use crate::input::{InputEditor, cursor_from_wrapped};
 use crate::key_handler;
-use crate::keys::map as map_key;
+use crate::keys::{KeyAction, map as map_key};
 use crate::layout;
 use crate::render::{ANIMATION_TICK_MS, check_latest_release, rect_contains, render_frame};
 use crate::{
@@ -699,31 +699,16 @@ pub(crate) async fn run_frames(
                                             app.app.last_transcript_rect.unwrap_or_default();
                                         app.open_task_panel(&handle, canvas);
                                     } else if let Some(action) = mcp_action_hit {
-                                        match action {
-                                            crate::wm::component::McpPanelAction::Add => {
-                                                app.wm.modals.open_mcp_add();
-                                            }
-                                            crate::wm::component::McpPanelAction::Edit => {
-                                                if let Some(server) = app
-                                                    .app
-                                                    .context
-                                                    .mcp_servers
-                                                    .get(app.app.mcp_selected)
-                                                {
-                                                    let name = server.name.clone();
-                                                    if let Err(error) =
-                                                        app.wm.modals.open_mcp_edit(&name)
-                                                    {
-                                                        app.app.push_toast(
-                                                            error,
-                                                            crate::app::NoteLevel::Warn,
-                                                            std::time::Duration::from_secs(4),
-                                                            crate::app::ToastPosition::TopRight,
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
+                                        let key = match action {
+                                            crate::wm::component::McpPanelAction::Add => KeyAction::Char('a'),
+                                            crate::wm::component::McpPanelAction::Edit => KeyAction::Char('e'),
+                                            crate::wm::component::McpPanelAction::Test => KeyAction::Char('t'),
+                                            crate::wm::component::McpPanelAction::Toggle => KeyAction::Char('d'),
+                                            crate::wm::component::McpPanelAction::Remove => KeyAction::Char('r'),
+                                            crate::wm::component::McpPanelAction::CancelRemove => KeyAction::Escape,
+                                            crate::wm::component::McpPanelAction::NextTab => KeyAction::Tab,
+                                        };
+                                        crate::key_handler::handle_mcp_panel_key(&key, &mut app, handle.control_tx.as_ref());
                                     } else if let Some(name) = mcp_hit {
                                         if let Some(index) = app
                                             .app
@@ -734,9 +719,8 @@ pub(crate) async fn run_frames(
                                         {
                                             app.app.mcp_selected = index;
                                         }
-                                        if !app.app.expanded_mcp_servers.remove(&name) {
-                                            app.app.expanded_mcp_servers.insert(name);
-                                        }
+                                        app.app.mcp_remove_armed = None;
+                                        crate::key_handler::handle_mcp_panel_key(&KeyAction::Submit, &mut app, handle.control_tx.as_ref());
                                     } else if let Some((panel_idx, path)) = wf_hit {
                                         if path.is_empty() {
                                             app.app.toggle_workflow_panel_expansion(panel_idx);
@@ -1294,6 +1278,11 @@ pub(crate) async fn run_frames(
                                         app.wm.interaction.hovered_mcp_row = mcp_hover;
                                     }
 
+                                    let action_hover = app.wm.interaction.last_hitmap.mcp_action_rects.iter()
+                                        .find(|(pid, _, rect)| *pid == panel_id && rect_contains(*rect, me.column, me.row))
+                                        .map(|(_, action, _)| *action);
+                                    app.wm.interaction.hovered_mcp_action = action_hover;
+
                                     // Over a floating panel — base-layer hovers cleared.
                                     app.app.hovered_sidebar_row = None;
                                     app.app.hovered_sidebar_hamburger = false;
@@ -1320,6 +1309,7 @@ pub(crate) async fn run_frames(
                                     if app.wm.interaction.hovered_mcp_row.is_some() {
                                         app.wm.interaction.hovered_mcp_row = None;
                                     }
+                                    app.wm.interaction.hovered_mcp_action = None;
                                     // Sidebar strip hover
                                 let sidebar_hover = app
                                     .last_sidebar_strip_rects

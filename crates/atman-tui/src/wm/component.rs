@@ -84,6 +84,11 @@ pub struct HitRegion {
 pub enum McpPanelAction {
     Add,
     Edit,
+    Test,
+    Toggle,
+    Remove,
+    CancelRemove,
+    NextTab,
 }
 
 #[derive(Debug, Clone)]

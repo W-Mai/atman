@@ -100,6 +100,7 @@ pub struct WmInteractionState {
     pub hovered_panel_btn: Option<(WindowId, PanelBtn)>,
     pub hovered_history_row: Option<String>,
     pub hovered_mcp_row: Option<String>,
+    pub hovered_mcp_action: Option<component::McpPanelAction>,
     pub last_hitmap: WmHitmap,
     pub panel_close_armed_id: Option<String>,
     pub panel_close_armed_at: Option<std::time::Instant>,
@@ -650,14 +651,15 @@ impl WindowManager {
             return (false, Vec::new());
         };
 
-        if matches!(panel.content_kind, WindowContent::Projects)
-            && matches!(
-                action,
-                crate::keys::KeyAction::PageUp
-                    | crate::keys::KeyAction::PageDown
-                    | crate::keys::KeyAction::Escape
-            )
-            && let Some(content) = panel.content.as_mut()
+        if matches!(
+            panel.content_kind,
+            WindowContent::Projects | WindowContent::Knowledge
+        ) && matches!(
+            action,
+            crate::keys::KeyAction::PageUp
+                | crate::keys::KeyAction::PageDown
+                | crate::keys::KeyAction::Escape
+        ) && let Some(content) = panel.content.as_mut()
         {
             let mut ctx = EventCtx {
                 scroll: &mut panel.scroll,
@@ -692,18 +694,10 @@ impl WindowManager {
                 return (true, Vec::new());
             }
             crate::keys::KeyAction::Escape => {
-                if matches!(panel.content_kind, WindowContent::Knowledge)
-                    && let Some(content) = panel.content.as_mut()
+                if matches!(panel.content_kind, WindowContent::Mcp)
+                    && app.mcp_remove_armed.take().is_some()
                 {
-                    let mut ctx = EventCtx {
-                        scroll: &mut panel.scroll,
-                        h_scroll: &mut panel.h_scroll,
-                    };
-                    if let WmEventResult::Consumed(commands) =
-                        content.handle_event(&WmEvent::Key(action.clone()), &mut ctx)
-                    {
-                        return (true, commands);
-                    }
+                    return (true, Vec::new());
                 }
                 if let WindowContent::Task {
                     handle,
@@ -917,6 +911,9 @@ impl WindowManager {
         control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> (bool, Vec<WmCommand>) {
         self.sync_modals();
+        if app.modal_notification.is_some() {
+            return (true, Vec::new());
+        }
         if self.top_kind() == Some(ModalKind::Palette) {
             if let Some(id) = self.modals.palette.handle_mouse(event) {
                 return (true, self.apply_palette_action(id, app, control_tx));
@@ -1076,6 +1073,8 @@ impl WindowManager {
             let hovered_panel_btn = self.interaction.hovered_panel_btn;
             let hovered_history_row = self.interaction.hovered_history_row.clone();
             let hovered_mcp_row = self.interaction.hovered_mcp_row.clone();
+            let mut mcp_browser = app.mcp_browser_state();
+            mcp_browser.hovered_action = self.interaction.hovered_mcp_action;
             let close_armed_id = self.interaction.panel_close_armed_id.clone();
             let close_armed = close_armed_id
                 .as_deref()
@@ -1103,7 +1102,7 @@ impl WindowManager {
                 &app.expanded_mcp_servers,
                 app.mcp_selected,
                 &hovered_mcp_row,
-                &app.mcp_browser_state(),
+                &mcp_browser,
             );
         }
 
@@ -1206,7 +1205,13 @@ pub fn render(
     sorted.sort_by_key(|&i| panels.panels[i].z);
 
     for panel in &mut panels.panels {
-        if panel.maximized {
+        if matches!(
+            panel.content_kind,
+            WindowContent::Mcp | WindowContent::Knowledge
+        ) && (canvas.width < 55 || canvas.height < 22)
+        {
+            panel.rect = canvas;
+        } else if panel.maximized {
             panel.rect = if matches!(panel.content_kind, WindowContent::Projects) {
                 canvas
             } else {
@@ -1256,7 +1261,14 @@ pub fn render(
 
         let mut panel_hitmap = WmHitmap::default();
         if content_area.height > 0 && content_area.width > 0 {
-            let content_bg: Color = t.code_bg.into();
+            let content_bg: Color = if matches!(
+                panel.content_kind,
+                WindowContent::Mcp | WindowContent::Knowledge
+            ) {
+                shell::surface_bg(&t)
+            } else {
+                t.code_bg.into()
+            };
             f.render_widget(Clear, content_area);
             f.render_widget(
                 Block::default().style(Style::default().bg(content_bg)),
@@ -1515,6 +1527,39 @@ mod tests {
         let reopened = wm.panels[0].content.as_deref().unwrap() as *const dyn WindowComponent;
         assert_eq!(wm.panels.len(), 1);
         assert!(std::ptr::addr_eq(original, reopened));
+    }
+
+    #[test]
+    fn management_panels_fit_small_canvases_and_notifications_block_mouse() {
+        for kind in [WindowContent::Mcp, WindowContent::Knowledge] {
+            let mut wm = WindowManager::default();
+            let mut app = crate::app::AppState::default();
+            let canvas = Rect::new(0, 0, 40, 18);
+            let id = wm.open("management", kind.content_key(), kind, "Management", canvas);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 18)).unwrap();
+            terminal
+                .draw(|frame| wm.render(frame, canvas, &mut app))
+                .unwrap();
+            assert_eq!(wm.panels[0].rect, canvas);
+            app.modal_notification = Some("Notice".into());
+            let event = MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 10,
+                row: 8,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            };
+            assert!(wm.dispatch_mouse(&event, &mut app, None).0);
+            assert_eq!(wm.panels[0].scroll, 0);
+            app.modal_notification = None;
+            app.mcp_remove_armed = Some("server".into());
+            if matches!(wm.content_kind(id), Some(WindowContent::Mcp)) {
+                let (consumed, commands) =
+                    wm.dispatch_key(&crate::keys::KeyAction::Escape, &mut app, None);
+                assert!(consumed && commands.is_empty());
+                assert!(app.mcp_remove_armed.is_none());
+            }
+        }
     }
 
     #[test]
@@ -2186,6 +2231,8 @@ mod tests {
         let browser = crate::mcp_manager::McpBrowserState {
             tab: crate::mcp_manager::McpBrowserTab::default(),
             content_revision: 0,
+            hovered_action: None,
+            remove_armed: None,
             resources: &resources,
             prompts: &prompts,
         };
@@ -2275,6 +2322,8 @@ mod tests {
         let mcp_browser = crate::mcp_manager::McpBrowserState {
             tab: crate::mcp_manager::McpBrowserTab::default(),
             content_revision: 0,
+            hovered_action: None,
+            remove_armed: None,
             resources: &mcp_resources,
             prompts: &mcp_prompts,
         };
@@ -2351,6 +2400,8 @@ mod tests {
         let mcp_browser = crate::mcp_manager::McpBrowserState {
             tab: crate::mcp_manager::McpBrowserTab::default(),
             content_revision: 0,
+            hovered_action: None,
+            remove_armed: None,
             resources: &mcp_resources,
             prompts: &mcp_prompts,
         };

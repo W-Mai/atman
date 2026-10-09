@@ -68,7 +68,7 @@ impl WindowComponent for McpPanelContent {
 
     fn preferred_size(&self, _viewport: Rect) -> SizeHint {
         SizeHint {
-            min: (40, 10),
+            min: (44, 18),
             max: None,
             preferred: (70, 30),
         }

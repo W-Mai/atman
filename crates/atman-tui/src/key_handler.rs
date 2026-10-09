@@ -764,6 +764,210 @@ pub(crate) fn dispatch_approval_click(
     }
 }
 
+pub(crate) fn handle_mcp_panel_key(
+    action: &KeyAction,
+    app: &mut UiState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) -> bool {
+    if app.modal_notification.is_some() || app.wm.modals.any_open() {
+        return false;
+    }
+    let Some(id) = app.wm.focused_id().filter(|id| {
+        app.wm.panels.iter().any(|panel| {
+            panel.id == *id && matches!(panel.content_kind, crate::wm::WindowContent::Mcp)
+        })
+    }) else {
+        return false;
+    };
+    app.wm.interaction.last_hitmap.mcp_action_rects.clear();
+    app.wm.interaction.last_hitmap.mcp_row_rects.clear();
+    app.mcp_selected = app
+        .mcp_selected
+        .min(app.context.mcp_servers.len().saturating_sub(1));
+    let selected_name = app
+        .context
+        .mcp_servers
+        .get(app.mcp_selected)
+        .map(|server| server.name.clone());
+    if let Some(armed) = app.mcp_remove_armed.take() {
+        if selected_name.as_deref() == Some(armed.as_str())
+            && matches!(action, KeyAction::Submit | KeyAction::Char('r'))
+        {
+            match atman_runtime::config_hub::ConfigHub::global()
+                .and_then(|hub| hub.remove_mcp(&armed))
+            {
+                Ok(()) => {
+                    app.push_toast(
+                        format!("removed {armed} — reloading…"),
+                        app::NoteLevel::Info,
+                        std::time::Duration::from_secs(3),
+                        app::ToastPosition::TopRight,
+                    );
+                    if let Some(tx) = control_tx {
+                        let _ = tx.send(TuiControl::McpReload);
+                    }
+                }
+                Err(error) => app.push_toast(
+                    format!("remove failed: {error}"),
+                    app::NoteLevel::Error,
+                    std::time::Duration::from_secs(5),
+                    app::ToastPosition::TopRight,
+                ),
+            }
+            return true;
+        }
+        if matches!(action, KeyAction::Escape) {
+            return true;
+        }
+    }
+    let server_count = app.context.mcp_servers.len();
+    match action {
+        KeyAction::Tab => {
+            app.mcp_browser_tab = app.mcp_browser_tab.next();
+            ensure_mcp_tab_data(app, control_tx);
+            return true;
+        }
+        KeyAction::HistoryUp | KeyAction::Char('k') => {
+            app.mcp_remove_armed = None;
+            if app.mcp_selected > 0 {
+                app.mcp_selected -= 1;
+            }
+            return true;
+        }
+        KeyAction::HistoryDown | KeyAction::Char('j') => {
+            app.mcp_remove_armed = None;
+            if app.mcp_selected + 1 < server_count {
+                app.mcp_selected += 1;
+            }
+            return true;
+        }
+        KeyAction::Submit => {
+            if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
+                let name = s.name.clone();
+                if !app.expanded_mcp_servers.remove(&name) {
+                    app.expanded_mcp_servers.insert(name);
+                }
+            }
+            ensure_mcp_tab_data(app, control_tx);
+            return true;
+        }
+        KeyAction::Char('d') => {
+            if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
+                let name = s.name.clone();
+                match atman_runtime::config_hub::ConfigHub::global()
+                    .and_then(|hub| hub.toggle_mcp(&name))
+                {
+                    Ok(disabled) => {
+                        let msg = if disabled {
+                            format!("disabled {name} — reloading…")
+                        } else {
+                            format!("enabled {name} — reloading…")
+                        };
+                        app.push_toast(
+                            msg,
+                            app::NoteLevel::Info,
+                            std::time::Duration::from_secs(3),
+                            app::ToastPosition::TopRight,
+                        );
+                        if let Some(tx) = control_tx {
+                            let _ = tx.send(TuiControl::McpReload);
+                        }
+                    }
+                    Err(e) => {
+                        app.push_toast(
+                            format!("toggle failed: {e}"),
+                            app::NoteLevel::Error,
+                            std::time::Duration::from_secs(5),
+                            app::ToastPosition::TopRight,
+                        );
+                    }
+                }
+            }
+            return true;
+        }
+        KeyAction::Char('r') => {
+            if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
+                app.mcp_remove_armed = Some(s.name.clone());
+            }
+            return true;
+        }
+        KeyAction::Char('a') => {
+            app.wm.modals.open_mcp_add();
+            return true;
+        }
+        KeyAction::Char('e') => {
+            if let Some(server) = app.context.mcp_servers.get(app.mcp_selected) {
+                let name = server.name.clone();
+                if let Err(error) = app.wm.modals.open_mcp_edit(&name) {
+                    app.push_toast(
+                        error,
+                        app::NoteLevel::Warn,
+                        std::time::Duration::from_secs(4),
+                        app::ToastPosition::TopRight,
+                    );
+                }
+            }
+            return true;
+        }
+        KeyAction::Char('t') => {
+            if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
+                let name = s.name.clone();
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::McpTest { name: name.clone() });
+                    app.push_toast(
+                        format!("testing {name}…"),
+                        app::NoteLevel::Info,
+                        std::time::Duration::from_secs(10),
+                        app::ToastPosition::TopRight,
+                    );
+                } else {
+                    app.push_toast(
+                        "test not available (no control channel)",
+                        app::NoteLevel::Warn,
+                        std::time::Duration::from_secs(3),
+                        app::ToastPosition::TopRight,
+                    );
+                }
+            }
+            return true;
+        }
+        KeyAction::Char('q') => {
+            app.wm.close(id);
+            return true;
+        }
+        _ => {}
+    }
+    false
+}
+
+fn ensure_mcp_tab_data(app: &mut UiState, control_tx: Option<&mpsc::UnboundedSender<TuiControl>>) {
+    let Some(tx) = control_tx else {
+        return;
+    };
+    for server in &app.context.mcp_servers {
+        if !server.is_ok() || !app.expanded_mcp_servers.contains(&server.name) {
+            continue;
+        }
+        let name = server.name.clone();
+        let request = match app.mcp_browser_tab {
+            crate::mcp_manager::McpBrowserTab::Resources
+                if !app.mcp_resources_cache.contains_key(&name) =>
+            {
+                Some(TuiControl::McpListResources { name })
+            }
+            crate::mcp_manager::McpBrowserTab::Prompts
+                if !app.mcp_prompts_cache.contains_key(&name) =>
+            {
+                Some(TuiControl::McpListPrompts { name })
+            }
+            _ => None,
+        };
+        if let Some(request) = request {
+            let _ = tx.send(request);
+        }
+    }
+}
+
 pub(crate) fn handle_key(
     action: KeyAction,
     app: &mut UiState,
@@ -785,7 +989,8 @@ pub(crate) fn handle_key(
     }
 
     if let KeyAction::Tab = action {
-        if let Some(id) = app.wm.focused_id()
+        if !app.wm.modals.any_open()
+            && let Some(id) = app.wm.focused_id()
             && let Some(panel) = app.wm.panels.iter_mut().find(|p| p.id == id)
             && matches!(panel.content_kind, crate::wm::WindowContent::Mermaid { .. })
         {
@@ -795,205 +1000,10 @@ pub(crate) fn handle_key(
         }
     }
 
-    if let Some(id) = app.wm.focused_id()
-        && app
-            .wm
-            .panels
-            .iter()
-            .any(|p| p.id == id && matches!(p.content_kind, crate::wm::WindowContent::Mcp))
-    {
-        let server_count = app.context.mcp_servers.len();
-        match action {
-            KeyAction::Tab => {
-                app.mcp_browser_tab = app.mcp_browser_tab.next();
-                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
-                    let name = s.name.clone();
-                    match app.mcp_browser_tab {
-                        crate::mcp_manager::McpBrowserTab::Resources
-                            if !app.mcp_resources_cache.contains_key(&name) =>
-                        {
-                            if let Some(tx) = control_tx {
-                                let _ = tx.send(TuiControl::McpListResources { name });
-                                app.push_toast(
-                                    "loading resources…".to_string(),
-                                    app::NoteLevel::Info,
-                                    std::time::Duration::from_secs(3),
-                                    app::ToastPosition::TopRight,
-                                );
-                            }
-                        }
-                        crate::mcp_manager::McpBrowserTab::Prompts
-                            if !app.mcp_prompts_cache.contains_key(&name) =>
-                        {
-                            if let Some(tx) = control_tx {
-                                let _ = tx.send(TuiControl::McpListPrompts { name });
-                                app.push_toast(
-                                    "loading prompts…".to_string(),
-                                    app::NoteLevel::Info,
-                                    std::time::Duration::from_secs(3),
-                                    app::ToastPosition::TopRight,
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                return;
-            }
-            KeyAction::HistoryUp | KeyAction::Char('k') => {
-                app.mcp_remove_armed = None;
-                if app.mcp_selected > 0 {
-                    app.mcp_selected -= 1;
-                }
-                return;
-            }
-            KeyAction::HistoryDown | KeyAction::Char('j') => {
-                app.mcp_remove_armed = None;
-                if app.mcp_selected + 1 < server_count {
-                    app.mcp_selected += 1;
-                }
-                return;
-            }
-            KeyAction::Submit => {
-                app.mcp_remove_armed = None;
-                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
-                    let name = s.name.clone();
-                    if !app.expanded_mcp_servers.remove(&name) {
-                        app.expanded_mcp_servers.insert(name);
-                    }
-                }
-                return;
-            }
-            KeyAction::Char('d') => {
-                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
-                    let name = s.name.clone();
-                    match atman_runtime::config_hub::ConfigHub::global()
-                        .and_then(|hub| hub.toggle_mcp(&name))
-                    {
-                        Ok(disabled) => {
-                            let msg = if disabled {
-                                format!("disabled {name} — reloading…")
-                            } else {
-                                format!("enabled {name} — reloading…")
-                            };
-                            app.push_toast(
-                                msg,
-                                app::NoteLevel::Info,
-                                std::time::Duration::from_secs(3),
-                                app::ToastPosition::TopRight,
-                            );
-                            if let Some(tx) = control_tx {
-                                let _ = tx.send(TuiControl::McpReload);
-                            }
-                        }
-                        Err(e) => {
-                            app.push_toast(
-                                format!("toggle failed: {e}"),
-                                app::NoteLevel::Error,
-                                std::time::Duration::from_secs(5),
-                                app::ToastPosition::TopRight,
-                            );
-                        }
-                    }
-                }
-                return;
-            }
-            KeyAction::Char('r') => {
-                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
-                    let name = s.name.clone();
-                    app.mcp_remove_armed = Some(name.clone());
-                    app.modal_notification = Some(format!(
-                        "Remove MCP server \"{name}\"?\n\n  Enter = confirm   Esc = cancel"
-                    ));
-                }
-                return;
-            }
-            KeyAction::Char('a') => {
-                app.wm.modals.open_mcp_add();
-                return;
-            }
-            KeyAction::Char('e') => {
-                if let Some(server) = app.context.mcp_servers.get(app.mcp_selected) {
-                    let name = server.name.clone();
-                    if let Err(error) = app.wm.modals.open_mcp_edit(&name) {
-                        app.push_toast(
-                            error,
-                            app::NoteLevel::Warn,
-                            std::time::Duration::from_secs(4),
-                            app::ToastPosition::TopRight,
-                        );
-                    }
-                }
-                return;
-            }
-            KeyAction::Char('t') => {
-                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
-                    let name = s.name.clone();
-                    if let Some(tx) = control_tx {
-                        let _ = tx.send(TuiControl::McpTest { name: name.clone() });
-                        app.push_toast(
-                            format!("testing {name}…"),
-                            app::NoteLevel::Info,
-                            std::time::Duration::from_secs(10),
-                            app::ToastPosition::TopRight,
-                        );
-                    } else {
-                        app.push_toast(
-                            "test not available (no control channel)",
-                            app::NoteLevel::Warn,
-                            std::time::Duration::from_secs(3),
-                            app::ToastPosition::TopRight,
-                        );
-                    }
-                }
-                return;
-            }
-            KeyAction::Char('q') => {
-                app.wm.close(id);
-                return;
-            }
-            _ => {}
-        }
+    if handle_mcp_panel_key(&action, app, control_tx) {
+        return;
     }
     if app.modal_notification.is_some() {
-        if app.mcp_remove_armed.is_some() {
-            match action {
-                KeyAction::Submit => {
-                    let name = app.mcp_remove_armed.take().unwrap();
-                    app.modal_notification = None;
-                    match atman_runtime::config_hub::ConfigHub::global()
-                        .and_then(|hub| hub.remove_mcp(&name))
-                    {
-                        Ok(()) => {
-                            app.push_toast(
-                                format!("removed {name} — reloading…"),
-                                app::NoteLevel::Info,
-                                std::time::Duration::from_secs(3),
-                                app::ToastPosition::TopRight,
-                            );
-                            if let Some(tx) = control_tx {
-                                let _ = tx.send(TuiControl::McpReload);
-                            }
-                        }
-                        Err(e) => {
-                            app.push_toast(
-                                format!("remove failed: {e}"),
-                                app::NoteLevel::Error,
-                                std::time::Duration::from_secs(5),
-                                app::ToastPosition::TopRight,
-                            );
-                        }
-                    }
-                    return;
-                }
-                KeyAction::Escape => {
-                    app.mcp_remove_armed = None;
-                    app.modal_notification = None;
-                    return;
-                }
-                _ => return,
-            }
-        }
         if matches!(action, KeyAction::Escape) {
             app.modal_notification = None;
         }
@@ -1867,6 +1877,60 @@ pub(crate) fn request_project_session_switch(
 mod tests {
     use super::*;
     use crate::history_search_modal::extract_event_text;
+
+    #[test]
+    fn mcp_actions_share_selection_loading_and_modal_boundaries() {
+        use atman_runtime::mcp::{McpServerState, McpServerStatus, TransportKind};
+        let mut state = crate::UiState::new(AppState::default());
+        state.context.mcp_servers = ["first", "second"]
+            .into_iter()
+            .map(|name| McpServerStatus {
+                name: name.into(),
+                transport: TransportKind::Stdio,
+                state: McpServerState::Connected {
+                    tool_count: 0,
+                    tools: Vec::new(),
+                },
+            })
+            .collect();
+        state.wm.open(
+            "mcp",
+            crate::wm::ContentKey::Mcp,
+            crate::wm::WindowContent::Mcp,
+            "MCP",
+            ratatui::layout::Rect::new(0, 0, 80, 30),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(handle_mcp_panel_key(
+            &KeyAction::Submit,
+            &mut state,
+            Some(&tx)
+        ));
+        assert!(state.expanded_mcp_servers.contains("first"));
+        assert!(handle_mcp_panel_key(&KeyAction::Tab, &mut state, Some(&tx)));
+        assert!(
+            matches!(rx.try_recv(), Ok(TuiControl::McpListResources { name }) if name == "first")
+        );
+        state.mcp_resources_cache.insert("first".into(), Vec::new());
+        handle_mcp_panel_key(&KeyAction::HistoryDown, &mut state, Some(&tx));
+        handle_mcp_panel_key(&KeyAction::Submit, &mut state, Some(&tx));
+        assert!(
+            matches!(rx.try_recv(), Ok(TuiControl::McpListResources { name }) if name == "second")
+        );
+        assert!(rx.try_recv().is_err());
+        handle_mcp_panel_key(&KeyAction::Char('r'), &mut state, Some(&tx));
+        assert_eq!(state.mcp_remove_armed.as_deref(), Some("second"));
+        assert!(state.modal_notification.is_none());
+        handle_mcp_panel_key(&KeyAction::Escape, &mut state, Some(&tx));
+        assert!(state.mcp_remove_armed.is_none());
+        state.wm.modals.model_picker.open = true;
+        assert!(!handle_mcp_panel_key(
+            &KeyAction::Submit,
+            &mut state,
+            Some(&tx)
+        ));
+        assert!(state.expanded_mcp_servers.contains("second"));
+    }
 
     struct ModelConfigReset;
 

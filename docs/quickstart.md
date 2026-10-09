@@ -287,6 +287,8 @@ Run the entry flow with `atman run .atman/commands/review.at --flow review input
 
 ### MCP discovery and calls
 
+The MCP browser supports arrows to select a server, `Enter` or a click to expand it, and `Tab` to cycle Tools, Resources, and Prompts. Scroll expanded descriptions or diagnostics with the wheel or `PgUp` / `PgDn`. Add / `a`, Edit / `e`, Test / `t`, Toggle / `d`, and Remove / `r` have clickable buttons. Remove first displays Confirm / `Enter` and Cancel / `Esc`; changing the selection cancels the pending removal. Small terminals retain a complete server record above the actions.
+
 The MCP Add/Edit form uses `Tab` / `Shift+Tab` or vertical arrows to switch fields. Click a text value to position the cursor; click selector arrows to change transport or approval tier. Save / `Enter` applies the draft, while Cancel / `Esc` closes without saving. Environment entries use one `KEY=value` per line; `Shift+Enter` adds a line. Scroll long validation details with the mouse wheel over the message, or `PgUp` / `PgDn`.
 
 The managed agent exposes `mcp.status`, `mcp.tools`, `mcp.await`, and `mcp.call`. The request's MCP definitions stay fixed as the catalog grows. Tool descriptions and schemas are retrieved as tool results, so discovery does not replace the model's existing tool prefix.

@@ -1680,6 +1680,8 @@ impl AppState {
         crate::mcp_manager::McpBrowserState {
             tab: self.mcp_browser_tab,
             content_revision: self.mcp_content_revision,
+            hovered_action: None,
+            remove_armed: self.mcp_remove_armed.as_deref(),
             resources: &self.mcp_resources_cache,
             prompts: &self.mcp_prompts_cache,
         }
@@ -1687,6 +1689,25 @@ impl AppState {
 
     pub fn replace_context_snapshot(&mut self, context: atman_runtime::ContextSnapshot) {
         if self.context.mcp_servers != context.mcp_servers {
+            let selected = self.context.mcp_servers.get(self.mcp_selected);
+            self.mcp_selected = selected
+                .and_then(|selected| {
+                    context
+                        .mcp_servers
+                        .iter()
+                        .position(|server| server.name == selected.name)
+                })
+                .unwrap_or(
+                    self.mcp_selected
+                        .min(context.mcp_servers.len().saturating_sub(1)),
+                );
+            if !context
+                .mcp_servers
+                .iter()
+                .any(|server| self.mcp_remove_armed.as_deref() == Some(server.name.as_str()))
+            {
+                self.mcp_remove_armed = None;
+            }
             self.mcp_content_revision = self.mcp_content_revision.wrapping_add(1);
         }
         self.context = context;
@@ -5507,6 +5528,18 @@ mod tests {
         assert_eq!(app.mcp_content_revision, 4);
         app.replace_mcp_prompts("server".into(), prompts);
         assert_eq!(app.mcp_content_revision, 4);
+
+        let mut context = app.context.clone();
+        let mut other = context.mcp_servers[0].clone();
+        other.name = "other".into();
+        context.mcp_servers.insert(0, other);
+        app.mcp_remove_armed = Some("server".into());
+        app.replace_context_snapshot(context.clone());
+        assert_eq!(app.mcp_selected, 1);
+        context.mcp_servers.pop();
+        app.replace_context_snapshot(context);
+        assert_eq!(app.mcp_selected, 0);
+        assert!(app.mcp_remove_armed.is_none());
     }
 
     #[test]
@@ -8132,6 +8165,8 @@ mod terminal_e2e_tests {
                 let browser = crate::mcp_manager::McpBrowserState {
                     tab: crate::mcp_manager::McpBrowserTab::Resources,
                     content_revision: 0,
+                    hovered_action: None,
+                    remove_armed: None,
                     resources: &empty_resources,
                     prompts: &empty_prompts,
                 };
