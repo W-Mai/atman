@@ -253,7 +253,12 @@ pub(crate) async fn read_stream(
         _ = cancel.cancelled() => return Err(RuntimeError::Cancelled("responses cancelled mid-stream".into())),
         next = stream.next() => next,
     } {
-        let event = event.map_err(|error| protocol_error(format!("sse: {error}")))?;
+        let event = event.map_err(|error| match error {
+            eventsource_stream::EventStreamError::Transport(error) => {
+                RuntimeError::ToolFailed(format!("responses network: {error}"))
+            }
+            error => protocol_error(format!("sse: {error}")),
+        })?;
         if event.data.is_empty() || event.data == "[DONE]" {
             continue;
         }
@@ -273,6 +278,7 @@ pub(crate) async fn read_stream(
 #[derive(Default)]
 struct ResponseReducer {
     items: std::collections::BTreeMap<u64, serde_json::Value>,
+    completed_items: std::collections::BTreeSet<u64>,
     text: String,
     thinking: String,
     estimated_output: u64,
@@ -286,6 +292,20 @@ impl ResponseReducer {
         tools: &[crate::tool::ToolSpec],
         tx: &broadcast::Sender<NodeEvent>,
     ) -> Result<bool, RuntimeError> {
+        if matches!(
+            event["type"].as_str(),
+            Some(
+                "response.output_item.added"
+                    | "response.output_item.done"
+                    | "response.function_call_arguments.delta"
+                    | "response.function_call_arguments.done"
+            )
+        ) && event["output_index"]
+            .as_u64()
+            .is_some_and(|index| self.completed_items.contains(&index))
+        {
+            return Err(protocol_error("completed output item was modified"));
+        }
         match event["type"].as_str().unwrap_or("") {
             "response.output_text.delta" => {
                 if let Some(delta) = event["delta"].as_str() {
@@ -311,6 +331,9 @@ impl ResponseReducer {
                     .get("item")
                     .filter(|item| item.is_object())
                     .ok_or_else(|| protocol_error("missing output item"))?;
+                if event["type"] == "response.output_item.done" {
+                    self.completed_items.insert(index);
+                }
                 self.items.insert(index, item.clone());
             }
             "response.function_call_arguments.delta" => {
@@ -357,12 +380,38 @@ impl ResponseReducer {
                     )));
                 }
                 if let Some(output) = response["output"].as_array() {
-                    self.items = output
+                    if self
+                        .completed_items
                         .iter()
-                        .cloned()
-                        .enumerate()
-                        .map(|(index, item)| (index as u64, item))
-                        .collect();
+                        .any(|index| *index >= output.len() as u64)
+                    {
+                        return Err(protocol_error("terminal response omitted a completed item"));
+                    }
+                    let mut items = std::collections::BTreeMap::new();
+                    for (index, item) in output.iter().enumerate() {
+                        let index = index as u64;
+                        let item = if self.completed_items.contains(&index) {
+                            let completed = &self.items[&index];
+                            if completed["id"] != item["id"] || completed["type"] != item["type"] {
+                                return Err(protocol_error(
+                                    "terminal output item identity changed",
+                                ));
+                            }
+                            // Item completion owns replay state; the response summary may omit it.
+                            completed
+                        } else {
+                            item
+                        };
+                        items.insert(index, item.clone());
+                    }
+                    self.items = items;
+                } else if self.items.is_empty()
+                    || self
+                        .items
+                        .keys()
+                        .any(|index| !self.completed_items.contains(index))
+                {
+                    return Err(protocol_error("terminal response has no completed output"));
                 }
                 self.terminal = Some(response.clone());
                 return Ok(true);
@@ -1123,6 +1172,15 @@ mod tests {
         for (index, delta) in [(3, "{\"n\":"), (1, "{\"n\":1}"), (3, "2}")] {
             reducer.push(json!({"type":"response.function_call_arguments.delta","output_index":index,"delta":delta}), &req.tools, &tx).unwrap();
         }
+        for (index, item) in reducer.items.clone() {
+            reducer
+                .push(
+                    json!({"type":"response.output_item.done","output_index":index,"item":item}),
+                    &req.tools,
+                    &tx,
+                )
+                .unwrap();
+        }
         reducer
             .push(
                 json!({"type":"response.completed","response":{"status":"completed"}}),
@@ -1164,6 +1222,86 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn completed_items_own_replay_state_across_terminal_summaries() {
+        let req = request();
+        let route = ResponsesRoute {
+            provider: "test".into(),
+            endpoint: "https://gateway.example/v1/responses".into(),
+            model: req.model.clone(),
+        };
+        let (tx, _) = broadcast::channel(32);
+        let mut reducer = ResponseReducer::default();
+        let complete = output();
+        for item in [&complete[0], &complete[2]] {
+            let mut unfinished = ResponseReducer::default();
+            unfinished
+                .push(
+                    json!({"type":"response.output_item.added","output_index":0,"item":item}),
+                    &req.tools,
+                    &tx,
+                )
+                .unwrap();
+            assert!(
+                unfinished
+                    .push(
+                        json!({"type":"response.completed","response":{"status":"completed"}}),
+                        &req.tools,
+                        &tx
+                    )
+                    .is_err()
+            );
+        }
+        let mut summary = complete.clone();
+        summary[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("encrypted_content");
+        for (index, item) in complete.as_array().unwrap().iter().enumerate() {
+            reducer
+                .push(
+                    json!({"type":"response.output_item.done","output_index":index,"item":item}),
+                    &req.tools,
+                    &tx,
+                )
+                .unwrap();
+        }
+        reducer.push(completed(summary), &req.tools, &tx).unwrap();
+        let response = reducer
+            .finish(route.clone(), req.tools.clone(), TurnId::now())
+            .unwrap();
+        let mut next = req.clone();
+        next.messages
+            .push(serde_json::from_value(serde_json::to_value(response.message).unwrap()).unwrap());
+        let body = serde_json::to_value(build_body(&next, &route).unwrap()).unwrap();
+        assert_eq!(body["input"][1]["encrypted_content"], "opaque-reasoning");
+
+        for terminal_output in [json!([]), json!([{"type":"reasoning","id":"other"}])] {
+            let mut reducer = ResponseReducer::default();
+            reducer
+                .push(
+                    json!({"type":"response.output_item.done","output_index":0,"item":complete[0]}),
+                    &req.tools,
+                    &tx,
+                )
+                .unwrap();
+            assert!(
+                reducer
+                    .push(completed(terminal_output), &req.tools, &tx)
+                    .is_err()
+            );
+        }
+        let mut finalized = ResponseReducer::default();
+        finalized
+            .push(
+                json!({"type":"response.output_item.done","output_index":0,"item":complete[2]}),
+                &req.tools,
+                &tx,
+            )
+            .unwrap();
+        assert!(finalized.push(json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":"{}"}), &req.tools, &tx).is_err());
     }
 
     #[test]

@@ -52,6 +52,8 @@ API selection resolves from the configured model and its provider before convert
 
 Responses uses `store: false` and replays local message history. Opaque reasoning items and output metadata remain attached to assistant messages with their provider, endpoint, and model identity. Matching routes can replay them after session restoration; other routes omit the opaque state. Compaction removes this state with the corresponding messages, and it is not rendered as user-visible text.
 
+Completed streaming items own their replay state; a terminal response summary cannot replace them with a partial copy. A stream must reach a valid terminal response before tool calls can execute. When a terminal response omits its output array, every retained item must already have a completion event. Transport interruptions can be retried without dispatching partial tool calls; malformed protocol data remains an error.
+
 Dynamic model context can be represented as an internal `ContextRecord` message
 part. Records carry a stable key, monotonic revision, semantic content digest,
 authority, and retention policy. OpenAI chat projects them as mid-conversation

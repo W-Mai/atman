@@ -116,6 +116,29 @@ impl RuntimeError {
 
 fn classify_tool_failed(msg: &str) -> ErrorKind {
     let m = msg.to_ascii_lowercase();
+    // Transport status is authoritative; error bodies can mention unrelated failures.
+    for provider in ["openai", "anthropic", "codex", "responses"] {
+        if let Some(status) = m
+            .strip_prefix(&format!("{provider} http "))
+            .and_then(|rest| rest.get(..3))
+            .and_then(|value| value.parse::<u16>().ok())
+        {
+            match status {
+                401 | 403 => return ErrorKind::AuthFailed,
+                408 => return ErrorKind::Timeout,
+                429 => return ErrorKind::RateLimit,
+                400..=499 => {
+                    return if m.contains("content_filter") {
+                        ErrorKind::ContentFilter
+                    } else {
+                        ErrorKind::InvalidRequest
+                    };
+                }
+                500..=599 => return ErrorKind::ProviderDown,
+                _ => {}
+            }
+        }
+    }
     if m.contains("timeout") || m.contains("timed out") {
         return ErrorKind::Timeout;
     }
@@ -151,6 +174,12 @@ fn classify_tool_failed(msg: &str) -> ErrorKind {
         || m.contains("connection")
         || m.contains("connect ")
         || m.contains("reset by peer")
+        || ["openai", "anthropic", "codex", "responses"]
+            .iter()
+            .any(|provider| {
+                m.starts_with(&format!("{provider} net: error sending request for url"))
+            })
+        || m == "responses protocol: stream ended before a terminal response"
     {
         return ErrorKind::Transient;
     }
@@ -167,6 +196,31 @@ mod tests {
     #[test]
     fn classify_covers_common_provider_error_strings() {
         let cases: &[(&str, ErrorKind)] = &[
+            (
+                "responses net: error sending request for url (https://gateway.example/v1/responses)",
+                ErrorKind::Transient,
+            ),
+            (
+                "openai net: error sending request for url (https://gateway.example/v1/chat/completions)",
+                ErrorKind::Transient,
+            ),
+            (
+                "responses protocol: stream ended before a terminal response",
+                ErrorKind::Transient,
+            ),
+            (
+                "responses protocol: function arguments must be an object",
+                ErrorKind::ToolError,
+            ),
+            ("openai net: builder error", ErrorKind::ToolError),
+            (
+                "responses http 400 Bad Request: invalid connection settings, retry timeout 429",
+                ErrorKind::InvalidRequest,
+            ),
+            (
+                "responses http 503 Service Unavailable: request validation timeout",
+                ErrorKind::ProviderDown,
+            ),
             ("openai net: request timed out", ErrorKind::Timeout),
             ("anthropic: 429 rate limit exceeded", ErrorKind::RateLimit),
             ("openai http 401: unauthorized", ErrorKind::AuthFailed),

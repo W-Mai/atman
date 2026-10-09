@@ -1184,7 +1184,7 @@ mod tests {
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
                     .set_body_string(
-                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"model\":\"gpt-test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
                     ),
             )
             .expect(1)
@@ -1215,7 +1215,7 @@ mod tests {
                 .insert_header("content-type", "text/event-stream")
                 .insert_header(X_CODEX_TURN_STATE, "sticky-turn")
                 .set_body_string(
-                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"model\":\"gpt-test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
                 )
         };
         Mock::given(method("POST"))
@@ -1337,7 +1337,7 @@ mod tests {
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
                     .set_body_string(
-                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-current\",\"model\":\"gpt-test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-current\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
                     ),
             )
             .expect(1)

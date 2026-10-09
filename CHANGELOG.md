@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Responses stream completion** — Completed output items retain replay state across terminal summaries. Unfinished or subsequently modified items cannot become executable tool calls. Transport interruptions remain retryable, while HTTP status takes precedence over error-body keywords.
 - **Provider resolution** — Explicit provider selection takes precedence over matching model names. API overrides resolve consistently on cold and warm configuration loads. Resolved reasoning defaults obey model capabilities and provider output limits; Responses accepts supported reasoning modes.
 - **MCP readiness isolation** — Status queries and readiness waits respect request scopes. Waiting for one server no longer serializes unrelated tool calls.
 - **Permanent request errors** — Default retries stop on authentication failures, invalid requests, and unsupported schemas. Explicit `retry_classified` selections retain control over other error categories.
