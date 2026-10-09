@@ -116,7 +116,7 @@ pub struct ProviderManager {
     form_max_tokens: Option<u32>,
     form_api: Option<atman_runtime::provider::OpenAiApi>,
     form_max_tools: Option<usize>,
-    form_hits: Vec<(usize, Rect, usize)>,
+    form_hits: Vec<(usize, crate::settings_form::FieldHit)>,
     selector_hits: Vec<(usize, Rect, Rect)>,
     hovered_field: Option<usize>,
     show_confirm: bool,
@@ -210,11 +210,16 @@ impl ProviderManager {
                 }
             }
             MouseEventKind::Moved => {
-                self.hovered_field = self
-                    .form_hits
-                    .iter()
-                    .find(|(_, rect, _)| hit(Some(*rect), point))
-                    .map(|(field, _, _)| *field);
+                self.hovered_field = if hit(self.save_rect, point) {
+                    Some(usize::MAX)
+                } else if hit(self.test_btn_rect, point) {
+                    Some(7)
+                } else {
+                    self.form_hits
+                        .iter()
+                        .find(|(_, field)| hit(Some(field.record), point))
+                        .map(|(field, _)| *field)
+                };
             }
             MouseEventKind::Down(MouseButton::Left)
                 if self.selector_hits.iter().any(|(_, left, right)| {
@@ -236,18 +241,22 @@ impl ProviderManager {
                 self.handle_add_key(&action, control_tx);
             }
             MouseEventKind::Down(MouseButton::Left) if self.in_form => {
-                if let Some((field, rect, offset)) = self
+                if let Some((field, field_hit)) = self
                     .form_hits
                     .iter()
-                    .find(|(_, rect, _)| hit(Some(*rect), point))
+                    .find(|(_, field)| hit(Some(field.record), point))
                     .copied()
                 {
                     if field == 0 && self.editing_provider.is_some() {
                         return;
                     }
                     self.form_field = field;
+                    if !hit(Some(field_hit.value), point) {
+                        return;
+                    }
                     if matches!(field, 1 | 5 | 6 | 8) {
-                        let action = if me.column < rect.x + rect.width / 2 {
+                        let action = if me.column < field_hit.record.x + field_hit.record.width / 2
+                        {
                             KeyAction::CursorLeft
                         } else {
                             KeyAction::CursorRight
@@ -257,11 +266,21 @@ impl ProviderManager {
                         editor.set_cursor_by_display(
                             0,
                             me.column
-                                .saturating_sub(rect.x + 2)
-                                .saturating_add(offset as u16),
+                                .saturating_sub(field_hit.value.x)
+                                .saturating_add(field_hit.offset as u16),
                         );
                     }
                 }
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if self.show_add && self.in_form =>
+            {
+                let action = if matches!(me.kind, MouseEventKind::ScrollUp) {
+                    KeyAction::HistoryUp
+                } else {
+                    KeyAction::HistoryDown
+                };
+                self.handle_add_key(&action, control_tx);
             }
             _ => {}
         }
@@ -1410,20 +1429,15 @@ fn render_add_dialog(
         if !fields.contains(&mgr.form_field) {
             mgr.form_field = fields[0];
         }
-        mgr.form_hits.clear();
-        let available = inner.height.saturating_sub(4) as usize / 2;
+        let fields: Vec<_> = fields.into_iter().filter(|field| *field != 7).collect();
         let selected = fields
             .iter()
             .position(|field| *field == mgr.form_field)
-            .unwrap_or(0);
-        let start = selected.saturating_sub(available.saturating_sub(1));
-        for (row, field) in fields
-            .iter()
-            .skip(start)
-            .take(available)
-            .copied()
-            .enumerate()
-        {
+            .unwrap_or(fields.len().saturating_sub(1));
+        let layout = crate::settings_form::FormLayout::new(inner, fields.len(), selected);
+        let locked = mgr.has_pending_mutation();
+        for &(index, rect) in &layout.fields {
+            let field = fields[index];
             let active = field == mgr.form_field;
             let (label, value, cursor) = match field {
                 0 => (
@@ -1457,102 +1471,104 @@ fn render_add_dialog(
                     None,
                 ),
                 6 => ("Enabled", mgr.enabled_editor.buf().to_owned(), None),
-                7 => (
-                    "Test connection",
-                    "Enter / click · checks directory and credentials".into(),
-                    None,
-                ),
                 8 => ("API", mgr.form_api.unwrap_or_default().to_string(), None),
                 _ => continue,
             };
-            let rect = Rect {
-                y: inner.y + row as u16 * 2,
-                height: 2,
-                ..inner
-            };
-            let width = rect.width.saturating_sub(4) as usize;
-            let offset = if active {
-                cursor
-                    .unwrap_or_default()
-                    .saturating_sub(width.saturating_sub(1))
-            } else {
-                0
-            };
-            mgr.form_hits.push((field, rect, offset));
-            if field == 7 {
-                mgr.test_btn_rect = Some(rect);
-            }
-            let bg = if mgr.hovered_field == Some(field) {
-                theme.work_hover_bg.into()
-            } else {
-                theme.modal_bg.into()
-            };
-            let style = Style::default().bg(bg).fg(if active {
-                theme.accent.into()
-            } else {
-                theme.tinted_fg.into()
-            });
-            let shown = crate::width::trim_display_offset(&value, offset, width);
-            f.render_widget(
-                Paragraph::new(vec![
-                    Line::from(Span::styled(format!(" {label}"), style)),
-                    Line::from(Span::styled(
-                        format!("  {shown}"),
-                        Style::default().bg(bg).fg(theme.tinted_fg.into()),
-                    )),
-                ])
-                .style(Style::default().bg(bg)),
+            let field_hit = crate::settings_form::render_field(
+                f,
                 rect,
+                &crate::settings_form::Field {
+                    label,
+                    value: &value,
+                    placeholder: "Not set",
+                    focused: active,
+                    hovered: mgr.hovered_field == Some(field),
+                    cursor,
+                    selector: matches!(field, 1 | 5 | 6 | 8),
+                    locked,
+                },
+                theme,
             );
-            if active && matches!(field, 1 | 5 | 6 | 8) && rect.width >= 8 {
-                let left = Rect::new(rect.right() - 5, rect.y, 2, 1);
-                let right = Rect::new(rect.right() - 2, rect.y, 2, 1);
-                f.render_widget(Paragraph::new("←").style(style), left);
-                f.render_widget(Paragraph::new("→").style(style), right);
+            mgr.form_hits.push((field, field_hit));
+            if let Some((left, right)) = field_hit.arrows {
                 mgr.selector_hits.push((field, left, right));
             }
-            if active
-                && !mgr.has_pending_mutation()
-                && let Some(cursor) = cursor
-            {
-                cursor_pos = Some((
-                    (rect.x
-                        + 2
-                        + cursor.saturating_sub(offset).min(width.saturating_sub(1)) as u16)
-                        .min(rect.right().saturating_sub(1)),
-                    rect.y + 1,
-                ));
-            }
         }
-        if inner.height >= 4 {
-            mgr.save_rect = Some(Rect {
-                y: inner.bottom() - 1,
-                height: 1,
-                ..inner
-            });
-            let api_hint =
-                if mgr.selected_api() == Some(atman_runtime::provider::OpenAiApi::Responses) {
-                    format!(
-                        "Protocol-defined reasoning · saved Chat format: {}",
-                        mgr.reasoning_format_editor.buf()
-                    )
-                } else {
-                    "".into()
-                };
-            f.render_widget(
-                Paragraph::new(vec![
-                    Line::from(format!(" Endpoint: {}", mgr.form_endpoint())),
-                    Line::from(format!(" {api_hint}")),
-                    Line::from(" Tab / Shift+Tab: field · Enter: save / test · Esc: save"),
-                ])
-                .style(Style::default().fg(theme.subtle_fg.into())),
-                Rect {
-                    y: inner.bottom() - 3,
-                    height: 3,
-                    ..inner
+        if layout.test.height > 0 {
+            mgr.test_btn_rect = Some(layout.test);
+            crate::settings_form::render_action(
+                f,
+                layout.test,
+                &crate::settings_form::Action {
+                    label: if layout.test.width >= 24 {
+                        "Test connection"
+                    } else {
+                        "Test"
+                    },
+                    shortcut: if mgr.form_field == 7 { "Enter" } else { "" },
+                    focused: mgr.form_field == 7,
+                    hovered: mgr.hovered_field == Some(7),
+                    disabled: locked,
                 },
+                theme,
             );
         }
+        if layout.save.height > 0 {
+            mgr.save_rect = Some(layout.save);
+            crate::settings_form::render_action(
+                f,
+                layout.save,
+                &crate::settings_form::Action {
+                    label: "Save",
+                    shortcut: if mgr.form_field == 7 { "Esc" } else { "Enter" },
+                    focused: false,
+                    hovered: mgr.hovered_field == Some(usize::MAX),
+                    disabled: locked,
+                },
+                theme,
+            );
+        }
+        let endpoint = mgr.form_endpoint();
+        let mut info = vec![Line::from(if layout.info.height == 1 {
+            crate::width::middle_truncate(&endpoint, layout.info.width as usize)
+        } else {
+            format!("Endpoint: {endpoint}")
+        })];
+        if mgr.selected_api() == Some(atman_runtime::provider::OpenAiApi::Responses) {
+            info.push(Line::from(format!(
+                "Protocol-defined reasoning · saved Chat format: {}",
+                mgr.reasoning_format_editor.buf()
+            )));
+        }
+        f.render_widget(
+            Paragraph::new(info)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(theme.subtle_fg.into())),
+            layout.info,
+        );
+        if let (Some((first, _)), Some((last, _))) = (layout.fields.first(), layout.fields.last())
+            && layout.fields.len() < fields.len()
+        {
+            f.render_widget(
+                Paragraph::new(format!(
+                    "Fields {}–{} / {} · ↑↓ / wheel",
+                    first + 1,
+                    last + 1,
+                    fields.len()
+                ))
+                .style(Style::default().fg(theme.subtle_fg.into())),
+                layout.scroll,
+            );
+        }
+        f.render_widget(
+            Paragraph::new(if layout.help.width < 56 {
+                "Tab field · ←→ select · Esc save"
+            } else {
+                "Tab/Shift+Tab: field · ←/→: select · Esc: save"
+            })
+            .style(Style::default().fg(theme.subtle_fg.into())),
+            layout.help,
+        );
     } else if mgr.name_focused {
         lines.push(Line::from("Name:"));
         lines.push(Line::from(Span::styled(
@@ -2347,18 +2363,19 @@ mod tests {
                 );
             })
             .unwrap();
-        assert!(!manager.form_hits.iter().any(|(field, _, _)| *field == 5));
-        let (_, rect, _) = manager
+        assert!(!manager.form_hits.iter().any(|(field, _)| *field == 5));
+        let (_, field_hit) = manager
             .form_hits
             .iter()
-            .find(|(field, _, _)| *field == 8)
+            .find(|(field, _)| *field == 8)
             .copied()
             .unwrap();
+        let (_, right) = field_hit.arrows.unwrap();
         manager.handle_mouse(
             &crossterm::event::MouseEvent {
                 kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-                column: rect.right() - 1,
-                row: rect.y,
+                column: right.x,
+                row: right.y,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
             None,
@@ -2372,6 +2389,95 @@ mod tests {
         manager.provider_type_editor.replace_with("anthropic");
         assert!(!manager.form_fields().contains(&8));
         assert!(!manager.form_fields().contains(&5));
+    }
+
+    #[test]
+    fn provider_form_uses_rendered_field_geometry_and_separate_action_hits() {
+        use crate::wm::modal::ModalOverlay;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        for (width, row_height) in [(52, 4), (100, 3)] {
+            let mut manager = ProviderManager::default();
+            populate_config_form(&mut manager, None);
+            manager.form_field = 2;
+            manager.api_key_editor.replace_with(&"key-".repeat(30));
+            let app = crate::app::AppState::new("session".into(), None);
+            let theme = crate::theme::theme();
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 36)).unwrap();
+            terminal
+                .draw(|frame| manager.render_content(frame, frame.area(), &app, &theme))
+                .unwrap();
+
+            let (_, field) = manager
+                .form_hits
+                .iter()
+                .find(|(field, _)| *field == 2)
+                .copied()
+                .unwrap();
+            assert_eq!(field.record.height, row_height);
+            assert!(field.offset > 0);
+            manager.handle_mouse(
+                &MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column: field.record.x + 1,
+                    row: field.record.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                None,
+            );
+            assert_eq!(manager.hovered_field, Some(2));
+            manager.handle_mouse(
+                &MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: field.value.x + 2,
+                    row: field.value.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                None,
+            );
+            assert_eq!(
+                manager.api_key_editor.cursor_display_col(),
+                field.offset + 2
+            );
+
+            let test = manager.test_btn_rect.unwrap();
+            let save = manager.save_rect.unwrap();
+            assert_eq!(test.height, 3);
+            assert_eq!(save.height, 3);
+            assert!(test.right() < save.x);
+            assert!(
+                manager
+                    .form_hits
+                    .iter()
+                    .all(|(index, field)| { *index != 7 && field.record.bottom() <= test.y })
+            );
+            manager.handle_mouse(
+                &MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column: save.x + 1,
+                    row: save.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                None,
+            );
+            assert_eq!(manager.hovered_field, Some(usize::MAX));
+            manager.form_field = 7;
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            manager.handle_mouse(
+                &MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: save.x + 1,
+                    row: save.y + 2,
+                    modifiers: KeyModifiers::NONE,
+                },
+                Some(&tx),
+            );
+            assert!(matches!(
+                receive_mutation(&mut rx).action,
+                crate::ProviderMutation::UpsertConfig { .. }
+            ));
+        }
     }
 
     #[test]

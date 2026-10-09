@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Provider and model forms** — Padded fields share the modal surface, focus marker, and subdued hover colors. Test and Save use separate buttons. Responsive layout keeps actions visible in small terminals, aligns mouse cursors with rendered text, and makes wrapped model diagnostics scrollable.
 - **HTTP MCP transport** — Requests advertise JSON and SSE support and preserve configured headers across connection entry points. Incremental SSE parsing delivers matching results without waiting for EOF. Negotiated sessions and protocol versions persist across calls; session expiration reinitializes once, while ambiguous failures do not replay tool execution.
 - **Provider form state** — Saving locks pasted input, model edits clear stale test feedback, and closing a model test cancels its request. Scrolled provider rows target the visible record, and empty base URLs can retain the configured default.
 - **Responses stream completion** — Completed output items retain replay state across terminal summaries. Unfinished or subsequently modified items cannot become executable tool calls. Transport interruptions remain retryable, while HTTP status takes precedence over error-body keywords.

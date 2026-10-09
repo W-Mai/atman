@@ -10,6 +10,10 @@ use crate::wm::WindowContent;
 
 use super::{PanelBtn, WindowInstance};
 
+pub(crate) fn surface_bg(t: &crate::theme::Theme) -> Color {
+    t.modal_bg.lerp(t.highlight_bg, 0.15)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_shell(
     f: &mut Frame,
@@ -22,7 +26,7 @@ pub fn render_shell(
     t: &crate::theme::Theme,
 ) {
     let panel_bg: Color = if is_focused {
-        t.modal_bg.lerp(t.highlight_bg, 0.15)
+        surface_bg(t)
     } else {
         t.modal_bg.into()
     };
@@ -234,7 +238,7 @@ pub fn render_overlay_shell(
     show_header: bool,
     t: &crate::theme::Theme,
 ) -> Rect {
-    let bg: Color = t.modal_bg.lerp(t.highlight_bg, 0.15);
+    let bg = surface_bg(t);
 
     let sanitize_rect = Rect {
         x: rect.x.saturating_sub(2),
@@ -301,7 +305,7 @@ pub fn render_overlay_shell(
 }
 
 pub fn render_section_header(f: &mut Frame, area: Rect, title: Line<'_>, t: &crate::theme::Theme) {
-    let bg: Color = t.modal_bg.lerp(t.highlight_bg, 0.15);
+    let bg = surface_bg(t);
     let line = Line::from(
         std::iter::once(Span::styled(" ", Style::default().bg(bg)))
             .chain(title.spans)
@@ -334,7 +338,7 @@ pub fn render_section_header(f: &mut Frame, area: Rect, title: Line<'_>, t: &cra
 }
 
 pub fn render_column_divider(f: &mut Frame, x: u16, y: u16, height: u16, t: &crate::theme::Theme) {
-    let bg: Color = t.modal_bg.lerp(t.highlight_bg, 0.15);
+    let bg = surface_bg(t);
     let buf_area = f.buffer_mut().area;
     for ry in 0..height {
         let py = y + ry;

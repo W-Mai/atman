@@ -25,6 +25,7 @@ pub mod model_browser;
 pub mod model_manager;
 pub mod model_picker;
 pub mod onboarding;
+mod settings_form;
 pub mod window;
 pub mod wm;
 

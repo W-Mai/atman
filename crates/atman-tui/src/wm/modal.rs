@@ -592,11 +592,18 @@ impl ModalManager {
                 center_rect(canvas, w, h)
             }
             ModalKind::ProviderManager => {
-                let w = canvas.width.saturating_sub(4).clamp(50, 70);
+                let w = canvas
+                    .width
+                    .saturating_sub(4)
+                    .min(if self.provider_manager.in_form {
+                        96
+                    } else {
+                        70
+                    });
                 let h = if self.provider_manager.in_form {
-                    canvas.height.saturating_sub(2).clamp(20, 30)
+                    canvas.height.saturating_sub(2).min(44)
                 } else {
-                    canvas.height.saturating_sub(2).clamp(10, 24)
+                    canvas.height.saturating_sub(2).min(24)
                 };
                 center_rect(canvas, w, h)
             }
@@ -617,8 +624,14 @@ impl ModalManager {
                 center_rect(canvas, w, h)
             }
             ModalKind::ModelManager => {
-                let w = canvas.width.saturating_sub(4).clamp(50, 80);
-                let h = canvas.height.saturating_sub(2).clamp(10, 24);
+                let w = canvas
+                    .width
+                    .saturating_sub(4)
+                    .min(if self.model_manager.show_form { 96 } else { 80 });
+                let h = canvas
+                    .height
+                    .saturating_sub(2)
+                    .min(if self.model_manager.show_form { 44 } else { 24 });
                 center_rect(canvas, w, h)
             }
             ModalKind::McpEditor => {
@@ -1142,6 +1155,21 @@ fn center_rect(canvas: Rect, w: u16, h: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_forms_fit_small_and_wide_canvases() {
+        let mut manager = ModalManager::default();
+        manager.provider_manager.in_form = true;
+        manager.model_manager.show_form = true;
+        for (width, height) in [(40, 14), (80, 30), (140, 60)] {
+            let canvas = Rect::new(3, 2, width, height);
+            for kind in [ModalKind::ProviderManager, ModalKind::ModelManager] {
+                let rect = manager.compute_rect(kind, canvas);
+                assert_eq!(rect.intersection(canvas), rect);
+                assert!(rect.width <= 96 && rect.height <= 44);
+            }
+        }
+    }
 
     #[test]
     fn session_switcher_height_accounts_for_dynamic_list_height() {

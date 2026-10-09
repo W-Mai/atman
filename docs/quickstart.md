@@ -100,6 +100,8 @@ The model's `api` overrides the provider default; omit it to inherit. Existing O
 
 Use a connection root in `base_url`; do not append `/responses` or `/chat/completions`. **Test connection** checks the provider's model discovery endpoint. **Test model** sends a small model request using the draft protocol, reasoning selection, and tool schema without running an external tool.
 
+Provider and model forms use `Tab` / `Shift+Tab` to move between fields and the Test button; selector arrows also accept mouse clicks. Click a text value to place its cursor. Test and Save remain separate buttons below the fields. `Enter` tests when Test is focused and saves while editing a field; `Esc` saves, except during a pending model test, when it cancels and closes without saving. Scroll long model diagnostics with the mouse wheel over the details area, or `PgUp` / `PgDn` while Test is focused.
+
 The default OpenAI API endpoint and Codex enable stable prompt-cache routing by default. Custom OpenAI base URLs and OpenAI-compatible gateways leave it disabled unless `prompt_cache_key = true` is configured explicitly. Changing the API changes the cache projection; provider usage reports remain authoritative for cache hits.
 
 Set `max_tools = 128` in a provider table when that endpoint limits the total number of request tool definitions to 128. The count includes built-in tools and native MCP tools. The official OpenAI Chat Completions endpoint applies this limit by default; other endpoints require an explicit limit. A request exceeding the limit fails locally with the actual count, before sending its conversation history. MCP broker calls do not add target definitions to the request.

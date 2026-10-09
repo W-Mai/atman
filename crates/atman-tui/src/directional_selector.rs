@@ -1,5 +1,3 @@
-use ratatui::style::{Modifier, Style};
-
 use crate::keys::KeyAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,16 +31,6 @@ pub(crate) fn move_wrapped(
         SelectorDirection::Next => (*selected + 1) % item_count,
     };
     true
-}
-
-pub(crate) fn value_style(theme: &crate::theme::Theme, focused: bool) -> Style {
-    if focused {
-        Style::default()
-            .fg(theme.accent.into())
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.tinted_fg.into())
-    }
 }
 
 pub(crate) fn footer_help(prefix: &str, suffix: &str) -> String {
