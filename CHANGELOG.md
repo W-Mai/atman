@@ -10,6 +10,10 @@ All notable changes to atman are documented in this file.
 
 - **Resource-aware tool batches** — `dispatch_all` runs resource-independent calls concurrently, preserves source order for conflicting resources, and treats permission-control calls as authorization and execution barriers. `Tool`, `ToolDefinition`, and `#[atman_runtime::tools]` expose structured scheduling claims for built-in and host-provided tools; undeclared tools remain opaque barriers.
 
+### 🐛 Bug Fixes
+
+- **Context cache row** — The sidebar renders cache usage once and keeps its text-selection coordinates aligned with the visible Context rows.
+
 ## [1.14.0] — 2026-09-30
 
 ### ⚠️ Breaking Changes

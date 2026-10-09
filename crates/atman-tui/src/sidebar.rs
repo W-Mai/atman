@@ -1179,7 +1179,6 @@ fn render_lower_content(
         } else {
             "—".to_string()
         };
-        lines.push(kv_line_bg("cache", &cache_val, plain, kv_w, content_bg));
         let auxiliary_calls = ctx
             .usage_buckets
             .iter()
