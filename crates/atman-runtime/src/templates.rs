@@ -47,6 +47,8 @@ Explore the repository for relevant Markdown and other descriptive documentation
 ## Tool calls and transactions
 Before calling tools, identify every call whose arguments are already knowable and whose correctness does not depend on another call's success. Emit those calls in the same assistant response; the runtime runs resource-independent calls concurrently and preserves source order for declared conflicts. Put result-dependent or success-dependent work in a later response, or express it in an `.at` flow with variables and `.await`; use `fanout` only for independent branches. Do not add model-defined priorities or dependency metadata. Do not invent, omit, or rewrite tool outcomes.
 
+When MCP broker tools are available, inspect `mcp.status` for connected servers and use `mcp.tools(query: ...)` to find relevant tools. Follow `next_cursor` with the same filters when another page is needed. Load the complete input schema with `mcp.tools(server: ..., tool: ...)` before calling `mcp.call(server: ..., tool: ..., input: ...)`; fill input according to that schema, and keep `_atman_intent` on the outer call. Use `mcp.await` when a particular server is still connecting. Discovery does not grant access to tools outside the current request's scope, and a proxy call uses the target tool's permissions.
+
 ## Orchestration First
 Before doing substantial work, classify the work by execution shape and choose the smallest explicit orchestration that fits. Use only tools exposed by the current role's allowlist; role-specific restrictions override this general guidance:
 
@@ -282,7 +284,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                 "session.push", "sleep",
                 "message.user", "message.assistant", "message.system", "message.tool",
                 "watch", "watcher.list", "watcher.unwatch", "wait_for_watcher", "has_pending_injections",
-                "mcp.*"
+                "mcp.status", "mcp.tools", "mcp.await", "mcp.call"
             ],
         )
         final_answer = extract_final_answer(reply)

@@ -349,10 +349,24 @@ pub(crate) async fn authorize_tool_invocation(
     if ctx.flow_cancel.is_cancelled() {
         return Err(RuntimeError::Cancelled("flow cancelled by user".into()));
     }
-    let tool = ctx
-        .tools
-        .get(&name)
-        .ok_or_else(|| RuntimeError::UndefinedTool(name.clone()))?;
+    let (name, tool, call_args) = if name == "mcp.call" {
+        let mut resolution_ctx = ctx
+            .tool_ctx
+            .as_ref()
+            .clone()
+            .with_registry(std::sync::Arc::new(ctx.tools.clone()));
+        if let Some(session) = ctx.session_runtime.as_ref() {
+            resolution_ctx = resolution_ctx.with_session_runtime(session.clone());
+        }
+        let (tool, args) = crate::tools::mcp::resolve_call(&call_args, &resolution_ctx).await?;
+        (tool.name().to_string(), tool, args)
+    } else {
+        let tool = ctx
+            .tools
+            .get(&name)
+            .ok_or_else(|| RuntimeError::UndefinedTool(name.clone()))?;
+        (name, tool, call_args)
+    };
     if matches!(tool.tier(), crate::tool::Tier::Four) && !ctx.allows_shell {
         return Err(RuntimeError::ToolFailed(format!(
             "tool `{name}` is Tier 4 (shell); flow contract must declare `capabilities {{ shell: true }}`"
@@ -1524,6 +1538,64 @@ mod tests {
         let (starts, terminals) = tool_frame_counts(&mut rx);
         assert_eq!(starts, 1);
         assert_eq!(terminals, vec![(true, "\"called\"".into())]);
+    }
+
+    #[tokio::test]
+    async fn mcp_proxy_at_call_uses_target_authority_and_shell_contract() {
+        struct Target(Tier);
+        impl Tool for Target {
+            fn name(&self) -> &str {
+                "mcp.engine.run"
+            }
+            fn tier(&self) -> Tier {
+                self.0
+            }
+            fn mcp_identity(&self) -> Option<(&str, &str)> {
+                Some(("engine", "run"))
+            }
+            fn call<'a>(
+                &'a self,
+                _args: ToolArgs,
+                ctx: &'a ToolCtx,
+            ) -> BoxFut<'a, crate::tool::ToolResult> {
+                Box::pin(async move {
+                    assert_ne!(self.0, Tier::Four, "shell contract must reject the target");
+                    let permit = ctx
+                        .invocation_authorization()
+                        .expect("target authorization");
+                    assert!(permit.is_for_call(ctx.tool_use_id.as_deref().unwrap(), self.name()));
+                    Ok(Value::Bool(true))
+                })
+            }
+        }
+        let tools = ToolRegistry::new();
+        tools.register(std::sync::Arc::new(crate::tools::mcp::McpCall));
+        tools.register(std::sync::Arc::new(Target(Tier::Four)));
+        let tool_ctx = authorized_eval_tool_ctx(None);
+        let providers = crate::provider::ProviderRegistry::new();
+        let flows = std::collections::HashMap::new();
+        let host = tool_test_host(&tools, &tool_ctx, &providers, &flows);
+        let args = ToolArgs {
+            named: vec![
+                ("server".into(), Value::Str("engine".into())),
+                ("tool".into(), Value::Str("run".into())),
+            ],
+            positional: Vec::new(),
+        };
+        assert!(
+            matches!(authorize_tool_invocation("mcp.call".into(), args.clone(), None, &host).await,
+                Err(RuntimeError::ToolFailed(message)) if message.contains("Tier 4")
+            )
+        );
+        tools.register(std::sync::Arc::new(Target(Tier::Zero)));
+        let permit = authorize_tool_invocation("mcp.call".into(), args, None, &host)
+            .await
+            .unwrap();
+        assert_eq!(permit.name, "mcp.engine.run");
+        assert!(matches!(
+            execute_tool_invocation(permit).await,
+            Value::Bool(true)
+        ));
     }
 
     #[tokio::test]

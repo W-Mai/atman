@@ -16,6 +16,7 @@ pub struct LlmNodeArgs {
     pub context_mode: String,
     pub fallback_value: Option<crate::value::Value>,
     pub tool_specs: Vec<crate::tool::ToolSpec>,
+    pub(crate) mcp_scope: crate::tool::McpToolScope,
     pub reasoning: Option<crate::provider::ReasoningSelection>,
     pub call_purpose: crate::context_plan::ContextCallPurpose,
     pub stall_timeout_secs: u64,
@@ -36,6 +37,7 @@ pub fn parse_llm_args_from_toolargs(
     let mut context_budget: Option<u64> = None;
     let mut context_mode = String::from("none");
     let mut tool_specs: Vec<crate::tool::ToolSpec> = Vec::new();
+    let mut mcp_scope = crate::tool::McpToolScope::default();
     let mut reasoning: Option<crate::provider::ReasoningSelection> = None;
     let mut reasoning_arg: Option<&'static str> = None;
     let mut legacy_thinking: Option<bool> = None;
@@ -92,6 +94,7 @@ pub fn parse_llm_args_from_toolargs(
                     Ok(specs) => tool_specs = specs,
                     Err(msg) => return Err(RuntimeError::ToolFailed(msg)),
                 }
+                mcp_scope = mcp_scope_from_values(items);
                 continue;
             }
             "context" => {
@@ -292,6 +295,7 @@ pub fn parse_llm_args_from_toolargs(
         context_mode,
         fallback_value,
         tool_specs,
+        mcp_scope,
         reasoning: reasoning.or_else(|| {
             legacy_thinking.map(|enabled| {
                 if enabled {
@@ -306,6 +310,26 @@ pub fn parse_llm_args_from_toolargs(
         call_purpose: crate::context_plan::ContextCallPurpose::General,
         stall_timeout_secs,
     })
+}
+
+fn mcp_scope_from_values(values: &[Value]) -> crate::tool::McpToolScope {
+    let mut broker = false;
+    let mut selectors = std::collections::BTreeSet::new();
+    for value in values {
+        let Value::Str(name) = value else {
+            continue;
+        };
+        if crate::tools::mcp::CONTROL_TOOL_NAMES.contains(&name.as_str()) {
+            broker = true;
+        } else if name.starts_with("mcp.") {
+            selectors.insert(name.clone());
+        }
+    }
+    if broker && selectors.is_empty() {
+        crate::tool::McpToolScope::All
+    } else {
+        crate::tool::McpToolScope::Selectors(selectors)
+    }
 }
 
 fn set_reasoning_arg(
@@ -387,6 +411,25 @@ fn wildcard_prefix_value(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_scope_uses_explicit_selectors_and_broker_grants() {
+        let scope = |names: &[&str]| {
+            mcp_scope_from_values(
+                &names
+                    .iter()
+                    .map(|name| Value::Str((*name).into()))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert!(!scope(&[]).permits("mcp.files.read"));
+        assert!(scope(&["mcp.tools", "mcp.call"]).permits("mcp.files.read"));
+        let restricted = scope(&["mcp.tools", "mcp.call", "mcp.files.*"]);
+        assert!(restricted.permits("mcp.files.read"));
+        assert!(!restricted.permits("mcp.mail.send"));
+        assert!(!restricted.permits("mcp.call"));
+        assert!(scope(&["mcp.*"]).permits("mcp.mail.send"));
+    }
 
     struct NamedTool(String);
 

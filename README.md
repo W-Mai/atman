@@ -286,7 +286,9 @@ See [`examples/`](examples/) for the canonical flows covering agent loops, code 
 
 ## Tools
 
-55+ built-in tools across 15 categories. Plus any MCP server configured in `mcp_servers.json` is auto-connected at boot and exposed through the same tool interface. An `llm.call` with a named MCP selector waits for that server and reports an unavailable dependency. The broad `"mcp.*"` selector briefly discovers available servers and continues if another server fails or remains unavailable; use `mcp.await` when a server is required.
+55+ built-in tools across 15 categories. MCP servers configured in `mcp_servers.json` connect at boot. The managed agent uses fixed MCP tools: `mcp.status`, `mcp.tools`, `mcp.await`, and `mcp.call`. Search the catalog with `mcp.tools(query: ...)`, retrieve a tool's full input schema with `mcp.tools(server: ..., tool: ...)`, then invoke it through `mcp.call`. Discovery results enter the conversation without changing the request's tool definitions. Proxy calls use the target tool's permissions, scheduling, and input validation.
+
+Custom flows can expose native MCP tools with explicit selectors. A named selector waits for its server and reports an unavailable dependency. The broad `"mcp.*"` selector briefly discovers available servers and continues if another server fails or remains unavailable; it still expands into native tool definitions and is subject to the provider's tool limit. Use `mcp.await` when a server is required.
 
 | Category | Tools | Tier |
 |---|---|---|

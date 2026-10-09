@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use crate::error::RuntimeError;
 use crate::mcp::{McpServerState, McpServerStatus};
-use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::tool_schedule::SchedulingClaims;
-use crate::value::Value;
+use crate::value::{Value, ValueJson};
 
 pub const CONTROL_TOOL_NAMES: &[&str] = &["mcp.status", "mcp.tools", "mcp.await", "mcp.call"];
 
@@ -194,9 +194,33 @@ fn string_arg(args: &ToolArgs, name: &str) -> Result<String, RuntimeError> {
     }
 }
 
-fn call_target(args: &ToolArgs) -> Result<(String, ToolArgs), RuntimeError> {
+fn optional_string_arg<'a>(
+    args: &'a ToolArgs,
+    name: &str,
+) -> Result<Option<&'a str>, RuntimeError> {
+    match args.named(name) {
+        Some(Value::Str(value)) => Ok(Some(value)),
+        Some(value) => Err(RuntimeError::TypeMismatch {
+            expected: "string".into(),
+            actual: value.kind_name().into(),
+        }),
+        None => Ok(None),
+    }
+}
+
+fn call_target(args: &ToolArgs, ctx: &ToolCtx) -> Result<(String, ToolArgs), RuntimeError> {
     let server = string_arg(args, "server")?;
     let tool = string_arg(args, "tool")?;
+    let target = format!("mcp.{server}.{tool}");
+    if ctx
+        .model_mcp_scope
+        .as_ref()
+        .is_some_and(|scope| !scope.permits(&target))
+    {
+        return Err(RuntimeError::ToolFailed(format!(
+            "MCP tool `{target}` was not allowed by the LLM request that produced this call"
+        )));
+    }
     let target_args = match args.named("input") {
         None | Some(Value::Unit) => ToolArgs::default(),
         Some(Value::Struct(fields)) => ToolArgs {
@@ -210,7 +234,48 @@ fn call_target(args: &ToolArgs) -> Result<(String, ToolArgs), RuntimeError> {
             });
         }
     };
-    Ok((format!("mcp.{server}.{tool}"), target_args))
+    Ok((target, target_args))
+}
+
+pub(crate) fn resolve_registered_call(
+    args: &ToolArgs,
+    ctx: &ToolCtx,
+) -> Result<(std::sync::Arc<dyn Tool>, ToolArgs), RuntimeError> {
+    let (target, target_args) = call_target(args, ctx)?;
+    let server = string_arg(args, "server")?;
+    let tool = ctx
+        .registry
+        .as_ref()
+        .and_then(|registry| registry.get(&target))
+        .ok_or_else(|| {
+            RuntimeError::ToolFailed(format!(
+                "MCP tool `{target}` is not ready or unavailable; inspect `mcp.status` or use `mcp.await` before calling it"
+            ))
+        })?;
+    let tool_name = string_arg(args, "tool")?;
+    if tool.mcp_identity() != Some((server.as_str(), tool_name.as_str())) {
+        return Err(RuntimeError::ToolFailed(format!(
+            "tool `{target}` is not a registered MCP server tool"
+        )));
+    }
+    Ok((tool, target_args))
+}
+
+pub(crate) async fn resolve_call(
+    args: &ToolArgs,
+    ctx: &ToolCtx,
+) -> Result<(std::sync::Arc<dyn Tool>, ToolArgs), RuntimeError> {
+    // Reject invalid or out-of-scope targets before waiting for their server.
+    call_target(args, ctx)?;
+    let server = string_arg(args, "server")?;
+    await_selectors(
+        &[format!("mcp.{server}.*")],
+        ctx,
+        Duration::from_secs(120),
+        ReadinessMode::Required,
+    )
+    .await?;
+    resolve_registered_call(args, ctx)
 }
 
 impl Tool for McpStatus {
@@ -261,35 +326,119 @@ impl Tool for McpTools {
         Tier::Zero
     }
     fn description(&self) -> Option<&str> {
-        Some("List currently registered MCP tools, optionally restricted to one server.")
+        Some(
+            "Search available MCP tools with query and cursor pagination. Set server and tool to retrieve that tool's complete input schema before calling mcp.call.",
+        )
     }
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({"type":"object","properties":{"server":{"type":"string"}},"additionalProperties":false})
+        serde_json::json!({
+            "type":"object",
+            "properties": {
+                "server":{"type":"string","description":"Restrict discovery to this MCP server."},
+                "tool":{"type":"string","description":"Exact MCP tool name within server; returns its complete input_schema. Requires server."},
+                "query":{"type":"string","description":"Search tool names and descriptions for every whitespace-separated term."},
+                "cursor":{"type":"string","description":"Continue using next_cursor from the previous page with the same filters."},
+                "limit":{"type":"integer","minimum":1,"maximum":100,"default":20}
+            },
+            "additionalProperties":false
+        })
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let registry = ctx.registry.as_ref().ok_or_else(|| {
                 RuntimeError::ToolFailed("mcp.tools: no tool registry available".into())
             })?;
-            let prefix = match args.named("server") {
-                Some(Value::Str(server)) => format!("mcp.{server}."),
-                Some(value) => {
-                    return Err(RuntimeError::TypeMismatch {
-                        expected: "string".into(),
-                        actual: value.kind_name().into(),
-                    });
+            let server = optional_string_arg(&args, "server")?;
+            let selected_tool = optional_string_arg(&args, "tool")?;
+            let query = optional_string_arg(&args, "query")?
+                .unwrap_or("")
+                .to_lowercase();
+            let cursor = optional_string_arg(&args, "cursor")?;
+            if selected_tool.is_some() {
+                if server.is_none() {
+                    return Err(RuntimeError::MissingArg("server".into()));
                 }
-                None => "mcp.".into(),
+                if !query.is_empty() || cursor.is_some() {
+                    return Err(RuntimeError::ToolFailed(
+                        "mcp.tools: tool cannot be combined with query or cursor".into(),
+                    ));
+                }
+            }
+            let limit = match args.named("limit") {
+                None => 20,
+                Some(Value::Int(limit @ 1..=100)) => *limit as usize,
+                _ => {
+                    return Err(RuntimeError::ToolFailed(
+                        "mcp.tools: limit must be an integer from 1 to 100".into(),
+                    ));
+                }
             };
-            let mut names = registry
+            let mut matches = registry
                 .names()
                 .into_iter()
                 .filter(|name| {
-                    name.starts_with(&prefix) && !CONTROL_TOOL_NAMES.contains(&name.as_str())
+                    ctx.model_mcp_scope
+                        .as_ref()
+                        .is_none_or(|scope| scope.permits(name))
+                })
+                .filter_map(|name| registry.get(&name).map(|tool| (name, tool)))
+                .filter(|(name, tool)| {
+                    let Some((tool_server, tool_name)) = tool.mcp_identity() else {
+                        return false;
+                    };
+                    server.is_none_or(|server| server == tool_server)
+                        && selected_tool.is_none_or(|selected| selected == tool_name)
+                        && query.split_whitespace().all(|term| {
+                            name.to_lowercase().contains(term)
+                                || tool.description().is_some_and(|description| {
+                                    description.to_lowercase().contains(term)
+                                })
+                        })
                 })
                 .collect::<Vec<_>>();
-            names.sort();
-            Ok(Value::List(names.into_iter().map(Value::Str).collect()))
+            matches.sort_by(|(left, _), (right, _)| left.cmp(right));
+            if selected_tool.is_some() && matches.is_empty() {
+                return Err(RuntimeError::ToolFailed(
+                    "mcp.tools: no matching tool is available in the current scope".into(),
+                ));
+            }
+            let total = matches.len();
+            let start = cursor.map_or(0, |cursor| {
+                matches.partition_point(|(name, _)| name.as_str() <= cursor)
+            });
+            let page = &matches[start..matches.len().min(start + limit)];
+            let next_cursor = if start + page.len() < matches.len() {
+                Value::Str(page.last().expect("nonempty page").0.clone())
+            } else {
+                Value::Unit
+            };
+            let tools = page
+                .iter()
+                .map(|(name, tool)| {
+                    let (server, tool_name) =
+                        tool.mcp_identity().expect("MCP identity was filtered");
+                    let mut fields = vec![
+                        ("name".into(), Value::Str(name.clone())),
+                        ("server".into(), Value::Str(server.into())),
+                        ("tool".into(), Value::Str(tool_name.into())),
+                        (
+                            "description".into(),
+                            tool.description()
+                                .map(|text| Value::Str(text.into()))
+                                .unwrap_or(Value::Unit),
+                        ),
+                    ];
+                    if selected_tool.is_some() {
+                        fields.push(("input_schema".into(), Value::from_json(tool.input_schema())));
+                    }
+                    Value::Struct(fields)
+                })
+                .collect();
+            Ok(Value::Struct(vec![
+                ("tools".into(), Value::List(tools)),
+                ("next_cursor".into(), next_cursor),
+                ("total".into(), Value::Int(total as i64)),
+            ]))
         })
     }
 }
@@ -353,20 +502,9 @@ impl Tool for McpCall {
     fn tier(&self) -> Tier {
         Tier::Zero
     }
-    fn approval_level(&self, args: &ToolArgs, ctx: &ToolCtx) -> ApprovalLevel {
-        let Ok((target, target_args)) = call_target(args) else {
-            return ApprovalLevel::Dangerous;
-        };
-        ctx.registry
-            .as_ref()
-            .and_then(|registry| registry.get(&target))
-            .map_or(ApprovalLevel::Dangerous, |tool| {
-                tool.approval_level(&target_args, ctx)
-            })
-    }
     fn description(&self) -> Option<&str> {
         Some(
-            "Call a connected MCP tool directly from At code without routing the operation through an LLM.",
+            "Call a ready MCP tool by server and tool name using its declared input parameters. Use mcp.await before calling a server that is still connecting.",
         )
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -383,21 +521,27 @@ impl Tool for McpCall {
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let (target, target_args) = call_target(&args)?;
-            let server = string_arg(&args, "server")?;
-            await_selectors(
-                &[format!("mcp.{server}.*")],
-                ctx,
-                Duration::from_secs(120),
-                ReadinessMode::Required,
+            let (tool, target_args) = resolve_call(&args, ctx).await?;
+            let id = ctx
+                .tool_use_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+            let invocation_ctx = ctx
+                .clone()
+                .for_tool_invocation(tool.tier())
+                .with_tool_use_id(id.clone());
+            let call_ctx = crate::approval::authorize_tool_invocation(
+                &invocation_ctx,
+                &id,
+                tool.name(),
+                &target_args,
+                tool.as_ref(),
             )
-            .await?;
-            let tool = ctx
-                .registry
-                .as_ref()
-                .and_then(|registry| registry.get(&target))
-                .ok_or_else(|| RuntimeError::UndefinedTool(target.clone()))?;
-            tool.call(target_args, ctx).await
+            .await
+            .map_err(|reason| {
+                RuntimeError::ToolFailed(format!("tool `{}` denied: {reason}", tool.name()))
+            })?;
+            tool.call(target_args, &call_ctx).await
         })
     }
 }
@@ -405,6 +549,131 @@ impl Tool for McpCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::ValueJson;
+
+    struct CatalogTool {
+        name: &'static str,
+        server: &'static str,
+        tool: &'static str,
+    }
+
+    impl Tool for CatalogTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+        fn mcp_identity(&self) -> Option<(&str, &str)> {
+            Some((self.server, self.tool))
+        }
+        fn description(&self) -> Option<&str> {
+            Some("Read documents")
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object", "properties":{"id":{"type":"integer"}}, "required":["id"]})
+        }
+        fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async { Ok(Value::Unit) })
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_discovery_scopes_search_pages_and_exact_schema_before_results() {
+        let registry = std::sync::Arc::new(crate::tool::ToolRegistry::new());
+        for tool in [
+            CatalogTool {
+                name: "mcp.team.tools.z.read",
+                server: "team.tools",
+                tool: "z.read",
+            },
+            CatalogTool {
+                name: "mcp.hidden.read",
+                server: "hidden",
+                tool: "read",
+            },
+            CatalogTool {
+                name: "mcp.team.tools.a.read",
+                server: "team.tools",
+                tool: "a.read",
+            },
+        ] {
+            registry.register(std::sync::Arc::new(tool));
+        }
+        registry.register(std::sync::Arc::new(McpCall));
+        registry
+            .register_fn(
+                crate::tool::ToolDefinition::new("mcp.team.tools.fake", Tier::Zero),
+                |_, _| async { Ok(Value::Unit) },
+            )
+            .unwrap();
+        let mut ctx = ToolCtx::new().with_registry(registry);
+        ctx.model_mcp_scope = Some(crate::tool::McpToolScope::Selectors(
+            ["mcp.team.tools.*".into()].into(),
+        ));
+        let search = ToolArgs {
+            named: vec![
+                ("query".into(), Value::Str("READ document".into())),
+                ("limit".into(), Value::Int(1)),
+            ],
+            positional: Vec::new(),
+        };
+        let first = McpTools
+            .call(search.clone(), &ctx)
+            .await
+            .unwrap()
+            .to_json()
+            .unwrap();
+        assert_eq!(first["total"], 2);
+        assert_eq!(first["tools"][0]["name"], "mcp.team.tools.a.read");
+        assert_eq!(first["tools"][0]["server"], "team.tools");
+        assert_eq!(first["tools"][0]["tool"], "a.read");
+        assert!(first["tools"][0].get("input_schema").is_none());
+        let mut next = search;
+        next.named.push((
+            "cursor".into(),
+            Value::from_json(first["next_cursor"].clone()),
+        ));
+        let second = McpTools.call(next, &ctx).await.unwrap().to_json().unwrap();
+        assert_eq!(second["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(second["tools"][0]["name"], "mcp.team.tools.z.read");
+        assert!(second["next_cursor"].is_null());
+        let mut exact = ToolArgs {
+            named: vec![
+                ("server".into(), Value::Str("team.tools".into())),
+                ("tool".into(), Value::Str("z.read".into())),
+            ],
+            positional: Vec::new(),
+        };
+        let detail = McpTools
+            .call(exact.clone(), &ctx)
+            .await
+            .unwrap()
+            .to_json()
+            .unwrap();
+        assert_eq!(
+            detail["tools"][0]["input_schema"]["required"],
+            serde_json::json!(["id"])
+        );
+        exact.named[0].1 = Value::Str("hidden".into());
+        exact.named[1].1 = Value::Str("read".into());
+        assert!(McpTools.call(exact, &ctx).await.is_err());
+        let fake = ToolArgs {
+            named: vec![
+                ("server".into(), Value::Str("team.tools".into())),
+                ("tool".into(), Value::Str("fake".into())),
+            ],
+            positional: Vec::new(),
+        };
+        assert!(
+            resolve_call(&fake, &ctx)
+                .await
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("not a registered MCP")
+        );
+    }
 
     #[test]
     fn mcp_call_claims_the_explicit_server_without_parsing_qualified_names() {

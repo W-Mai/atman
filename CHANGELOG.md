@@ -6,12 +6,18 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ⚠️ Breaking Changes
+
+- **MCP directory results** — `mcp.tools` returns `{tools, next_cursor, total}` with paginated summaries. An exact `server` and `tool` lookup includes the input schema.
+
 ### ✨ Features
 
+- **MCP discovery** — Managed agents use fixed MCP discovery and call tools. Catalog search and cursor pagination load tool details on demand; explicit selectors still expose native definitions.
 - **Resource-aware tool batches** — `dispatch_all` runs resource-independent calls concurrently, preserves source order for conflicting resources, and treats permission-control calls as authorization and execution barriers. `Tool`, `ToolDefinition`, and `#[atman_runtime::tools]` expose structured scheduling claims for built-in and host-provided tools; undeclared tools remain opaque barriers.
 
 ### 🐛 Bug Fixes
 
+- **MCP proxy execution** — Proxy calls enforce the originating request's target scope and use the target's permissions, scheduling, and audit identity. Arguments are validated against the original JSON Schema before transport; invalid schemas and external schema references fail only the affected tool.
 - **Context cache row** — The sidebar renders cache usage once and keeps its text-selection coordinates aligned with the visible Context rows.
 
 ## [1.14.0] — 2026-09-30

@@ -260,15 +260,22 @@ flow review(input: string) -> string {
 
 Run the entry flow with `atman run .atman/commands/review.at --flow review input=hello`. A relative specifier such as `use "./lib/text.at"::normalize` resolves beside its declaring file. `use "user:text.at"::normalize` reads from `~/.config/atman/lib/`. A named `use` makes only the selected public flow callable in the current file; the shared file's private helper flows remain available to its own flows. Calling `normalize(input)` creates a cold Future; `.await` executes it, and `fanout [normalize(a), normalize(b)]` runs both calls concurrently.
 
-### MCP readiness and direct calls
+### MCP discovery and calls
 
-An `llm.call` with a named selector such as `"mcp.jira.search"` or `"mcp.jira.*"` waits for that server and fails if it is unavailable. The broad `"mcp.*"` selector gives connecting servers a short discovery window, then exposes whichever tools are available without failing the flow because another server failed. Use `mcp.await` or `mcp.call` when a specific server is required. At code can inspect or invoke a server without an LLM:
+The managed agent exposes `mcp.status`, `mcp.tools`, `mcp.await`, and `mcp.call`. The request's MCP definitions stay fixed as the catalog grows. Tool descriptions and schemas are retrieved as tool results, so discovery does not replace the model's existing tool prefix.
+
+`mcp.tools(query: "search", limit: 20)` returns `{tools, next_cursor, total}`. Each catalog item includes `name`, `server`, `tool`, and `description`. Continue with the returned `next_cursor` and the same filters; a null cursor marks the end. Results are sorted by qualified name. `limit` accepts 1–100 and defaults to 20. Query terms match tool names and descriptions, ignoring case. Set both `server` and `tool` to retrieve an exact tool, including its complete `input_schema`, before calling it:
 
 ```at
 ready = mcp.await(server: "jira")
-tools = mcp.tools(server: "jira")
+catalog = mcp.tools(server: "jira", query: "search")
+definition = mcp.tools(server: "jira", tool: "search")
 result = mcp.call(server: "jira", tool: "search", input: {query: "open"})
 ```
+
+`mcp.call` uses the real target's approval level, permissions, scheduling resources, and audit identity. The model's call ID stays unchanged. Model tool batches resolve only registered targets; a call to an unavailable tool returns an error immediately, allowing other tools in the batch to run. Use `mcp.await` before calling a server that is still connecting. Direct `.at` calls can wait for that server. The MCP adapter validates arguments against the original JSON Schema after argument reconciliation and before transport. Local schema references are supported; external HTTP and file references are rejected. An invalid schema disables calls to that tool without preventing unrelated tools from registering.
+
+Custom `llm.call` flows can expose native tools with a named selector such as `"mcp.jira.search"` or `"mcp.jira.*"`; those selectors wait for the server and fail if it is unavailable. The broad `"mcp.*"` selector gives connecting servers a short discovery window and exposes available native tools without failing because another server is unavailable. Native definitions count toward the provider's tool limit. Exposing the broker controls alone grants MCP discovery and calls across the catalog, subject to target permissions. When the same request also includes specific MCP selectors, those selectors restrict both broker discovery and calls. Exposing `mcp.call` never bypasses the target's approval policy.
 
 The CLI supports the same direct operation with JSON input. Tools declaring the MCP `readOnlyHint` annotation can run directly; tools without that declaration require the explicit write override:
 

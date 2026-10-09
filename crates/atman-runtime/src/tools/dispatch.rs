@@ -239,11 +239,11 @@ fn prepare_dispatch(
             });
             continue;
         }
-        if ctx
-            .model_tool_exposures
-            .as_ref()
-            .is_some_and(|exposures| !exposures.claim(ctx.flow_run_id.as_ref(), &id, &name))
-        {
+        let model_mcp_scope = match ctx.model_tool_exposures.as_ref() {
+            Some(exposures) => exposures.claim_with_mcp_scope(ctx.flow_run_id.as_ref(), &id, &name),
+            None => ctx.model_mcp_scope.clone(),
+        };
+        if ctx.model_tool_exposures.is_some() && model_mcp_scope.is_none() {
             emit_tool_node(ctx, &id, &name, &input, call_intent.as_ref());
             prepared.push(PreparedEntry::Failed {
                 index,
@@ -255,7 +255,7 @@ fn prepare_dispatch(
                     ctx,
                     &id,
                     &format!(
-                        "dispatch_all: tool `{name}` was not exposed by the LLM request that produced call `{id}`"
+                        "dispatch_all: tool `{name}` was not exposed by its LLM request, or call ID `{id}` is ambiguous across pending responses. Issue a new tool call."
                     ),
                 ),
             });
@@ -307,6 +307,30 @@ fn prepare_dispatch(
                 continue;
             }
         };
+        let mut request_ctx = ctx.clone();
+        request_ctx.model_mcp_scope = model_mcp_scope;
+        let (name, tool, named) = if name == "mcp.call" {
+            let args = ToolArgs {
+                positional: Vec::new(),
+                named,
+            };
+            match crate::tools::mcp::resolve_registered_call(&args, &request_ctx) {
+                Ok((tool, args)) => (tool.name().to_string(), tool, args.named),
+                Err(error) => {
+                    emit_tool_node(ctx, &id, &name, &input, call_intent.as_ref());
+                    prepared.push(PreparedEntry::Failed {
+                        index,
+                        plane,
+                        msg: build_error_result(ctx, &id, &error.to_string()),
+                    });
+                    continue;
+                }
+            }
+        } else {
+            (name, tool, named)
+        };
+        let plane = tool.invocation_plane();
+        let raw_schema = tool.input_schema();
         emit_tool_node(
             ctx,
             &id,
@@ -351,8 +375,7 @@ fn prepare_dispatch(
             positional: Vec::new(),
             named,
         };
-        let invocation_ctx = ctx
-            .clone()
+        let invocation_ctx = request_ctx
             .for_tool_invocation(tool.tier())
             .with_tool_use_id(id.clone())
             .with_call_intent(call_intent);
@@ -1028,6 +1051,335 @@ mod tests {
     }
 
     struct PermitProbeTool;
+
+    struct McpTargetProbe(&'static str);
+
+    #[tokio::test]
+    async fn pending_mcp_target_does_not_delay_other_batch_tools() {
+        let registry = crate::tool::ToolRegistry::new();
+        registry.register(std::sync::Arc::new(PermitProbeTool));
+        registry.register(std::sync::Arc::new(crate::tools::mcp::McpCall));
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        session.update_mcp_server(crate::mcp::McpServerStatus {
+            name: "pending".into(),
+            transport: crate::mcp::TransportKind::Stdio,
+            state: crate::mcp::McpServerState::Connecting,
+        });
+        let ctx = authorized_ctx(std::sync::Arc::new(registry)).with_session_runtime(session);
+        let uses = Value::from_json(serde_json::json!([
+            {"id":"probe_id", "name":"permit.probe", "intent":"Inspect authorization", "input":{}},
+            {"id":"pending_id", "name":"mcp.call", "intent":"Read remote data", "input":{"server":"pending", "tool":"read"}}
+        ]));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            DispatchAll.call(
+                ToolArgs {
+                    positional: vec![uses],
+                    named: Vec::new(),
+                },
+                &ctx,
+            ),
+        )
+        .await
+        .expect("batch preparation must not await MCP readiness")
+        .unwrap();
+        let Value::List(results) = result else {
+            panic!("dispatch result list")
+        };
+        assert_eq!(results.len(), 2);
+        for (index, result) in results.iter().enumerate() {
+            let Value::Host(AtmanPayload::Message(message)) = result else {
+                panic!("tool result message")
+            };
+            let [
+                crate::message::MessagePart::ToolResult {
+                    content, is_error, ..
+                },
+            ] = message.parts.as_slice()
+            else {
+                panic!("one tool result")
+            };
+            assert_eq!(*is_error, index == 1);
+            if index == 0 {
+                assert_eq!(content, "true");
+            } else {
+                assert!(content.contains("mcp.await"));
+            }
+        }
+    }
+
+    impl Tool for McpTargetProbe {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Three
+        }
+
+        fn mcp_identity(&self) -> Option<(&str, &str)> {
+            self.0
+                .strip_prefix("mcp.")
+                .and_then(|name| name.split_once('.'))
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object", "required":["value"]})
+        }
+
+        fn scheduling_claims(
+            &self,
+            args: &ToolArgs,
+            _ctx: &ToolCtx,
+        ) -> Result<crate::SchedulingClaims, RuntimeError> {
+            assert!(matches!(args.named("value"), Some(Value::Int(7))));
+            Ok(crate::SchedulingClaims::declared([
+                crate::ResourceAccess::exclusive(crate::ResourceKey::Named(
+                    "target-resource".into(),
+                )),
+            ]))
+        }
+
+        fn invocation_provenance(
+            &self,
+            _args: &ToolArgs,
+            _ctx: &ToolCtx,
+        ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+            Ok(crate::permission::ResourceProvenance::none().with_network())
+        }
+
+        fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async move {
+                let permit = ctx
+                    .invocation_authorization()
+                    .expect("target authorization");
+                assert!(permit.is_for_call(ctx.tool_use_id.as_deref().unwrap(), self.name()));
+                assert!(permit.provenance().network);
+                assert!(args.named("server").is_none());
+                Ok(args.named("value").unwrap().clone())
+            })
+        }
+    }
+
+    async fn assert_colliding_mcp_scopes_fail_closed(scopes: [crate::tool::McpToolScope; 2]) {
+        use crate::message::{Message, MessageOrigin, MessagePart, MessageRole, ToolCallIntent};
+
+        let registry = crate::tool::ToolRegistry::new();
+        registry.register(std::sync::Arc::new(crate::tools::mcp::McpCall));
+        registry.register(std::sync::Arc::new(McpTargetProbe("mcp.secret.mutate")));
+        let mut ctx = authorized_ctx(std::sync::Arc::new(registry));
+        let exposures = crate::tool::ToolExposureRegistry::default();
+        ctx.model_tool_exposures = Some(exposures.clone());
+        let responses = ["first", "second"].map(|label| Message {
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::ToolUse {
+                id: "reused-id".into(),
+                name: "mcp.call".into(),
+                input: serde_json::json!({"server":"secret", "tool":"mutate", "input":{"value":7}}),
+                intent: ToolCallIntent::new(label),
+            }],
+            turn_id: crate::event::TurnId::now(),
+            origin: MessageOrigin::User,
+        });
+        for (response, scope) in responses.iter().zip(scopes) {
+            exposures.register_response_with_mcp_scope(
+                ctx.flow_run_id.as_ref(),
+                response,
+                ["mcp.call"],
+                scope,
+            );
+        }
+        for response in responses.iter().rev() {
+            let uses = ExtractToolUses
+                .call(
+                    ToolArgs {
+                        positional: vec![Value::Host(AtmanPayload::Message(response.clone()))],
+                        named: Vec::new(),
+                    },
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            let Value::List(results) = DispatchAll
+                .call(
+                    ToolArgs {
+                        positional: vec![uses],
+                        named: Vec::new(),
+                    },
+                    &ctx,
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("dispatch results")
+            };
+            assert!(matches!(results.as_slice(),
+                [Value::Host(AtmanPayload::Message(message))]
+                    if matches!(message.parts.as_slice(),
+                        [MessagePart::ToolResult { is_error: true, content, .. }]
+                            if content.contains("ambiguous")
+                    )
+            ));
+        }
+        assert!(ctx.permission_broker.as_ref().unwrap().list().is_empty());
+
+        // Consuming every colliding call removes the ambiguity. Sequential
+        // responses may then reuse the provider's ID without losing their scope.
+        for _ in 0..2 {
+            exposures.register_response_with_mcp_scope(
+                ctx.flow_run_id.as_ref(),
+                &responses[0],
+                ["mcp.call"],
+                crate::tool::McpToolScope::All,
+            );
+            assert_eq!(
+                exposures.claim_with_mcp_scope(ctx.flow_run_id.as_ref(), "reused-id", "mcp.call"),
+                Some(crate::tool::McpToolScope::All)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_proxy_rejects_restricted_response_before_colliding_broad_response() {
+        assert_colliding_mcp_scopes_fail_closed([
+            crate::tool::McpToolScope::All,
+            crate::tool::McpToolScope::Selectors(["mcp.docs.*".into()].into()),
+        ])
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mcp_proxy_rejects_broad_response_before_colliding_restricted_response() {
+        assert_colliding_mcp_scopes_fail_closed([
+            crate::tool::McpToolScope::Selectors(["mcp.docs.*".into()].into()),
+            crate::tool::McpToolScope::All,
+        ])
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mcp_proxy_dispatch_preserves_target_contract_and_request_scope() {
+        use crate::message::{Message, MessageOrigin, MessagePart, MessageRole, ToolCallIntent};
+
+        let registry = crate::tool::ToolRegistry::new();
+        registry.register(std::sync::Arc::new(crate::tools::mcp::McpCall));
+        registry.register(std::sync::Arc::new(McpTargetProbe("mcp.docs.mutate")));
+        registry.register(std::sync::Arc::new(McpTargetProbe("mcp.secret.mutate")));
+        let sink = crate::event::EventSink::new();
+        let mut ctx = authorized_ctx(std::sync::Arc::new(registry))
+            .with_events(sink.clone())
+            .with_current_node(Some("dispatch".into()));
+        let response = Message {
+            role: MessageRole::Assistant,
+            parts: [
+                ("direct", "mcp.docs.mutate", serde_json::json!({"value":7})),
+                (
+                    "proxy",
+                    "mcp.call",
+                    serde_json::json!({"server":"docs", "tool":"mutate", "input":{"value":7}}),
+                ),
+                (
+                    "missing",
+                    "mcp.call",
+                    serde_json::json!({"server":"docs", "tool":"mutate", "input":{}}),
+                ),
+                (
+                    "forbidden",
+                    "mcp.call",
+                    serde_json::json!({"server":"secret", "tool":"mutate", "input":{"value":7}}),
+                ),
+            ]
+            .into_iter()
+            .map(|(id, name, input)| MessagePart::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input,
+                intent: ToolCallIntent::new("Update the requested record"),
+            })
+            .collect(),
+            turn_id: crate::event::TurnId::now(),
+            origin: MessageOrigin::User,
+        };
+        let exposures = crate::tool::ToolExposureRegistry::default();
+        exposures.register_response_with_mcp_scope(
+            ctx.flow_run_id.as_ref(),
+            &response,
+            ["mcp.call", "mcp.docs.mutate"],
+            crate::tool::McpToolScope::Selectors(["mcp.docs.*".into()].into()),
+        );
+        ctx.model_tool_exposures = Some(exposures);
+        let Value::List(uses) = ExtractToolUses
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Host(AtmanPayload::Message(response))],
+                    named: Vec::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("tool uses");
+        };
+        let prepared = prepare_dispatch(&uses, ctx.registry.as_ref().unwrap(), &ctx).unwrap();
+        let [
+            PreparedEntry::Ready(direct),
+            PreparedEntry::Ready(proxy),
+            PreparedEntry::Failed { .. },
+            PreparedEntry::Failed { .. },
+        ] = prepared.as_slice()
+        else {
+            panic!("two valid calls, one incomplete call, one forbidden call");
+        };
+        assert_eq!(direct.name, "mcp.docs.mutate");
+        assert_eq!(proxy.name, direct.name);
+        assert_eq!(proxy.tool.tier(), Tier::Three);
+        assert_eq!(proxy.claims, direct.claims);
+        assert_eq!(proxy.id, "proxy");
+        assert!(sink.snapshot().iter().any(|event| matches!(event,
+            crate::event::Event::ToolNode { tool_use_id, tool_name, .. }
+                if tool_use_id == "proxy" && tool_name == "mcp.docs.mutate"
+        )));
+        let results = dispatch_prepared(prepared, &ctx).await;
+        for (index, id) in ["direct", "proxy", "missing", "forbidden"]
+            .iter()
+            .enumerate()
+        {
+            let Value::Host(AtmanPayload::Message(message)) =
+                &results[index].as_ref().unwrap().tool_result
+            else {
+                panic!("result message");
+            };
+            let [
+                MessagePart::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                },
+            ] = message.parts.as_slice()
+            else {
+                panic!("tool result");
+            };
+            assert_eq!(tool_use_id, id);
+            assert_eq!(*is_error, index >= 2);
+            match index {
+                0 | 1 => assert_eq!(content, "7"),
+                2 => assert!(content.contains("Missing required fields: value")),
+                _ => assert!(content.contains("was not allowed")),
+            }
+        }
+        let requests = ctx.permission_broker.as_ref().unwrap().list();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| {
+            request.intent.tool_name == "mcp.docs.mutate"
+                && request.intent.tier == Tier::Three
+                && request.intent.provenance.network
+        }));
+        assert_eq!(
+            requests[0].intent.args_digest,
+            requests[1].intent.args_digest
+        );
+    }
 
     impl Tool for PermitProbeTool {
         fn name(&self) -> &str {

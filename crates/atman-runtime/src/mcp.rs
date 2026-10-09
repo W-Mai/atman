@@ -1269,7 +1269,19 @@ pub struct McpToolAdapter {
     client: Arc<McpClient>,
     reconcile: Option<ReconcilePlan>,
     schema: serde_json::Value,
+    validator: Result<jsonschema::Validator, String>,
     description: Option<String>,
+}
+
+struct LocalSchemaReferences;
+
+impl jsonschema::Retrieve for LocalSchemaReferences {
+    fn retrieve(
+        &self,
+        _uri: &jsonschema::Uri<String>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        Err("external references are not allowed in MCP tool schemas".into())
+    }
 }
 
 pub(crate) fn mcp_server_scheduling_claim(server: &str) -> crate::tool_schedule::SchedulingClaims {
@@ -1294,6 +1306,10 @@ impl McpToolAdapter {
         let schema = schema
             .cloned()
             .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+        let validator = jsonschema::options()
+            .with_retriever(LocalSchemaReferences)
+            .build(&schema)
+            .map_err(|error| error.to_string());
         Self {
             qualified_name,
             tool_name,
@@ -1301,6 +1317,7 @@ impl McpToolAdapter {
             client,
             reconcile,
             schema,
+            validator,
             description: description.map(str::to_string),
         }
     }
@@ -1321,6 +1338,10 @@ impl crate::tool::Tool for McpToolAdapter {
 
     fn description(&self) -> Option<&str> {
         self.description.as_deref()
+    }
+
+    fn mcp_identity(&self) -> Option<(&str, &str)> {
+        Some((&self.client.name, &self.tool_name))
     }
 
     fn scheduling_claims(
@@ -1347,6 +1368,18 @@ impl crate::tool::Tool for McpToolAdapter {
             } else {
                 params
             };
+            let validator = self.validator.as_ref().map_err(|error| {
+                RuntimeError::ToolFailed(format!(
+                    "MCP tool `{}` has an invalid input schema: {error}",
+                    self.qualified_name,
+                ))
+            })?;
+            validator.validate(&params).map_err(|error| {
+                RuntimeError::ToolFailed(format!(
+                    "MCP tool `{}` input does not match its schema at {}: {error}",
+                    self.qualified_name, error.instance_path,
+                ))
+            })?;
             let v = self.client.call_tool(&self.tool_name, params).await?;
             Ok(v)
         })
@@ -1642,6 +1675,7 @@ mod tests {
                 .push((method.to_string(), params.clone()));
             let result = match method {
                 "initialize" => Ok(serde_json::json!({})),
+                "tools/call" => Ok(serde_json::json!({"content":[]})),
                 "tools/list" if params.get("cursor").is_none() => Ok(serde_json::json!({
                     "tools": [{
                         "name": "zeta",
@@ -1769,6 +1803,141 @@ mod tests {
                 .scheduling_claims(&wrapper_args, &ctx)
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn adapter_validates_original_schema_after_reconciliation_without_external_retrieval() {
+        use crate::tool::Tool;
+
+        let transport = Arc::new(PagedToolTransport::new(false));
+        let client = Arc::new(
+            McpClient::connect_with_transport("schema-test", transport.clone())
+                .await
+                .unwrap(),
+        );
+        let schema = serde_json::json!({
+            "$schema":"https://json-schema.org/draft/2020-12/schema",
+            "$defs":{"positive":{"type":"integer","minimum":1}},
+            "type":"object",
+            "properties":{
+                "items":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/positive"}},
+                "mode":{"enum":["read","write"]},
+                "id":{"oneOf":[{"type":"integer"},{"type":"string","minLength":2}]}
+            },
+            "required":["items","mode","id"],
+            "additionalProperties":false
+        });
+        let adapter = McpToolAdapter::new(
+            client.clone(),
+            "validate",
+            crate::tool::Tier::Zero,
+            Some(&schema),
+            None,
+        );
+        let args = |input: serde_json::Value| crate::tool::ToolArgs {
+            positional: Vec::new(),
+            named: input
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), crate::value::Value::from_json(value.clone())))
+                .collect(),
+        };
+        let ctx = crate::tool::ToolCtx::new();
+        for input in [
+            serde_json::json!({"items":[0],"mode":"read","id":7}),
+            serde_json::json!({"items":[1],"mode":"unknown","id":7}),
+            serde_json::json!({"items":[1],"mode":"read","id":true}),
+            serde_json::json!({"items":[1],"mode":"read","id":"x"}),
+            serde_json::json!({"items":[1],"mode":"read","id":7,"extra":1}),
+        ] {
+            assert!(
+                adapter
+                    .call(args(input), &ctx)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("input does not match")
+            );
+        }
+        assert!(
+            !transport
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(method, _)| method == "tools/call")
+        );
+        adapter
+            .call(
+                args(serde_json::json!({"items":[1],"mode":"read","id":7})),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let container_schema = serde_json::json!({
+            "type":"object",
+            "properties":{
+                "action":{"enum":["count"]},
+                "params":{"type":"object","additionalProperties":{"type":"integer","minimum":1}}
+            },
+            "required":["action","params"],
+            "additionalProperties":false
+        });
+        let container = McpToolAdapter::new(
+            client.clone(),
+            "container",
+            crate::tool::Tier::Zero,
+            Some(&container_schema),
+            None,
+        );
+        container
+            .call(args(serde_json::json!({"action":"count","n":3})), &ctx)
+            .await
+            .unwrap();
+        assert!(
+            container
+                .call(
+                    args(serde_json::json!({"action":"count","n":"wrong"})),
+                    &ctx
+                )
+                .await
+                .is_err()
+        );
+        for invalid_schema in [
+            serde_json::json!({"type":42}),
+            serde_json::json!({"$ref":"https://schemas.example/tool.json"}),
+            serde_json::json!({"$ref":"file:///not-readable/schema.json"}),
+        ] {
+            let invalid = McpToolAdapter::new(
+                client.clone(),
+                "invalid",
+                crate::tool::Tier::Zero,
+                Some(&invalid_schema),
+                None,
+            );
+            assert!(invalid.validator.is_err());
+            assert!(
+                invalid
+                    .call(args(serde_json::json!({})), &ctx)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("invalid input schema")
+            );
+        }
+        let calls = transport.calls.lock().unwrap();
+        let sent = calls
+            .iter()
+            .filter(|(method, _)| method == "tools/call")
+            .collect::<Vec<_>>();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(
+            sent[1].1["arguments"],
+            serde_json::json!({"action":"count","params":{"n":3}})
+        );
+        assert_eq!(adapter.input_schema(), schema);
     }
 
     #[tokio::test]

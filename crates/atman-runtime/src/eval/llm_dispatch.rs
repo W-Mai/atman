@@ -582,10 +582,11 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             match outcome {
                 Ok(am) => {
                     if let Some(exposures) = ctx.model_tool_exposures.as_ref() {
-                        exposures.register_response(
+                        exposures.register_response_with_mcp_scope(
                             ctx.flow_run_id.as_ref(),
                             &am.message,
                             tool_specs.iter().map(|tool| tool.name.as_str()),
+                            args.mcp_scope.clone(),
                         );
                     }
                     if last_err.is_some() {

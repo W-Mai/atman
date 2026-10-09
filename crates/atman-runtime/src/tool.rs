@@ -146,6 +146,7 @@ pub struct ToolCtx {
     pub call_intent: Option<crate::message::ToolCallIntent>,
     pub tool_use_id: Option<String>,
     pub(crate) model_tool_exposures: Option<ToolExposureRegistry>,
+    pub(crate) model_mcp_scope: Option<McpToolScope>,
     pub(crate) invocation_env: crate::invocation_env::InvocationEnv,
     pub watch_rules: Option<crate::streaming::WatchRules>,
     /// Called when memory.recent_turns is invoked, with the count of returned messages.
@@ -157,7 +158,43 @@ pub struct ToolCtx {
 
 #[derive(Clone, Default)]
 pub(crate) struct ToolExposureRegistry {
-    pending: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<ToolExposureKey, usize>>>,
+    pending: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<ToolExposureKey, PendingToolExposure>>,
+    >,
+}
+
+struct PendingToolExposure {
+    remaining: usize,
+    scope: Option<McpToolScope>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum McpToolScope {
+    All,
+    Selectors(std::collections::BTreeSet<String>),
+}
+
+impl Default for McpToolScope {
+    fn default() -> Self {
+        Self::Selectors(Default::default())
+    }
+}
+
+impl McpToolScope {
+    pub(crate) fn permits(&self, name: &str) -> bool {
+        if !name.starts_with("mcp.") || crate::tools::mcp::CONTROL_TOOL_NAMES.contains(&name) {
+            return false;
+        }
+        match self {
+            Self::All => true,
+            Self::Selectors(selectors) => selectors.iter().any(|selector| {
+                selector == name
+                    || selector
+                        .strip_suffix('*')
+                        .is_some_and(|prefix| name.starts_with(prefix))
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -168,11 +205,30 @@ struct ToolExposureKey {
 }
 
 impl ToolExposureRegistry {
+    #[cfg(test)]
     pub(crate) fn register_response<I, S>(
         &self,
         flow_run_id: Option<&crate::event::FlowRunId>,
         message: &crate::message::Message,
         exposed_names: I,
+    ) where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let exposed_names: std::collections::HashSet<String> = exposed_names
+            .into_iter()
+            .map(|name| name.as_ref().to_string())
+            .collect();
+        let scope = McpToolScope::Selectors(exposed_names.iter().cloned().collect());
+        self.register_response_with_mcp_scope(flow_run_id, message, exposed_names, scope);
+    }
+
+    pub(crate) fn register_response_with_mcp_scope<I, S>(
+        &self,
+        flow_run_id: Option<&crate::event::FlowRunId>,
+        message: &crate::message::Message,
+        exposed_names: I,
+        scope: McpToolScope,
     ) where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -193,39 +249,57 @@ impl ToolExposureRegistry {
             let crate::message::MessagePart::ToolUse { id, name, .. } = part else {
                 continue;
             };
-            if id_counts.get(id.as_str()) != Some(&1) || !exposed_names.contains(name) {
-                continue;
-            }
-            *pending
+            let scope = (id_counts.get(id.as_str()) == Some(&1) && exposed_names.contains(name))
+                .then(|| scope.clone());
+            pending
                 .entry(ToolExposureKey {
                     flow_run_id: flow_run_id.cloned(),
                     tool_use_id: id.clone(),
                     tool_name: name.clone(),
                 })
-                .or_insert(0) += 1;
+                .and_modify(|exposure| {
+                    // Wire IDs can repeat across responses. An outstanding collision
+                    // cannot identify which request authorized either invocation.
+                    exposure.remaining += 1;
+                    exposure.scope = None;
+                })
+                .or_insert(PendingToolExposure {
+                    remaining: 1,
+                    scope,
+                });
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn claim(
         &self,
         flow_run_id: Option<&crate::event::FlowRunId>,
         tool_use_id: &str,
         tool_name: &str,
     ) -> bool {
+        self.claim_with_mcp_scope(flow_run_id, tool_use_id, tool_name)
+            .is_some()
+    }
+
+    pub(crate) fn claim_with_mcp_scope(
+        &self,
+        flow_run_id: Option<&crate::event::FlowRunId>,
+        tool_use_id: &str,
+        tool_name: &str,
+    ) -> Option<McpToolScope> {
         let key = ToolExposureKey {
             flow_run_id: flow_run_id.cloned(),
             tool_use_id: tool_use_id.to_string(),
             tool_name: tool_name.to_string(),
         };
         let mut pending = self.pending.lock().unwrap();
-        let Some(count) = pending.get_mut(&key) else {
-            return false;
-        };
-        *count -= 1;
-        if *count == 0 {
+        let exposure = pending.get_mut(&key)?;
+        exposure.remaining -= 1;
+        let scope = exposure.scope.clone();
+        if exposure.remaining == 0 {
             pending.remove(&key);
         }
-        true
+        scope
     }
 }
 
@@ -683,6 +757,9 @@ pub trait Tool: Send + Sync {
         atman_rt::ToolCallMode::Immediate
     }
     fn description(&self) -> Option<&str> {
+        None
+    }
+    fn mcp_identity(&self) -> Option<(&str, &str)> {
         None
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -1274,7 +1351,60 @@ mod tests {
         exposures.register_response(Some(&run), &response, ["allowed.probe"]);
 
         assert!(!exposures.claim(Some(&run), "duplicate", "allowed.probe"));
+        assert!(!exposures.claim(Some(&run), "duplicate", "allowed.probe"));
         assert!(!exposures.claim(Some(&run), "hidden", "hidden.probe"));
+    }
+
+    #[test]
+    fn model_tool_exposure_preserves_each_requests_mcp_scope() {
+        let exposures = ToolExposureRegistry::default();
+        let run = crate::event::FlowRunId::now();
+        let mut response = crate::message::Message {
+            role: crate::message::MessageRole::Assistant,
+            parts: vec![crate::message::MessagePart::ToolUse {
+                id: "restricted".into(),
+                name: "mcp.call".into(),
+                input: serde_json::json!({}),
+                intent: None,
+            }],
+            turn_id: crate::event::TurnId::now(),
+            origin: crate::message::MessageOrigin::User,
+        };
+        exposures.register_response_with_mcp_scope(
+            Some(&run),
+            &response,
+            ["mcp.call"],
+            McpToolScope::Selectors(["mcp.docs.*".into(), "mcp.tasks.read".into()].into()),
+        );
+        let crate::message::MessagePart::ToolUse { id, .. } = &mut response.parts[0] else {
+            unreachable!()
+        };
+        *id = "unrestricted".into();
+        exposures.register_response_with_mcp_scope(
+            Some(&run),
+            &response,
+            ["mcp.call"],
+            McpToolScope::All,
+        );
+        let scope = exposures
+            .claim_with_mcp_scope(Some(&run), "restricted", "mcp.call")
+            .unwrap();
+        assert!(scope.permits("mcp.docs.read"));
+        assert!(scope.permits("mcp.tasks.read"));
+        assert!(!scope.permits("mcp.tasks.delete"));
+        assert!(!scope.permits("mcp.docs_other.read"));
+        assert!(!scope.permits("mcp.call"));
+        assert!(
+            exposures
+                .claim_with_mcp_scope(Some(&run), "restricted", "mcp.call")
+                .is_none()
+        );
+        let all = exposures
+            .claim_with_mcp_scope(Some(&run), "unrestricted", "mcp.call")
+            .unwrap();
+        assert!(all.permits("mcp.tasks.delete"));
+        assert!(!all.permits("fs.read"));
+        assert!(!all.permits("mcp.call"));
     }
 
     struct ReservedEnvTool;

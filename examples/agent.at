@@ -34,7 +34,7 @@ flow agent_loop(completion_state: string) -> string {
             "final.answer",
             "preview.push",
             "session.push", "sleep", "message.user",
-            "mcp.*"
+            "mcp.status", "mcp.tools", "mcp.await", "mcp.call"
         ],
     )
     final_answer = extract_final_answer(reply)

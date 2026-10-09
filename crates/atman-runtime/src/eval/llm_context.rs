@@ -173,6 +173,7 @@ mod tests {
             context_mode: "session".into(),
             fallback_value: None,
             tool_specs: Vec::new(),
+            mcp_scope: Default::default(),
             reasoning: None,
             call_purpose: crate::context_plan::ContextCallPurpose::General,
             stall_timeout_secs: 0,

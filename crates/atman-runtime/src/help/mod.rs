@@ -239,9 +239,10 @@ fn render_mcp() -> String {
     out.push_str("      \"tier\": \"Two\",\n      \"timeout_ms\": 30000\n    }\n  }\n}\n");
     out.push_str("```\n");
 
-    out.push_str("\nIn a flow, include MCP tools with `\"mcp.*\"` in the `tools` list:\n\n");
-    out.push_str("```\nllm.call(\n    tools: [fs.read, \"mcp.*\"]\n)\n```\n");
-    out.push_str("\n`llm.call` waits for the MCP servers referenced by its resolved `tools` argument before validating tool names. Direct At code can inspect and invoke MCP without an LLM:\n\n");
-    out.push_str("```\nmcp.await(server: \"jira\")\nmcp.status(server: \"jira\")\nmcp.tools(server: \"jira\")\nmcp.call(server: \"jira\", tool: \"search\", input: {query: \"open\"})\n```\n");
+    out.push_str("\nUse the fixed MCP broker tools for discovery and calls:\n\n");
+    out.push_str("```\nllm.call(\n    tools: [\"fs.read\", \"mcp.status\", \"mcp.tools\", \"mcp.await\", \"mcp.call\"]\n)\n```\n");
+    out.push_str("\n`mcp.tools` returns `{tools, next_cursor, total}`. Search with `query`, use `limit` (1–100, default 20), and continue with `cursor` using the same filters. Set `server` and `tool` to load the complete input schema before calling. Direct At code uses the same tools:\n\n");
+    out.push_str("```\nmcp.await(server: \"jira\")\nmcp.status(server: \"jira\")\nmcp.tools(server: \"jira\", query: \"search\")\nmcp.tools(server: \"jira\", tool: \"search\")\nmcp.call(server: \"jira\", tool: \"search\", input: {query: \"open\"})\n```\n");
+    out.push_str("\nExplicit `\"mcp.server.tool\"`, `\"mcp.server.*\"`, and `\"mcp.*\"` selectors still expose native tool definitions and count toward the provider's tool limit. Named selectors wait for their server; the broad wildcard briefly discovers available servers. Specific MCP selectors in the same request also restrict broker discovery and calls. Proxy calls use the target's permissions, scheduling, and original input schema.\n");
     out
 }
