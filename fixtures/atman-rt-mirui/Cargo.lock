@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "atman-macros"
-version = "1.13.2"
+version = "1.14.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "atman-rt"
-version = "1.13.2"
+version = "1.14.0"
 dependencies = [
  "async-lock",
  "atman-macros",
