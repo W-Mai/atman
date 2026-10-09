@@ -2707,32 +2707,7 @@ async fn cmd_repl_once(
                                 });
                                 return;
                             };
-                            let client = match cfg.transport {
-                                atman_runtime::mcp::TransportKind::Stdio => {
-                                    atman_runtime::mcp::McpClient::connect_stdio(
-                                        &cfg.name,
-                                        &cfg.command,
-                                        &cfg.args,
-                                        &cfg.env,
-                                        cfg.timeout_ms,
-                                    )
-                                    .await
-                                }
-                                _ => match cfg.url.as_deref() {
-                                    Some(url) => {
-                                        atman_runtime::mcp::McpClient::connect_http(
-                                            &cfg.name,
-                                            url,
-                                            cfg.auth_token.clone(),
-                                            cfg.timeout_ms,
-                                        )
-                                        .await
-                                    }
-                                    None => Err(atman_runtime::mcp::McpError::Protocol(
-                                        "transport requires url".into(),
-                                    )),
-                                },
-                            };
+                            let client = atman_runtime::mcp::McpClient::connect_config(&cfg).await;
                             let resources = match client {
                                 Ok(c) => c.list_resources().await.unwrap_or_default(),
                                 Err(_) => Vec::new(),
@@ -2755,32 +2730,7 @@ async fn cmd_repl_once(
                                 });
                                 return;
                             };
-                            let client = match cfg.transport {
-                                atman_runtime::mcp::TransportKind::Stdio => {
-                                    atman_runtime::mcp::McpClient::connect_stdio(
-                                        &cfg.name,
-                                        &cfg.command,
-                                        &cfg.args,
-                                        &cfg.env,
-                                        cfg.timeout_ms,
-                                    )
-                                    .await
-                                }
-                                _ => match cfg.url.as_deref() {
-                                    Some(url) => {
-                                        atman_runtime::mcp::McpClient::connect_http(
-                                            &cfg.name,
-                                            url,
-                                            cfg.auth_token.clone(),
-                                            cfg.timeout_ms,
-                                        )
-                                        .await
-                                    }
-                                    None => Err(atman_runtime::mcp::McpError::Protocol(
-                                        "transport requires url".into(),
-                                    )),
-                                },
-                            };
+                            let client = atman_runtime::mcp::McpClient::connect_config(&cfg).await;
                             let prompts = match client {
                                 Ok(c) => c.list_prompts().await.unwrap_or_default(),
                                 Err(_) => Vec::new(),
@@ -8796,32 +8746,8 @@ async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
 async fn connect_mcp_client(
     cfg: &atman_runtime::mcp::McpServerConfig,
 ) -> anyhow::Result<std::sync::Arc<atman_runtime::mcp::McpClient>> {
-    let client = match cfg.transport {
-        atman_runtime::mcp::TransportKind::Stdio => {
-            atman_runtime::mcp::McpClient::connect_stdio(
-                &cfg.name,
-                &cfg.command,
-                &cfg.args,
-                &cfg.env,
-                cfg.timeout_ms,
-            )
-            .await
-        }
-        atman_runtime::mcp::TransportKind::Http | atman_runtime::mcp::TransportKind::Sse => {
-            let url = cfg
-                .url
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("missing url"))?;
-            atman_runtime::mcp::McpClient::connect_http(
-                &cfg.name,
-                url,
-                cfg.auth_token.clone(),
-                cfg.timeout_ms,
-            )
-            .await
-        }
-    };
-    client
+    atman_runtime::mcp::McpClient::connect_config(cfg)
+        .await
         .map(std::sync::Arc::new)
         .map_err(|e| anyhow::anyhow!("{e}"))
 }

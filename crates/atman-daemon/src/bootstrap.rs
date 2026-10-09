@@ -135,13 +135,8 @@ pub fn spawn_mcp_boot(
                 }
                 let executor = executor.clone();
                 let session = session.clone();
+                let cfg = cfg.clone();
                 let name = cfg.name.clone();
-                let command = cfg.command.clone();
-                let args = cfg.args.clone();
-                let env = cfg.env.clone();
-                let url = cfg.url.clone();
-                let auth_token = cfg.auth_token.clone();
-                let timeout_ms = cfg.timeout_ms;
                 let tier = cfg.tier;
                 let transport = cfg.transport;
                 tasks.push(tokio::task::spawn_local(async move {
@@ -150,36 +145,7 @@ pub fn spawn_mcp_boot(
                         transport,
                         state: atman_runtime::mcp::McpServerState::Connecting,
                     });
-                    let outcome = match transport {
-                        atman_runtime::mcp::TransportKind::Stdio => {
-                            atman_runtime::mcp::McpClient::connect_stdio(
-                                &name, &command, &args, &env, timeout_ms,
-                            )
-                            .await
-                        }
-                        atman_runtime::mcp::TransportKind::Http => match url.as_deref() {
-                            Some(url) => {
-                                atman_runtime::mcp::McpClient::connect_http(
-                                    &name, url, auth_token, timeout_ms,
-                                )
-                                .await
-                            }
-                            None => Err(atman_runtime::mcp::McpError::Protocol(
-                                "http transport requires `url`".into(),
-                            )),
-                        },
-                        atman_runtime::mcp::TransportKind::Sse => match url.as_deref() {
-                            Some(url) => {
-                                atman_runtime::mcp::McpClient::connect_http(
-                                    &name, url, auth_token, timeout_ms,
-                                )
-                                .await
-                            }
-                            None => Err(atman_runtime::mcp::McpError::Protocol(
-                                "sse transport requires `url`".into(),
-                            )),
-                        },
-                    };
+                    let outcome = atman_runtime::mcp::McpClient::connect_config(&cfg).await;
                     match outcome {
                         Ok(client) => {
                             let providers = executor.providers.clone();

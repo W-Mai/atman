@@ -290,6 +290,8 @@ See [`examples/`](examples/) for the canonical flows covering agent loops, code 
 
 Custom flows can expose native MCP tools with explicit selectors. A named selector waits for its server and reports an unavailable dependency. The broad `"mcp.*"` selector briefly discovers available servers and continues if another server fails or remains unavailable; it still expands into native tool definitions and is subject to the provider's tool limit. Use `mcp.await` when a server is required.
 
+HTTP MCP connections accept JSON and streaming SSE responses, apply configured headers to initialization and subsequent requests, and retain the negotiated protocol version and session ID. See [HTTP MCP configuration](docs/quickstart.md#http-mcp-configuration) for authentication, headers, and session recovery.
+
 | Category | Tools | Tier |
 |---|---|---|
 | `fs` | read, list, grep, write, edit | 0–2 |

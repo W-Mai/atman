@@ -297,6 +297,30 @@ atman mcp call jira search '{"query":"open"}'
 atman mcp call jira update_issue '{"key":"PROJ-1","summary":"Updated"}' --allow-write
 ```
 
+#### HTTP MCP configuration
+
+Configure an HTTP endpoint in `~/.config/atman/mcp_servers.json`:
+
+```json
+{
+  "mcpServers": {
+    "remote": {
+      "type": "http",
+      "url": "https://mcp.example/mcp",
+      "authToken": "YOUR_TOKEN",
+      "headers": {
+        "X-Workspace": "example"
+      },
+      "timeout_ms": 30000
+    }
+  }
+}
+```
+
+HTTP requests always advertise `Accept: application/json, text/event-stream`; additional configured media types are retained. Custom headers apply to initialization, notifications, calls, and reconnection through the CLI, TUI, and daemon. If both `authToken` and an `Authorization` header are configured, `authToken` takes precedence. Atman manages `Content-Type`, `MCP-Protocol-Version`, and `Mcp-Session-Id`; configured values cannot override them. Redirects are rejected, so use the endpoint's final URL.
+
+The HTTP handshake requests protocol version `2025-11-25` and accepts the server's supported `2025-11-25`, `2025-06-18`, or `2025-03-26` revision. Responses may contain JSON or SSE; SSE supports batch messages, notifications, and server ping requests. A matching result is delivered without waiting for the server to close the connection. An HTTP 404 for an established session triggers one reinitialization and retry. Timeouts, network failures, and other HTTP errors are returned without automatically replaying a request that might already have executed. The `sse` configuration type uses the same HTTP POST transport; legacy GET/endpoint SSE negotiation and background GET notification streams are not supported.
+
 ## 8. Session discovery and spec state
 
 Session listings default to the current project. Use `atman session list --all` for every project or `--project <path>` for an explicit project root. Session metadata retains a title and project root; manual rename is persistent, while automatic naming cannot overwrite a user title. Daemon clients can pass `project_root`, `search`, and `limit` to `list_sessions`.
