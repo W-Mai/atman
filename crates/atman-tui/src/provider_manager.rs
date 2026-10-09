@@ -94,6 +94,7 @@ pub struct ProviderManager {
     groups: Vec<atman_runtime::model_registry::ProviderGroup>,
     pub test_btn_rect: Option<Rect>,
     list_rect: Option<Rect>,
+    list_offset: usize,
     save_rect: Option<Rect>,
     confirm_yes_rect: Option<Rect>,
     confirm_no_rect: Option<Rect>,
@@ -155,7 +156,7 @@ pub(crate) enum ProviderMutationResolution {
 
 impl ProviderManager {
     pub fn has_text_focus(&self) -> bool {
-        if !self.open || !self.show_add {
+        if !self.open || !self.show_add || self.has_pending_mutation() {
             return false;
         }
         if !self.in_form {
@@ -199,8 +200,11 @@ impl ProviderManager {
             }
             MouseEventKind::Down(button) if hit(self.list_rect, point) => {
                 let rect = self.list_rect.expect("matched list rect");
-                self.selected = usize::from(me.row.saturating_sub(rect.y))
-                    .min(self.providers.len().saturating_sub(1));
+                let index = self.list_offset + usize::from(me.row.saturating_sub(rect.y));
+                if index >= self.providers.len() {
+                    return;
+                }
+                self.selected = index;
                 if button == MouseButton::Right {
                     self.request_confirm(ConfirmKind::Delete);
                 }
@@ -1075,7 +1079,7 @@ impl ProviderManager {
             self.enabled_editor.buf().trim().to_lowercase().as_str(),
             "true" | "1" | "yes" | "on"
         );
-        if name.is_empty() || base_url.is_empty() {
+        if name.is_empty() {
             return None;
         }
         let kind = if kind.is_empty() {
@@ -1201,7 +1205,7 @@ fn mutation_success_matches(
 fn render_provider_list(
     f: &mut ratatui::Frame,
     area: Rect,
-    mgr: &ProviderManager,
+    mgr: &mut ProviderManager,
     theme: &crate::theme::Theme,
 ) {
     let items: Vec<ListItem> = mgr
@@ -1257,6 +1261,7 @@ fn render_provider_list(
         height: area.height.saturating_sub(2).saturating_sub(1),
     };
     f.render_stateful_widget(List::new(items), inner, &mut state);
+    mgr.list_offset = state.offset();
 }
 
 fn render_model_detail(
@@ -1506,7 +1511,10 @@ fn render_add_dialog(
                 f.render_widget(Paragraph::new("→").style(style), right);
                 mgr.selector_hits.push((field, left, right));
             }
-            if active && let Some(cursor) = cursor {
+            if active
+                && !mgr.has_pending_mutation()
+                && let Some(cursor) = cursor
+            {
                 cursor_pos = Some((
                     (rect.x
                         + 2
@@ -1782,7 +1790,7 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
     }
 
     fn handle_paste(&mut self, text: &str) {
-        if !self.in_form {
+        if !self.in_form || self.has_pending_mutation() {
             return;
         }
         if self.form_field == 0 && self.editing_provider.is_some() {
@@ -1932,6 +1940,53 @@ mod tests {
     }
 
     #[test]
+    fn scrolled_provider_hitbox_targets_the_rendered_record() {
+        use crate::wm::modal::ModalOverlay;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut manager = ProviderManager {
+            open: true,
+            providers: (0..16)
+                .map(|index| ProviderEntry {
+                    source: ProviderSource::Config,
+                    name: format!("gateway-{index}"),
+                    kind: "openai-compat".into(),
+                    status: ProviderStatus::Active,
+                    detail: String::new(),
+                })
+                .collect(),
+            selected: 15,
+            ..Default::default()
+        };
+        let app = crate::app::AppState::new("session".into(), None);
+        let theme = crate::theme::theme();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 12)).unwrap();
+        terminal
+            .draw(|frame| manager.render_content(frame, frame.area(), &app, &theme))
+            .unwrap();
+        assert!(manager.list_offset > 0);
+        let first = manager.providers[manager.list_offset].name.clone();
+        let rect = manager.list_rect.unwrap();
+        let row = (rect.x..rect.right())
+            .map(|x| terminal.backend().buffer()[(x, rect.y)].symbol())
+            .collect::<String>();
+        assert!(row.contains(&first), "{row}");
+        for button in [MouseButton::Left, MouseButton::Right] {
+            manager.handle_mouse(
+                &MouseEvent {
+                    kind: MouseEventKind::Down(button),
+                    column: rect.x + 1,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                None,
+            );
+            assert_eq!(manager.providers[manager.selected].name, first);
+        }
+        assert_eq!(manager.confirm_provider_name, first);
+    }
+
+    #[test]
     fn provider_type_selector_wraps_with_directional_keys() {
         let mut manager = ProviderManager::default();
         manager.open_custom_form();
@@ -2001,6 +2056,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut manager = ProviderManager::default();
         populate_config_form(&mut manager, None);
+        manager.base_url_editor.replace_with("");
 
         manager.commit_form(Some(&tx));
         let failed_request = receive_mutation(&mut rx);
@@ -2008,13 +2064,22 @@ mod tests {
             &failed_request.action,
             crate::ProviderMutation::UpsertConfig {
                 name,
+                base_url,
                 create: true,
                 ..
-            } if name == "gateway"
+            } if name == "gateway" && base_url.is_empty()
         ));
         assert!(manager.in_form);
         assert!(manager.show_add);
         assert_eq!(manager.pending_mutation.as_ref(), Some(&failed_request));
+        manager.form_field = 2;
+        assert!(!manager.has_text_focus());
+        <ProviderManager as crate::wm::modal::ModalOverlay>::handle_paste(
+            &mut manager,
+            "lost text",
+        );
+        manager.handle_key(&KeyAction::Char('x'), Some(&tx));
+        assert_eq!(manager.api_key_editor.buf(), "test-key");
 
         assert_eq!(
             manager.resolve_mutation(&failed_request, &Err("save failed".into())),

@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Provider form state** — Saving locks pasted input, model edits clear stale test feedback, and closing a model test cancels its request. Scrolled provider rows target the visible record, and empty base URLs can retain the configured default.
 - **Responses stream completion** — Completed output items retain replay state across terminal summaries. Unfinished or subsequently modified items cannot become executable tool calls. Transport interruptions remain retryable, while HTTP status takes precedence over error-body keywords.
 - **Provider resolution** — Explicit provider selection takes precedence over matching model names. API overrides resolve consistently on cold and warm configuration loads. Resolved reasoning defaults obey model capabilities and provider output limits; Responses accepts supported reasoning modes.
 - **MCP readiness isolation** — Status queries and readiness waits respect request scopes. Waiting for one server no longer serializes unrelated tool calls.

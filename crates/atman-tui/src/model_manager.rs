@@ -40,7 +40,7 @@ pub struct ModelManager {
     selector_hits: Vec<(usize, Rect, Rect)>,
     hovered_field: Option<usize>,
     test_rect: Option<Rect>,
-    pending_test: Option<u64>,
+    pending_test: Option<PendingModelTest>,
     test_result: Option<(String, bool)>,
     next_request_id: u64,
     pending: Option<crate::ModelMutationRequest>,
@@ -51,7 +51,16 @@ pub struct ModelManager {
     confirm_no_rect: Option<Rect>,
 }
 
+struct PendingModelTest {
+    request_id: u64,
+    _cancel_on_drop: tokio_util::sync::DropGuard,
+}
+
 impl ModelManager {
+    fn inputs_locked(&self) -> bool {
+        self.pending.is_some() || self.pending_test.is_some()
+    }
+
     pub fn open(&mut self) {
         self.open = true;
         self.locked_provider = None;
@@ -74,9 +83,7 @@ impl ModelManager {
     }
 
     pub fn has_text_focus(&self) -> bool {
-        self.show_form
-            && self.pending_test.is_none()
-            && matches!(self.form_field, 0 | 1 | 3 | 4 | 5)
+        self.show_form && !self.inputs_locked() && matches!(self.form_field, 0 | 1 | 3 | 4 | 5)
     }
 
     pub fn handle_mouse(
@@ -85,7 +92,7 @@ impl ModelManager {
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
         use crossterm::event::{MouseButton, MouseEventKind};
-        if self.pending.is_some() || self.pending_test.is_some() {
+        if self.inputs_locked() {
             return;
         }
         let point = (event.column, event.row);
@@ -417,7 +424,7 @@ impl ModelManager {
         &mut self,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
-        if self.pending_test.is_some() {
+        if self.inputs_locked() {
             return;
         }
         let model = self.model_editor.buf().trim();
@@ -450,6 +457,7 @@ impl ModelManager {
             return;
         };
         self.next_request_id = self.next_request_id.wrapping_add(1);
+        let cancel = tokio_util::sync::CancellationToken::new();
         let request = crate::ModelTestRequest {
             request_id: self.next_request_id,
             identity: self.editing.clone(),
@@ -458,12 +466,16 @@ impl ModelManager {
             api: self.form_api,
             reasoning,
             max_tokens,
+            cancel: cancel.clone(),
         };
         if tx.send(crate::TuiControl::TestModel(request)).is_err() {
             atman_runtime::notify!(error, "Model test is unavailable");
             return;
         }
-        self.pending_test = Some(self.next_request_id);
+        self.pending_test = Some(PendingModelTest {
+            request_id: self.next_request_id,
+            _cancel_on_drop: cancel.drop_guard(),
+        });
         self.test_result = None;
     }
 
@@ -472,7 +484,7 @@ impl ModelManager {
         request_id: u64,
         result: &Result<String, String>,
     ) -> bool {
-        if self.pending_test != Some(request_id) {
+        if self.pending_test.as_ref().map(|test| test.request_id) != Some(request_id) {
             return false;
         }
         self.pending_test = None;
@@ -615,7 +627,7 @@ impl ModelManager {
     }
 
     pub fn paste(&mut self, text: &str) {
-        if self.pending_test.is_some() || !self.show_form || matches!(self.form_field, 2 | 6 | 7) {
+        if self.inputs_locked() || !self.show_form || matches!(self.form_field, 2 | 6 | 7) {
             return;
         }
         let editor = match self.form_field {
@@ -627,6 +639,9 @@ impl ModelManager {
             _ => return,
         };
         editor.insert_str(text);
+        if !text.is_empty() {
+            self.test_result = None;
+        }
     }
 
     fn handle_form_key(
@@ -634,7 +649,7 @@ impl ModelManager {
         action: &KeyAction,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
-        if self.pending_test.is_some() {
+        if self.inputs_locked() {
             return;
         }
         let fields = self.form_fields();
@@ -679,6 +694,7 @@ impl ModelManager {
                             direction,
                         ) {
                             self.selected_provider = providers[selected].clone();
+                            self.test_result = None;
                             if !self.api_visible() {
                                 self.form_api = None;
                             }
@@ -700,6 +716,7 @@ impl ModelManager {
                             direction,
                         );
                         self.form_api = choices[selected];
+                        self.test_result = None;
                     }
                     _ => {
                         let choices = self.reasoning_choices();
@@ -713,13 +730,18 @@ impl ModelManager {
                             direction,
                         ) {
                             self.thinking_editor.replace_with(&choices[selected]);
+                            self.test_result = None;
                         }
                     }
                 }
             }
             _ => {
                 if let Some(editor) = self.form_editor_mut() {
+                    let before = editor.buf().to_owned();
                     editor.handle_key(action);
+                    if editor.buf() != before {
+                        self.test_result = None;
+                    }
                 }
             }
         }
@@ -1160,7 +1182,7 @@ impl ModelManager {
                 self.selector_hits.push((field, left, right));
             }
             if active
-                && self.pending_test.is_none()
+                && !self.inputs_locked()
                 && let Some(cursor) = cursor
             {
                 cursor_pos = Some((
@@ -1306,6 +1328,12 @@ mod tests {
         assert!(manager.resolve_test(request.request_id, &Err("rejected".into())));
         assert!(manager.show_form);
         assert_eq!(manager.thinking_editor.buf(), "high");
+        assert!(manager.test_result.is_some());
+        manager.form_field = 1;
+        manager.handle_key(&KeyAction::CursorLeft, Some(&tx));
+        assert!(manager.test_result.is_some());
+        manager.handle_key(&KeyAction::Char('x'), Some(&tx));
+        assert!(manager.test_result.is_none());
         manager.form_field = 7;
         manager.save_rect = Some(Rect::new(0, 10, 80, 1));
         manager.handle_mouse(
@@ -1321,6 +1349,55 @@ mod tests {
             rx.try_recv(),
             Ok(crate::TuiControl::MutateModel(_))
         ));
+    }
+
+    #[test]
+    fn closing_or_dropping_model_form_cancels_its_test_and_ignores_late_results() {
+        let mut manager = ModelManager::default();
+        manager.open_form();
+        manager.name_editor.replace_with("demo");
+        manager.selected_provider = "gateway".into();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        manager.test_model(Some(&tx));
+        let crate::TuiControl::TestModel(first) = rx.try_recv().unwrap() else {
+            panic!("expected model test");
+        };
+        assert!(!first.cancel.is_cancelled());
+        manager.handle_key(&KeyAction::Escape, Some(&tx));
+        assert!(first.cancel.is_cancelled());
+        manager.open_form();
+        manager.name_editor.replace_with("demo");
+        manager.selected_provider = "gateway".into();
+        manager.test_model(Some(&tx));
+        let crate::TuiControl::TestModel(second) = rx.try_recv().unwrap() else {
+            panic!("expected model test");
+        };
+        assert!(!manager.resolve_test(first.request_id, &Ok("late result".into())));
+        assert!(manager.test_result.is_none());
+        assert!(!second.cancel.is_cancelled());
+        drop(manager);
+        assert!(second.cancel.is_cancelled());
+    }
+
+    #[test]
+    fn every_model_edit_invalidates_the_previous_test_result() {
+        let mut manager = ModelManager {
+            groups: vec![provider_group("alpha"), provider_group("beta")],
+            ..Default::default()
+        };
+        manager.open_form();
+        for field in [0, 1, 3, 4, 5] {
+            manager.form_field = field;
+            manager.test_result = Some(("accepted".into(), true));
+            manager.paste("x");
+            assert!(manager.test_result.is_none());
+        }
+        for field in [2, 4, 6] {
+            manager.form_field = field;
+            manager.test_result = Some(("accepted".into(), true));
+            manager.handle_form_key(&KeyAction::CursorRight, None);
+            assert!(manager.test_result.is_none());
+        }
     }
 
     #[test]
@@ -1455,6 +1532,10 @@ mod tests {
         let crate::TuiControl::MutateModel(request) = rx.try_recv().unwrap() else {
             panic!("unexpected control message");
         };
+        assert!(!manager.has_text_focus());
+        manager.paste("lost text");
+        manager.handle_key(&KeyAction::Char('x'), Some(&tx));
+        assert_eq!(manager.name_editor.buf(), "vendor/model");
         assert!(matches!(
             &request.action,
             crate::ModelMutation::Upsert {

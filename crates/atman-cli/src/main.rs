@@ -8930,6 +8930,9 @@ async fn test_model_endpoint(
     draft: &atman_tui::ModelTestRequest,
 ) -> Result<String, String> {
     use atman_runtime::provider::LlmRequest;
+    if draft.cancel.is_cancelled() {
+        return Err("Model test cancelled".into());
+    }
     let snapshot = atman_runtime::model_registry::draft_model_call_config(
         draft.identity.as_deref(),
         &draft.provider,
@@ -8966,8 +8969,12 @@ async fn test_model_endpoint(
         stall_timeout_secs: 0,
     };
     let observable = provider.call_streaming(request);
-    let result = tokio::time::timeout(std::time::Duration::from_secs(60), observable.output).await;
-    observable.cancel.cancel();
+    let _cancel_on_drop = observable.cancel.drop_guard();
+    let result = tokio::select! {
+        biased;
+        _ = draft.cancel.cancelled() => return Err("Model test cancelled".into()),
+        result = tokio::time::timeout(std::time::Duration::from_secs(60), observable.output) => result,
+    };
     let label = format!(
         "{} / {} · {endpoint} · reasoning {}",
         draft.provider, draft.model, reasoning
@@ -9016,6 +9023,59 @@ async fn test_provider_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelling_model_test_stops_its_provider_stream() {
+        use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, ProviderRegistry};
+        use atman_runtime::tool::BoxFut;
+        use tokio_util::sync::CancellationToken;
+
+        struct PendingProvider(CancellationToken);
+        impl Provider for PendingProvider {
+            fn name(&self) -> &str {
+                "test-cancellation"
+            }
+
+            fn call<'a>(
+                &'a self,
+                _request: LlmRequest,
+            ) -> BoxFut<'a, Result<AssistantMessage, atman_runtime::RuntimeError>> {
+                Box::pin(std::future::pending())
+            }
+
+            fn call_streaming(
+                &self,
+                _request: LlmRequest,
+            ) -> atman_runtime::event::Observable<AssistantMessage> {
+                atman_runtime::event::Observable {
+                    output: Box::pin(std::future::pending()),
+                    events: tokio::sync::broadcast::channel(1).1,
+                    cancel: self.0.clone(),
+                }
+            }
+        }
+
+        let provider_cancel = CancellationToken::new();
+        let registry = ProviderRegistry::new();
+        registry.register(std::sync::Arc::new(PendingProvider(
+            provider_cancel.clone(),
+        )));
+        let draft = atman_tui::ModelTestRequest {
+            request_id: 1,
+            identity: None,
+            provider: "test-cancellation".into(),
+            model: "vendor/model".into(),
+            api: None,
+            reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
+            max_tokens: None,
+            cancel: CancellationToken::new(),
+        };
+        let mut test = Box::pin(test_model_endpoint(&registry, &draft));
+        assert!(futures::poll!(&mut test).is_pending());
+        draft.cancel.cancel();
+        assert!(test.await.unwrap_err().contains("cancelled"));
+        assert!(provider_cancel.is_cancelled());
+    }
 
     #[test]
     fn model_test_uses_live_provider_limit_instead_of_planning_limit() {
@@ -9079,6 +9139,7 @@ mod tests {
                         tokens: 20_000,
                     },
                     max_tokens: Some(32_768),
+                    cancel: tokio_util::sync::CancellationToken::new(),
                 },
             )
             .await

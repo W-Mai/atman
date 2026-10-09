@@ -464,6 +464,7 @@ pub struct ModelTestRequest {
     pub api: Option<atman_runtime::provider::OpenAiApi>,
     pub reasoning: atman_runtime::provider::ReasoningSelection,
     pub max_tokens: Option<u32>,
+    pub cancel: tokio_util::sync::CancellationToken,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
