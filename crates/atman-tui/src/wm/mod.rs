@@ -927,6 +927,12 @@ impl WindowManager {
             self.modals.form_modal.handle_mouse(event, control_tx);
             return (true, Vec::new());
         }
+        if self.top_kind() == Some(ModalKind::CompactReview) {
+            if let Some(modal) = self.modals.compact_review.as_mut() {
+                modal.handle_mouse(event, app, control_tx);
+            }
+            return (true, Vec::new());
+        }
         if self.top_kind() == Some(ModalKind::ProviderManager) {
             self.modals.handle_provider_mouse(event, app, control_tx);
             return (true, Vec::new());
