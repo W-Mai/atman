@@ -360,24 +360,32 @@ REPL builtins: `:help`, `:cost`, `:goal`, `:suggest`, `:compact`, `:copy`, `:att
 [providers.openai-compatible]
 kind = "openai-compat"
 base_url = "https://gateway.example/v1"
+api = "chat-completions"
+# Applies to models using Chat Completions.
 reasoning_format = "reasoning-effort"
 # Enable only when the gateway accepts OpenAI's prompt_cache_key field.
 # prompt_cache_key = true
 
-[models."deepseek/deepseek-v4-pro"]
+[models.reasoning]
 provider = "openai-compatible"
-context_budget = 1000000
-max_tokens = 393216
+model = "vendor/reasoning-model"
+api = "responses"
+context_budget = 128000
+max_tokens = 16384
 reasoning = "high"
-reasoning_mode = "pro"
 input_modalities = ["text", "image"]
 image_detail = "auto"
 
+[models.fast]
+provider = "openai-compatible"
+model = "vendor/fast-model"
+context_budget = 64000
+
 [alias.smart]
-model = "deepseek/deepseek-v4-pro"
+model = "reasoning"
 
 [alias.cheap]
-model = "gpt-4o-mini"
+model = "fast"
 
 [compaction]
 review = "manual-only"   # always | manual-only | never
@@ -403,17 +411,11 @@ Tool calls from one assistant dispatch are grouped into an ordered `working · N
 
 Provider env vars: `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_BASE_URL`.
 
-Reasoning values include `default`, `off`, `auto`, `minimal`, `low`, `medium`,
-`high`, `xhigh`, `max`, `ultra`, and `persistent`. Provider and model capability
-checks reject unsupported efforts or execution modes before the request is sent.
-Anthropic models with explicit thinking budgets can use
-`reasoning_budget_tokens = 4096`. The legacy `thinking = true|false` setting is
-still accepted.
+Reasoning values include `default`, `off`, `auto`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, and `persistent`. Provider and model capability checks reject unsupported efforts or execution modes before the request is sent. Anthropic models with explicit thinking budgets can use `reasoning_budget_tokens = 4096`. The legacy `thinking = true|false` setting is still accepted.
 
-OpenAI-compatible providers default to `reasoning_format = "thinking-toggle"`,
-which can represent only default/off/auto. Set `reasoning-effort` when the
-gateway implements Chat Completions `reasoning_effort`; the provider manager
-exposes the same setting as **Reasoning wire**.
+OpenAI and OpenAI-compatible providers accept `api = "chat-completions"` or `api = "responses"`. Models inherit the provider API unless their own `api` overrides it. Omitting both fields preserves Chat Completions. Set `base_url` to the connection root, such as `https://gateway.example/v1`; the selected API determines the endpoint. Anthropic connections use Messages, and Codex login uses Responses.
+
+For Chat Completions, OpenAI-compatible providers default to `reasoning_format = "thinking-toggle"`, which represents default/off/auto. Select `reasoning-effort` when the gateway accepts exact effort values. Responses encodes effort using its own protocol and does not send the Chat thinking toggle. Changing API does not lower the selected effort; unsupported combinations produce a configuration error.
 
 The TUI imports a clipboard image with Cmd+V, Ctrl+V, or Alt+V. Pending images appear in a bar above the input and as stable `[image N]` references in the editor; deleting a reference removes that image, while Ctrl+U removes the latest image when no quote is pending. Images are copied into the session attachment store by content digest before the user turn is written. The effective reasoning depth appears at the input's top-right corner, and Ctrl+T selects the effort captured with the next submission. CLI and daemon runs accept repeatable `--image` arguments and the same `--reasoning` values. The selected value is invocation-local. `llm.call`, `llm.extract`, `llm.classify`, and `llm.generate_branches` consume it only when their own call explicitly passes `effort: env("effort")`; inheriting the invocation environment alone does not change a request. The managed agent's primary call opts in.
 Flows can also use a fixed selection with `llm.call(reasoning: "high@pro")` or

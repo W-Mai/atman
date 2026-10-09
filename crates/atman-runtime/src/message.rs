@@ -138,9 +138,49 @@ pub enum MessageRole {
     Tool,
 }
 
+/// Identifies the connection and model that can replay opaque Responses state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResponsesRoute {
+    pub provider: String,
+    pub endpoint: String,
+    pub model: String,
+}
+
+/// Protocol state retained with its assistant message, never rendered as text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResponsesReasoningItem {
+    pub id: String,
+    #[serde(default)]
+    pub summary: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResponsesState {
+    Reasoning(ResponsesReasoningItem),
+    Message {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
+    },
+    FunctionCall {
+        id: String,
+        call_id: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessagePart {
+    ResponsesState {
+        route: ResponsesRoute,
+        state: ResponsesState,
+    },
     ContextRecord(crate::context_plan::ContextRecord),
     CompactSummary {
         summary: String,
@@ -325,15 +365,23 @@ pub fn retain_complete_tool_pairs(messages: &mut Vec<Message>) {
     let mut seen_uses = std::collections::HashSet::new();
     let mut seen_results = std::collections::HashSet::new();
     for message in messages.iter_mut() {
+        let mut removed_call = false;
         message.parts.retain(|part| match part {
             MessagePart::ToolUse { id, .. } => {
-                result_ids.contains(id) && seen_uses.insert(id.clone())
+                let retain = result_ids.contains(id) && seen_uses.insert(id.clone());
+                removed_call |= !retain;
+                retain
             }
             MessagePart::ToolResult { tool_use_id, .. } => {
                 use_ids.contains(tool_use_id) && seen_results.insert(tool_use_id.clone())
             }
             _ => true,
         });
+        if removed_call {
+            message
+                .parts
+                .retain(|part| !matches!(part, MessagePart::ResponsesState { .. }));
+        }
     }
     messages.retain(|message| !message.parts.is_empty());
 }

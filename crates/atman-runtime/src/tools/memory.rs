@@ -203,7 +203,7 @@ fn visit_message_excerpt_segments(
     }
     for part in &message.parts {
         let stop = match part {
-            MessagePart::FinalAnswerSummary { .. } => false,
+            MessagePart::FinalAnswerSummary { .. } | MessagePart::ResponsesState { .. } => false,
             MessagePart::ContextRecord(record) => {
                 let label = format!("\n[context {}@{}]\n", record.key(), record.revision());
                 visit(&label) || visit(&record.render_for_model())

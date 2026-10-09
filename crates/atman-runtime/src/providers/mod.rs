@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod codex;
 pub mod mock;
 pub mod openai;
+pub mod responses;
 
 pub(crate) fn classify_attachment_error(status: u16, body: &str) -> Option<String> {
     if status == 413 {

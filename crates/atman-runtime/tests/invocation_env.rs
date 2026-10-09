@@ -54,6 +54,7 @@ impl Provider for ReasoningCaptureProvider {
         atman_runtime::ProviderCapabilities {
             prompt_cache_key: true,
             context_prefix_profile: atman_runtime::ContextPrefixProfile::OpenAiChat,
+            max_tools: None,
         }
     }
 
@@ -85,7 +86,7 @@ async fn managed_calls_keep_one_cache_route_across_append_only_turns() {
     let (_registry, executor, provider) = reasoning_capture_executor("off").await;
     let file = parse_file(
         r#"
-flow cached() -> string {
+flow cached() -> Message {
     return llm.call(
         model: "reasoning-test",
         prompt: "hello",
@@ -125,7 +126,7 @@ async fn managed_calls_rotate_the_cache_route_after_checkpoint_rewrite() {
     let (_registry, executor, provider) = reasoning_capture_executor("off").await;
     let file = parse_file(
         r#"
-flow cached() -> string {
+flow cached() -> Message {
     return llm.call(
         model: "reasoning-test",
         prompt: "hello",
@@ -294,7 +295,7 @@ async fn consecutive_root_invocations_do_not_reuse_effort() {
 async fn invocation_env_is_not_rendered_as_context_or_provider_tool() {
     let (_registry, executor, provider) = reasoning_capture_executor("off").await;
     let file = parse_file(
-        r#"flow explicit() -> string {
+        r#"flow explicit() -> Message {
     return llm.call(
         model: "reasoning-test",
         prompt: "hello",

@@ -1,14 +1,12 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
-use crate::event::{NodeEvent, Observable, TurnId};
-use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
+use crate::event::Observable;
 use crate::provider::{
-    AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, ModelDiscoveryError, Provider,
-    ReasoningEffort, ReasoningSelection, ReasoningWireProfile, StopReason, TokenUsage,
-    estimate_tokens,
+    AssistantMessage, DEFAULT_STREAM_BUFFER, LlmRequest, ModelDiscoveryError, Provider,
+    ReasoningEffort, ReasoningSelection, ReasoningWireProfile,
 };
 use crate::tool::BoxFut;
 use anyhow::Context;
@@ -122,35 +120,29 @@ impl CodexProvider {
         self
     }
 
-    fn build_body(&self, req: &LlmRequest) -> Result<ResponsesRequest, RuntimeError> {
-        let model = req
-            .model
-            .split_once('/')
-            .map(|(_, slug)| slug)
-            .or_else(|| req.model.split_once(':').map(|(_, slug)| slug))
-            .unwrap_or(&req.model)
-            .to_string();
+    fn route(&self, req: &LlmRequest) -> crate::message::ResponsesRoute {
+        crate::message::ResponsesRoute {
+            provider: self.name.clone(),
+            endpoint: self.responses_url.clone(),
+            model: req
+                .model
+                .split_once('/')
+                .map(|(_, slug)| slug)
+                .or_else(|| req.model.split_once(':').map(|(_, slug)| slug))
+                .unwrap_or(&req.model)
+                .to_owned(),
+        }
+    }
 
-        let input = build_input_items(req)?;
-        let tools = build_tools(&req.tools);
-
-        Ok(ResponsesRequest {
-            model,
-            input,
-            instructions: req
-                .system
-                .clone()
-                .filter(|instructions| !instructions.is_empty()),
-            tools,
-            stream: true,
-            store: false,
-            reasoning: build_reasoning_config(&req.reasoning),
-            text: Some(TextConfig {
-                verbosity: "medium".into(),
-            }),
-            include: Some(vec!["reasoning.encrypted_content".into()]),
-            prompt_cache_key: req.prompt_cache_key.clone(),
-        })
+    fn build_body(
+        &self,
+        req: &LlmRequest,
+    ) -> Result<super::responses::ResponsesRequest, RuntimeError> {
+        let mut body = super::responses::build_body(req, &self.route(req))?;
+        body.text = Some(super::responses::TextConfig {
+            verbosity: "medium".into(),
+        });
+        Ok(body)
     }
 
     fn validate_reasoning(selection: &ReasoningSelection) -> Result<(), RuntimeError> {
@@ -158,233 +150,6 @@ impl CodexProvider {
             .validate(selection, None)
             .map_err(|error| RuntimeError::ToolFailed(format!("invalid request: {error}")))
     }
-}
-
-fn build_reasoning_config(selection: &ReasoningSelection) -> Option<ReasoningConfig> {
-    match selection {
-        ReasoningSelection::ProviderDefault => None,
-        ReasoningSelection::Disabled => Some(ReasoningConfig {
-            effort: Some(ReasoningEffort::None.to_string()),
-            mode: None,
-            summary: None,
-        }),
-        ReasoningSelection::Auto { execution_mode } => Some(ReasoningConfig {
-            effort: None,
-            mode: execution_mode.as_ref().map(ToString::to_string),
-            summary: Some("auto".into()),
-        }),
-        ReasoningSelection::Effort {
-            effort,
-            execution_mode,
-        } => Some(ReasoningConfig {
-            effort: Some(effort.to_string()),
-            mode: execution_mode.as_ref().map(ToString::to_string),
-            summary: (!matches!(effort, ReasoningEffort::None)).then(|| "auto".into()),
-        }),
-        ReasoningSelection::BudgetTokens { .. } => None,
-    }
-}
-
-fn build_input_items(req: &LlmRequest) -> Result<Vec<InputItem>, RuntimeError> {
-    let mut tool_names: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    for m in &req.messages {
-        if m.role == MessageRole::Assistant {
-            for p in &m.parts {
-                if let MessagePart::ToolUse { id, name, .. } = p {
-                    tool_names.insert(id.clone(), crate::tool_naming::to_wire(name));
-                }
-            }
-        }
-    }
-
-    let mut items: Vec<InputItem> = Vec::new();
-
-    for m in &req.messages {
-        match m.role {
-            MessageRole::User => {
-                let Some(content) = build_user_content(&m.parts)? else {
-                    continue;
-                };
-                items.push(InputItem {
-                    role: Some("user".into()),
-                    content: Some(content),
-                    item_type: Some("message".into()),
-                    call_id: None,
-                    name: None,
-                    arguments: None,
-                    output: None,
-                });
-            }
-            MessageRole::Assistant => {
-                let (text, tool_calls) = split_assistant_parts(&m.parts, &req.tools);
-                if let Some(t) = text {
-                    items.push(InputItem {
-                        role: Some("assistant".into()),
-                        content: Some(InputContent::Text(t)),
-                        item_type: Some("message".into()),
-                        call_id: None,
-                        name: None,
-                        arguments: None,
-                        output: None,
-                    });
-                }
-                for tc in tool_calls {
-                    items.push(InputItem {
-                        role: None,
-                        content: None,
-                        item_type: Some("function_call".into()),
-                        call_id: Some(tc.id),
-                        name: Some(tc.name),
-                        arguments: Some(tc.arguments),
-                        output: None,
-                    });
-                }
-            }
-            MessageRole::Tool => {
-                for p in &m.parts {
-                    if let MessagePart::ToolResult {
-                        tool_use_id,
-                        content,
-                        ..
-                    } = p
-                    {
-                        let name = tool_names.get(tool_use_id).cloned();
-                        items.push(InputItem {
-                            role: None,
-                            content: None,
-                            item_type: Some("function_call_output".into()),
-                            call_id: Some(tool_use_id.clone()),
-                            name,
-                            arguments: None,
-                            output: Some(content.clone()),
-                        });
-                    }
-                }
-            }
-            MessageRole::System => {
-                let Some(content) = build_user_content(&m.parts)? else {
-                    continue;
-                };
-                items.push(InputItem {
-                    role: Some(
-                        if m.origin == MessageOrigin::Internal
-                            && m.parts
-                                .iter()
-                                .any(|part| matches!(part, MessagePart::ContextRecord(_)))
-                        {
-                            "developer"
-                        } else {
-                            "user"
-                        }
-                        .into(),
-                    ),
-                    content: Some(content),
-                    item_type: Some("message".into()),
-                    call_id: None,
-                    name: None,
-                    arguments: None,
-                    output: None,
-                });
-            }
-        }
-    }
-
-    Ok(items)
-}
-
-fn build_user_content(parts: &[MessagePart]) -> Result<Option<InputContent>, RuntimeError> {
-    let mut parts_out: Vec<ResponseInputContent> = Vec::new();
-    for p in parts {
-        match p {
-            MessagePart::ContextRecord(record) => {
-                let text = record.render_for_model();
-                if !text.is_empty() {
-                    parts_out.push(ResponseInputContent::InputText { text });
-                }
-            }
-            MessagePart::Text { text } => {
-                if !text.is_empty() {
-                    parts_out.push(ResponseInputContent::InputText { text: text.clone() });
-                }
-            }
-            MessagePart::Image { source } => {
-                let data = crate::attachment_store::image_base64(source)?;
-                parts_out.push(ResponseInputContent::InputImage {
-                    image_url: format!("data:{};base64,{}", source.media_type, data),
-                    detail: (!matches!(source.detail, crate::provider::ImageDetail::Auto))
-                        .then(|| source.detail.as_str()),
-                });
-            }
-            MessagePart::CompactSummary { summary, .. } => {
-                if !summary.is_empty() {
-                    parts_out.push(ResponseInputContent::InputText {
-                        text: summary.clone(),
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-    if let [ResponseInputContent::InputText { text }] = parts_out.as_slice() {
-        Ok(Some(InputContent::Text(text.clone())))
-    } else if parts_out.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(InputContent::Parts(parts_out)))
-    }
-}
-
-struct AssistantSplit {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-fn split_assistant_parts(
-    parts: &[MessagePart],
-    tool_specs: &[crate::tool::ToolSpec],
-) -> (Option<String>, Vec<AssistantSplit>) {
-    let mut text = String::new();
-    let mut tools: Vec<AssistantSplit> = Vec::new();
-    for p in parts {
-        match p {
-            MessagePart::ContextRecord(record) => text.push_str(&record.render_for_model()),
-            MessagePart::Text { text: t } => text.push_str(t),
-            MessagePart::ToolUse {
-                id,
-                name,
-                input,
-                intent,
-            } => tools.push(AssistantSplit {
-                id: id.clone(),
-                name: crate::tool_naming::to_wire(name),
-                arguments: serde_json::to_string(&crate::message::encode_tool_call_input(
-                    input,
-                    intent.as_ref(),
-                    name,
-                    tool_specs,
-                ))
-                .unwrap_or_default(),
-            }),
-            _ => {}
-        }
-    }
-    let text_out = if text.is_empty() { None } else { Some(text) };
-    (text_out, tools)
-}
-
-fn build_tools(tools: &[crate::tool::ToolSpec]) -> Vec<ResponsesTool> {
-    tools
-        .iter()
-        .map(|t| ResponsesTool {
-            r#type: "function".into(),
-            // Responses function names reject '.', so use the provider-safe mapping.
-            name: crate::tool_naming::to_wire(&t.name),
-            description: t.description.clone(),
-            parameters: t.input_schema.clone(),
-        })
-        .collect()
 }
 
 #[derive(Deserialize)]
@@ -496,6 +261,7 @@ impl Provider for CodexProvider {
         crate::provider::ProviderCapabilities {
             prompt_cache_key: true,
             context_prefix_profile: crate::context_plan::ContextPrefixProfile::CodexResponses,
+            max_tools: None,
         }
     }
 
@@ -503,28 +269,11 @@ impl Provider for CodexProvider {
         &self,
         req: &LlmRequest,
     ) -> Result<crate::context_plan::ContextPrefixSnapshot, RuntimeError> {
-        let body = self.build_body(req)?;
-        let mut builder = crate::context_plan::ContextPrefixSnapshot::builder(
-            crate::context_plan::ContextPrefixProfile::CodexResponses,
+        super::responses::context_prefix(
+            &self.build_body(req)?,
             req,
-        );
-        if let Some(instructions) = &body.instructions {
-            builder.push(crate::context_plan::ContextPrefixLane::Stable, instructions)?;
-        }
-        for tool in &body.tools {
-            builder.push(crate::context_plan::ContextPrefixLane::Tools, tool)?;
-        }
-        for item in &body.input {
-            builder.push(
-                if item.role.as_deref() == Some("developer") {
-                    crate::context_plan::ContextPrefixLane::Records
-                } else {
-                    crate::context_plan::ContextPrefixLane::Messages
-                },
-                item,
-            )?;
-        }
-        Ok(builder.finish())
+            crate::context_plan::ContextPrefixProfile::CodexResponses,
+        )
     }
 
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
@@ -541,7 +290,8 @@ impl Provider for CodexProvider {
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
         let preflight =
             Self::validate_reasoning(&req.reasoning).and_then(|()| self.build_body(&req));
-        let turn_id = turn_id_from_req(&req);
+        let turn_id = super::responses::turn_id_from_req(&req);
+        let route = self.route(&req);
         let streaming_tools = req.tools.clone();
         let credentials = self.credentials.clone();
         let client = self.client.clone();
@@ -596,9 +346,6 @@ impl Provider for CodexProvider {
                 {
                     request = request.header(X_CODEX_TURN_STATE, turn_state);
                 }
-                use eventsource_stream::Eventsource;
-                use futures::StreamExt;
-
                 let resp = tokio::select! {
                     biased;
                     _ = cancel_for_task.cancelled() => {
@@ -638,203 +385,15 @@ impl Provider for CodexProvider {
                     states.entry(turn_state_key).or_insert(turn_state);
                 }
 
-                let mut stream = resp.bytes_stream().eventsource();
-
-                let mut acc_text = String::new();
-                let mut acc_thinking = String::new();
-                let mut cumulative = 0u64;
-                let mut final_usage: Option<ResponsesUsage> = None;
-                let mut resp_model: Option<String> = None;
-                let mut resp_id: Option<String> = None;
-                let mut stop_reason = StopReason::End;
-
-                let mut partial_tool_calls: Vec<PartialToolCall> = Vec::new();
-
-                while let Some(event) = tokio::select! {
-                    biased;
-                    _ = cancel_for_task.cancelled() => None,
-                    next = stream.next() => next,
-                } {
-                    let event =
-                        event.map_err(|e| RuntimeError::ToolFailed(format!("codex sse: {e}")))?;
-                    if event.data.is_empty() || event.data == "[DONE]" {
-                        continue;
-                    }
-                    let parsed: serde_json::Value = match serde_json::from_str(&event.data) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-
-                    let ev_type = parsed["type"].as_str().unwrap_or("");
-
-                    match ev_type {
-                        "response.output_text.delta" => {
-                            if let Some(delta) = parsed["delta"].as_str() {
-                                acc_text.push_str(delta);
-                                cumulative += estimate_tokens(delta);
-                                let _ = tx.send(NodeEvent::LlmChunk {
-                                    text: delta.to_string(),
-                                    cumulative_tokens: cumulative,
-                                });
-                            }
-                        }
-
-                        "response.reasoning_text.delta" => {
-                            if let Some(delta) = parsed["delta"].as_str() {
-                                acc_thinking.push_str(delta);
-                                let _ = tx.send(NodeEvent::ThinkingChunk {
-                                    text: delta.to_string(),
-                                });
-                            }
-                        }
-
-                        "response.output_item.added" => {
-                            if let Some(item) = parsed.get("item")
-                                && item["type"].as_str() == Some("function_call")
-                            {
-                                let idx = parsed["output_index"].as_u64().unwrap_or(0) as usize;
-                                while partial_tool_calls.len() <= idx {
-                                    partial_tool_calls.push(PartialToolCall::default());
-                                }
-                                let slot = &mut partial_tool_calls[idx];
-                                slot.id = item["call_id"].as_str().unwrap_or("").to_string();
-                                slot.name = item["name"].as_str().unwrap_or("").to_string();
-                            }
-                        }
-
-                        "response.function_call_arguments.delta" => {
-                            let idx = parsed["output_index"].as_u64().unwrap_or(0) as usize;
-                            while partial_tool_calls.len() <= idx {
-                                partial_tool_calls.push(PartialToolCall::default());
-                            }
-                            if let Some(delta) = parsed["delta"].as_str() {
-                                partial_tool_calls[idx].arguments.push_str(delta);
-                                let slot = &partial_tool_calls[idx];
-                                let _ = tx.send(NodeEvent::ToolCallDraft {
-                                    index: idx,
-                                    call_id: slot.id.clone(),
-                                    name: crate::tool_naming::from_wire(
-                                        &slot.name,
-                                        &streaming_tools,
-                                    ),
-                                    arguments_delta: delta.to_string(),
-                                });
-                            }
-                        }
-
-                        "response.completed" => {
-                            if let Some(r) = parsed.get("response") {
-                                resp_model = r["model"].as_str().map(|s| s.to_string());
-                                resp_id = r["id"].as_str().map(|s| s.to_string());
-                                if let Some(u) = r.get("usage") {
-                                    final_usage =
-                                        serde_json::from_value::<ResponsesUsage>(u.clone()).ok();
-                                }
-                                if r["status"].as_str() == Some("cancelled") {
-                                    stop_reason = StopReason::Cancelled;
-                                }
-                            }
-                        }
-
-                        "error" => {
-                            let msg = parsed["message"].as_str().unwrap_or("unknown codex error");
-                            return Err(RuntimeError::ToolFailed(msg.to_string()));
-                        }
-
-                        _ => {}
-                    }
-                }
-
-                if cancel_for_task.is_cancelled() {
-                    let _ = tx.send(NodeEvent::LlmDone {
-                        total_tokens: cumulative,
-                    });
-                    return Err(RuntimeError::Cancelled("codex cancelled mid-stream".into()));
-                }
-
-                let total_output = final_usage
-                    .as_ref()
-                    .and_then(|u| u.output_tokens)
-                    .unwrap_or(cumulative);
-                let _ = tx.send(NodeEvent::LlmDone {
-                    total_tokens: total_output,
-                });
-
-                let mut parts: Vec<MessagePart> = Vec::new();
-                if !acc_thinking.is_empty() {
-                    parts.push(MessagePart::Thinking {
-                        thinking: acc_thinking,
-                        signature: None,
-                    });
-                }
-                if !acc_text.is_empty() {
-                    parts.push(MessagePart::Text { text: acc_text });
-                }
-                for tc in partial_tool_calls {
-                    if tc.name.is_empty() {
-                        continue;
-                    }
-                    let input: serde_json::Value = if tc.arguments.is_empty() {
-                        serde_json::Value::Object(Default::default())
-                    } else {
-                        serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null)
-                    };
-                    let name = crate::tool_naming::from_wire(&tc.name, &streaming_tools);
-                    let (input, intent) =
-                        crate::message::decode_tool_call_input(input, &name, &streaming_tools);
-                    parts.push(MessagePart::ToolUse {
-                        id: tc.id,
-                        name,
-                        input,
-                        intent,
-                    });
-                }
-
-                let token_usage = final_usage.map(|u| {
-                    let input_tokens = u.input_tokens.unwrap_or(0);
-                    let cached_input = u
-                        .input_tokens_details
-                        .as_ref()
-                        .and_then(|d| d.cached_tokens)
-                        .unwrap_or(0);
-                    let cache_write = u
-                        .input_tokens_details
-                        .as_ref()
-                        .and_then(|d| d.cache_write_tokens)
-                        .unwrap_or(0);
-                    TokenUsage {
-                        // Responses API reports input_tokens as the total input,
-                        // including cache reads and writes. TokenUsage stores
-                        // the three prompt lanes independently.
-                        input: crate::provider::regular_input_tokens(
-                            input_tokens,
-                            cached_input,
-                            cache_write,
-                        ),
-                        cached_input,
-                        output: u.output_tokens.unwrap_or(0),
-                        cache_write,
-                        reasoning_tokens: u
-                            .output_tokens_details
-                            .as_ref()
-                            .and_then(|d| d.reasoning_tokens)
-                            .unwrap_or(0),
-                    }
-                });
-
-                Ok(AssistantMessage {
-                    message: Message {
-                        role: MessageRole::Assistant,
-                        parts,
-                        turn_id,
-                        origin: MessageOrigin::User,
-                    },
-                    stop_reason,
-                    token_usage: token_usage.unwrap_or_default(),
-                    timing: CallTiming::default(),
-                    model: resp_model.unwrap_or_default(),
-                    response_id: resp_id,
-                })
+                super::responses::read_stream(
+                    resp,
+                    route,
+                    streaming_tools,
+                    turn_id,
+                    tx,
+                    cancel_for_task,
+                )
+                .await
             },
         );
         Observable {
@@ -1068,20 +627,6 @@ impl crate::oauth::OAuthProvider for CodexProvider {
     }
 }
 
-#[derive(Default)]
-struct PartialToolCall {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-fn turn_id_from_req(req: &LlmRequest) -> TurnId {
-    req.messages
-        .first()
-        .map(|m| m.turn_id.clone())
-        .unwrap_or_else(TurnId::now)
-}
-
 fn net_err(e: reqwest::Error) -> RuntimeError {
     RuntimeError::ToolFailed(format!("codex net: {e}"))
 }
@@ -1090,120 +635,12 @@ fn credential_err(error: crate::oauth::OAuthCredentialError) -> RuntimeError {
     RuntimeError::ToolFailed(format!("codex credentials: {error}"))
 }
 
-#[derive(Serialize)]
-struct ResponsesRequest {
-    model: String,
-    input: Vec<InputItem>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    instructions: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    tools: Vec<ResponsesTool>,
-    stream: bool,
-    store: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning: Option<ReasoningConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<TextConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    include: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_cache_key: Option<String>,
-}
-
-#[derive(Serialize)]
-struct InputItem {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    role: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<InputContent>,
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    item_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    arguments: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    output: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-enum InputContent {
-    Text(String),
-    Parts(Vec<ResponseInputContent>),
-}
-
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ResponseInputContent {
-    InputText {
-        text: String,
-    },
-    InputImage {
-        image_url: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        detail: Option<&'static str>,
-    },
-}
-
-#[derive(Serialize)]
-struct ResponsesTool {
-    #[serde(rename = "type")]
-    r#type: String,
-    name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    parameters: serde_json::Value,
-}
-
-#[derive(Serialize)]
-struct ReasoningConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    effort: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    summary: Option<String>,
-}
-
-#[derive(Serialize)]
-struct TextConfig {
-    verbosity: String,
-}
-
-#[derive(Deserialize, Default)]
-struct ResponsesUsage {
-    #[serde(default)]
-    input_tokens: Option<u64>,
-    #[serde(default)]
-    output_tokens: Option<u64>,
-    #[serde(default)]
-    input_tokens_details: Option<InputTokensDetails>,
-    #[serde(default)]
-    output_tokens_details: Option<OutputTokensDetails>,
-}
-
-#[derive(Deserialize, Default)]
-struct InputTokensDetails {
-    #[serde(default)]
-    cached_tokens: Option<u64>,
-    #[serde(default)]
-    cache_write_tokens: Option<u64>,
-}
-
-#[derive(Deserialize, Default)]
-struct OutputTokensDetails {
-    #[serde(default)]
-    reasoning_tokens: Option<u64>,
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::responses::split_assistant_parts;
     use super::{
         CodexCredentialSource, CodexProvider, X_CODEX_TURN_STATE, oauth_account_id,
-        parse_codex_models, split_assistant_parts,
+        parse_codex_models,
     };
     use crate::message::MessagePart;
     use crate::provider::Provider;

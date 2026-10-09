@@ -77,21 +77,32 @@ export OPENAI_API_KEY="sk-..."
 
 Optionally point at a compat gateway with `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`.
 
-Compatible OpenAI gateways that implement `reasoning_effort` can select that
-wire format independently of the endpoint type:
+OpenAI-compatible connections select the API separately from the Chat reasoning parameter format:
 
 ```toml
 [providers.gateway]
 kind = "openai-compat"
 base_url = "https://gateway.example/v1"
+api = "chat-completions"
 reasoning_format = "reasoning-effort"
 # Enable only when the gateway accepts OpenAI's prompt_cache_key field.
 # prompt_cache_key = true
+
+[models.reasoning]
+provider = "gateway"
+model = "vendor/reasoning-model"
+api = "responses"
+context_budget = 128000
+reasoning = "high"
 ```
 
-The default OpenAI API endpoint and Codex enable stable prompt-cache routing by
-default. Custom OpenAI base URLs and OpenAI-compatible gateways leave it disabled unless
-`prompt_cache_key = true` is configured explicitly.
+The model's `api` overrides the provider default; omit it to inherit. Existing OpenAI-compatible configurations without `api` use Chat Completions. Responses supports API-key authentication and preserves model IDs such as `vendor/reasoning-model`. `reasoning_format` applies only to Chat Completions.
+
+Use a connection root in `base_url`; do not append `/responses` or `/chat/completions`.
+
+The default OpenAI API endpoint and Codex enable stable prompt-cache routing by default. Custom OpenAI base URLs and OpenAI-compatible gateways leave it disabled unless `prompt_cache_key = true` is configured explicitly. Changing the API changes the cache projection; provider usage reports remain authoritative for cache hits.
+
+Set `max_tools = 128` in a provider table when that endpoint limits the total number of request tool definitions to 128. The count includes built-in tools and native MCP tools. The official OpenAI Chat Completions endpoint applies this limit by default; other endpoints require an explicit limit. A request exceeding the limit fails locally with the actual count, before sending its conversation history. MCP broker calls do not add target definitions to the request.
 
 Model reasoning and image defaults can be configured per model:
 
@@ -106,6 +117,8 @@ image_detail = "auto"
 ```
 
 Reasoning can also be selected for one run with `--reasoning high`; repeat `--image path/to/image.png` to attach images. In the TUI, Cmd+V, Ctrl+V, or Alt+V attaches the clipboard image. Its `[image N]` reference and attachment bar remain visible until submit; deleting the reference removes that image. Ctrl+U removes the pending quote first, then the latest pending image. The input border shows the effective reasoning depth for the next submission, and Ctrl+T cycles that input value. It is exposed to the flow as invocation-local `env("effort")` data. `llm.call`, `llm.extract`, `llm.classify`, and `llm.generate_branches` consume it only when their own call explicitly passes `effort: env("effort")`; inheriting the invocation environment alone does not change a request.
+
+`llm.call(retry: N)` retries transient network failures, timeouts, rate limits, and provider outages. Authentication, invalid requests, and unsupported tool schemas fail immediately; `retry_classified: [...]` explicitly selects other error categories when a flow requires them. Context-overflow recovery still compacts the input before resending. Requests never switch API protocol or reasoning effort in response to a protocol rejection.
 
 Drag across transcript text, line-end space, or short Markdown gaps to open Copy, Rich Copy, Quote, and Cancel actions; holding the pointer past the visible document edge scrolls the selection. Quote appears above the input until submission, separate from the editable prompt. Click its card or press F4 to expand it, then use PgUp/PgDn or the mouse wheel to scroll; click `[x]` or press Ctrl+U to remove it. A short terminal shows the pending quote count in the input border.
 

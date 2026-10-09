@@ -18,6 +18,7 @@ pub struct AnthropicProvider {
     base_url: String,
     client: reqwest::Client,
     max_tokens: u32,
+    max_tools: Option<usize>,
     anthropic_version: String,
 }
 
@@ -29,6 +30,7 @@ impl AnthropicProvider {
             base_url: "https://api.anthropic.com".into(),
             client: reqwest::Client::new(),
             max_tokens: 16384,
+            max_tools: None,
             anthropic_version: "2023-06-01".into(),
         }
     }
@@ -40,6 +42,11 @@ impl AnthropicProvider {
 
     pub fn with_max_tokens(mut self, n: u32) -> Self {
         self.max_tokens = n;
+        self
+    }
+
+    pub fn with_max_tools(mut self, max_tools: Option<usize>) -> Self {
+        self.max_tools = max_tools;
         self
     }
 
@@ -166,7 +173,7 @@ fn build_wire_message(
     let last_idx = m.parts.len().saturating_sub(1);
     for (i, part) in m.parts.iter().enumerate() {
         let block = match part {
-            MessagePart::FinalAnswerSummary { .. } => continue,
+            MessagePart::FinalAnswerSummary { .. } | MessagePart::ResponsesState { .. } => continue,
             MessagePart::ContextRecord(record) => ContentPart::Text {
                 text: record.render_for_model(),
                 cache_control: if apply_cache_control && i == last_idx {
@@ -275,6 +282,7 @@ impl Provider for AnthropicProvider {
     fn capabilities(&self) -> crate::provider::ProviderCapabilities {
         crate::provider::ProviderCapabilities {
             context_prefix_profile: crate::context_plan::ContextPrefixProfile::AnthropicMessages,
+            max_tools: self.max_tools,
             ..Default::default()
         }
     }

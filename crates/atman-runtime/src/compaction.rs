@@ -42,6 +42,9 @@ pub fn estimate_tokens_for_message(msg: &Message) -> u64 {
     for part in &msg.parts {
         chars += match part {
             MessagePart::FinalAnswerSummary { .. } => 0,
+            MessagePart::ResponsesState { state, .. } => {
+                serde_json::to_string(state).map_or(0, |value| value.len())
+            }
             MessagePart::ContextRecord(record) => record.render_for_model().len(),
             MessagePart::CompactSummary { summary, .. } => summary.len(),
             MessagePart::Text { text } => text.len(),
@@ -627,7 +630,8 @@ async fn generate_llm_summary_with_delta(
     providers: &crate::provider::ProviderRegistry,
     on_delta: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
 ) -> Result<String, crate::error::RuntimeError> {
-    let provider = providers.resolve(model).ok_or_else(|| {
+    let model_config = crate::model_registry::model_call_config(model);
+    let provider = providers.resolve_call(&model_config)?.ok_or_else(|| {
         crate::error::RuntimeError::ToolFailed(format!("no provider for {model}"))
     })?;
     let payload = format_slice_for_summary(slice);
@@ -661,7 +665,7 @@ async fn generate_llm_summary_with_delta(
         );
     }
     let req = crate::provider::LlmRequest {
-        model: crate::model_registry::api_model_id(model),
+        model: model_config.api_model,
         messages,
         system: Some(SUMMARY_SYSTEM_PROMPT.into()),
         input: crate::value::Value::Unit,
@@ -913,7 +917,7 @@ fn serialize_message_for_summary(msg: &Message) -> String {
     let mut parts = Vec::new();
     for part in &msg.parts {
         match part {
-            MessagePart::FinalAnswerSummary { .. } => {}
+            MessagePart::FinalAnswerSummary { .. } | MessagePart::ResponsesState { .. } => {}
             MessagePart::ContextRecord(record) => {
                 if record.retention() == crate::context_plan::ContextRecordRetention::Timeline {
                     parts.push(record.render_for_model());

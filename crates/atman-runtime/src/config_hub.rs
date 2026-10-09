@@ -112,7 +112,9 @@ pub struct ProviderConfigUpdate<'a> {
     pub api_key: Option<&'a str>,
     pub api_key_env: Option<&'a str>,
     pub base_url: Option<&'a str>,
+    pub api: Option<crate::provider::OpenAiApi>,
     pub max_tokens: Option<u32>,
+    pub max_tools: Option<usize>,
     pub reasoning_format: Option<crate::providers::openai::OpenAiReasoningFormat>,
     pub prompt_cache_key: Option<bool>,
     pub enabled: bool,
@@ -1557,11 +1559,41 @@ impl ConfigHub {
                         .and_then(|entry| entry.get("prompt_cache_key"))
                         .and_then(toml_edit::Item::as_bool)
                 });
+                let previous = providers
+                    .get(update.name)
+                    .and_then(toml_edit::Item::as_table);
+                let api = match update.api {
+                    Some(api) => Some(api),
+                    None if !matches!(update.kind, "openai" | "openai-compat") => None,
+                    None => previous
+                        .and_then(|entry| entry.get("api"))
+                        .and_then(toml_edit::Item::as_str)
+                        .map(str::parse)
+                        .transpose()
+                        .map_err(ConfigError::Invalid)?,
+                };
+                let max_tools = update.max_tools.or_else(|| {
+                    previous
+                        .and_then(|entry| entry.get("max_tools"))
+                        .and_then(toml_edit::Item::as_integer)
+                        .and_then(|value| usize::try_from(value).ok())
+                });
                 let mut entry = toml_edit::Table::new();
                 entry.insert("kind", toml_edit::value(update.kind));
                 insert_nonempty(&mut entry, "api_key", update.api_key);
                 insert_nonempty(&mut entry, "api_key_env", update.api_key_env);
                 insert_nonempty(&mut entry, "base_url", update.base_url);
+                if let Some(api) = api {
+                    entry.insert("api", toml_edit::value(api.as_str()));
+                }
+                if let Some(max_tools) = max_tools {
+                    let max_tools = i64::try_from(max_tools).map_err(|_| {
+                        ConfigError::Invalid(
+                            "max_tools exceeds the configuration integer range".into(),
+                        )
+                    })?;
+                    entry.insert("max_tools", toml_edit::value(max_tools));
+                }
                 if let Some(value) = update.max_tokens {
                     entry.insert("max_tokens", toml_edit::value(i64::from(value)));
                 }
@@ -1589,6 +1621,8 @@ impl ConfigHub {
                         .filter(|value| !value.is_empty())
                         .map(str::to_string),
                     max_tokens: update.max_tokens,
+                    api,
+                    max_tools,
                     reasoning_format,
                     prompt_cache_key,
                     enabled: Some(update.enabled),
@@ -2263,6 +2297,8 @@ mod tests {
             api_key: None,
             api_key_env: Some("GATEWAY_KEY"),
             base_url: Some("https://gateway.example/v1"),
+            api: Some(crate::provider::OpenAiApi::Responses),
+            max_tools: Some(64),
             max_tokens: None,
             reasoning_format: Some(crate::providers::openai::OpenAiReasoningFormat::Official),
             prompt_cache_key: Some(true),
@@ -2270,6 +2306,8 @@ mod tests {
         };
         hub.upsert_provider(base).unwrap();
         hub.upsert_provider(ProviderConfigUpdate {
+            api: None,
+            max_tools: None,
             reasoning_format: None,
             prompt_cache_key: None,
             enabled: false,
@@ -2281,6 +2319,8 @@ mod tests {
         assert!(config.contains("reasoning_format = \"reasoning-effort\""));
         assert!(config.contains("prompt_cache_key = true"));
         assert!(config.contains("enabled = false"));
+        assert!(config.contains("api = \"responses\""));
+        assert!(config.contains("max_tools = 64"));
         assert_eq!(
             hub.model_config().unwrap().unwrap().providers["gateway"].prompt_cache_key,
             Some(true)
@@ -2302,6 +2342,8 @@ mod tests {
                 api_key: Some("inline-key"),
                 api_key_env: Some("GATEWAY_KEY"),
                 base_url: Some("https://gateway.example/v1"),
+                api: None,
+                max_tools: None,
                 max_tokens: Some(16_384),
                 reasoning_format: Some(crate::providers::openai::OpenAiReasoningFormat::Official),
                 prompt_cache_key: None,
@@ -2348,6 +2390,8 @@ mod tests {
             api_key: Some("first-key"),
             api_key_env: None,
             base_url: Some("https://first.example/v1"),
+            api: None,
+            max_tools: None,
             max_tokens: Some(8_192),
             reasoning_format: None,
             prompt_cache_key: None,
@@ -2398,6 +2442,8 @@ mod tests {
                 api_key: None,
                 api_key_env: None,
                 base_url: Some("https://gateway.example/v1"),
+                api: None,
+                max_tools: None,
                 max_tokens: None,
                 reasoning_format: None,
                 prompt_cache_key: None,
@@ -4258,6 +4304,7 @@ custom_patterns = [{ kind = "ticket", regex = "T-[0-9]+" }]
             name,
             model,
             provider: Some("test"),
+            api: None,
             context_budget: 100_000,
             reasoning: crate::provider::ReasoningSelection::Disabled,
             capabilities: None,

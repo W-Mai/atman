@@ -18,6 +18,7 @@ pub struct OpenAiProvider {
     base_url: String,
     client: reqwest::Client,
     max_tokens: Option<u32>,
+    max_tools: Option<usize>,
     reasoning_format: OpenAiReasoningFormat,
     prompt_cache_key: bool,
 }
@@ -76,13 +77,24 @@ impl OpenAiProvider {
             base_url: "https://api.openai.com/v1".into(),
             client: reqwest::Client::new(),
             max_tokens: None,
+            max_tools: None,
             reasoning_format: OpenAiReasoningFormat::default(),
             prompt_cache_key: true,
         }
     }
 
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
-        self.base_url = url.into();
+        self.base_url = url.into().trim_end_matches('/').to_owned();
+        self
+    }
+
+    pub(crate) fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
+    pub fn with_max_tools(mut self, max_tools: Option<usize>) -> Self {
+        self.max_tools = max_tools;
         self
     }
 
@@ -393,6 +405,9 @@ impl Provider for OpenAiProvider {
         crate::provider::ProviderCapabilities {
             prompt_cache_key: self.prompt_cache_key,
             context_prefix_profile: crate::context_plan::ContextPrefixProfile::OpenAiChat,
+            max_tools: self.max_tools.or_else(|| {
+                (self.base_url.trim_end_matches('/') == "https://api.openai.com/v1").then_some(128)
+            }),
         }
     }
 

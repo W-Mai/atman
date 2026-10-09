@@ -131,6 +131,7 @@ fn build_long_history(session: &Session, turn_count: usize) {
 }
 
 fn run_with(provider: Arc<ScriptedProvider>, src: &str) -> (Result<Value, RuntimeError>, usize) {
+    let _registry = common::SyncModelRegistryGuard::mock("m");
     let file = parse_file(src).unwrap();
     let ex = Executor::new();
     let counter = provider.clone();
@@ -195,16 +196,7 @@ fn retry_classified_gives_up_immediately_on_kind_not_in_list() {
 }
 
 #[test]
-fn retry_without_classified_retries_any_error() {
-    let provider = Arc::new(ScriptedProvider::new(
-        "m",
-        vec![
-            Err(RuntimeError::ToolFailed(
-                "openai http 401: unauthorized".into(),
-            )),
-            Ok("still tried again".into()),
-        ],
-    ));
+fn retry_without_classified_stops_on_permanent_errors() {
     let src = r#"flow t() -> string {
     return llm.call(
         model: "m",
@@ -213,12 +205,22 @@ fn retry_without_classified_retries_any_error() {
     )
 }
 "#;
-    let (value, calls) = run_with(provider, src);
-    match value.unwrap() {
-        Value::Str(s) => assert!(s.contains("still tried again")),
-        other => panic!("expected str got {other:?}"),
+    for message in [
+        "openai http 401: unauthorized",
+        "openai http 400: invalid request",
+        "tool schema unsupported",
+    ] {
+        let provider = Arc::new(ScriptedProvider::new(
+            "m",
+            vec![
+                Err(RuntimeError::ToolFailed(message.into())),
+                Ok("must not retry".into()),
+            ],
+        ));
+        let (value, calls) = run_with(provider, src);
+        assert!(matches!(value, Err(RuntimeError::ToolFailed(msg)) if msg == message));
+        assert_eq!(calls, 1, "permanent error must not retry: {message}");
     }
-    assert_eq!(calls, 2, "without retry_classified, any err retries");
 }
 
 #[test]
@@ -373,12 +375,13 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
     build_long_history(&session, 30);
     let file = parse_file(
         r#"flow t() -> string {
-    return llm.call(
+    reply = llm.call(
         model: "m",
         context: "session",
         prompt: "continue",
         retry: 10,
     )
+    return text_concat(reply)
 }
 "#,
     )

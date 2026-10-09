@@ -15,6 +15,51 @@ use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use crate::tool::BoxFut;
 use crate::value::Value;
 
+/// API protocol used by an OpenAI-compatible connection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpenAiApi {
+    #[default]
+    ChatCompletions,
+    Responses,
+}
+
+impl OpenAiApi {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat-completions",
+            Self::Responses => "responses",
+        }
+    }
+
+    pub fn endpoint_path(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "/chat/completions",
+            Self::Responses => "/responses",
+        }
+    }
+}
+
+impl fmt::Display for OpenAiApi {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for OpenAiApi {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim() {
+            "chat-completions" => Ok(Self::ChatCompletions),
+            "responses" => Ok(Self::Responses),
+            _ => Err(format!(
+                "invalid API `{value}`; expected `chat-completions` or `responses`"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ReasoningEffort {
     None,
@@ -171,6 +216,7 @@ pub enum ReasoningSelection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningWireProfile {
     OpenAiOfficial,
+    OpenAiResponses,
     CompatibleThinking,
     CodexResponses,
     AnthropicMessages,
@@ -208,7 +254,7 @@ const ANTHROPIC_REASONING_EFFORTS: &[ReasoningEffort] = &[
 impl ReasoningWireProfile {
     pub fn fallback_efforts(self) -> &'static [ReasoningEffort] {
         match self {
-            Self::OpenAiOfficial => OPENAI_REASONING_EFFORTS,
+            Self::OpenAiOfficial | Self::OpenAiResponses => OPENAI_REASONING_EFFORTS,
             Self::CodexResponses => CODEX_REASONING_EFFORTS,
             Self::AnthropicMessages => ANTHROPIC_REASONING_EFFORTS,
             Self::CompatibleThinking | Self::Unknown => &[],
@@ -234,6 +280,9 @@ impl ReasoningWireProfile {
                 Self::OpenAiOfficial | Self::CompatibleThinking => {
                     "Chat Completions does not support reasoning execution mode".into()
                 }
+                Self::OpenAiResponses => {
+                    "Responses does not support reasoning execution mode".into()
+                }
                 Self::CodexResponses | Self::Unknown => unreachable!(),
             });
         }
@@ -241,7 +290,10 @@ impl ReasoningWireProfile {
         match (self, selection) {
             (Self::Unknown, _) => Ok(()),
             (
-                Self::OpenAiOfficial | Self::CompatibleThinking | Self::CodexResponses,
+                Self::OpenAiOfficial
+                | Self::OpenAiResponses
+                | Self::CompatibleThinking
+                | Self::CodexResponses,
                 ReasoningSelection::BudgetTokens { .. },
             ) => Err(match self {
                 Self::CodexResponses => {
@@ -426,6 +478,8 @@ pub struct ModelCapabilities {
 pub struct ProviderCapabilities {
     pub prompt_cache_key: bool,
     pub context_prefix_profile: crate::context_plan::ContextPrefixProfile,
+    /// Maximum number of tool definitions accepted by the endpoint, when known.
+    pub max_tools: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -539,6 +593,10 @@ pub(crate) fn bounded_utf8_prefix(value: &str, max_bytes: usize) -> &str {
 
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
+    /// Select a protocol variant from the same connection and credential snapshot.
+    fn for_api(&self, _api: OpenAiApi) -> Option<Arc<dyn Provider>> {
+        None
+    }
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities::default()
     }
@@ -858,28 +916,49 @@ impl ProviderRegistry {
     }
 
     pub fn resolve(&self, model: &str) -> Option<Arc<dyn Provider>> {
-        let providers = self.providers.read().unwrap();
-        if let Some(p) = providers.get(model) {
-            return Some(p.clone());
-        }
-        if let Some(entry) = crate::model_registry::model_entry(model)
-            && let Some(ref provider_name) = entry.provider
-        {
-            if let Some(provider) = providers.get(provider_name) {
-                return Some(provider.clone());
+        self.try_resolve(model).ok().flatten()
+    }
+
+    pub fn try_resolve(&self, model: &str) -> Result<Option<Arc<dyn Provider>>, RuntimeError> {
+        self.resolve_call(&crate::model_registry::model_call_config(model))
+    }
+
+    pub fn resolve_call(
+        &self,
+        config: &crate::model_registry::ModelCallConfig,
+    ) -> Result<Option<Arc<dyn Provider>>, RuntimeError> {
+        let model = config.requested();
+        let provider = {
+            let providers = self.providers.read().unwrap();
+            if let Some(provider) = providers.get(model) {
+                Some(provider.clone())
+            } else if let Some(provider_name) = config.provider() {
+                if let Some(provider) = providers.get(provider_name) {
+                    Some(provider.clone())
+                } else if crate::model_registry::is_provider_enabled(provider_name) {
+                    providers.get(&format!("config:{provider_name}")).cloned()
+                } else {
+                    None
+                }
+            } else {
+                model
+                    .split_once('/')
+                    .and_then(|(prefix, _)| providers.get(prefix))
+                    .cloned()
             }
-            if !crate::model_registry::is_provider_enabled(provider_name) {
-                return None;
+        };
+        let Some(provider) = provider else {
+            return Ok(None);
+        };
+        match config.api {
+            Some(api) if !config.explicitly_selects_api() => {
+                Ok(Some(provider.for_api(api).unwrap_or_else(|| provider.clone())))
             }
-            let config_key = format!("config:{provider_name}");
-            return providers.get(&config_key).cloned();
+            Some(api) => provider.for_api(api).map(Some).ok_or_else(|| RuntimeError::ToolFailed(format!(
+                "invalid request: model `{model}` selects API `{api}`, but provider `{}` does not support API selection", provider.name()
+            ))),
+            None => Ok(Some(provider)),
         }
-        if let Some((prefix, _)) = model.split_once('/')
-            && let Some(p) = providers.get(prefix)
-        {
-            return Some(p.clone());
-        }
-        None
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Provider>> {
@@ -1265,6 +1344,22 @@ mod tests {
                 )
                 .unwrap_err()
                 .contains("cannot represent effort `xhigh`")
+        );
+        assert!(
+            ReasoningWireProfile::OpenAiResponses
+                .validate(&high, None)
+                .is_ok()
+        );
+        assert!(
+            ReasoningWireProfile::OpenAiResponses
+                .validate(
+                    &ReasoningSelection::Effort {
+                        effort: ReasoningEffort::High,
+                        execution_mode: Some(ReasoningExecutionMode::Pro),
+                    },
+                    None
+                )
+                .is_err()
         );
     }
 }

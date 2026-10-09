@@ -46,17 +46,11 @@ The Session retains the latest usage in bounded provider/model/purpose/identity 
 Only a general root-session call updates the active model-window reading; helper and
 child calls remain visible in their own buckets without replacing it.
 
-Each call also fingerprints the cacheable prompt sequence after OpenAI Chat,
-Anthropic Messages, Codex Responses, or provider-neutral projection. The observation
-records prompt bytes and estimated tokens, plus a conservative common-prefix lower
-bound at complete tool, instruction, message, or content-block boundaries. It reports
-cold starts, cache enablement or disablement, provider/model/projection changes,
-stable-instruction changes, tool changes, compaction, and other message-prefix
-rewrites separately. Transport JSON punctuation and output-only request fields are
-excluded because they do not represent the provider's semantic prompt prefix.
-Successful calls record the number of tool uses returned in the assistant message.
-Each dispatched tool result records raw bytes, model-visible excerpt bytes, and
-whether output budgeting changed the content before it enters message history.
+Each call also fingerprints the cacheable prompt sequence after OpenAI Chat, API-key Responses, Anthropic Messages, Codex Responses, or provider-neutral projection. The observation records prompt bytes and estimated tokens, plus a conservative common-prefix lower bound at complete tool, instruction, message, or content-block boundaries. It reports cold starts, cache enablement or disablement, provider/model/projection changes, stable-instruction changes, tool changes, compaction, and other message-prefix rewrites separately. Transport JSON punctuation and output-only request fields are excluded because they do not represent the provider's semantic prompt prefix. Successful calls record the number of tool uses returned in the assistant message. Each dispatched tool result records raw bytes, model-visible excerpt bytes, and whether output budgeting changed the content before it enters message history.
+
+API selection resolves from the configured model and its provider before converting an alias to an API model ID. Request dispatch, reasoning validation, and cache projection use the same model configuration snapshot and selected provider. Compaction uses the same protocol resolution. Changing a model between Chat Completions and Responses changes its projection; a stable cache routing key does not guarantee a provider cache hit.
+
+Responses uses `store: false` and replays local message history. Opaque reasoning items and output metadata remain attached to assistant messages with their provider, endpoint, and model identity. Matching routes can replay them after session restoration; other routes omit the opaque state. Compaction removes this state with the corresponding messages, and it is not rendered as user-visible text.
 
 Dynamic model context can be represented as an internal `ContextRecord` message
 part. Records carry a stable key, monotonic revision, semantic content digest,

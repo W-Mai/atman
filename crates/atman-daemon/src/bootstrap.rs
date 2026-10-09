@@ -188,8 +188,9 @@ pub fn spawn_mcp_boot(
                                     let providers = providers.clone();
                                     Box::pin(async move {
                                         let model = req.model.unwrap_or_default();
+                                        let model_config = atman_runtime::model_registry::model_call_config(&model);
                                         let provider =
-                                            providers.resolve(&model).ok_or_else(|| {
+                                            providers.resolve_call(&model_config)?.ok_or_else(|| {
                                                 atman_runtime::RuntimeError::ToolFailed(format!(
                                                     "no provider for model `{model}`"
                                                 ))
@@ -221,7 +222,7 @@ pub fn spawn_mcp_boot(
                                             })
                                             .collect();
                                         let llm_req = atman_runtime::provider::LlmRequest {
-                                            model: model.clone(),
+                                            model: model_config.api_model.clone(),
                                             messages,
                                             system: req.system_prompt,
                                             input: Value::Unit,
@@ -236,7 +237,7 @@ pub fn spawn_mcp_boot(
                                         Ok(atman_runtime::mcp::SamplingResponse {
                                             role: "assistant".into(),
                                             content: serde_json::json!(am.text_concat()),
-                                            model: Some(model),
+                                            model: Some(model_config.api_model),
                                         })
                                     })
                                 },

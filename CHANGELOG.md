@@ -12,11 +12,14 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Provider API selection** — API-key connections support Chat Completions and Responses with provider defaults and per-model overrides. Responses preserves protocol state across local history replay and shares request encoding, streaming, usage, and cache projection with Codex.
+- **Request tool limits** — Providers can declare `max_tools`; oversized requests fail locally without truncating the tool catalog. The official OpenAI Chat Completions endpoint defaults to 128 tools.
 - **MCP discovery** — Managed agents use fixed MCP discovery and call tools. Catalog search and cursor pagination load tool details on demand; explicit selectors still expose native definitions.
 - **Resource-aware tool batches** — `dispatch_all` runs resource-independent calls concurrently, preserves source order for conflicting resources, and treats permission-control calls as authorization and execution barriers. `Tool`, `ToolDefinition`, and `#[atman_runtime::tools]` expose structured scheduling claims for built-in and host-provided tools; undeclared tools remain opaque barriers.
 
 ### 🐛 Bug Fixes
 
+- **Permanent request errors** — Default retries stop on authentication failures, invalid requests, and unsupported schemas. Explicit `retry_classified` selections retain control over other error categories.
 - **MCP proxy execution** — Proxy calls enforce the originating request's target scope and use the target's permissions, scheduling, and audit identity. Arguments are validated against the original JSON Schema before transport; invalid schemas and external schema references fail only the affected tool.
 - **Context cache row** — The sidebar renders cache usage once and keeps its text-selection coordinates aligned with the visible Context rows.
 

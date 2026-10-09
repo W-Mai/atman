@@ -478,6 +478,7 @@ pub enum ContextPrefixProfile {
     #[default]
     ProviderNeutral,
     OpenAiChat,
+    OpenAiResponses,
     AnthropicMessages,
     CodexResponses,
 }
@@ -1337,6 +1338,7 @@ mod tests {
         let capabilities = crate::provider::ProviderCapabilities {
             prompt_cache_key: true,
             context_prefix_profile: ContextPrefixProfile::CodexResponses,
+            max_tools: None,
         };
         let mut first_request = request();
         first_request
@@ -1389,6 +1391,7 @@ mod tests {
         let capabilities = crate::provider::ProviderCapabilities {
             prompt_cache_key: true,
             context_prefix_profile: ContextPrefixProfile::CodexResponses,
+            max_tools: None,
         };
         let first = ModelContextPlan::for_provider_call(
             request(),
@@ -1443,6 +1446,7 @@ mod tests {
             crate::provider::ProviderCapabilities {
                 prompt_cache_key: true,
                 context_prefix_profile: ContextPrefixProfile::OpenAiChat,
+                max_tools: None,
             },
             None,
         );

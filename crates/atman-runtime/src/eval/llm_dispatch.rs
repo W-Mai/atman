@@ -67,7 +67,12 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         .as_ref()
         .map(|p| (**p).clone())
         .unwrap_or_default();
-    let Some(provider) = providers_reg.resolve(&model) else {
+    let model_config = crate::model_registry::model_call_config(&model);
+    let provider = match providers_reg.resolve_call(&model_config) {
+        Ok(provider) => provider,
+        Err(error) => return Value::Err(error),
+    };
+    let Some(provider) = provider else {
         if let Some(entry) = crate::model_registry::model_entry(&model)
             && let Some(ref pname) = entry.provider
             && !crate::model_registry::is_provider_enabled(pname)
@@ -80,13 +85,22 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             "no provider registered for model `{model}`"
         )));
     };
-    let api_model = crate::model_registry::api_model_id(&model);
+    if let Some(limit) = provider.capabilities().max_tools
+        && tool_specs.len() > limit
+    {
+        return Value::Err(RuntimeError::ToolFailed(format!(
+            "invalid request: model `{model}` on provider `{}` has {} tools, exceeding the configured API limit of {limit}; use mcp.tools and mcp.call for MCP discovery and calls, or narrow the explicit tool selectors",
+            provider.name(),
+            tool_specs.len(),
+        )));
+    }
+    let api_model = model_config.api_model.clone();
     let has_messages_override = args.messages_override.is_some();
     let turn_id = ctx
         .turn_id
         .clone()
         .unwrap_or_else(crate::event::TurnId::now);
-    let model_info = crate::model_registry::model_info(&model);
+    let model_info = model_config.info.clone();
     if model_info.context_budget == 0 {
         return Value::Err(RuntimeError::ToolFailed(format!(
             "model `{model}` is not registered in config.toml — add a [models.{model}] section with context_budget before using it"
@@ -317,45 +331,44 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         .reasoning
         .clone()
         .unwrap_or_else(|| model_info.reasoning.clone());
-    let mut reasoning =
-        match crate::model_registry::resolve_reasoning_for_model(&model, &requested_reasoning) {
-            Ok(reasoning) => reasoning,
-            Err(error) => {
-                let error =
-                    RuntimeError::ToolFailed(format!("model `{model}` reasoning config: {error}"));
-                if let Some(sink) = ctx.events.as_ref() {
-                    sink.emit(crate::event::Event::LlmCall {
-                        model: model.clone(),
-                        provider: provider.name().to_string(),
-                        context_plan_id: None,
-                        context_epoch: None,
-                        context_tokens: None,
-                        usage_source: None,
-                        context_call_purpose: Some(args.call_purpose),
-                        context_call_identity: Some(
-                            crate::context_plan::ContextCallIdentity::from_tool_context(ctx),
-                        ),
-                        context_cache: None,
-                        assistant_tool_batch_width: None,
-                        usage: crate::provider::TokenUsage::default(),
-                        wallclock_ms: 0,
-                        ttft_ms: None,
-                        tokens_per_second: None,
-                        status: crate::event::LlmCallStatus::Errored {
-                            message: error.to_string(),
-                        },
-                        run_id: ctx.flow_run_id.clone(),
-                        node_id: ctx.current_node_id.clone(),
-                    });
-                }
-                send_llm_diagnostic(
-                    ctx,
-                    crate::notify::NotifyLevel::Error,
-                    format!("LLM call failed: {error}"),
-                );
-                return Value::Err(error);
+    let mut reasoning = match model_config.resolve_reasoning(&requested_reasoning) {
+        Ok(reasoning) => reasoning,
+        Err(error) => {
+            let error =
+                RuntimeError::ToolFailed(format!("model `{model}` reasoning config: {error}"));
+            if let Some(sink) = ctx.events.as_ref() {
+                sink.emit(crate::event::Event::LlmCall {
+                    model: model.clone(),
+                    provider: provider.name().to_string(),
+                    context_plan_id: None,
+                    context_epoch: None,
+                    context_tokens: None,
+                    usage_source: None,
+                    context_call_purpose: Some(args.call_purpose),
+                    context_call_identity: Some(
+                        crate::context_plan::ContextCallIdentity::from_tool_context(ctx),
+                    ),
+                    context_cache: None,
+                    assistant_tool_batch_width: None,
+                    usage: crate::provider::TokenUsage::default(),
+                    wallclock_ms: 0,
+                    ttft_ms: None,
+                    tokens_per_second: None,
+                    status: crate::event::LlmCallStatus::Errored {
+                        message: error.to_string(),
+                    },
+                    run_id: ctx.flow_run_id.clone(),
+                    node_id: ctx.current_node_id.clone(),
+                });
             }
-        };
+            send_llm_diagnostic(
+                ctx,
+                crate::notify::NotifyLevel::Error,
+                format!("LLM call failed: {error}"),
+            );
+            return Value::Err(error);
+        }
+    };
     let mut signature_retries: u32 = 0;
     'llm_attempts: loop {
         for attempt in 0..=retry_count {
@@ -779,7 +792,13 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         let kind = e.kind();
                         let should_retry = match &retry_kinds_ref {
                             Some(allowed) => allowed.contains(&kind),
-                            None => true,
+                            None => matches!(
+                                kind,
+                                crate::error::ErrorKind::RateLimit
+                                    | crate::error::ErrorKind::Timeout
+                                    | crate::error::ErrorKind::ProviderDown
+                                    | crate::error::ErrorKind::Transient
+                            ),
                         };
                         if !should_retry {
                             last_err = Some(e);
@@ -969,6 +988,61 @@ fn normalize_working_directory_context(system: &mut Option<String>, cwd: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tool_budget_rejects_before_provider_call_or_context_consumption() {
+        struct BoundedProvider;
+        impl crate::provider::Provider for BoundedProvider {
+            fn name(&self) -> &str {
+                "bounded"
+            }
+
+            fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+                crate::provider::ProviderCapabilities {
+                    max_tools: Some(1),
+                    ..Default::default()
+                }
+            }
+
+            fn call<'a>(
+                &'a self,
+                _: crate::provider::LlmRequest,
+            ) -> crate::tool::BoxFut<'a, Result<crate::provider::AssistantMessage, RuntimeError>>
+            {
+                panic!("an oversized tool catalog must never reach the provider")
+            }
+
+            fn call_streaming(
+                &self,
+                _: crate::provider::LlmRequest,
+            ) -> crate::event::Observable<crate::provider::AssistantMessage> {
+                panic!("an oversized tool catalog must never reach the provider")
+            }
+        }
+        let providers = std::sync::Arc::new(crate::provider::ProviderRegistry::new());
+        providers.register(std::sync::Arc::new(BoundedProvider));
+        let ctx = ToolCtx::new().with_providers(providers);
+        let mut args = crate::eval::llm_args::parse_llm_args_from_toolargs(
+            &crate::tool::ToolArgs {
+                positional: Vec::new(),
+                named: vec![("model".into(), Value::Str("bounded".into()))],
+            },
+            &crate::tool::ToolRegistry::new(),
+        )
+        .unwrap();
+        args.tool_specs = ["read", "write"]
+            .map(|name| crate::tool::ToolSpec {
+                name: name.into(),
+                description: None,
+                input_schema: serde_json::json!({"type":"object"}),
+            })
+            .into();
+        let result = dispatch_llm(args, &ctx).await;
+        assert!(matches!(result, Value::Err(error)
+            if error.kind() == crate::error::ErrorKind::InvalidRequest
+            && error.to_string().contains("2 tools")
+            && error.to_string().contains("limit of 1")));
+    }
 
     #[test]
     fn fixed_wire_prefix_counts_only_system_and_tool_definitions() {

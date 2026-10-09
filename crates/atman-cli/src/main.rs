@@ -4179,6 +4179,8 @@ async fn execute_provider_mutation(
                 )
             };
             let update = atman_runtime::config_hub::ProviderConfigUpdate {
+                api: None,
+                max_tools: None,
                 name: &name,
                 kind: &kind,
                 api_key: (!api_key.is_empty()).then_some(api_key.as_str()),
@@ -4219,6 +4221,7 @@ fn execute_model_mutation(
             enabled,
         } => {
             hub.upsert_model(atman_runtime::model_registry::ModelConfigUpdate {
+                api: None,
                 old_name: old_name.as_deref(),
                 name,
                 model,
@@ -9453,6 +9456,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
         hub.upsert_provider(atman_runtime::config_hub::ProviderConfigUpdate {
+            api: None,
+            max_tools: None,
             name: "gateway",
             kind: "openai-compat",
             api_key: Some("test-key"),
@@ -9466,6 +9471,7 @@ mod tests {
         .unwrap();
         for (name, enabled) in [("old", true), ("new", true), ("disabled", false)] {
             hub.upsert_model(atman_runtime::model_registry::ModelConfigUpdate {
+                api: None,
                 old_name: None,
                 name,
                 model: name,

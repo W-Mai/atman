@@ -3,7 +3,7 @@ use std::sync::{LazyLock, RwLock};
 
 use crate::auth_store::AuthStore;
 use crate::provider::{
-    CapabilityKnowledge, ImageDetail, InputModality, ModelCapabilities, ReasoningEffort,
+    CapabilityKnowledge, ImageDetail, InputModality, ModelCapabilities, OpenAiApi, ReasoningEffort,
     ReasoningExecutionMode, ReasoningSelection, ReasoningWireProfile,
 };
 
@@ -43,7 +43,9 @@ pub struct ProviderEntry {
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
     pub base_url: Option<String>,
+    pub api: Option<OpenAiApi>,
     pub max_tokens: Option<u32>,
+    pub max_tools: Option<usize>,
     pub reasoning_format: Option<crate::providers::openai::OpenAiReasoningFormat>,
     pub prompt_cache_key: Option<bool>,
     pub enabled: Option<bool>,
@@ -53,6 +55,7 @@ pub struct ProviderEntry {
 pub struct ModelEntry {
     pub model: String,
     pub provider: Option<String>,
+    pub api: Option<OpenAiApi>,
     pub context_budget: Option<u64>,
     pub compact_threshold_ratio: Option<f64>,
     pub thinking: Option<bool>,
@@ -69,6 +72,42 @@ pub struct ModelEntry {
     pub enabled: Option<bool>,
     #[allow(dead_code)]
     pub discovered: bool,
+}
+
+impl ProviderEntry {
+    pub fn supports_api_selection(&self) -> bool {
+        matches!(self.kind.as_str(), "openai" | "openai-compat")
+    }
+
+    pub fn effective_api(&self, model_api: Option<OpenAiApi>) -> Option<OpenAiApi> {
+        self.supports_api_selection()
+            .then(|| model_api.or(self.api).unwrap_or_default())
+    }
+
+    pub fn reasoning_profile(&self, model_api: Option<OpenAiApi>) -> ReasoningWireProfile {
+        match self.effective_api(model_api) {
+            Some(OpenAiApi::Responses) => ReasoningWireProfile::OpenAiResponses,
+            Some(OpenAiApi::ChatCompletions) => match self.reasoning_format.unwrap_or_else(|| {
+                crate::providers::openai::OpenAiReasoningFormat::for_provider_kind(&self.kind)
+            }) {
+                crate::providers::openai::OpenAiReasoningFormat::Official => {
+                    ReasoningWireProfile::OpenAiOfficial
+                }
+                crate::providers::openai::OpenAiReasoningFormat::CompatibleThinking => {
+                    ReasoningWireProfile::CompatibleThinking
+                }
+            },
+            None => match self.kind.as_str() {
+                "anthropic" => ReasoningWireProfile::AnthropicMessages,
+                "codex" => ReasoningWireProfile::CodexResponses,
+                _ => ReasoningWireProfile::Unknown,
+            },
+        }
+    }
+
+    pub fn api_endpoint(&self, model_api: Option<OpenAiApi>) -> Option<String> {
+        crate::config_provider::effective_api_endpoint(self, model_api)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -489,6 +528,8 @@ pub struct CatalogDelta {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum CatalogError {
+    #[error("invalid provider API configuration: {message}")]
+    InvalidApiConfiguration { message: String },
     #[error("provider catalog {field} must not be empty")]
     EmptyDescriptorField { field: &'static str },
     #[error("provider catalog contains an empty model id")]
@@ -541,9 +582,50 @@ impl PreparedConfigLayer {
 }
 
 fn prepare_config_layer(config: ConfigLayer) -> Result<PreparedConfigLayer, CatalogError> {
+    for (name, entry) in &config.values.providers {
+        if entry.api.is_some() && !entry.supports_api_selection() {
+            return Err(CatalogError::InvalidApiConfiguration {
+                message: format!(
+                    "provider `{name}` of kind `{}` does not support API selection",
+                    entry.kind
+                ),
+            });
+        }
+        if entry.supports_api_selection()
+            && let Some(base_url) = entry
+                .base_url
+                .as_deref()
+                .filter(|url| !url.trim().is_empty())
+        {
+            crate::config_provider::validate_openai_base_url(base_url).map_err(|message| {
+                CatalogError::InvalidApiConfiguration {
+                    message: format!("provider `{name}`: {message}"),
+                }
+            })?;
+        }
+    }
     let presets = build_preset_models(&config);
     let transaction = REGISTRY_TRANSACTION_LOCK.lock().unwrap();
     let state = REGISTRY_STATE.read().unwrap();
+    for (name, entry) in &config.values.models {
+        if entry.api.is_none() {
+            continue;
+        }
+        let provider = entry.provider.as_deref().map(str::to_owned).or_else(|| {
+            resolved_model_in_state(&state, name).and_then(|model| model.entry.provider)
+        });
+        let supported = provider
+            .as_deref()
+            .and_then(|key| config.values.providers.get(key))
+            .is_some_and(ProviderEntry::supports_api_selection);
+        if !supported {
+            return Err(CatalogError::InvalidApiConfiguration {
+                message: format!(
+                    "model `{name}` can select an API only on an OpenAI-compatible config provider"
+                ),
+            });
+        }
+    }
     for (preset_identity, preset) in &presets {
         if let Some(catalog) = state.catalogs.values().find(|catalog| {
             catalog.models.values().any(|model| {
@@ -871,21 +953,7 @@ struct ResolvedModel {
 }
 
 fn profile_from_provider_entry(entry: &ProviderEntry) -> ReasoningWireProfile {
-    match entry.kind.as_str() {
-        "openai" | "openai-compat" => match entry.reasoning_format.unwrap_or_else(|| {
-            crate::providers::openai::OpenAiReasoningFormat::for_provider_kind(&entry.kind)
-        }) {
-            crate::providers::openai::OpenAiReasoningFormat::Official => {
-                ReasoningWireProfile::OpenAiOfficial
-            }
-            crate::providers::openai::OpenAiReasoningFormat::CompatibleThinking => {
-                ReasoningWireProfile::CompatibleThinking
-            }
-        },
-        "anthropic" => ReasoningWireProfile::AnthropicMessages,
-        "codex" => ReasoningWireProfile::CodexResponses,
-        _ => ReasoningWireProfile::Unknown,
-    }
+    entry.reasoning_profile(None)
 }
 
 fn fallback_profile(provider: &str) -> ReasoningWireProfile {
@@ -909,13 +977,24 @@ fn provider_entries_in_state(state: &RegistryState) -> BTreeMap<String, Provider
 }
 
 fn provider_profile_in_state(state: &RegistryState, provider: &str) -> ReasoningWireProfile {
+    if let Some(entry) = state.config.values.providers.get(provider) {
+        return profile_from_provider_entry(entry);
+    }
     if let Some(catalog) = state.catalogs.get(provider) {
         return catalog.descriptor.wire_profile;
     }
-    provider_entries_in_state(state)
-        .get(provider)
-        .map(profile_from_provider_entry)
-        .unwrap_or_else(|| fallback_profile(provider))
+    fallback_profile(provider)
+}
+
+fn model_profile_in_state(state: &RegistryState, entry: &ModelEntry) -> ReasoningWireProfile {
+    let Some(provider) = entry.provider.as_deref() else {
+        return ReasoningWireProfile::Unknown;
+    };
+    if let Some(provider) = state.config.values.providers.get(provider) {
+        provider.reasoning_profile(entry.api)
+    } else {
+        provider_profile_in_state(state, provider)
+    }
 }
 
 fn catalog_model_to_resolved(
@@ -975,11 +1054,7 @@ fn model_entry_to_resolved(
     declarations: &CapabilityDeclarations,
     legacy_capabilities: bool,
 ) -> ResolvedModel {
-    let wire_profile = entry
-        .provider
-        .as_deref()
-        .map(|provider| provider_profile_in_state(state, provider))
-        .unwrap_or(ReasoningWireProfile::Unknown);
+    let wire_profile = model_profile_in_state(state, &entry);
     let unknown_or_legacy = if legacy_capabilities {
         CapabilityFieldKnowledge::Legacy
     } else {
@@ -1033,6 +1108,7 @@ fn overlay_model_entry(
     if overlay.provider.is_some() {
         entry.provider = overlay.provider.clone();
     }
+    entry.api = overlay.api.or(entry.api);
     entry.context_budget = overlay.context_budget.or(entry.context_budget);
     entry.compact_threshold_ratio = overlay
         .compact_threshold_ratio
@@ -1075,12 +1151,12 @@ fn overlay_model_entry(
     if declarations.input_modalities {
         capability_knowledge.input_modalities = CapabilityFieldKnowledge::Advertised;
     }
-    let wire_profile = entry
-        .provider
-        .as_deref()
-        .map(|provider| provider_profile_in_state(state, provider))
-        .filter(|profile| *profile != ReasoningWireProfile::Unknown)
-        .unwrap_or(base.wire_profile);
+    let profile = model_profile_in_state(state, &entry);
+    let wire_profile = if profile == ReasoningWireProfile::Unknown {
+        base.wire_profile
+    } else {
+        profile
+    };
     ResolvedModel {
         key,
         identity: base.identity.clone(),
@@ -1097,7 +1173,7 @@ fn config_matches_base(config_key: &str, config: &ModelEntry, base: &ResolvedMod
         || (config_key == base.key && entries_have_compatible_identity(&base.entry, config))
 }
 
-fn resolved_models_in_state(state: &RegistryState) -> BTreeMap<String, ResolvedModel> {
+fn base_models_in_state(state: &RegistryState) -> BTreeMap<ModelIdentity, ResolvedModel> {
     let mut bases = BTreeMap::new();
     for (identity, preset) in &state.preset_models {
         let model = model_entry_to_resolved(
@@ -1111,13 +1187,26 @@ fn resolved_models_in_state(state: &RegistryState) -> BTreeMap<String, ResolvedM
     }
     for catalog in state.catalogs.values() {
         for model in catalog.models.values() {
-            let model = catalog_model_to_resolved(catalog, model);
+            let mut model = catalog_model_to_resolved(catalog, model);
+            if state
+                .config
+                .values
+                .providers
+                .contains_key(&catalog.descriptor.provider_key)
+            {
+                model.wire_profile = model_profile_in_state(state, &model.entry);
+            }
             if let Some(identity) = model.identity.clone() {
                 bases.insert(identity, model);
             }
         }
     }
 
+    bases
+}
+
+fn resolved_models_in_state(state: &RegistryState) -> BTreeMap<String, ResolvedModel> {
+    let bases = base_models_in_state(state);
     let mut configs: Vec<(&String, &ModelEntry)> = state.config.values.models.iter().collect();
     configs.sort_by(|left, right| left.0.cmp(right.0));
     let associations: BTreeMap<String, ResolvedModel> = configs
@@ -1309,6 +1398,134 @@ pub fn api_model_id(name: &str) -> String {
     model_entry(name)
         .and_then(|entry| (!entry.model.is_empty()).then_some(entry.model))
         .unwrap_or_else(|| name.to_string())
+}
+
+/// Immutable model configuration used for one provider call and its cache projection.
+#[derive(Debug, Clone)]
+pub struct ModelCallConfig {
+    requested: String,
+    resolved: Option<ResolvedModel>,
+    pub api_model: String,
+    pub info: ModelInfo,
+    pub api: Option<OpenAiApi>,
+    explicit_api: bool,
+}
+
+impl ModelCallConfig {
+    pub fn requested(&self) -> &str {
+        &self.requested
+    }
+
+    pub fn provider(&self) -> Option<&str> {
+        self.resolved
+            .as_ref()
+            .and_then(|model| model.entry.provider.as_deref())
+    }
+
+    pub fn explicitly_selects_api(&self) -> bool {
+        self.explicit_api
+    }
+
+    pub fn resolve_reasoning(
+        &self,
+        selection: &ReasoningSelection,
+    ) -> Result<ReasoningSelection, String> {
+        match &self.resolved {
+            Some(model) => resolve_reasoning_for_resolved(model, selection),
+            None => ReasoningWireProfile::Unknown
+                .validate(selection, None)
+                .map(|()| selection.clone()),
+        }
+    }
+}
+
+pub fn model_call_config(name: &str) -> ModelCallConfig {
+    let state = REGISTRY_STATE.read().unwrap();
+    let resolved = resolved_model_in_state(&state, name);
+    model_call_config_from_resolved(&state, name, resolved)
+}
+
+/// Resolves an unsaved model draft through the same capability and protocol projection as saved models.
+pub fn draft_model_call_config(
+    identity: Option<&str>,
+    provider: &str,
+    api_model: &str,
+    api: Option<OpenAiApi>,
+    max_tokens: Option<u32>,
+) -> ModelCallConfig {
+    let state = REGISTRY_STATE.read().unwrap();
+    let key = identity.unwrap_or(api_model);
+    let target = ModelIdentity::new(provider, api_model);
+    let mut bases = base_models_in_state(&state);
+    let base_max_tokens = bases.get(&target).and_then(|base| base.entry.max_tokens);
+    let mut resolved = identity
+        .and_then(|name| resolved_model_in_state(&state, name))
+        .filter(|model| model.identity.as_ref() == Some(&target))
+        .or_else(|| bases.remove(&target))
+        .unwrap_or_else(|| {
+            model_entry_to_resolved(
+                &state,
+                key.into(),
+                ModelEntry {
+                    model: api_model.into(),
+                    provider: Some(provider.into()),
+                    ..Default::default()
+                },
+                &CapabilityDeclarations::default(),
+                false,
+            )
+        });
+    resolved.key = key.into();
+    resolved.entry.api = api;
+    resolved.entry.max_tokens = max_tokens.or(base_max_tokens);
+    resolved.entry.enabled = Some(true);
+    resolved.wire_profile = model_profile_in_state(&state, &resolved.entry);
+    model_call_config_from_resolved(&state, key, Some(resolved))
+}
+
+fn model_call_config_from_resolved(
+    state: &RegistryState,
+    name: &str,
+    resolved: Option<ResolvedModel>,
+) -> ModelCallConfig {
+    let api_model = resolved
+        .as_ref()
+        .map(|model| &model.entry.model)
+        .filter(|model| !model.is_empty())
+        .cloned()
+        .unwrap_or_else(|| name.to_owned());
+    let provider_entry = resolved
+        .as_ref()
+        .and_then(|model| model.entry.provider.as_deref())
+        .and_then(|key| state.config.values.providers.get(key));
+    let explicit_api = resolved
+        .as_ref()
+        .is_some_and(|model| model.entry.api.is_some())
+        || provider_entry.is_some_and(|provider| provider.api.is_some());
+    let api = resolved
+        .as_ref()
+        .and_then(|model| model.entry.api)
+        .or_else(|| provider_entry.and_then(|provider| provider.effective_api(None)));
+    let info = resolved
+        .as_ref()
+        .map(model_info_from_resolved)
+        .unwrap_or_else(|| ModelInfo {
+            name: resolve_alias_in_state(state, name),
+            context_budget: 0,
+            compact_threshold_ratio: 0.8,
+            reasoning: ReasoningSelection::ProviderDefault,
+            capabilities: ModelCapabilities::default(),
+            image_detail: ImageDetail::Auto,
+            max_output_tokens: None,
+        });
+    ModelCallConfig {
+        requested: name.to_owned(),
+        resolved,
+        api_model,
+        info,
+        api,
+        explicit_api,
+    }
 }
 
 pub fn all_model_entries() -> Vec<(String, ModelEntry)> {
@@ -1608,7 +1825,26 @@ pub fn reasoning_selections_for_model(model: &str) -> Vec<ReasoningSelection> {
             },
         ];
     };
-    let info = model_info_from_resolved(&model);
+    reasoning_selections_for_resolved(&model)
+}
+
+pub fn reasoning_selections_for_model_draft(
+    identity: Option<&str>,
+    provider: &str,
+    api_model: &str,
+    api: Option<OpenAiApi>,
+    max_tokens: Option<u32>,
+) -> Vec<ReasoningSelection> {
+    let snapshot = draft_model_call_config(identity, provider, api_model, api, max_tokens);
+    snapshot
+        .resolved
+        .as_ref()
+        .map(reasoning_selections_for_resolved)
+        .unwrap_or_default()
+}
+
+fn reasoning_selections_for_resolved(model: &ResolvedModel) -> Vec<ReasoningSelection> {
+    let info = model_info_from_resolved(model);
     let mut choices = match model.capability_knowledge.reasoning_efforts {
         CapabilityFieldKnowledge::Legacy => vec![
             ReasoningSelection::ProviderDefault,
@@ -1624,7 +1860,7 @@ pub fn reasoning_selections_for_model(model: &str) -> Vec<ReasoningSelection> {
             reasoning_selections(model.wire_profile, &info.capabilities, true)
         }
     };
-    choices.retain(|selection| resolve_reasoning_for_resolved(&model, selection).is_ok());
+    choices.retain(|selection| resolve_reasoning_for_resolved(model, selection).is_ok());
     choices
 }
 
@@ -2054,7 +2290,11 @@ fn parse_config_layer(text: &str) -> Result<Option<ConfigLayer>, toml::de::Error
         #[serde(default)]
         base_url: Option<String>,
         #[serde(default)]
+        api: Option<OpenAiApi>,
+        #[serde(default)]
         max_tokens: Option<u32>,
+        #[serde(default)]
+        max_tools: Option<usize>,
         #[serde(default)]
         reasoning_format: Option<crate::providers::openai::OpenAiReasoningFormat>,
         #[serde(default)]
@@ -2069,6 +2309,8 @@ fn parse_config_layer(text: &str) -> Result<Option<ConfigLayer>, toml::de::Error
         model: Option<String>,
         #[serde(default)]
         provider: Option<String>,
+        #[serde(default)]
+        api: Option<OpenAiApi>,
         #[serde(default)]
         context_budget: Option<u64>,
         #[serde(default)]
@@ -2129,7 +2371,9 @@ fn parse_config_layer(text: &str) -> Result<Option<ConfigLayer>, toml::de::Error
                 api_key: p.api_key,
                 api_key_env: p.api_key_env,
                 base_url: p.base_url,
+                api: p.api,
                 max_tokens: p.max_tokens,
+                max_tools: p.max_tools,
                 reasoning_format: p.reasoning_format,
                 prompt_cache_key: p.prompt_cache_key,
                 enabled: p.enabled,
@@ -2151,6 +2395,7 @@ fn parse_config_layer(text: &str) -> Result<Option<ConfigLayer>, toml::de::Error
             ModelEntry {
                 model: m.model.unwrap_or_default(),
                 provider: m.provider,
+                api: m.api,
                 context_budget: m.context_budget,
                 compact_threshold_ratio: m.compact_threshold_ratio,
                 thinking: m.thinking,
@@ -2206,6 +2451,8 @@ pub fn upsert_provider_config(
             api_key_env,
             base_url,
             max_tokens,
+            api: None,
+            max_tools: None,
             reasoning_format: None,
             prompt_cache_key: None,
             enabled,
@@ -2219,6 +2466,7 @@ pub struct ModelConfigUpdate<'a> {
     pub name: &'a str,
     pub model: &'a str,
     pub provider: Option<&'a str>,
+    pub api: Option<OpenAiApi>,
     pub context_budget: u64,
     pub reasoning: ReasoningSelection,
     pub capabilities: Option<ModelCapabilities>,
@@ -2240,18 +2488,42 @@ pub(crate) fn apply_model_config_update(
             .and_then(|item| item.as_table_mut())
             .ok_or_else(|| anyhow::anyhow!("models is not a table"))?;
         if let Some(old_name) = update.old_name.filter(|old| *old != update.name) {
-            models.remove(old_name);
+            if models.contains_key(update.name) {
+                anyhow::bail!("model `{}` already exists", update.name);
+            }
+            if let Some(previous) = models.remove(old_name) {
+                models.insert(update.name, previous);
+            }
         }
         let entry = models
             .entry(update.name)
             .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
             .as_table_mut()
             .ok_or_else(|| anyhow::anyhow!("model entry is not a table"))?;
+        let identity_changed = entry.get("model").and_then(toml_edit::Item::as_str)
+            != Some(update.model)
+            || entry.get("provider").and_then(toml_edit::Item::as_str) != update.provider;
+        if identity_changed && update.capabilities.is_none() {
+            for field in [
+                "reasoning_efforts",
+                "default_reasoning_effort",
+                "reasoning_modes",
+                "default_reasoning_mode",
+                "input_modalities",
+            ] {
+                entry.remove(field);
+            }
+        }
         entry.insert("model", toml_edit::value(update.model));
         if let Some(provider) = update.provider {
             entry.insert("provider", toml_edit::value(provider));
         } else {
             entry.remove("provider");
+        }
+        if let Some(api) = update.api {
+            entry.insert("api", toml_edit::value(api.as_str()));
+        } else {
+            entry.remove("api");
         }
         entry.insert(
             "context_budget",
@@ -2557,6 +2829,199 @@ mod tests {
         *REGISTRY_STATE.write().unwrap() = RegistryState::default();
         CATALOG_REVISION.send_replace(0);
         IsolatedRegistry { _lock: lock }
+    }
+
+    #[test]
+    fn draft_and_saved_models_share_reasoning_resolution_and_identity_bound_metadata() {
+        let _registry = isolated_registry();
+        let text = r#"
+[providers.gateway]
+kind = "openai-compat"
+api = "responses"
+reasoning_format = "reasoning-effort"
+[providers.other]
+kind = "openai-compat"
+api = "responses"
+[models.original]
+model = "vendor/model"
+provider = "gateway"
+context_budget = 32768
+reasoning_efforts = ["high"]
+default_reasoning_effort = "high"
+"#;
+        reload_from_text(text).unwrap();
+        let auto = ReasoningSelection::Auto {
+            execution_mode: None,
+        };
+        let draft =
+            draft_model_call_config(Some("original"), "gateway", "vendor/model", None, None);
+        let high = ReasoningSelection::Effort {
+            effort: ReasoningEffort::High,
+            execution_mode: None,
+        };
+        assert_eq!(draft.resolve_reasoning(&auto).unwrap(), high);
+        assert_eq!(
+            draft.resolve_reasoning(&auto).unwrap(),
+            model_call_config("original")
+                .resolve_reasoning(&auto)
+                .unwrap()
+        );
+        let other_model =
+            draft_model_call_config(Some("original"), "gateway", "vendor/other", None, None);
+        assert_eq!(other_model.resolve_reasoning(&auto).unwrap(), auto);
+        let other_provider =
+            draft_model_call_config(Some("original"), "other", "vendor/model", None, None);
+        assert_eq!(other_provider.resolve_reasoning(&auto).unwrap(), auto);
+
+        let mut document = text.parse::<toml_edit::DocumentMut>().unwrap();
+        apply_model_config_update(
+            &mut document,
+            ModelConfigUpdate {
+                old_name: Some("original"),
+                name: "renamed",
+                model: "vendor/model",
+                provider: Some("gateway"),
+                api: None,
+                context_budget: 32768,
+                reasoning: auto.clone(),
+                capabilities: None,
+                image_detail: None,
+                max_tokens: None,
+                enabled: true,
+            },
+        )
+        .unwrap();
+        reload_from_text(&document.to_string()).unwrap();
+        assert_eq!(
+            model_call_config("renamed")
+                .resolve_reasoning(&auto)
+                .unwrap(),
+            high
+        );
+        apply_model_config_update(
+            &mut document,
+            ModelConfigUpdate {
+                old_name: Some("renamed"),
+                name: "renamed",
+                model: "vendor/other",
+                provider: Some("gateway"),
+                api: None,
+                context_budget: 32768,
+                reasoning: auto.clone(),
+                capabilities: None,
+                image_detail: None,
+                max_tokens: None,
+                enabled: true,
+            },
+        )
+        .unwrap();
+        reload_from_text(&document.to_string()).unwrap();
+        assert_eq!(
+            model_call_config("renamed")
+                .resolve_reasoning(&auto)
+                .unwrap(),
+            other_model.resolve_reasoning(&auto).unwrap()
+        );
+    }
+
+    #[test]
+    fn api_selection_is_shared_by_alias_reasoning_and_provider_projection() {
+        let _registry = isolated_registry();
+        let config = r#"
+[providers.gateway]
+kind = "openai-compat"
+api_key = "test-key"
+base_url = "https://gateway.example/v1"
+api = "chat-completions"
+reasoning_format = "thinking-toggle"
+max_tools = 64
+[models.reasoning]
+model = "vendor/reasoning-model"
+provider = "gateway"
+api = "responses"
+context_budget = 100000
+[models.chat]
+model = "vendor/chat-model"
+provider = "gateway"
+context_budget = 100000
+[alias.smart]
+model = "reasoning"
+"#;
+        reload_from_text(config).unwrap();
+        let providers = crate::provider::ProviderRegistry::new();
+        let entry = all_provider_entries()
+            .into_iter()
+            .find(|(name, _)| name == "gateway")
+            .unwrap()
+            .1;
+        providers.register(
+            crate::config_provider::build_config_provider("config:gateway", &entry).unwrap(),
+        );
+        let snapshot = model_call_config("smart");
+        assert_eq!(snapshot.api_model, "vendor/reasoning-model");
+        assert_eq!(snapshot.api, Some(OpenAiApi::Responses));
+        assert_eq!(
+            reasoning_wire_profile_for_model("smart"),
+            ReasoningWireProfile::OpenAiResponses
+        );
+        let high = ReasoningSelection::Effort {
+            effort: ReasoningEffort::High,
+            execution_mode: None,
+        };
+        assert_eq!(snapshot.resolve_reasoning(&high).unwrap(), high);
+        assert!(model_call_config("chat").resolve_reasoning(&high).is_err());
+        let selected = providers.resolve_call(&snapshot).unwrap().unwrap();
+        assert_eq!(
+            selected.capabilities().context_prefix_profile,
+            crate::context_plan::ContextPrefixProfile::OpenAiResponses
+        );
+        assert_eq!(selected.capabilities().max_tools, Some(64));
+        providers.register(crate::config_provider::build_config_provider("smart", &entry).unwrap());
+        assert_eq!(
+            providers
+                .try_resolve("smart")
+                .unwrap()
+                .unwrap()
+                .capabilities()
+                .context_prefix_profile,
+            crate::context_plan::ContextPrefixProfile::OpenAiResponses,
+        );
+        assert_eq!(
+            providers
+                .try_resolve("chat")
+                .unwrap()
+                .unwrap()
+                .capabilities()
+                .context_prefix_profile,
+            crate::context_plan::ContextPrefixProfile::OpenAiChat
+        );
+
+        reload_from_text(&config.replace("api = \"responses\"", "api = \"chat-completions\""))
+            .unwrap();
+        assert!(model_call_config("smart").resolve_reasoning(&high).is_err());
+        assert_eq!(snapshot.resolve_reasoning(&high).unwrap(), high);
+        assert_eq!(
+            providers
+                .resolve_call(&snapshot)
+                .unwrap()
+                .unwrap()
+                .capabilities()
+                .context_prefix_profile,
+            crate::context_plan::ContextPrefixProfile::OpenAiResponses
+        );
+    }
+
+    #[test]
+    fn api_configuration_rejects_unsupported_connections_and_endpoint_urls() {
+        let _registry = isolated_registry();
+        for config in [
+            "[providers.other]\nkind='anthropic'\napi='responses'",
+            "[providers.other]\nkind='anthropic'\n[models.test]\nmodel='x'\nprovider='other'\napi='responses'",
+            "[providers.other]\nkind='openai-compat'\nbase_url='https://gateway.example/v1/responses'",
+        ] {
+            assert!(prepare_config_text(config).is_err());
+        }
+        assert!(parse_config("[providers.other]\nkind='openai-compat'\napi='auto'").is_none());
     }
 
     fn descriptor(
@@ -2947,6 +3412,7 @@ enabled = true
                 name: "new-name",
                 model: "new-id",
                 provider: Some("openai"),
+                api: None,
                 context_budget: 128_000,
                 reasoning: ReasoningSelection::Effort {
                     effort: ReasoningEffort::High,
@@ -2994,6 +3460,7 @@ kind = "openai"
                 name: "known-empty",
                 model: "api/model",
                 provider: Some("official"),
+                api: None,
                 context_budget: 128_000,
                 reasoning: ReasoningSelection::ProviderDefault,
                 capabilities: Some(ModelCapabilities::default()),

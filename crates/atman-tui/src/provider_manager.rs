@@ -756,6 +756,8 @@ impl ProviderManager {
             }
         };
         let entry = atman_runtime::model_registry::ProviderEntry {
+            api: None,
+            max_tools: None,
             name: name.clone(),
             kind,
             api_key: non_empty(self.api_key_editor.buf()),
