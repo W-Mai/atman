@@ -215,6 +215,8 @@ Press `Ctrl+L`, choose **All Projects** from `Ctrl+P`, or run `:projects` to ope
 
 Command Palette and Search History keep long queries in a horizontal input viewport. Click the query to position its cursor. In Search History, click a result to update its preview; the mouse wheel navigates results or scrolls the preview according to the pointer's location. The query field remains visible in small terminals.
 
+**Manage Memory & Rules** in `Ctrl+P` uses padded records with clickable actions and visible shortcuts. In a narrow window, click `›` or press `Enter` to expand details; arrows, `PgUp` / `PgDn`, and the wheel scroll the detail view. Click `‹ List` or press `Esc` to return. Editing keeps the focused field visible: `Tab` / `Shift+Tab` changes fields, `Shift+Enter` inserts a newline, `Enter` saves, and `Esc` cancels.
+
 Choose **Set Project Storage Scope** from `Ctrl+P` or run `:storage` to select where new sessions for the current project store Atman data. `global` uses the central Atman data directory; `local` uses `<project>/.atman`. `:storage global` and `:storage local` apply the choice directly. The setting is saved in the project's `.atman/config.toml` and takes effect for new sessions.
 
 ## 6. Anchor the agent on a session goal

@@ -846,12 +846,16 @@ impl WindowManager {
             }
             PaletteEntryId::ManageKnowledge => {
                 let canvas = app.last_transcript_rect.unwrap_or_default();
-                self.open(
+                self.open_with_size(
                     "memory-rules",
                     crate::wm::ContentKey::Knowledge,
+                    OpenPolicy::ReuseExisting,
                     crate::wm::WindowContent::Knowledge,
                     "Memory & Rules",
                     canvas,
+                    100,
+                    36,
+                    false,
                 );
                 if let Some(panel) = self
                     .panels

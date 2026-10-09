@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Memory and Rules panel** — Padded records and action buttons share mouse geometry and subdued hover. Narrow windows can expand a record's details with independent keyboard or mouse scrolling. Editor fields follow focus while preserving cursor placement and visible Save / Cancel controls; archive confirmation also supports keyboard scrolling.
 - **MCP browser controls** — Server records and action buttons share padded mouse targets and subdued hover. Selection stays visible, diagnostics wrap in the scrollable view, and expanded resources or prompts load when changing sections. Remove provides explicit Confirm and Cancel controls, and covered panels no longer handle input intended for a modal.
 - **Model selection and setup** — Switch Model and initial setup use padded records, subdued hover, visible action buttons, and keyboard or mouse selection. Model switches wait for their matching result, model lists keep selection visible while paging, and narrow terminals retain the primary controls.
 - **Compaction review controls** — Accept, Edit, Reject, Save, and Back have padded mouse targets. Summary editing supports wrapped cursor navigation and mouse positioning, each pane scrolls independently, and accepting after returning to viewing retains edits. Review mouse events no longer reach underlying panels.

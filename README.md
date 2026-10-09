@@ -503,6 +503,8 @@ Model Context Protocol. atman is an MCP consumer — any MCP server you configur
 **How are confessions and rules managed?**
 Open **Manage Memory & Rules** from the TUI command palette (Ctrl+P). Action labels show their keys, including **[E]dit** and **[X] Archive**. In the editor, click to place the cursor, use Tab or Shift+Tab to change fields, Shift+Enter for a newline, Enter to save, or Esc to cancel. Search confessions and the rules loaded by the current agent, edit confession fields, and inspect revision history; original records remain intact. Archiving a confession requires confirmation, removes it from active memory and search, and retains its revision history. **Organize** generates category and related-record suggestions with the active model and shows progress or errors in the Suggestions pane; a fresh session uses the configured smart model. Review the suggestions, select individual rows or **Select All**, then apply the chosen categories. Rules are read-only in this panel; **Reload** refreshes their source files.
 
+Records and action buttons have padded mouse targets and subdued hover. Use `PgUp` / `PgDn` to page through records. In a narrow window, click `›` or press `Enter` to expand the selected record's details; `↑` / `↓`, `PgUp` / `PgDn`, or the wheel scrolls the details, and `Esc` or `‹ List` returns to the list. The editor keeps the focused field and Save / Cancel controls visible as its fields wrap.
+
 ## Contributing
 
 PRs welcome. Run `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` before submitting.

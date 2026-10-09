@@ -4,8 +4,7 @@ use std::sync::{Arc, Mutex};
 use crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::style::Style;
 use ratatui::widgets::{Block, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
@@ -14,6 +13,7 @@ use atman_runtime::memory::confession::{ConfessionChange, ConfessionFields, Conf
 
 use crate::input::{InputEditor, cursor_from_wrapped, visual_line_count, wrapped_cursor_position};
 use crate::keys::KeyAction;
+use crate::settings_form::{Action, render_action, render_record};
 use crate::wm::component::{
     CloseOutcome, EventCtx, HitRegion, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
@@ -89,6 +89,7 @@ enum HoverTarget {
     Action(&'static str),
     Tab(usize),
     Row(usize),
+    Details(usize),
     Search,
     Field(usize),
 }
@@ -106,8 +107,12 @@ pub struct KnowledgePanelContent {
     selected: usize,
     scroll: u32,
     detail_scroll: u16,
+    list_rect: Rect,
     detail_rect: Rect,
     body_height: u16,
+    visible_rows: usize,
+    compact: bool,
+    detail_open: bool,
     search: InputEditor,
     search_focused: bool,
     search_scroll: u16,
@@ -119,6 +124,7 @@ pub struct KnowledgePanelContent {
     search_rect: Rect,
     search_input_rect: Rect,
     row_rects: Vec<(usize, Rect)>,
+    detail_toggle_rects: Vec<(usize, Rect)>,
     action_rects: Vec<(&'static str, Rect)>,
     edit_segment_rects: [Rect; 5],
     edit_text_rects: [Rect; 5],
@@ -138,8 +144,12 @@ impl KnowledgePanelContent {
             selected: 0,
             scroll: 0,
             detail_scroll: 0,
+            list_rect: Rect::default(),
             detail_rect: Rect::default(),
             body_height: 0,
+            visible_rows: 1,
+            compact: false,
+            detail_open: false,
             search: InputEditor::default(),
             search_focused: false,
             search_scroll: 0,
@@ -151,6 +161,7 @@ impl KnowledgePanelContent {
             search_rect: Rect::default(),
             search_input_rect: Rect::default(),
             row_rects: Vec::new(),
+            detail_toggle_rects: Vec::new(),
             action_rects: Vec::new(),
             edit_segment_rects: [Rect::default(); 5],
             edit_text_rects: [Rect::default(); 5],
@@ -243,6 +254,7 @@ impl KnowledgePanelContent {
             "Reload" => "[⇧R]eload",
             "Stop" => "[C]ancel",
             "Select All" => "[S]elect all",
+            "Select" => "[Space] Select",
             "Apply" => "[A]pply",
             "Applying…" => "Applying…",
             _ => "",
@@ -256,6 +268,7 @@ impl KnowledgePanelContent {
             "History" => "[H]ist",
             "Organize" => "[O]rg",
             "Refresh" => "[R]ef",
+            "Select All" => "[S] All",
             _ => Self::action_label(name),
         }
     }
@@ -282,6 +295,13 @@ impl KnowledgePanelContent {
         if self.search_rect.contains(point) {
             return Some(HoverTarget::Search);
         }
+        if let Some((index, _)) = self
+            .detail_toggle_rects
+            .iter()
+            .find(|(_, rect)| rect.contains(point))
+        {
+            return Some(HoverTarget::Details(*index));
+        }
         self.row_rects
             .iter()
             .find(|(_, rect)| rect.contains(point))
@@ -290,6 +310,7 @@ impl KnowledgePanelContent {
 
     fn action(&mut self, name: &str) {
         self.search_focused = false;
+        self.clear_geometry();
         if let Some(confirm) = self.archive_confirm.take() {
             match name {
                 "Confirm Archive" => {
@@ -341,6 +362,8 @@ impl KnowledgePanelContent {
                         base_revision: view.revision,
                         trigger: view.confession.trigger.clone(),
                     });
+                    self.detail_open = self.compact;
+                    self.detail_scroll = 0;
                 }
             }
             "History" => {
@@ -351,6 +374,8 @@ impl KnowledgePanelContent {
                     let id = view.confession.id.clone();
                     drop(state);
                     self.show_history = !self.show_history;
+                    self.detail_open = self.compact;
+                    self.detail_scroll = 0;
                     if self.show_history {
                         self.send(TuiControl::GetConfessionHistory(id));
                     }
@@ -368,7 +393,10 @@ impl KnowledgePanelContent {
                 drop(state);
                 self.selected_proposals.clear();
                 self.tab = 2;
+                self.detail_open = false;
                 self.selected = 0;
+                self.scroll = 0;
+                self.detail_scroll = 0;
                 self.send(TuiControl::SuggestOrganization { request_id });
             }
             "Stop" => {
@@ -436,16 +464,49 @@ impl KnowledgePanelContent {
                     });
                 }
             }
+            "Select" if self.tab == 2 => {
+                if let Some(&index) = indices.get(self.selected) {
+                    let id = state.proposals[index].id.clone();
+                    if !self.selected_proposals.remove(&id) {
+                        self.selected_proposals.insert(id);
+                    }
+                }
+            }
             "Cancel" if self.edit.as_ref().is_some_and(|edit| !edit.saving) => self.edit = None,
             _ => {}
         }
     }
 
+    fn clear_geometry(&mut self) {
+        self.tab_rects = [Rect::default(); 3];
+        self.search_rect = Rect::default();
+        self.search_input_rect = Rect::default();
+        self.list_rect = Rect::default();
+        self.detail_rect = Rect::default();
+        self.row_rects.clear();
+        self.detail_toggle_rects.clear();
+        self.action_rects.clear();
+        self.edit_segment_rects = [Rect::default(); 5];
+        self.edit_text_rects = [Rect::default(); 5];
+        self.hovered = None;
+        self.cursor_on_screen = false;
+    }
+
     fn render_editor(&mut self, area: Rect, frame: &mut Frame) {
+        self.edit_segment_rects = [Rect::default(); 5];
+        self.edit_text_rects = [Rect::default(); 5];
+        self.action_rects.clear();
+        self.cursor_on_screen = false;
         let Some(edit) = &mut self.edit else {
             return;
         };
         let t = crate::theme::theme();
+        let surface = crate::wm::shell::surface_bg(&t);
+        frame.render_widget(Block::default().style(Style::default().bg(surface)), area);
+        if area.width < 5 || area.height < 10 {
+            frame.render_widget(Paragraph::new("Enlarge window to edit memory"), area);
+            return;
+        }
         let labels = [
             "Trigger",
             "Rule violated",
@@ -460,57 +521,51 @@ impl KnowledgePanelContent {
                 (edit.fields[index].buf() != edit.original[index]).then_some(*label)
             })
             .collect::<Vec<_>>();
-        frame.render_widget(
-            Paragraph::new(format!(
-                " Edit confession · revision {} · Tab/Shift+Tab fields · ↑↓ move ",
+        let title = if area.width < 60 {
+            format!(
+                " Edit · field {}/5 · revision {}",
+                edit.focused + 1,
                 edit.revision + 1
-            ))
-            .style(Style::default().fg(t.accent.into())),
+            )
+        } else {
+            format!(
+                " Edit confession · revision {} · field {}/5",
+                edit.revision + 1,
+                edit.focused + 1
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(title).style(Style::default().fg(t.subtle_fg.into()).bg(surface)),
             Rect::new(area.x, area.y, area.width, 1),
         );
-        let body_rows = area.height.saturating_sub(3);
-        let base_rows = body_rows / 5;
-        let extra_rows = body_rows % 5;
-        let mut y = area.y + 1;
-        for (index, label) in labels.into_iter().enumerate() {
-            let rows = base_rows + u16::from(index < extra_rows as usize);
+        let body_rows = area.height.saturating_sub(7);
+        let visible = (body_rows / 5).clamp(1, 5) as usize;
+        let start = edit.focused.saturating_sub(visible - 1);
+        let base_rows = body_rows / visible as u16;
+        let extra_rows = body_rows % visible as u16;
+        let mut y = area.y + 2;
+        for (row, index) in (start..start + visible).enumerate() {
+            let rows = base_rows + u16::from(row < extra_rows as usize);
             let segment = Rect::new(area.x, y, area.width, rows);
             let text_rect = Rect::new(
                 area.x + 2,
-                y + 1,
-                area.width.saturating_sub(3),
-                rows.saturating_sub(1),
+                y + 2,
+                area.width.saturating_sub(4),
+                rows.saturating_sub(3),
             );
             self.edit_segment_rects[index] = segment;
             self.edit_text_rects[index] = text_rect;
             let focused = edit.focused == index;
-            let hovered = self.hovered == Some(HoverTarget::Field(index));
-            let bg = if hovered {
-                t.work_hover_bg.into()
-            } else if focused {
-                t.code_bg.into()
-            } else {
-                t.work_bg.into()
-            };
-            frame.render_widget(Block::default().style(Style::default().bg(bg)), segment);
+            let bg = render_record(
+                frame,
+                segment,
+                focused,
+                self.hovered == Some(HoverTarget::Field(index)) && !edit.saving,
+                &t,
+            );
             frame.render_widget(
-                Paragraph::new(format!(" {} {label}", if focused { "▸" } else { " " })).style(
-                    Style::default()
-                        .fg(if focused {
-                            t.accent.into()
-                        } else if hovered {
-                            t.tinted_fg.into()
-                        } else {
-                            t.subtle_fg.into()
-                        })
-                        .bg(bg)
-                        .add_modifier(if focused {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                ),
-                Rect::new(area.x, y, area.width, 1),
+                Paragraph::new(labels[index]).style(Style::default().fg(t.subtle_fg.into()).bg(bg)),
+                Rect::new(text_rect.x, y + 1, text_rect.width, 1),
             );
             let content_width = text_rect.width.max(1) as usize;
             let total_rows = visual_line_count(edit.fields[index].buf(), content_width);
@@ -524,16 +579,16 @@ impl KnowledgePanelContent {
             let max_scroll = total_rows
                 .max(cursor_position.map_or(0, |(row, _)| row + 1))
                 .saturating_sub(text_rect.height as usize);
-            if let Some((cursor_row, _)) = cursor_position {
-                if edit.follow_cursor {
-                    let scroll = edit.scroll[index] as usize;
-                    if cursor_row < scroll {
-                        edit.scroll[index] = cursor_row as u16;
-                    } else if cursor_row >= scroll + text_rect.height as usize {
-                        edit.scroll[index] = cursor_row
-                            .saturating_sub(text_rect.height as usize)
-                            .saturating_add(1) as u16;
-                    }
+            if let Some((cursor_row, _)) = cursor_position
+                && edit.follow_cursor
+            {
+                let scroll = edit.scroll[index] as usize;
+                if cursor_row < scroll {
+                    edit.scroll[index] = cursor_row as u16;
+                } else if cursor_row >= scroll + text_rect.height as usize {
+                    edit.scroll[index] = cursor_row
+                        .saturating_sub(text_rect.height as usize)
+                        .saturating_add(1) as u16;
                 }
             }
             edit.scroll[index] = edit.scroll[index].min(max_scroll as u16);
@@ -541,7 +596,7 @@ impl KnowledgePanelContent {
                 Paragraph::new(edit.fields[index].buf())
                     .wrap(Wrap { trim: false })
                     .scroll((edit.scroll[index], 0))
-                    .style(Style::default().bg(bg)),
+                    .style(Style::default().fg(t.tinted_fg.into()).bg(bg)),
                 text_rect,
             );
             if let Some((cursor_row, cursor_col)) = cursor_position.filter(|_| !edit.saving) {
@@ -560,11 +615,10 @@ impl KnowledgePanelContent {
             y += rows;
         }
         edit.follow_cursor = false;
-        self.action_rects.clear();
         let status = Rect::new(
-            area.x,
-            area.y + area.height.saturating_sub(2),
-            area.width,
+            area.x + 1,
+            area.bottom() - 5,
+            area.width.saturating_sub(2),
             1,
         );
         let message = if edit.saving {
@@ -573,7 +627,7 @@ impl KnowledgePanelContent {
             let state_message = self.state.lock().unwrap().message.clone();
             if state_message.is_empty() || state_message.contains(" confessions · ") {
                 format!(
-                    " Changed: {}",
+                    "Changed: {}",
                     if changed.is_empty() {
                         "none".into()
                     } else {
@@ -584,44 +638,61 @@ impl KnowledgePanelContent {
                 state_message
             }
         };
-        frame.render_widget(Paragraph::new(message), status);
-        let y = area.y + area.height.saturating_sub(1);
-        let save = Rect::new(area.x, y, 14.min(area.width), 1);
-        let cancel = Rect::new(
-            area.x.saturating_add(15),
-            y,
-            14.min(area.width.saturating_sub(15)),
-            1,
-        );
         frame.render_widget(
-            Paragraph::new("Save [Enter]").style(Style::default().fg(
-                if self.hovered == Some(HoverTarget::Action("Save")) {
-                    t.tinted_fg.into()
-                } else {
-                    t.subtle_fg.into()
-                },
-            )),
-            save,
+            Paragraph::new(crate::width::truncate(&message, status.width as usize))
+                .style(Style::default().fg(t.subtle_fg.into()).bg(surface)),
+            status,
         );
-        frame.render_widget(
-            Paragraph::new("Cancel [Esc]").style(Style::default().fg(
-                if self.hovered == Some(HoverTarget::Action("Cancel")) {
-                    t.tinted_fg.into()
-                } else {
-                    t.subtle_fg.into()
+        let button_width = area.width.saturating_sub(2) / 2;
+        for (name, shortcut, rect) in [
+            (
+                "Save",
+                "Enter",
+                Rect::new(area.x, status.bottom(), button_width, 3),
+            ),
+            (
+                "Cancel",
+                "Esc",
+                Rect::new(
+                    area.x + button_width + 2,
+                    status.bottom(),
+                    area.width - button_width - 2,
+                    3,
+                ),
+            ),
+        ] {
+            render_action(
+                frame,
+                rect,
+                &Action {
+                    label: name,
+                    shortcut,
+                    hovered: self.hovered == Some(HoverTarget::Action(name)),
+                    disabled: edit.saving,
+                    ..Default::default()
                 },
-            )),
-            cancel,
-        );
-        if area.width > 31 {
-            frame.render_widget(
-                Paragraph::new("Newline [Shift+Enter]")
-                    .style(Style::default().fg(t.subtle_fg.into())),
-                Rect::new(area.x + 30, y, area.width - 30, 1),
+                &t,
             );
+            if !edit.saving {
+                self.action_rects.push((name, rect));
+            }
         }
-        self.action_rects
-            .extend([("Save", save), ("Cancel", cancel)]);
+        let help = if area.width < 29 {
+            "Tab fields · ⇧↵ newline"
+        } else if area.width < 48 {
+            "Tab field · Shift+↵ newline"
+        } else {
+            "Tab/Shift+Tab fields · Shift+Enter newline"
+        };
+        frame.render_widget(
+            Paragraph::new(help).style(Style::default().fg(t.subtle_fg.into()).bg(surface)),
+            Rect::new(
+                area.x + 1,
+                area.bottom() - 1,
+                area.width.saturating_sub(2),
+                1,
+            ),
+        );
     }
 
     fn sync_edit_result(&mut self) {
@@ -648,13 +719,17 @@ impl WindowComponent for KnowledgePanelContent {
         frame: &mut Frame,
         _ctx: &RenderCtx,
     ) -> Vec<HitRegion> {
+        let width = area.width.saturating_sub(4).min(112);
+        let top = u16::from(area.height >= 22);
         let area = Rect::new(
-            area.x.saturating_add(1),
-            area.y,
-            area.width.saturating_sub(2),
-            area.height,
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + top,
+            width,
+            area.height.saturating_sub(top * 2),
         );
-        self.cursor_on_screen = false;
+        let hovered = self.hovered;
+        self.clear_geometry();
+        self.hovered = hovered;
         if area.width < 25 || area.height < 13 {
             frame.render_widget(Paragraph::new("Enlarge window to edit memory"), area);
             return Vec::new();
@@ -666,55 +741,69 @@ impl WindowComponent for KnowledgePanelContent {
         }
         let state = self.state.lock().unwrap();
         let t = crate::theme::theme();
-        let tab_names = ["Confessions", "Rules", "Suggestions"];
-        let mut x = area.x;
-        for (index, name) in tab_names.into_iter().enumerate() {
-            let width = (name.len() as u16 + 4).min(area.x + area.width - x);
-            let rect = Rect::new(x, area.y, width, 1);
-            self.tab_rects[index] = rect;
-            frame.render_widget(
-                Paragraph::new(format!(" {name} ")).style(
-                    Style::default()
-                        .fg(if self.tab == index {
-                            t.accent.into()
-                        } else if self.hovered == Some(HoverTarget::Tab(index)) {
-                            t.tinted_fg.into()
-                        } else {
-                            t.subtle_fg.into()
-                        })
-                        .bg(if self.hovered == Some(HoverTarget::Tab(index)) {
-                            t.work_hover_bg.into()
-                        } else {
-                            t.work_bg.into()
-                        })
-                        .add_modifier(if self.tab == index {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                ),
-                rect,
-            );
-            x = x.saturating_add(width);
+        let surface = crate::wm::shell::surface_bg(&t);
+        frame.render_widget(Block::default().style(Style::default().bg(surface)), area);
+        self.compact = area.width < 84;
+        if !self.compact {
+            self.detail_open = false;
         }
-        self.search_rect = Rect::new(area.x, area.y + 1, area.width, 1);
-        self.search_input_rect =
-            Rect::new(area.x + 12, area.y + 1, area.width.saturating_sub(12), 1);
-        let search_bg = if self.search_focused {
-            t.code_bg.into()
-        } else if self.hovered == Some(HoverTarget::Search) {
-            t.work_hover_bg.into()
+        let mut tab_names = if area.width < 44 {
+            ["Memory", "Rules", "Suggest"]
         } else {
-            t.work_bg.into()
+            ["Confessions", "Rules", "Suggestions"]
+        };
+        if self.compact && self.detail_open {
+            tab_names[self.tab] = "‹ List";
+        }
+        let tab_width = area.width.saturating_sub(2) / 3;
+        for (index, name) in tab_names.into_iter().enumerate() {
+            let x = area.x + index as u16 * (tab_width + 1);
+            let rect = Rect::new(
+                x,
+                area.y,
+                if index == 2 {
+                    area.right() - x
+                } else {
+                    tab_width
+                },
+                3,
+            );
+            self.tab_rects[index] = rect;
+            render_action(
+                frame,
+                rect,
+                &Action {
+                    label: name,
+                    focused: self.tab == index,
+                    hovered: self.hovered == Some(HoverTarget::Tab(index)),
+                    ..Default::default()
+                },
+                &t,
+            );
+        }
+        let search_rows = u16::from(!(self.compact && self.detail_open));
+        self.search_rect = Rect::new(area.x, area.y + 3, area.width, search_rows);
+        self.search_input_rect = Rect::new(
+            area.x + 12,
+            area.y + 3,
+            area.width.saturating_sub(14),
+            search_rows,
+        );
+        let search_bg = if self.search_focused {
+            crate::theme::ThemeColor::new(surface).lerp(t.accent, 0.12)
+        } else if self.hovered == Some(HoverTarget::Search) {
+            crate::theme::ThemeColor::new(surface).lerp(t.work_hover_bg, 0.45)
+        } else {
+            surface
         };
         frame.render_widget(
             Block::default().style(Style::default().bg(search_bg)),
             self.search_rect,
         );
         frame.render_widget(
-            Paragraph::new(" Search [/]")
+            Paragraph::new("  Search /")
                 .style(Style::default().fg(t.subtle_fg.into()).bg(search_bg)),
-            Rect::new(area.x, area.y + 1, 12, 1),
+            Rect::new(area.x, self.search_rect.y, 12, search_rows),
         );
         let search_width = self.search_input_rect.width.max(1) as usize;
         if self.search_focused {
@@ -733,58 +822,150 @@ impl WindowComponent for KnowledgePanelContent {
             self.search_scroll = 0;
         }
         frame.render_widget(
-            Paragraph::new(self.search.buf())
-                .scroll((0, self.search_scroll))
-                .style(Style::default().bg(search_bg)),
+            Paragraph::new(crate::width::trim_display_offset(
+                self.search.buf(),
+                self.search_scroll as usize,
+                search_width,
+            ))
+            .style(Style::default().fg(t.tinted_fg.into()).bg(search_bg)),
             self.search_input_rect,
         );
-        let hint = if self.tab == 2 {
-            " ←/→ tabs · ↑/↓ rows · Space select · / search "
+        let hint_rows = u16::from(area.height >= 20);
+        let hint = if self.compact && self.detail_open {
+            " Esc list · ↑/↓ scroll · PgUp/PgDn page"
+        } else if self.tab == 2 {
+            " ←/→ tabs · ↑/↓ rows · PgUp/PgDn page · Space select"
         } else {
-            " ←/→ tabs · ↑/↓ rows · u/d detail · / search "
+            " ←/→ tabs · ↑/↓ rows · PgUp/PgDn page · u/d detail"
         };
         frame.render_widget(
-            Paragraph::new(hint).style(Style::default().fg(t.subtle_fg.into())),
-            Rect::new(area.x, area.y + 2, area.width, 1),
+            Paragraph::new(hint).style(Style::default().fg(t.subtle_fg.into()).bg(surface)),
+            Rect::new(area.x, area.y + 3 + search_rows, area.width, hint_rows),
         );
+        let actions: &[&str] = if self.archive_confirm.is_some() {
+            &["Confirm Archive", "Cancel Archive"]
+        } else if self.compact && self.detail_open {
+            match self.tab {
+                0 if state.archiving => &["Archiving…", "History"],
+                0 => &["Edit", "Archive", "History"],
+                1 => &["Reload", "Refresh"],
+                _ if state.loading => &["Stop"],
+                _ if state.applying => &["Applying…"],
+                _ => &["Select", "Apply"],
+            }
+        } else if state.archiving && self.tab == 0 {
+            &["Archiving…", "History", "Organize", "Refresh"]
+        } else {
+            match self.tab {
+                0 => &["Edit", "Archive", "History", "Organize", "Refresh"],
+                1 => &["Reload", "Refresh"],
+                _ if state.loading => &["Stop"],
+                _ if state.applying => &["Applying…"],
+                _ => &["Select All", "Apply", "Organize", "Refresh"],
+            }
+        };
+        let mut buttons = Vec::new();
+        let mut button_x = 0;
+        let mut button_y = 0;
+        for &name in actions {
+            let label = if area.width < 65 {
+                Self::compact_action_label(name)
+            } else {
+                Self::action_label(name)
+            };
+            let width = (crate::width::width(label) as u16 + 2).min(area.width);
+            if button_x > 0 && button_x + width > area.width {
+                button_x = 0;
+                button_y += 4;
+            }
+            buttons.push((
+                name,
+                label,
+                Rect::new(area.x + button_x, button_y, width, 3),
+            ));
+            button_x += width + 1;
+        }
+        let footer_height = button_y + 4;
+        let body_y = area.y + 3 + search_rows + hint_rows;
+        let body_height = area
+            .height
+            .saturating_sub(3 + search_rows + hint_rows + footer_height);
+        let stacked = self.compact;
+        let list_width = if stacked {
+            area.width
+        } else {
+            area.width * 2 / 5
+        };
+        let list_height = if self.compact && self.detail_open {
+            0
+        } else if stacked {
+            (body_height / 2 / 3 * 3).max(3).min(body_height)
+        } else {
+            body_height
+        };
+        let list_area = Rect::new(area.x, body_y, list_width, list_height);
+        self.list_rect = list_area;
+        let detail_area = if list_height == 0 {
+            Rect::new(
+                area.x + 2,
+                body_y,
+                area.width.saturating_sub(4),
+                body_height,
+            )
+        } else if stacked {
+            Rect::new(
+                area.x + 2,
+                list_area.bottom() + 1,
+                area.width.saturating_sub(4),
+                body_height.saturating_sub(list_height + 1),
+            )
+        } else {
+            Rect::new(
+                list_area.right() + 3,
+                body_y + 1,
+                area.width.saturating_sub(list_width + 5),
+                body_height.saturating_sub(2),
+            )
+        };
+        self.detail_rect = detail_area;
+        self.body_height = detail_area.height;
+        let row_height = if stacked { 3 } else { 4 };
+        self.visible_rows = (list_area.height / row_height).max(1) as usize;
         let indices = self.filtered_indices(&state);
         self.selected = self.selected.min(indices.len().saturating_sub(1));
-        let body_y = area.y + 3;
-        let body_height = area.height.saturating_sub(5);
-        self.body_height = body_height;
-        let list_width = (area.width * 2 / 5)
-            .max(20)
-            .min(area.width.saturating_sub(1));
-        let list_area = Rect::new(area.x, body_y, list_width, body_height);
-        let detail_area = Rect::new(
-            area.x + list_width + 1,
-            body_y,
-            area.width.saturating_sub(list_width + 1),
-            body_height,
-        );
-        self.detail_rect = detail_area;
         self.scroll = self
             .scroll
-            .min(indices.len().saturating_sub(body_height as usize) as u32);
-        self.row_rects.clear();
-        let mut list_lines = Vec::new();
+            .min(indices.len().saturating_sub(self.visible_rows) as u32);
+        if self.selected < self.scroll as usize {
+            self.scroll = self.selected as u32;
+        } else if self.selected >= self.scroll as usize + self.visible_rows {
+            self.scroll = self.selected.saturating_sub(self.visible_rows - 1) as u32;
+        }
         for (row, &index) in indices
             .iter()
             .enumerate()
             .skip(self.scroll as usize)
-            .take(body_height as usize)
+            .take((list_area.height / row_height) as usize)
         {
-            let label = match self.tab {
-                0 => format!(
-                    "{}{}",
-                    state.confessions[index]
-                        .category
-                        .as_deref()
-                        .map(|c| format!("[{c}] "))
-                        .unwrap_or_default(),
-                    state.confessions[index].confession.trigger
-                ),
-                1 => state.rules[index].name.clone(),
+            let (label, metadata) = match self.tab {
+                0 => {
+                    let view = &state.confessions[index];
+                    (
+                        view.confession.trigger.clone(),
+                        format!(
+                            "{} · {}",
+                            view.category.as_deref().unwrap_or("Uncategorized"),
+                            view.confession.created_at.format("%Y-%m-%d")
+                        ),
+                    )
+                }
+                1 => {
+                    let rule = &state.rules[index];
+                    (
+                        rule.name.clone(),
+                        format!("{} · {}", rule.scope, rule.description),
+                    )
+                }
                 _ => {
                     let proposal = &state.proposals[index];
                     let trigger = state
@@ -793,49 +974,78 @@ impl WindowComponent for KnowledgePanelContent {
                         .find(|view| view.confession.id == proposal.id)
                         .map(|view| view.confession.trigger.as_str())
                         .unwrap_or("Unknown confession");
-                    format!(
-                        "{} {} · {}",
-                        if self.selected_proposals.contains(&proposal.id) {
-                            "[x]"
-                        } else {
-                            "[ ]"
-                        },
-                        proposal.category,
-                        trigger
+                    (
+                        format!(
+                            "{} {}",
+                            if self.selected_proposals.contains(&proposal.id) {
+                                "[x]"
+                            } else {
+                                "[ ]"
+                            },
+                            trigger
+                        ),
+                        proposal.category.clone(),
                     )
                 }
             };
-            let marker = if row == self.selected { "▸" } else { " " };
-            list_lines.push(Line::styled(
-                format!(
-                    "{marker} {}",
-                    crate::width::truncate(&label, list_width.saturating_sub(3) as usize)
-                ),
-                Style::default()
-                    .fg(if row == self.selected {
-                        t.accent.into()
-                    } else if self.hovered == Some(HoverTarget::Row(row)) {
-                        t.tinted_fg.into()
-                    } else {
-                        t.subtle_fg.into()
-                    })
-                    .bg(if self.hovered == Some(HoverTarget::Row(row)) {
-                        t.work_hover_bg.into()
-                    } else {
-                        t.work_bg.into()
-                    }),
-            ));
-            self.row_rects.push((
-                row,
-                Rect::new(
-                    list_area.x,
-                    list_area.y + (row - self.scroll as usize) as u16,
-                    list_area.width,
-                    1,
-                ),
-            ));
+            let rect = Rect::new(
+                list_area.x,
+                list_area.y + (row - self.scroll as usize) as u16 * row_height,
+                list_area.width,
+                row_height.min(list_area.height),
+            );
+            let bg = render_record(
+                frame,
+                rect,
+                row == self.selected,
+                self.hovered == Some(HoverTarget::Row(row)),
+                &t,
+            );
+            let text = Rect::new(
+                rect.x + 2,
+                rect.y + 1,
+                rect.width.saturating_sub(if stacked { 7 } else { 4 }),
+                1,
+            );
+            frame.render_widget(
+                Paragraph::new(crate::width::truncate(
+                    &label.replace('\n', " "),
+                    text.width as usize,
+                ))
+                .style(Style::default().fg(t.tinted_fg.into()).bg(bg)),
+                text,
+            );
+            if row_height == 4 {
+                frame.render_widget(
+                    Paragraph::new(crate::width::truncate(
+                        &metadata.replace('\n', " "),
+                        text.width as usize,
+                    ))
+                    .style(Style::default().fg(t.subtle_fg.into()).bg(bg)),
+                    Rect::new(text.x, text.y + 1, text.width, 1),
+                );
+            }
+            if stacked {
+                let toggle = Rect::new(
+                    rect.right().saturating_sub(4),
+                    rect.y,
+                    4.min(rect.width),
+                    rect.height,
+                );
+                render_action(
+                    frame,
+                    toggle,
+                    &Action {
+                        label: "›",
+                        hovered: self.hovered == Some(HoverTarget::Details(row)),
+                        ..Default::default()
+                    },
+                    &t,
+                );
+                self.detail_toggle_rects.push((row, toggle));
+            }
+            self.row_rects.push((row, rect));
         }
-        frame.render_widget(Paragraph::new(list_lines), list_area);
         let mut detail = match indices.get(self.selected).copied() {
             Some(index)
                 if self.tab == 0
@@ -948,65 +1158,49 @@ impl WindowComponent for KnowledgePanelContent {
             .saturating_sub(detail_area.height as usize) as u16;
         self.detail_scroll = self.detail_scroll.min(max_detail_scroll);
         frame.render_widget(
-            Paragraph::new(detail_lines.join("\n")).scroll((self.detail_scroll, 0)),
+            Paragraph::new(detail_lines.join("\n"))
+                .scroll((self.detail_scroll, 0))
+                .style(Style::default().fg(t.tinted_fg.into()).bg(surface)),
             detail_area,
         );
-        let status = Rect::new(area.x, area.y + area.height - 2, area.width, 1);
+        let status = Rect::new(
+            area.x + 1,
+            area.bottom() - footer_height,
+            area.width.saturating_sub(2),
+            1,
+        );
+        let status_text = format!(
+            "{} / {} · {}",
+            if indices.is_empty() {
+                0
+            } else {
+                self.selected + 1
+            },
+            indices.len(),
+            state.message
+        );
         frame.render_widget(
-            Paragraph::new(format!(" {} entries · {}", indices.len(), state.message))
-                .style(Style::default().fg(t.subtle_fg.into())),
+            Paragraph::new(crate::width::truncate(&status_text, status.width as usize))
+                .style(Style::default().fg(t.subtle_fg.into()).bg(surface)),
             status,
         );
-        self.action_rects.clear();
-        let actions: &[&str] = if self.archive_confirm.is_some() {
-            &["Confirm Archive", "Cancel Archive"]
-        } else if state.archiving && self.tab == 0 {
-            &["Archiving…", "History", "Organize", "Refresh"]
-        } else {
-            match self.tab {
-                0 => &["Edit", "Archive", "History", "Organize", "Refresh"],
-                1 => &["Reload", "Refresh"],
-                _ if state.loading => &["Stop"],
-                _ if state.applying => &["Applying…"],
-                _ => &["Select All", "Apply", "Organize", "Refresh"],
-            }
-        };
-        let mut x = area.x;
-        for &name in actions {
-            let label = if self.tab == 0 && area.width < 65 {
-                Self::compact_action_label(name)
-            } else {
-                Self::action_label(name)
-            };
-            let width = crate::width::width(label) as u16 + 1;
-            let rect = Rect::new(
-                x,
-                area.y + area.height - 1,
-                width.min(area.x + area.width - x),
-                1,
-            );
-            frame.render_widget(
-                Paragraph::new(label).style(
-                    Style::default()
-                        .fg(if self.hovered == Some(HoverTarget::Action(name)) {
-                            t.tinted_fg.into()
-                        } else {
-                            t.subtle_fg.into()
-                        })
-                        .bg(if self.hovered == Some(HoverTarget::Action(name)) {
-                            t.work_hover_bg.into()
-                        } else {
-                            t.work_bg.into()
-                        }),
-                ),
+        for (name, label, mut rect) in buttons {
+            rect.y += status.bottom();
+            let disabled = matches!(name, "Applying…" | "Archiving…")
+                || (indices.is_empty() && matches!(name, "Edit" | "Archive" | "History"));
+            render_action(
+                frame,
                 rect,
+                &Action {
+                    label,
+                    hovered: self.hovered == Some(HoverTarget::Action(name)),
+                    disabled,
+                    ..Default::default()
+                },
+                &t,
             );
-            if name != "Applying…" && name != "Archiving…" {
+            if !disabled {
                 self.action_rects.push((name, rect));
-            }
-            x = x.saturating_add(width + 1);
-            if x >= area.x + area.width {
-                break;
             }
         }
         Vec::new()
@@ -1024,6 +1218,9 @@ impl WindowComponent for KnowledgePanelContent {
             if self.search_focused {
                 self.search.paste_single_line(text);
                 self.selected = 0;
+                self.scroll = 0;
+                self.detail_scroll = 0;
+                self.clear_geometry();
                 return WmEventResult::Consumed(Vec::new());
             }
         }
@@ -1069,7 +1266,9 @@ impl WindowComponent for KnowledgePanelContent {
                 } else {
                     self.detail_scroll.saturating_sub(3)
                 };
-            } else {
+            } else if self.list_rect.contains((mouse.column, mouse.row).into())
+                && self.archive_confirm.is_none()
+            {
                 let total = {
                     let state = self.state.lock().unwrap();
                     self.filtered_indices(&state).len()
@@ -1077,11 +1276,15 @@ impl WindowComponent for KnowledgePanelContent {
                 self.scroll = if down {
                     self.scroll
                         .saturating_add(3)
-                        .min(total.saturating_sub(self.body_height as usize) as u32)
+                        .min(total.saturating_sub(self.visible_rows) as u32)
                 } else {
                     self.scroll.saturating_sub(3)
                 };
                 self.selected = self.scroll as usize;
+                self.show_history = false;
+                self.detail_scroll = 0;
+                self.row_rects.clear();
+                self.detail_toggle_rects.clear();
             }
             return WmEventResult::Consumed(Vec::new());
         }
@@ -1133,20 +1336,38 @@ impl WindowComponent for KnowledgePanelContent {
                     .position(|rect| rect.contains((mouse.column, mouse.row).into()))
                 {
                     self.tab = index;
+                    self.detail_open = false;
                     self.selected = 0;
                     self.scroll = 0;
                     self.search_focused = false;
+                    self.show_history = false;
+                    self.detail_scroll = 0;
+                    self.clear_geometry();
                     return WmEventResult::Consumed(Vec::new());
                 }
                 if self.search_rect.contains((mouse.column, mouse.row).into()) {
                     self.search_focused = true;
-                    let col = if mouse.column < self.search_input_rect.x {
-                        0
-                    } else {
-                        mouse.column.saturating_sub(self.search_input_rect.x) as usize
-                            + self.search_scroll as usize
-                    };
-                    self.search.set_cursor_by_display(0, col as u16);
+                    if self
+                        .search_input_rect
+                        .contains((mouse.column, mouse.row).into())
+                    {
+                        let col = mouse.column.saturating_sub(self.search_input_rect.x) as usize
+                            + self.search_scroll as usize;
+                        self.search.set_cursor_by_display(0, col as u16);
+                    }
+                    return WmEventResult::Consumed(Vec::new());
+                }
+                if let Some((row, _)) = self
+                    .detail_toggle_rects
+                    .iter()
+                    .find(|(_, rect)| rect.contains((mouse.column, mouse.row).into()))
+                {
+                    self.selected = *row;
+                    self.detail_open = true;
+                    self.detail_scroll = 0;
+                    self.show_history = false;
+                    self.search_focused = false;
+                    self.clear_geometry();
                     return WmEventResult::Consumed(Vec::new());
                 }
                 if let Some((row, _)) = self
@@ -1154,6 +1375,9 @@ impl WindowComponent for KnowledgePanelContent {
                     .iter()
                     .find(|(_, rect)| rect.contains((mouse.column, mouse.row).into()))
                 {
+                    if self.selected != *row || self.show_history {
+                        self.detail_scroll = 0;
+                    }
                     self.selected = *row;
                     self.show_history = false;
                     self.search_focused = false;
@@ -1179,7 +1403,10 @@ impl WindowComponent for KnowledgePanelContent {
                 return WmEventResult::Consumed(Vec::new());
             }
             match action {
-                KeyAction::Escape => self.edit = None,
+                KeyAction::Escape => {
+                    self.edit = None;
+                    self.clear_geometry();
+                }
                 KeyAction::Tab => {
                     edit.focused = (edit.focused + 1) % 5;
                     edit.follow_cursor = true;
@@ -1201,6 +1428,19 @@ impl WindowComponent for KnowledgePanelContent {
                     );
                     edit.follow_cursor = true;
                 }
+                KeyAction::PageUp | KeyAction::PageDown => {
+                    let rect = self.edit_text_rects[edit.focused];
+                    for _ in 0..rect.height.max(1) {
+                        if *action == KeyAction::PageUp {
+                            edit.fields[edit.focused]
+                                .move_line_up_visual(rect.width.max(1) as usize);
+                        } else {
+                            edit.fields[edit.focused]
+                                .move_line_down_visual(rect.width.max(1) as usize);
+                        }
+                    }
+                    edit.follow_cursor = true;
+                }
                 _ => {
                     if edit.fields[edit.focused].handle_key(action) {
                         edit.follow_cursor = true;
@@ -1216,6 +1456,10 @@ impl WindowComponent for KnowledgePanelContent {
                 _ => {
                     if self.search.handle_key(action) {
                         self.selected = 0;
+                        self.scroll = 0;
+                        self.detail_scroll = 0;
+                        self.row_rects.clear();
+                        self.detail_toggle_rects.clear();
                     }
                 }
             }
@@ -1225,6 +1469,18 @@ impl WindowComponent for KnowledgePanelContent {
             match action {
                 KeyAction::Char('y') | KeyAction::Submit => self.action("Confirm Archive"),
                 KeyAction::Char('n') | KeyAction::Escape => self.action("Cancel Archive"),
+                KeyAction::HistoryUp => {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(1);
+                }
+                KeyAction::HistoryDown => {
+                    self.detail_scroll = self.detail_scroll.saturating_add(1);
+                }
+                KeyAction::PageUp | KeyAction::Char('u') => {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(self.body_height.max(1));
+                }
+                KeyAction::PageDown | KeyAction::Char('d') => {
+                    self.detail_scroll = self.detail_scroll.saturating_add(self.body_height.max(1));
+                }
                 _ => {}
             }
             return WmEventResult::Consumed(Vec::new());
@@ -1233,7 +1489,29 @@ impl WindowComponent for KnowledgePanelContent {
             let state = self.state.lock().unwrap();
             self.filtered_indices(&state).len()
         };
+        let old_selected = self.selected;
         match action {
+            KeyAction::Submit if self.compact => {
+                self.detail_open = !self.detail_open;
+                self.detail_scroll = 0;
+                self.clear_geometry();
+            }
+            KeyAction::Escape if self.detail_open => {
+                self.detail_open = false;
+                self.clear_geometry();
+            }
+            KeyAction::HistoryUp | KeyAction::Char('k') if self.compact && self.detail_open => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(1);
+            }
+            KeyAction::HistoryDown | KeyAction::Char('j') if self.compact && self.detail_open => {
+                self.detail_scroll = self.detail_scroll.saturating_add(1);
+            }
+            KeyAction::PageUp if self.compact && self.detail_open => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(self.body_height.max(1));
+            }
+            KeyAction::PageDown if self.compact && self.detail_open => {
+                self.detail_scroll = self.detail_scroll.saturating_add(self.body_height.max(1));
+            }
             KeyAction::HistoryUp | KeyAction::Char('k') => {
                 self.selected = self.selected.saturating_sub(1);
                 self.show_history = false;
@@ -1242,13 +1520,28 @@ impl WindowComponent for KnowledgePanelContent {
                 self.selected = (self.selected + 1).min(total.saturating_sub(1));
                 self.show_history = false;
             }
+            KeyAction::PageUp => {
+                self.selected = self.selected.saturating_sub(self.visible_rows);
+                self.show_history = false;
+            }
+            KeyAction::PageDown => {
+                self.selected = self
+                    .selected
+                    .saturating_add(self.visible_rows)
+                    .min(total.saturating_sub(1));
+                self.show_history = false;
+            }
             KeyAction::Char('u') => {
                 self.detail_scroll = self.detail_scroll.saturating_sub(self.body_height)
             }
             KeyAction::Char('d') => {
                 self.detail_scroll = self.detail_scroll.saturating_add(self.body_height)
             }
-            KeyAction::Char('/') => self.search_focused = true,
+            KeyAction::Char('/') => {
+                self.search_focused = true;
+                self.detail_open = false;
+                self.clear_geometry();
+            }
             KeyAction::Char('e') if self.tab == 0 => self.action("Edit"),
             KeyAction::Char('x') if self.tab == 0 => self.action("Archive"),
             KeyAction::Char('h') if self.tab == 0 => self.action("History"),
@@ -1258,32 +1551,37 @@ impl WindowComponent for KnowledgePanelContent {
             KeyAction::Char('R') if self.tab == 1 => self.action("Reload"),
             KeyAction::Char('a') if self.tab == 2 => self.action("Apply"),
             KeyAction::Char('s') if self.tab == 2 => self.action("Select All"),
-            KeyAction::Char(' ') if self.tab == 2 => {
-                let state = self.state.lock().unwrap();
-                if let Some(&index) = self.filtered_indices(&state).get(self.selected) {
-                    let id = state.proposals[index].id.clone();
-                    if !self.selected_proposals.remove(&id) {
-                        self.selected_proposals.insert(id);
-                    }
-                }
-            }
-            KeyAction::CursorLeft => {
+            KeyAction::Char(' ') if self.tab == 2 => self.action("Select"),
+            KeyAction::CursorLeft | KeyAction::BackTab => {
                 self.tab = self.tab.saturating_sub(1);
                 self.selected = 0;
+                self.detail_open = false;
                 self.scroll = 0;
+                self.show_history = false;
+                self.detail_scroll = 0;
+                self.clear_geometry();
             }
-            KeyAction::CursorRight => {
+            KeyAction::CursorRight | KeyAction::Tab => {
                 self.tab = (self.tab + 1).min(2);
                 self.selected = 0;
+                self.detail_open = false;
                 self.scroll = 0;
+                self.show_history = false;
+                self.detail_scroll = 0;
+                self.clear_geometry();
             }
             _ => return WmEventResult::Ignored,
         }
         if self.selected < self.scroll as usize {
             self.scroll = self.selected as u32;
         }
-        if self.selected >= self.scroll as usize + self.body_height as usize {
-            self.scroll = (self.selected + 1).saturating_sub(self.body_height as usize) as u32;
+        if self.selected >= self.scroll as usize + self.visible_rows {
+            self.scroll = (self.selected + 1).saturating_sub(self.visible_rows) as u32;
+        }
+        if self.selected != old_selected {
+            self.detail_scroll = 0;
+            self.row_rects.clear();
+            self.detail_toggle_rects.clear();
         }
         WmEventResult::Consumed(Vec::new())
     }
@@ -1339,6 +1637,175 @@ mod tests {
             category: None,
             related_ids: Vec::new(),
             archived: false,
+        }
+    }
+
+    fn render_panel(panel: &mut KnowledgePanelContent, terminal: &mut Terminal<TestBackend>) {
+        let empty_index = std::collections::HashMap::new();
+        let empty_details = std::collections::HashMap::new();
+        let empty_set = std::collections::HashSet::new();
+        let resources = std::collections::HashMap::new();
+        let prompts = std::collections::HashMap::new();
+        let browser = crate::mcp_manager::McpBrowserState {
+            tab: crate::mcp_manager::McpBrowserTab::default(),
+            content_revision: 0,
+            resources: &resources,
+            prompts: &prompts,
+            hovered_action: None,
+            remove_armed: None,
+        };
+        terminal
+            .draw(|frame| {
+                panel.render_content(
+                    frame.area(),
+                    frame,
+                    &RenderCtx {
+                        window_id: crate::wm::WindowId(1),
+                        snapshots: &[],
+                        items: &[],
+                        item_revisions: &[],
+                        handle_index: &empty_index,
+                        detached_task_details: &empty_details,
+                        task_handle_index: &empty_index,
+                        workflow_run_to_panel: &empty_index,
+                        task_snapshots_revision: 0,
+                        interaction_revision: 0,
+                        animation_frame: 0,
+                        expanded_tools: &empty_set,
+                        activity_nodes: &[],
+                        mcp_servers: &[],
+                        expanded_mcp_servers: &empty_set,
+                        mcp_selected: 0,
+                        hovered_mcp_row: &None,
+                        mcp_browser: &browser,
+                        hovered_history_row: &None,
+                    },
+                );
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn record_geometry_drives_padding_paging_and_click_selection() {
+        let state = Arc::new(Mutex::new(KnowledgeState {
+            confessions: (0..20).map(|_| sample_view()).collect(),
+            ..Default::default()
+        }));
+        for (width, height) in [(100, 36), (55, 16), (40, 18), (34, 15)] {
+            let mut panel = KnowledgePanelContent::new(state.clone(), None);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            render_panel(&mut panel, &mut terminal);
+            let visible = panel.visible_rows;
+            let mut scroll = 0;
+            let mut h_scroll = 0;
+            let mut ctx = EventCtx {
+                scroll: &mut scroll,
+                h_scroll: &mut h_scroll,
+            };
+            panel.handle_event(&WmEvent::Key(KeyAction::PageDown), &mut ctx);
+            render_panel(&mut panel, &mut terminal);
+            assert_eq!(panel.selected, visible);
+            assert!(panel.scroll > 0);
+            let row_rects = panel.row_rects.clone();
+            assert!(!row_rects.is_empty());
+            let selected = panel.selected;
+            for (row, rect) in row_rects {
+                assert!(rect.height >= 3);
+                assert!(panel.list_rect.contains((rect.x, rect.bottom() - 1).into()));
+                if row == selected {
+                    for y in rect.y..rect.bottom() {
+                        assert_eq!(terminal.backend().buffer()[(rect.x, y)].symbol(), "▌");
+                    }
+                }
+                panel.handle_event(
+                    &WmEvent::Mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: rect.x + 1,
+                        row: rect.bottom() - 1,
+                        modifiers: KeyModifiers::NONE,
+                    }),
+                    &mut ctx,
+                );
+                assert_eq!(panel.selected, row);
+            }
+            for (_, rect) in &panel.action_rects {
+                assert_eq!(rect.height, 3);
+                assert!(rect.right() <= width && rect.bottom() <= height);
+            }
+            assert!(panel.detail_rect.width >= if panel.compact { width - 8 } else { 30 });
+            if panel.compact {
+                let (_, toggle) = panel.detail_toggle_rects[0];
+                panel.handle_event(
+                    &WmEvent::Mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: toggle.x,
+                        row: toggle.bottom() - 1,
+                        modifiers: KeyModifiers::NONE,
+                    }),
+                    &mut ctx,
+                );
+                assert!(panel.detail_open);
+                assert!(panel.row_rects.is_empty());
+                render_panel(&mut panel, &mut terminal);
+                assert!(panel.row_rects.is_empty());
+                assert!(panel.search_rect.is_empty());
+                assert!(panel.detail_rect.height >= 8);
+                assert_eq!(panel.action_rects.len(), 3);
+                assert!(
+                    panel
+                        .action_rects
+                        .iter()
+                        .all(|(_, rect)| rect.y == panel.action_rects[0].1.y)
+                );
+                let selected = panel.selected;
+                let page = panel.detail_rect.height;
+                panel.handle_event(&WmEvent::Key(KeyAction::PageDown), &mut ctx);
+                assert_eq!(panel.selected, selected);
+                assert_eq!(panel.detail_scroll, page);
+                panel.handle_event(&WmEvent::Key(KeyAction::HistoryUp), &mut ctx);
+                assert_eq!(panel.detail_scroll, page - 1);
+                panel.handle_event(&WmEvent::Key(KeyAction::Escape), &mut ctx);
+                assert!(!panel.detail_open);
+                render_panel(&mut panel, &mut terminal);
+                panel.handle_event(&WmEvent::Key(KeyAction::Submit), &mut ctx);
+                assert!(panel.detail_open);
+            }
+        }
+    }
+
+    #[test]
+    fn editor_focus_keeps_fields_and_actions_visible_without_stale_targets() {
+        for (width, height) in [(100, 36), (55, 16), (40, 18)] {
+            let mut view = sample_view();
+            view.confession.trigger = "one\ntwo\nthree\nfour\nfive\nsix\nseven".into();
+            let state = Arc::new(Mutex::new(KnowledgeState {
+                confessions: vec![view],
+                ..Default::default()
+            }));
+            let mut panel = KnowledgePanelContent::new(state, None);
+            panel.action("Edit");
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            for focused in 0..5 {
+                let edit = panel.edit.as_mut().unwrap();
+                edit.focused = focused;
+                edit.follow_cursor = true;
+                render_panel(&mut panel, &mut terminal);
+                assert!(panel.cursor_visible());
+                let segment = panel.edit_segment_rects[focused];
+                let text = panel.edit_text_rects[focused];
+                assert!(segment.height >= 5);
+                assert!(text.height >= 2);
+                assert!(text.bottom() < segment.bottom());
+                assert_eq!(panel.action_rects.len(), 2);
+                for (_, rect) in &panel.action_rects {
+                    assert_eq!(rect.height, 3);
+                    assert!(rect.right() <= width && rect.bottom() <= height);
+                }
+            }
+            panel.action("Cancel");
+            assert!(panel.edit.is_none());
+            assert!(panel.action_rects.is_empty());
+            assert!(panel.edit_segment_rects.iter().all(|rect| rect.is_empty()));
         }
     }
 
@@ -1419,6 +1886,8 @@ mod tests {
         assert!(panel.selected_proposals.is_empty());
         panel.action("Select All");
         assert!(panel.selected_proposals.contains(&id));
+        panel.action("Select");
+        assert!(panel.selected_proposals.is_empty());
     }
 
     #[test]
@@ -1436,19 +1905,6 @@ mod tests {
             ..Default::default()
         }));
         let mut panel = KnowledgePanelContent::new(state, None);
-        let empty_index = std::collections::HashMap::new();
-        let empty_details = std::collections::HashMap::new();
-        let empty_set = std::collections::HashSet::new();
-        let resources = std::collections::HashMap::new();
-        let prompts = std::collections::HashMap::new();
-        let browser = crate::mcp_manager::McpBrowserState {
-            tab: crate::mcp_manager::McpBrowserTab::default(),
-            content_revision: 0,
-            resources: &resources,
-            prompts: &prompts,
-            hovered_action: None,
-            remove_armed: None,
-        };
         for (width, height) in [(100, 36), (55, 16)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             for tab in 0..3 {
@@ -1457,35 +1913,7 @@ mod tests {
                     panel.state.lock().unwrap().message =
                         "Organization failed: model unavailable".into();
                 }
-                terminal
-                    .draw(|frame| {
-                        panel.render_content(
-                            frame.area(),
-                            frame,
-                            &RenderCtx {
-                                window_id: crate::wm::WindowId(1),
-                                snapshots: &[],
-                                items: &[],
-                                item_revisions: &[],
-                                handle_index: &empty_index,
-                                detached_task_details: &empty_details,
-                                task_handle_index: &empty_index,
-                                workflow_run_to_panel: &empty_index,
-                                task_snapshots_revision: 0,
-                                interaction_revision: 0,
-                                animation_frame: 0,
-                                expanded_tools: &empty_set,
-                                activity_nodes: &[],
-                                mcp_servers: &[],
-                                expanded_mcp_servers: &empty_set,
-                                mcp_selected: 0,
-                                hovered_mcp_row: &None,
-                                mcp_browser: &browser,
-                                hovered_history_row: &None,
-                            },
-                        );
-                    })
-                    .unwrap();
+                render_panel(&mut panel, &mut terminal);
                 let content = terminal
                     .backend()
                     .buffer()
@@ -1556,7 +1984,8 @@ mod tests {
         let segment = panel.edit_segment_rects[0];
         assert_eq!(
             terminal.backend().buffer()[(segment.x, segment.y)].bg,
-            crate::theme::theme().work_hover_bg.into()
+            crate::theme::ThemeColor::new(crate::wm::shell::surface_bg(&crate::theme::theme()))
+                .lerp(crate::theme::theme().accent, 0.12)
         );
         let outside = WmEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Moved,
@@ -1628,7 +2057,7 @@ mod tests {
         panel.action("Edit");
         let mut terminal = Terminal::new(TestBackend::new(20, 16)).unwrap();
         terminal
-            .draw(|frame| panel.render_editor(Rect::new(0, 0, 9, 16), frame))
+            .draw(|frame| panel.render_editor(Rect::new(0, 0, 10, 16), frame))
             .unwrap();
         let rect = panel.edit_text_rects[0];
         assert_eq!(rect.width, 6);
@@ -1713,6 +2142,17 @@ mod tests {
         assert!(panel.search_focused);
         panel.handle_event(&WmEvent::Key(KeyAction::Char('X')), &mut ctx);
         assert_eq!(panel.search.buf(), "hello Xworld");
+        let cursor = panel.search.cursor();
+        panel.handle_event(
+            &WmEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: panel.search_rect.x + 1,
+                row: panel.search_rect.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &mut ctx,
+        );
+        assert_eq!(panel.search.cursor(), cursor);
     }
 
     #[test]
@@ -1789,6 +2229,15 @@ mod tests {
             scroll: &mut scroll,
             h_scroll: &mut h_scroll,
         };
+        panel.body_height = 6;
+        panel.handle_event(&WmEvent::Key(KeyAction::PageDown), &mut ctx);
+        assert_eq!(panel.detail_scroll, 6);
+        panel.handle_event(&WmEvent::Key(KeyAction::HistoryUp), &mut ctx);
+        assert_eq!(panel.detail_scroll, 5);
+        panel.handle_event(&WmEvent::Key(KeyAction::PageUp), &mut ctx);
+        assert_eq!(panel.detail_scroll, 0);
+        assert_eq!(panel.archive_confirm.as_ref().unwrap().id, id);
+        assert!(rx.try_recv().is_err());
         panel.handle_event(
             &WmEvent::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
