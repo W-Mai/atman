@@ -162,12 +162,21 @@ fn required_servers(selectors: &[String], statuses: &[McpServerStatus]) -> BTree
     required
 }
 
-fn status_value(status: &McpServerStatus) -> Value {
+fn status_value(status: &McpServerStatus, scope: Option<&crate::tool::McpToolScope>) -> Value {
     let (state, tool_count, message) = match &status.state {
         McpServerState::Disabled => ("disabled", 0, None),
         McpServerState::Pending => ("pending", 0, None),
         McpServerState::Connecting => ("connecting", 0, None),
-        McpServerState::Connected { tool_count, .. } => ("connected", *tool_count, None),
+        McpServerState::Connected { tool_count, tools } => {
+            let count = match scope {
+                Some(scope @ crate::tool::McpToolScope::Selectors(_)) => tools
+                    .iter()
+                    .filter(|tool| scope.permits(&format!("mcp.{}.{}", status.name, tool.name)))
+                    .count(),
+                _ => *tool_count,
+            };
+            ("connected", count, None)
+        }
         McpServerState::Error { message } => ("error", 0, Some(message.clone())),
         McpServerState::Disconnected { message } => ("disconnected", 0, Some(message.clone())),
         McpServerState::Timeout { message } => ("timeout", 0, Some(message.clone())),
@@ -286,10 +295,19 @@ impl Tool for McpStatus {
         Tier::Zero
     }
     fn description(&self) -> Option<&str> {
-        Some("Inspect MCP connection readiness before selecting or calling a server tool.")
+        Some(
+            "Inspect connection readiness and permitted tool counts for MCP servers in the current request's scope.",
+        )
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"server":{"type":"string"}},"additionalProperties":false})
+    }
+    fn scheduling_claims(
+        &self,
+        _args: &ToolArgs,
+        _ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        Ok(SchedulingClaims::declared([]))
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
@@ -311,7 +329,12 @@ impl Tool for McpStatus {
                 .mcp_servers
                 .iter()
                 .filter(|status| server.is_none_or(|server| status.name == server))
-                .map(status_value)
+                .filter(|status| {
+                    ctx.model_mcp_scope
+                        .as_ref()
+                        .is_none_or(|scope| scope.permits_server(&status.name))
+                })
+                .map(|status| status_value(status, ctx.model_mcp_scope.as_ref()))
                 .collect();
             Ok(Value::List(statuses))
         })
@@ -342,6 +365,13 @@ impl Tool for McpTools {
             },
             "additionalProperties":false
         })
+    }
+    fn scheduling_claims(
+        &self,
+        _args: &ToolArgs,
+        _ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        Ok(SchedulingClaims::declared([]))
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
@@ -451,14 +481,36 @@ impl Tool for McpAwait {
         Tier::Zero
     }
     fn description(&self) -> Option<&str> {
-        Some("Wait until one MCP server is connected or reports a terminal connection error.")
+        Some(
+            "Wait until one MCP server in the current request's scope is connected or reports a terminal connection error.",
+        )
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"server":{"type":"string"},"timeout":{"type":"integer","minimum":1,"default":120}},"required":["server"],"additionalProperties":false})
     }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        _ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        Ok(SchedulingClaims::declared([
+            crate::tool_schedule::ResourceAccess::read(
+                crate::tool_schedule::ResourceKey::McpServer(string_arg(args, "server")?),
+            ),
+        ]))
+    }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let server = string_arg(&args, "server")?;
+            if ctx
+                .model_mcp_scope
+                .as_ref()
+                .is_some_and(|scope| !scope.permits_server(&server))
+            {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "MCP server `{server}` was not allowed by the LLM request that produced this call"
+                )));
+            }
             let session = ctx.session_runtime.as_ref().ok_or_else(|| {
                 RuntimeError::ToolFailed("mcp.await: no session available".into())
             })?;
@@ -576,6 +628,99 @@ mod tests {
         fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
             Box::pin(async { Ok(Value::Unit) })
         }
+    }
+
+    #[tokio::test]
+    async fn readiness_observation_respects_the_requests_mcp_scope() {
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        for name in ["docs", "hidden"] {
+            session.update_mcp_server(McpServerStatus {
+                name: name.into(),
+                transport: crate::mcp::TransportKind::Stdio,
+                state: McpServerState::Connected {
+                    tool_count: 2,
+                    tools: ["read", "write"]
+                        .into_iter()
+                        .map(|name| crate::mcp::McpToolInfo {
+                            name: name.into(),
+                            description: None,
+                        })
+                        .collect(),
+                },
+            });
+        }
+        session.update_mcp_server(McpServerStatus {
+            name: "pending".into(),
+            transport: crate::mcp::TransportKind::Stdio,
+            state: McpServerState::Connecting,
+        });
+        let mut ctx = ToolCtx::new().with_session_runtime(session);
+        ctx.model_mcp_scope = Some(crate::tool::McpToolScope::Selectors(
+            ["mcp.docs.read".into(), "mcp.pending.*".into()].into(),
+        ));
+        let statuses = McpStatus
+            .call(ToolArgs::default(), &ctx)
+            .await
+            .unwrap()
+            .to_json()
+            .unwrap();
+        let statuses = statuses.as_array().unwrap();
+        assert_eq!(statuses.len(), 2);
+        assert!(
+            statuses
+                .iter()
+                .any(|status| { status["name"] == "docs" && status["tool_count"] == 1 })
+        );
+        assert!(
+            statuses
+                .iter()
+                .any(|status| { status["name"] == "pending" && status["state"] == "connecting" })
+        );
+        let args = |server: &str| ToolArgs {
+            named: vec![("server".into(), Value::Str(server.into()))],
+            ..ToolArgs::default()
+        };
+        assert!(
+            matches!(McpStatus.call(args("hidden"), &ctx).await.unwrap(), Value::List(values) if values.is_empty())
+        );
+        assert!(
+            McpAwait
+                .call(args("hidden"), &ctx)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("not allowed")
+        );
+        assert!(matches!(
+            McpAwait.call(args("docs"), &ctx).await.unwrap(),
+            Value::Bool(true)
+        ));
+        ctx.model_mcp_scope = None;
+        assert!(matches!(
+            McpAwait.call(args("hidden"), &ctx).await.unwrap(),
+            Value::Bool(true)
+        ));
+    }
+
+    #[test]
+    fn broker_observation_does_not_serialize_unrelated_tool_execution() {
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            named: vec![("server".into(), Value::Str("slow".into()))],
+            ..ToolArgs::default()
+        };
+        let waiting = McpAwait.scheduling_claims(&args, &ctx).unwrap();
+        let ready = crate::mcp::mcp_server_scheduling_claim("ready");
+        assert!(!waiting.conflicts_with(&ready));
+        assert!(waiting.conflicts_with(&crate::mcp::mcp_server_scheduling_claim("slow")));
+        for observer in [&McpStatus as &dyn Tool, &McpTools] {
+            let claims = observer
+                .scheduling_claims(&ToolArgs::default(), &ctx)
+                .unwrap();
+            assert!(!claims.conflicts_with(&ready));
+        }
+        let graph = crate::tool_schedule::SchedulingGraph::from_claims(&[waiting, ready]);
+        assert_eq!(graph.ready_wave(), vec![0, 1]);
     }
 
     #[tokio::test]

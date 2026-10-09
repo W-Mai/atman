@@ -181,6 +181,19 @@ impl Default for McpToolScope {
 }
 
 impl McpToolScope {
+    pub(crate) fn permits_server(&self, server: &str) -> bool {
+        let namespace = crate::mcp::mcp_tool_namespace(server);
+        match self {
+            Self::All => true,
+            Self::Selectors(selectors) => selectors.iter().any(|selector| {
+                selector.strip_suffix('*').map_or_else(
+                    || selector.starts_with(&namespace),
+                    |prefix| namespace.starts_with(prefix) || prefix.starts_with(&namespace),
+                )
+            }),
+        }
+    }
+
     pub(crate) fn permits(&self, name: &str) -> bool {
         if !name.starts_with("mcp.") || crate::tools::mcp::CONTROL_TOOL_NAMES.contains(&name) {
             return false;
