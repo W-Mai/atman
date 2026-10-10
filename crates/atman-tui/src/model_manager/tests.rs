@@ -59,12 +59,128 @@ fn click(rect: Rect) -> MouseEvent {
 }
 
 #[test]
+fn provider_groups_survive_search_scope_paging_and_empty_catalogs() {
+    let mut manager = fixture();
+    manager
+        .groups
+        .push(atman_runtime::model_registry::ProviderGroup {
+            provider_name: "empty-provider".into(),
+            models: Vec::new(),
+        });
+    manager.sync_browser();
+    assert_eq!(manager.filtered_model_count(), 18);
+    assert_eq!(
+        manager
+            .browser
+            .rows()
+            .iter()
+            .filter(|row| row.kind == BrowserRowKind::Provider)
+            .count(),
+        3
+    );
+    for (width, height) in [(40, 14), (80, 30), (108, 42)] {
+        manager.page = Page::List;
+        manager.focus = Focus::List;
+        manager.search.replace_with("");
+        manager.sync_browser();
+        manager.navigate(&KeyAction::Home);
+        render(&mut manager, width, height);
+        let pages = manager.list_pages().len();
+        for page in 0..pages {
+            let buffer = render(&mut manager, width, height);
+            assert_eq!(manager.list_page, page);
+            let rect = manager.list_rect.unwrap();
+            let header = &manager.browser.rows()[manager.list_pages()[page][0]];
+            assert_eq!(header.kind, BrowserRowKind::Provider);
+            assert!(buffer[(rect.x + 2, rect.y + 1)].symbol() != " ");
+            assert!(
+                manager
+                    .record_hits
+                    .iter()
+                    .all(|(_, hit)| hit.height == 4 && hit.bottom() <= rect.bottom())
+            );
+            manager.handle_key(&KeyAction::PageDown, None);
+        }
+        manager.search.replace_with("empty-provider");
+        manager.sync_browser();
+        assert_eq!(manager.current_provider(), "empty-provider");
+        assert!(manager.current_model().is_none());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        manager.handle_key(&KeyAction::Delete, Some(&tx));
+        manager.handle_key(&KeyAction::Char('a'), Some(&tx));
+        assert!(rx.try_recv().is_err());
+        assert!(manager.open_alias_model.is_none());
+    }
+    manager.search.replace_with("model-8");
+    manager.sync_browser();
+    assert_eq!(manager.filtered_model_count(), 2);
+    assert_eq!(
+        manager
+            .browser
+            .rows()
+            .iter()
+            .filter(|row| row.kind == BrowserRowKind::Provider)
+            .count(),
+        2
+    );
+    manager.search.replace_with("does-not-exist");
+    manager.sync_browser();
+    assert!(manager.browser.rows().is_empty());
+    assert!(manager.current_model().is_none());
+    manager.search.replace_with("");
+    manager.locked_provider = Some("catalog-account".into());
+    manager.sync_browser();
+    assert_eq!(manager.filtered_model_count(), 9);
+    assert_eq!(
+        manager
+            .browser
+            .rows()
+            .iter()
+            .filter(|row| row.kind == BrowserRowKind::Provider)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn empty_provider_pages_are_reachable_by_mouse_without_selecting_old_models() {
+    let mut manager = fixture();
+    manager.groups = (0..7)
+        .map(|index| atman_runtime::model_registry::ProviderGroup {
+            provider_name: format!("empty-{index}"),
+            models: Vec::new(),
+        })
+        .collect();
+    manager.sync_browser();
+    render(&mut manager, 40, 14);
+    let pages = manager.list_pages().len();
+    for expected in 1..pages {
+        let rect = manager.list_rect.unwrap();
+        manager.handle_mouse(
+            &MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            None,
+        );
+        render(&mut manager, 40, 14);
+        assert_eq!(manager.list_page, expected);
+        assert!(manager.current_model().is_none());
+    }
+    let last = manager.browser.selected_index();
+    manager.navigate(&KeyAction::HistoryDown);
+    assert_eq!(manager.browser.selected_index(), last);
+}
+
+#[test]
 fn identity_controls_scope_search_and_write_capabilities() {
     let mut manager = fixture();
     assert!(manager.current_editable());
     manager.locked_provider = Some("catalog-account".into());
     manager.sync_browser();
-    assert_eq!(manager.browser.rows().len(), 9);
+    assert_eq!(manager.filtered_model_count(), 9);
     assert!(!manager.current_editable());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     manager.handle_key(&KeyAction::Char('e'), Some(&tx));
@@ -74,7 +190,7 @@ fn identity_controls_scope_search_and_write_capabilities() {
     assert!(rx.try_recv().is_err());
     manager.handle_key(&KeyAction::Char('/'), None);
     manager.paste("model-8");
-    assert_eq!(manager.browser.rows().len(), 1);
+    assert_eq!(manager.filtered_model_count(), 1);
     assert_eq!(manager.current_model().unwrap().slug, "model-8");
     manager.handle_key(&KeyAction::Escape, None);
     manager.dispatch(Action::Add, None);

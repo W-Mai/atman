@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Model provider groups** — Model Manager retains provider headings, display names, model counts, and empty groups during search and scope changes. Pagination preserves group context and padded model records; keyboard and mouse navigation reach empty provider pages without acting on a previous model selection.
 - **Model management** — Provider scopes, local search, Configured / Catalog permissions, and responsive details share keyboard and mouse actions. Explicit Save / Cancel preserves drafts and hidden tests; Stop test cancels the request. Alias references block deletion and refresh after editing. Disabled providers retain a read-only catalog view without registering callable models.
 - **Provider management** — Searchable records, source-specific actions, and responsive details preserve keyboard and mouse navigation. Provider forms use explicit Save / Cancel, retain hidden pending operations, and bind connection results to the tested draft. Removal checks references, and modal input stays isolated from transcript selection menus and blocking notifications.
 - **Memory and Rules panel** — Padded records and action buttons share mouse geometry and subdued hover. Narrow windows can expand a record's details with independent keyboard or mouse scrolling. Editor fields follow focus while preserving cursor placement and visible Save / Cancel controls; archive confirmation also supports keyboard scrolling.

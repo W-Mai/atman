@@ -65,6 +65,8 @@ pub struct ModelManager {
     provider_idx: usize,
     model_idx: Vec<usize>,
     browser: ModelBrowser,
+    list_page: usize,
+    list_height: u16,
     configured: std::collections::HashSet<(String, String)>,
     search: InputEditor,
     search_hit: Option<crate::settings_form::FieldHit>,
@@ -490,7 +492,17 @@ impl ModelManager {
     }
 
     fn sync_browser(&mut self) {
-        let selected = self.browser.selected().map(|row| row.value.clone());
+        let previous_header = self
+            .browser
+            .rows()
+            .get(self.browser.selected_index())
+            .filter(|row| row.kind == BrowserRowKind::Provider)
+            .map(|row| row.value.clone());
+        let selected = self
+            .browser
+            .rows()
+            .get(self.browser.selected_index())
+            .map(|row| row.value.clone());
         let old_index = self.browser.selected_index();
         let query = self.search.buf().to_lowercase();
         let entries: std::collections::HashMap<_, _> =
@@ -506,6 +518,15 @@ impl ModelManager {
             {
                 continue;
             }
+            let display_name =
+                atman_runtime::model_registry::provider_display_name(&group.provider_name);
+            let group_start = rows.len();
+            rows.push(BrowserRow {
+                kind: BrowserRowKind::Provider,
+                label: display_name.clone(),
+                value: group.provider_name.clone(),
+                selectable: false,
+            });
             for model in &group.models {
                 let source = if self.is_config_model(&group.provider_name, &model.slug) {
                     "Configured"
@@ -520,7 +541,7 @@ impl ModelManager {
                     .map(|entry| entry.model.as_str())
                     .unwrap_or_default();
                 if !format!(
-                    "{} {} {source} {api_model}",
+                    "{} {} {display_name} {source} {api_model}",
                     model.slug, group.provider_name
                 )
                 .to_lowercase()
@@ -535,6 +556,14 @@ impl ModelManager {
                     selectable: true,
                 });
             }
+            if rows.len() == group_start + 1
+                && !query.is_empty()
+                && !format!("{} {display_name}", group.provider_name)
+                    .to_lowercase()
+                    .contains(&query)
+            {
+                rows.pop();
+            }
         }
         let fallback = rows
             .get(old_index.min(rows.len().saturating_sub(1)))
@@ -543,7 +572,14 @@ impl ModelManager {
             .filter(|key| rows.iter().any(|row| &row.value == key))
             .or(fallback);
         self.browser.replace_rows(rows, selected.as_deref());
+        if let Some(index) = self.browser.rows().iter().position(|row| {
+            row.kind == BrowserRowKind::Provider
+                && Some(row.value.as_str()) == previous_header.as_deref()
+        }) {
+            self.browser.focus_page(&[index]);
+        }
         self.apply_browser_selection();
+        self.align_list_page();
         self.clear_geometry();
     }
 
@@ -554,11 +590,24 @@ impl ModelManager {
         self.browser
             .replace_rows(self.browser.rows().to_vec(), Some(key));
         self.apply_browser_selection();
+        self.align_list_page();
         self.detail_scroll = 0;
         self.clear_geometry();
     }
 
     fn apply_browser_selection(&mut self) {
+        if let Some(row) = self.browser.rows().get(self.browser.selected_index())
+            && row.kind == BrowserRowKind::Provider
+        {
+            if let Some(index) = self
+                .groups
+                .iter()
+                .position(|group| group.provider_name == row.value)
+            {
+                self.provider_idx = index;
+            }
+            return;
+        }
         let Some(row) = self.browser.selected() else {
             return;
         };
@@ -604,13 +653,78 @@ impl ModelManager {
 
     fn navigate(&mut self, action: &KeyAction) {
         let before = self.browser.selected_index();
-        self.browser.handle_key(action, 0);
+        let previous_page = self.list_page;
+        let step = match action {
+            KeyAction::HistoryUp | KeyAction::Char('k') => Some(-1),
+            KeyAction::HistoryDown | KeyAction::Char('j') => Some(1),
+            _ => None,
+        };
+        if matches!(action, KeyAction::PageUp | KeyAction::PageDown) {
+            self.page_by(if matches!(action, KeyAction::PageUp) {
+                -1
+            } else {
+                1
+            });
+        } else if let Some(step) = step
+            && self.list_pages().get(self.list_page).is_some_and(|page| {
+                !page
+                    .iter()
+                    .any(|&index| self.browser.rows()[index].selectable)
+            })
+        {
+            self.page_by(step);
+        } else {
+            self.browser.handle_key(action, 0);
+            self.align_list_page();
+            if let Some(step) = step
+                && (before == self.browser.selected_index()
+                    || self.list_page.abs_diff(previous_page) > 1)
+            {
+                self.list_page = previous_page;
+                self.page_by(step);
+            }
+        }
         self.apply_browser_selection();
         if before != self.browser.selected_index() {
             self.detail_scroll = 0;
             self.status = None;
         }
         self.clear_geometry();
+    }
+
+    fn page_by(&mut self, step: isize) {
+        let pages = self.list_pages();
+        let next = self
+            .list_page
+            .saturating_add_signed(step)
+            .min(pages.len().saturating_sub(1));
+        if self.list_page == next {
+            return;
+        }
+        self.list_page = next;
+        if let Some(page) = pages.get(self.list_page) {
+            self.browser.focus_page(page);
+        }
+    }
+
+    fn list_pages(&self) -> Vec<Vec<usize>> {
+        self.browser.grouped_pages(self.list_height.max(7), 3, 4)
+    }
+
+    fn align_list_page(&mut self) {
+        let pages = self.list_pages();
+        self.list_page = pages
+            .iter()
+            .position(|page| page.contains(&self.browser.selected_index()))
+            .unwrap_or(0);
+    }
+
+    fn filtered_model_count(&self) -> usize {
+        self.browser
+            .rows()
+            .iter()
+            .filter(|row| row.kind == BrowserRowKind::Model)
+            .count()
     }
 
     fn draft(&self) -> Vec<String> {

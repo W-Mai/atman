@@ -103,6 +103,68 @@ impl ModelBrowser {
         self.selected
     }
 
+    /// Paginate padded records, repeating the provider heading on continuation pages.
+    pub fn grouped_pages(
+        &self,
+        height: u16,
+        provider_height: u16,
+        model_height: u16,
+    ) -> Vec<Vec<usize>> {
+        let height = u32::from(height);
+        let provider_height = u32::from(provider_height);
+        let model_height = u32::from(model_height);
+        if height < provider_height + model_height || model_height == 0 {
+            return Vec::new();
+        }
+        let mut pages = Vec::new();
+        let mut page = Vec::new();
+        let mut used = 0;
+        let mut provider = None;
+        for (index, row) in self.rows.iter().enumerate() {
+            if row.kind == BrowserRowKind::Provider {
+                let has_models = self
+                    .rows
+                    .get(index + 1)
+                    .is_some_and(|next| next.kind != BrowserRowKind::Provider);
+                let needed = provider_height + if has_models { model_height } else { 0 };
+                if used + needed > height && !page.is_empty() {
+                    pages.push(std::mem::take(&mut page));
+                    used = 0;
+                }
+                page.push(index);
+                used += provider_height;
+                provider = Some(index);
+            } else {
+                if used + model_height > height {
+                    pages.push(std::mem::take(&mut page));
+                    used = 0;
+                    if let Some(header) = provider {
+                        page.push(header);
+                        used += provider_height;
+                    }
+                }
+                page.push(index);
+                used += model_height;
+            }
+        }
+        if !page.is_empty() {
+            pages.push(page);
+        }
+        pages
+    }
+
+    /// Focus the first selectable record on a page, or its empty provider heading.
+    pub fn focus_page(&mut self, rows: &[usize]) {
+        if let Some(index) = rows
+            .iter()
+            .find(|index| self.rows.get(**index).is_some_and(|row| row.selectable))
+            .or_else(|| rows.first())
+        {
+            self.selected = *index;
+            self.ensure_visible(self.visible_rows);
+        }
+    }
+
     pub fn select_visible_row(&mut self, row: usize) -> bool {
         let index = self.viewport.saturating_add(row);
         if !self.rows.get(index).is_some_and(|entry| entry.selectable) {
@@ -200,6 +262,65 @@ impl ModelBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_pages_preserve_source_headers_counts_and_empty_groups() {
+        let rows: Vec<_> = [("first", 5), ("empty", 0), ("last", 2)]
+            .into_iter()
+            .flat_map(|(provider, count)| {
+                std::iter::once(BrowserRow {
+                    kind: BrowserRowKind::Provider,
+                    label: provider.into(),
+                    value: provider.into(),
+                    selectable: false,
+                })
+                .chain((0..count).map(move |i| BrowserRow {
+                    kind: BrowserRowKind::Model,
+                    label: format!("{provider}-{i}"),
+                    value: format!("{provider}-{i}"),
+                    selectable: true,
+                }))
+            })
+            .collect();
+        let mut browser = ModelBrowser::new(rows, None);
+        for height in [7, 8, 11, 14, 25] {
+            let pages = browser.grouped_pages(height, 3, 4);
+            let mut models = Vec::new();
+            let mut providers = std::collections::HashSet::new();
+            for page in &pages {
+                let mut source = None;
+                let mut used = 0;
+                for &index in page {
+                    let row = &browser.rows()[index];
+                    if row.kind == BrowserRowKind::Provider {
+                        source = Some(row.value.as_str());
+                        providers.insert(row.value.clone());
+                        used += 3;
+                    } else {
+                        assert!(row.value.starts_with(source.unwrap()));
+                        used += 4;
+                        models.push(row.value.clone());
+                    }
+                }
+                assert!(used <= height);
+                browser.focus_page(page);
+                assert!(page.contains(&browser.selected_index()));
+                assert_eq!(
+                    browser.selected().is_some(),
+                    page.iter().any(|&i| browser.rows()[i].selectable)
+                );
+            }
+            assert_eq!(providers.len(), 3);
+            assert_eq!(models.len(), 7);
+            assert_eq!(
+                models
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                7
+            );
+        }
+    }
 
     fn browser(count: usize) -> ModelBrowser {
         ModelBrowser::new(

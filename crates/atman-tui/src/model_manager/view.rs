@@ -19,7 +19,7 @@ impl ModelManager {
         self.save_rect = None;
         self.confirm_yes_rect = None;
         self.confirm_no_rect = None;
-        if area.height < 12 || area.width < 24 {
+        if area.height < 14 || area.width < 24 {
             text(f, area, "Enlarge terminal to view models", t);
             return;
         }
@@ -66,7 +66,7 @@ impl ModelManager {
         text(
             f,
             Rect::new(content.x, content.y, content.width, 1),
-            &format!("{scope} · {} / {total}", self.browser.rows().len()),
+            &format!("{scope} · {} / {total}", self.filtered_model_count()),
             t,
         );
         let search_area = Rect::new(content.x, content.y + 1, content.width, 1);
@@ -173,12 +173,8 @@ impl ModelManager {
             actions
         };
         self.render_buttons(f, footer, &visible, t);
-        let per_page = self
-            .list_rect
-            .map_or(1, |r| usize::from(r.height / 4).max(1));
-        let count = self.browser.rows().len();
-        let page = self.browser.selected_index() / per_page + 1;
-        let pages = count.div_ceil(per_page).max(1);
+        let pages = self.list_pages().len().max(1);
+        let page = self.list_page + 1;
         let hint = if self.page == Page::Details && self.narrow {
             "↑↓ scroll · Enter action".to_owned()
         } else {
@@ -194,8 +190,10 @@ impl ModelManager {
 
     fn render_records(&mut self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
         self.list_rect = Some(area);
-        let count = usize::from(area.height / 4).max(1);
-        self.browser.set_visible_rows(count);
+        if self.list_height != area.height {
+            self.list_height = area.height;
+            self.align_list_page();
+        }
         if self.browser.rows().is_empty() {
             text(
                 f,
@@ -209,9 +207,56 @@ impl ModelManager {
             );
             return;
         }
-        let start = self.browser.selected_index() / count * count;
-        for (row, index) in (start..(start + count).min(self.browser.rows().len())).enumerate() {
+        let pages = self.list_pages();
+        self.list_page = self.list_page.min(pages.len().saturating_sub(1));
+        let Some(page) = pages.get(self.list_page) else {
+            return;
+        };
+        let mut y = area.y;
+        for &index in page {
             let record = &self.browser.rows()[index];
+            if record.kind == BrowserRowKind::Provider {
+                let count = self.browser.rows()[index + 1..]
+                    .iter()
+                    .take_while(|row| row.kind != BrowserRowKind::Provider)
+                    .count();
+                let total = self
+                    .groups
+                    .iter()
+                    .find(|group| group.provider_name == record.value)
+                    .map_or(0, |group| group.models.len());
+                let count = if count == total {
+                    format!("{count} models")
+                } else {
+                    format!("{count}/{total} models")
+                };
+                let width = area.width.saturating_sub(4) as usize;
+                let name_width = width.saturating_sub(crate::width::width(&count) + 2);
+                let title = format!(
+                    "{}  {count}",
+                    crate::width::pad_right(
+                        &crate::width::truncate(&record.label, name_width),
+                        name_width
+                    )
+                );
+                let rect = Rect::new(area.x, y, area.width, 3);
+                let bg = t.code_bg;
+                f.render_widget(
+                    ratatui::widgets::Block::default().style(Style::default().bg(bg.into())),
+                    rect,
+                );
+                f.render_widget(
+                    Paragraph::new(title).style(
+                        Style::default()
+                            .bg(bg.into())
+                            .fg(t.heading.into())
+                            .add_modifier(ratatui::style::Modifier::BOLD),
+                    ),
+                    Rect::new(rect.x + 2, rect.y + 1, rect.width.saturating_sub(4), 1),
+                );
+                y += 3;
+                continue;
+            }
             let mut parts = record.value.splitn(3, '\0');
             let source = if parts.next() == Some("config") {
                 "Configured"
@@ -219,7 +264,24 @@ impl ModelManager {
                 "Catalog"
             };
             let provider = parts.next().unwrap_or_default();
-            let rect = Rect::new(area.x, area.y + row as u16 * 4, area.width, 4);
+            let slug = parts.next().unwrap_or_default();
+            let model = self
+                .groups
+                .iter()
+                .find(|group| group.provider_name == provider)
+                .and_then(|group| group.models.iter().find(|model| model.slug == slug));
+            let summary = model.map_or_else(
+                || source.to_owned(),
+                |model| {
+                    format!(
+                        "{source} · {}{}",
+                        atman_runtime::humanize::format_count(model.context_budget),
+                        if model.thinking { " · thinking" } else { "" }
+                    )
+                },
+            );
+            let rect = Rect::new(area.x + 2, y, area.width.saturating_sub(2), 4);
+            y += 4;
             let bg = render_record(
                 f,
                 rect,
@@ -235,11 +297,8 @@ impl ModelManager {
             );
             let meta = Rect::new(name.x, name.y + 1, name.width, 1);
             f.render_widget(
-                Paragraph::new(crate::width::truncate(
-                    &format!("{source} · {provider}"),
-                    meta.width as usize,
-                ))
-                .style(Style::default().bg(bg).fg(t.subtle_fg.into())),
+                Paragraph::new(crate::width::truncate(&summary, meta.width as usize))
+                    .style(Style::default().bg(bg).fg(t.subtle_fg.into())),
                 meta,
             );
             self.record_hits.push((record.value.clone(), rect));
