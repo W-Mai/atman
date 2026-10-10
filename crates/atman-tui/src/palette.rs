@@ -214,6 +214,42 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
 ];
 
 impl PaletteEntryId {
+    /// The colon command that executes this palette action.
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::SwitchSession => "sessions",
+            Self::AutoNameSession => "name-session",
+            Self::NewSession => "new-session",
+            Self::MoveSession => "move-session",
+            Self::DeleteSession => "delete-session",
+            Self::OpenProjectHub => "projects",
+            Self::SetProjectStorageScope => "storage",
+            Self::SetFormulaRendering => "formula",
+            Self::YankMode => "yank",
+            Self::CopyLastMessage => "copy last-message",
+            Self::CopyLastTool => "copy last-tool",
+            Self::CompactNow => "compact",
+            Self::SearchHistory => "history",
+            Self::ToggleSidebar => "sidebar",
+            Self::ManageProviders => "providers",
+            Self::ManageAliases => "aliases",
+            Self::ManageModels => "models",
+            Self::SwitchModel => "model",
+            Self::ManageMcp => "mcp",
+            Self::ManageKnowledge => "memory",
+            Self::SetTrustMode => "mode",
+            Self::SetModeTheme => "mode-theme",
+            Self::ShowHelp => "keybindings",
+        }
+    }
+
+    pub fn from_command(command: &str) -> Option<Self> {
+        PALETTE_ENTRIES
+            .iter()
+            .find(|entry| entry.id.command() == command)
+            .map(|entry| entry.id)
+    }
+
     pub fn all() -> Vec<PaletteEntryId> {
         PALETTE_ENTRIES.iter().map(|e| e.id).collect()
     }
@@ -383,6 +419,7 @@ impl CommandPalette {
                 .filter(|e| {
                     fuzzy_match(e.label.to_lowercase().as_str(), query)
                         || fuzzy_match(e.keyword, query)
+                        || fuzzy_match(e.id.command(), query.trim_start_matches(':'))
                 })
                 .map(|e| e.id)
                 .collect()
@@ -502,7 +539,7 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
                             Style::default().add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
-                            id.hint().to_string(),
+                            format!(":{} · {}", id.command(), id.hint()),
                             Style::default().fg(t.subtle_fg.into()),
                         ),
                     ]);
@@ -602,6 +639,34 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
 mod tests {
     use super::*;
     use crate::wm::modal::ModalOverlay;
+
+    #[test]
+    fn every_palette_action_has_a_registered_colon_command() {
+        let mut commands = std::collections::HashSet::new();
+        let candidates = crate::completion::compute_candidates(
+            ":",
+            &[],
+            &crate::completion::builtins(),
+            &[],
+            false,
+        );
+        for entry in PALETTE_ENTRIES {
+            let command = entry.id.command();
+            assert!(commands.insert(command), "duplicate command {command}");
+            assert_eq!(PaletteEntryId::from_command(command), Some(entry.id));
+            let registered = atman_runtime::meta_commands::match_command(command)
+                .expect("palette commands must be registered for help and completion");
+            assert!(
+                candidates
+                    .iter()
+                    .any(|item| { item.insert == format!(":{} ", registered.name) })
+            );
+        }
+        assert!(candidates.iter().any(|item| item.insert == ":panel "));
+        for command in ["models extra", "storage local", "sidebar off", "help"] {
+            assert!(PaletteEntryId::from_command(command).is_none());
+        }
+    }
 
     #[test]
     fn query_viewport_keeps_cursor_and_mouse_in_rendered_columns() {

@@ -189,6 +189,25 @@ Three input modes:
 
 When a completion menu is open, use `↑`/`↓` to select an item and `Enter` or `Tab` to place it in the input. Press `Enter` again to submit the completed command.
 
+In the TUI, `:panel` opens the `Ctrl+P` command palette without requiring the shortcut. Palette actions also have direct commands, displayed beside each menu item:
+
+| Action | Command |
+|--------|---------|
+| Command palette | `:panel` |
+| Provider, model, and alias managers | `:providers`, `:models`, `:aliases` |
+| Switch active model | `:model` |
+| MCP servers; Memory & Rules | `:mcp`, `:memory` |
+| History search; keyboard shortcuts | `:history`, `:keybindings` |
+| All Projects; project storage scope | `:projects`, `:storage` |
+| Trust mode; display theme; formula rendering | `:mode`, `:mode-theme`, `:formula` |
+| Switch; create; move session | `:sessions`, `:new-session`, `:move-session` |
+| Choose a session to delete; generate a name | `:delete-session`, `:name-session` |
+| Toggle sidebar; select transcript text | `:sidebar`, `:yank` |
+| Copy last assistant message or tool result | `:copy last-message`, `:copy last-tool` |
+| Compact transcript | `:compact` |
+
+Panel commands use the same actions as the palette and remain available during a running flow. Opening a panel does not submit a prompt or consume pending quotes or attachments. Transcript commands such as `:copy` and `:compact`, and commands with arguments such as `:storage local` and `:sidebar off`, retain their existing behavior. `:help` prints command help; `:keybindings` opens the shortcuts panel. The plain REPL completes commands from the same registry and reports when a command requires the TUI.
+
 Tool-call purposes become the primary labels in output blocks, workflow nodes, approval rows, sub-agent panels, task windows, and the Tasks activity area. The tool name and source handle remain visible as secondary technical metadata. Expanded Bash and Terminal output blocks and their floating task panels also show the original spawn command for auditing. The managed agent writes these dynamic labels in the current user's language when practical. The Tasks activity area shows running leaves, so a dispatcher is hidden while its concrete parallel tool calls are active.
 
 Try the smoke test first:

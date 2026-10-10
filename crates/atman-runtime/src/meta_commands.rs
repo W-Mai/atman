@@ -7,6 +7,90 @@ pub struct MetaCommand {
 
 pub const META_COMMANDS: &[MetaCommand] = &[
     MetaCommand {
+        name: "panel",
+        desc: "open the command palette (Ctrl+P)",
+        usage: ":panel",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "providers",
+        desc: "manage provider connections",
+        usage: ":providers",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "models",
+        desc: "manage model configurations",
+        usage: ":models",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "aliases",
+        desc: "manage model aliases",
+        usage: ":aliases",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "mcp",
+        desc: "manage MCP servers and tools",
+        usage: ":mcp",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "memory",
+        desc: "manage memory and rules",
+        usage: ":memory",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "history",
+        desc: "search session and project history",
+        usage: ":history",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "formula",
+        desc: "configure formula rendering",
+        usage: ":formula",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "keybindings",
+        desc: "open the keyboard shortcuts panel",
+        usage: ":keybindings",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "new-session",
+        desc: "start a new session in this directory",
+        usage: ":new-session",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "move-session",
+        desc: "choose a new working directory for this session",
+        usage: ":move-session",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "delete-session",
+        desc: "open the session list to choose a session to delete",
+        usage: ":delete-session",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "name-session",
+        desc: "generate a session name",
+        usage: ":name-session",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "yank",
+        desc: "enter transcript selection and copy mode",
+        usage: ":yank",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "help",
         desc: "show this help",
         usage: ":help",
@@ -86,8 +170,8 @@ pub const META_COMMANDS: &[MetaCommand] = &[
     },
     MetaCommand {
         name: "sidebar",
-        desc: "sidebar on / off / auto",
-        usage: ":sidebar on | off | auto",
+        desc: "toggle sidebar or set on / off / auto",
+        usage: ":sidebar [on|off|auto]",
         aliases: &[],
     },
     MetaCommand {

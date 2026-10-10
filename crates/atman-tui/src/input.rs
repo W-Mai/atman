@@ -675,6 +675,11 @@ impl InputEditor {
         self.submit_with_images().map(|submission| submission.text)
     }
 
+    /// Resolve text placeholders without consuming the composer or its attachments.
+    pub fn submission_text(&self) -> String {
+        expand_submission_text(self.buf.clone(), &self.pending_images, &self.pending_pastes)
+    }
+
     pub fn submit_with_images(&mut self) -> Option<EditorSubmission> {
         let raw = std::mem::take(&mut self.buf);
         self.cursor = 0;
@@ -684,17 +689,7 @@ impl InputEditor {
         let pending_images = std::mem::take(&mut self.pending_images);
         self.next_paste_index = 0;
         self.next_image_index = 0;
-        let mut line = raw;
-        for image in &pending_images {
-            remove_marker_text(&mut line, &image.marker);
-        }
-        for PastedEntry {
-            placeholder,
-            content,
-        } in &pending
-        {
-            line = line.replacen(placeholder, content, 1);
-        }
+        let line = expand_submission_text(raw, &pending_images, &pending);
         if line.trim().is_empty() && pending_images.is_empty() {
             return None;
         }
@@ -895,6 +890,20 @@ impl InputEditor {
     }
 }
 
+fn expand_submission_text(
+    mut text: String,
+    images: &[PendingImageRef],
+    pastes: &[PastedEntry],
+) -> String {
+    for image in images {
+        remove_marker_text(&mut text, &image.marker);
+    }
+    for paste in pastes {
+        text = text.replacen(&paste.placeholder, &paste.content, 1);
+    }
+    text
+}
+
 fn remove_marker_text(text: &mut String, marker: &str) {
     let Some((remove_start, end)) = marker_removal_range(text, marker) else {
         return;
@@ -979,6 +988,9 @@ mod tests {
         editor.attach_image(image("one.png"));
         editor.insert_str("describe it");
 
+        assert_eq!(editor.submission_text(), "describe it");
+        assert_eq!(editor.pending_images().len(), 1);
+        assert!(editor.buf().contains("[image 1]"));
         let submission = editor.submit_with_images().unwrap();
 
         assert_eq!(submission.text, "describe it");

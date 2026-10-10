@@ -12,6 +12,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Colon panel commands** — `:panel` opens the command palette, and every palette action has a direct colon command. Panel commands open during running flows without submitting prompts or consuming pending quotes and attachments. TUI and plain REPL command completion share the command registry.
 - **Alias model search** — Alias forms support provider groups, model counts, search by model name or API ID, provider scopes, and grouped pagination. Keyboard and mouse controls preserve the bound target during filtering and keep the original name-to-model Tab navigation.
 - **Protocol settings and model tests** — Provider settings expose API selection separately from Chat reasoning format; model settings support inheritance and overrides. Test connection checks discovery, while Test model uses the draft's resolved protocol and reasoning without executing tools. Dynamic fields share keyboard and mouse navigation.
 - **Provider API selection** — API-key connections support Chat Completions and Responses with provider defaults and per-model overrides. Responses preserves protocol state across local history replay and shares request encoding, streaming, usage, and cache projection with Codex.

@@ -3216,7 +3216,10 @@ async fn cmd_repl_once(
                     let arg = trimmed.strip_prefix("copy").unwrap_or("").trim();
                     handle_copy_builtin(arg, &session, &reporter);
                 }
-                _ => {}
+                _ => reporter.info(format!(
+                    "[atman] :{} — {} (available in TUI mode)",
+                    mc.name, mc.desc
+                )),
             }
             continue;
         }

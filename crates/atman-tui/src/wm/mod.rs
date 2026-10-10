@@ -735,6 +735,37 @@ impl WindowManager {
         }
     }
 
+    /// Execute a colon command through the same action path as the palette.
+    pub(crate) fn dispatch_meta_command(
+        &mut self,
+        input: &str,
+        app: &mut crate::app::AppState,
+        control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool {
+        let Some(command) = input.trim().strip_prefix(':').map(str::trim) else {
+            return false;
+        };
+        if command == "panel" {
+            self.modals.palette.open();
+            return true;
+        }
+        let Some(id) = crate::palette::PaletteEntryId::from_command(command) else {
+            return false;
+        };
+        // Keep existing transcript operations on their runtime command path.
+        if matches!(
+            id,
+            crate::palette::PaletteEntryId::CopyLastMessage
+                | crate::palette::PaletteEntryId::CopyLastTool
+                | crate::palette::PaletteEntryId::CompactNow
+        ) {
+            return false;
+        }
+        let commands = self.apply_palette_action(id, app, control_tx);
+        self.apply_commands(app, commands, control_tx);
+        true
+    }
+
     /// Execute a picked command-palette entry. Called right after the palette
     /// closes on Submit; opens the target modal, mutates app state, and emits
     /// control/session commands.
@@ -1339,6 +1370,28 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[test]
+    fn transcript_commands_and_arguments_remain_runtime_owned() {
+        let mut wm = WindowManager::default();
+        let mut app = crate::app::AppState::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for command in [
+            ":copy last-message",
+            ":copy last-tool",
+            ":compact",
+            ":storage local",
+            ":sidebar off",
+            ":help",
+            ":panel extra",
+            ":unknown",
+        ] {
+            assert!(!wm.dispatch_meta_command(command, &mut app, Some(&tx)));
+        }
+        assert!(rx.try_recv().is_err());
+        assert!(wm.panels.is_empty());
+        assert!(!wm.modals.any_open());
+    }
 
     struct CountingContent(Arc<AtomicUsize>);
 

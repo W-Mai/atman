@@ -1113,6 +1113,19 @@ pub(crate) fn handle_key(
         app.save_ui_state();
         return;
     }
+    if matches!(action, KeyAction::Submit)
+        && !app.popup.is_open()
+        && app
+            .wm
+            .dispatch_meta_command(&editor.submission_text(), &mut app.app, control_tx)
+    {
+        editor.submit();
+        if let Some(session) = app.session.as_ref() {
+            editor.reconcile_images(&session.pending_images());
+        }
+        *interrupt_prompt = None;
+        return;
+    }
     if startup_recent_len.is_some()
         && matches!(action, KeyAction::Submit)
         && !editor.buf().trim().is_empty()
@@ -2097,6 +2110,97 @@ mod tests {
             assert_eq!(editor.buf(), completed);
             assert!(!state.app.popup.is_open());
             assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn panel_command_completes_before_opening_and_preserves_startup() {
+        let mut state = startup_state();
+        let mut editor = InputEditor::default();
+        editor.replace_with(":pan");
+        state.app.refresh_popup(editor.buf());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let count = state.items.len();
+
+        press_startup_key(&mut state, &mut editor, KeyAction::Submit, Some(&tx));
+        assert_eq!(editor.buf(), ":panel ");
+        assert!(!state.wm.modals.palette.open);
+        press_startup_key(&mut state, &mut editor, KeyAction::Submit, Some(&tx));
+        assert!(state.wm.modals.palette.open);
+        assert!(editor.buf().is_empty());
+        assert!(state.startup_intro.is_none());
+        assert_eq!(state.items.len(), count);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn panel_commands_bypass_submission_and_preserve_pending_content() {
+        for command in [":panel", ":history", ":memory"] {
+            for (running, image_first) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
+                let session = std::sync::Arc::new(atman_runtime::Session::open_ephemeral());
+                session
+                    .queue_image_bytes(PNG_BYTES, Some("pending.png"))
+                    .unwrap();
+                let mut state = crate::UiState::new(AppState::new("session".into(), None));
+                state.session = Some(session.clone());
+                state.pending_quote = Some("pending quote".into());
+                if running {
+                    state.apply_stream_frame(atman_runtime::stream::StreamFrame::FlowStart {
+                        run_id: "running".into(),
+                        flow_name: "agent".into(),
+                        parent_run_id: None,
+                        parent_node_id: None,
+                    });
+                }
+                let count = state.items.len();
+                let mut editor = InputEditor::default();
+                if image_first {
+                    editor.reconcile_images(&session.pending_images());
+                    editor.insert_str(command);
+                } else {
+                    editor.insert_str(command);
+                    editor.reconcile_images(&session.pending_images());
+                }
+                assert!(editor.buf().contains("[image 1]"));
+                let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+                let (submit_tx, mut submit_rx) = mpsc::unbounded_channel();
+                let mut interrupt = Some(std::time::Instant::now());
+                handle_key(
+                    KeyAction::Submit,
+                    &mut state,
+                    &mut editor,
+                    &mut interrupt,
+                    Some(&submit_tx),
+                    Some(&control_tx),
+                );
+                match command {
+                    ":panel" => assert!(state.wm.modals.palette.open),
+                    ":history" => assert!(state.wm.modals.history_search.open),
+                    ":memory" => {
+                        assert!(state.wm.panels.iter().any(|panel| {
+                            panel.content_key == crate::wm::ContentKey::Knowledge
+                                && panel.content.is_some()
+                        }));
+                        assert!(matches!(
+                            control_rx.try_recv(),
+                            Ok(TuiControl::ListKnowledge)
+                        ));
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(control_rx.try_recv().is_err());
+                assert!(submit_rx.try_recv().is_err());
+                assert!(interrupt.is_none());
+                assert_eq!(state.items.len(), count);
+                assert_eq!(state.has_running_workflow(), running);
+                assert_eq!(state.pending_quote.as_deref(), Some("pending quote"));
+                assert_eq!(session.pending_image_count(), 1);
+                assert!(!session.flow_cancel_token().is_cancelled());
+                assert!(!editor.buf().contains(command));
+                assert!(editor.buf().contains("[image 1]"));
+            }
         }
     }
 

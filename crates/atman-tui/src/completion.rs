@@ -112,14 +112,18 @@ pub fn compute_candidates(
                 hint: hint.clone(),
             })
             .collect(),
-        ':' => builtins
-            .iter()
-            .filter(|(name, _)| name.to_ascii_lowercase().starts_with(&query_lower))
-            .map(|(name, hint)| CompletionItem {
-                insert: format!(":{name} "),
-                hint: hint.to_string(),
-            })
-            .collect(),
+        ':' => {
+            let mut candidates: Vec<_> = builtins
+                .iter()
+                .filter(|(name, _)| name.to_ascii_lowercase().starts_with(&query_lower))
+                .map(|(name, hint)| CompletionItem {
+                    insert: format!(":{name} "),
+                    hint: hint.to_string(),
+                })
+                .collect();
+            candidates.sort_by_key(|item| !item.insert.trim_end().eq_ignore_ascii_case(buf));
+            candidates
+        }
         '!' => interjections
             .iter()
             .filter(|(name, _)| {
@@ -319,8 +323,8 @@ pub fn cheatsheet_lines() -> Vec<Line<'static>> {
         Line::from(section("Windows")),
         kv("F1", "this cheatsheet"),
         kv("F2 / :sidebar", "toggle sidebar"),
-        kv("Ctrl+P", "command palette"),
-        kv("Ctrl+K", "search history"),
+        kv("Ctrl+P / :panel", "command palette"),
+        kv("Ctrl+K / :history", "search history"),
         Line::from(""),
         Line::from(section("Search History (Ctrl+K)")),
         kv("Enter", "search"),
@@ -393,6 +397,15 @@ mod tests {
         let out = compute_candidates(":he", &flows(), &builtins(), &interjections(), false);
         let inserts: Vec<_> = out.iter().map(|c| c.insert.clone()).collect();
         assert_eq!(inserts, vec![":help "]);
+    }
+
+    #[test]
+    fn complete_command_precedes_longer_prefix_matches() {
+        for command in ["model", "mode", "session"] {
+            let out = compute_candidates(&format!(":{command}"), &[], &builtins(), &[], false);
+            assert!(out.len() > 1);
+            assert_eq!(out[0].insert, format!(":{command} "));
+        }
     }
 
     #[test]

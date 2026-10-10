@@ -6,10 +6,6 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 
-const BUILTINS: &[&str] = &[
-    "help", "exit", "quit", "session", "sessions", "cost", "attach", "suggest", "goal", "model",
-];
-
 const INTERJECTIONS: &[&str] = &["nudge", "course-correct", "redirect", "stop"];
 
 pub struct AtmanCompleter {
@@ -36,9 +32,18 @@ impl AtmanCompleter {
     pub fn complete_line(&self, line: &str, pos: usize) -> (usize, Vec<Pair>) {
         let head = &line[..pos];
         if let Some(rest) = head.strip_prefix(':') {
-            let (word, word_start) = last_word(rest, pos - rest.len());
-            let candidates = filter_prefix(BUILTINS.iter().map(|s| s.to_string()), word);
-            return (word_start, pairs(&candidates));
+            let word = rest.trim_start();
+            if word.chars().any(char::is_whitespace) {
+                return (pos, Vec::new());
+            }
+            let names = atman_runtime::meta_commands::META_COMMANDS
+                .iter()
+                .flat_map(|command| {
+                    std::iter::once(command.name).chain(command.aliases.iter().copied())
+                })
+                .map(str::to_owned);
+            let candidates = filter_prefix(names, word);
+            return (pos - word.len(), pairs(&candidates));
         }
         if let Some(rest) = head.strip_prefix('!') {
             let (word, word_start) = last_word(rest, pos - rest.len());
@@ -139,11 +144,48 @@ mod tests {
     }
 
     #[test]
-    fn colon_prefix_lists_all_when_empty() {
+    fn colon_completions_cover_the_command_registry_and_aliases() {
         let c = AtmanCompleter::new(None);
         let (_, cand) = c.complete_line(":", 1);
-        assert!(cand.iter().any(|p| p.display == "help"));
-        assert!(cand.iter().any(|p| p.display == "attach"));
+        let names = cand
+            .iter()
+            .map(|pair| pair.replacement.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut registered_count = 0;
+        for command in atman_runtime::meta_commands::META_COMMANDS {
+            assert!(names.contains(command.name));
+            registered_count += 1;
+            for alias in command.aliases {
+                assert!(names.contains(alias));
+                registered_count += 1;
+            }
+        }
+        assert_eq!(cand.len(), registered_count);
+        assert_eq!(names.len(), registered_count);
+
+        let (start, aliases) = c.complete_line(":qui", 4);
+        assert_eq!(start, 1);
+        assert!(aliases.iter().any(|pair| pair.replacement == "quit"));
+    }
+
+    #[test]
+    fn colon_completions_only_replace_the_command_word() {
+        let c = AtmanCompleter::new(None);
+        for line in [":help ", ":rename he", ":storage\tlo", ":copy\nlast"] {
+            let (start, cand) = c.complete_line(line, line.len());
+            assert_eq!(start, line.len());
+            assert!(
+                cand.is_empty(),
+                "unexpected command completion for {line:?}"
+            );
+        }
+
+        for (line, pos, expected_start) in [(":ex argument", 3, 1), (":  ex", 5, 3)] {
+            let (start, cand) = c.complete_line(line, pos);
+            assert_eq!(start, expected_start);
+            assert_eq!(cand.len(), 1);
+            assert_eq!(cand[0].replacement, "exit");
+        }
     }
 
     #[test]
