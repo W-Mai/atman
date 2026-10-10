@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Provider management** — Searchable records, source-specific actions, and responsive details preserve keyboard and mouse navigation. Provider forms use explicit Save / Cancel, retain hidden pending operations, and bind connection results to the tested draft. Removal checks references, and modal input stays isolated from transcript selection menus and blocking notifications.
 - **Memory and Rules panel** — Padded records and action buttons share mouse geometry and subdued hover. Narrow windows can expand a record's details with independent keyboard or mouse scrolling. Editor fields follow focus while preserving cursor placement and visible Save / Cancel controls; archive confirmation also supports keyboard scrolling.
 - **MCP browser controls** — Server records and action buttons share padded mouse targets and subdued hover. Selection stays visible, diagnostics wrap in the scrollable view, and expanded resources or prompts load when changing sections. Remove provides explicit Confirm and Cancel controls, and covered panels no longer handle input intended for a modal.
 - **Model selection and setup** — Switch Model and initial setup use padded records, subdued hover, visible action buttons, and keyboard or mouse selection. Model switches wait for their matching result, model lists keep selection visible while paging, and narrow terminals retain the primary controls.

@@ -174,6 +174,9 @@ impl WindowManager {
         control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> bool {
         self.sync_modals();
+        if app.modal_notification.is_some() {
+            return true;
+        }
         if let Some(kind) = self.top_kind() {
             self.modals.dispatch_paste(kind, text, app, control_tx);
             return true;
@@ -609,6 +612,12 @@ impl WindowManager {
         control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> (bool, Vec<WmCommand>) {
         self.sync_modals();
+        if app.modal_notification.is_some() {
+            if matches!(action, crate::keys::KeyAction::Escape) {
+                app.modal_notification = None;
+            }
+            return (true, Vec::new());
+        }
         if let Some(kind) = self.layers.dispatch_key() {
             let (consumed, carried) = self.modals.handle_key_top(kind, action, app, control_tx);
             let commands = carried
@@ -618,13 +627,11 @@ impl WindowManager {
                     }
                     crate::wm::ModalAction::Consumed
                     | crate::wm::ModalAction::OpenModelManager(_)
+                    | crate::wm::ModalAction::OpenAliasManager
                     | crate::wm::ModalAction::OpenAliasForModel(_) => None,
                 })
                 .unwrap_or_default();
             return (consumed, commands);
-        }
-        if app.modal_notification.is_some() {
-            return (false, Vec::new());
         }
         if !app.submission_focus
             && (!app.pending_permissions.is_empty() || !app.pending_permission_groups.is_empty())
@@ -1531,6 +1538,30 @@ mod tests {
         let reopened = wm.panels[0].content.as_deref().unwrap() as *const dyn WindowComponent;
         assert_eq!(wm.panels.len(), 1);
         assert!(std::ptr::addr_eq(original, reopened));
+    }
+
+    #[test]
+    fn notifications_block_keys_and_paste_before_underlying_modals() {
+        let mut wm = WindowManager::default();
+        let mut app = crate::app::AppState::default();
+        wm.modals.palette.open();
+        app.modal_notification = Some("Notice".into());
+
+        assert!(wm.dispatch_paste("hidden input", &mut app, None));
+        for action in [crate::keys::KeyAction::Save, crate::keys::KeyAction::Submit] {
+            let (consumed, commands) = wm.dispatch_key(&action, &mut app, None);
+            assert!(consumed && commands.is_empty());
+            assert!(app.modal_notification.is_some());
+        }
+        assert!(wm.modals.palette.input.buf().is_empty());
+        assert!(wm.modals.palette.open);
+
+        assert!(
+            wm.dispatch_key(&crate::keys::KeyAction::Escape, &mut app, None)
+                .0
+        );
+        assert!(app.modal_notification.is_none());
+        assert!(wm.modals.palette.open);
     }
 
     #[test]

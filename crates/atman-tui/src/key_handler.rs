@@ -1619,6 +1619,7 @@ pub(crate) fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::BackTab => {}
+        KeyAction::Save => {}
         KeyAction::MoveItemUp | KeyAction::MoveItemDown => {}
         KeyAction::CyclePanelForward | KeyAction::CyclePanelBackward => {}
         KeyAction::OpenProjectHub => {}

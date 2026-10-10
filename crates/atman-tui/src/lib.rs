@@ -173,10 +173,7 @@ pub enum TuiControl {
         request_id: u64,
         model: String,
     },
-    TestProvider {
-        name: String,
-        entry: atman_runtime::model_registry::ProviderEntry,
-    },
+    TestProviderConnection(ProviderConnectionTestRequest),
     TestModel(ModelTestRequest),
     TermResize {
         handle: String,
@@ -277,7 +274,10 @@ pub enum TuiCommand {
         request: ModelMutationRequest,
         result: Result<ModelMutationSuccess, String>,
     },
-    ProviderTestResult((String, bool)),
+    ProviderTestResult {
+        request_id: u64,
+        result: Result<String, String>,
+    },
     ModelTestResult {
         request_id: u64,
         result: Result<String, String>,
@@ -466,6 +466,14 @@ pub struct ModelTestRequest {
     pub reasoning: atman_runtime::provider::ReasoningSelection,
     pub max_tokens: Option<u32>,
     pub cancel: tokio_util::sync::CancellationToken,
+}
+
+/// Checks a provider draft's directory access without saving its configuration.
+#[derive(Debug, Clone)]
+pub struct ProviderConnectionTestRequest {
+    pub request_id: u64,
+    pub name: String,
+    pub entry: atman_runtime::model_registry::ProviderEntry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

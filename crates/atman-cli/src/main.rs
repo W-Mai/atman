@@ -2641,11 +2641,16 @@ async fn cmd_repl_once(
                             result,
                         });
                     }
-                    atman_tui::TuiControl::TestProvider { name, entry } => {
+                    atman_tui::TuiControl::TestProviderConnection(request) => {
                         let tx = cmd_tx_for_models.clone();
                         tokio::spawn(async move {
-                            let (msg, ok) = test_provider_endpoint(&name, &entry).await;
-                            let _ = tx.send(atman_tui::TuiCommand::ProviderTestResult((msg, ok)));
+                            let (message, ok) =
+                                test_provider_endpoint(&request.name, &request.entry).await;
+                            let result = if ok { Ok(message) } else { Err(message) };
+                            let _ = tx.send(atman_tui::TuiCommand::ProviderTestResult {
+                                request_id: request.request_id,
+                                result,
+                            });
                         });
                     }
                     atman_tui::TuiControl::TestModel(request) => {
@@ -8916,7 +8921,9 @@ async fn test_provider_endpoint(
     name: &str,
     entry: &atman_runtime::model_registry::ProviderEntry,
 ) -> (String, bool) {
-    let provider = match atman_runtime::config_provider::build_config_provider(name, entry) {
+    let mut draft = entry.clone();
+    draft.enabled = Some(true);
+    let provider = match atman_runtime::config_provider::build_config_provider(name, &draft) {
         Ok(provider) => provider,
         Err(availability) => {
             let reason = match availability {

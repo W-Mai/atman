@@ -9,6 +9,7 @@ use crate::theme::Theme;
 /// Geometry shared by settings fields, actions, and their mouse targets.
 pub(crate) struct FormLayout {
     pub fields: Vec<(usize, Rect)>,
+    pub actions: Vec<Rect>,
     pub test: Rect,
     pub save: Rect,
     pub info: Rect,
@@ -18,6 +19,15 @@ pub(crate) struct FormLayout {
 
 impl FormLayout {
     pub fn new(area: Rect, field_count: usize, selected: usize) -> Self {
+        Self::with_actions(area, field_count, selected, 2)
+    }
+
+    pub fn with_actions(
+        area: Rect,
+        field_count: usize,
+        selected: usize,
+        action_count: usize,
+    ) -> Self {
         let width = area.width.saturating_sub(2).min(96);
         let top = u16::from(area.height >= 16);
         let content = Rect::new(
@@ -64,18 +74,31 @@ impl FormLayout {
         );
         let info = Rect::new(content.x, content.y + body_height, width, info_height);
         let action_y = info.bottom() + gap;
-        let action_gap = 2.min(width);
-        let button_width = width.saturating_sub(action_gap) / 2;
-        let test = Rect::new(content.x, action_y, button_width, action_height);
-        let save = Rect::new(
-            test.right() + action_gap,
-            action_y,
-            width.saturating_sub(button_width + action_gap),
-            action_height,
-        );
+        let count = action_count.clamp(1, 3) as u16;
+        let action_gap = 2.min(width / count);
+        let button_width = width.saturating_sub(action_gap * (count - 1)) / count;
+        let actions: Vec<_> = (0..count)
+            .map(|index| {
+                let x = content.x + index * (button_width + action_gap);
+                let remaining = content.right().saturating_sub(x);
+                Rect::new(
+                    x,
+                    action_y,
+                    if index + 1 == count {
+                        remaining
+                    } else {
+                        button_width.min(remaining)
+                    },
+                    action_height,
+                )
+            })
+            .collect();
+        let test = actions[actions.len().saturating_sub(2)];
+        let save = actions[actions.len() - 1];
         let help = Rect::new(content.x, save.bottom(), width, help_height);
         Self {
             fields,
+            actions,
             test,
             save,
             info,
@@ -293,6 +316,26 @@ pub(crate) fn render_action(f: &mut Frame, rect: Rect, action: &Action<'_>, t: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_groups_share_the_available_width_without_overlap() {
+        for width in [0, 1, 2, 3, 8, 24, 40, 96] {
+            for count in 1..=3 {
+                let area = Rect::new(3, 2, width, 18);
+                let layout = FormLayout::with_actions(area, 8, 4, count);
+                assert_eq!(layout.actions.len(), count);
+                for rect in &layout.actions {
+                    assert!(rect.x >= area.x && rect.right() <= area.right());
+                    assert!(rect.y >= area.y && rect.bottom() <= area.bottom());
+                    assert_eq!(rect.height, 3);
+                }
+                for pair in layout.actions.windows(2) {
+                    assert!(pair[0].right() <= pair[1].x);
+                }
+                assert_eq!(layout.save, *layout.actions.last().unwrap());
+            }
+        }
+    }
 
     #[test]
     fn form_geometry_keeps_padded_records_and_actions_inside_the_viewport() {

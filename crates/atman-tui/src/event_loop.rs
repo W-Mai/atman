@@ -186,7 +186,9 @@ pub(crate) async fn run_frames(
         let draw_result = terminal
             .draw(|f| render_frame(f, &mut app, &editor))
             .map(|_| ());
-        let cursor_result = if let Some(kind) = app.wm.top_kind() {
+        let cursor_result = if app.app.modal_notification.is_some() {
+            terminal.hide_cursor()
+        } else if let Some(kind) = app.wm.top_kind() {
             if app.wm.modals.cursor_visible(kind) {
                 terminal.show_cursor()
             } else {
@@ -240,6 +242,9 @@ pub(crate) async fn run_frames(
                 let mut scroll_delta: i32 = 0;
                 let mut drained: u32 = 0;
                 loop {
+                    if app.wm.modals.any_open() || app.app.modal_notification.is_some() {
+                        app.selection_menu = None;
+                    }
                     match current {
                         Some(Ok(CtEvent::Mouse(me))) if app.selection_menu.is_some() => {
                             if handle_selection_menu_mouse(&mut app, &mut editor, &me) {
@@ -1788,18 +1793,14 @@ pub(crate) async fn run_frames(
                         TuiCommand::ModelMutationResult { request, result } => {
                             apply_model_mutation_result(&mut app, request, result);
                         }
-                        TuiCommand::ProviderTestResult((msg, ok)) => {
-                            let level = if ok {
-                                app::NoteLevel::Success
-                            } else {
-                                app::NoteLevel::Error
-                            };
-                            app.app.push_toast(
-                                msg,
-                                level,
-                                std::time::Duration::from_secs(5),
-                                app::ToastPosition::TopRight,
-                            );
+                        TuiCommand::ProviderTestResult { request_id, result } => {
+                            if app.wm.modals.provider_manager.resolve_test(request_id, &result) {
+                                let (message, level) = match result {
+                                    Ok(message) => (message, app::NoteLevel::Success),
+                                    Err(message) => (message, app::NoteLevel::Error),
+                                };
+                                app.app.push_toast(message, level, std::time::Duration::from_secs(5), app::ToastPosition::TopRight);
+                            }
                         }
                         TuiCommand::ModelTestResult { request_id, result } => {
                             if app.wm.modals.model_manager.resolve_test(request_id, &result) {
@@ -1975,7 +1976,7 @@ fn apply_provider_catalog_changed(app: &mut UiState, added_provider: Option<Stri
             .into_iter()
             .find(|group| group.provider_name == name)
             .is_none_or(|group| group.models.is_empty());
-        if needs_model {
+        if needs_model && (app.wm.modals.provider_manager.open || app.wm.modals.onboarding_open) {
             app.wm.modals.model_manager.open_with_provider(&name);
         }
         if app.wm.modals.onboarding_open {
@@ -4341,6 +4342,25 @@ mod tests {
             crate::onboarding::OnboardingStep::ModelSelect
         );
         assert!(app.wm.modals.model_manager.open);
+        assert!(app.app.toasts.last().unwrap().message.contains("added"));
+    }
+
+    #[test]
+    fn hidden_provider_completion_keeps_managers_hidden() {
+        let mut app = UiState::new(AppState::new("session".into(), None));
+        let provider = "hidden-config-ack-empty";
+        let request = pending_provider_request(&mut app, config_upsert(provider, true));
+        app.wm.modals.provider_manager.close();
+        apply_provider_mutation_result(
+            &mut app,
+            request,
+            Ok(crate::ProviderMutationSuccess::ConfigSaved {
+                name: provider.into(),
+                created: true,
+            }),
+        );
+        assert!(!app.wm.modals.provider_manager.open);
+        assert!(!app.wm.modals.model_manager.open);
         assert!(app.app.toasts.last().unwrap().message.contains("added"));
     }
 

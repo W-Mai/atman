@@ -1083,7 +1083,11 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     {
         render_selection_highlight(f, area, 0, &app.last_window_selection_projection, selection);
     }
-    render_selection_menu(f, area, &mut ui.selection_menu);
+    if ui.wm.modals.any_open() || app.modal_notification.is_some() {
+        ui.selection_menu = None;
+    } else {
+        render_selection_menu(f, area, &mut ui.selection_menu);
+    }
     if intro_progress >= 1.0 && app.startup_intro.is_some() {
         app.startup_intro = None;
     }

@@ -172,6 +172,7 @@ pub enum ModalAction {
     Dispatched(crate::palette::PaletteEntryId),
     OpenModelManager(String),
     OpenAliasForModel(String),
+    OpenAliasManager,
 }
 
 pub trait ModalOverlay {
@@ -282,9 +283,7 @@ impl ModalManager {
                         app,
                         tx,
                     );
-                    if let Some(ModalAction::OpenAliasForModel(model)) = mm_action {
-                        self.alias_manager.open_form_with_model(&model);
-                    }
+                    self.dispatch_manager_action(mm_action);
                     (true, None)
                 } else {
                     (false, None)
@@ -308,16 +307,8 @@ impl ModalManager {
             ModalKind::ProviderManager => {
                 if self.provider_manager.open {
                     let pm_action = self.provider_manager.handle_key(action, tx);
-                    if let Some(ModalAction::OpenModelManager(name)) = pm_action {
-                        self.model_manager.open_with_provider(&name);
-                    }
+                    self.dispatch_manager_action(pm_action);
                     self.drain_provider_feedback(app);
-                    if self.onboarding_open
-                        && !self.provider_manager.open
-                        && !self.provider_manager.has_pending_mutation()
-                    {
-                        self.onboarding.check_provider_manager_closed();
-                    }
                 }
                 (true, None)
             }
@@ -472,7 +463,8 @@ impl ModalManager {
         app: &mut crate::app::AppState,
         tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
-        self.provider_manager.handle_mouse(event, tx);
+        let action = self.provider_manager.handle_mouse(event, tx);
+        self.dispatch_manager_action(action);
         self.drain_provider_feedback(app);
     }
 
@@ -482,6 +474,19 @@ impl ModalManager {
         tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
         self.model_manager.handle_mouse(event, tx);
+    }
+
+    fn dispatch_manager_action(&mut self, action: Option<ModalAction>) {
+        match action {
+            Some(ModalAction::OpenModelManager(provider)) => {
+                self.model_manager.open_with_provider(&provider);
+            }
+            Some(ModalAction::OpenAliasForModel(model)) => {
+                self.alias_manager.open_form_with_model(&model);
+            }
+            Some(ModalAction::OpenAliasManager) => self.alias_manager.open(),
+            _ => {}
+        }
     }
 
     pub(super) fn handle_alias_mouse(
@@ -497,6 +502,12 @@ impl ModalManager {
     }
 
     fn drain_provider_feedback(&mut self, app: &mut crate::app::AppState) {
+        if self.onboarding_open
+            && !self.provider_manager.open
+            && !self.provider_manager.has_pending_mutation()
+        {
+            self.onboarding.check_provider_manager_closed();
+        }
         while let Some(feedback) = self.provider_manager.take_feedback() {
             let (message, level, duration) = match feedback {
                 crate::provider_manager::ProviderFeedback::RefreshStarted => (
@@ -623,20 +634,15 @@ impl ModalManager {
                 center_rect(canvas, w, h)
             }
             ModalKind::ProviderManager => {
-                let w = canvas
-                    .width
-                    .saturating_sub(4)
-                    .min(if self.provider_manager.in_form {
-                        96
-                    } else {
-                        70
-                    });
-                let h = if self.provider_manager.in_form {
-                    canvas.height.saturating_sub(2).min(44)
+                if canvas.width < 55 || canvas.height < 22 {
+                    canvas
                 } else {
-                    canvas.height.saturating_sub(2).min(24)
-                };
-                center_rect(canvas, w, h)
+                    center_rect(
+                        canvas,
+                        canvas.width.saturating_sub(4).min(108),
+                        canvas.height.saturating_sub(2).min(42),
+                    )
+                }
             }
             ModalKind::AliasManager => {
                 if self.alias_manager.show_form {
@@ -655,15 +661,15 @@ impl ModalManager {
                 center_rect(canvas, w, h)
             }
             ModalKind::ModelManager => {
-                let w = canvas
-                    .width
-                    .saturating_sub(4)
-                    .min(if self.model_manager.show_form { 96 } else { 80 });
-                let h = canvas
-                    .height
-                    .saturating_sub(2)
-                    .min(if self.model_manager.show_form { 44 } else { 24 });
-                center_rect(canvas, w, h)
+                if canvas.width < 55 || canvas.height < 22 {
+                    canvas
+                } else {
+                    center_rect(
+                        canvas,
+                        canvas.width.saturating_sub(4).min(108),
+                        canvas.height.saturating_sub(2).min(42),
+                    )
+                }
             }
             ModalKind::McpEditor => {
                 let w = canvas.width.saturating_sub(4).min(96);
@@ -1204,7 +1210,13 @@ mod tests {
             ] {
                 let rect = manager.compute_rect(kind, canvas);
                 assert_eq!(rect.intersection(canvas), rect);
-                assert!(rect.width <= 96 && rect.height <= 44);
+                let max_width =
+                    if matches!(kind, ModalKind::ProviderManager | ModalKind::ModelManager) {
+                        108
+                    } else {
+                        96
+                    };
+                assert!(rect.width <= max_width && rect.height <= 44);
             }
         }
     }

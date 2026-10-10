@@ -7,6 +7,7 @@ pub enum KeyAction {
     Delete,
     DeleteWordBackward,
     Submit,
+    Save,
     Newline,
     HistoryUp,
     HistoryDown,
@@ -58,6 +59,7 @@ pub fn map(ev: KeyEvent) -> KeyAction {
     let alt = ev.modifiers.contains(KeyModifiers::ALT);
     match (ev.code, ctrl, shift, alt) {
         (Char('c'), true, _, _) => KeyAction::Interrupt,
+        (Char('s' | 'S'), true, _, _) | (Char('\u{13}'), _, _, _) => KeyAction::Save,
         (Char('d'), true, _, _) => KeyAction::Quit,
         (Char('g'), true, _, _) => KeyAction::NudgePrefill,
         (Char('b'), true, _, false) => KeyAction::CoursePrefill,
@@ -134,6 +136,24 @@ mod tests {
         assert_eq!(
             map(ke(KeyCode::Enter, KeyModifiers::NONE)),
             KeyAction::Submit
+        );
+    }
+
+    #[test]
+    fn control_s_maps_to_save_without_inserting_text() {
+        for (code, modifiers) in [
+            (KeyCode::Char('s'), KeyModifiers::CONTROL),
+            (
+                KeyCode::Char('S'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            (KeyCode::Char('\u{13}'), KeyModifiers::NONE),
+        ] {
+            assert_eq!(map(ke(code, modifiers)), KeyAction::Save);
+        }
+        assert_eq!(
+            map(ke(KeyCode::Char('s'), KeyModifiers::NONE)),
+            KeyAction::Char('s')
         );
     }
 
