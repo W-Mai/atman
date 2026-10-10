@@ -445,9 +445,30 @@ fn prepare_discovered_details_with_profile(
     persisted_namespace: Option<&str>,
     models: &[crate::provider::DiscoveredModelDetails],
 ) -> Result<PreparedProviderCatalog, CatalogError> {
-    let in_memory_namespace = REGISTRY_STATE
-        .read()
-        .unwrap()
+    let model_namespace = provider_namespace(
+        &REGISTRY_STATE.read().unwrap(),
+        provider_key,
+        provider_name,
+        auth,
+        persisted_namespace,
+    )?;
+    let descriptor = ProviderDescriptor {
+        provider_key: provider_key.to_string(),
+        provider_name: provider_name.to_string(),
+        namespace: model_namespace,
+        wire_profile,
+    };
+    prepare_provider_catalog(descriptor, models)
+}
+
+fn provider_namespace(
+    state: &RegistryState,
+    provider_key: &str,
+    provider_name: &str,
+    auth: &AuthStore,
+    persisted_namespace: Option<&str>,
+) -> Result<String, CatalogError> {
+    let in_memory_namespace = state
         .catalogs
         .get(provider_key)
         .map(|catalog| catalog.descriptor.namespace.clone());
@@ -473,13 +494,7 @@ fn prepare_discovered_details_with_profile(
         let short_id = shortest_unique_provider_id(provider_key, &provider_ids);
         format!("{short_id}@{provider_name}")
     };
-    let descriptor = ProviderDescriptor {
-        provider_key: provider_key.to_string(),
-        provider_name: provider_name.to_string(),
-        namespace: model_namespace,
-        wire_profile,
-    };
-    prepare_provider_catalog(descriptor, models)
+    Ok(model_namespace)
 }
 
 pub(crate) fn shortest_unique_provider_id(provider_id: &str, provider_ids: &[String]) -> String {
@@ -685,10 +700,10 @@ pub fn replace_provider_catalog(
     Ok(commit_prepared_provider_catalog(prepared))
 }
 
-pub fn prepare_provider_catalog(
+fn build_provider_catalog(
     descriptor: ProviderDescriptor,
     models: &[crate::provider::DiscoveredModelDetails],
-) -> Result<PreparedProviderCatalog, CatalogError> {
+) -> Result<ProviderCatalog, CatalogError> {
     for (field, value) in [
         ("provider_key", descriptor.provider_key.as_str()),
         ("provider_name", descriptor.provider_name.as_str()),
@@ -716,6 +731,20 @@ pub fn prepare_provider_catalog(
         }
     }
 
+    Ok(ProviderCatalog {
+        descriptor,
+        models: next_models,
+    })
+}
+
+pub fn prepare_provider_catalog(
+    descriptor: ProviderDescriptor,
+    models: &[crate::provider::DiscoveredModelDetails],
+) -> Result<PreparedProviderCatalog, CatalogError> {
+    let ProviderCatalog {
+        descriptor,
+        models: next_models,
+    } = build_provider_catalog(descriptor, models)?;
     let transaction = REGISTRY_TRANSACTION_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1372,9 +1401,72 @@ pub fn all_provider_groups_with_empty() -> Vec<ProviderGroup> {
     provider_groups(true)
 }
 
+/// Return configuration and cached catalogs for management, including disabled providers. Cached records are projected without registering callable models or changing provider state.
+pub fn all_provider_groups_for_management() -> Vec<ProviderGroup> {
+    let mut state = REGISTRY_STATE.read().unwrap().clone();
+    let auth = AuthStore::load().unwrap_or_default();
+    let hub = crate::config_hub::ConfigHub::global().ok();
+    for provider in &auth.providers {
+        if state.catalogs.contains_key(&provider.id) {
+            continue;
+        }
+        let namespace = hub
+            .as_ref()
+            .and_then(|hub| hub.load_auth_model_namespace(&provider.id).ok().flatten());
+        let Ok(namespace) = provider_namespace(
+            &state,
+            &provider.id,
+            &provider.name,
+            &auth,
+            namespace.as_deref(),
+        ) else {
+            continue;
+        };
+        let models = hub
+            .as_ref()
+            .and_then(|hub| {
+                hub.load_auth_model_cache_details(&provider.id)
+                    .ok()
+                    .flatten()
+            })
+            .or_else(|| {
+                provider
+                    .model_cache
+                    .as_ref()
+                    .map(crate::auth_store::cached_to_discovered_details)
+            })
+            .unwrap_or_default();
+        let descriptor = ProviderDescriptor {
+            provider_key: provider.id.clone(),
+            provider_name: provider.name.clone(),
+            namespace,
+            wire_profile: match provider.kind {
+                crate::auth_store::ProviderKind::Codex => ReasoningWireProfile::CodexResponses,
+                crate::auth_store::ProviderKind::AnthropicOauth => {
+                    ReasoningWireProfile::AnthropicMessages
+                }
+                crate::auth_store::ProviderKind::GitHubCopilot
+                | crate::auth_store::ProviderKind::Custom => ReasoningWireProfile::Unknown,
+            },
+        };
+        if let Ok(catalog) = build_provider_catalog(descriptor, &models) {
+            state.catalogs.insert(provider.id.clone(), catalog);
+        }
+    }
+    provider_groups_in_state(&state, true, true)
+}
+
 fn provider_groups(include_empty: bool) -> Vec<ProviderGroup> {
     let state = REGISTRY_STATE.read().unwrap();
-    let entries = resolved_models_in_state(&state);
+    provider_groups_in_state(&state, include_empty, false)
+}
+
+fn provider_groups_in_state(
+    state: &RegistryState,
+    include_empty: bool,
+    management: bool,
+) -> Vec<ProviderGroup> {
+    let entries = resolved_models_in_state(state);
     let mut groups: std::collections::BTreeMap<String, Vec<ModelRow>> =
         std::collections::BTreeMap::new();
     for (name, resolved) in entries {
@@ -1387,7 +1479,11 @@ fn provider_groups(include_empty: bool) -> Vec<ProviderGroup> {
         let row = ModelRow {
             slug: name,
             provider_name: provider.clone(),
-            context_budget: info.context_budget,
+            context_budget: if management {
+                resolved.entry.context_budget.unwrap_or(info.context_budget)
+            } else {
+                info.context_budget
+            },
             max_output_tokens: info.max_output_tokens,
             thinking: info.thinking_enabled(),
             reasoning: info.reasoning.clone(),
@@ -1397,8 +1493,8 @@ fn provider_groups(include_empty: bool) -> Vec<ProviderGroup> {
         groups.entry(provider).or_default().push(row);
     }
     if include_empty {
-        for (provider, entry) in provider_entries_in_state(&state) {
-            if entry.enabled.unwrap_or(true) {
+        for (provider, entry) in provider_entries_in_state(state) {
+            if management || entry.enabled.unwrap_or(true) {
                 groups.entry(provider).or_default();
             }
         }
@@ -3258,6 +3354,66 @@ max_tokens = 4096
                 ..Default::default()
             }),
         }
+    }
+
+    #[test]
+    fn management_projection_keeps_cached_identity_without_enabling_runtime_models() {
+        let _registry = isolated_registry();
+        let revision = model_catalog_revision();
+        let mut snapshot = REGISTRY_STATE.read().unwrap().clone();
+        snapshot.config.values.providers.insert(
+            "disabled-config".into(),
+            ProviderEntry {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        );
+        snapshot.config.values.models.insert(
+            "configured-model".into(),
+            ModelEntry {
+                provider: Some("disabled-config".into()),
+                model: "vendor/configured".into(),
+                context_budget: Some(128000),
+                enabled: Some(false),
+                ..Default::default()
+            },
+        );
+        let descriptor = descriptor(
+            "disabled-account",
+            "saved:account",
+            ReasoningWireProfile::CodexResponses,
+        );
+        let models = vec![advertised_model(
+            "vendor/model",
+            64000,
+            vec![ReasoningEffort::High],
+        )];
+        let catalog = build_provider_catalog(descriptor.clone(), &models).unwrap();
+        let expected_key = catalog.models["vendor/model"].registry_key.clone();
+        snapshot.catalogs.insert("disabled-account".into(), catalog);
+        let groups = provider_groups_in_state(&snapshot, true, true);
+        let cached = &groups
+            .iter()
+            .find(|group| group.provider_name == "disabled-account")
+            .unwrap()
+            .models[0];
+        assert_eq!(cached.slug, expected_key);
+        assert_eq!(cached.slug, "saved%3Aaccount:vendor/model");
+        assert_eq!(cached.context_budget, 64000);
+        let configured = &groups
+            .iter()
+            .find(|group| group.provider_name == "disabled-config")
+            .unwrap()
+            .models[0];
+        assert_eq!(configured.context_budget, 128000);
+        assert!(model_entry(&cached.slug).is_none());
+        assert!(all_provider_groups().is_empty());
+        assert_eq!(model_catalog_revision(), revision);
+        let prepared = prepare_provider_catalog(descriptor, &models).unwrap();
+        assert_eq!(
+            prepared.catalog.models["vendor/model"].registry_key,
+            cached.slug
+        );
     }
 
     #[test]

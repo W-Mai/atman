@@ -33,10 +33,6 @@ pub(crate) fn move_wrapped(
     true
 }
 
-pub(crate) fn footer_help(prefix: &str, suffix: &str) -> String {
-    format!("{prefix}  ←/→:switch  {suffix}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

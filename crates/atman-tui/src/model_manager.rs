@@ -1,13 +1,53 @@
 use crate::wm::modal::ModalAction;
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
 use crate::model_browser::{BrowserRow, BrowserRowKind, ModelBrowser};
+
+mod view;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Page {
+    #[default]
+    List,
+    Details,
+    Actions,
+    Status,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    Add,
+    Edit,
+    Alias,
+    Delete,
+    All,
+    More,
+    Back,
+    Save,
+    Cancel,
+    Test,
+    Stop,
+    Details,
+    Confirm,
+    Discard,
+    Keep,
+    Aliases,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Focus {
+    Search,
+    #[default]
+    List,
+    Details,
+    Action(Action),
+}
 
 fn reasoning_label(selection: &atman_runtime::provider::ReasoningSelection) -> String {
     selection.to_string()
@@ -20,10 +60,33 @@ fn parse_reasoning(value: &str) -> Option<atman_runtime::provider::ReasoningSele
 #[derive(Default)]
 pub struct ModelManager {
     pub open: bool,
+    resume_on_open: bool,
     groups: Vec<atman_runtime::model_registry::ProviderGroup>,
     provider_idx: usize,
     model_idx: Vec<usize>,
     browser: ModelBrowser,
+    configured: std::collections::HashSet<(String, String)>,
+    search: InputEditor,
+    search_hit: Option<crate::settings_form::FieldHit>,
+    page: Page,
+    return_page: Page,
+    focus: Focus,
+    narrow: bool,
+    record_hits: Vec<(String, Rect)>,
+    action_hits: Vec<(Action, Rect)>,
+    hovered_record: Option<String>,
+    hovered_action: Option<Action>,
+    detail_rect: Option<Rect>,
+    detail_scroll: usize,
+    detail_max_scroll: usize,
+    actions_offset: usize,
+    draft_snapshot: Vec<String>,
+    form_enabled: bool,
+    confirm_discard: bool,
+    confirm_focus: usize,
+    delete_aliases: Vec<String>,
+    status: Option<(String, bool)>,
+    open_alias_manager: bool,
     pub(crate) show_form: bool,
     form_field: usize,
     editing: Option<String>,
@@ -55,6 +118,9 @@ pub struct ModelManager {
 
 struct PendingModelTest {
     request_id: u64,
+    identity: Option<String>,
+    draft: Vec<String>,
+    cancel: tokio_util::sync::CancellationToken,
     _cancel_on_drop: tokio_util::sync::DropGuard,
 }
 
@@ -70,162 +136,208 @@ impl ModelManager {
 
     pub fn open(&mut self) {
         self.open = true;
-        self.locked_provider = None;
-        self.refresh();
+        if std::mem::take(&mut self.resume_on_open) {
+            return;
+        }
+        if !self.show_form && !self.inputs_locked() {
+            self.locked_provider = None;
+            self.refresh();
+        }
     }
 
     pub fn open_with_provider(&mut self, provider: &str) {
         self.open = true;
-        self.locked_provider = Some(provider.to_string());
-        self.refresh();
-        self.select_provider(provider);
+        if std::mem::take(&mut self.resume_on_open) {
+            return;
+        }
+        if !self.show_form && !self.inputs_locked() {
+            self.locked_provider = Some(provider.to_owned());
+            self.page = Page::List;
+            self.refresh();
+        }
     }
 
     pub fn close(&mut self) {
+        self.resume_on_open = self.inputs_locked() || self.show_form;
         self.open = false;
-        self.show_form = false;
-        self.confirm_delete = None;
-        self.pending_test = None;
-        self.clear_test_result();
+        self.clear_geometry();
+    }
+
+    fn clear_geometry(&mut self) {
+        self.record_hits.clear();
+        self.action_hits.clear();
+        self.form_hits.clear();
+        self.search_hit = None;
+        self.list_rect = None;
+        self.detail_rect = None;
+        self.form_info_rect = None;
+        self.save_rect = None;
+        self.test_rect = None;
+        self.confirm_yes_rect = None;
+        self.confirm_no_rect = None;
+        self.hovered_record = None;
+        self.hovered_action = None;
+        self.hovered_field = None;
     }
 
     pub fn has_text_focus(&self) -> bool {
-        self.show_form && !self.inputs_locked() && matches!(self.form_field, 0 | 1 | 3 | 4 | 5)
+        self.page != Page::Status
+            && !self.inputs_locked()
+            && !self.confirm_discard
+            && self.confirm_delete.is_none()
+            && ((self.show_form && matches!(self.form_field, 0 | 1 | 3 | 4 | 5))
+                || (!self.show_form && self.focus == Focus::Search))
+    }
+
+    fn take_modal_action(&mut self) -> Option<ModalAction> {
+        if let Some(model) = self.open_alias_model.take() {
+            Some(ModalAction::OpenAliasForModel(model))
+        } else if std::mem::take(&mut self.open_alias_manager) {
+            Some(ModalAction::OpenAliasManager)
+        } else {
+            Some(ModalAction::Consumed)
+        }
     }
 
     pub fn handle_mouse(
         &mut self,
         event: &crossterm::event::MouseEvent,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> Option<ModalAction> {
         use crossterm::event::{MouseButton, MouseEventKind};
-        if self.inputs_locked() {
-            return;
-        }
         let point = (event.column, event.row);
-        let selector = self.form_hits.iter().find_map(|(field, hit)| {
-            let (left, right) = hit.arrows?;
-            (rect_hit(Some(left), point) || rect_hit(Some(right), point)).then_some((*field, left))
-        });
-        match event.kind {
-            MouseEventKind::Down(MouseButton::Left) if rect_hit(self.confirm_yes_rect, point) => {
-                self.handle_key(&KeyAction::Submit, control_tx);
+        let action = self
+            .action_hits
+            .iter()
+            .find(|(_, rect)| rect_hit(Some(*rect), point))
+            .map(|(action, _)| *action);
+        if event.kind == MouseEventKind::Moved {
+            self.hovered_action = action;
+            self.hovered_record = self
+                .record_hits
+                .iter()
+                .find(|(_, rect)| rect_hit(Some(*rect), point))
+                .map(|(key, _)| key.clone());
+            self.hovered_field = self
+                .form_hits
+                .iter()
+                .find(|(_, hit)| rect_hit(Some(hit.record), point))
+                .map(|(field, _)| *field);
+            return Some(ModalAction::Consumed);
+        }
+        if event.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(action) = action {
+                self.dispatch(action, tx);
+                return self.take_modal_action();
             }
-            MouseEventKind::Down(MouseButton::Left) if rect_hit(self.confirm_no_rect, point) => {
-                self.handle_key(&KeyAction::Escape, control_tx);
-            }
-            MouseEventKind::Down(MouseButton::Left) if rect_hit(self.test_rect, point) => {
-                self.form_field = 7;
-                self.test_model(control_tx);
-            }
-            MouseEventKind::Down(MouseButton::Left) if selector.is_some() => {
-                let (field, left) = selector.unwrap();
-                self.form_field = field;
-                let action = if rect_hit(Some(left), point) {
-                    KeyAction::CursorLeft
-                } else {
-                    KeyAction::CursorRight
-                };
-                self.handle_form_key(&action, control_tx);
-            }
-            MouseEventKind::Moved => {
-                self.hovered_field = if rect_hit(self.save_rect, point) {
-                    Some(usize::MAX)
-                } else if rect_hit(self.test_rect, point) {
-                    Some(7)
-                } else {
-                    self.form_hits
+            if !self.inputs_locked() && !self.confirm_discard && self.confirm_delete.is_none() {
+                if self.show_form {
+                    if let Some((field, hit)) = self
+                        .form_hits
                         .iter()
                         .find(|(_, hit)| rect_hit(Some(hit.record), point))
-                        .map(|(field, _)| *field)
-                };
-            }
-            MouseEventKind::ScrollUp if rect_hit(self.form_info_rect, point) => {
-                self.form_info_scroll = self.form_info_scroll.saturating_sub(1);
-            }
-            MouseEventKind::ScrollDown if rect_hit(self.form_info_rect, point) => {
-                self.form_info_scroll = self
-                    .form_info_scroll
-                    .saturating_add(1)
-                    .min(self.form_info_max_scroll);
-            }
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                if self.show_form
-                    && self
-                        .form_hits
-                        .iter()
-                        .any(|(_, hit)| rect_hit(Some(hit.record), point)) =>
-            {
-                self.handle_form_key(
-                    &if matches!(event.kind, MouseEventKind::ScrollUp) {
-                        KeyAction::HistoryUp
-                    } else {
-                        KeyAction::HistoryDown
-                    },
-                    control_tx,
-                );
-            }
-            MouseEventKind::Down(MouseButton::Left)
-                if self.show_form
-                    && self
-                        .form_hits
-                        .iter()
-                        .any(|(_, hit)| rect_hit(Some(hit.record), point)) =>
-            {
-                let (field, hit) = self
-                    .form_hits
-                    .iter()
-                    .find(|(_, hit)| rect_hit(Some(hit.record), point))
-                    .copied()
-                    .unwrap();
-                self.form_field = field;
-                if !rect_hit(Some(hit.value), point) {
-                    return;
-                }
-                if matches!(field, 2 | 6) {
-                    let action = if event.column < hit.value.x + hit.value.width / 2 {
-                        KeyAction::CursorLeft
-                    } else {
-                        KeyAction::CursorRight
-                    };
-                    self.handle_form_key(&action, control_tx);
-                } else if let Some(editor) = self.form_editor_mut() {
-                    editor.set_cursor_by_display(
+                        .copied()
+                    {
+                        self.form_field = field;
+                        if let Some((left, right)) = hit.arrows
+                            && (rect_hit(Some(left), point) || rect_hit(Some(right), point))
+                        {
+                            self.handle_form_key(
+                                &if rect_hit(Some(left), point) {
+                                    KeyAction::CursorLeft
+                                } else {
+                                    KeyAction::CursorRight
+                                },
+                                tx,
+                            );
+                        } else if rect_hit(Some(hit.value), point) {
+                            if matches!(field, 2 | 6) {
+                                self.handle_form_key(&KeyAction::CursorRight, tx);
+                            } else if let Some(editor) = self.form_editor_mut() {
+                                editor.set_cursor_by_display(
+                                    0,
+                                    event
+                                        .column
+                                        .saturating_sub(hit.value.x)
+                                        .saturating_add(hit.offset.min(u16::MAX as usize) as u16),
+                                );
+                            }
+                        }
+                    }
+                } else if let Some(hit) = self
+                    .search_hit
+                    .filter(|hit| rect_hit(Some(hit.record), point))
+                {
+                    self.focus = Focus::Search;
+                    self.search.set_cursor_by_display(
                         0,
                         event
                             .column
                             .saturating_sub(hit.value.x)
                             .saturating_add(hit.offset.min(u16::MAX as usize) as u16),
                     );
-                }
-            }
-            MouseEventKind::Down(MouseButton::Left) if rect_hit(self.save_rect, point) => {
-                self.commit_form(control_tx);
-            }
-            MouseEventKind::Down(button) if rect_hit(self.list_rect, point) => {
-                let rect = self.list_rect.expect("matched list rect");
-                if self
-                    .browser
-                    .select_visible_row(usize::from(event.row.saturating_sub(rect.y)))
+                } else if let Some(key) = self
+                    .record_hits
+                    .iter()
+                    .find(|(_, rect)| rect_hit(Some(*rect), point))
+                    .map(|(key, _)| key.clone())
                 {
-                    self.apply_browser_selection();
-                    if button == MouseButton::Right {
-                        self.handle_key(&KeyAction::Char('d'), control_tx);
-                    }
+                    self.select_key(&key);
+                    self.dispatch(Action::Details, tx);
+                } else if rect_hit(self.detail_rect, point) {
+                    self.focus = Focus::Details;
                 }
             }
-            _ => {}
+        } else if matches!(
+            event.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            let up = event.kind == MouseEventKind::ScrollUp;
+            if rect_hit(self.form_info_rect, point) {
+                self.form_info_scroll = if up {
+                    self.form_info_scroll.saturating_sub(1)
+                } else {
+                    (self.form_info_scroll + 1).min(self.form_info_max_scroll)
+                };
+            } else if rect_hit(self.detail_rect, point) {
+                self.detail_scroll = if up {
+                    self.detail_scroll.saturating_sub(1)
+                } else {
+                    (self.detail_scroll + 1).min(self.detail_max_scroll)
+                };
+            } else if rect_hit(self.list_rect, point) && !self.inputs_locked() {
+                self.navigate(&if up {
+                    KeyAction::HistoryUp
+                } else {
+                    KeyAction::HistoryDown
+                });
+            } else if self.page == Page::Actions {
+                self.handle_key(
+                    &if up {
+                        KeyAction::HistoryUp
+                    } else {
+                        KeyAction::HistoryDown
+                    },
+                    tx,
+                );
+            } else if self.show_form
+                && self
+                    .form_hits
+                    .iter()
+                    .any(|(_, hit)| rect_hit(Some(hit.record), point))
+            {
+                self.handle_form_key(
+                    &if up {
+                        KeyAction::BackTab
+                    } else {
+                        KeyAction::Tab
+                    },
+                    tx,
+                );
+            }
         }
+        self.take_modal_action()
     }
-
-    fn is_config_model(name: &str) -> bool {
-        atman_runtime::config_hub::ConfigHub::global()
-            .and_then(|hub| hub.model_config())
-            .ok()
-            .flatten()
-            .is_some_and(|config| config.models.contains_key(name))
-    }
-
     fn begin_mutation(
         &mut self,
         action: crate::ModelMutation,
@@ -235,6 +347,8 @@ impl ModelManager {
             return false;
         }
         let Some(tx) = control_tx else {
+            self.test_result = Some(("Model operation is unavailable".into(), false));
+            self.status = self.test_result.clone();
             atman_runtime::notify!(error, "Model operation is unavailable");
             return false;
         };
@@ -247,10 +361,13 @@ impl ModelManager {
             .send(crate::TuiControl::MutateModel(request.clone()))
             .is_err()
         {
+            self.test_result = Some(("Model operation is unavailable".into(), false));
+            self.status = self.test_result.clone();
             atman_runtime::notify!(error, "Model operation is unavailable");
             return false;
         }
         self.pending = Some(request);
+        self.confirm_discard = false;
         true
     }
 
@@ -277,118 +394,363 @@ impl ModelManager {
             ) if name == removed
         );
         if !matches {
+            let message = result
+                .as_ref()
+                .err()
+                .cloned()
+                .unwrap_or_else(|| "Unexpected model operation response".into());
+            self.status = Some((message.clone(), false));
+            if self.show_form {
+                self.test_result = Some((message, false));
+            }
             return true;
         }
         match &request.action {
-            crate::ModelMutation::Upsert { .. } => {
+            crate::ModelMutation::Upsert { name, .. } => {
                 self.show_form = false;
                 self.editing = None;
+                self.page = Page::Details;
+                self.status = Some((format!("Saved model configuration: {name}"), true));
             }
-            crate::ModelMutation::Remove { .. } => {
+            crate::ModelMutation::Remove { name } => {
                 self.confirm_delete = None;
+                self.status = Some((format!("Deleted model configuration: {name}"), true));
             }
         }
         self.refresh();
+        if let crate::ModelMutation::Upsert { name, provider, .. } = &request.action {
+            let key = self.row_key(provider.as_deref().unwrap_or("unknown"), name);
+            if !self.browser.rows().iter().any(|row| row.value == key) {
+                self.search = InputEditor::default();
+                self.sync_browser();
+            }
+            self.select_key(&key);
+            self.status = Some((format!("Saved model configuration: {name}"), true));
+        }
         true
     }
 
     pub fn refresh(&mut self) {
-        let selected_provider = self.current_provider().to_string();
-        let selected_model = self.current_model().map(|model| model.slug.clone());
-        let enabled_providers = atman_runtime::model_registry::enabled_provider_names();
-        self.groups = atman_runtime::model_registry::all_provider_groups_with_empty()
-            .into_iter()
-            .filter(|g| enabled_providers.contains(&g.provider_name))
-            .collect();
-        self.provider_idx = self
-            .groups
-            .iter()
-            .position(|group| group.provider_name == selected_provider)
-            .unwrap_or(0);
+        self.groups = atman_runtime::model_registry::all_provider_groups_for_management();
+        self.groups
+            .sort_by(|a, b| a.provider_name.cmp(&b.provider_name));
+        self.configured = atman_runtime::config_hub::ConfigHub::global()
+            .and_then(|hub| hub.model_config())
+            .ok()
+            .flatten()
+            .map(|config| {
+                config
+                    .models
+                    .into_iter()
+                    .map(|(name, entry)| (entry.provider.unwrap_or_else(|| "unknown".into()), name))
+                    .collect()
+            })
+            .unwrap_or_default();
         self.model_idx = vec![0; self.groups.len()];
-        if let (Some(group), Some(selected_model)) =
-            (self.groups.get(self.provider_idx), selected_model)
-        {
-            self.model_idx[self.provider_idx] = group
-                .models
-                .iter()
-                .position(|model| model.slug == selected_model)
-                .unwrap_or(0);
-        }
         self.sync_browser();
+        if self
+            .confirm_delete
+            .as_ref()
+            .is_some_and(|name| !self.configured.iter().any(|(_, key)| key == name))
+        {
+            self.confirm_delete = None;
+        }
+        self.refresh_delete_references();
+    }
+
+    pub(crate) fn refresh_delete_references(&mut self) {
+        if let Some(name) = &self.confirm_delete {
+            self.delete_aliases = Self::aliases_for(name);
+            self.confirm_focus = 0;
+            self.clear_geometry();
+        }
+    }
+
+    fn row_key(&self, provider: &str, name: &str) -> String {
+        format!(
+            "{}\0{}\0{}",
+            if self.is_config_model(provider, name) {
+                "config"
+            } else {
+                "catalog"
+            },
+            provider,
+            name
+        )
+    }
+
+    fn is_config_model(&self, provider: &str, name: &str) -> bool {
+        self.configured
+            .contains(&(provider.to_owned(), name.to_owned()))
+    }
+
+    fn current_editable(&self) -> bool {
+        self.current_model()
+            .is_some_and(|model| self.is_config_model(self.current_provider(), &model.slug))
     }
 
     fn sync_browser(&mut self) {
+        let selected = self.browser.selected().map(|row| row.value.clone());
+        let old_index = self.browser.selected_index();
+        let query = self.search.buf().to_lowercase();
+        let entries: std::collections::HashMap<_, _> =
+            atman_runtime::model_registry::all_model_entries()
+                .into_iter()
+                .collect();
         let mut rows = Vec::new();
         for group in &self.groups {
-            rows.push(BrowserRow {
-                kind: BrowserRowKind::Provider,
-                label: atman_runtime::model_registry::provider_display_name(&group.provider_name),
-                value: group.provider_name.clone(),
-                selectable: false,
-            });
-            rows.extend(group.models.iter().map(|model| BrowserRow {
-                kind: BrowserRowKind::Model,
-                label: model.slug.clone(),
-                value: format!("{}\0{}", group.provider_name, model.slug),
-                selectable: true,
-            }));
+            if self
+                .locked_provider
+                .as_ref()
+                .is_some_and(|scope| scope != &group.provider_name)
+            {
+                continue;
+            }
+            for model in &group.models {
+                let source = if self.is_config_model(&group.provider_name, &model.slug) {
+                    "Configured"
+                } else {
+                    "Catalog"
+                };
+                let api_model = entries
+                    .get(&model.slug)
+                    .filter(|entry| {
+                        entry.provider.as_deref().unwrap_or("unknown") == group.provider_name
+                    })
+                    .map(|entry| entry.model.as_str())
+                    .unwrap_or_default();
+                if !format!(
+                    "{} {} {source} {api_model}",
+                    model.slug, group.provider_name
+                )
+                .to_lowercase()
+                .contains(&query)
+                {
+                    continue;
+                }
+                rows.push(BrowserRow {
+                    kind: BrowserRowKind::Model,
+                    label: model.slug.clone(),
+                    value: self.row_key(&group.provider_name, &model.slug),
+                    selectable: true,
+                });
+            }
         }
-        let selected = self
-            .groups
-            .get(self.provider_idx)
-            .and_then(|group| {
-                group
-                    .models
-                    .get(self.model_idx.get(self.provider_idx).copied().unwrap_or(0))
-            })
-            .map(|model| format!("{}\0{}", self.current_provider(), model.slug));
+        let fallback = rows
+            .get(old_index.min(rows.len().saturating_sub(1)))
+            .map(|row| row.value.clone());
+        let selected = selected
+            .filter(|key| rows.iter().any(|row| &row.value == key))
+            .or(fallback);
         self.browser.replace_rows(rows, selected.as_deref());
+        self.apply_browser_selection();
+        self.clear_geometry();
+    }
+
+    fn select_key(&mut self, key: &str) {
+        if self.browser.selected().is_none_or(|row| row.value != key) {
+            self.status = None;
+        }
+        self.browser
+            .replace_rows(self.browser.rows().to_vec(), Some(key));
+        self.apply_browser_selection();
+        self.detail_scroll = 0;
+        self.clear_geometry();
     }
 
     fn apply_browser_selection(&mut self) {
         let Some(row) = self.browser.selected() else {
             return;
         };
-        let Some((provider, slug)) = row.value.split_once('\0') else {
+        let mut parts = row.value.splitn(3, '\0');
+        let _ = parts.next();
+        let (Some(provider), Some(slug)) = (parts.next(), parts.next()) else {
             return;
         };
         if let Some(pi) = self
             .groups
             .iter()
             .position(|group| group.provider_name == provider)
-        {
-            if let Some(mi) = self.groups[pi]
+            && let Some(mi) = self.groups[pi]
                 .models
                 .iter()
                 .position(|model| model.slug == slug)
-            {
-                self.provider_idx = pi;
-                self.model_idx[pi] = mi;
-            }
-        }
-    }
-
-    fn select_provider(&mut self, name: &str) {
-        if let Some(idx) = self.groups.iter().position(|g| g.provider_name == name) {
-            self.provider_idx = idx;
-            self.sync_browser();
+        {
+            self.provider_idx = pi;
+            self.model_idx.resize(self.groups.len(), 0);
+            self.model_idx[pi] = mi;
         }
     }
 
     fn current_model(&self) -> Option<&atman_runtime::model_registry::ModelRow> {
-        self.groups
-            .get(self.provider_idx)
-            .and_then(|g| g.models.get(self.model_idx[self.provider_idx]))
+        self.browser.selected()?;
+        self.groups.get(self.provider_idx).and_then(|group| {
+            group
+                .models
+                .get(self.model_idx.get(self.provider_idx).copied().unwrap_or(0))
+        })
     }
 
     fn current_provider(&self) -> &str {
-        self.groups
-            .get(self.provider_idx)
-            .map(|g| g.provider_name.as_str())
+        self.locked_provider
+            .as_deref()
+            .or_else(|| {
+                self.groups
+                    .get(self.provider_idx)
+                    .map(|group| group.provider_name.as_str())
+            })
             .unwrap_or("")
     }
 
+    fn navigate(&mut self, action: &KeyAction) {
+        let before = self.browser.selected_index();
+        self.browser.handle_key(action, 0);
+        self.apply_browser_selection();
+        if before != self.browser.selected_index() {
+            self.detail_scroll = 0;
+            self.status = None;
+        }
+        self.clear_geometry();
+    }
+
+    fn draft(&self) -> Vec<String> {
+        vec![
+            self.name_editor.buf().into(),
+            self.model_editor.buf().into(),
+            self.selected_provider.clone(),
+            self.context_budget_editor.buf().into(),
+            self.thinking_editor.buf().into(),
+            self.max_tokens_editor.buf().into(),
+            format!("{:?}", self.form_api),
+            self.form_enabled.to_string(),
+        ]
+    }
+
+    fn aliases_for(name: &str) -> Vec<String> {
+        atman_runtime::model_registry::all_aliases()
+            .into_iter()
+            .filter(|(_, model)| {
+                model == name || atman_runtime::model_registry::resolve_alias(model) == name
+            })
+            .map(|(alias, _)| alias)
+            .collect()
+    }
+
+    fn actions(&self) -> Vec<Action> {
+        let mut actions = vec![Action::Add, Action::Edit, Action::Alias, Action::Delete];
+        if self.locked_provider.is_some() {
+            actions.push(Action::All);
+        }
+        actions
+    }
+
+    fn dispatch(
+        &mut self,
+        action: Action,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        if self.inputs_locked()
+            && !matches!(
+                action,
+                Action::Cancel | Action::Back | Action::Stop | Action::Details
+            )
+        {
+            return;
+        }
+        match action {
+            Action::Add => self.open_form(),
+            Action::Edit if self.current_editable() => self.open_edit(),
+            Action::Delete if self.current_editable() => {
+                self.status = None;
+                if let Some(name) = self.current_model().map(|model| model.slug.clone()) {
+                    self.delete_aliases = Self::aliases_for(&name);
+                    self.confirm_delete = Some(name);
+                    self.confirm_focus = 0;
+                    self.detail_scroll = 0;
+                }
+            }
+            Action::Edit | Action::Delete => {
+                self.status = Some((
+                    "Catalog model · read-only. Add creates a separate configuration.".into(),
+                    false,
+                ));
+                self.page = Page::Details;
+                self.focus = Focus::Details;
+            }
+            Action::Alias => {
+                self.open_alias_model = self.current_model().map(|model| model.slug.clone())
+            }
+            Action::Aliases => self.open_alias_manager = true,
+            Action::All => {
+                self.locked_provider = None;
+                self.page = Page::List;
+                self.sync_browser();
+            }
+            Action::More => {
+                self.return_page = self.page;
+                self.page = Page::Actions;
+                self.focus = Focus::Action(Action::Alias);
+                self.actions_offset = 0;
+            }
+            Action::Details if self.show_form => {
+                self.return_page = self.page;
+                self.page = Page::Status;
+                self.detail_scroll = 0;
+            }
+            Action::Details => {
+                self.page = Page::Details;
+                self.focus = Focus::Details;
+            }
+            Action::Save => self.commit_form(tx),
+            Action::Test => self.test_model(tx),
+            Action::Stop => {
+                if let Some(test) = &self.pending_test {
+                    test.cancel.cancel();
+                }
+            }
+            Action::Confirm => {
+                if let Some(name) = self.confirm_delete.clone() {
+                    self.delete_aliases = Self::aliases_for(&name);
+                    if self.delete_aliases.is_empty() {
+                        self.begin_mutation(crate::ModelMutation::Remove { name }, tx);
+                    }
+                }
+            }
+            Action::Discard => {
+                self.show_form = false;
+                self.confirm_discard = false;
+                self.editing = None;
+                self.page = Page::Details;
+            }
+            Action::Keep => self.confirm_discard = false,
+            Action::Cancel | Action::Back => {
+                if self.inputs_locked() {
+                    self.close();
+                } else if self.confirm_discard {
+                    self.confirm_discard = false;
+                } else if self.confirm_delete.take().is_some() {
+                    self.detail_scroll = 0;
+                } else if self.page == Page::Status || self.page == Page::Actions {
+                    self.page = self.return_page;
+                    self.focus = Focus::List;
+                } else if self.show_form {
+                    if self.draft() != self.draft_snapshot {
+                        self.confirm_discard = true;
+                        self.confirm_focus = 2;
+                    } else {
+                        self.show_form = false;
+                        self.page = Page::Details;
+                    }
+                } else if self.page == Page::Details {
+                    self.page = Page::List;
+                    self.focus = Focus::List;
+                } else {
+                    self.close();
+                }
+            }
+        }
+        self.clear_geometry();
+    }
     fn provider_entry(&self) -> Option<atman_runtime::model_registry::ProviderEntry> {
         atman_runtime::model_registry::all_provider_entries()
             .into_iter()
@@ -438,7 +800,7 @@ impl ModelManager {
         if self.api_visible() {
             fields.push(6);
         }
-        fields.extend([3, 4, 5, 7]);
+        fields.extend([3, 4, 5, 7, 8, 9, 10]);
         fields
     }
 
@@ -467,10 +829,12 @@ impl ModelManager {
             model
         };
         if model.is_empty() || self.selected_provider.is_empty() {
+            self.test_result = Some(("Select a provider and model before testing".into(), false));
             atman_runtime::notify!(error, "Select a provider and model before testing");
             return;
         }
         let Some(reasoning) = parse_reasoning(self.thinking_editor.buf()) else {
+            self.test_result = Some(("Reasoning value is invalid".into(), false));
             atman_runtime::notify!(error, "Reasoning value is invalid");
             return;
         };
@@ -480,12 +844,15 @@ impl ModelManager {
             match self.max_tokens_editor.buf().trim().parse::<u32>() {
                 Ok(value) if value > 0 => Some(value),
                 _ => {
+                    self.test_result =
+                        Some(("Max Tokens must be a positive integer".into(), false));
                     atman_runtime::notify!(error, "Max Tokens must be a positive integer");
                     return;
                 }
             }
         };
         let Some(tx) = control_tx else {
+            self.test_result = Some(("Model test is unavailable".into(), false));
             atman_runtime::notify!(error, "Model test is unavailable");
             return;
         };
@@ -502,11 +869,15 @@ impl ModelManager {
             cancel: cancel.clone(),
         };
         if tx.send(crate::TuiControl::TestModel(request)).is_err() {
+            self.test_result = Some(("Model test is unavailable".into(), false));
             atman_runtime::notify!(error, "Model test is unavailable");
             return;
         }
         self.pending_test = Some(PendingModelTest {
             request_id: self.next_request_id,
+            identity: self.editing.clone(),
+            draft: self.draft(),
+            cancel: cancel.clone(),
             _cancel_on_drop: cancel.drop_guard(),
         });
         self.clear_test_result();
@@ -517,7 +888,11 @@ impl ModelManager {
         request_id: u64,
         result: &Result<String, String>,
     ) -> bool {
-        if self.pending_test.as_ref().map(|test| test.request_id) != Some(request_id) {
+        if !self.pending_test.as_ref().is_some_and(|test| {
+            test.request_id == request_id
+                && test.identity == self.editing
+                && test.draft == self.draft()
+        }) {
             return false;
         }
         self.pending_test = None;
@@ -531,6 +906,9 @@ impl ModelManager {
 
     fn open_form(&mut self) {
         self.show_form = true;
+        self.page = Page::List;
+        self.confirm_discard = false;
+        self.form_enabled = true;
         self.form_field = 0;
         self.editing = None;
         self.form_api = None;
@@ -542,6 +920,8 @@ impl ModelManager {
         self.thinking_editor = InputEditor::default();
         self.thinking_editor.insert_str("default");
         self.max_tokens_editor = InputEditor::default();
+        self.draft_snapshot = self.draft();
+        self.clear_geometry();
     }
 
     fn open_edit(&mut self) {
@@ -556,8 +936,19 @@ impl ModelManager {
             .find(|(n, _)| *n == model.slug)
             .map(|(_, e)| e.clone());
         let Some(entry) = entry else { return };
+        self.load_edit_entry(&model, provider, &entry);
+    }
 
+    fn load_edit_entry(
+        &mut self,
+        model: &atman_runtime::model_registry::ModelRow,
+        provider: String,
+        entry: &atman_runtime::model_registry::ModelEntry,
+    ) {
         self.show_form = true;
+        self.page = Page::List;
+        self.confirm_discard = false;
+        self.form_enabled = entry.enabled.unwrap_or(true);
         self.form_field = 0;
         self.editing = Some(model.slug.clone());
         self.form_api = entry.api;
@@ -572,8 +963,9 @@ impl ModelManager {
             &entry.model
         });
         self.context_budget_editor = InputEditor::default();
-        self.context_budget_editor
-            .insert_str(&model.context_budget.to_string());
+        if let Some(budget) = entry.context_budget {
+            self.context_budget_editor.insert_str(&budget.to_string());
+        }
         self.thinking_editor = InputEditor::default();
         self.thinking_editor
             .insert_str(&reasoning_label(&model.reasoning));
@@ -581,87 +973,205 @@ impl ModelManager {
         if let Some(mt) = entry.max_tokens {
             self.max_tokens_editor.insert_str(&mt.to_string());
         }
+        self.draft_snapshot = self.draft();
+        self.clear_geometry();
     }
 
     pub fn handle_key(
         &mut self,
         action: &KeyAction,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
-        if self.pending_test.is_some() {
-            if matches!(action, KeyAction::Escape) {
-                self.close();
-            }
-            return;
-        }
-        if self.pending.is_some() {
-            return;
-        }
-        if let Some(name) = self.confirm_delete.clone() {
+        if self.inputs_locked() {
             match action {
-                KeyAction::Submit | KeyAction::Char('y') | KeyAction::Char('Y') => {
-                    self.begin_mutation(crate::ModelMutation::Remove { name }, control_tx);
+                KeyAction::Escape => self.close(),
+                KeyAction::Tab | KeyAction::BackTab if self.pending_test.is_some() => {
+                    self.form_field = if self.form_field == 7 { 9 } else { 7 }
                 }
-                KeyAction::Escape | KeyAction::Char('n') | KeyAction::Char('N') => {
-                    self.confirm_delete = None;
+                KeyAction::Submit if self.form_field == 7 && self.pending_test.is_some() => {
+                    self.dispatch(Action::Stop, tx)
+                }
+                KeyAction::Submit if self.form_field == 9 => self.close(),
+                KeyAction::PageUp | KeyAction::PageDown if self.show_form => {
+                    self.scroll_form_info(action)
                 }
                 _ => {}
             }
             return;
         }
+        if self.confirm_discard || self.confirm_delete.is_some() {
+            let actions = if self.confirm_discard {
+                vec![Action::Save, Action::Discard, Action::Keep]
+            } else if self.delete_aliases.is_empty() {
+                vec![Action::Cancel, Action::Confirm]
+            } else {
+                vec![Action::Cancel, Action::Aliases]
+            };
+            match action {
+                KeyAction::Escape => self.dispatch(Action::Cancel, tx),
+                KeyAction::Tab | KeyAction::CursorRight => {
+                    self.confirm_focus = (self.confirm_focus + 1) % actions.len()
+                }
+                KeyAction::BackTab | KeyAction::CursorLeft => {
+                    self.confirm_focus = (self.confirm_focus + actions.len() - 1) % actions.len()
+                }
+                KeyAction::Submit => {
+                    self.dispatch(actions[self.confirm_focus.min(actions.len() - 1)], tx)
+                }
+                KeyAction::PageUp
+                | KeyAction::PageDown
+                | KeyAction::HistoryUp
+                | KeyAction::HistoryDown => self.scroll_details(action),
+                _ => {}
+            }
+            return;
+        }
+        if self.page == Page::Status {
+            match action {
+                KeyAction::Escape | KeyAction::Submit => self.dispatch(Action::Back, tx),
+                _ => self.scroll_details(action),
+            }
+            return;
+        }
         if self.show_form {
-            self.handle_form_key(action, control_tx);
+            self.handle_form_key(action, tx);
+            return;
+        }
+        if self.focus == Focus::Search {
+            match action {
+                KeyAction::Escape | KeyAction::Submit | KeyAction::Tab => self.focus = Focus::List,
+                KeyAction::BackTab => self.focus = Focus::Action(Action::More),
+                _ => {
+                    let before = self.search.buf().to_owned();
+                    self.search.handle_key(action);
+                    if before != self.search.buf() {
+                        self.sync_browser();
+                        self.detail_scroll = 0;
+                    }
+                }
+            }
+            return;
+        }
+        if self.page == Page::Actions {
+            let actions = self.actions();
+            let i = actions
+                .iter()
+                .position(|a| self.focus == Focus::Action(*a))
+                .unwrap_or(0);
+            match action {
+                KeyAction::Escape => self.dispatch(Action::Back, tx),
+                KeyAction::HistoryUp | KeyAction::Char('k') | KeyAction::BackTab => {
+                    self.focus = Focus::Action(actions[i.saturating_sub(1)])
+                }
+                KeyAction::HistoryDown | KeyAction::Char('j') | KeyAction::Tab => {
+                    self.focus = Focus::Action(actions[(i + 1).min(actions.len() - 1)])
+                }
+                KeyAction::Home | KeyAction::CursorHome => self.focus = Focus::Action(actions[0]),
+                KeyAction::End | KeyAction::CursorEnd => {
+                    self.focus = Focus::Action(*actions.last().unwrap())
+                }
+                KeyAction::Submit => {
+                    self.page = self.return_page;
+                    self.dispatch(actions[i], tx);
+                }
+                _ => self.dispatch_shortcut(action, tx),
+            }
             return;
         }
         match action {
-            KeyAction::Escape => self.close(),
+            KeyAction::Escape => self.dispatch(Action::Back, tx),
+            KeyAction::Tab | KeyAction::BackTab => {
+                let mut focus = vec![Focus::Search, Focus::List];
+                if !self.narrow || self.page == Page::Details {
+                    focus.push(Focus::Details);
+                }
+                focus.extend(self.action_hits.iter().map(|(a, _)| Focus::Action(*a)));
+                let i = focus.iter().position(|f| f == &self.focus).unwrap_or(0);
+                self.focus = focus[if matches!(action, KeyAction::Tab) {
+                    (i + 1) % focus.len()
+                } else {
+                    (i + focus.len() - 1) % focus.len()
+                }];
+            }
+            KeyAction::Submit => self.dispatch(
+                if let Focus::Action(action) = self.focus {
+                    action
+                } else {
+                    Action::Details
+                },
+                tx,
+            ),
             KeyAction::HistoryUp
             | KeyAction::HistoryDown
-            | KeyAction::Char('j')
-            | KeyAction::Char('k')
+            | KeyAction::Char('j' | 'k')
             | KeyAction::PageUp
             | KeyAction::PageDown
             | KeyAction::Home
-            | KeyAction::End => {
-                self.browser.handle_key(action, 0);
-                self.apply_browser_selection();
-            }
-            KeyAction::Char('n') => self.open_form(),
-            KeyAction::Char('d') => {
-                if let Some(name) = self.current_model().map(|model| model.slug.clone()) {
-                    if Self::is_config_model(&name) {
-                        self.confirm_delete = Some(name);
-                    } else {
-                        atman_runtime::notify!(
-                            warn,
-                            "Discovered and preset models cannot be deleted"
-                        );
-                    }
+            | KeyAction::End
+            | KeyAction::CursorHome
+            | KeyAction::CursorEnd => {
+                if self.focus == Focus::Details || (self.narrow && self.page == Page::Details) {
+                    self.scroll_details(action);
+                } else {
+                    self.focus = Focus::List;
+                    self.navigate(action);
                 }
             }
-            KeyAction::Char('a') => {
-                if let Some(m) = self.current_model() {
-                    self.open_alias_model = Some(m.slug.clone());
-                }
-            }
-            KeyAction::Submit => {
-                if let Some(name) = self.current_model().map(|model| model.slug.clone()) {
-                    if Self::is_config_model(&name) {
-                        self.open_edit();
-                    } else {
-                        atman_runtime::notify!(
-                            warn,
-                            "Discovered and preset models cannot be edited"
-                        );
-                    }
-                }
-            }
+            _ => self.dispatch_shortcut(action, tx),
+        }
+    }
+
+    fn dispatch_shortcut(
+        &mut self,
+        key: &KeyAction,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        match key {
+            KeyAction::Char('/') => self.focus = Focus::Search,
+            KeyAction::Char('n') => self.dispatch(Action::Add, tx),
+            KeyAction::Char('e') => self.dispatch(Action::Edit, tx),
+            KeyAction::Char('a') => self.dispatch(Action::Alias, tx),
+            KeyAction::Delete => self.dispatch(Action::Delete, tx),
             _ => {}
         }
     }
 
+    fn scroll_details(&mut self, action: &KeyAction) {
+        let page = self.detail_rect.map_or(1, |r| usize::from(r.height).max(1));
+        self.detail_scroll = match action {
+            KeyAction::HistoryUp | KeyAction::Char('k') => self.detail_scroll.saturating_sub(1),
+            KeyAction::HistoryDown | KeyAction::Char('j') => {
+                (self.detail_scroll + 1).min(self.detail_max_scroll)
+            }
+            KeyAction::PageUp => self.detail_scroll.saturating_sub(page),
+            KeyAction::PageDown => (self.detail_scroll + page).min(self.detail_max_scroll),
+            KeyAction::Home | KeyAction::CursorHome => 0,
+            KeyAction::End | KeyAction::CursorEnd => self.detail_max_scroll,
+            _ => self.detail_scroll,
+        };
+    }
+
+    fn scroll_form_info(&mut self, action: &KeyAction) {
+        let page = self
+            .form_info_rect
+            .map_or(1, |rect| usize::from(rect.height).max(1));
+        self.form_info_scroll = if matches!(action, KeyAction::PageUp) {
+            self.form_info_scroll.saturating_sub(page)
+        } else {
+            (self.form_info_scroll + page).min(self.form_info_max_scroll)
+        };
+    }
     pub fn paste(&mut self, text: &str) {
-        if self.inputs_locked() || !self.show_form || matches!(self.form_field, 2 | 6 | 7) {
+        if !self.show_form && self.focus == Focus::Search {
+            self.search.insert_str(text);
+            self.sync_browser();
+            return;
+        }
+        if self.inputs_locked()
+            || self.confirm_discard
+            || !self.show_form
+            || matches!(self.form_field, 2 | 6 | 7 | 8 | 9 | 10)
+        {
             return;
         }
         let editor = match self.form_field {
@@ -693,7 +1203,7 @@ impl ModelManager {
             .unwrap_or(0);
         match action {
             KeyAction::Submit if self.form_field == 7 => self.test_model(control_tx),
-            KeyAction::PageUp | KeyAction::PageDown if self.form_field == 7 => {
+            KeyAction::PageUp | KeyAction::PageDown if matches!(self.form_field, 7 | 10) => {
                 let page = self
                     .form_info_rect
                     .map_or(1, |rect| usize::from(rect.height).max(1));
@@ -705,7 +1215,14 @@ impl ModelManager {
                         .min(self.form_info_max_scroll)
                 };
             }
-            KeyAction::Escape | KeyAction::Submit => self.commit_form(control_tx),
+            KeyAction::Save => self.commit_form(control_tx),
+            KeyAction::Escape => self.dispatch(Action::Cancel, control_tx),
+            KeyAction::Submit if self.form_field == 8 => self.commit_form(control_tx),
+            KeyAction::Submit if self.form_field == 9 => self.dispatch(Action::Cancel, control_tx),
+            KeyAction::Submit if self.form_field == 10 => {
+                self.dispatch(Action::Details, control_tx)
+            }
+            KeyAction::Submit => {}
             KeyAction::Tab | KeyAction::HistoryDown => {
                 self.form_field = fields[(index + 1) % fields.len()]
             }
@@ -741,9 +1258,6 @@ impl ModelManager {
                         ) {
                             self.selected_provider = providers[selected].clone();
                             self.clear_test_result();
-                            if !self.api_visible() {
-                                self.form_api = None;
-                            }
                         }
                     }
                     6 => {
@@ -799,6 +1313,7 @@ impl ModelManager {
     ) {
         let name = self.name_editor.buf().trim().to_string();
         if name.is_empty() {
+            self.test_result = Some(("Model name is required".into(), false));
             return;
         }
         let model = self.model_editor.buf().trim().to_string();
@@ -806,23 +1321,36 @@ impl ModelManager {
         let context_budget = if self.context_budget_editor.buf().trim().is_empty() {
             32768
         } else {
-            let Ok(value) = self.context_budget_editor.buf().trim().parse() else {
+            let Ok(value) = self.context_budget_editor.buf().trim().parse::<u64>() else {
+                self.test_result =
+                    Some(("Context Budget must be a positive integer".into(), false));
                 atman_runtime::notify!(error, "Context Budget must be a positive integer");
                 return;
             };
+            if value == 0 {
+                self.test_result =
+                    Some(("Context Budget must be a positive integer".into(), false));
+                return;
+            }
             value
         };
         let Some(reasoning) = parse_reasoning(self.thinking_editor.buf()) else {
+            self.test_result = Some(("Reasoning value is invalid".into(), false));
             atman_runtime::notify!(error, "Reasoning value is invalid");
             return;
         };
         let max_tokens = if self.max_tokens_editor.buf().trim().is_empty() {
             None
         } else {
-            let Ok(value) = self.max_tokens_editor.buf().trim().parse() else {
+            let Ok(value) = self.max_tokens_editor.buf().trim().parse::<u32>() else {
+                self.test_result = Some(("Max Tokens must be a positive integer".into(), false));
                 atman_runtime::notify!(error, "Max Tokens must be a positive integer");
                 return;
             };
+            if value == 0 {
+                self.test_result = Some(("Max Tokens must be a positive integer".into(), false));
+                return;
+            }
             Some(value)
         };
         self.begin_mutation(
@@ -839,7 +1367,7 @@ impl ModelManager {
                 reasoning,
                 max_tokens,
                 api: self.form_api,
-                enabled: true,
+                enabled: self.form_enabled,
             },
             control_tx,
         );
@@ -860,210 +1388,7 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
         _app: &crate::app::AppState,
         t: &crate::theme::Theme,
     ) {
-        self.list_rect = None;
-        self.test_rect = None;
-        self.form_hits.clear();
-        self.form_info_rect = None;
-        self.save_rect = None;
-        self.confirm_yes_rect = None;
-        self.confirm_no_rect = None;
-        if let Some(name) = self.confirm_delete.as_deref() {
-            let button_y = area.y + area.height / 2 + 2;
-            self.confirm_yes_rect = Some(Rect {
-                x: area.x,
-                y: button_y,
-                width: area.width / 2,
-                height: 1,
-            });
-            self.confirm_no_rect = Some(Rect {
-                x: area.x + area.width / 2,
-                y: button_y,
-                width: area.width - area.width / 2,
-                height: 1,
-            });
-            render_delete_confirm(f, area, "model", name, t);
-            return;
-        }
-        if self.show_form {
-            self.render_form(f, area, t);
-            return;
-        }
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
-            .split(area);
-        let main = rows[0];
-        let footer_area = rows[1];
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-            .split(main);
-        let left_col = columns[0];
-        let right_col = Rect {
-            x: columns[1].x + 1,
-            width: columns[1].width.saturating_sub(1),
-            ..columns[1]
-        };
-
-        crate::wm::shell::render_section_header(f, left_col, Line::from("Models"), t);
-        let inner_left = Rect {
-            x: left_col.x,
-            y: left_col.y + 2,
-            width: left_col.width,
-            height: left_col.height.saturating_sub(2).saturating_sub(1),
-        };
-
-        self.browser.set_visible_rows(inner_left.height as usize);
-        let mut lines: Vec<Line> = Vec::new();
-        for index in self.browser.visible_rows(inner_left.height as usize) {
-            let row = &self.browser.rows()[index];
-            let selected = index == self.browser.selected_index();
-            let style = if selected {
-                Style::default()
-                    .fg(t.accent.into())
-                    .add_modifier(Modifier::BOLD)
-            } else if row.kind == BrowserRowKind::Provider {
-                Style::default()
-                    .fg(t.heading.into())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(t.tinted_fg.into())
-            };
-            if row.kind == BrowserRowKind::Provider {
-                let count = self
-                    .groups
-                    .iter()
-                    .find(|group| group.provider_name == row.value)
-                    .map(|group| group.models.len())
-                    .unwrap_or(0);
-                lines.push(Line::from(Span::styled(
-                    format!(" {} [{} models]", row.label, count),
-                    style,
-                )));
-            } else if let Some((provider, slug)) = row.value.split_once('\0') {
-                let suffix = self
-                    .groups
-                    .iter()
-                    .find(|group| group.provider_name == provider)
-                    .and_then(|group| group.models.iter().find(|model| model.slug == slug))
-                    .map(|model| {
-                        let thinking = if model.thinking { " 🧠" } else { "" };
-                        format!(
-                            "  {}{}",
-                            atman_runtime::humanize::format_count(model.context_budget),
-                            thinking
-                        )
-                    })
-                    .unwrap_or_default();
-                lines.push(Line::from(Span::styled(
-                    format!("   {slug}{suffix}"),
-                    style,
-                )));
-            }
-        }
-        if lines.is_empty() {
-            lines.push(Line::from(Span::styled(
-                " No models. Press n to add one.",
-                Style::default().fg(t.meta_fg.into()),
-            )));
-        }
-        f.render_widget(Paragraph::new(lines), inner_left);
-
-        crate::wm::shell::render_section_header(f, right_col, Line::from("Details"), t);
-        let inner_right = Rect {
-            x: right_col.x,
-            y: right_col.y + 2,
-            width: right_col.width,
-            height: right_col.height.saturating_sub(2).saturating_sub(1),
-        };
-        let mut detail_lines = vec![];
-        if let Some(m) = self.current_model() {
-            let label = Style::default().fg(t.meta_fg.into());
-            let val = Style::default().fg(t.accent.into());
-            detail_lines.push(Line::from(vec![
-                Span::styled(" Name:     ", label),
-                Span::styled(&m.slug, val),
-            ]));
-            detail_lines.push(Line::from(vec![
-                Span::styled(" Provider: ", label),
-                Span::styled(self.current_provider(), val),
-            ]));
-            detail_lines.push(Line::from(vec![
-                Span::styled(" Budget:   ", label),
-                Span::styled(atman_runtime::humanize::format_count(m.context_budget), val),
-            ]));
-            detail_lines.push(Line::from(vec![
-                Span::styled(" Reasoning:", label),
-                Span::styled(format!(" {}", reasoning_label(&m.reasoning)), val),
-            ]));
-            let slug = m.slug.clone();
-            let entries = atman_runtime::model_registry::all_model_entries();
-            if let Some((_, provider)) = atman_runtime::model_registry::all_provider_entries()
-                .into_iter()
-                .find(|(name, _)| name == self.current_provider())
-            {
-                let api = entries
-                    .iter()
-                    .find(|(name, _)| *name == slug)
-                    .and_then(|(_, entry)| entry.api);
-                if let Some(effective) = provider.effective_api(api) {
-                    detail_lines.push(Line::from(vec![
-                        Span::styled(" API:      ", label),
-                        Span::styled(
-                            if api.is_some() {
-                                effective.to_string()
-                            } else {
-                                format!("Inherit ({effective})")
-                            },
-                            val,
-                        ),
-                    ]));
-                }
-                if let Some(endpoint) = provider.api_endpoint(api) {
-                    detail_lines.push(Line::from(vec![
-                        Span::styled(" Endpoint: ", label),
-                        Span::styled(endpoint, val),
-                    ]));
-                }
-            }
-            if let Some((_, e)) = entries.iter().find(|(n, _)| *n == slug) {
-                if e.model != slug && !e.model.is_empty() {
-                    let model_id = e.model.clone();
-                    detail_lines.push(Line::from(vec![
-                        Span::styled(" Model ID: ", label),
-                        Span::styled(model_id, val),
-                    ]));
-                }
-                if let Some(mt) = e.max_tokens {
-                    let mt_str = mt.to_string();
-                    detail_lines.push(Line::from(vec![
-                        Span::styled(" Max Out:  ", label),
-                        Span::styled(mt_str, val),
-                    ]));
-                }
-            }
-        } else {
-            detail_lines.push(Line::from(Span::styled(
-                " Select a model to view details",
-                Style::default().fg(t.meta_fg.into()),
-            )));
-        }
-        f.render_widget(Paragraph::new(detail_lines), inner_right);
-
-        crate::wm::shell::render_column_divider(
-            f,
-            columns[0].right(),
-            columns[0].y,
-            columns[0].height,
-            t,
-        );
-
-        let footer = Paragraph::new(Line::from(Span::styled(
-            crate::directional_selector::footer_help("n:add  a:alias  Enter:edit", "Esc:close"),
-            Style::default().fg(t.meta_fg.into()),
-        )))
-        .alignment(ratatui::layout::Alignment::Right);
-        f.render_widget(footer, footer_area);
+        self.render_manager(f, area, t);
     }
 
     fn handle_key(
@@ -1073,10 +1398,7 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
         tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
         self.handle_key(action, tx);
-        if let Some(model) = self.open_alias_model.take() {
-            return Some(ModalAction::OpenAliasForModel(model));
-        }
-        Some(ModalAction::Consumed)
+        self.take_modal_action()
     }
 
     fn handle_paste(&mut self, text: &str) {
@@ -1088,7 +1410,10 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
     }
 
     fn title(&self) -> Line<'static> {
-        Line::from("Model Manager")
+        Line::from(self.locked_provider.as_ref().map_or_else(
+            || "Model Manager".to_owned(),
+            |provider| format!("Models · {provider}"),
+        ))
     }
 
     fn icon(&self) -> &str {
@@ -1102,7 +1427,9 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
 
 impl ModelManager {
     fn render_form(&mut self, f: &mut ratatui::Frame, area: Rect, t: &crate::theme::Theme) {
-        use crate::settings_form::{Action, Field, FormLayout, render_action, render_field};
+        use crate::settings_form::{
+            Action as Button, Field, FormLayout, render_action, render_field,
+        };
         crate::wm::shell::render_section_header(
             f,
             area,
@@ -1123,12 +1450,12 @@ impl ModelManager {
         if !navigation.contains(&self.form_field) {
             self.form_field = navigation[0];
         }
-        let fields: Vec<_> = navigation.into_iter().filter(|field| *field != 7).collect();
+        let fields: Vec<_> = navigation.into_iter().filter(|field| *field < 7).collect();
         let selected = fields
             .iter()
             .position(|field| *field == self.form_field)
             .unwrap_or_else(|| fields.len().saturating_sub(1));
-        let layout = FormLayout::new(inner, fields.len(), selected);
+        let layout = FormLayout::with_actions(inner, fields.len(), selected, 3);
         let locked = self.inputs_locked();
         for &(index, rect) in &layout.fields {
             let field = fields[index];
@@ -1208,686 +1535,141 @@ impl ModelManager {
             );
         }
 
-        let endpoint = self
-            .provider_entry()
-            .and_then(|entry| entry.api_endpoint(self.form_api))
-            .unwrap_or_else(|| "Provider-managed endpoint".into());
-        let endpoint = format!("{} · {endpoint}", self.selected_provider);
-        let info = match &self.test_result {
-            Some((result, _)) => format!("{result}\n{endpoint}"),
-            None => {
-                format!("{endpoint}\nTest sends a model request; returned tools are not executed.")
-            }
-        };
+        let info = self.form_status();
         let lines = crate::width::word_wrap(&info, usize::from(layout.info.width).max(1));
-        self.form_info_max_scroll = if layout.info.height > 0 {
-            lines.len().saturating_sub(usize::from(layout.info.height))
-        } else {
-            0
+        let info_area = Rect {
+            height: layout.info.height.saturating_sub(1),
+            ..layout.info
         };
+        self.form_info_max_scroll = lines.len().saturating_sub(usize::from(info_area.height));
         self.form_info_scroll = self.form_info_scroll.min(self.form_info_max_scroll);
-        self.form_info_rect = (layout.info.height > 0).then_some(layout.info);
-        let info_style = Style::default()
-            .fg(if self.test_result.as_ref().is_some_and(|(_, ok)| !ok) {
-                t.warn.into()
-            } else {
-                t.meta_fg.into()
-            })
-            .bg(crate::wm::shell::surface_bg(t));
+        self.form_info_rect = (info_area.height > 0).then_some(info_area);
         f.render_widget(
             Paragraph::new(
                 lines
                     .iter()
                     .skip(self.form_info_scroll)
-                    .take(usize::from(layout.info.height))
+                    .take(usize::from(info_area.height))
                     .cloned()
                     .map(Line::from)
                     .collect::<Vec<_>>(),
             )
-            .style(info_style),
-            layout.info,
+            .style(
+                Style::default()
+                    .fg(if self.test_result.as_ref().is_some_and(|(_, ok)| !ok) {
+                        t.warn.into()
+                    } else {
+                        t.meta_fg.into()
+                    })
+                    .bg(crate::wm::shell::surface_bg(t)),
+            ),
+            info_area,
         );
+        if layout.info.height > 0 {
+            let link = Rect::new(
+                layout.info.x,
+                layout.info.bottom() - 1,
+                layout.info.width,
+                1,
+            );
+            self.action_hits.push((Action::Details, link));
+            f.render_widget(
+                Paragraph::new(if self.form_field == 10 {
+                    "Details · Enter"
+                } else {
+                    "Details · click or Tab"
+                })
+                .style(
+                    Style::default()
+                        .fg(t.subtle_fg.into())
+                        .bg(crate::wm::shell::surface_bg(t)),
+                ),
+                link,
+            );
+        }
         let help = if self.pending_test.is_some() {
-            if layout.help.width < 52 {
-                "Testing… · Esc: close".to_string()
-            } else {
-                "Testing… inputs locked · Esc: close without saving".to_string()
-            }
+            "Stop cancels · Esc hides"
         } else if self.pending.is_some() {
-            "Saving model configuration…".to_string()
-        } else if self.form_info_max_scroll > 0 {
-            format!(
-                "{}–{}/{} · PgUp/PgDn on Test",
-                self.form_info_scroll + 1,
-                (self.form_info_scroll + usize::from(layout.info.height)).min(lines.len()),
-                lines.len(),
-            )
+            "Saving model · Esc hides"
+        } else if self.form_field == 10 {
+            "Enter details · PgUp/PgDn scroll"
         } else {
-            "Tab / Shift+Tab: field · ← →: choices · Esc: save".to_string()
+            "Tab · Ctrl+S save · Esc back"
         };
         f.render_widget(
-            Paragraph::new(help).style(
+            Paragraph::new(crate::width::truncate(help, layout.help.width as usize)).style(
                 Style::default()
                     .fg(t.meta_fg.into())
                     .bg(crate::wm::shell::surface_bg(t)),
             ),
             layout.help,
         );
-        self.test_rect = (layout.test.height > 0 && layout.test.width > 0).then_some(layout.test);
-        self.save_rect = (layout.save.height > 0 && layout.save.width > 0).then_some(layout.save);
-        render_action(
-            f,
-            layout.test,
-            &Action {
-                label: if self.pending_test.is_some() {
-                    "Testing…"
-                } else if layout.test.width < 24 {
+        let actions = [
+            (
+                Action::Cancel,
+                9,
+                if locked { "Hide" } else { "Cancel" },
+                "Esc",
+            ),
+            (
+                if self.pending_test.is_some() {
+                    Action::Stop
+                } else {
+                    Action::Test
+                },
+                7,
+                if self.pending_test.is_some() {
+                    "Stop test"
+                } else {
                     "Test"
-                } else {
-                    "Test model"
                 },
-                shortcut: if self.form_field == 7 && !locked {
-                    "Enter"
-                } else {
-                    ""
-                },
-                focused: self.form_field == 7,
-                hovered: self.hovered_field == Some(7),
-                disabled: locked,
-            },
-            t,
-        );
-        render_action(
-            f,
-            layout.save,
-            &Action {
-                label: if self.pending.is_some() {
+                "",
+            ),
+            (
+                Action::Save,
+                8,
+                if self.pending.is_some() {
                     "Saving…"
-                } else if layout.save.width < 24 {
+                } else {
                     "Save"
-                } else {
-                    "Save model"
                 },
-                shortcut: if locked {
-                    ""
-                } else if self.form_field == 7 {
-                    "Esc"
-                } else {
-                    "Enter"
+                "^S",
+            ),
+        ];
+        for ((action, field, label, shortcut), rect) in
+            actions.into_iter().zip(layout.actions.iter().copied())
+        {
+            let label = match action {
+                Action::Stop if rect.width < 13 => "Stop",
+                _ => label,
+            };
+            let shortcut = if action == Action::Cancel && rect.width < 13 {
+                ""
+            } else {
+                shortcut
+            };
+            render_action(
+                f,
+                rect,
+                &Button {
+                    label,
+                    shortcut,
+                    focused: self.form_field == field,
+                    hovered: self.hovered_action == Some(action),
+                    disabled: locked && !matches!(action, Action::Cancel | Action::Stop),
                 },
-                focused: false,
-                hovered: self.hovered_field == Some(usize::MAX),
-                disabled: locked,
-            },
-            t,
-        );
+                t,
+            );
+            self.action_hits.push((action, rect));
+            if field == 7 {
+                self.test_rect = Some(rect);
+            }
+            if field == 8 {
+                self.save_rect = Some(rect);
+            }
+        }
     }
-}
-
-fn render_delete_confirm(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    kind: &str,
-    name: &str,
-    theme: &crate::theme::Theme,
-) {
-    let w = area.width.saturating_sub(4).clamp(40, 60);
-    let h = 9u16;
-    let dlg = Rect {
-        x: area.x + area.width.saturating_sub(w) / 2,
-        y: area.y + area.height.saturating_sub(h) / 2,
-        width: w,
-        height: h,
-    };
-    let inner = crate::wm::shell::render_overlay_shell(
-        f,
-        dlg,
-        Line::from(" Delete? "),
-        "⚠",
-        theme.warn.into(),
-        true,
-        theme,
-    );
-    f.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                format!("Delete {kind} \"{name}\"?"),
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "This change cannot be undone.",
-                Style::default().fg(theme.meta_fg.into()),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  y / Enter: confirm    n / Esc: cancel",
-                Style::default().fg(theme.meta_fg.into()),
-            )),
-        ])
-        .alignment(ratatui::layout::Alignment::Center),
-        inner,
-    );
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cursor_visibility_tracks_only_editable_model_fields() {
-        let mut manager = ModelManager {
-            show_form: true,
-            ..Default::default()
-        };
-        for field in [0, 1, 3, 4, 5] {
-            manager.form_field = field;
-            assert!(manager.has_text_focus());
-        }
-        for field in [2, 6, 7] {
-            manager.form_field = field;
-            assert!(!manager.has_text_focus());
-        }
-    }
-
-    #[test]
-    fn model_test_sends_a_draft_and_accepts_only_its_matching_result() {
-        let mut manager = ModelManager::default();
-        manager.open_form();
-        manager.name_editor.replace_with("demo");
-        manager.model_editor.replace_with("vendor/model");
-        manager.selected_provider = "gateway".into();
-        manager.form_api = Some(atman_runtime::provider::OpenAiApi::Responses);
-        manager.thinking_editor.replace_with("high");
-        manager.form_field = 7;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        manager.handle_form_key(&KeyAction::Submit, Some(&tx));
-        let crate::TuiControl::TestModel(request) = rx.try_recv().unwrap() else {
-            panic!("expected model test");
-        };
-        assert_eq!(request.model, "vendor/model");
-        assert_eq!(request.api, manager.form_api);
-        assert!(manager.pending.is_none());
-        manager.form_field = 1;
-        manager.handle_key(&KeyAction::Char('x'), Some(&tx));
-        assert_eq!(manager.model_editor.buf(), "vendor/model");
-        assert!(!manager.resolve_test(request.request_id + 1, &Ok("wrong".into())));
-        assert!(manager.resolve_test(request.request_id, &Err("rejected".into())));
-        assert!(manager.show_form);
-        assert_eq!(manager.thinking_editor.buf(), "high");
-        assert!(manager.test_result.is_some());
-        manager.form_field = 1;
-        manager.handle_key(&KeyAction::CursorLeft, Some(&tx));
-        assert!(manager.test_result.is_some());
-        manager.handle_key(&KeyAction::Char('x'), Some(&tx));
-        assert!(manager.test_result.is_none());
-        manager.form_field = 7;
-        manager.save_rect = Some(Rect::new(0, 10, 80, 1));
-        manager.handle_mouse(
-            &crossterm::event::MouseEvent {
-                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-                column: 1,
-                row: 10,
-                modifiers: crossterm::event::KeyModifiers::NONE,
-            },
-            Some(&tx),
-        );
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(crate::TuiControl::MutateModel(_))
-        ));
-    }
-
-    #[test]
-    fn closing_or_dropping_model_form_cancels_its_test_and_ignores_late_results() {
-        let mut manager = ModelManager::default();
-        manager.open_form();
-        manager.name_editor.replace_with("demo");
-        manager.selected_provider = "gateway".into();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        manager.test_model(Some(&tx));
-        let crate::TuiControl::TestModel(first) = rx.try_recv().unwrap() else {
-            panic!("expected model test");
-        };
-        assert!(!first.cancel.is_cancelled());
-        manager.handle_key(&KeyAction::Escape, Some(&tx));
-        assert!(first.cancel.is_cancelled());
-        manager.open_form();
-        manager.name_editor.replace_with("demo");
-        manager.selected_provider = "gateway".into();
-        manager.test_model(Some(&tx));
-        let crate::TuiControl::TestModel(second) = rx.try_recv().unwrap() else {
-            panic!("expected model test");
-        };
-        assert!(!manager.resolve_test(first.request_id, &Ok("late result".into())));
-        assert!(manager.test_result.is_none());
-        assert!(!second.cancel.is_cancelled());
-        drop(manager);
-        assert!(second.cancel.is_cancelled());
-    }
-
-    #[test]
-    fn every_model_edit_invalidates_the_previous_test_result() {
-        let mut manager = ModelManager {
-            groups: vec![provider_group("alpha"), provider_group("beta")],
-            ..Default::default()
-        };
-        manager.open_form();
-        for field in [0, 1, 3, 4, 5] {
-            manager.form_field = field;
-            manager.test_result = Some(("accepted".into(), true));
-            manager.form_info_scroll = 10;
-            manager.paste("x");
-            assert!(manager.test_result.is_none());
-            assert_eq!(manager.form_info_scroll, 0);
-        }
-        for field in [2, 4, 6] {
-            manager.form_field = field;
-            manager.test_result = Some(("accepted".into(), true));
-            manager.form_info_scroll = 10;
-            manager.handle_form_key(&KeyAction::CursorRight, None);
-            assert!(manager.test_result.is_none());
-            assert_eq!(manager.form_info_scroll, 0);
-        }
-    }
-
-    #[test]
-    fn rendered_reasoning_arrows_select_and_text_region_places_the_cursor() {
-        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-        let mut manager = ModelManager::default();
-        manager.open_form();
-        manager.selected_provider = "unknown".into();
-        manager.form_field = 4;
-        manager.thinking_editor.replace_with("default");
-        let app = crate::app::AppState::new("session".into(), None);
-        let theme = crate::theme::theme();
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-        terminal
-            .draw(|frame| {
-                <ModelManager as crate::wm::modal::ModalOverlay>::render_content(
-                    &mut manager,
-                    frame,
-                    frame.area(),
-                    &app,
-                    &theme,
-                )
-            })
-            .unwrap();
-        let hit = manager
-            .form_hits
-            .iter()
-            .find(|(field, _)| *field == 4)
-            .unwrap()
-            .1;
-        let (left, right) = hit.arrows.unwrap();
-        assert_eq!(
-            terminal.backend().buffer()[(right.x + 1, right.y)].symbol(),
-            "›"
-        );
-        assert_eq!(
-            terminal.backend().buffer()[(left.x + 1, left.y)].symbol(),
-            "‹"
-        );
-        let click = |rect: Rect| MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: rect.x,
-            row: rect.y,
-            modifiers: KeyModifiers::NONE,
-        };
-        manager.handle_mouse(&click(right), None);
-        assert_eq!(manager.thinking_editor.buf(), "off");
-        manager.handle_mouse(&click(left), None);
-        assert_eq!(manager.thinking_editor.buf(), "default");
-        manager.handle_mouse(&click(Rect::new(hit.value.x + 1, hit.value.y, 1, 1)), None);
-        assert_eq!(manager.thinking_editor.cursor(), 1);
-        assert_eq!(manager.thinking_editor.buf(), "default");
-    }
-
-    #[test]
-    fn model_form_navigation_and_mouse_targets_share_rendered_geometry() {
-        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-        for width in [48, 96] {
-            let mut manager = ModelManager::default();
-            manager.open_form();
-            manager.selected_provider = "fixture-provider".into();
-            manager.name_editor.replace_with("vendor/model");
-            let fields = manager.form_fields();
-            for field in &fields {
-                manager.form_field = *field;
-                render_model_form(&mut manager, width, 24);
-                assert!(manager.form_hits.iter().all(|(field, _)| *field != 7));
-                let test = manager.test_rect.unwrap();
-                let save = manager.save_rect.unwrap();
-                assert_eq!(test.height, 3);
-                assert_eq!(save.height, 3);
-                assert!(test.right() < save.x);
-                if *field != 7 {
-                    let hit = manager
-                        .form_hits
-                        .iter()
-                        .find(|(rendered, _)| rendered == field)
-                        .unwrap()
-                        .1;
-                    assert_eq!(hit.record.height, if width < 70 { 4 } else { 3 });
-                    assert!(hit.value.y > hit.record.y);
-                    assert!(hit.value.bottom() < hit.record.bottom());
-                    let original = manager
-                        .form_editor_mut()
-                        .map(|editor| editor.buf().to_owned());
-                    manager.handle_mouse(
-                        &MouseEvent {
-                            kind: MouseEventKind::Down(MouseButton::Left),
-                            column: hit.record.x + 1,
-                            row: hit.record.y,
-                            modifiers: KeyModifiers::NONE,
-                        },
-                        None,
-                    );
-                    assert_eq!(manager.form_field, *field);
-                    assert_eq!(
-                        manager
-                            .form_editor_mut()
-                            .map(|editor| editor.buf().to_owned()),
-                        original
-                    );
-                }
-            }
-            manager.handle_form_key(&KeyAction::Tab, None);
-            assert_eq!(manager.form_field, fields[0]);
-            manager.handle_form_key(&KeyAction::BackTab, None);
-            assert_eq!(manager.form_field, 7);
-
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            let save = manager.save_rect.unwrap();
-            let test = manager.test_rect.unwrap();
-            let mut click = MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: test.right(),
-                row: save.y + 1,
-                modifiers: KeyModifiers::NONE,
-            };
-            manager.handle_mouse(&click, Some(&tx));
-            assert!(rx.try_recv().is_err());
-            click.column = save.x;
-            manager.handle_mouse(&click, Some(&tx));
-            assert!(matches!(
-                rx.try_recv(),
-                Ok(crate::TuiControl::MutateModel(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn model_test_details_remain_reachable_after_wrapping() {
-        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
-        let mut manager = ModelManager::default();
-        manager.open_form();
-        manager.selected_provider = "fixture-provider".into();
-        manager.form_field = 7;
-        manager.test_result = Some((
-            format!("{} END-OF-DETAILS", "diagnostic context ".repeat(40)),
-            false,
-        ));
-        let buffer = render_model_form(&mut manager, 48, 24);
-        let info = manager.form_info_rect.unwrap();
-        let first_line: String = (info.x..info.right())
-            .map(|x| buffer[(x, info.y)].symbol())
-            .collect();
-        assert!(first_line.starts_with("diagnostic context"));
-        assert!(manager.form_info_max_scroll > 0);
-        while manager.form_info_scroll < manager.form_info_max_scroll {
-            manager.handle_form_key(&KeyAction::PageDown, None);
-        }
-        let buffer = render_model_form(&mut manager, 48, 24);
-        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
-        assert!(text.contains("END-OF-DETAILS"));
-        let info = manager.form_info_rect.unwrap();
-        let before = manager.form_info_scroll;
-        manager.handle_mouse(
-            &MouseEvent {
-                kind: MouseEventKind::ScrollUp,
-                column: info.x,
-                row: info.y,
-                modifiers: KeyModifiers::NONE,
-            },
-            None,
-        );
-        assert_eq!(manager.form_info_scroll, before - 1);
-    }
-
-    fn render_model_form(
-        manager: &mut ModelManager,
-        width: u16,
-        height: u16,
-    ) -> ratatui::buffer::Buffer {
-        let app = crate::app::AppState::new("fixture-session".into(), None);
-        let theme = crate::theme::theme();
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| {
-                <ModelManager as crate::wm::modal::ModalOverlay>::render_content(
-                    manager,
-                    frame,
-                    frame.area(),
-                    &app,
-                    &theme,
-                );
-            })
-            .unwrap();
-        terminal.backend().buffer().clone()
-    }
-
-    #[test]
-    fn reasoning_retains_custom_text_entry_and_paste() {
-        let mut manager = ModelManager::default();
-        manager.open_form();
-        manager.form_field = 4;
-        manager.thinking_editor.replace_with("budget:");
-        manager.paste("8192");
-        manager.handle_form_key(&KeyAction::Backspace, None);
-        manager.handle_form_key(&KeyAction::Char('4'), None);
-        assert_eq!(manager.thinking_editor.buf(), "budget:8194");
-        assert!(manager.has_text_focus());
-    }
-
-    #[test]
-    fn paste_inserts_into_current_text_field() {
-        let mut manager = ModelManager::default();
-        manager.open_form();
-
-        manager.paste("model-name");
-        assert_eq!(manager.name_editor.buf(), "model-name");
-
-        manager.form_field = 3;
-        manager.paste("128000");
-        assert_eq!(manager.context_budget_editor.buf(), "128000");
-    }
-
-    #[test]
-    fn empty_catalog_navigation_is_safe() {
-        let mut manager = ModelManager::default();
-
-        manager.handle_key(&KeyAction::HistoryUp, None);
-        manager.handle_key(&KeyAction::HistoryDown, None);
-        manager.handle_key(&KeyAction::Submit, None);
-
-        assert!(manager.current_model().is_none());
-    }
-
-    #[test]
-    fn modal_overlay_paste_routes_to_model_editor() {
-        let mut manager = ModelManager::default();
-        manager.open_form();
-        <ModelManager as crate::wm::modal::ModalOverlay>::handle_paste(&mut manager, "pasted");
-        assert_eq!(manager.name_editor.buf(), "pasted");
-    }
-
-    #[test]
-    fn form_directional_selectors_switch_provider_and_reasoning() {
-        let mut manager = ModelManager {
-            groups: vec![provider_group("alpha"), provider_group("beta")],
-            show_form: true,
-            selected_provider: "alpha".to_string(),
-            ..Default::default()
-        };
-
-        manager.form_field = 2;
-        manager.handle_key(&KeyAction::CursorLeft, None);
-        assert_eq!(manager.selected_provider, "beta");
-
-        manager.form_field = 4;
-        manager.thinking_editor.replace_with("default");
-        manager.handle_key(&KeyAction::CursorRight, None);
-        assert_eq!(manager.thinking_editor.buf(), "off");
-    }
-
-    #[test]
-    fn add_form_escape_submits_model() {
-        let mut manager = ModelManager::default();
-        manager.open_form();
-        manager.name_editor.insert_str("vendor/model");
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-        manager.handle_key(&KeyAction::Escape, Some(&tx));
-
-        assert!(manager.show_form);
-        let crate::TuiControl::MutateModel(request) = rx.try_recv().unwrap() else {
-            panic!("unexpected control message");
-        };
-        assert!(!manager.has_text_focus());
-        manager.paste("lost text");
-        manager.handle_key(&KeyAction::Char('x'), Some(&tx));
-        assert_eq!(manager.name_editor.buf(), "vendor/model");
-        assert!(matches!(
-            &request.action,
-            crate::ModelMutation::Upsert {
-                old_name: None,
-                name,
-                model,
-                ..
-            } if name == "vendor/model" && model == "vendor/model"
-        ));
-        assert!(manager.resolve_mutation(
-            &request,
-            &Ok(crate::ModelMutationSuccess::Saved {
-                name: "vendor/model".into()
-            })
-        ));
-        assert!(!manager.show_form);
-    }
-
-    #[test]
-    fn edit_form_escape_submits_and_failure_keeps_form() {
-        let mut manager = ModelManager {
-            show_form: true,
-            editing: Some("vendor/model".into()),
-            selected_provider: "vendor".into(),
-            ..Default::default()
-        };
-        manager.name_editor.insert_str("vendor/model");
-        manager.thinking_editor.insert_str("default");
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-        manager.handle_key(&KeyAction::Escape, Some(&tx));
-
-        let crate::TuiControl::MutateModel(request) = rx.try_recv().unwrap() else {
-            panic!("unexpected control message");
-        };
-        assert!(manager.show_form);
-        assert!(manager.resolve_mutation(&request, &Err("write failed".into())));
-        assert!(manager.show_form);
-        assert_eq!(manager.editing.as_deref(), Some("vendor/model"));
-    }
-
-    #[test]
-    fn delete_failure_keeps_confirmation_for_retry() {
-        let mut manager = ModelManager {
-            confirm_delete: Some("vendor/model".into()),
-            ..Default::default()
-        };
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-        manager.handle_key(&KeyAction::Submit, Some(&tx));
-
-        let crate::TuiControl::MutateModel(request) = rx.try_recv().unwrap() else {
-            panic!("unexpected control message");
-        };
-        assert!(matches!(
-            request.action,
-            crate::ModelMutation::Remove { ref name } if name == "vendor/model"
-        ));
-        assert!(manager.resolve_mutation(&request, &Err("write failed".into())));
-        assert_eq!(manager.confirm_delete.as_deref(), Some("vendor/model"));
-        assert!(manager.pending.is_none());
-    }
-
-    #[test]
-    fn delete_confirmation_renders_and_mouse_cancel_closes_it() {
-        let mut manager = ModelManager {
-            confirm_delete: Some("vendor/model".into()),
-            ..Default::default()
-        };
-        let app = crate::app::AppState::new("session".into(), None);
-        let theme = crate::theme::theme();
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-
-        terminal
-            .draw(|frame| {
-                <ModelManager as crate::wm::modal::ModalOverlay>::render_content(
-                    &mut manager,
-                    frame,
-                    frame.area(),
-                    &app,
-                    &theme,
-                );
-            })
-            .unwrap();
-
-        let content: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        assert!(content.contains("Delete model \"vendor/model\"?"));
-        assert!(manager.list_rect.is_none());
-        assert!(manager.save_rect.is_none());
-        let cancel = manager.confirm_no_rect.unwrap();
-        manager.handle_mouse(
-            &crossterm::event::MouseEvent {
-                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-                column: cancel.x,
-                row: cancel.y,
-                modifiers: crossterm::event::KeyModifiers::NONE,
-            },
-            None,
-        );
-        assert!(manager.confirm_delete.is_none());
-    }
-
-    #[test]
-    fn reasoning_field_parses_effort_mode_and_budget() {
-        assert_eq!(
-            parse_reasoning("high@pro"),
-            Some(atman_runtime::provider::ReasoningSelection::Effort {
-                effort: atman_runtime::provider::ReasoningEffort::High,
-                execution_mode: Some(atman_runtime::provider::ReasoningExecutionMode::Pro),
-            })
-        );
-        assert_eq!(
-            parse_reasoning("budget:4096"),
-            Some(atman_runtime::provider::ReasoningSelection::BudgetTokens { tokens: 4096 })
-        );
-    }
-
-    fn provider_group(name: &str) -> atman_runtime::model_registry::ProviderGroup {
-        atman_runtime::model_registry::ProviderGroup {
-            provider_name: name.to_string(),
-            models: Vec::new(),
-        }
-    }
-}
+mod tests;

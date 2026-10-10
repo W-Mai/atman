@@ -315,6 +315,7 @@ impl ModalManager {
             ModalKind::AliasManager => {
                 if self.alias_manager.open {
                     self.alias_manager.handle_key(action, tx);
+                    self.sync_model_alias_references();
                 }
                 (true, None)
             }
@@ -473,7 +474,8 @@ impl ModalManager {
         event: &crossterm::event::MouseEvent,
         tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
-        self.model_manager.handle_mouse(event, tx);
+        let action = self.model_manager.handle_mouse(event, tx);
+        self.dispatch_manager_action(action);
     }
 
     fn dispatch_manager_action(&mut self, action: Option<ModalAction>) {
@@ -495,6 +497,13 @@ impl ModalManager {
         tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
         self.alias_manager.handle_mouse(event, tx);
+        self.sync_model_alias_references();
+    }
+
+    fn sync_model_alias_references(&mut self) {
+        if !self.alias_manager.open {
+            self.model_manager.refresh_delete_references();
+        }
     }
 
     pub(super) fn handle_session_switcher_mouse(&mut self, event: &crossterm::event::MouseEvent) {
