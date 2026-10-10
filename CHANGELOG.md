@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.15.0] — 2026-10-10
+
 ### ⚠️ Breaking Changes
 
 - **MCP directory results** — `mcp.tools` returns `{tools, next_cursor, total}` with paginated summaries. An exact `server` and `tool` lookup includes the input schema.
