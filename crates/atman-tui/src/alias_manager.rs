@@ -15,11 +15,16 @@ enum Focus {
     #[default]
     NameInput,
     Tree,
+    Search,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hit {
     Name,
+    Search,
+    ClearSearch,
+    PreviousGroup,
+    NextGroup,
     Row(usize),
     New,
     Edit,
@@ -38,6 +43,10 @@ pub struct AliasManager {
     pub last_input_rect: Option<Rect>,
     is_edit: bool,
     editor: InputEditor,
+    search: InputEditor,
+    search_hit: Option<FieldHit>,
+    group_scope: Option<String>,
+    tree_pages: Vec<Vec<usize>>,
     edit_original: Option<String>,
     target_model: Option<String>,
     groups: Vec<atman_runtime::model_registry::ProviderGroup>,
@@ -84,6 +93,7 @@ impl AliasManager {
     fn clear_geometry(&mut self) {
         self.last_input_rect = None;
         self.name_hit = None;
+        self.search_hit = None;
         self.list_rect = None;
         self.save_rect = None;
         self.confirm_yes_rect = None;
@@ -109,13 +119,43 @@ impl AliasManager {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.hovered = target;
                 match target {
-                    Some(Hit::Confirm | Hit::Save) => {
+                    Some(Hit::Confirm) => {
                         self.handle_key(&KeyAction::Submit, control_tx);
                     }
+                    Some(Hit::Save) => self.handle_key(&KeyAction::Save, control_tx),
                     Some(Hit::Cancel) => self.handle_key(&KeyAction::Escape, control_tx),
                     Some(Hit::New) => self.handle_key(&KeyAction::Char('n'), control_tx),
                     Some(Hit::Edit) => self.handle_key(&KeyAction::Char('e'), control_tx),
                     Some(Hit::Delete) => self.handle_key(&KeyAction::Char('d'), control_tx),
+                    Some(Hit::Search) => {
+                        self.focus = Focus::Search;
+                        if let Some(hit) = self.search_hit
+                            && rect_hit(Some(hit.value), point)
+                        {
+                            self.search.set_cursor_by_display(
+                                0,
+                                event
+                                    .column
+                                    .saturating_sub(hit.value.x)
+                                    .saturating_add(hit.offset.min(u16::MAX as usize) as u16),
+                            );
+                        }
+                    }
+                    Some(Hit::ClearSearch) => {
+                        self.search = InputEditor::default();
+                        self.filter_models();
+                    }
+                    Some(Hit::PreviousGroup | Hit::NextGroup) => {
+                        self.focus = Focus::Tree;
+                        self.handle_key(
+                            &if target == Some(Hit::PreviousGroup) {
+                                KeyAction::CursorLeft
+                            } else {
+                                KeyAction::CursorRight
+                            },
+                            control_tx,
+                        );
+                    }
                     Some(Hit::Name) => {
                         self.focus = Focus::NameInput;
                         if let Some(hit) = self.name_hit
@@ -182,6 +222,12 @@ impl AliasManager {
         {
             return Some(Hit::Name);
         }
+        if self
+            .search_hit
+            .is_some_and(|hit| rect_hit(Some(hit.record), point))
+        {
+            return Some(Hit::Search);
+        }
         self.action_hits
             .iter()
             .find_map(|(action, rect)| rect_hit(Some(*rect), point).then_some(*action))
@@ -201,7 +247,7 @@ impl AliasManager {
 
     fn refresh_groups(&mut self) {
         let enabled_providers = atman_runtime::model_registry::enabled_provider_names();
-        self.groups = atman_runtime::model_registry::all_provider_groups()
+        self.groups = atman_runtime::model_registry::all_provider_groups_with_empty()
             .into_iter()
             .filter(|g| enabled_providers.contains(&g.provider_name))
             .collect();
@@ -212,9 +258,43 @@ impl AliasManager {
     }
 
     fn sync_browser(&mut self, selected: Option<&str>) {
+        let query = self.search.buf().trim().to_lowercase();
+        let entries: std::collections::HashMap<_, _> =
+            atman_runtime::model_registry::all_model_entries()
+                .into_iter()
+                .collect();
         let mut rows = Vec::new();
         for group in &self.groups {
-            rows.extend(group.models.iter().map(|model| BrowserRow {
+            if self
+                .group_scope
+                .as_ref()
+                .is_some_and(|scope| scope != &group.provider_name)
+            {
+                continue;
+            }
+            let display_name =
+                atman_runtime::model_registry::provider_display_name(&group.provider_name);
+            let provider_matches = format!("{} {display_name}", group.provider_name)
+                .to_lowercase()
+                .contains(&query);
+            let models: Vec<_> = group
+                .models
+                .iter()
+                .filter(|model| {
+                    provider_matches
+                        || model_matches_search(model, entries.get(&model.slug), &query)
+                })
+                .collect();
+            if !query.is_empty() && models.is_empty() && !provider_matches {
+                continue;
+            }
+            rows.push(BrowserRow {
+                kind: BrowserRowKind::Provider,
+                label: format!("{display_name} · {}", models.len()),
+                value: group.provider_name.clone(),
+                selectable: false,
+            });
+            rows.extend(models.into_iter().map(|model| BrowserRow {
                 kind: BrowserRowKind::Model,
                 label: model.slug.clone(),
                 value: model.slug.clone(),
@@ -222,6 +302,17 @@ impl AliasManager {
             }));
         }
         self.browser.replace_rows(rows, selected);
+    }
+
+    fn filter_models(&mut self) {
+        let selected = self
+            .browser
+            .selected()
+            .map(|row| row.value.clone())
+            .or_else(|| self.target_model.clone());
+        self.sync_browser(selected.as_deref());
+        self.clear_geometry();
+        self.tree_pages.clear();
     }
 
     pub fn open_form_with_model(&mut self, model: &str) {
@@ -240,6 +331,9 @@ impl AliasManager {
         self.show_form = true;
         self.is_edit = is_edit;
         self.hovered = None;
+        self.search = InputEditor::default();
+        self.group_scope = None;
+        self.sync_browser(model);
         let mut ed = InputEditor::default();
         if let Some(a) = alias {
             ed.insert_str(a);
@@ -256,6 +350,7 @@ impl AliasManager {
     fn select_model(&mut self, slug: &str) {
         self.target_model = Some(slug.to_owned());
         self.sync_browser(Some(slug));
+        self.clear_geometry();
         for (pi, g) in self.groups.iter().enumerate() {
             if let Some(mi) = g.models.iter().position(|m| m.slug == slug) {
                 self.provider_idx = pi;
@@ -281,6 +376,7 @@ impl AliasManager {
         self.provider_idx = pi;
         self.model_idx[pi] = mi;
         self.target_model = Some(row.value.clone());
+        self.clear_geometry();
     }
 
     fn current_model(&self) -> Option<&atman_runtime::model_registry::ModelRow> {
@@ -362,6 +458,31 @@ impl AliasManager {
             return;
         }
 
+        if self.focus == Focus::Search {
+            match action {
+                KeyAction::Save => self.commit_alias(control_tx),
+                KeyAction::Tab | KeyAction::Submit | KeyAction::Escape => self.focus = Focus::Tree,
+                KeyAction::BackTab => self.focus = Focus::NameInput,
+                KeyAction::RemoveAttachment => {
+                    self.search = InputEditor::default();
+                    self.filter_models();
+                }
+                _ => {
+                    let before = self.search.buf().to_owned();
+                    self.search.handle_key(action);
+                    if self.search.buf() != before {
+                        self.filter_models();
+                    }
+                }
+            }
+            return;
+        }
+
+        if matches!(action, KeyAction::Save) {
+            self.commit_alias(control_tx);
+            return;
+        }
+
         if matches!(action, KeyAction::Escape)
             && (self.editor.buf().trim().is_empty() || self.target_model.is_none())
         {
@@ -374,9 +495,7 @@ impl AliasManager {
             Focus::NameInput => match action {
                 KeyAction::Escape | KeyAction::Submit => self.commit_alias(control_tx),
                 KeyAction::Tab | KeyAction::BackTab => {
-                    if !self.browser.rows().is_empty() {
-                        self.focus = Focus::Tree;
-                    }
+                    self.focus = Focus::Tree;
                 }
                 KeyAction::Backspace
                 | KeyAction::Delete
@@ -391,21 +510,29 @@ impl AliasManager {
                 _ => {}
             },
             Focus::Tree => match action {
-                KeyAction::Escape | KeyAction::Submit => self.commit_alias(control_tx),
+                KeyAction::Char('/') => self.focus = Focus::Search,
+                KeyAction::Escape => self.commit_alias(control_tx),
+                KeyAction::Submit => {
+                    self.apply_browser_selection();
+                    self.commit_alias(control_tx);
+                }
                 KeyAction::Tab | KeyAction::BackTab => self.focus = Focus::NameInput,
                 KeyAction::HistoryUp
                 | KeyAction::Char('k')
-                | KeyAction::PageUp
-                | KeyAction::Home => {
+                | KeyAction::Home
+                | KeyAction::CursorHome => {
                     self.browser.handle_key(action, 0);
                     self.apply_browser_selection();
                 }
                 KeyAction::HistoryDown
                 | KeyAction::Char('j')
-                | KeyAction::PageDown
-                | KeyAction::End => {
+                | KeyAction::End
+                | KeyAction::CursorEnd => {
                     self.browser.handle_key(action, 0);
                     self.apply_browser_selection();
+                }
+                KeyAction::PageUp | KeyAction::PageDown => {
+                    self.page_models(matches!(action, KeyAction::PageDown))
                 }
                 KeyAction::CursorLeft | KeyAction::CursorRight => {
                     let Some(direction) =
@@ -413,22 +540,51 @@ impl AliasManager {
                     else {
                         return;
                     };
+                    let mut selected = self
+                        .group_scope
+                        .as_ref()
+                        .and_then(|scope| {
+                            self.groups
+                                .iter()
+                                .position(|group| &group.provider_name == scope)
+                        })
+                        .map_or(0, |i| i + 1);
                     crate::directional_selector::move_wrapped(
-                        &mut self.provider_idx,
-                        self.groups.len(),
+                        &mut selected,
+                        self.groups.len() + 1,
                         direction,
                     );
-                    let selected = self
-                        .groups
-                        .get(self.provider_idx)
-                        .and_then(|group| group.models.get(self.model_idx[self.provider_idx]))
-                        .map(|model| model.slug.clone());
-                    if let Some(selected) = selected {
-                        self.select_model(&selected);
-                    }
+                    self.group_scope = selected
+                        .checked_sub(1)
+                        .and_then(|i| self.groups.get(i))
+                        .map(|group| group.provider_name.clone());
+                    self.provider_idx = selected.saturating_sub(1);
+                    self.filter_models();
                 }
                 _ => {}
             },
+            Focus::Search => unreachable!("search input is handled before form navigation"),
+        }
+    }
+
+    fn page_models(&mut self, forward: bool) {
+        let page = self
+            .tree_pages
+            .iter()
+            .position(|page| page.contains(&self.browser.selected_index()))
+            .unwrap_or(0);
+        let next = if forward {
+            (page + 1).min(self.tree_pages.len().saturating_sub(1))
+        } else {
+            page.saturating_sub(1)
+        };
+        if next == page {
+            return;
+        }
+        if let Some(indices) = self.tree_pages.get(next) {
+            self.browser.focus_page(indices);
+            self.apply_browser_selection();
+            self.clear_geometry();
         }
     }
 
@@ -443,13 +599,8 @@ impl AliasManager {
         let Some(slug) = self.target_model.as_deref().filter(|slug| !slug.is_empty()) else {
             return;
         };
-        let result = atman_runtime::config_hub::ConfigHub::global().and_then(|hub| {
-            if self.is_edit {
-                hub.update_alias(self.edit_original.as_deref(), &alias, slug)
-            } else {
-                hub.add_alias(&alias, slug)
-            }
-        });
+        let result = atman_runtime::config_hub::ConfigHub::global()
+            .and_then(|hub| self.persist_alias(&hub, &alias, slug));
         match result {
             Ok(()) => {
                 self.refresh_list();
@@ -461,12 +612,36 @@ impl AliasManager {
             }
         }
     }
+
+    fn persist_alias(
+        &self,
+        hub: &atman_runtime::config_hub::ConfigHub,
+        alias: &str,
+        model: &str,
+    ) -> Result<(), atman_runtime::config_hub::ConfigError> {
+        if self.is_edit {
+            hub.update_alias(self.edit_original.as_deref(), alias, model)
+        } else {
+            hub.add_alias(alias, model)
+        }
+    }
 }
 
 fn rect_hit(rect: Option<Rect>, point: (u16, u16)) -> bool {
     rect.is_some_and(|rect| {
         point.0 >= rect.x && point.0 < rect.right() && point.1 >= rect.y && point.1 < rect.bottom()
     })
+}
+
+fn model_matches_search(
+    model: &atman_runtime::model_registry::ModelRow,
+    entry: Option<&atman_runtime::model_registry::ModelEntry>,
+    query: &str,
+) -> bool {
+    model.slug.to_lowercase().contains(query)
+        || entry
+            .filter(|entry| entry.provider.as_deref().unwrap_or("unknown") == model.provider_name)
+            .is_some_and(|entry| entry.model.to_lowercase().contains(query))
 }
 
 fn render_tree_panel(
@@ -476,25 +651,56 @@ fn render_tree_panel(
     theme: &crate::theme::Theme,
 ) {
     mgr.list_rect = Some(area);
-    let visible = usize::from(area.height / 3);
-    mgr.browser.set_visible_rows(visible);
-    if mgr.browser.rows().is_empty() {
-        render_hint(f, area, "No enabled models available", theme);
+    mgr.tree_pages = mgr.browser.grouped_pages(area.height, 1, 3);
+    if area.height < 4 {
+        render_hint(f, area, "Enlarge to browse models", theme);
+        return;
     }
-    for (slot, index) in mgr.browser.visible_rows(visible).take(visible).enumerate() {
+    let page = mgr
+        .tree_pages
+        .iter()
+        .position(|rows| rows.contains(&mgr.browser.selected_index()))
+        .unwrap_or(0);
+    let indices = mgr.tree_pages.get(page).cloned().unwrap_or_default();
+    let models = indices
+        .iter()
+        .filter(|index| mgr.browser.rows()[**index].selectable)
+        .count();
+    mgr.browser.set_visible_rows(models.max(1));
+    let mut y = area.y;
+    for index in indices {
         let row = &mgr.browser.rows()[index];
-        let selected =
-            mgr.focus == Focus::Tree && mgr.target_model.as_deref() == Some(row.value.as_str());
-        let rect = Rect::new(area.x, area.y + slot as u16 * 3, area.width, 3);
-        render_choice(
+        if row.kind == BrowserRowKind::Provider {
+            render_hint(f, Rect::new(area.x, y, area.width, 1), &row.label, theme);
+            y += 1;
+        } else {
+            let selected = index == mgr.browser.selected_index()
+                && (mgr.focus == Focus::Tree
+                    || mgr.target_model.as_deref() == Some(row.value.as_str()));
+            let rect = Rect::new(area.x, y, area.width, 3);
+            render_choice(
+                f,
+                rect,
+                &row.label,
+                selected,
+                mgr.hovered == Some(Hit::Row(index)),
+                theme,
+            );
+            mgr.row_hits.push((index, rect));
+            y += 3;
+        }
+    }
+    if !mgr.browser.rows().iter().any(|row| row.selectable) && y < area.bottom() {
+        render_hint(
             f,
-            rect,
-            &row.label,
-            selected,
-            mgr.hovered == Some(Hit::Row(index)),
+            Rect::new(area.x, y, area.width, area.bottom() - y),
+            if mgr.search.buf().is_empty() {
+                "No enabled models available"
+            } else {
+                "No matching models"
+            },
             theme,
         );
-        mgr.row_hits.push((index, rect));
     }
 }
 
@@ -719,14 +925,15 @@ fn render_alias_form(
     } else {
         3
     };
-    let gap = u16::from(area.height >= 17);
+    let gap = u16::from(area.height >= 18);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(field_height),
             Constraint::Length(gap),
+            Constraint::Length(1),
             Constraint::Min(0),
-            Constraint::Length(u16::from(area.height >= 11)),
+            Constraint::Length(1),
             Constraint::Length(gap),
             Constraint::Length(3),
             Constraint::Length(1),
@@ -748,54 +955,183 @@ fn render_alias_form(
     );
     mgr.last_input_rect = Some(name.value);
     mgr.name_hit = Some(name);
+    render_model_search(f, rows[2], mgr, t);
     if area.width >= 74 {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-            .split(rows[2]);
+            .split(rows[3]);
         render_tree_panel(f, cols[0], mgr, t);
         render_preview_panel(f, cols[1], mgr, t);
     } else {
-        render_tree_panel(f, rows[2], mgr, t);
+        render_tree_panel(f, rows[3], mgr, t);
     }
-    let info = if mgr.current_model().is_none() {
-        mgr.target_model.as_ref().map_or_else(
-            || "Select a model".to_owned(),
-            |target| format!("Retaining saved target: {target}"),
-        )
-    } else {
-        format!(
-            "{} / {} models · ←→ provider",
-            mgr.browser.selected_index() + 1,
-            mgr.browser.rows().len()
-        )
-    };
-    render_hint(f, rows[3], &info, t);
-    let disabled = mgr.editor.buf().trim().is_empty() || mgr.target_model.is_none();
-    render_action(
-        f,
-        rows[5],
-        &Action {
-            label: "Save",
-            shortcut: "Enter",
-            hovered: mgr.hovered == Some(Hit::Save),
-            disabled,
-            ..Default::default()
-        },
-        t,
+    let page = mgr
+        .tree_pages
+        .iter()
+        .position(|rows| rows.contains(&mgr.browser.selected_index()))
+        .unwrap_or(0)
+        + 1;
+    let info = format!(
+        "Page {page}/{} · Target: {}",
+        mgr.tree_pages.len().max(1),
+        mgr.target_model.as_deref().unwrap_or("none")
     );
-    if !disabled {
-        mgr.save_rect = Some(rows[5]);
-        mgr.action_hits.push((Hit::Save, rows[5]));
+    render_hint(f, rows[4], &info, t);
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Ratio(1, 3),
+            Constraint::Length(1),
+            Constraint::Ratio(1, 3),
+            Constraint::Length(1),
+            Constraint::Ratio(1, 3),
+        ])
+        .split(rows[6]);
+    for (hit, label, shortcut, rect) in [
+        (
+            Hit::PreviousGroup,
+            if buttons[0].width >= 15 {
+                "Prev group"
+            } else {
+                "Group"
+            },
+            "←",
+            buttons[0],
+        ),
+        (
+            Hit::NextGroup,
+            if buttons[2].width >= 15 {
+                "Next group"
+            } else {
+                "Group"
+            },
+            "→",
+            buttons[2],
+        ),
+        (Hit::Save, "Save", "^S", buttons[4]),
+    ] {
+        let disabled = match hit {
+            Hit::Save => mgr.editor.buf().trim().is_empty() || mgr.target_model.is_none(),
+            _ => mgr.groups.is_empty(),
+        };
+        render_action(
+            f,
+            rect,
+            &Action {
+                label,
+                shortcut,
+                hovered: mgr.hovered == Some(hit),
+                disabled,
+                ..Default::default()
+            },
+            t,
+        );
+        if !disabled {
+            mgr.action_hits.push((hit, rect));
+            if hit == Hit::Save {
+                mgr.save_rect = Some(rect);
+            }
+        }
     }
-    let help = if disabled {
-        "Tab focus · ↑↓ · Esc back"
-    } else if area.width < 55 {
-        "Tab focus · ↑↓ · Esc save"
-    } else {
-        "Tab/Shift+Tab: name / model · ↑↓: model · Esc: save"
+    let help = match mgr.focus {
+        Focus::NameInput => "Tab models · Ctrl+S save",
+        Focus::Tree => "↑↓ select · PgUp/PgDn · Tab name",
+        Focus::Search => "Tab models · Ctrl+U clear",
     };
-    render_hint(f, rows[6], help, t);
+    render_hint(f, rows[7], help, t);
+}
+
+fn render_model_search(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    mgr: &mut AliasManager,
+    t: &crate::theme::Theme,
+) {
+    let inset = area.width.min(2);
+    let label_width = 9.min(area.width.saturating_sub(inset));
+    let clear_width = if mgr.search.buf().is_empty() { 0 } else { 3 };
+    let record = Rect::new(
+        area.x + inset,
+        area.y,
+        area.width.saturating_sub(inset * 2 + clear_width),
+        area.height,
+    );
+    let value = Rect::new(
+        record.x + label_width,
+        record.y,
+        record.width.saturating_sub(label_width),
+        record.height,
+    );
+    let offset = if mgr.focus == Focus::Search {
+        mgr.search
+            .cursor_display_col()
+            .saturating_sub(value.width.saturating_sub(1) as usize)
+    } else {
+        0
+    };
+    let bg = if mgr.hovered == Some(Hit::Search) {
+        crate::theme::ThemeColor::new(crate::wm::shell::surface_bg(t)).lerp(t.work_hover_bg, 0.45)
+    } else {
+        crate::wm::shell::surface_bg(t)
+    };
+    f.render_widget(
+        Paragraph::new("Search /").style(Style::default().fg(t.subtle_fg.into()).bg(bg)),
+        record,
+    );
+    let query = if mgr.search.buf().is_empty() {
+        "model name or ID"
+    } else {
+        mgr.search.buf()
+    };
+    f.render_widget(
+        Paragraph::new(crate::width::trim_display_offset(
+            query,
+            offset,
+            value.width as usize,
+        ))
+        .style(
+            Style::default()
+                .fg(if mgr.focus == Focus::Search {
+                    t.tinted_fg.into()
+                } else {
+                    t.subtle_fg.into()
+                })
+                .bg(bg),
+        ),
+        value,
+    );
+    mgr.search_hit = Some(FieldHit {
+        record,
+        value,
+        offset,
+        arrows: None,
+    });
+    if clear_width > 0 {
+        let clear = Rect::new(record.right(), record.y, clear_width, record.height);
+        let clear_bg = if mgr.hovered == Some(Hit::ClearSearch) {
+            crate::theme::ThemeColor::new(crate::wm::shell::surface_bg(t))
+                .lerp(t.work_hover_bg, 0.45)
+        } else {
+            bg
+        };
+        f.render_widget(
+            Paragraph::new(" × ").style(Style::default().fg(t.subtle_fg.into()).bg(clear_bg)),
+            clear,
+        );
+        mgr.action_hits.push((Hit::ClearSearch, clear));
+    }
+    if mgr.focus == Focus::Search && value.width > 0 && value.height > 0 {
+        f.set_cursor_position((
+            value.x
+                + mgr
+                    .search
+                    .cursor_display_col()
+                    .saturating_sub(offset)
+                    .min(value.width as usize - 1) as u16,
+            value.y,
+        ));
+    }
 }
 
 impl crate::wm::modal::ModalOverlay for AliasManager {
@@ -838,16 +1174,22 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
     }
 
     fn cursor_position(&self) -> Option<(u16, u16)> {
-        (self.open
-            && self.show_form
-            && self.focus == Focus::NameInput
-            && self.confirm_delete.is_none())
-        .then_some(self.last_input_rect)
-        .flatten()
-        .filter(|rect| rect.width > 0 && rect.height > 0)
-        .map(|rect| {
-            let cursor = self.editor.cursor_display_col();
-            let offset = self.name_hit.map_or(0, |hit| hit.offset);
+        if !self.open || !self.show_form || self.confirm_delete.is_some() {
+            return None;
+        }
+        let (rect, cursor, offset) = match self.focus {
+            Focus::NameInput => (
+                self.last_input_rect?,
+                self.editor.cursor_display_col(),
+                self.name_hit.map_or(0, |hit| hit.offset),
+            ),
+            Focus::Search => {
+                let hit = self.search_hit?;
+                (hit.value, self.search.cursor_display_col(), hit.offset)
+            }
+            Focus::Tree => return None,
+        };
+        (rect.width > 0 && rect.height > 0).then(|| {
             (
                 rect.x + cursor.saturating_sub(offset).min(rect.width as usize - 1) as u16,
                 rect.y,
@@ -856,8 +1198,15 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
     }
 
     fn handle_paste(&mut self, text: &str) {
-        if self.open && self.show_form && self.focus == Focus::NameInput {
-            self.editor.paste_single_line(text);
+        if self.open && self.show_form {
+            match self.focus {
+                Focus::NameInput => self.editor.paste_single_line(text),
+                Focus::Search => {
+                    self.search.paste_single_line(text);
+                    self.filter_models();
+                }
+                Focus::Tree => {}
+            }
         }
     }
 
@@ -1261,6 +1610,9 @@ mod tests {
             assert_eq!(manager.focus, Focus::Tree);
             assert_eq!(manager.target_model.as_deref(), Some(model.as_str()));
             assert!(manager.cursor_position().is_none());
+            terminal
+                .draw(|frame| manager.render_content(frame, frame.area(), &app, &theme))
+                .unwrap();
             let save = manager.save_rect.unwrap();
             assert_eq!(save.height, 3);
             assert_eq!(manager.hit_at((save.x, save.bottom() - 1)), Some(Hit::Save));
@@ -1285,5 +1637,168 @@ mod tests {
             provider_name: name.to_string(),
             models: Vec::new(),
         }
+    }
+
+    #[test]
+    fn search_and_group_changes_never_replace_the_saved_alias_target() {
+        let mut manager = populated_manager();
+        manager.groups.push(provider_group("empty-group"));
+        manager.model_idx.push(0);
+        manager.prepare_form(true, Some("smart"), Some("vendor/model-09"));
+        manager.handle_key(&KeyAction::Tab, None);
+        manager.handle_key(&KeyAction::Char('/'), None);
+        <AliasManager as crate::wm::modal::ModalOverlay>::handle_paste(&mut manager, "model-01");
+        assert_eq!(
+            manager
+                .browser
+                .rows()
+                .iter()
+                .filter(|row| row.selectable)
+                .count(),
+            1
+        );
+        assert_eq!(manager.target_model.as_deref(), Some("vendor/model-09"));
+        manager.handle_key(&KeyAction::Tab, None);
+        assert_eq!(manager.focus, Focus::Tree);
+        manager.handle_key(&KeyAction::CursorLeft, None);
+        assert_eq!(manager.group_scope.as_deref(), Some("empty-group"));
+        assert!(!manager.browser.rows().iter().any(|row| row.selectable));
+        assert_eq!(manager.target_model.as_deref(), Some("vendor/model-09"));
+        manager.handle_key(&KeyAction::CursorRight, None);
+        assert!(manager.group_scope.is_none());
+        manager.handle_key(&KeyAction::Char('/'), None);
+        manager.handle_key(&KeyAction::RemoveAttachment, None);
+        assert!(manager.search.buf().is_empty());
+        assert_eq!(
+            manager
+                .browser
+                .rows()
+                .iter()
+                .filter(|row| row.kind == BrowserRowKind::Provider)
+                .count(),
+            2
+        );
+        assert_eq!(manager.target_model.as_deref(), Some("vendor/model-09"));
+        let dir = tempfile::tempdir().unwrap();
+        let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
+        manager
+            .persist_alias(&hub, "smart", manager.target_model.as_deref().unwrap())
+            .unwrap();
+        let config = hub.model_config().unwrap().unwrap();
+        assert_eq!(config.aliases["smart"].model, "vendor/model-09");
+    }
+
+    #[test]
+    fn model_search_matches_configuration_names_and_bound_api_ids() {
+        let manager = populated_manager();
+        let model = &manager.groups[0].models[0];
+        let mut entry = atman_runtime::model_registry::ModelEntry {
+            provider: Some("vendor".into()),
+            model: "upstream/reasoning-model".into(),
+            ..Default::default()
+        };
+        assert!(model_matches_search(model, Some(&entry), "model-00"));
+        assert!(model_matches_search(model, Some(&entry), "reasoning"));
+        entry.provider = Some("different-provider".into());
+        assert!(!model_matches_search(model, Some(&entry), "reasoning"));
+    }
+
+    #[test]
+    fn search_cursor_clear_hit_and_grouped_page_geometry_remain_consistent() {
+        use crate::wm::modal::ModalOverlay;
+        let mut manager = populated_manager();
+        manager.prepare_form(true, Some("smart"), Some("vendor/model-09"));
+        let app = crate::app::AppState::new("test".into(), None);
+        let theme = crate::theme::theme();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 14)).unwrap();
+        manager.focus = Focus::Search;
+        manager
+            .search
+            .replace_with("长查询文本-model-which-does-not-exist");
+        manager.filter_models();
+        terminal
+            .draw(|frame| manager.render_content(frame, frame.area(), &app, &theme))
+            .unwrap();
+        let hit = manager.search_hit.unwrap();
+        assert!(hit.offset > 0);
+        assert!(rect_hit(
+            Some(hit.value),
+            manager.cursor_position().unwrap()
+        ));
+        let expected =
+            crate::input::cursor_from_wrapped(manager.search.buf(), 0, hit.offset + 1, usize::MAX);
+        manager.handle_mouse(
+            &mouse(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                hit.value.x + 1,
+                hit.value.y,
+            ),
+            None,
+        );
+        assert_eq!(manager.search.cursor(), expected);
+        let clear = manager
+            .action_hits
+            .iter()
+            .find(|(hit, _)| *hit == Hit::ClearSearch)
+            .unwrap()
+            .1;
+        manager.handle_mouse(
+            &mouse(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                clear.x,
+                clear.y,
+            ),
+            None,
+        );
+        assert!(manager.search.buf().is_empty());
+        assert_eq!(manager.target_model.as_deref(), Some("vendor/model-09"));
+        manager.handle_key(&KeyAction::Tab, None);
+        terminal
+            .draw(|frame| manager.render_content(frame, frame.area(), &app, &theme))
+            .unwrap();
+        assert!(!manager.row_hits.is_empty());
+        let page = manager
+            .tree_pages
+            .iter()
+            .find(|page| page.contains(&manager.browser.selected_index()))
+            .unwrap();
+        assert_eq!(
+            manager.browser.rows()[page[0]].kind,
+            BrowserRowKind::Provider
+        );
+        assert!(
+            manager.row_hits.iter().all(|(_, rect)| rect.height == 3
+                && rect.bottom() <= manager.list_rect.unwrap().bottom())
+        );
+        let before = manager.browser.selected_index();
+        manager.handle_key(&KeyAction::PageDown, None);
+        assert!(manager.browser.selected_index() > before);
+        terminal
+            .draw(|frame| manager.render_content(frame, frame.area(), &app, &theme))
+            .unwrap();
+        let next = manager
+            .action_hits
+            .iter()
+            .find(|(hit, _)| *hit == Hit::NextGroup)
+            .unwrap()
+            .1;
+        let target = manager.target_model.clone();
+        manager.handle_mouse(
+            &mouse(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                next.x,
+                next.bottom() - 1,
+            ),
+            None,
+        );
+        assert_eq!(manager.group_scope.as_deref(), Some("vendor"));
+        assert_eq!(manager.target_model, target);
+        manager.select_model("vendor/model-15");
+        terminal
+            .draw(|frame| manager.render_content(frame, frame.area(), &app, &theme))
+            .unwrap();
+        manager.handle_key(&KeyAction::PageDown, None);
+        assert_eq!(manager.target_model.as_deref(), Some("vendor/model-15"));
     }
 }

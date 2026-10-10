@@ -654,7 +654,9 @@ impl ModalManager {
                 }
             }
             ModalKind::AliasManager => {
-                if self.alias_manager.show_form {
+                if canvas.width < 55 || canvas.height < 22 {
+                    canvas
+                } else if self.alias_manager.show_form {
                     let w = canvas.width.saturating_sub(4).min(96);
                     let h = canvas.height.saturating_sub(2).min(40);
                     center_rect(canvas, w, h)
