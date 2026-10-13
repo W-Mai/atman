@@ -12,7 +12,7 @@ async fn memory_confess_persists_via_dsl_call() {
     let dir = TempDir::new().unwrap();
     let store = Arc::new(ConfessionStore::at(dir.path()));
 
-    let src = r#"flow t() -> Unit {
+    let src = r#"flow t() -> Int {
     memory.confess(
         trigger: "wrote as any again",
         rule_violated: "no-as-any",

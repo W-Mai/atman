@@ -33,7 +33,7 @@ async fn l2_injection_mid_stream_triggers_restart_with_correction() {
     ));
 
     let src = r#"
-flow t(user: string) -> string {
+flow t(user: string) -> message {
     reply = llm.call(model: "mock-slow", prompt: user, context: "session")
     watch reply {
         on token(match: "___never_match_but_forces_streaming___") {

@@ -24,7 +24,7 @@ async fn llm_chunks_flow_from_provider_to_session_stream() {
             .with_chunk_delay(Duration::from_millis(1)),
     ));
 
-    let src = r#"flow t() -> string {
+    let src = r#"flow t() -> message {
     return llm.call(model: "mock", prompt: "irrelevant", context: "session")
 }
 "#;

@@ -268,7 +268,10 @@ async fn executor_runs_review_flow_with_mock_provider() {
         .run(
             &file,
             "review_code",
-            vec![("file".into(), Value::Str("src/main.rs".into()))],
+            vec![(
+                "file".into(),
+                Value::Host(atman_runtime::AtmanPayload::Path("src/main.rs".into())),
+            )],
         )
         .await
         .unwrap();

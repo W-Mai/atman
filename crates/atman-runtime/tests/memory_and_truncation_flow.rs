@@ -20,7 +20,7 @@ async fn spec_tools_execute_status_update_deviate_and_materialize() {
     tools::register_tier_zero(&ex.tools);
     tools::register_spec_memory(&ex.tools, spec);
 
-    let src = r#"flow t() -> String {
+    let src = r#"flow t() -> Int {
     before = memory.spec.status(feature: "demo")
     memory.spec.update(feature: "demo", phase: "research", content: "notes")
     memory.spec.deviate(feature: "demo", section: "scope", delta: "changed", reason: "needed")
