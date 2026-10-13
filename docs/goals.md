@@ -37,6 +37,8 @@ No default turn, token, fuel, or time budget is added. Provider retries retain t
 
 The root Goal section and child flow panels display padded **Pause / Resume** buttons with `Ctrl+Y`. `:goal` or **Manage Goal** in `Ctrl+P` opens the goal panel. Its agent selector addresses the root or an existing managed child; `Tab` / `Shift+Tab`, `Enter`, and mouse clicks operate the same controls. `Space` toggles the selected goal outside editing. `Ctrl+S` saves the objective; `Esc` leaves editing. Clear requires a second activation. Saving keeps the draft visible, including when a revision conflict rejects it.
 
+The goal panel opens centered. Drag its title area to move it or its bottom-right handle to resize it. Reopening focuses the existing panel without resetting its position, size, or draft; resizing respects the component's minimum dimensions.
+
 Plain REPL commands are `:goal`, `:goal set <text>`, `:goal pause`, `:goal resume`, and `:goal clear`. Controls run immediately instead of entering the prompt queue. Managed `atman run` invocations continue while active and exit when paused or failed; interactive REPL and daemon owners remain available for explicit Resume. No entry point adds a default goal budget.
 
 ## Daemon methods

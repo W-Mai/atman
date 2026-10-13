@@ -547,10 +547,15 @@ impl WindowManager {
         }
     }
 
-    pub fn resize_panel(&mut self, id: WindowId, w: u16, h: u16, _canvas: Rect) {
+    pub fn resize_panel(&mut self, id: WindowId, w: u16, h: u16, canvas: Rect) {
         if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
-            p.rect.width = w.max(MIN_PANEL_W);
-            p.rect.height = h.max(MIN_PANEL_H);
+            let min = p
+                .content
+                .as_ref()
+                .map(|content| content.preferred_size(canvas).min)
+                .unwrap_or((MIN_PANEL_W, MIN_PANEL_H));
+            p.rect.width = w.max(min.0).max(MIN_PANEL_W);
+            p.rect.height = h.max(min.1).max(MIN_PANEL_H);
         }
     }
 
@@ -884,6 +889,15 @@ impl WindowManager {
             }
             PaletteEntryId::ManageGoal => {
                 if let Some(session) = app.session.clone() {
+                    if let Some(id) = self
+                        .panels
+                        .iter()
+                        .find(|p| p.content_key == ContentKey::Goal)
+                        .map(|p| p.id)
+                    {
+                        self.focus(id);
+                        return Vec::new();
+                    }
                     let canvas = app.maximized_canvas();
                     let id = self.open_with_size(
                         "goal",
@@ -899,6 +913,9 @@ impl WindowManager {
                     if let Some(panel) = self.panels.iter_mut().find(|p| p.id == id)
                         && panel.content.is_none()
                     {
+                        panel.rect.x = canvas.x + canvas.width.saturating_sub(panel.rect.width) / 2;
+                        panel.rect.y =
+                            canvas.y + canvas.height.saturating_sub(panel.rect.height) / 2;
                         panel.content = Some(Box::new(
                             crate::window::goal_panel::GoalPanelContent::new(session),
                         ));
@@ -1026,6 +1043,24 @@ impl WindowManager {
         }
         if self.top_kind().is_some() {
             return (true, Vec::new());
+        }
+        // The shell owns pointer capture and chrome, regardless of how eagerly
+        // a content component consumes mouse events.
+        if matches!(event.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
+            && (self.interaction.drag_target.is_some() || self.interaction.resize_target.is_some())
+        {
+            return (false, Vec::new());
+        }
+        if matches!(
+            event.kind,
+            MouseEventKind::Down(_)
+                | MouseEventKind::Drag(_)
+                | MouseEventKind::Up(_)
+                | MouseEventKind::Moved
+        ) && (self.hit_test_btn(event.column, event.row).is_some()
+            || self.hit_test_titlebar(event.column, event.row).is_some())
+        {
+            return (false, Vec::new());
         }
         let Some(id) = self
             .hit_test_panel(event.column, event.row)
@@ -1287,7 +1322,7 @@ pub fn render(
     for panel in &mut panels.panels {
         if matches!(
             panel.content_kind,
-            WindowContent::Mcp | WindowContent::Knowledge | WindowContent::Goal
+            WindowContent::Mcp | WindowContent::Knowledge
         ) && (canvas.width < 55 || canvas.height < 22)
         {
             panel.rect = canvas;
@@ -1629,6 +1664,89 @@ mod tests {
         let reopened = wm.panels[0].content.as_deref().unwrap() as *const dyn WindowComponent;
         assert_eq!(wm.panels.len(), 1);
         assert!(std::ptr::addr_eq(original, reopened));
+    }
+
+    #[test]
+    fn goal_window_centers_and_preserves_shell_pointer_control() {
+        for (width, height) in [(140, 44), (50, 20)] {
+            let canvas = Rect::new(0, 0, width, height);
+            let mut wm = WindowManager::default();
+            let mut app = crate::app::AppState::new("goal-window".into(), None);
+            app.session = Some(std::sync::Arc::new(atman_runtime::Session::open_ephemeral()));
+            app.last_full_rect = Some(canvas);
+            app.last_transcript_rect = Some(canvas);
+            assert!(wm.dispatch_meta_command(":goal", &mut app, None));
+            let id = wm.panels[0].id;
+            let rect = wm.panels[0].rect;
+            assert_eq!(rect.x, (width - rect.width) / 2);
+            assert_eq!(rect.y, (height - rect.height) / 2);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| wm.render(frame, canvas, &mut app))
+                .unwrap();
+            assert_eq!(wm.panels[0].rect, rect);
+            for (column, row) in [
+                (rect.x + 6, rect.y),
+                (rect.right() - 1, rect.bottom() - 1),
+                (rect.x, rect.y + 5),
+            ] {
+                let event = MouseEvent {
+                    kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                    column,
+                    row,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                };
+                assert!(
+                    !wm.dispatch_mouse(&event, &mut app, None).0,
+                    "content must not consume window chrome"
+                );
+            }
+            assert_eq!(
+                wm.hit_test_titlebar(rect.x + 6, rect.y).map(|p| p.id),
+                Some(id)
+            );
+            assert_eq!(
+                wm.hit_test_resize(rect.right() - 1, rect.bottom() - 1),
+                Some(id)
+            );
+            for resize in [false, true] {
+                wm.interaction.drag_target = (!resize).then_some(id);
+                wm.interaction.resize_target = resize.then_some(id);
+                for kind in [
+                    MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+                    MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                ] {
+                    let event = MouseEvent {
+                        kind,
+                        column: rect.x + 5,
+                        row: rect.y + 6,
+                        modifiers: crossterm::event::KeyModifiers::NONE,
+                    };
+                    assert!(
+                        !wm.dispatch_mouse(&event, &mut app, None).0,
+                        "captured pointer must stay with the shell over content"
+                    );
+                }
+            }
+            wm.interaction.drag_target = None;
+            wm.interaction.resize_target = None;
+            wm.move_panel(id, rect.x + 1, rect.y + 1, canvas);
+            wm.resize_panel(id, rect.width - 4, rect.height - 2, canvas);
+            let adjusted = wm.panels[0].rect;
+            terminal
+                .draw(|frame| wm.render(frame, canvas, &mut app))
+                .unwrap();
+            assert_eq!(wm.panels[0].rect, adjusted);
+            assert!(wm.dispatch_meta_command(":goal", &mut app, None));
+            assert_eq!(wm.panels.len(), 1);
+            assert_eq!(wm.panels[0].rect, adjusted);
+            wm.resize_panel(id, 1, 1, canvas);
+            assert_eq!(
+                (wm.panels[0].rect.width, wm.panels[0].rect.height),
+                (32, 14)
+            );
+        }
     }
 
     #[test]
