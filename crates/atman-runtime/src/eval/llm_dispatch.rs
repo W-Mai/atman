@@ -845,6 +845,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     if let Some(session) = ctx.session_runtime.as_ref()
         && !saw_context_overflow
     {
+        drop(compact_guard.take());
         crate::compaction::start_auto_compact_with_budget(
             session.clone(),
             model.clone(),

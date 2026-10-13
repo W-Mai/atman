@@ -212,7 +212,7 @@ fn user_msg(turn_id: TurnId, text: &str) -> Message {
 #[tokio::test]
 async fn run_in_turn_appends_assistant_message_to_session() {
     let _registry = common::ModelRegistryGuard::mock("mock").await;
-    let src = r#"flow ask() -> string {
+    let src = r#"flow ask() -> message {
     return llm.call(model: "mock", prompt: "hi", context: "session")
 }
 "#;
@@ -339,7 +339,7 @@ async fn run_without_turn_does_not_touch_session() {
 #[tokio::test]
 async fn assistant_msg_event_carries_flow_run_id() {
     let _registry = common::ModelRegistryGuard::mock("mock").await;
-    let src = r#"flow ask() -> string {
+    let src = r#"flow ask() -> message {
     return llm.call(model: "mock", prompt: "hi", context: "session")
 }
 "#;
@@ -393,7 +393,7 @@ async fn empty_assistant_message_retries_without_entering_session_history() {
         )]))
         .await;
     let file = parse_file(
-        r#"flow ask() -> string {
+        r#"flow ask() -> message {
     return llm.call(model: "empty-model", prompt: "hi", context: "session", retry: 1)
 }
 "#,
@@ -408,10 +408,13 @@ async fn empty_assistant_message_retries_without_entering_session_history() {
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
 
-    let output = executor
-        .run_in_turn(&file, "ask", vec![], Some(turn_id), Some(session.clone()))
-        .await
-        .unwrap();
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        executor.run_in_turn(&file, "ask", vec![], Some(turn_id), Some(session.clone())),
+    )
+    .await
+    .expect("empty response retry must complete")
+    .unwrap();
     session.end_turn();
 
     assert!(
@@ -439,6 +442,49 @@ async fn empty_assistant_message_retries_without_entering_session_history() {
         [LlmCallStatus::Errored { message }, LlmCallStatus::Ok]
             if message.contains("empty assistant message")
     ));
+}
+
+#[tokio::test]
+async fn exhausted_llm_failure_releases_context_lock() {
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "empty-model",
+            "empty-then-good",
+            8_192,
+            None,
+        )]))
+        .await;
+    let file = parse_file(
+        r#"flow ask() -> message {
+        return llm.call(model: "empty-model", prompt: "hi", context: "session", retry: 0)
+    }"#,
+    )
+    .unwrap();
+    let executor = Executor::new();
+    let provider = Arc::new(EmptyThenGoodProvider {
+        calls: AtomicU32::new(0),
+    });
+    executor.providers.register(provider.clone());
+    let session = Arc::new(Session::open_ephemeral());
+    let turn_id = TurnId::now();
+    session.begin_turn(user_msg(turn_id.clone(), "start"));
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        executor.run_in_turn(&file, "ask", vec![], Some(turn_id), Some(session.clone())),
+    )
+    .await
+    .expect("failed call must not wait on its own context lock")
+    .unwrap_err();
+    assert!(error.to_string().contains("empty assistant message"));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    let guard = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        session.acquire_compact_lock(),
+    )
+    .await
+    .expect("context lock must remain available after failure");
+    drop(guard);
+    session.end_turn();
 }
 
 #[tokio::test]

@@ -180,6 +180,7 @@ fn classify_tool_failed(msg: &str) -> ErrorKind {
                 m.starts_with(&format!("{provider} net: error sending request for url"))
             })
         || m == "responses protocol: stream ended before a terminal response"
+        || m == "llm returned an empty assistant message"
     {
         return ErrorKind::Transient;
     }
