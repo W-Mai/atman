@@ -220,6 +220,7 @@ pub fn parse_ansi_to_screen(body: &str) -> TerminalScreen {
 #[derive(Debug, Clone)]
 pub enum TermStreamEvent {
     Chunk {
+        revision: u64,
         bytes: Vec<u8>,
         screen: TerminalScreen,
         state: TermState,
@@ -591,15 +592,16 @@ fn run_reader_loop(
             Ok(n) => {
                 let chunk = &buf[..n];
                 let _ = log_file.write_all(chunk);
-                let screen = {
+                let (screen, revision) = {
                     let mut p = parser.lock().expect("parser poisoned");
                     p.process(chunk);
-                    snapshot_screen(&p)
+                    let revision = output_revision.fetch_add(1, Ordering::Release) + 1;
+                    (snapshot_screen(&p), revision)
                 };
-                output_revision.fetch_add(1, Ordering::Release);
                 let screen_changed = last_screen.as_ref() != Some(&screen);
                 let st = state.lock().expect("state poisoned").clone();
                 let _ = stream_tx.send(TermStreamEvent::Chunk {
+                    revision,
                     bytes: chunk.to_vec(),
                     screen: screen.clone(),
                     state: st.clone(),
@@ -1051,51 +1053,93 @@ fn find_pattern_columns(screen: &TerminalScreen, row: u16, pattern: &str) -> Vec
 
 impl crate::watch::Watchable for TermEntry {
     fn watch_output(
-        self: std::sync::Arc<Self>,
+        self: Arc<Self>,
         pattern: String,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::watch::WatchResult> + Send>>
-    {
-        let stream_tx = self.stream_tx.clone();
-        let state = self.state.clone();
-        let parser = self.parser.clone();
-        Box::pin(async move {
-            // Subscribe BEFORE checking state — closes the TOCTOU window where
-            // the terminal exits between the check and subscribe().
-            let mut rx = stream_tx.subscribe();
-            {
-                let st = state.lock().unwrap().clone();
-                if !st.is_running() {
-                    let p = parser.lock().unwrap();
-                    let screen = snapshot_screen(&p);
-                    if let Some((r, c)) = find_pattern_on_screen(&screen, &pattern) {
-                        return crate::watch::WatchResult::Matched {
-                            row: Some(r),
-                            col: Some(c),
-                            text: pattern,
-                        };
-                    }
-                    return crate::watch::WatchResult::SourceExited;
-                }
+    ) -> futures::stream::BoxStream<'static, crate::watch::WatchResult> {
+        let rx = self.stream_tx.subscribe();
+        let watch = TerminalWatch {
+            entry: self,
+            rx,
+            pattern,
+            revision: None,
+            matches: std::collections::HashSet::new(),
+            pending: std::collections::VecDeque::new(),
+            ended: false,
+        };
+        Box::pin(futures::stream::unfold(watch, |mut watch| async move {
+            let result = watch.next().await?;
+            Some((result, watch))
+        }))
+    }
+}
+
+struct TerminalWatch {
+    entry: Arc<TermEntry>,
+    rx: broadcast::Receiver<TermStreamEvent>,
+    pattern: String,
+    revision: Option<u64>,
+    matches: std::collections::HashSet<(u16, u16)>,
+    pending: std::collections::VecDeque<crate::watch::WatchResult>,
+    ended: bool,
+}
+
+impl TerminalWatch {
+    fn snapshot(&mut self) -> (TerminalScreen, u64) {
+        self.ended = !self.entry.state.lock().unwrap().is_running();
+        let parser = self.entry.parser.lock().unwrap();
+        (
+            snapshot_screen(&parser),
+            self.entry.output_revision.load(Ordering::Acquire),
+        )
+    }
+
+    async fn next(&mut self) -> Option<crate::watch::WatchResult> {
+        use crate::watch::WatchResult;
+        loop {
+            if let Some(result) = self.pending.pop_front() {
+                return Some(result);
             }
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => return crate::watch::WatchResult::Cancelled,
-                    result = rx.recv() => match result {
-                        Ok(crate::tools::term::TermStreamEvent::Chunk { screen, .. }) => {
-                            if let Some((r, c)) = find_pattern_on_screen(&screen, &pattern) {
-                                return crate::watch::WatchResult::Matched {
-                                    row: Some(r),
-                                    col: Some(c),
-                                    text: pattern,
-                                };
-                            }
+            if self.ended {
+                return None;
+            }
+            let (screen, revision) = if self.revision.is_none() {
+                self.snapshot()
+            } else {
+                match self.rx.recv().await {
+                    Ok(TermStreamEvent::Chunk {
+                        screen, revision, ..
+                    }) => (screen, revision),
+                    Ok(TermStreamEvent::Exited { .. })
+                    | Err(broadcast::error::RecvError::Closed) => {
+                        let snapshot = self.snapshot();
+                        self.ended = true;
+                        snapshot
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => self.snapshot(),
+                }
+            };
+            // Ignore broadcasts already included in the initial/recovery snapshot.
+            if self.revision.is_none_or(|seen| revision > seen) {
+                let mut matches = std::collections::HashSet::new();
+                for row in 0..screen.rows {
+                    for col in find_pattern_columns(&screen, row, &self.pattern) {
+                        if !self.matches.contains(&(row, col)) {
+                            self.pending.push_back(WatchResult::Matched {
+                                row: Some(row),
+                                col: Some(col),
+                                text: self.pattern.clone(),
+                            });
                         }
-                        _ => return crate::watch::WatchResult::SourceExited,
+                        matches.insert((row, col));
                     }
                 }
+                self.matches = matches;
+                self.revision = Some(revision);
             }
-        })
+            if self.ended {
+                self.pending.push_back(WatchResult::SourceExited);
+            }
+        }
     }
 }
 
@@ -3160,6 +3204,100 @@ mod tests {
         ));
         assert!(continuation.iter().any(|(name, _)| name == "next_row"));
         assert!(fields.iter().any(|(name, _)| name == "screen"));
+    }
+
+    #[tokio::test]
+    async fn persistent_watch_retains_screen_subscription_and_ends() {
+        use crate::watch::{WatchResult, Watchable};
+        use futures::{FutureExt, StreamExt};
+        let entry = Arc::new(TermEntry {
+            handle: TermHandle {
+                session_id: "watch-test".into(),
+                local_id: 1,
+            },
+            session_id: "session_a".into(),
+            pty_size: portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0))),
+            writer: Mutex::new(Box::new(std::io::sink())),
+            state: Arc::new(Mutex::new(TermState::Running {
+                pid: 0,
+                started_at: 0,
+            })),
+            stream_tx: broadcast::channel(STREAM_CHANNEL_CAPACITY).0,
+            output_revision: Arc::new(AtomicU64::new(0)),
+            action_gate: tokio::sync::Mutex::new(()),
+            log_path: std::env::temp_dir().join("term_test_dummy.log"),
+            reader_task: Mutex::new(None),
+            child: Mutex::new(None),
+            master: Mutex::new(None),
+            profile: Arc::new(Mutex::new(None)),
+            started_at: Instant::now(),
+            task_id: Mutex::new(None),
+        });
+        fn emit(entry: &TermEntry, bytes: &[u8]) {
+            let (screen, revision) = {
+                let mut parser = entry.parser.lock().unwrap();
+                parser.process(bytes);
+                let revision = entry.output_revision.fetch_add(1, Ordering::Release) + 1;
+                (snapshot_screen(&parser), revision)
+            };
+            let _ = entry.stream_tx.send(TermStreamEvent::Chunk {
+                revision,
+                bytes: bytes.to_vec(),
+                screen,
+                state: entry.state.lock().unwrap().clone(),
+            });
+        }
+        emit(&entry, b"done");
+        let mut stream = Arc::clone(&entry).watch_output("done".into());
+        assert!(matches!(
+            stream.next().await,
+            Some(WatchResult::Matched { .. })
+        ));
+        assert!(stream.next().now_or_never().is_none());
+        // Keep updates that arrive between polls, including a transient clear.
+        emit(&entry, b"\r\x1b[2K");
+        emit(&entry, b"done");
+        emit(&entry, b" extra");
+        assert!(matches!(
+            stream.next().await,
+            Some(WatchResult::Matched { .. })
+        ));
+        assert!(stream.next().now_or_never().is_none());
+        // Lag recovery reads a snapshot instead of misclassifying the source as exited.
+        for _ in 0..=STREAM_CHANNEL_CAPACITY {
+            emit(&entry, b"\x1b[0m");
+        }
+        assert!(stream.next().now_or_never().is_none());
+        *entry.state.lock().unwrap() = TermState::Exited {
+            exit_code: Some(0),
+            ended_at: 1,
+        };
+        entry
+            .stream_tx
+            .send(TermStreamEvent::Exited { exit_code: Some(0) })
+            .unwrap();
+        assert!(matches!(
+            stream.next().await,
+            Some(WatchResult::SourceExited)
+        ));
+        assert!(stream.next().await.is_none());
+        // Starting on an exited screen delivers its match exactly once.
+        let mut stream = entry.watch_output("done".into());
+        assert!(matches!(
+            stream.next().await,
+            Some(WatchResult::Matched { .. })
+        ));
+        assert!(matches!(
+            stream.next().await,
+            Some(WatchResult::SourceExited)
+        ));
+        assert!(stream.next().await.is_none());
     }
 
     #[test]

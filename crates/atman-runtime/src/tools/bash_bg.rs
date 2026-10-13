@@ -227,37 +227,33 @@ pub struct BgEntry {
 
 impl crate::watch::Watchable for BgEntry {
     fn watch_output(
-        self: std::sync::Arc<Self>,
+        self: Arc<Self>,
         pattern: String,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::watch::WatchResult> + Send>>
-    {
-        let output = self.output.clone();
-        let status = self.status.clone();
-        Box::pin(async move {
+    ) -> futures::stream::BoxStream<'static, crate::watch::WatchResult> {
+        use crate::watch::{OutputCursor, WatchResult};
+        let state = Some((self, OutputCursor::default(), pattern));
+        Box::pin(futures::stream::unfold(state, |state| async move {
+            let (entry, mut cursor, pattern) = state?;
             loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => return crate::watch::WatchResult::Cancelled,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                        let text = {
-                            let out = output.lock().unwrap();
-                            String::from_utf8_lossy(&out.combined).into_owned()
-                        };
-                        if let Some(pos) = text.find(&pattern) {
-                            return crate::watch::WatchResult::Matched {
-                                row: None,
-                                col: Some(pos as u16),
-                                text: pattern,
-                            };
-                        }
-                        let st = status.lock().unwrap().clone();
-                        if !matches!(st, BgStatus::Running { .. }) {
-                            return crate::watch::WatchResult::SourceExited;
-                        }
-                    }
+                let running = matches!(*entry.status.lock().unwrap(), BgStatus::Running { .. });
+                let position = {
+                    let out = entry.output.lock().unwrap();
+                    cursor.find(&out.combined, out.buffer_start, &pattern)
+                };
+                if let Some(position) = position {
+                    let result = WatchResult::Matched {
+                        row: None,
+                        col: u16::try_from(position).ok(),
+                        text: pattern.clone(),
+                    };
+                    return Some((result, Some((entry, cursor, pattern))));
                 }
+                if !running {
+                    return Some((WatchResult::SourceExited, None));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-        })
+        }))
     }
 }
 
@@ -1449,6 +1445,46 @@ fn extract_optional_string(args: &ToolArgs, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn persistent_watch_consumes_buffer_before_reporting_exit() {
+        use crate::watch::{WatchResult, Watchable};
+        use futures::{FutureExt, StreamExt};
+        let entry = Arc::new(BgEntry {
+            session_id: "watch-test".into(),
+            control_tx: mpsc::channel(1).0,
+            status: Arc::new(Mutex::new(BgStatus::Running {
+                pid: 0,
+                started_at: 0,
+            })),
+            output: Arc::new(Mutex::new(BgOutput::default())),
+            log_path: std::path::PathBuf::new(),
+            task_id: None,
+        });
+        entry
+            .output
+            .lock()
+            .unwrap()
+            .combined
+            .extend_from_slice(b"done done");
+        let mut stream = Arc::clone(&entry).watch_output("done".into());
+        for _ in 0..2 {
+            assert!(matches!(
+                stream.next().await,
+                Some(WatchResult::Matched { .. })
+            ));
+        }
+        assert!(stream.next().now_or_never().is_none());
+        *entry.status.lock().unwrap() = BgStatus::Exited {
+            exit_code: 0,
+            started_at: 0,
+            ended_at: 1,
+        };
+        assert!(matches!(
+            stream.next().await,
+            Some(WatchResult::SourceExited)
+        ));
+        assert!(stream.next().await.is_none());
+    }
     use crate::tool::{ToolArgs, ToolCtx};
     use crate::value::Value;
     use std::sync::Arc;

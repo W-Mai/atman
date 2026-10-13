@@ -82,72 +82,57 @@ impl crate::watch::Watchable for FlowEntry {
     fn watch_output(
         self: Arc<Self>,
         pattern: String,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::watch::WatchResult> + Send>>
-    {
-        let stream_tx = self.stream_tx.clone();
-        let output = self.output.clone();
-        let status = self.status.clone();
-        Box::pin(async move {
-            {
-                let existing = output.lock().unwrap().clone();
-                if existing.find(&pattern).is_some() {
-                    return crate::watch::WatchResult::Matched {
-                        row: None,
-                        col: None,
-                        text: existing,
-                    };
-                }
-            }
-            // Subscribe BEFORE checking status — if the source exits between
-            // subscribe and the status check, the broadcast event arrives via rx.
-            // If it exits before subscribe, the status check catches it.
-            let mut rx = stream_tx.subscribe();
-            {
-                let st = status.lock().unwrap().clone();
-                if !st.is_running() {
-                    if let FlowRunStatus::Ok { final_text, .. } = &st {
-                        if final_text.find(&pattern).is_some() {
-                            return crate::watch::WatchResult::Matched {
-                                row: None,
-                                col: None,
-                                text: final_text.clone(),
-                            };
-                        }
-                    }
-                    return crate::watch::WatchResult::SourceExited;
-                }
-            }
+    ) -> futures::stream::BoxStream<'static, crate::watch::WatchResult> {
+        use crate::watch::{OutputCursor, WatchResult};
+        // Subscribe before the initial snapshot and retain the receiver across matches.
+        let rx = self.stream_tx.subscribe();
+        let state = Some((self, rx, OutputCursor::default(), pattern, false));
+        Box::pin(futures::stream::unfold(state, |state| async move {
+            let (entry, mut rx, mut cursor, pattern, mut final_checked) = state?;
             loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => return crate::watch::WatchResult::Cancelled,
-                    result = rx.recv() => match result {
-                        Ok(FlowEvent::AssistantDone { text }) => {
-                            if text.find(&pattern).is_some() {
-                                return crate::watch::WatchResult::Matched {
-                                    row: None,
-                                    col: None,
-                                    text,
-                                };
+                // Observe status first so an exit racing with the output snapshot
+                // is either included here or delivered through the receiver.
+                let status = entry.status.lock().unwrap().clone();
+                let matched = {
+                    let output = entry.output.lock().unwrap();
+                    if cursor.find(output.as_bytes(), 0, &pattern).is_some() {
+                        Some(output.clone())
+                    } else if !final_checked && !status.is_running() {
+                        final_checked = true;
+                        match &status {
+                            FlowRunStatus::Ok { final_text, .. }
+                                if final_text.contains(&pattern)
+                                    && !output.contains(final_text) =>
+                            {
+                                Some(final_text.clone())
                             }
+                            _ => None,
                         }
-                        Ok(FlowEvent::Exited { status }) => {
-                            if let FlowRunStatus::Ok { final_text, .. } = &status {
-                                if final_text.find(&pattern).is_some() {
-                                    return crate::watch::WatchResult::Matched {
-                                        row: None,
-                                        col: None,
-                                        text: final_text.clone(),
-                                    };
-                                }
-                            }
-                            return crate::watch::WatchResult::SourceExited;
-                        }
-                        Err(_) => return crate::watch::WatchResult::SourceExited,
+                    } else {
+                        None
+                    }
+                };
+                if let Some(text) = matched {
+                    return Some((
+                        WatchResult::Matched {
+                            row: None,
+                            col: None,
+                            text,
+                        },
+                        Some((entry, rx, cursor, pattern, final_checked)),
+                    ));
+                }
+                if !status.is_running() {
+                    return Some((WatchResult::SourceExited, None));
+                }
+                match rx.recv().await {
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Some((WatchResult::SourceExited, None));
                     }
                 }
             }
-        })
+        }))
     }
 }
 

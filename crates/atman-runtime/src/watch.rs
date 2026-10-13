@@ -3,6 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::{StreamExt, stream::BoxStream};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -289,11 +290,32 @@ impl WatchHub {
 }
 
 pub trait Watchable: Send + Sync {
-    fn watch_output(
-        self: Arc<Self>,
-        pattern: String,
-        cancel: CancellationToken,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = WatchResult> + Send>>;
+    /// Keep the subscription and consumed output alive for the entire watch.
+    fn watch_output(self: Arc<Self>, pattern: String) -> BoxStream<'static, WatchResult>;
+}
+
+/// Absolute byte position, including overlap for patterns split across updates.
+#[derive(Default)]
+pub(crate) struct OutputCursor(usize);
+
+impl OutputCursor {
+    pub(crate) fn find(&mut self, bytes: &[u8], base: usize, pattern: &str) -> Option<usize> {
+        if pattern.is_empty() {
+            return None;
+        }
+        let start = self.0.saturating_sub(base).min(bytes.len());
+        if let Some(relative) = bytes[start..]
+            .windows(pattern.len())
+            .position(|window| window == pattern.as_bytes())
+        {
+            let position = base + start + relative;
+            self.0 = position + pattern.len();
+            Some(position)
+        } else {
+            self.0 = (base + start).max(base + bytes.len().saturating_sub(pattern.len() - 1));
+            None
+        }
+    }
 }
 
 pub async fn handle_watch_result(
@@ -445,7 +467,7 @@ impl Tool for Watch {
             "type": "object",
             "properties": {
                 "handle": {"type": "string"},
-                "pattern": {"type": "string"},
+                "pattern": {"type": "string", "minLength": 1},
                 "mode": {"type": "string", "enum": ["once", "persist"], "default": "once"},
                 "timeout_ms": {"type": "integer", "default": 120000}
             },
@@ -456,6 +478,11 @@ impl Tool for Watch {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
             let pattern = extract_string(&args, "pattern", 1)?;
+            if pattern.is_empty() {
+                return Err(RuntimeError::ToolFailed(
+                    "watch: pattern must not be empty".into(),
+                ));
+            }
             let mode = match extract_optional_string(&args, "mode").as_deref() {
                 Some("persist") => WatchMode::Persist,
                 _ => WatchMode::Once,
@@ -539,15 +566,16 @@ fn spawn_watcher(
     watchable: Arc<dyn Watchable>,
 ) {
     let cancel = hub.get_cancel(&wid);
-    let w = Arc::clone(&watchable);
-    let pat = pattern.clone();
     tokio::spawn(async move {
+        let mut output = watchable.watch_output(pattern.clone());
         loop {
-            let result = tokio::time::timeout(
-                timeout,
-                Arc::clone(&w).watch_output(pat.clone(), cancel.clone()),
-            )
-            .await;
+            let result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                result = tokio::time::timeout(timeout, output.next()) => {
+                    result.map(|item| item.unwrap_or(WatchResult::SourceExited))
+                }
+            };
             let matched = matches!(result, Ok(WatchResult::Matched { .. }));
             handle_watch_result(
                 Arc::clone(&hub),
@@ -561,10 +589,10 @@ fn spawn_watcher(
             if !matched || mode == WatchMode::Once {
                 break;
             }
+            // A buffered source can produce many immediately-ready matches.
+            tokio::task::yield_now().await;
         }
-        if mode == WatchMode::Persist {
-            hub.unregister(&wid);
-        }
+        hub.unregister(&wid);
     });
 }
 
@@ -753,6 +781,75 @@ impl Tool for HasPendingInjections {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_cursor_consumes_matches_and_preserves_split_patterns() {
+        let mut cursor = OutputCursor::default();
+        assert_eq!(cursor.find("完".as_bytes(), 0, "完成"), None);
+        assert_eq!(cursor.find("完成完成".as_bytes(), 0, "完成"), Some(0));
+        assert_eq!(cursor.find("完成完成".as_bytes(), 0, "完成"), Some(6));
+        assert_eq!(cursor.find("完成完成".as_bytes(), 0, "完成"), None);
+        // A ring buffer can discard bytes before the consumed position.
+        assert_eq!(cursor.find(b"xxdone", 100, "done"), Some(102));
+        assert_eq!(cursor.find(b"done", 102, "done"), None);
+        assert_eq!(cursor.find(b"done", 102, ""), None);
+    }
+
+    #[tokio::test]
+    async fn flow_watch_consumes_history_once_and_keeps_its_subscription() {
+        use crate::tools::agent_ctrl::{FlowEvent, FlowRegistry, FlowRunStatus};
+        use futures::FutureExt;
+        let entry = FlowRegistry::new().create_entry(
+            "watch-flow".into(),
+            String::new(),
+            String::new(),
+            crate::event::FlowRunId::now(),
+        );
+        entry.output.lock().unwrap().push_str("done");
+        let mut output = Arc::clone(&entry).watch_output("done".into());
+        assert!(matches!(
+            output.next().await,
+            Some(WatchResult::Matched { .. })
+        ));
+        assert!(output.next().now_or_never().is_none());
+        // Output arrives between polls, while the subscription stays alive.
+        entry.output.lock().unwrap().push_str(" done");
+        entry
+            .stream_tx
+            .send(FlowEvent::AssistantDone {
+                text: "done done".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            output.next().await,
+            Some(WatchResult::Matched { .. })
+        ));
+        assert!(output.next().now_or_never().is_none());
+        let status = FlowRunStatus::Ok {
+            ended_at: chrono::Utc::now(),
+            final_text: "done".into(),
+        };
+        *entry.status.lock().unwrap() = status.clone();
+        entry.stream_tx.send(FlowEvent::Exited { status }).unwrap();
+        assert!(matches!(
+            output.next().await,
+            Some(WatchResult::SourceExited)
+        ));
+        assert!(output.next().await.is_none());
+
+        // A completed flow with only a final tool response also terminates.
+        entry.output.lock().unwrap().clear();
+        let mut output = entry.watch_output("done".into());
+        assert!(matches!(
+            output.next().await,
+            Some(WatchResult::Matched { .. })
+        ));
+        assert!(matches!(
+            output.next().await,
+            Some(WatchResult::SourceExited)
+        ));
+        assert!(output.next().await.is_none());
+    }
 
     #[tokio::test]
     async fn removing_the_last_watch_wakes_all_waiters_and_rejects_late_results() {
@@ -1140,27 +1237,11 @@ mod tests {
 
     struct ScriptedWatchable {
         results: Vec<WatchResult>,
-        idx: Mutex<usize>,
     }
 
     impl Watchable for ScriptedWatchable {
-        fn watch_output(
-            self: Arc<Self>,
-            _pattern: String,
-            _cancel: CancellationToken,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = WatchResult> + Send>> {
-            let mut idx = self.idx.lock().unwrap();
-            let i = *idx;
-            *idx += 1;
-            let result = self
-                .results
-                .get(i)
-                .cloned()
-                .unwrap_or(WatchResult::SourceExited);
-            Box::pin(async move {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                result
-            })
+        fn watch_output(self: Arc<Self>, _pattern: String) -> BoxStream<'static, WatchResult> {
+            Box::pin(futures::stream::iter(self.results.clone()))
         }
     }
 
@@ -1189,7 +1270,6 @@ mod tests {
                 },
                 WatchResult::SourceExited,
             ],
-            idx: Mutex::new(0),
         });
         spawn_watcher(
             Arc::clone(&hub),
@@ -1233,16 +1313,8 @@ mod tests {
     async fn persist_watcher_timeout_removes_watcher() {
         struct NeverMatch;
         impl Watchable for NeverMatch {
-            fn watch_output(
-                self: Arc<Self>,
-                _pattern: String,
-                cancel: CancellationToken,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = WatchResult> + Send>>
-            {
-                Box::pin(async move {
-                    cancel.cancelled().await;
-                    WatchResult::Cancelled
-                })
+            fn watch_output(self: Arc<Self>, _pattern: String) -> BoxStream<'static, WatchResult> {
+                Box::pin(futures::stream::pending())
             }
         }
 
@@ -1284,16 +1356,8 @@ mod tests {
     async fn persist_watcher_stops_on_cancel() {
         struct NeverMatch;
         impl Watchable for NeverMatch {
-            fn watch_output(
-                self: Arc<Self>,
-                _pattern: String,
-                cancel: CancellationToken,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = WatchResult> + Send>>
-            {
-                Box::pin(async move {
-                    cancel.cancelled().await;
-                    WatchResult::Cancelled
-                })
+            fn watch_output(self: Arc<Self>, _pattern: String) -> BoxStream<'static, WatchResult> {
+                Box::pin(futures::stream::pending())
             }
         }
 
@@ -1325,5 +1389,45 @@ mod tests {
             !hub.has_active_watchers(),
             "persist watcher must stop and be removed when cancelled"
         );
+    }
+
+    #[tokio::test]
+    async fn persist_watcher_yields_and_cancels_an_always_ready_source() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Ready(Arc<AtomicUsize>);
+        impl Watchable for Ready {
+            fn watch_output(self: Arc<Self>, pattern: String) -> BoxStream<'static, WatchResult> {
+                Box::pin(futures::stream::repeat_with(move || {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                    WatchResult::Matched {
+                        row: None,
+                        col: None,
+                        text: pattern.clone(),
+                    }
+                }))
+            }
+        }
+        let hub = Arc::new(WatchHub::new());
+        let source = WatchSource::Bash {
+            handle: "ready".into(),
+        };
+        let timeout = Duration::from_secs(1);
+        let wid = hub.register(source.clone(), "done".into(), WatchMode::Persist, timeout);
+        let count = Arc::new(AtomicUsize::new(0));
+        spawn_watcher(
+            Arc::clone(&hub),
+            wid.clone(),
+            source,
+            "done".into(),
+            WatchMode::Persist,
+            timeout,
+            Arc::new(Ready(Arc::clone(&count))),
+        );
+        assert!(hub.wait_for_event(timeout).await.is_some());
+        hub.unregister(&wid);
+        let observed = count.load(Ordering::Relaxed);
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert_eq!(count.load(Ordering::Relaxed), observed);
     }
 }
