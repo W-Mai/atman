@@ -259,7 +259,7 @@ atman> :goal clear
 [atman] goal cleared
 ```
 
-`:goal` is stored in `<session_dir>/goal.txt` and appended to the system context of every LLM call running with this session. It does not enter the message list, so message compaction does not rewrite it. See `docs/context-strategy.md` for the complete request structure and compaction model.
+`:goal` is stored in `<session_dir>/goal.json` with an identity, revision, and state. Existing `goal.txt` records remain readable and load as paused goals; clearing a goal prevents the old text from reappearing. Goal text enters model history through versioned context records, without repeating unchanged content. See `docs/context-strategy.md` for the complete request structure and compaction model.
 
 Use the goal for the objective, `plan.write` / `plan.tick` for the high-level ordered route, and `memory.todo.*` for concrete execution items inside the current plan step. Goal and active plan are reassembled into the system context; todos remain available through tools and the UI.
 

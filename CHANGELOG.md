@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ✨ Features
+
+- **Goal persistence** — Goal records store identity, revision, ownership, and pause state atomically. Revision checks reject stale updates; existing text goals remain readable without enabling automatic execution, and cleared goals cannot reappear from legacy files.
+
 ### 🐛 Fixes
 
 - **LLM failure completion** — Failed calls release the context lock before scheduling automatic compaction. Empty assistant replies participate in transient-error retries and remain outside session history.
