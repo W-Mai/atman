@@ -152,6 +152,8 @@ impl WindowManager {
                 self.focus(id);
             }
         } else {
+            self.interaction.drag_target = None;
+            self.interaction.resize_target = None;
             if !was_open && let Some(root) = self.layers.modal_stack.first_mut() {
                 root.pre_modal_focus = focused_id;
             }
@@ -413,12 +415,6 @@ impl WindowManager {
             p.label = label.to_string();
             p.content_kind = content_kind;
             p.title = title.to_string();
-            if !p.maximized && !maximized {
-                let w = w.min(canvas.width.saturating_sub(4));
-                let h = h.min(canvas.height.saturating_sub(4));
-                p.rect.width = w;
-                p.rect.height = h;
-            }
             if maximized && !p.maximized {
                 p.prev_rect = Some(p.rect);
                 p.rect = maximized_rect(canvas);
@@ -434,6 +430,10 @@ impl WindowManager {
         let offset = (self.panels.len() as u16) * 3;
         let rect = if maximized {
             maximized_rect(canvas)
+        } else if matches!(content_kind, WindowContent::Mcp | WindowContent::Knowledge)
+            && (canvas.width < 55 || canvas.height < 22)
+        {
+            canvas
         } else {
             let w = w.min(canvas.width.saturating_sub(4));
             let h = h.min(canvas.height.saturating_sub(4));
@@ -475,19 +475,28 @@ impl WindowManager {
         id
     }
 
-    pub fn close(&mut self, id: WindowId) {
+    pub fn close(&mut self, id: WindowId) -> component::CloseOutcome {
         if let Some(idx) = self.panels.iter().position(|p| p.id == id) {
             if let Some(ref mut content) = self.panels[idx].content {
-                if matches!(
-                    content.on_close(),
-                    crate::wm::component::CloseOutcome::Block(_)
-                ) {
-                    return;
+                if let blocked @ component::CloseOutcome::Block(_) = content.on_close() {
+                    return blocked;
                 }
                 content.on_blur();
             }
             self.panels.remove(idx);
             self.focus.remove_and_refocus(id, &self.panels);
+        }
+        component::CloseOutcome::Close
+    }
+
+    pub fn request_close(&mut self, id: WindowId, app: &mut crate::app::AppState) {
+        if let component::CloseOutcome::Block(message) = self.close(id) {
+            app.push_toast(
+                message,
+                crate::app::NoteLevel::Warn,
+                std::time::Duration::from_secs(4),
+                crate::app::ToastPosition::TopRight,
+            );
         }
     }
 
@@ -663,16 +672,7 @@ impl WindowManager {
             return (false, Vec::new());
         };
 
-        if matches!(
-            panel.content_kind,
-            WindowContent::Projects | WindowContent::Knowledge | WindowContent::Goal
-        ) && matches!(
-            action,
-            crate::keys::KeyAction::PageUp
-                | crate::keys::KeyAction::PageDown
-                | crate::keys::KeyAction::Escape
-        ) && let Some(content) = panel.content.as_mut()
-        {
+        if let Some(content) = panel.content.as_mut() {
             let mut ctx = EventCtx {
                 scroll: &mut panel.scroll,
                 h_scroll: &mut panel.h_scroll,
@@ -727,17 +727,7 @@ impl WindowManager {
             _ => {}
         }
 
-        let Some(content) = panel.content.as_mut() else {
-            return (false, Vec::new());
-        };
-        let mut ctx = EventCtx {
-            scroll: &mut panel.scroll,
-            h_scroll: &mut panel.h_scroll,
-        };
-        match content.handle_event(&WmEvent::Key(action.clone()), &mut ctx) {
-            WmEventResult::Consumed(commands) => (true, commands),
-            WmEventResult::Ignored => (false, Vec::new()),
-        }
+        (false, Vec::new())
     }
 
     /// Execute a colon command through the same action path as the palette.
@@ -1122,7 +1112,7 @@ impl WindowManager {
         for command in commands {
             match command {
                 WmCommand::FocusWindow(id) => self.focus(id),
-                WmCommand::CloseWindow(id) => self.close(id),
+                WmCommand::CloseWindow(id) => self.request_close(id, app),
                 WmCommand::ToggleMaximize(id) => {
                     self.toggle_maximize(id, app.maximized_canvas());
                 }
@@ -1344,13 +1334,7 @@ pub fn render(
     sorted.sort_by_key(|&i| panels.panels[i].z);
 
     for panel in &mut panels.panels {
-        if matches!(
-            panel.content_kind,
-            WindowContent::Mcp | WindowContent::Knowledge
-        ) && (canvas.width < 55 || canvas.height < 22)
-        {
-            panel.rect = canvas;
-        } else if panel.maximized {
+        if panel.maximized {
             panel.rect = if matches!(panel.content_kind, WindowContent::Projects) {
                 canvas
             } else {
@@ -1530,7 +1514,9 @@ mod tests {
                 WmEvent::Mouse(MouseEvent {
                     kind: MouseEventKind::ScrollRight,
                     ..
-                })
+                }) | WmEvent::Key(
+                    crate::keys::KeyAction::PageDown | crate::keys::KeyAction::Escape
+                )
             ) {
                 self.0.fetch_add(1, Ordering::Relaxed);
                 WmEventResult::Consumed(Vec::new())
@@ -1680,6 +1666,8 @@ mod tests {
             None,
         );
         let original = wm.panels[0].content.as_deref().unwrap() as *const dyn WindowComponent;
+        let adjusted = Rect::new(7, 5, 64, 19);
+        wm.panels[0].rect = adjusted;
         wm.apply_palette_action(
             crate::palette::PaletteEntryId::ManageKnowledge,
             &mut app,
@@ -1688,6 +1676,73 @@ mod tests {
         let reopened = wm.panels[0].content.as_deref().unwrap() as *const dyn WindowComponent;
         assert_eq!(wm.panels.len(), 1);
         assert!(std::ptr::addr_eq(original, reopened));
+        assert_eq!(wm.panels[0].rect, adjusted);
+    }
+
+    #[test]
+    fn floating_geometry_survives_render_and_reopen_for_every_content_kind() {
+        let kinds = [
+            WindowContent::Task {
+                handle: "bash".into(),
+                kind: atman_runtime::TaskKind::Bash,
+            },
+            WindowContent::Task {
+                handle: "terminal".into(),
+                kind: atman_runtime::TaskKind::Terminal,
+            },
+            WindowContent::Task {
+                handle: "flow".into(),
+                kind: atman_runtime::TaskKind::Flow,
+            },
+            WindowContent::History,
+            WindowContent::Activity {
+                run_id: "run".into(),
+            },
+            WindowContent::Mermaid {
+                item_id: "diagram".into(),
+            },
+            WindowContent::Output {
+                item_id: "output".into(),
+            },
+            WindowContent::Cheatsheet,
+            WindowContent::Mcp,
+            WindowContent::Knowledge,
+            WindowContent::Goal,
+            WindowContent::Projects,
+        ];
+        for kind in kinds {
+            let mut wm = WindowManager::default();
+            let mut app = crate::app::AppState::default();
+            let canvas = Rect::new(0, 0, 50, 20);
+            let id = wm.open("panel", kind.content_key(), kind.clone(), "Panel", canvas);
+            wm.move_panel(id, 3, 2, canvas);
+            wm.resize_panel(id, 40, 16, canvas);
+            let rect = wm.panels[0].rect;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 20)).unwrap();
+            terminal
+                .draw(|frame| wm.render(frame, canvas, &mut app))
+                .unwrap();
+            wm.open("panel", kind.content_key(), kind.clone(), "Panel", canvas);
+            assert_eq!(wm.panels[0].rect, rect, "{kind:?}");
+            let count = Arc::new(AtomicUsize::new(0));
+            wm.panels[0].content = Some(Box::new(MouseConsumingContent(count.clone())));
+            for key in [
+                crate::keys::KeyAction::PageDown,
+                crate::keys::KeyAction::Escape,
+            ] {
+                let (consumed, commands) = wm.dispatch_key(&key, &mut app, None);
+                assert!(consumed && commands.is_empty(), "{kind:?}");
+            }
+            assert_eq!(count.load(Ordering::Relaxed), 2);
+            assert_eq!(wm.panels[0].scroll, 0);
+            wm.interaction.drag_target = Some(id);
+            wm.interaction.resize_target = Some(id);
+            wm.modals.palette.open();
+            wm.sync_modals();
+            assert!(wm.interaction.drag_target.is_none());
+            assert!(wm.interaction.resize_target.is_none());
+        }
     }
 
     #[test]

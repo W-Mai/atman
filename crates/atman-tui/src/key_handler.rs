@@ -932,7 +932,7 @@ pub(crate) fn handle_mcp_panel_key(
             return true;
         }
         KeyAction::Char('q') => {
-            app.wm.close(id);
+            app.wm.request_close(id, &mut app.app);
             return true;
         }
         _ => {}
@@ -1548,7 +1548,7 @@ pub(crate) fn handle_key(
         KeyAction::Escape => {
             if let Some(id) = app.wm.focused_id() {
                 if app.wm.panels.iter().any(|p| p.id == id) {
-                    app.wm.close(id);
+                    app.wm.request_close(id, &mut app.app);
                     return;
                 }
             }

@@ -550,7 +550,7 @@ pub(crate) async fn run_frames(
                                 if let Some(min_id) =
                                     app.wm.hit_test_minimize(me.column, me.row)
                                 {
-                                    app.wm.close(min_id);
+                                    app.wm.request_close(min_id, &mut app.app);
                                 } else if let Some(max_id) =
                                     app.wm.hit_test_maximize(me.column, me.row)
                                 {
@@ -606,7 +606,7 @@ pub(crate) async fn run_frames(
                                                 );
                                             }
                                             app.wm.clear_panel_close_arm();
-                                            app.wm.close(close_id);
+                                            app.wm.request_close(close_id, &mut app.app);
                                         }
                                         (Some(handle), Some(task)) if task.is_running() => {
                                             let armed = app
@@ -632,7 +632,7 @@ pub(crate) async fn run_frames(
                                                 );
                                             }
                                         }
-                                        _ => app.wm.close(close_id),
+                                        _ => app.wm.request_close(close_id, &mut app.app),
                                     }
                                 } else if let Some(resize_id) =
                                     app.wm.hit_test_resize(me.column, me.row)

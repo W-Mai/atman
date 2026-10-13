@@ -16,6 +16,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Floating panel controls** — Reopening preserves manual geometry across panel types, and narrow MCP and Knowledge windows remain movable and resizable. Modal activation releases pointer capture, editable content handles navigation before shell fallbacks, and blocked close actions display a reason. Child flow hover updates no longer swallow clicks on other content.
+
 - **Goal editing** — Save and Ctrl+S return to goal details after a successful write. Pending saves prevent duplicate submissions; failed saves retain the draft and display the error in the panel.
 
 - **Goal window interaction** — Goal windows open centered and retain manual position and size when rendered or reopened. Floating-window chrome and captured drag gestures reach the window shell before content handlers.

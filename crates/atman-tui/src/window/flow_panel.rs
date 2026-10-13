@@ -292,7 +292,9 @@ impl WindowComponent for FlowPanelContent {
                 super::goal_panel::toggle(&control.snapshot()),
             )]);
         }
-        if was_hovered != self.goal_hover {
+        if was_hovered != self.goal_hover
+            && matches!(event, WmEvent::Mouse(mouse) if mouse.kind == crossterm::event::MouseEventKind::Moved)
+        {
             return WmEventResult::Consumed(Vec::new());
         }
         WmEventResult::Ignored
@@ -612,6 +614,7 @@ fn subagent_status_label(status: &str, done: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::wm::{EventCtx, WmEvent, WmEventResult};
     use std::collections::{HashMap, HashSet};
     use std::time::Instant;
 
@@ -819,6 +822,29 @@ mod tests {
             output_store: None,
             selection_projection: None,
         };
+        panel.goal_hover = true;
+        let mut scroll = 0;
+        let mut h_scroll = 0;
+        assert!(
+            matches!(
+                panel.handle_event(
+                    &WmEvent::Mouse(crossterm::event::MouseEvent {
+                        kind: crossterm::event::MouseEventKind::Down(
+                            crossterm::event::MouseButton::Left
+                        ),
+                        column: 5,
+                        row: 5,
+                        modifiers: crossterm::event::KeyModifiers::NONE,
+                    }),
+                    &mut EventCtx {
+                        scroll: &mut scroll,
+                        h_scroll: &mut h_scroll
+                    },
+                ),
+                WmEventResult::Ignored
+            ),
+            "leaving the goal button must not swallow content clicks"
+        );
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         let mut cached_lines = None;
         for animation_frame in [0, 1] {
