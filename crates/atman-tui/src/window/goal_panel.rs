@@ -69,6 +69,7 @@ pub(crate) fn command(
 ) -> WmCommand {
     let record = control.record();
     WmCommand::GoalControl {
+        request_id: None,
         target,
         goal_id: record.as_ref().map(|g| g.id.clone()),
         revision: record.map(|g| g.revision),
@@ -88,6 +89,8 @@ pub struct GoalPanelContent {
     scroll: u16,
     confirm_clear: bool,
     cursor_visible: bool,
+    pending_save: Option<u64>,
+    save_error: Option<String>,
 }
 
 impl GoalPanelContent {
@@ -104,6 +107,8 @@ impl GoalPanelContent {
             scroll: 0,
             confirm_clear: false,
             cursor_visible: false,
+            pending_save: None,
+            save_error: None,
         }
     }
 
@@ -120,6 +125,9 @@ impl GoalPanelContent {
     }
 
     fn activate(&mut self, index: usize) -> Vec<WmCommand> {
+        if self.pending_save.is_some() {
+            return vec![];
+        }
         let choices = self.choices();
         let (target, control) = &choices[self.selected.min(choices.len() - 1)];
         match index {
@@ -136,8 +144,18 @@ impl GoalPanelContent {
             )],
             2 => {
                 if let Some(editor) = self.editor.as_ref() {
+                    if editor.buf().trim().is_empty() {
+                        self.save_error = Some("Enter an objective before saving.".into());
+                        return vec![];
+                    }
+                    static NEXT_SAVE: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(1);
+                    let request_id = NEXT_SAVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.pending_save = Some(request_id);
+                    self.save_error = None;
                     let expected = self.edit_revision.clone();
                     vec![WmCommand::GoalControl {
+                        request_id: Some(request_id),
                         target: target.clone(),
                         goal_id: expected.as_ref().map(|e| e.0.clone()),
                         revision: expected.map(|e| e.1),
@@ -153,6 +171,7 @@ impl GoalPanelContent {
                     }
                     self.edit_revision = record.map(|g| (g.id, g.revision));
                     self.editor = Some(editor);
+                    self.save_error = None;
                     self.focus = 2;
                     self.scroll = 0;
                     vec![]
@@ -187,12 +206,6 @@ impl WindowComponent for GoalPanelContent {
         self.selected = self.selected.min(choices.len() - 1);
         let (target, control) = &choices[self.selected];
         let snapshot = control.snapshot();
-        if let Some(editor) = &self.editor
-            && let Some(goal) = &snapshot.goal
-            && editor.buf().trim() == goal.objective
-        {
-            self.edit_revision = Some((goal.id.clone(), goal.revision));
-        }
         let name = target.as_deref().unwrap_or("Main agent");
         render_action(
             frame,
@@ -207,7 +220,27 @@ impl WindowComponent for GoalPanelContent {
             &t,
         );
         self.hits.push((0, top));
-        let body = Rect::new(x, top.bottom() + 1, width, area.height.saturating_sub(10));
+        let error_rows = self
+            .save_error
+            .as_ref()
+            .map_or(0, |error| {
+                crate::width::word_wrap(error, width.max(1) as usize).len() as u16
+            })
+            .min(area.height.saturating_sub(11));
+        if let Some(error) = &self.save_error {
+            frame.render_widget(
+                Paragraph::new(error.as_str())
+                    .wrap(Wrap { trim: false })
+                    .style(Style::default().fg(t.error.into())),
+                Rect::new(x, top.bottom(), width, error_rows),
+            );
+        }
+        let body = Rect::new(
+            x,
+            top.bottom() + 1 + error_rows,
+            width,
+            area.height.saturating_sub(10 + error_rows),
+        );
         render_record(frame, body, self.editor.is_some(), false, &t);
         self.text_rect = Rect::new(
             body.x + 2,
@@ -268,7 +301,9 @@ impl WindowComponent for GoalPanelContent {
             } else {
                 "Resume"
             },
-            if self.editor.is_some() {
+            if self.pending_save.is_some() {
+                "Saving…"
+            } else if self.editor.is_some() {
                 "Save"
             } else if snapshot.goal.is_some() {
                 "Edit"
@@ -302,7 +337,8 @@ impl WindowComponent for GoalPanelContent {
                     },
                     focused: self.focus == index,
                     hovered: self.hover == Some(index),
-                    disabled: index != 2 && (snapshot.goal.is_none() || self.editor.is_some()),
+                    disabled: self.pending_save.is_some()
+                        || (index != 2 && (snapshot.goal.is_none() || self.editor.is_some())),
                 },
                 &t,
             );
@@ -323,6 +359,20 @@ impl WindowComponent for GoalPanelContent {
     fn handle_event(&mut self, event: &WmEvent, _: &mut EventCtx) -> WmEventResult {
         let mut commands = vec![];
         match event {
+            WmEvent::GoalSaved { request_id, result } if self.pending_save == Some(*request_id) => {
+                self.pending_save = None;
+                match result {
+                    Ok(()) => {
+                        self.editor = None;
+                        self.edit_revision = None;
+                        self.save_error = None;
+                        self.scroll = 0;
+                    }
+                    Err(error) => self.save_error = Some(error.clone()),
+                }
+            }
+            WmEvent::GoalSaved { .. } => return WmEventResult::Ignored,
+            _ if self.pending_save.is_some() => return WmEventResult::Consumed(vec![]),
             WmEvent::Mouse(mouse) => {
                 let point = (mouse.column, mouse.row).into();
                 self.hover = self
@@ -357,6 +407,8 @@ impl WindowComponent for GoalPanelContent {
             WmEvent::Key(key) if self.editor.is_some() => match key {
                 KeyAction::Escape => {
                     self.editor = None;
+                    self.edit_revision = None;
+                    self.save_error = None;
                     self.confirm_clear = false;
                 }
                 KeyAction::Save => commands = self.activate(2),
@@ -547,6 +599,78 @@ mod tests {
                 panel.on_close(),
                 crate::wm::component::CloseOutcome::Block(_)
             ));
+            for use_mouse in [false, true] {
+                if panel.editor.is_none() {
+                    panel.activate(2);
+                }
+                panel.editor.as_mut().unwrap().insert_str(" updated");
+                draw(&mut panel, &mut terminal);
+                let save = panel.hits.iter().find(|(i, _)| *i == 2).unwrap().1;
+                let event = if use_mouse {
+                    WmEvent::Mouse(crossterm::event::MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: save.x + 1,
+                        row: save.y + 1,
+                        modifiers: crossterm::event::KeyModifiers::NONE,
+                    })
+                } else {
+                    WmEvent::Key(KeyAction::Save)
+                };
+                let WmEventResult::Consumed(commands) = panel.handle_event(&event, &mut ctx) else {
+                    panic!("save ignored")
+                };
+                let [
+                    WmCommand::GoalControl {
+                        request_id: Some(request_id),
+                        target,
+                        goal_id,
+                        revision,
+                        action,
+                    },
+                ] = commands.as_slice()
+                else {
+                    panic!("missing save command")
+                };
+                assert!(panel.editor.is_some(), "wait for the persistence result");
+                panel.handle_event(
+                    &WmEvent::GoalSaved {
+                        request_id: request_id + 1,
+                        result: Ok(()),
+                    },
+                    &mut ctx,
+                );
+                assert!(panel.editor.is_some(), "ignore unrelated replies");
+                let result = session
+                    .control_goal(
+                        target.as_deref(),
+                        action.clone(),
+                        goal_id.as_deref().zip(*revision),
+                    )
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
+                assert!(result.is_ok());
+                panel.handle_event(
+                    &WmEvent::GoalSaved {
+                        request_id: *request_id,
+                        result,
+                    },
+                    &mut ctx,
+                );
+                assert!(panel.editor.is_none(), "successful save exits editing");
+            }
+            panel.activate(2);
+            let draft = panel.editor.as_ref().unwrap().buf().to_string();
+            panel.activate(2);
+            let request_id = panel.pending_save.unwrap();
+            panel.handle_event(
+                &WmEvent::GoalSaved {
+                    request_id,
+                    result: Err("Goal revision changed".into()),
+                },
+                &mut ctx,
+            );
+            assert_eq!(panel.editor.as_ref().unwrap().buf(), draft);
+            assert_eq!(panel.save_error.as_deref(), Some("Goal revision changed"));
             panel.handle_event(&WmEvent::Key(KeyAction::Escape), &mut ctx);
             assert!(panel.editor.is_none());
         }

@@ -15,6 +15,10 @@ pub enum WmEvent {
     Mouse(MouseEvent),
     Paste(String),
     Scroll(u16, bool), // (delta, is_page)
+    GoalSaved {
+        request_id: u64,
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Debug)]
@@ -50,6 +54,7 @@ pub enum WmCommand {
     },
     MutateProject(crate::ProjectMutation),
     GoalControl {
+        request_id: Option<u64>,
         target: Option<String>,
         goal_id: Option<String>,
         revision: Option<u64>,

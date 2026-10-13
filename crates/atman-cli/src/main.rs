@@ -2316,16 +2316,24 @@ async fn cmd_repl_once(
                     }
                     atman_tui::TuiControl::CancelFlow => session_for_ctrl.cancel_flow(),
                     atman_tui::TuiControl::GoalControl {
+                        request_id,
                         target,
                         goal_id,
                         revision,
                         action,
                     } => {
-                        if let Err(error) = session_for_ctrl.control_goal(
-                            target.as_deref(),
-                            action,
-                            goal_id.as_deref().zip(revision),
-                        ) {
+                        let result = session_for_ctrl
+                            .control_goal(
+                                target.as_deref(),
+                                action,
+                                goal_id.as_deref().zip(revision),
+                            )
+                            .map(|_| ())
+                            .map_err(|error| error.to_string());
+                        if let Some(request_id) = request_id {
+                            let _ = cmd_tx_for_models
+                                .send(atman_tui::TuiCommand::GoalSaved { request_id, result });
+                        } else if let Err(error) = result {
                             reporter_for_ctrl.error(format!("Goal: {error}"));
                         }
                     }

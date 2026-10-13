@@ -16,6 +16,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Goal editing** — Save and Ctrl+S return to goal details after a successful write. Pending saves prevent duplicate submissions; failed saves retain the draft and display the error in the panel.
+
 - **Goal window interaction** — Goal windows open centered and retain manual position and size when rendered or reopened. Floating-window chrome and captured drag gestures reach the window shell before content handlers.
 
 - **Final response instructions** — Managed root and child prompts require `final.answer` for every turn, including simple questions and clarification. Goal pause instructions require a separate final response after the pause result.

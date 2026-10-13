@@ -1095,6 +1095,24 @@ impl WindowManager {
         (true, Vec::new())
     }
 
+    pub(crate) fn goal_saved(&mut self, request_id: u64, result: Result<(), String>) {
+        for panel in &mut self.panels {
+            if let Some(content) = panel.content.as_mut() {
+                let mut ctx = EventCtx {
+                    scroll: &mut panel.scroll,
+                    h_scroll: &mut panel.h_scroll,
+                };
+                content.handle_event(
+                    &WmEvent::GoalSaved {
+                        request_id,
+                        result: result.clone(),
+                    },
+                    &mut ctx,
+                );
+            }
+        }
+    }
+
     pub fn apply_commands(
         &mut self,
         app: &mut crate::app::AppState,
@@ -1114,18 +1132,24 @@ impl WindowManager {
                     }
                 }
                 WmCommand::GoalControl {
+                    request_id,
                     target,
                     goal_id,
                     revision,
                     action,
                 } => {
-                    if let Some(tx) = control_tx {
-                        let _ = tx.send(crate::TuiControl::GoalControl {
+                    let sent = control_tx.is_some_and(|tx| {
+                        tx.send(crate::TuiControl::GoalControl {
+                            request_id,
                             target,
                             goal_id,
                             revision,
                             action,
-                        });
+                        })
+                        .is_ok()
+                    });
+                    if !sent && let Some(request_id) = request_id {
+                        self.goal_saved(request_id, Err("Goal controls are unavailable".into()));
                     }
                 }
                 WmCommand::OpenTaskPanel { handle, maximized } => {

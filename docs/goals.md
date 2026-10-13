@@ -35,7 +35,7 @@ No default turn, token, fuel, or time budget is added. Provider retries retain t
 
 ## TUI and CLI controls
 
-The root Goal section and child flow panels display padded **Pause / Resume** buttons with `Ctrl+Y`. `:goal` or **Manage Goal** in `Ctrl+P` opens the goal panel. Its agent selector addresses the root or an existing managed child; `Tab` / `Shift+Tab`, `Enter`, and mouse clicks operate the same controls. `Space` toggles the selected goal outside editing. `Ctrl+S` saves the objective; `Esc` leaves editing. Clear requires a second activation. Saving keeps the draft visible, including when a revision conflict rejects it.
+The root Goal section and child flow panels display padded **Pause / Resume** buttons with `Ctrl+Y`. `:goal` or **Manage Goal** in `Ctrl+P` opens the goal panel. Its agent selector addresses the root or an existing managed child; `Tab` / `Shift+Tab`, `Enter`, and mouse clicks operate the same controls. `Space` toggles the selected goal outside editing. **Save** and `Ctrl+S` submit the objective and return to the goal details after persistence succeeds. A pending save displays **Saving…** and prevents duplicate submissions. Failed saves retain the draft and show the error in the panel. `Esc` discards editing when no save is pending. Clear requires a second activation.
 
 The goal panel opens centered. Drag its title area to move it or its bottom-right handle to resize it. Reopening focuses the existing panel without resetting its position, size, or draft; resizing respects the component's minimum dimensions.
 

@@ -107,6 +107,7 @@ pub enum TuiControl {
     UpdateTrust(atman_runtime::trust::TrustConfig),
     CancelFlow,
     GoalControl {
+        request_id: Option<u64>,
         target: Option<String>,
         goal_id: Option<String>,
         revision: Option<u64>,
@@ -331,6 +332,10 @@ pub enum TuiCommand {
         result: Result<Vec<atman_runtime::project_catalog::ProjectRecord>, String>,
     },
     QueueMutationRejected(String),
+    GoalSaved {
+        request_id: u64,
+        result: Result<(), String>,
+    },
     Toast {
         message: String,
         level: app::NoteLevel,

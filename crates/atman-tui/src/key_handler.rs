@@ -1466,6 +1466,7 @@ pub(crate) fn handle_key(
                     && let Some(tx) = control_tx
                 {
                     let _ = tx.send(TuiControl::GoalControl {
+                        request_id: None,
                         target: None,
                         goal_id: Some(goal.id),
                         revision: Some(goal.revision),

@@ -828,7 +828,7 @@ pub(crate) async fn run_frames(
                                         if let Some(session) = &app.app.session && let Some(tx) = handle.control_tx.as_ref() {
                                             let control = &session.goal_control;
                                             if let Some(goal) = control.record() {
-                                                let _ = tx.send(crate::TuiControl::GoalControl { target: None, goal_id: Some(goal.id), revision: Some(goal.revision), action: crate::window::goal_panel::toggle(&control.snapshot()) });
+                                                let _ = tx.send(crate::TuiControl::GoalControl { request_id: None, target: None, goal_id: Some(goal.id), revision: Some(goal.revision), action: crate::window::goal_panel::toggle(&control.snapshot()) });
                                             }
                                         }
                                     } else if let Some(idx) = key
@@ -1953,6 +1953,9 @@ pub(crate) async fn run_frames(
                                 app::ToastPosition::TopRight,
                             ),
                         },
+                        TuiCommand::GoalSaved { request_id, result } => {
+                            app.wm.goal_saved(request_id, result);
+                        }
                         TuiCommand::QueueMutationRejected(message) => {
                             app.app.push_toast(
                                 format!("queue update rejected: {message}"),
