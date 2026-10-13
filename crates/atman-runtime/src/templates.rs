@@ -392,9 +392,6 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
             when has_pending_injections() {
                 continue
             }
-            when has_pending_injections() {
-                continue
-            }
             break
         }
         tool_results = dispatch_all(tool_uses)
@@ -441,9 +438,6 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
         }
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
-            when has_pending_injections() {
-                continue
-            }
             when has_pending_injections() {
                 continue
             }
@@ -496,9 +490,6 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
             when has_pending_injections() {
                 continue
             }
-            when has_pending_injections() {
-                continue
-            }
             break
         }
         tool_results = dispatch_all(tool_uses)
@@ -540,9 +531,6 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
         }
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
-            when has_pending_injections() {
-                continue
-            }
             when has_pending_injections() {
                 continue
             }
