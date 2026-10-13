@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Flow watcher payloads** — Match notifications contain the matched text instead of copying the complete output history for every occurrence.
+
 - **Persistent watchers** — Output subscriptions and read positions survive matches. Historical output is consumed once, terminal matches do not repeat while unchanged, and cancellation remains responsive when buffered results are immediately available.
 
 - **Background turn startup** — Watcher notifications remain queued until a turn can start. Shared startup rechecks pauses after context waits, prevents overlapping background turns, and preserves notifications when input or cancellation takes priority. Cancellation and failures block automatic wakeups without requiring a goal.

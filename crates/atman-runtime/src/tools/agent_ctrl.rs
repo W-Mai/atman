@@ -92,37 +92,33 @@ impl crate::watch::Watchable for FlowEntry {
             loop {
                 // Observe status first so an exit racing with the output snapshot
                 // is either included here or delivered through the receiver.
-                let status = entry.status.lock().unwrap().clone();
-                let matched = {
+                let running = entry.status.lock().unwrap().is_running();
+                let mut matched = {
                     let output = entry.output.lock().unwrap();
-                    if cursor.find(output.as_bytes(), 0, &pattern).is_some() {
-                        Some(output.clone())
-                    } else if !final_checked && !status.is_running() {
-                        final_checked = true;
-                        match &status {
-                            FlowRunStatus::Ok { final_text, .. }
-                                if final_text.contains(&pattern)
-                                    && !output.contains(final_text) =>
-                            {
-                                Some(final_text.clone())
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    }
+                    cursor.find(output.as_bytes(), 0, &pattern).is_some()
                 };
-                if let Some(text) = matched {
+                if !matched && !final_checked && !running {
+                    final_checked = true;
+                    let final_text = match &*entry.status.lock().unwrap() {
+                        FlowRunStatus::Ok { final_text, .. } => Some(final_text.clone()),
+                        _ => None,
+                    };
+                    if let Some(final_text) = final_text {
+                        matched = final_text.contains(&pattern)
+                            && !entry.output.lock().unwrap().contains(&final_text);
+                    }
+                }
+                if matched {
                     return Some((
                         WatchResult::Matched {
                             row: None,
                             col: None,
-                            text,
+                            text: pattern.clone(),
                         },
                         Some((entry, rx, cursor, pattern, final_checked)),
                     ));
                 }
-                if !status.is_running() {
+                if !running {
                     return Some((WatchResult::SourceExited, None));
                 }
                 match rx.recv().await {

@@ -796,6 +796,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flow_watch_payload_depends_on_matches_not_output_history() {
+        use crate::tools::agent_ctrl::{FlowRegistry, FlowRunStatus};
+        let entry = FlowRegistry::new().create_entry(
+            "watch-flow".into(),
+            String::new(),
+            String::new(),
+            crate::event::FlowRunId::now(),
+        );
+        let pattern = "完成";
+        let history = format!("{pattern}{}", "x".repeat(58)).repeat(128);
+        *entry.output.lock().unwrap() = history;
+        *entry.status.lock().unwrap() = FlowRunStatus::Ok {
+            ended_at: chrono::Utc::now(),
+            final_text: String::new(),
+        };
+        let mut stream = Arc::clone(&entry).watch_output(pattern.into());
+        let mut matches = 0;
+        while let Some(result) = stream.next().await {
+            if let WatchResult::Matched { text, .. } = result {
+                assert_eq!(text, pattern);
+                matches += 1;
+            }
+        }
+        assert_eq!(matches, 128);
+        // Tool-only final responses use the same bounded payload contract.
+        entry.output.lock().unwrap().clear();
+        *entry.status.lock().unwrap() = FlowRunStatus::Ok {
+            ended_at: chrono::Utc::now(),
+            final_text: format!("{}{pattern}", "x".repeat(8192)),
+        };
+        let mut stream = entry.watch_output(pattern.into());
+        assert!(
+            matches!(stream.next().await, Some(WatchResult::Matched { text, .. }) if text == pattern)
+        );
+        assert!(matches!(
+            stream.next().await,
+            Some(WatchResult::SourceExited)
+        ));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
     async fn flow_watch_consumes_history_once_and_keeps_its_subscription() {
         use crate::tools::agent_ctrl::{FlowEvent, FlowRegistry, FlowRunStatus};
         use futures::FutureExt;
