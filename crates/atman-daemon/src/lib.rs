@@ -319,7 +319,78 @@ pub async fn dispatch_as(
                 Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
             }
         }
-        methods::RUN_FLOW => {
+        methods::GOAL_GET
+        | methods::GOAL_SET
+        | methods::GOAL_PAUSE
+        | methods::GOAL_RESUME
+        | methods::GOAL_CLEAR => {
+            let parsed =
+                serde_json::from_value::<atman_proto::GoalRequest>(req.params.unwrap_or(json!({})));
+            let p = match parsed {
+                Ok(p) => p,
+                Err(e) => {
+                    return JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string()));
+                }
+            };
+            let Some(session) = state.authorized_live_session(&p.session_id, principal_id) else {
+                return JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::application("session is not live or is owned by another client"),
+                );
+            };
+            let control = match p.target_handle.as_deref().filter(|h| *h != "root") {
+                None => session.goal_control.clone(),
+                Some(handle) => match session
+                    .flow_registry
+                    .lookup(handle)
+                    .ok()
+                    .and_then(|e| e.goal_control.get().cloned())
+                {
+                    Some(control) if session.goal_control.is_ancestor_of(&control) => control,
+                    _ => {
+                        return JsonRpcResponse::err(
+                            id,
+                            JsonRpcError::invalid_params("unknown goal target"),
+                        );
+                    }
+                },
+            };
+            let result = if req.method == methods::GOAL_GET {
+                Ok(control.snapshot())
+            } else {
+                if control.record().is_some()
+                    && (p.goal_id.is_none() || p.expected_revision.is_none())
+                {
+                    return JsonRpcResponse::err(
+                        id,
+                        JsonRpcError::invalid_params("goal_id and expected_revision are required"),
+                    );
+                }
+                use atman_runtime::goal::GoalAction;
+                let action = match req.method.as_str() {
+                    methods::GOAL_PAUSE => GoalAction::Pause,
+                    methods::GOAL_RESUME => GoalAction::Resume,
+                    methods::GOAL_CLEAR => GoalAction::Clear,
+                    _ => GoalAction::Set {
+                        text: p.text.unwrap_or_default(),
+                    },
+                };
+                session.control_goal(
+                    p.target_handle.as_deref(),
+                    action,
+                    p.goal_id.as_deref().zip(p.expected_revision),
+                )
+            };
+            match result {
+                Ok(snapshot) => {
+                    JsonRpcResponse::ok(id, serde_json::to_value(snapshot).expect("goal snapshot"))
+                }
+                Err(error) => {
+                    JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                }
+            }
+        }
+        methods::RUN_FLOW | methods::GOAL_RUN => {
             let Some(launcher) = state.launcher() else {
                 return JsonRpcResponse::err(
                     id,
@@ -344,6 +415,7 @@ pub async fn dispatch_as(
                             crate::run::RunOptions {
                                 reasoning: p.reasoning,
                                 images: p.images,
+                                goal: req.method == methods::GOAL_RUN,
                             },
                         )
                         .await
@@ -354,7 +426,12 @@ pub async fn dispatch_as(
                                 run_id: spawned.run_id,
                             };
                             match serde_json::to_value(&resp) {
-                                Ok(v) => JsonRpcResponse::ok(id, v),
+                                Ok(mut v) => {
+                                    if let Some(goal_id) = spawned.goal_id {
+                                        v["goal_id"] = json!(goal_id);
+                                    }
+                                    JsonRpcResponse::ok(id, v)
+                                }
                                 Err(e) => {
                                     JsonRpcResponse::err(id, JsonRpcError::internal(e.to_string()))
                                 }

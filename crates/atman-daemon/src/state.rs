@@ -332,9 +332,14 @@ impl DaemonState {
 
     pub fn cancel_run(&self, run_id: &FlowRunId) -> bool {
         let live = self.live.lock().unwrap();
-        for entry in live.values().filter_map(|entry| entry.live.as_ref()) {
-            if &entry.run_id == run_id {
-                entry.cancel.cancel();
+        for entry in live.values() {
+            if let Some(run) = entry.live.as_ref()
+                && &run.run_id == run_id
+            {
+                if let Some(session) = &entry.broker {
+                    session.cancel_flow();
+                }
+                run.cancel.cancel();
                 return true;
             }
         }

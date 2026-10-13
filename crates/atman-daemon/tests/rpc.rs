@@ -46,3 +46,59 @@ async fn list_sessions_reads_directory() {
     assert_eq!(arr[0]["event_count"], 1);
     assert_eq!(arr[0]["status"], "finished");
 }
+
+#[tokio::test]
+async fn goal_controls_require_owner_and_current_revision() {
+    use atman_daemon::{dispatch_as, state::LiveSession};
+    let tmp = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().into()));
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    session.goal_control.set("finish work", None).unwrap();
+    let sid = atman_proto::SessionId(session.id().0);
+    state.register_broker(sid.clone(), session.clone(), "owner");
+    state.register_live(
+        sid.clone(),
+        LiveSession {
+            run_id: atman_proto::FlowRunId(uuid::Uuid::now_v7()),
+            flow_name: "agent".into(),
+            cancel: session.flow_cancel_token(),
+            started_at: chrono::Utc::now(),
+        },
+    );
+    let params = serde_json::json!({"session_id":sid});
+    let denied = dispatch_as(
+        state.clone(),
+        JsonRpcRequest::new(1, methods::GOAL_GET, params.clone()),
+        "other",
+    )
+    .await;
+    assert!(denied.error.is_some());
+    let read = dispatch_as(
+        state.clone(),
+        JsonRpcRequest::new(2, methods::GOAL_GET, params.clone()),
+        "owner",
+    )
+    .await
+    .result
+    .unwrap();
+    let write = serde_json::json!({"session_id":sid,"goal_id":read["goal"]["id"],"expected_revision":read["goal"]["revision"]});
+    let paused = dispatch_as(
+        state.clone(),
+        JsonRpcRequest::new(3, methods::GOAL_PAUSE, write.clone()),
+        "owner",
+    )
+    .await
+    .result
+    .unwrap();
+    assert_eq!(paused["goal"]["status"], "paused");
+    assert!(!session.flow_cancel_token().is_cancelled());
+    let stale = dispatch_as(
+        state.clone(),
+        JsonRpcRequest::new(4, methods::GOAL_RESUME, write),
+        "owner",
+    )
+    .await;
+    assert!(stale.error.is_some());
+    let resumed = dispatch_as(state, JsonRpcRequest::new(5, methods::GOAL_RESUME, serde_json::json!({"session_id":sid,"goal_id":paused["goal"]["id"],"expected_revision":paused["goal"]["revision"]})), "owner").await.result.unwrap();
+    assert_eq!(resumed["goal"]["status"], "active");
+}

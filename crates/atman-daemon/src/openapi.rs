@@ -1,7 +1,8 @@
 use atman_proto::{
-    CancelRunRequest, CreatePermissionGroupRequest, GetEventsRequest, JsonRpcError, JsonRpcRequest,
-    JsonRpcResponse, ListPermissionRequestsRequest, ResolvePermissionRequestsRequest,
-    ResolvePromptRequest, RunFlowRequest, RunFlowResponse, SessionSummary,
+    CancelRunRequest, CreatePermissionGroupRequest, GetEventsRequest, GoalRequest, JsonRpcError,
+    JsonRpcRequest, JsonRpcResponse, ListPermissionRequestsRequest,
+    ResolvePermissionRequestsRequest, ResolvePromptRequest, RunFlowRequest, RunFlowResponse,
+    SessionSummary,
 };
 use utoipa::OpenApi;
 
@@ -54,7 +55,7 @@ fn openapi_endpoint() {}
         title = "atman daemon",
         version = env!("CARGO_PKG_VERSION"),
         description = "JSON-RPC 2.0 daemon for the atman flow runtime. \
-Methods dispatched at POST /rpc: ping, list_sessions, run_flow, cancel_run, resolve_prompt, list_permission_requests, create_permission_group, resolve_permission_requests. \
+Methods dispatched at POST /rpc: ping, list_sessions, run_flow, goal.run, goal.get, goal.set, goal.pause, goal.resume, goal.clear, cancel_run, resolve_prompt, list_permission_requests, create_permission_group, resolve_permission_requests. \
 SSE event stream at GET /events. Every endpoint requires a bearer token."
     ),
     paths(rpc_endpoint, sse_endpoint, openapi_endpoint),
@@ -64,6 +65,7 @@ SSE event stream at GET /events. Every endpoint requires a bearer token."
         JsonRpcError,
         RunFlowRequest,
         RunFlowResponse,
+        GoalRequest,
         CancelRunRequest,
         ResolvePromptRequest,
         GetEventsRequest,

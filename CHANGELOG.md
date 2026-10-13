@@ -11,6 +11,7 @@ All notable changes to atman are documented in this file.
 - **Goal persistence** — Goal records store identity, revision, ownership, and pause state atomically. Revision checks reject stale updates; existing text goals remain readable without enabling automatic execution, and cleared goals cannot reappear from legacy files.
 - **Goal execution control** — Shared parent and child controllers provide cooperative pause gates, cancellation-aware waits, operation tracking, and explicit recovery after interruption. Parent resume preserves each child's own pause state.
 - **Managed agent goals** — Scoped goal tools and revisioned state events connect root and child execution. User pauses preserve in-flight replies and tool results; child continuation retains its handle and context across distinct runs, and child goal outcomes enter the parent's context.
+- **Daemon goal control** — `goal.run` drives managed agents across turns while `run_flow` remains a single execution. Goal state and revision-checked controls are available to the owning client for root and child agents.
 
 ### 🐛 Fixes
 

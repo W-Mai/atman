@@ -167,6 +167,12 @@ impl JsonRpcError {
 }
 
 pub mod methods {
+    pub const GOAL_RUN: &str = "goal.run";
+    pub const GOAL_GET: &str = "goal.get";
+    pub const GOAL_SET: &str = "goal.set";
+    pub const GOAL_PAUSE: &str = "goal.pause";
+    pub const GOAL_RESUME: &str = "goal.resume";
+    pub const GOAL_CLEAR: &str = "goal.clear";
     pub const RUN_FLOW: &str = "run_flow";
     pub const CANCEL_RUN: &str = "cancel_run";
     pub const LIST_SESSIONS: &str = "list_sessions";
@@ -177,6 +183,19 @@ pub mod methods {
     pub const CREATE_PERMISSION_GROUP: &str = "create_permission_group";
     pub const RESOLVE_PERMISSION_REQUESTS: &str = "resolve_permission_requests";
     pub const PING: &str = "ping";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct GoalRequest {
+    pub session_id: SessionId,
+    #[serde(default)]
+    pub target_handle: Option<String>,
+    #[serde(default)]
+    pub goal_id: Option<String>,
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

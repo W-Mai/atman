@@ -31,6 +31,7 @@ pub struct RunLauncher {
 pub struct SpawnedRun {
     pub session_id: ProtoSessionId,
     pub run_id: ProtoRunId,
+    pub goal_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -83,6 +84,7 @@ impl ProviderCatalogRefreshDispatcher {
 
 #[derive(Default)]
 pub struct RunOptions {
+    pub goal: bool,
     pub reasoning: Option<String>,
     pub images: Vec<atman_proto::InlineImage>,
 }
@@ -220,7 +222,59 @@ impl RunLauncher {
     ) -> Result<SpawnedRun> {
         let path = PathBuf::from(flow_path);
         std::fs::metadata(&path).with_context(|| format!("stat flow {}", path.display()))?;
-        let RunOptions { reasoning, images } = options;
+        let RunOptions {
+            reasoning,
+            images,
+            goal,
+        } = options;
+        let objective = if goal {
+            if path_is_managed_agent_at(&path, self.config_dir.as_deref())
+                && let Some(dir) = &self.config_dir
+            {
+                atman_runtime::templates::ensure_managed_agent_at(dir)?;
+            }
+            let program = atman_runtime::source_program::load_program(
+                &path,
+                &atman_runtime::source_program::SourceRoots {
+                    project_root: Some(self.project_root.clone()),
+                    config_dir: self.config_dir.clone(),
+                },
+            )?;
+            if !program
+                .entry_file()
+                .flows
+                .first()
+                .is_some_and(atman_runtime::goal::is_managed)
+            {
+                anyhow::bail!("goal.run requires a managed agent invocation contract");
+            }
+            let parameter = program.entry_file().flows[0]
+                .contract
+                .as_ref()
+                .and_then(|c| c.blocks.iter().find(|b| b.name.name == "invocation"))
+                .and_then(|b| b.kwargs.iter().find(|(n, _)| n.name == "user_message"))
+                .and_then(|(_, v)| match v {
+                    atman_rt::ast::Expr::Ident(name) => Some(name.name.as_str()),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!("goal.run requires an invocation user_message parameter")
+                })?;
+            Some(
+                args.iter()
+                    .find_map(|(name, value)| match value {
+                        Value::Str(text) if name == parameter && !text.trim().is_empty() => {
+                            Some(text.clone())
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("goal.run requires a non-empty {parameter} argument")
+                    })?,
+            )
+        } else {
+            None
+        };
         let invocation_env = invocation_env_from_reasoning(reasoning)?;
 
         reload_model_config(self.config_dir.as_deref());
@@ -263,6 +317,10 @@ impl RunLauncher {
             .with_context(|| format!("opening session under {}", state.data_dir().display()))?,
         );
         queue_run_images(&session, images)?;
+        if let Some(objective) = objective {
+            session.goal_control.set(&objective, None)?;
+        }
+        let goal_id = session.goal_control.record().map(|g| g.id);
         let sid_proto = ProtoSessionId(session.id().0);
         let run_id_runtime = RuntimeRunId::now();
         let run_id_proto: ProtoRunId = run_id_runtime.clone().into();
@@ -319,21 +377,14 @@ impl RunLauncher {
                         Some(state_for_run),
                         provider_catalog_refresh,
                         invocation_env,
+                        goal,
                     )
                     .await
                     {
                         atman_runtime::notify!(error, "flow run failed: {e:#}");
                     }
                     state_for_task.deregister_broker(&sid_for_task);
-                    match std::sync::Arc::try_unwrap(session) {
-                        Ok(s) => s.shutdown().await,
-                        Err(_) => atman_runtime::notify!(
-                            warn,
-                            location = Log,
-                            stack = dedupe("session.refs_at_shutdown", 60_000),
-                            "session still had refs at shutdown"
-                        ),
-                    }
+                    session.shutdown().await;
                     state_for_task.deregister_live(&sid_for_task);
                 });
             },
@@ -345,6 +396,7 @@ impl RunLauncher {
         }
 
         Ok(SpawnedRun {
+            goal_id,
             session_id: sid_proto,
             run_id: run_id_proto,
         })
@@ -364,7 +416,9 @@ async fn run_flow_inner(
     daemon_state: Option<Arc<crate::DaemonState>>,
     provider_catalog_refresh: ProviderCatalogRefreshDispatcher,
     invocation_env: atman_runtime::InvocationEnv,
+    drive_goal: bool,
 ) -> Result<()> {
+    let owner_cancel = session.flow_cancel_token();
     if path_is_managed_agent_at(path, config_dir.as_deref()) {
         if let Some(dir) = &config_dir {
             atman_runtime::templates::ensure_managed_agent_at(dir)?;
@@ -447,11 +501,22 @@ async fn run_flow_inner(
         .fire(&executor, atman_rt::ast::LifecycleEvent::SessionStart)
         .await;
 
-    let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
-    let user_text = if args.is_empty() {
+    let mut turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
+    let recipe = atman_runtime::goal::GoalTurn {
+        program: program.clone(),
+        flow_name: flow_name.clone(),
+        args: args.clone(),
+        env: invocation_env.clone(),
+    };
+    let mut turn_args = args;
+    let mut next_run_id = Some(run_id);
+    let mut goal_changes = session.goal_control.subscribe();
+    let mut failure = None;
+    let user_text = if turn_args.is_empty() {
         flow_name.clone()
     } else {
-        args.iter()
+        turn_args
+            .iter()
             .map(|(k, v)| format!("{k}={}", render_value(v)))
             .collect::<Vec<_>>()
             .join(" ")
@@ -474,36 +539,77 @@ async fn run_flow_inner(
         let _compact_guard = session.acquire_compact_lock().await;
         session.begin_turn(user_msg);
     }
-    lifecycles
-        .fire(&executor, atman_rt::ast::LifecycleEvent::TurnStart)
-        .await;
-    let result = executor
-        .run_linked_with_invocation(
-            &program,
-            &flow_name,
-            args,
-            atman_runtime::RootInvocation {
-                turn_id: Some(turn_id),
-                session: Some(session.clone()),
-                first_run_id: Some(run_id),
-                env: invocation_env,
-            },
-        )
-        .await;
-    while let Ok(ev) = lifecycle_rx.try_recv() {
-        lifecycles.fire(&executor, ev).await;
-    }
-    lifecycles
-        .fire(&executor, atman_rt::ast::LifecycleEvent::TurnEnd)
-        .await;
-    session.end_turn();
-    if result.is_ok() && session.record_successful_flow().is_some() {
-        let _ =
-            atman_runtime::session_naming::maybe_generate_session_name(&executor, &session).await;
+    loop {
+        if owner_cancel.is_cancelled() {
+            session.cancel_flow();
+            session.end_turn();
+            break;
+        }
+        lifecycles
+            .fire(&executor, atman_rt::ast::LifecycleEvent::TurnStart)
+            .await;
+        let result = executor
+            .run_linked_with_invocation(
+                &program,
+                &flow_name,
+                turn_args,
+                atman_runtime::RootInvocation {
+                    turn_id: Some(turn_id.clone()),
+                    session: Some(session.clone()),
+                    first_run_id: next_run_id.take(),
+                    env: invocation_env.clone(),
+                },
+            )
+            .await;
+        while let Ok(ev) = lifecycle_rx.try_recv() {
+            lifecycles.fire(&executor, ev).await;
+        }
+        lifecycles
+            .fire(&executor, atman_rt::ast::LifecycleEvent::TurnEnd)
+            .await;
+        session.end_turn();
+        if let Err(error) = &result
+            && session.goal_control.record().is_some()
+        {
+            let _ = session.goal_control.pause(
+                atman_runtime::memory::goal::GoalActor::Runtime,
+                atman_runtime::memory::goal::GoalPauseReason::RunFailed,
+                error.to_string(),
+                None,
+            );
+        }
+        if result.is_ok() && session.record_successful_flow().is_some() {
+            let _ = atman_runtime::session_naming::maybe_generate_session_name(&executor, &session)
+                .await;
+        }
+        if !drive_goal {
+            failure = result.err();
+            break;
+        }
+        while !session.goal_control.should_continue()
+            && session.goal_control.record().is_some()
+            && !owner_cancel.is_cancelled()
+        {
+            tokio::select! { _ = goal_changes.changed() => {}, _ = owner_cancel.cancelled() => {} }
+        }
+        if owner_cancel.is_cancelled() || session.goal_control.record().is_none() {
+            break;
+        }
+        let prompt = atman_runtime::goal::continuation_prompt(&session.goal_control);
+        turn_id = atman_rt::TurnId::now();
+        let mut message =
+            atman_runtime::message::Message::user_text(turn_id.clone(), prompt.clone());
+        message.origin = atman_runtime::message::MessageOrigin::Internal;
+        session.begin_turn(message);
+        session.push_system_note("Goal continued".into());
+        turn_args = recipe.continuation_args(&prompt);
     }
     lifecycles
         .fire(&executor, atman_rt::ast::LifecycleEvent::SessionEnd)
         .await;
+    if let Some(error) = failure {
+        return Err(error.into());
+    }
     Ok(())
 }
 

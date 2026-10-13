@@ -6,6 +6,88 @@ use atman_daemon::{DaemonState, dispatch, run::RunLauncher};
 use atman_proto::{JsonRpcRequest, methods};
 
 #[tokio::test(flavor = "multi_thread")]
+async fn goal_driver_finishes_turns_and_resumes_without_replacing_the_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config");
+    let data = tmp.path().join("data");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("config.toml"), "[trust]\nmode = \"reckless\"\n").unwrap();
+    let path = tmp.path().join("goal.at");
+    std::fs::write(&path, r#"flow main(prompt: string, model: string = "unused") -> string {
+        contract { invocation { goal: true, user_message: prompt } }
+        snapshot = memory.goal.get()
+        when snapshot.goal.objective == "first" {
+            memory.goal.set(text: "second", goal_id: snapshot.goal.id, expected_revision: snapshot.goal.revision)
+            return "first turn"
+        }
+        memory.goal.pause(goal_id: snapshot.goal.id, expected_revision: snapshot.goal.revision, reason: "completed", summary: "Finished")
+        return "finished"
+    }"#).unwrap();
+    let state = Arc::new(DaemonState::new(data.clone()));
+    let launcher = RunLauncher::new(tmp.path().into(), Some(config), None).unwrap();
+    let spawned = launcher
+        .spawn_as_with_options(
+            state.clone(),
+            path.to_str().unwrap(),
+            vec![
+                (
+                    "model".into(),
+                    atman_runtime::Value::Str("not-the-goal".into()),
+                ),
+                ("prompt".into(), atman_runtime::Value::Str("first".into())),
+            ],
+            "goal-owner",
+            atman_daemon::run::RunOptions {
+                goal: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(spawned.goal_id.is_some());
+    let session = state
+        .authorized_live_session(&spawned.session_id, "goal-owner")
+        .unwrap();
+    let mut changes = session.goal_control.subscribe();
+    for count in [2, 3] {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let ended = session.sink().snapshot().iter().filter(|e| matches!(e, atman_runtime::Event::FlowEnd { .. })).count();
+                if ended == count && !session.goal_control.should_continue() && !session.goal_control.turn_running() { break; }
+                tokio::select! { _ = changes.changed() => {}, _ = tokio::time::sleep(Duration::from_millis(10)) => {} }
+            }
+        }).await.unwrap_or_else(|e| panic!("{e}: {:?}", session.goal_control.snapshot()));
+        assert_eq!(
+            session
+                .goal_control
+                .record()
+                .unwrap()
+                .pause
+                .unwrap()
+                .summary,
+            "Finished"
+        );
+        if count == 2 {
+            session
+                .control_goal(None, atman_runtime::goal::GoalAction::Resume, None)
+                .unwrap();
+        }
+    }
+    let runs: Vec<_> = session
+        .sink()
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e {
+            atman_runtime::Event::FlowStart { run_id, .. } => Some(run_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(runs.len(), 3);
+    assert!(runs.windows(2).all(|p| p[0] != p[1]));
+    assert!(state.cancel_run(&spawned.run_id));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn launcher_uses_injected_config_and_data_dirs_for_project_scope() {
     let tmp = tempfile::tempdir().unwrap();
     let config_dir = tmp.path().join("config");

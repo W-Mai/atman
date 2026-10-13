@@ -26,3 +26,9 @@ Root and child goals use the same controller. Pausing an ancestor adds a restric
 Root state is stored in `<session>/goal.json`; child records are stored in `<session>/goals/<goal-id>.json`. Writes are atomic and revision checked. Existing `goal.txt` records load paused. Clearing writes a tombstone so legacy text cannot reappear. Opening a session with an interrupted active goal pauses it; recovery requires explicit control and does not replay past side effects.
 
 No default turn, token, fuel, or time budget is added. Provider retries retain their existing limits; exhausted retries pause the goal instead of silently starting another attempt.
+
+## Daemon control
+
+`goal.run` accepts the same parameters as `run_flow` and requires a managed invocation contract with a `user_message` string parameter. It creates an active goal from that parameter and returns `session_id`, the initial `run_id`, and `goal_id`. Subsequent turns have separate run IDs in the event stream. The owner stays live while paused so the authenticated client can resume it. `run_flow` retains its single-execution contract.
+
+`goal.get`, `goal.set`, `goal.pause`, `goal.resume`, and `goal.clear` accept `session_id` and optional `target_handle`. Writes to an existing goal also require `goal_id` and `expected_revision`; `goal.set` requires `text`. Responses contain the same snapshot as the goal tools. Only the authenticated owner of the live session can read or control these goals. `cancel_run` stops the owner and its current turn; clearing removes its goal and stops continuation.
