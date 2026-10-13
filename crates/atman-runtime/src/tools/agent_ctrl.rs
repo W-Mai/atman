@@ -773,6 +773,9 @@ impl FlowRegistry {
 }
 
 impl Tool for AgentSpawn {
+    fn manages_goal_operations(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         "flow.spawn"
     }
@@ -1782,6 +1785,9 @@ async fn run_prepared_flow_agent(
             |start| emit_flow_agent_start(ctx, start),
             || async {
                 let mut child_ctx = sanitize_child_ctx(ctx);
+                if child_ctx.goal_control.is_some() {
+                    child_ctx.turn_id = Some(crate::event::TurnId::now());
+                }
                 child_ctx.session_messages_handle = Some(child_messages);
                 child_ctx.compact_lock_handle = Some(child_compact_lock);
                 child_ctx.context_epoch_handle =
@@ -1836,6 +1842,9 @@ async fn run_prepared_flow_agent(
                         run_id.clone()
                     };
                     let goal_turn = child_ctx.goal_control.as_ref().map(|g| g.start_turn());
+                    if let Some(control) = &child_ctx.goal_control {
+                        control.record_turn(child_ctx.turn_id.clone(), turn_run.clone());
+                    }
                     let turn_lifecycle = child_ctx.goal_control.as_ref().map(|_| {
                         let start = child_flow_start(&child_ctx, &turn_run, &flow.name.name);
                         emit_flow_agent_start(&child_ctx, start);

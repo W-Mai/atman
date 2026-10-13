@@ -429,6 +429,14 @@ impl Executor {
                         sess.set_current_root("root".to_string());
                     }
                     let _goal_turn = tool_ctx.goal_control.as_ref().map(|g| g.start_turn());
+                    if let Some(control) = &tool_ctx.goal_control {
+                        control.record_turn(
+                            turn_id
+                                .clone()
+                                .or_else(|| body_session.as_ref().and_then(|s| s.current_turn())),
+                            body_run_id.clone(),
+                        );
+                    }
                     let result = exec_flow_with_linked_siblings(
                         flow,
                         args,

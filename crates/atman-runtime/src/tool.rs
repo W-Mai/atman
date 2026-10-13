@@ -341,6 +341,21 @@ impl ToolExposureRegistry {
 }
 
 impl ToolCtx {
+    pub(crate) async fn enter_goal_operation(
+        &self,
+        tool: &dyn Tool,
+    ) -> Result<Option<crate::goal::GoalOperation>, RuntimeError> {
+        let Some(control) = &self.goal_control else {
+            return Ok(None);
+        };
+        if tool.manages_goal_operations() {
+            control.wait(&self.cancel).await?;
+            Ok(None)
+        } else {
+            control.enter(&self.cancel).await.map(Some)
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -771,6 +786,10 @@ impl ToolCtx {
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn tier(&self) -> Tier;
+    /// Orchestrators count their inner effects instead of their entire suspended call.
+    fn manages_goal_operations(&self) -> bool {
+        false
+    }
     fn requires_call_intent(&self) -> bool {
         true
     }

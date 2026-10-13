@@ -3167,6 +3167,13 @@ impl Session {
         {
             return Err(std::io::Error::other("goal belongs to another session"));
         }
+        if matches!(action, GoalAction::Resume)
+            && entry
+                .as_ref()
+                .is_some_and(|entry| entry.cancel.is_cancelled())
+        {
+            return Err(std::io::Error::other("cancelled agent cannot be resumed"));
+        }
         match action {
             GoalAction::Pause => control.pause(
                 GoalActor::User,

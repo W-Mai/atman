@@ -86,6 +86,12 @@ impl<'de> serde::Deserialize<'de> for EventEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
+    GoalTurnStarted {
+        owner: String,
+        goal_id: Option<String>,
+        turn_id: Option<TurnId>,
+        run_id: FlowRunId,
+    },
     GoalChanged {
         owner: String,
         goal: Option<crate::memory::goal::GoalRecord>,

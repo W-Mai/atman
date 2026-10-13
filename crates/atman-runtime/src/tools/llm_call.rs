@@ -7,6 +7,9 @@ use crate::value::Value;
 pub struct LlmCallTool;
 
 impl Tool for LlmCallTool {
+    fn manages_goal_operations(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         "llm.call"
     }

@@ -13,6 +13,9 @@ use crate::value::ValueJson;
 pub struct LlmExtractTool;
 
 impl Tool for LlmExtractTool {
+    fn manages_goal_operations(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         "llm.extract"
     }

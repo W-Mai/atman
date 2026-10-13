@@ -547,7 +547,15 @@ pub(crate) async fn execute_tool_invocation(permit: AuthorizedToolInvocation) ->
         flow_run_id,
         terminal,
     } = permit;
+    let operation = match call_ctx.enter_goal_operation(tool.as_ref()).await {
+        Ok(operation) => operation,
+        Err(error) => {
+            terminal.finish(false, error.to_string());
+            return Value::Err(error);
+        }
+    };
     let outcome = tool.call(args, &call_ctx).await;
+    drop(operation);
     let (ok, preview) = match &outcome {
         Ok(value) => (true, preview_tool_value(value)),
         Err(error) => (false, error.to_string()),
@@ -1515,6 +1523,9 @@ mod tests {
 
     #[tokio::test]
     async fn tool_invocation_split_executes_authorized_permit_exactly_once() {
+        use crate::memory::goal::{GoalActor, GoalPauseReason};
+        let goal = crate::goal::GoalController::ephemeral("root".into());
+        goal.set("execute once", None).unwrap();
         let tools = ToolRegistry::new();
         let calls = std::sync::Arc::new(AtomicUsize::new(0));
         let authorized_calls = std::sync::Arc::new(AtomicUsize::new(0));
@@ -1523,7 +1534,8 @@ mod tests {
             authorized_calls: std::sync::Arc::clone(&authorized_calls),
         }));
         let (tx, mut rx) = tokio::sync::broadcast::channel(8);
-        let tool_ctx = authorized_eval_tool_ctx(None).with_stream_tx(tx);
+        let mut tool_ctx = authorized_eval_tool_ctx(None).with_stream_tx(tx);
+        tool_ctx.goal_control = Some(goal.clone());
         let providers = crate::provider::ProviderRegistry::new();
         let flows = std::collections::HashMap::new();
         let host = tool_test_host(&tools, &tool_ctx, &providers, &flows);
@@ -1533,9 +1545,19 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 0);
-
+        goal.pause(
+            GoalActor::User,
+            GoalPauseReason::UserRequested,
+            "pause after approval".into(),
+            None,
+        )
+        .unwrap();
+        let mut execution = Box::pin(execute_tool_invocation(permit));
+        assert!(futures::poll!(execution.as_mut()).is_pending());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        goal.resume(GoalActor::User, None).unwrap();
         assert!(matches!(
-            execute_tool_invocation(permit).await,
+            execution.await,
             Value::Str(value) if value == "called"
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 1);

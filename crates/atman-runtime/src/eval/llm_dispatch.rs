@@ -195,7 +195,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     } else {
         None
     };
-    if uses_spawned_context
+    let compact_operation = ctx.goal_control.as_ref().map(|control| control.try_enter());
+    if compact_operation.as_ref().is_none_or(Option::is_some)
+        && uses_spawned_context
         && compact_guard.is_some()
         && let Some(messages) = ctx.session_messages_handle.as_ref()
         && let Some(result) = crate::compaction::maybe_auto_compact_handle_locked(
@@ -209,6 +211,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     {
         record_spawned_compaction(ctx, &result);
     }
+    drop(compact_operation);
     let llm_context = match llm_context::build_llm_context(
         &args,
         context_mode,
@@ -692,6 +695,20 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     {
                         compact_after_overflow_used = true;
                         saw_context_overflow = true;
+                        // Never suspend on a goal gate while holding the context lock.
+                        drop(compact_guard.take());
+                        let _compact_operation = if let Some(control) = &ctx.goal_control {
+                            match control.enter(&ctx.cancel).await {
+                                Ok(operation) => Some(operation),
+                                Err(error) => return Value::Err(error),
+                            }
+                        } else {
+                            None
+                        };
+                        if uses_spawned_context && let Some(lock) = ctx.compact_lock_handle.as_ref()
+                        {
+                            compact_guard = Some(lock.lock().await);
+                        }
                         if let Some(tx) = stream_tx.as_ref() {
                             let _ = tx.send(crate::stream::StreamFrame::Note(
                                 "context overflow — compacting and retrying".into(),

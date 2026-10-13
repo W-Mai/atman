@@ -8,6 +8,9 @@ use crate::value::Value;
 pub struct LlmGenerateBranchesTool;
 
 impl Tool for LlmGenerateBranchesTool {
+    fn manages_goal_operations(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         "llm.generate_branches"
     }

@@ -84,6 +84,9 @@ impl Tool for ExtractToolUses {
 pub struct DispatchAll;
 
 impl Tool for DispatchAll {
+    fn manages_goal_operations(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         "dispatch_all"
     }
@@ -572,13 +575,9 @@ fn execution_future(index: usize, call: &PreparedCall, call_ctx: ToolCtx) -> Exe
     let call_args = call.call_args.clone();
     let tool = std::sync::Arc::clone(&call.tool);
     Box::pin(async move {
-        let _operation = if let Some(control) = &call_ctx.goal_control {
-            match control.enter(&call_ctx.cancel).await {
-                Ok(operation) => Some(operation),
-                Err(error) => return (index, Err(error)),
-            }
-        } else {
-            None
+        let _operation = match call_ctx.enter_goal_operation(tool.as_ref()).await {
+            Ok(operation) => operation,
+            Err(error) => return (index, Err(error)),
         };
         let result = tool.call(call_args, &call_ctx).await;
         (index, result)

@@ -15,6 +15,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Pause boundaries** — Approved tools and overflow recovery respect goal pauses. Cancelled child instances reject Resume, and goal execution events identify each turn and run.
 - **LLM failure completion** — Failed calls release the context lock before scheduling automatic compaction. Empty assistant replies participate in transient-error retries and remain outside session history.
 - **MCP call recovery** — Tool rejection results distinguish unexposed tools, ambiguous call IDs, and missing authorization receipts. Calls using unexposed MCP names receive schema discovery and broker guidance limited to the originating request's tools and target scope.
 

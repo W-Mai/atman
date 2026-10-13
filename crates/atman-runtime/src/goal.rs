@@ -267,6 +267,21 @@ impl GoalController {
         GoalTurnGuard(self.clone())
     }
 
+    pub fn record_turn(
+        &self,
+        turn_id: Option<crate::event::TurnId>,
+        run_id: crate::event::FlowRunId,
+    ) {
+        if let Some(sink) = self.events.get() {
+            sink.emit(crate::event::Event::GoalTurnStarted {
+                owner: self.owner.clone(),
+                goal_id: self.record().map(|g| g.id),
+                turn_id,
+                run_id,
+            });
+        }
+    }
+
     pub fn is_ancestor_of(&self, other: &Self) -> bool {
         let mut next = other.parent.as_deref();
         while let Some(parent) = next {

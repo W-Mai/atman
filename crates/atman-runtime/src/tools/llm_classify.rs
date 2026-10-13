@@ -8,6 +8,9 @@ use crate::value::Value;
 pub struct LlmClassifyTool;
 
 impl Tool for LlmClassifyTool {
+    fn manages_goal_operations(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         "llm.classify"
     }

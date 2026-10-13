@@ -226,6 +226,12 @@ impl Tool for MemoryGoalControl {
             };
             let expected = goal_expected(&args, true)?;
             if self.resume {
+                if let Some(Value::Str(handle)) = args.named("target_handle")
+                    && let Some(registry) = &ctx.flow_registry
+                    && registry.lookup(handle)?.cancel.is_cancelled()
+                {
+                    return Err(goal_error("cancelled agent cannot be resumed"));
+                }
                 if actor == GoalActor::Agent && !ctx.goal_resume_allowed {
                     return Err(goal_error("self resume requires new user or parent input"));
                 }
@@ -313,6 +319,26 @@ mod goal_control_tests {
         assert!(!sibling.should_continue());
         assert!(root.should_continue());
         assert!(child.should_continue());
+        peer_entry.cancel.cancel();
+        let saved = sibling.record().unwrap();
+        let args = ToolArgs {
+            named: vec![
+                ("target_handle".into(), Value::Str("sibling".into())),
+                ("goal_id".into(), Value::Str(saved.id)),
+                (
+                    "expected_revision".into(),
+                    Value::Int(saved.revision as i64),
+                ),
+            ],
+            ..Default::default()
+        };
+        assert!(
+            MemoryGoalControl { resume: true }
+                .call(args, &ctx)
+                .await
+                .is_err()
+        );
+        assert!(!sibling.should_continue());
     }
 }
 
@@ -690,8 +716,7 @@ impl Tool for MemoryGoalClear {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Clear the session goal. Call this when the task is complete or the user \
-             changes direction entirely. Returns nothing.",
+            "Clear a custom session goal. Managed agents report completion with goal.pause; user controls can clear managed goals.",
         )
     }
 
