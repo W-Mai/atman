@@ -599,23 +599,24 @@ impl WindowManager {
         if self.panels.len() < 2 {
             return;
         }
-        let mut sorted: Vec<&WindowInstance> = self.panels.iter().collect();
-        sorted.sort_by_key(|p| std::cmp::Reverse(p.z));
-        let current_idx = sorted.iter().position(|p| Some(p.id) == self.focus.active);
+        // Z order changes when focus moves, so traversal uses stable creation order.
+        let current_idx = self
+            .panels
+            .iter()
+            .position(|p| Some(p.id) == self.focus.active);
         let next_idx = match current_idx {
             Some(i) => {
                 if forward {
-                    (i + 1) % sorted.len()
+                    (i + 1) % self.panels.len()
                 } else {
-                    (i + sorted.len() - 1) % sorted.len()
+                    (i + self.panels.len() - 1) % self.panels.len()
                 }
             }
             None => 0,
         };
-        if let Some(target) = sorted.get(next_idx) {
+        if let Some(target) = self.panels.get(next_idx) {
             let id = target.id;
-            self.focus.focus(id);
-            self.bring_to_front(id);
+            self.focus(id);
         }
     }
 
@@ -1029,6 +1030,12 @@ impl WindowManager {
         }
         if self.top_kind() == Some(ModalKind::SessionSwitcher) {
             self.modals.handle_session_switcher_mouse(event);
+            return (true, Vec::new());
+        }
+        if let Some(kind @ (ModalKind::ThemePicker | ModalKind::TrustModePicker)) = self.top_kind()
+        {
+            self.modals
+                .handle_picker_mouse(kind, event, app, control_tx);
             return (true, Vec::new());
         }
         if self.top_kind().is_some() {
@@ -1939,6 +1946,38 @@ mod tests {
         fp.close(id(&fp, "b"));
         assert_eq!(fp.panels.len(), 1);
         assert_eq!(fp.focused(), Some("a".to_string()));
+    }
+
+    #[test]
+    fn window_shortcuts_visit_all_windows_in_both_directions() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut wm = WindowManager::default();
+        let mut app = crate::app::AppState::default();
+        let ids: Vec<_> = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| {
+                wm.open(
+                    name,
+                    ContentKey::Task(name.into()),
+                    task_content(name),
+                    name,
+                    canvas(),
+                )
+            })
+            .collect();
+        for (modifiers, expected) in [
+            (KeyModifiers::CONTROL, vec![ids[0], ids[1], ids[2]]),
+            (
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                vec![ids[1], ids[0], ids[2]],
+            ),
+        ] {
+            for id in expected {
+                let action = crate::keys::map(KeyEvent::new(KeyCode::Tab, modifiers));
+                assert!(wm.dispatch_key(&action, &mut app, None).0);
+                assert_eq!(wm.focused_id(), Some(id));
+            }
+        }
     }
 
     #[test]

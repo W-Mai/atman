@@ -20,6 +20,12 @@ pub enum ModalKind {
     TrustModePicker,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PickerAction {
+    Select(usize),
+    Cancel,
+}
+
 #[derive(Default)]
 pub struct ModalManager {
     pub palette: crate::palette::CommandPalette,
@@ -37,6 +43,9 @@ pub struct ModalManager {
     pub theme_picker_open: bool,
     pub trust_mode_picker_open: bool,
     pub trust_draft: Option<atman_runtime::trust::TrustConfig>,
+    pub(crate) picker_hits: Vec<(PickerAction, Rect)>,
+    pub(crate) picker_hover: Option<PickerAction>,
+    pub(crate) picker_kind: Option<ModalKind>,
 }
 
 impl ModalManager {
@@ -697,12 +706,12 @@ impl ModalManager {
                 }
             }
             ModalKind::ThemePicker => {
-                let h = 5u16 + 4;
+                let h = 5u16 * 3 + 7;
                 let w = 70u16.min(canvas.width);
                 center_rect(canvas, w, h)
             }
             ModalKind::TrustModePicker => {
-                let h = atman_runtime::trust::TrustMode::all().len() as u16 + 4;
+                let h = atman_runtime::trust::TrustMode::all().len() as u16 * 3 + 7;
                 let w = 70u16.min(canvas.width);
                 center_rect(canvas, w, h)
             }
@@ -875,7 +884,7 @@ impl ModalManager {
     // ── Theme picker ──
 
     fn render_theme_picker_content(
-        &self,
+        &mut self,
         f: &mut Frame,
         area: Rect,
         app: &crate::app::AppState,
@@ -883,7 +892,6 @@ impl ModalManager {
     ) {
         use ratatui::style::{Modifier, Style};
         use ratatui::text::{Line, Span};
-        use ratatui::widgets::{List, ListItem, ListState};
 
         let themes = [
             ("default", "calm / steady / eager / reckless"),
@@ -892,30 +900,27 @@ impl ModalManager {
             ("weather", "🌧 drizzle / ☀️ clear / ⛈ storm / 🌪 tornado"),
             ("drink", "💧 water / ☕ coffee / ☕ espresso / 🧪 bleach"),
         ];
-        let items: Vec<ListItem> = themes
+        let items: Vec<Line> = themes
             .iter()
             .map(|(id, desc)| {
                 let is_current = app.trust.theme.to_string() == *id;
                 let marker = if is_current { "  ← current" } else { "" };
-                ListItem::new(Line::from(vec![
+                Line::from(vec![
                     Span::styled(
                         format!(" {:<10}", id),
                         Style::default().add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(format!("  {}{}", desc, marker)),
-                ]))
+                ])
             })
             .collect();
-        let mut state = ListState::default();
-        state.select(Some(app.picker_selected.min(items.len() - 1)));
-        f.render_stateful_widget(
-            List::new(items).highlight_style(
-                Style::default()
-                    .fg(t.tinted_fg.into())
-                    .add_modifier(Modifier::BOLD),
-            ),
+        self.render_picker_rows(
+            ModalKind::ThemePicker,
+            f,
             area,
-            &mut state,
+            items,
+            app.picker_selected,
+            t,
         );
     }
 
@@ -955,7 +960,7 @@ impl ModalManager {
     // ── Trust mode picker ──
 
     fn render_trust_mode_picker_content(
-        &self,
+        &mut self,
         f: &mut Frame,
         area: Rect,
         app: &crate::app::AppState,
@@ -963,11 +968,10 @@ impl ModalManager {
     ) {
         use ratatui::style::{Modifier, Style};
         use ratatui::text::{Line, Span};
-        use ratatui::widgets::{List, ListItem, ListState};
 
         let draft = self.trust_draft.as_ref().unwrap_or(&app.trust);
         let modes = atman_runtime::trust::TrustMode::all();
-        let items: Vec<ListItem> = modes
+        let items: Vec<Line> = modes
             .iter()
             .map(|&m| {
                 let d = app.trust.theme.display(m);
@@ -1040,27 +1044,153 @@ impl ModalManager {
                         config.escalation.label()
                     )
                 };
-                ListItem::new(Line::from(vec![
+                Line::from(vec![
                     Span::styled(format!(" {} ", d.emoji), Style::default().fg(color)),
                     Span::styled(
                         format!("{:<14}", d.name),
                         Style::default().fg(color).add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(format!("  {} · {}  {}", d.description, matrix, marker)),
-                ]))
+                ])
             })
             .collect();
-        let mut state = ListState::default();
-        state.select(Some(app.picker_selected.min(items.len() - 1)));
-        f.render_stateful_widget(
-            List::new(items).highlight_style(
-                Style::default()
-                    .bg(t.highlight_bg.into())
-                    .add_modifier(Modifier::BOLD),
-            ),
+        self.render_picker_rows(
+            ModalKind::TrustModePicker,
+            f,
             area,
-            &mut state,
+            items,
+            app.picker_selected,
+            t,
         );
+    }
+
+    fn render_picker_rows(
+        &mut self,
+        kind: ModalKind,
+        f: &mut Frame,
+        area: Rect,
+        rows: Vec<ratatui::text::Line<'_>>,
+        selected: usize,
+        t: &crate::theme::Theme,
+    ) {
+        use ratatui::{style::Style, widgets::Paragraph};
+        self.picker_hits.clear();
+        if self.picker_kind != Some(kind) {
+            self.picker_hover = None;
+        }
+        self.picker_kind = Some(kind);
+        let footer_height = 3.min(area.height);
+        let list_height = area.height.saturating_sub(footer_height + 1);
+        let visible = (list_height / 3).max(1) as usize;
+        let start = selected / visible * visible;
+        for (slot, (index, line)) in rows
+            .into_iter()
+            .enumerate()
+            .skip(start)
+            .take(visible)
+            .enumerate()
+        {
+            let rect = Rect::new(
+                area.x,
+                area.y + slot as u16 * 3,
+                area.width,
+                3.min(list_height),
+            );
+            if rect.is_empty() {
+                continue;
+            }
+            let action = PickerAction::Select(index);
+            let bg = crate::settings_form::render_record(
+                f,
+                rect,
+                index == selected,
+                self.picker_hover == Some(action),
+                t,
+            );
+            f.render_widget(
+                Paragraph::new(line).style(Style::default().fg(t.tinted_fg.into()).bg(bg)),
+                Rect::new(
+                    rect.x + 2.min(rect.width),
+                    rect.y + rect.height.saturating_sub(1) / 2,
+                    rect.width.saturating_sub(4),
+                    1,
+                ),
+            );
+            self.picker_hits.push((action, rect));
+        }
+        let footer = Rect::new(
+            area.x,
+            area.bottom().saturating_sub(footer_height),
+            area.width,
+            footer_height,
+        );
+        let cancel = Rect::new(
+            footer.right().saturating_sub(14.min(footer.width)),
+            footer.y,
+            14.min(footer.width),
+            footer.height,
+        );
+        crate::settings_form::render_action(
+            f,
+            cancel,
+            &crate::settings_form::Action {
+                label: "Cancel",
+                shortcut: "Esc",
+                hovered: self.picker_hover == Some(PickerAction::Cancel),
+                ..Default::default()
+            },
+            t,
+        );
+        self.picker_hits.push((PickerAction::Cancel, cancel));
+        f.render_widget(
+            Paragraph::new("↑↓ select · Enter / click apply")
+                .style(Style::default().fg(t.subtle_fg.into())),
+            Rect::new(
+                footer.x,
+                footer.y + footer.height.saturating_sub(1) / 2,
+                footer.width.saturating_sub(cancel.width + 1),
+                1,
+            ),
+        );
+    }
+
+    pub fn handle_picker_mouse(
+        &mut self,
+        kind: ModalKind,
+        event: &crossterm::event::MouseEvent,
+        app: &mut crate::app::AppState,
+        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        use crate::keys::KeyAction;
+        use crossterm::event::{MouseButton, MouseEventKind};
+        if self.picker_kind != Some(kind) {
+            return;
+        }
+        let hit = self
+            .picker_hits
+            .iter()
+            .find(|(_, rect)| rect.contains((event.column, event.row).into()))
+            .map(|(action, _)| *action);
+        let key = match event.kind {
+            MouseEventKind::Moved => {
+                self.picker_hover = hit;
+                None
+            }
+            MouseEventKind::Down(MouseButton::Left) => match hit {
+                Some(PickerAction::Select(index)) => {
+                    app.picker_selected = index;
+                    Some(KeyAction::Submit)
+                }
+                Some(PickerAction::Cancel) => Some(KeyAction::Escape),
+                None => None,
+            },
+            MouseEventKind::ScrollUp => Some(KeyAction::HistoryUp),
+            MouseEventKind::ScrollDown => Some(KeyAction::HistoryDown),
+            _ => None,
+        };
+        if let Some(key) = key {
+            self.handle_key_top(kind, &key, app, tx);
+        }
     }
 
     fn handle_trust_mode_picker_key(
@@ -1205,6 +1335,77 @@ fn center_rect(canvas: Rect, w: u16, h: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picker_mouse_uses_rendered_rows_and_the_keyboard_action_path() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        for (width, height) in [(40, 14), (100, 40)] {
+            for kind in [ModalKind::ThemePicker, ModalKind::TrustModePicker] {
+                let mut wm = crate::wm::WindowManager::default();
+                let mut app = crate::app::AppState::default();
+                wm.modals.theme_picker_open = kind == ModalKind::ThemePicker;
+                wm.modals.trust_mode_picker_open = kind == ModalKind::TrustModePicker;
+                let selected = if kind == ModalKind::ThemePicker { 4 } else { 3 };
+                app.picker_selected = selected;
+                let canvas = Rect::new(0, 0, width, height);
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                        .unwrap();
+                terminal
+                    .draw(|frame| wm.render(frame, canvas, &mut app))
+                    .unwrap();
+                let rect = wm
+                    .modals
+                    .picker_hits
+                    .iter()
+                    .find(|(hit, _)| *hit == PickerAction::Select(selected))
+                    .unwrap()
+                    .1;
+                assert_eq!(rect.height, 3);
+                assert_eq!(rect.intersection(canvas), rect);
+                let mut mouse = MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column: rect.x + 1,
+                    row: rect.bottom() - 1,
+                    modifiers: KeyModifiers::NONE,
+                };
+                assert!(wm.dispatch_mouse(&mouse, &mut app, None).0);
+                assert!(wm.modals.picker_hover == Some(PickerAction::Select(selected)));
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                mouse.kind = MouseEventKind::Down(MouseButton::Left);
+                assert!(wm.dispatch_mouse(&mouse, &mut app, Some(&tx)).0);
+                if kind == ModalKind::ThemePicker {
+                    assert!(!wm.modals.theme_picker_open);
+                    assert_eq!(app.trust.theme, atman_runtime::trust::Theme::Drink);
+                } else {
+                    assert!(!wm.modals.trust_mode_picker_open);
+                    assert!(
+                        matches!(rx.try_recv(), Ok(crate::TuiControl::UpdateTrust(config)) if config.mode == atman_runtime::trust::TrustMode::all()[selected])
+                    );
+                }
+                wm.modals.theme_picker_open = kind == ModalKind::ThemePicker;
+                wm.modals.trust_mode_picker_open = kind == ModalKind::TrustModePicker;
+                terminal
+                    .draw(|frame| wm.render(frame, canvas, &mut app))
+                    .unwrap();
+                mouse.kind = MouseEventKind::ScrollUp;
+                wm.dispatch_mouse(&mouse, &mut app, None);
+                assert_eq!(app.picker_selected, selected - 1);
+                let cancel = wm
+                    .modals
+                    .picker_hits
+                    .iter()
+                    .find(|(hit, _)| *hit == PickerAction::Cancel)
+                    .unwrap()
+                    .1;
+                mouse.kind = MouseEventKind::Down(MouseButton::Left);
+                mouse.column = cancel.x;
+                mouse.row = cancel.y;
+                wm.dispatch_mouse(&mouse, &mut app, None);
+                assert!(!wm.modals.theme_picker_open && !wm.modals.trust_mode_picker_open);
+            }
+        }
+    }
 
     #[test]
     fn settings_forms_fit_small_and_wide_canvases() {

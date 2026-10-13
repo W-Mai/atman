@@ -87,6 +87,8 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (F(2), _, _, _) => KeyAction::ToggleSidebar,
         (F(3), _, _, _) => KeyAction::ToggleMouseCapture,
         (F(4), _, _, _) => KeyAction::ToggleQuote,
+        (Tab, true, true, _) | (BackTab, true, _, _) => KeyAction::CyclePanelBackward,
+        (Tab, true, false, _) => KeyAction::CyclePanelForward,
         (Tab, _, _, _) => KeyAction::Tab,
         (BackTab, _, _, _) => KeyAction::BackTab,
         (Enter, _, true, _) => KeyAction::Newline,

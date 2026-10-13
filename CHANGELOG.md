@@ -16,6 +16,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Panel navigation** — Ctrl+Tab and Ctrl+Shift+Tab traverse all floating windows in stable order. Theme and trust-mode pickers support padded mouse targets, subdued hover, wheel navigation, and a Cancel button through their keyboard action paths.
+
 - **Floating panel controls** — Reopening preserves manual geometry across panel types, and narrow MCP and Knowledge windows remain movable and resizable. Modal activation releases pointer capture, editable content handles navigation before shell fallbacks, and blocked close actions display a reason. Child flow hover updates no longer swallow clicks on other content.
 
 - **Goal editing** — Save and Ctrl+S return to goal details after a successful write. Pending saves prevent duplicate submissions; failed saves retain the draft and display the error in the panel.

@@ -325,6 +325,10 @@ pub fn cheatsheet_lines() -> Vec<Line<'static>> {
         kv("F2 / :sidebar", "toggle sidebar"),
         kv("Ctrl+P / :panel", "command palette"),
         kv(
+            "Ctrl+Tab / Ctrl+Shift+Tab",
+            "next / previous floating window",
+        ),
+        kv(
             "Ctrl+Y / Goal button",
             "pause or resume the displayed agent goal",
         ),
