@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.16.0] — 2026-10-13
+
 ### ✨ Features
 
 - **New goal control** — The Goal panel has a persistent New goal button and `N` shortcut for root and child agents. Saving replaces the selected objective with a fresh identity through a revision-checked write; cancelling preserves the existing goal.
