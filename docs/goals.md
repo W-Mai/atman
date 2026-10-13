@@ -21,6 +21,8 @@ Pause reasons accepted from agents are `completed`, `needs_input`, `blocked`, an
 
 ## Execution boundaries
 
+Watcher registration validates its target before adding an active watch. Unwatch stops future results from that registration; notifications already queued remain available. Watcher completion and notification enqueue share one state lock, and changes wake every waiter, including hosts waiting for all watches to finish.
+
 User Pause stops new requests and tool starts. An in-flight model request finishes and its reply is recorded before execution waits. Already running tools can finish; undispatched work waits. Resume continues the suspended execution without replaying its reply or completed tools. Pause does not close the current turn or return its pending input to the submission queue. Esc cancels the turn and pauses its goal.
 
 Root and child goals use the same controller. Pausing an ancestor adds a restriction to descendants without changing their own states. Resuming an ancestor leaves completed or separately paused children paused. Child goal changes are recorded as revisioned events and delivered through the parent's versioned context records. Child continuation preserves its handle and private context while assigning each execution a distinct run identity.

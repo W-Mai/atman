@@ -74,13 +74,20 @@ async fn goal_driver_finishes_turns_and_resumes_without_replacing_the_session() 
         }
         if count == 3 {
             // A retired watcher still starts a separate turn after an agent completion pause.
+            let source = atman_runtime::watch::WatchSource::Bash {
+                handle: "job".into(),
+            };
+            let watcher_id = session.watch_hub.register(
+                source.clone(),
+                "ready".into(),
+                atman_runtime::watch::WatchMode::Once,
+                Duration::from_secs(1),
+            );
             session
                 .watch_hub
                 .enqueue_event(atman_runtime::watch::WatchEvent {
-                    watcher_id: "completed-watch".into(),
-                    source: atman_runtime::watch::WatchSource::Bash {
-                        handle: "job".into(),
-                    },
+                    watcher_id,
+                    source,
                     pattern: "ready".into(),
                     row: None,
                     col: None,

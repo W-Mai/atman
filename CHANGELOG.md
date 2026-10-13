@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Watcher lifecycle** — Failed target resolution leaves no active watch. State changes wake every waiter, completed watches retire atomically with their notifications, and unwatched producers cannot publish late results.
+
 - **Agent turn completion** — Valid final answers end the current turn without waiting for watcher events. Hosts deliver queued watcher notifications in arrival order in a separate turn, retain invocation settings, and respect execution pauses.
 
 ## [1.16.0] — 2026-10-13

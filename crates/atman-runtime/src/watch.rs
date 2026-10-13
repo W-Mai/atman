@@ -3,7 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
@@ -88,9 +88,14 @@ pub struct WatcherInfo {
 }
 
 pub struct WatchHub {
-    watchers: Mutex<HashMap<WatcherId, Watcher>>,
-    pending_events: Mutex<VecDeque<WatchEvent>>,
-    notify: Notify,
+    state: Mutex<WatchState>,
+    changes: watch::Sender<u64>,
+}
+
+#[derive(Default)]
+struct WatchState {
+    watchers: HashMap<WatcherId, Watcher>,
+    pending_events: VecDeque<WatchEvent>,
 }
 
 impl Default for WatchHub {
@@ -102,9 +107,8 @@ impl Default for WatchHub {
 impl WatchHub {
     pub fn new() -> Self {
         Self {
-            watchers: Mutex::new(HashMap::new()),
-            pending_events: Mutex::new(VecDeque::new()),
-            notify: Notify::new(),
+            state: Mutex::new(WatchState::default()),
+            changes: watch::channel(0).0,
         }
     }
 
@@ -126,14 +130,20 @@ impl WatchHub {
             created_at: chrono::Utc::now(),
             cancel,
         };
-        self.watchers.lock().unwrap().insert(id.clone(), watcher);
+        self.state
+            .lock()
+            .unwrap()
+            .watchers
+            .insert(id.clone(), watcher);
+        self.changed();
         id
     }
 
     pub fn unregister(&self, id: &WatcherId) -> bool {
-        if let Some(w) = self.watchers.lock().unwrap().remove(id) {
+        let removed = self.state.lock().unwrap().watchers.remove(id);
+        if let Some(w) = removed {
             w.cancel.cancel();
-            self.notify.notify_one();
+            self.changed();
             true
         } else {
             false
@@ -141,20 +151,30 @@ impl WatchHub {
     }
 
     pub fn has_active_watchers(&self) -> bool {
-        !self.watchers.lock().unwrap().is_empty()
+        !self.state.lock().unwrap().watchers.is_empty()
     }
 
     /// Include queued events from watches that have already completed.
     pub fn has_work(&self) -> bool {
-        let pending = self.pending_events.lock().unwrap();
-        !pending.is_empty() || self.has_active_watchers()
+        let state = self.state.lock().unwrap();
+        !state.pending_events.is_empty() || !state.watchers.is_empty()
+    }
+
+    pub fn has_pending_events(&self) -> bool {
+        !self.state.lock().unwrap().pending_events.is_empty()
+    }
+
+    fn changed(&self) {
+        self.changes
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     pub fn list_active(&self) -> Vec<WatcherInfo> {
         let now = chrono::Utc::now();
-        self.watchers
+        self.state
             .lock()
             .unwrap()
+            .watchers
             .values()
             .map(|w| WatcherInfo {
                 id: w.id.clone(),
@@ -175,59 +195,64 @@ impl WatchHub {
     }
 
     pub fn get_cancel(&self, id: &WatcherId) -> CancellationToken {
-        self.watchers
+        self.state
             .lock()
             .unwrap()
+            .watchers
             .get(id)
             .map(|w| w.cancel.clone())
-            .unwrap_or_default()
+            .unwrap_or_else(|| {
+                let cancel = CancellationToken::new();
+                cancel.cancel();
+                cancel
+            })
     }
 
     pub fn enqueue_event(&self, event: WatchEvent) {
-        // Retiring a one-shot watch and publishing its event must not expose an idle gap.
-        let mut pending = self.pending_events.lock().unwrap();
-        let should_remove = {
-            let watchers = self.watchers.lock().unwrap();
-            watchers
-                .get(&event.watcher_id)
-                .map(|w| matches!(w.mode, WatchMode::Once))
-                .unwrap_or(false)
+        let mut state = self.state.lock().unwrap();
+        let Some(watcher) = state.watchers.get(&event.watcher_id) else {
+            return; // Unwatch won the race against a late producer.
         };
-        if should_remove {
-            if let Some(w) = self.watchers.lock().unwrap().remove(&event.watcher_id) {
-                w.cancel.cancel();
-            }
+        let removed = if watcher.mode == WatchMode::Once || event.timed_out || event.exited {
+            state.watchers.remove(&event.watcher_id)
+        } else {
+            None
+        };
+        state.pending_events.push_back(event);
+        drop(state);
+        if let Some(watcher) = removed {
+            watcher.cancel.cancel();
         }
-        pending.push_back(event);
-        drop(pending);
-        self.notify.notify_one();
+        self.changed();
     }
 
     /// Wait without consuming events so a competing input or pause cannot lose them.
     pub async fn wait_for_pending(&self) {
-        loop {
-            let notified = self.notify.notified();
-            if !self.pending_events.lock().unwrap().is_empty() {
-                return;
-            }
-            notified.await;
-        }
+        self.wait_until_ready(false).await;
     }
 
     /// A batch host may exit when all watches have been removed without an event.
     pub async fn wait_for_pending_or_idle(&self) {
+        self.wait_until_ready(true).await;
+    }
+
+    async fn wait_until_ready(&self, include_idle: bool) {
+        let mut changes = self.changes.subscribe();
         loop {
-            let notified = self.notify.notified();
-            if !self.pending_events.lock().unwrap().is_empty() || !self.has_active_watchers() {
+            let ready = {
+                let state = self.state.lock().unwrap();
+                !state.pending_events.is_empty() || (include_idle && state.watchers.is_empty())
+            };
+            if ready {
                 return;
             }
-            notified.await;
+            let _ = changes.changed().await;
         }
     }
 
     /// Deliver the current notification batch in arrival order, including retired watchers.
     pub fn take_pending_prompt(&self) -> Option<String> {
-        let events: Vec<_> = self.pending_events.lock().unwrap().drain(..).collect();
+        let events = std::mem::take(&mut self.state.lock().unwrap().pending_events);
         if events.is_empty() {
             return None;
         }
@@ -242,14 +267,24 @@ impl WatchHub {
     }
 
     pub async fn wait_for_event(&self, timeout: Duration) -> Option<WatchEvent> {
-        if let Some(evt) = self.pending_events.lock().unwrap().pop_front() {
-            return Some(evt);
-        }
-        if !self.has_active_watchers() {
-            return None;
-        }
-        let _ = tokio::time::timeout(timeout, self.wait_for_pending_or_idle()).await;
-        self.pending_events.lock().unwrap().pop_front()
+        tokio::time::timeout(timeout, async {
+            let mut changes = self.changes.subscribe();
+            loop {
+                {
+                    let mut state = self.state.lock().unwrap();
+                    if let Some(event) = state.pending_events.pop_front() {
+                        return Some(event);
+                    }
+                    if state.watchers.is_empty() {
+                        return None;
+                    }
+                }
+                let _ = changes.changed().await;
+            }
+        })
+        .await
+        .ok()
+        .flatten()
     }
 }
 
@@ -454,63 +489,37 @@ impl Tool for Watch {
                 },
             };
 
-            let watcher_id = watch_hub.register(
-                source.clone(),
-                pattern.clone(),
-                mode,
-                Duration::from_millis(timeout_ms),
-            );
-
-            match snapshot.kind {
+            let watchable: Arc<dyn Watchable> = match snapshot.kind {
                 crate::task_registry::TaskKind::Terminal => {
                     let reg = ctx.term_registry.clone().ok_or_else(|| {
                         RuntimeError::ToolFailed("watch: terminal registry not available".into())
                     })?;
-                    let entry = reg.lookup(&handle, &session_id)?;
-                    let watchable: Arc<dyn Watchable> = Arc::clone(&entry) as Arc<dyn Watchable>;
-                    spawn_watcher(
-                        watch_hub,
-                        watcher_id.clone(),
-                        source,
-                        pattern,
-                        mode,
-                        Duration::from_millis(timeout_ms),
-                        watchable,
-                    );
+                    reg.lookup(&handle, &session_id)?
                 }
                 crate::task_registry::TaskKind::Bash => {
                     let reg = ctx.bg_registry.clone().ok_or_else(|| {
                         RuntimeError::ToolFailed("watch: bash registry not available".into())
                     })?;
-                    let entry = reg.lookup(&handle, &session_id)?;
-                    let watchable: Arc<dyn Watchable> = Arc::clone(&entry) as Arc<dyn Watchable>;
-                    spawn_watcher(
-                        watch_hub,
-                        watcher_id.clone(),
-                        source,
-                        pattern,
-                        mode,
-                        Duration::from_millis(timeout_ms),
-                        watchable,
-                    );
+                    reg.lookup(&handle, &session_id)?
                 }
                 crate::task_registry::TaskKind::Flow => {
                     let reg = ctx.flow_registry.clone().ok_or_else(|| {
                         RuntimeError::ToolFailed("watch: agent registry not available".into())
                     })?;
-                    let entry = reg.lookup(&handle)?;
-                    let watchable: Arc<dyn Watchable> = Arc::clone(&entry) as Arc<dyn Watchable>;
-                    spawn_watcher(
-                        watch_hub,
-                        watcher_id.clone(),
-                        source,
-                        pattern,
-                        mode,
-                        Duration::from_millis(timeout_ms),
-                        watchable,
-                    );
+                    reg.lookup(&handle)?
                 }
-            }
+            };
+            let timeout = Duration::from_millis(timeout_ms);
+            let watcher_id = watch_hub.register(source.clone(), pattern.clone(), mode, timeout);
+            spawn_watcher(
+                watch_hub,
+                watcher_id.clone(),
+                source,
+                pattern,
+                mode,
+                timeout,
+                watchable,
+            );
 
             Ok(Value::Struct(vec![(
                 "watcher_id".into(),
@@ -746,6 +755,82 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn removing_the_last_watch_wakes_all_waiters_and_rejects_late_results() {
+        let hub = Arc::new(WatchHub::new());
+        let source = WatchSource::Bash {
+            handle: "job".into(),
+        };
+        let id = hub.register(
+            source.clone(),
+            "done".into(),
+            WatchMode::Once,
+            Duration::from_secs(1),
+        );
+        let first = hub.wait_for_pending_or_idle();
+        let second = hub.wait_for_pending_or_idle();
+        tokio::pin!(first, second);
+        for waiter in [&mut first, &mut second] {
+            tokio::select! {
+                biased;
+                _ = waiter => panic!("watch is still active"),
+                _ = std::future::ready(()) => {},
+            }
+        }
+        hub.unregister(&id);
+        assert!(hub.get_cancel(&id).is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(first, second);
+        })
+        .await
+        .unwrap();
+        handle_watch_result(
+            hub.clone(),
+            id,
+            source,
+            "done".into(),
+            Duration::from_secs(1),
+            Ok(WatchResult::Matched {
+                row: None,
+                col: None,
+                text: "late".into(),
+            }),
+        )
+        .await;
+        assert!(!hub.has_work());
+    }
+
+    #[tokio::test]
+    async fn failed_watch_target_resolution_leaves_no_active_registration() {
+        let hub = Arc::new(WatchHub::new());
+        let tasks = crate::task_registry::TaskRegistry::new();
+        tasks.register(
+            crate::task_registry::TaskKind::Bash,
+            crate::task_registry::TaskDisplay {
+                label: "job".into(),
+                command: None,
+            },
+            "job".into(),
+            "session".into(),
+            CancellationToken::new(),
+        );
+        let mut ctx = ToolCtx::new()
+            .with_session_id("session")
+            .with_task_registry(tasks);
+        ctx.watch_hub = Some(hub.clone());
+        let result = Watch
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Str("job".into()), Value::Str("done".into())],
+                    named: vec![],
+                },
+                &ctx,
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(!hub.has_work());
+    }
+
+    #[tokio::test]
     async fn pending_injection_check_uses_the_current_flow_store() {
         let session = Arc::new(crate::session::Session::open_ephemeral());
         let turn_id = crate::event::TurnId::now();
@@ -962,7 +1047,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_event_returns_pending_event() {
         let hub = Arc::new(WatchHub::new());
-        hub.register(
+        let id = hub.register(
             WatchSource::Terminal {
                 handle: "t1".into(),
             },
@@ -971,7 +1056,7 @@ mod tests {
             Duration::from_secs(10),
         );
         hub.enqueue_event(WatchEvent {
-            watcher_id: "w_test".into(),
+            watcher_id: id,
             source: WatchSource::Terminal {
                 handle: "t1".into(),
             },
