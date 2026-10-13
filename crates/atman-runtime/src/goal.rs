@@ -93,6 +93,7 @@ pub enum GoalAction {
     Pause,
     Resume,
     Set { text: String },
+    Create { text: String },
     Clear,
 }
 
@@ -445,6 +446,31 @@ impl GoalController {
         Ok(())
     }
 
+    /// Create a fresh objective for an owner, replacing only the acknowledged record.
+    pub fn create(&self, text: &str, expected: Option<(&str, u64)>) -> io::Result<()> {
+        let _transition = self.transition.lock().unwrap();
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(io::Error::other("goal objective must not be empty"));
+        }
+        self.mutate(expected, |record| {
+            if record.is_some() && expected.is_none() {
+                return Err(io::Error::other(
+                    "a goal already exists; read it before replacing",
+                ));
+            }
+            *record = Some(GoalRecord::new(
+                text.into(),
+                self.owner.clone(),
+                self.parent.as_ref().and_then(|p| p.record().map(|g| g.id)),
+            ));
+            Ok(())
+        })?;
+        self.state.lock().unwrap().execution_paused = false;
+        self.changed();
+        Ok(())
+    }
+
     pub fn set(&self, text: &str, expected: Option<(&str, u64)>) -> io::Result<()> {
         let _transition = self.transition.lock().unwrap();
         let text = text.trim();
@@ -699,5 +725,61 @@ mod tests {
         assert!(!restored.should_continue());
         restored.resume(GoalActor::User, None).unwrap();
         assert!(restored.should_continue());
+    }
+    #[test]
+    fn creating_a_goal_requires_the_current_identity_and_preserves_parent_gates() {
+        let root = GoalController::ephemeral("root".into());
+        root.create("original", None).unwrap();
+        let original = root.record().unwrap();
+        let child = root
+            .child("child".into(), "child objective".into(), None)
+            .unwrap();
+        assert!(root.create("unacknowledged", None).is_err());
+        assert!(
+            root.create("stale", Some((&original.id, original.revision + 1)))
+                .is_err()
+        );
+        assert_eq!(root.record().unwrap(), original);
+        root.pause(
+            GoalActor::User,
+            GoalPauseReason::UserRequested,
+            "pause".into(),
+            None,
+        )
+        .unwrap();
+        let paused = root.record().unwrap();
+        root.create("replacement", Some((&paused.id, paused.revision)))
+            .unwrap();
+        let replacement = root.record().unwrap();
+        assert_ne!(replacement.id, original.id);
+        assert_eq!(replacement.revision, 1);
+        assert!(root.should_continue());
+        assert!(
+            !child.should_continue(),
+            "old descendants must not follow a replacement root goal"
+        );
+        let old_child = child.record().unwrap();
+        child
+            .create(
+                "new child objective",
+                Some((&old_child.id, old_child.revision)),
+            )
+            .unwrap();
+        assert_eq!(child.record().unwrap().parent_goal_id, Some(replacement.id));
+        root.pause(
+            GoalActor::User,
+            GoalPauseReason::UserRequested,
+            "pause".into(),
+            None,
+        )
+        .unwrap();
+        assert!(
+            !child.should_continue(),
+            "new child goals still respect the parent's pause"
+        );
+        assert!(
+            root.set("stale edit", Some((&original.id, original.revision)))
+                .is_err()
+        );
     }
 }

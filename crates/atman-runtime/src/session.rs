@@ -3167,7 +3167,7 @@ impl Session {
         {
             return Err(std::io::Error::other("goal belongs to another session"));
         }
-        if matches!(action, GoalAction::Resume)
+        if matches!(action, GoalAction::Resume | GoalAction::Create { .. })
             && entry
                 .as_ref()
                 .is_some_and(|entry| entry.cancel.is_cancelled())
@@ -3183,6 +3183,7 @@ impl Session {
             )?,
             GoalAction::Resume => control.resume(GoalActor::User, expected)?,
             GoalAction::Set { text } => control.set(&text, expected)?,
+            GoalAction::Create { text } => control.create(&text, expected)?,
             GoalAction::Clear => {
                 control.pause(
                     GoalActor::User,

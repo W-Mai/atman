@@ -86,6 +86,8 @@ pub struct GoalPanelContent {
     text_rect: Rect,
     editor: Option<InputEditor>,
     edit_revision: Option<(String, u64)>,
+    edit_target: Option<String>,
+    creating: bool,
     scroll: u16,
     confirm_clear: bool,
     cursor_visible: bool,
@@ -98,12 +100,14 @@ impl GoalPanelContent {
         Self {
             session,
             selected: 0,
-            focus: 1,
+            focus: 4,
             hover: None,
             hits: vec![],
             text_rect: Rect::default(),
             editor: None,
             edit_revision: None,
+            edit_target: None,
+            creating: false,
             scroll: 0,
             confirm_clear: false,
             cursor_visible: false,
@@ -156,20 +160,31 @@ impl GoalPanelContent {
                     let expected = self.edit_revision.clone();
                     vec![WmCommand::GoalControl {
                         request_id: Some(request_id),
-                        target: target.clone(),
+                        target: self.edit_target.clone(),
                         goal_id: expected.as_ref().map(|e| e.0.clone()),
                         revision: expected.map(|e| e.1),
-                        action: GoalAction::Set {
-                            text: editor.buf().into(),
+                        action: if self.creating {
+                            GoalAction::Create {
+                                text: editor.buf().into(),
+                            }
+                        } else {
+                            GoalAction::Set {
+                                text: editor.buf().into(),
+                            }
                         },
                     }]
                 } else {
                     let record = control.record();
+                    if record.is_none() {
+                        return vec![];
+                    }
                     let mut editor = InputEditor::default();
                     if let Some(goal) = &record {
                         editor.insert_str(&goal.objective);
                     }
                     self.edit_revision = record.map(|g| (g.id, g.revision));
+                    self.creating = self.edit_revision.is_none();
+                    self.edit_target = target.clone();
                     self.editor = Some(editor);
                     self.save_error = None;
                     self.focus = 2;
@@ -186,6 +201,17 @@ impl GoalPanelContent {
                     vec![]
                 }
             }
+            4 if self.editor.is_none() => {
+                self.edit_revision = control.record().map(|g| (g.id, g.revision));
+                self.edit_target = target.clone();
+                self.creating = true;
+                self.editor = Some(InputEditor::default());
+                self.save_error = None;
+                self.confirm_clear = false;
+                self.focus = 2;
+                self.scroll = 0;
+                vec![]
+            }
             _ => vec![],
         }
     }
@@ -201,7 +227,8 @@ impl WindowComponent for GoalPanelContent {
         let t = crate::theme::theme();
         let width = area.width.saturating_sub(4).min(88);
         let x = area.x + (area.width - width) / 2;
-        let top = Rect::new(x, area.y + 1, width, 3);
+        let new_width = 14.min(width / 2);
+        let top = Rect::new(x, area.y + 1, width.saturating_sub(new_width + 1), 3);
         let choices = self.choices();
         self.selected = self.selected.min(choices.len() - 1);
         let (target, control) = &choices[self.selected];
@@ -211,7 +238,7 @@ impl WindowComponent for GoalPanelContent {
             frame,
             top,
             &Action {
-                label: &format!("{} / {} · {name}", self.selected + 1, choices.len()),
+                label: &format!("Agent {} / {} · {name}", self.selected + 1, choices.len()),
                 shortcut: "← →",
                 focused: self.focus == 0,
                 hovered: self.hover == Some(0),
@@ -220,6 +247,20 @@ impl WindowComponent for GoalPanelContent {
             &t,
         );
         self.hits.push((0, top));
+        let new_rect = Rect::new(top.right() + 1, top.y, new_width, 3);
+        render_action(
+            frame,
+            new_rect,
+            &Action {
+                label: "New goal",
+                shortcut: "N",
+                focused: self.focus == 4,
+                hovered: self.hover == Some(4),
+                disabled: self.editor.is_some(),
+            },
+            &t,
+        );
+        self.hits.push((4, new_rect));
         let error_rows = self
             .save_error
             .as_ref()
@@ -305,10 +346,8 @@ impl WindowComponent for GoalPanelContent {
                 "Saving…"
             } else if self.editor.is_some() {
                 "Save"
-            } else if snapshot.goal.is_some() {
-                "Edit"
             } else {
-                "New goal"
+                "Edit"
             },
             if self.confirm_clear {
                 "Confirm clear"
@@ -338,6 +377,7 @@ impl WindowComponent for GoalPanelContent {
                     focused: self.focus == index,
                     hovered: self.hover == Some(index),
                     disabled: self.pending_save.is_some()
+                        || (index == 2 && self.editor.is_none() && snapshot.goal.is_none())
                         || (index != 2 && (snapshot.goal.is_none() || self.editor.is_some())),
                 },
                 &t,
@@ -345,11 +385,15 @@ impl WindowComponent for GoalPanelContent {
             self.hits.push((index, rect));
         }
         frame.render_widget(
-            Paragraph::new(if self.editor.is_some() {
-                "Ctrl+S save · Esc discard · click to place cursor"
-            } else {
-                "Tab focus · Space pause/resume · ↑↓ scroll · Esc close"
-            })
+            Paragraph::new(
+                if self.editor.is_some() && self.creating && self.edit_revision.is_some() {
+                    "Ctrl+S replace current goal · Esc cancel"
+                } else if self.editor.is_some() {
+                    "Ctrl+S save · Esc discard · click to place cursor"
+                } else {
+                    "Tab focus · Space pause/resume · ↑↓ scroll · Esc close"
+                },
+            )
             .style(Style::default().fg(t.subtle_fg.into())),
             Rect::new(x, area.bottom() - 1, width, 1),
         );
@@ -430,8 +474,25 @@ impl WindowComponent for GoalPanelContent {
                 }
             },
             WmEvent::Key(key) => match key {
-                KeyAction::Tab => self.focus = (self.focus + 1) % 4,
-                KeyAction::BackTab => self.focus = (self.focus + 3) % 4,
+                KeyAction::Tab => {
+                    self.focus = match self.focus {
+                        0 => 4,
+                        4 => 1,
+                        1 => 2,
+                        2 => 3,
+                        _ => 0,
+                    }
+                }
+                KeyAction::BackTab => {
+                    self.focus = match self.focus {
+                        0 => 3,
+                        3 => 2,
+                        2 => 1,
+                        1 => 4,
+                        _ => 0,
+                    }
+                }
+                KeyAction::Char('n' | 'N') => commands = self.activate(4),
                 KeyAction::Submit => commands = self.activate(self.focus),
                 KeyAction::Char(' ') | KeyAction::ToggleGoal => commands = self.activate(1),
                 KeyAction::CursorRight if self.focus == 0 => commands = self.activate(0),
@@ -535,11 +596,11 @@ mod tests {
             let mut panel = GoalPanelContent::new(session.clone());
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             draw(&mut panel, &mut terminal);
-            assert_eq!(panel.hits.len(), 4);
+            assert_eq!(panel.hits.len(), 5);
             assert!(panel.hits.iter().all(|(_, rect)| rect.height == 3
                 && rect.right() <= width
                 && rect.bottom() <= height));
-            let (_, rect) = panel.hits[1];
+            let (_, rect) = *panel.hits.iter().find(|(index, _)| *index == 1).unwrap();
             assert!(rect.y >= panel.text_rect.bottom());
             let mut scroll = 0;
             let mut horizontal = 0;
@@ -673,6 +734,71 @@ mod tests {
             assert_eq!(panel.save_error.as_deref(), Some("Goal revision changed"));
             panel.handle_event(&WmEvent::Key(KeyAction::Escape), &mut ctx);
             assert!(panel.editor.is_none());
+            for use_mouse in [false, true] {
+                draw(&mut panel, &mut terminal);
+                let old = session.goal_control.record().unwrap();
+                let rect = panel.hits.iter().find(|(index, _)| *index == 4).unwrap().1;
+                let event = if use_mouse {
+                    WmEvent::Mouse(crossterm::event::MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: rect.x + 1,
+                        row: rect.y + 1,
+                        modifiers: crossterm::event::KeyModifiers::NONE,
+                    })
+                } else {
+                    WmEvent::Key(KeyAction::Char('n'))
+                };
+                panel.handle_event(&event, &mut ctx);
+                assert!(panel.editor.as_ref().unwrap().buf().is_empty());
+                assert_eq!(
+                    session.goal_control.record().unwrap(),
+                    old,
+                    "opening a new draft must not replace the goal"
+                );
+                panel.handle_event(&WmEvent::Key(KeyAction::Escape), &mut ctx);
+                assert_eq!(
+                    session.goal_control.record().unwrap(),
+                    old,
+                    "cancelling preserves the goal"
+                );
+                panel.handle_event(&event, &mut ctx);
+                panel
+                    .editor
+                    .as_mut()
+                    .unwrap()
+                    .insert_str("A fresh objective");
+                let commands = panel.activate(2);
+                let [
+                    WmCommand::GoalControl {
+                        request_id: Some(request_id),
+                        target,
+                        goal_id,
+                        revision,
+                        action: action @ GoalAction::Create { .. },
+                    },
+                ] = commands.as_slice()
+                else {
+                    panic!("expected a new goal command")
+                };
+                session
+                    .control_goal(
+                        target.as_deref(),
+                        action.clone(),
+                        goal_id.as_deref().zip(*revision),
+                    )
+                    .unwrap();
+                let new = session.goal_control.record().unwrap();
+                assert_ne!(new.id, old.id);
+                assert_eq!(new.objective, "A fresh objective");
+                panel.handle_event(
+                    &WmEvent::GoalSaved {
+                        request_id: *request_id,
+                        result: Ok(()),
+                    },
+                    &mut ctx,
+                );
+                assert!(panel.editor.is_none());
+            }
         }
     }
 }
