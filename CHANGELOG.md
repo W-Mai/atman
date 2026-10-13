@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### 🐛 Fixes
+
+- **MCP call recovery** — Tool rejection results distinguish unexposed tools, ambiguous call IDs, and missing authorization receipts. Calls using unexposed MCP names receive schema discovery and broker guidance limited to the originating request's tools and target scope.
+
 ## [1.15.0] — 2026-10-10
 
 ### ⚠️ Breaking Changes

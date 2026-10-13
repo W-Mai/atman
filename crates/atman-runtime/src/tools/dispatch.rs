@@ -164,6 +164,40 @@ struct PreparedCall {
     plane: crate::tool::InvocationPlane,
 }
 
+fn exposure_error_message(
+    error: &crate::tool::ToolExposureError,
+    id: &str,
+    name: &str,
+    registry: &crate::tool::ToolRegistry,
+) -> String {
+    use crate::tool::ToolExposureError;
+    match error {
+        ToolExposureError::NotExposed {
+            exposed_names,
+            scope,
+        } => {
+            let mut message = format!(
+                "tool_not_exposed: tool `{name}` was not executed because it was not exposed by its LLM request. Repeating this tool name will not fix the error."
+            );
+            if let Some(hint) =
+                crate::tools::mcp::unexposed_tool_hint(name, registry, exposed_names, scope)
+            {
+                message.push(' ');
+                message.push_str(&hint);
+            } else {
+                message.push_str(" Choose a tool from the current request's available tools.");
+            }
+            message
+        }
+        ToolExposureError::AmbiguousCallId => format!(
+            "ambiguous_tool_call_id: tool `{name}` was not executed because call ID `{id}` is ambiguous across pending calls. Issue a fresh tool call with a unique ID; do not replay this call."
+        ),
+        ToolExposureError::MissingReceipt => format!(
+            "missing_tool_call_receipt: tool `{name}` was not executed because no pending authorization receipt matches this flow, call ID `{id}`, and tool name. The receipt may already have been consumed. Issue a fresh call using the current request's available tools; do not replay this call."
+        ),
+    }
+}
+
 fn prepare_dispatch(
     uses: &[Value],
     registry: &crate::tool::ToolRegistry,
@@ -240,27 +274,31 @@ fn prepare_dispatch(
             continue;
         }
         let model_mcp_scope = match ctx.model_tool_exposures.as_ref() {
-            Some(exposures) => exposures.claim_with_mcp_scope(ctx.flow_run_id.as_ref(), &id, &name),
-            None => ctx.model_mcp_scope.clone(),
+            Some(exposures) => exposures
+                .claim_with_mcp_scope(ctx.flow_run_id.as_ref(), &id, &name)
+                .map(Some),
+            None => Ok(ctx.model_mcp_scope.clone()),
         };
-        if ctx.model_tool_exposures.is_some() && model_mcp_scope.is_none() {
-            emit_tool_node(ctx, &id, &name, &input, call_intent.as_ref());
-            prepared.push(PreparedEntry::Failed {
-                index,
-                plane: registry.get(&name).map_or(
-                    crate::tool::InvocationPlane::Ordinary,
-                    |tool| tool.invocation_plane(),
-                ),
-                msg: build_error_result(
-                    ctx,
-                    &id,
-                    &format!(
-                        "dispatch_all: tool `{name}` was not exposed by its LLM request, or call ID `{id}` is ambiguous across pending responses. Issue a new tool call."
+        let model_mcp_scope = match model_mcp_scope {
+            Ok(scope) => scope,
+            Err(error) => {
+                emit_tool_node(ctx, &id, &name, &input, call_intent.as_ref());
+                prepared.push(PreparedEntry::Failed {
+                    index,
+                    plane: registry
+                        .get(&name)
+                        .map_or(crate::tool::InvocationPlane::Ordinary, |tool| {
+                            tool.invocation_plane()
+                        }),
+                    msg: build_error_result(
+                        ctx,
+                        &id,
+                        &exposure_error_message(&error, &id, &name, registry),
                     ),
-                ),
-            });
-            continue;
-        }
+                });
+                continue;
+            }
+        };
         let Some(tool) = registry.get(&name) else {
             emit_tool_node(ctx, &id, &name, &input, call_intent.as_ref());
             prepared.push(PreparedEntry::Failed {
@@ -1161,6 +1199,119 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn stale_mcp_name_recovers_through_schema_discovery_and_authorized_proxy() {
+        use crate::message::{Message, MessageOrigin, MessagePart, MessageRole, ToolCallIntent};
+        use crate::tool::{McpToolScope, ToolExposureRegistry};
+
+        let registry = crate::tool::ToolRegistry::new();
+        registry.register(std::sync::Arc::new(crate::tools::mcp::McpTools));
+        registry.register(std::sync::Arc::new(crate::tools::mcp::McpCall));
+        registry.register(std::sync::Arc::new(McpTargetProbe("mcp.docs.mutate")));
+        let registry = std::sync::Arc::new(registry);
+        let mut ctx = authorized_ctx(registry.clone());
+        // Recovery and execution must use the producing request, not this default.
+        ctx.model_mcp_scope = Some(McpToolScope::default());
+        let exposures = ToolExposureRegistry::default();
+        ctx.model_tool_exposures = Some(exposures.clone());
+        let specs = ["mcp.tools", "mcp.call"]
+            .map(|name| crate::tool::tool_spec(registry.get(name).unwrap().as_ref()));
+        // A provider can return a historical wire name absent from this request.
+        let stale_name = crate::tool_naming::from_wire("mcp_docs_mutate", &specs);
+        let mut recovery_target = serde_json::Value::Null;
+        for (id, name, input) in [
+            ("stale", stale_name.as_str(), serde_json::json!({"value":7})),
+            ("schema", "mcp.tools", serde_json::Value::Null),
+            ("retry", "mcp.call", serde_json::Value::Null),
+        ] {
+            let input = match id {
+                "schema" => recovery_target.clone(),
+                "retry" => {
+                    let mut input = recovery_target.clone();
+                    input["input"] = serde_json::json!({"value":7});
+                    input
+                }
+                _ => input,
+            };
+            let response = Message {
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::ToolUse {
+                    id: id.into(),
+                    name: name.into(),
+                    input,
+                    intent: ToolCallIntent::new("Update the requested record"),
+                }],
+                turn_id: crate::event::TurnId::now(),
+                origin: MessageOrigin::User,
+            };
+            exposures.register_response_with_mcp_scope(
+                ctx.flow_run_id.as_ref(),
+                &response,
+                specs.iter().map(|spec| &spec.name),
+                McpToolScope::Selectors(["mcp.docs.*".into()].into()),
+            );
+            let uses = ExtractToolUses
+                .call(
+                    ToolArgs {
+                        positional: vec![Value::Host(AtmanPayload::Message(response))],
+                        named: Vec::new(),
+                    },
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            let Value::List(results) = DispatchAll
+                .call(
+                    ToolArgs {
+                        positional: vec![uses],
+                        named: Vec::new(),
+                    },
+                    &ctx,
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("dispatch results")
+            };
+            let Value::Host(AtmanPayload::Message(message)) = &results[0] else {
+                panic!("tool message")
+            };
+            let MessagePart::ToolResult {
+                content,
+                is_error,
+                tool_use_id,
+                ..
+            } = &message.parts[0]
+            else {
+                panic!("tool result")
+            };
+            assert_eq!(tool_use_id, id);
+            match id {
+                "stale" => {
+                    assert!(*is_error);
+                    assert!(content.starts_with("tool_not_exposed:"));
+                    assert!(!content.contains("ambiguous"));
+                    assert!(ctx.permission_broker.as_ref().unwrap().list().is_empty());
+                    recovery_target =
+                        crate::eval::llm_parse::extract_json_from_text(content).unwrap();
+                    assert_eq!(
+                        recovery_target,
+                        serde_json::json!({"server":"docs", "tool":"mutate"})
+                    );
+                }
+                "schema" => {
+                    assert!(!is_error, "{content}");
+                    let schema: serde_json::Value = serde_json::from_str(content).unwrap();
+                    assert_eq!(schema["tools"][0]["input_schema"]["required"][0], "value");
+                }
+                _ => {
+                    assert!(!is_error, "{content}");
+                    assert_eq!(content, "7");
+                }
+            }
+        }
+    }
+
     async fn assert_colliding_mcp_scopes_fail_closed(scopes: [crate::tool::McpToolScope; 2]) {
         use crate::message::{Message, MessageOrigin, MessagePart, MessageRole, ToolCallIntent};
 
@@ -1234,7 +1385,7 @@ mod tests {
             );
             assert_eq!(
                 exposures.claim_with_mcp_scope(ctx.flow_run_id.as_ref(), "reused-id", "mcp.call"),
-                Some(crate::tool::McpToolScope::All)
+                Ok(crate::tool::McpToolScope::All)
             );
         }
     }

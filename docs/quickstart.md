@@ -322,6 +322,8 @@ The MCP Add/Edit form uses `Tab` / `Shift+Tab` or vertical arrows to switch fiel
 
 The managed agent exposes `mcp.status`, `mcp.tools`, `mcp.await`, and `mcp.call`. The request's MCP definitions stay fixed as the catalog grows. Tool descriptions and schemas are retrieved as tool results, so discovery does not replace the model's existing tool prefix.
 
+Calls to tool names absent from the current request return `tool_not_exposed` without executing the tool. For MCP names retained in conversation history, the error provides discovery and broker guidance only when the originating request exposes `mcp.tools` and `mcp.call`. A unique permitted catalog match includes the exact `server` and `tool` for schema retrieval; unresolved names require searching the permitted catalog. The model must issue a new call, which still passes target permissions and approval. Ambiguous call IDs and missing or consumed authorization receipts have separate errors and do not grant a recovery target.
+
 `mcp.tools(query: "search", limit: 20)` returns `{tools, next_cursor, total}`. Each catalog item includes `name`, `server`, `tool`, and `description`. Continue with the returned `next_cursor` and the same filters; a null cursor marks the end. Results are sorted by qualified name. `limit` accepts 1–100 and defaults to 20. Query terms match tool names and descriptions, ignoring case. Set both `server` and `tool` to retrieve an exact tool, including its complete `input_schema`, before calling it:
 
 ```at

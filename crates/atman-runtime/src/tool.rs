@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
@@ -165,7 +166,17 @@ pub(crate) struct ToolExposureRegistry {
 
 struct PendingToolExposure {
     remaining: usize,
-    scope: Option<McpToolScope>,
+    authorization: Result<McpToolScope, ToolExposureError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ToolExposureError {
+    NotExposed {
+        exposed_names: Arc<std::collections::HashSet<String>>,
+        scope: McpToolScope,
+    },
+    AmbiguousCallId,
+    MissingReceipt,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,12 +269,21 @@ impl ToolExposureRegistry {
         }
 
         let mut pending = self.pending.lock().unwrap();
+        let exposed_names = Arc::new(exposed_names);
         for part in &message.parts {
             let crate::message::MessagePart::ToolUse { id, name, .. } = part else {
                 continue;
             };
-            let scope = (id_counts.get(id.as_str()) == Some(&1) && exposed_names.contains(name))
-                .then(|| scope.clone());
+            let authorization = if id_counts.get(id.as_str()) != Some(&1) {
+                Err(ToolExposureError::AmbiguousCallId)
+            } else if !exposed_names.contains(name) {
+                Err(ToolExposureError::NotExposed {
+                    exposed_names: Arc::clone(&exposed_names),
+                    scope: scope.clone(),
+                })
+            } else {
+                Ok(scope.clone())
+            };
             pending
                 .entry(ToolExposureKey {
                     flow_run_id: flow_run_id.cloned(),
@@ -274,11 +294,11 @@ impl ToolExposureRegistry {
                     // Wire IDs can repeat across responses. An outstanding collision
                     // cannot identify which request authorized either invocation.
                     exposure.remaining += 1;
-                    exposure.scope = None;
+                    exposure.authorization = Err(ToolExposureError::AmbiguousCallId);
                 })
                 .or_insert(PendingToolExposure {
                     remaining: 1,
-                    scope,
+                    authorization,
                 });
         }
     }
@@ -291,7 +311,7 @@ impl ToolExposureRegistry {
         tool_name: &str,
     ) -> bool {
         self.claim_with_mcp_scope(flow_run_id, tool_use_id, tool_name)
-            .is_some()
+            .is_ok()
     }
 
     pub(crate) fn claim_with_mcp_scope(
@@ -299,20 +319,22 @@ impl ToolExposureRegistry {
         flow_run_id: Option<&crate::event::FlowRunId>,
         tool_use_id: &str,
         tool_name: &str,
-    ) -> Option<McpToolScope> {
+    ) -> Result<McpToolScope, ToolExposureError> {
         let key = ToolExposureKey {
             flow_run_id: flow_run_id.cloned(),
             tool_use_id: tool_use_id.to_string(),
             tool_name: tool_name.to_string(),
         };
         let mut pending = self.pending.lock().unwrap();
-        let exposure = pending.get_mut(&key)?;
+        let exposure = pending
+            .get_mut(&key)
+            .ok_or(ToolExposureError::MissingReceipt)?;
         exposure.remaining -= 1;
-        let scope = exposure.scope.clone();
+        let authorization = exposure.authorization.clone();
         if exposure.remaining == 0 {
             pending.remove(&key);
         }
-        scope
+        authorization
     }
 }
 
@@ -1363,9 +1385,21 @@ mod tests {
         };
         exposures.register_response(Some(&run), &response, ["allowed.probe"]);
 
-        assert!(!exposures.claim(Some(&run), "duplicate", "allowed.probe"));
-        assert!(!exposures.claim(Some(&run), "duplicate", "allowed.probe"));
-        assert!(!exposures.claim(Some(&run), "hidden", "hidden.probe"));
+        for _ in 0..2 {
+            assert_eq!(
+                exposures.claim_with_mcp_scope(Some(&run), "duplicate", "allowed.probe"),
+                Err(ToolExposureError::AmbiguousCallId)
+            );
+        }
+        assert!(matches!(
+            exposures.claim_with_mcp_scope(Some(&run), "hidden", "hidden.probe"),
+            Err(ToolExposureError::NotExposed { exposed_names, .. })
+                if exposed_names.contains("allowed.probe") && !exposed_names.contains("hidden.probe")
+        ));
+        assert_eq!(
+            exposures.claim_with_mcp_scope(Some(&run), "hidden", "hidden.probe"),
+            Err(ToolExposureError::MissingReceipt)
+        );
     }
 
     #[test]
@@ -1410,7 +1444,7 @@ mod tests {
         assert!(
             exposures
                 .claim_with_mcp_scope(Some(&run), "restricted", "mcp.call")
-                .is_none()
+                .is_err()
         );
         let all = exposures
             .claim_with_mcp_scope(Some(&run), "unrestricted", "mcp.call")

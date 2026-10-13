@@ -9,6 +9,60 @@ use crate::value::{Value, ValueJson};
 
 pub const CONTROL_TOOL_NAMES: &[&str] = &["mcp.status", "mcp.tools", "mcp.await", "mcp.call"];
 
+pub(crate) fn unexposed_tool_hint(
+    name: &str,
+    registry: &crate::tool::ToolRegistry,
+    exposed_names: &std::collections::HashSet<String>,
+    scope: &crate::tool::McpToolScope,
+) -> Option<String> {
+    if !name.starts_with("mcp.") && !name.starts_with("mcp_") {
+        return None;
+    }
+    if CONTROL_TOOL_NAMES
+        .iter()
+        .any(|control| *control == name || crate::tool_naming::to_wire(control) == name)
+    {
+        return None;
+    }
+    if !["mcp.tools", "mcp.call"]
+        .iter()
+        .all(|control| exposed_names.contains(*control))
+    {
+        return Some(
+            "MCP broker recovery is unavailable: this request did not expose both mcp.tools and mcp.call. Use only the current request's available tools.".into(),
+        );
+    }
+    // Match complete catalog names; replacing underscores cannot recover identity.
+    let matches = registry
+        .iter()
+        .into_iter()
+        .filter(|(candidate, _)| {
+            candidate == name || crate::tool_naming::to_wire(candidate) == name
+        })
+        .filter_map(|(candidate, tool)| {
+            let (server, target) = tool.mcp_identity()?;
+            Some((candidate, server.to_owned(), target.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    let mut hint = match matches.as_slice() {
+        [(target, server, tool)] if scope.permits(target) => format!(
+            "Retrieve the full input schema with mcp.tools using {}. Then issue a new mcp.call with the same server and tool and an input object matching that schema. The catalog name is a target identity, not an additional exposed function.",
+            serde_json::json!({"server": server, "tool": tool}),
+        ),
+        [(_, _, _)] => return Some(
+            "No recovery target can be offered within this request's MCP scope. Use only tools permitted by the current request; do not bypass its scope.".into(),
+        ),
+        _ => "No unique catalog target was resolved. Use mcp.tools with query terms describing the intended task to search the permitted catalog, then mcp.tools(server, tool) to retrieve the full input schema. Issue a new mcp.call(server, tool, input) using the returned identity and schema; do not infer server or tool names by splitting underscores.".into(),
+    };
+    if exposed_names.contains("mcp.status") {
+        hint.push_str(" Use mcp.status to inspect connection state.");
+    }
+    if exposed_names.contains("mcp.await") {
+        hint.push_str(" If the selected server is still connecting, use mcp.await before retrying discovery or execution.");
+    }
+    Some(hint)
+}
+
 pub struct McpStatus;
 pub struct McpTools;
 pub struct McpAwait;
@@ -627,6 +681,69 @@ mod tests {
         }
         fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
             Box::pin(async { Ok(Value::Unit) })
+        }
+    }
+
+    #[test]
+    fn recovery_hints_respect_request_controls_scope_and_catalog_identity() {
+        use crate::tool::{McpToolScope, ToolRegistry};
+        let registry = ToolRegistry::new();
+        registry.register(std::sync::Arc::new(CatalogTool {
+            name: "mcp.docs.read_item",
+            server: "docs",
+            tool: "read_item",
+        }));
+        let controls = CONTROL_TOOL_NAMES
+            .iter()
+            .map(|name| (*name).into())
+            .collect();
+        for name in ["mcp.docs.read_item", "mcp_docs_read_item"] {
+            let hint = unexposed_tool_hint(name, &registry, &controls, &McpToolScope::All).unwrap();
+            assert!(hint.contains(r#"{"server":"docs","tool":"read_item"}"#));
+            assert!(hint.contains("mcp.await"));
+        }
+        let restricted = McpToolScope::Selectors(["mcp.other.*".into()].into());
+        let hint =
+            unexposed_tool_hint("mcp_docs_read_item", &registry, &controls, &restricted).unwrap();
+        assert!(!hint.contains(r#""server":"docs""#));
+        assert!(hint.contains("scope"));
+        for controls in [
+            Default::default(),
+            ["mcp.call".into()].into(),
+            ["mcp.tools".into()].into(),
+        ] {
+            let hint = unexposed_tool_hint(
+                "mcp_docs_read_item",
+                &registry,
+                &controls,
+                &McpToolScope::All,
+            )
+            .unwrap();
+            assert!(hint.contains("recovery is unavailable"));
+            assert!(!hint.contains(r#""server":"docs""#));
+        }
+        let minimal = ["mcp.tools".into(), "mcp.call".into()].into();
+        let hint = unexposed_tool_hint(
+            "mcp_docs_read_item",
+            &registry,
+            &minimal,
+            &McpToolScope::All,
+        )
+        .unwrap();
+        assert!(!hint.contains("mcp.await"));
+        assert!(!hint.contains("mcp.status"));
+        for name in ["fs.read", "mcp.status", "mcp_status"] {
+            assert!(unexposed_tool_hint(name, &registry, &controls, &McpToolScope::All).is_none());
+        }
+        registry.register(std::sync::Arc::new(CatalogTool {
+            name: "mcp.docs_read.item",
+            server: "docs_read",
+            tool: "item",
+        }));
+        for name in ["mcp_docs_read_item", "mcp_missing_tool"] {
+            let hint = unexposed_tool_hint(name, &registry, &controls, &McpToolScope::All).unwrap();
+            assert!(hint.contains("No unique catalog target"));
+            assert!(!hint.contains(r#""server":"#));
         }
     }
 
