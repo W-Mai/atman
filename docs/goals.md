@@ -39,6 +39,8 @@ The root Goal section and child flow panels display padded **Pause / Resume** bu
 
 The goal panel opens centered. Drag its title area to move it or its bottom-right handle to resize it. Reopening focuses the existing panel without resetting its position, size, or draft; resizing respects the component's minimum dimensions.
 
+The sidebar Goal card highlights on hover. Click its title, objective, or padding to open the goal panel; drag across the objective to select text. The small left arrow only collapses the preview, and the separate Pause / Resume button only changes execution state. The header displays `:goal` as the keyboard entry point.
+
 Plain REPL commands are `:goal`, `:goal set <text>`, `:goal pause`, `:goal resume`, and `:goal clear`. Controls run immediately instead of entering the prompt queue. Managed `atman run` invocations continue while active and exit when paused or failed; interactive REPL and daemon owners remain available for explicit Resume. No entry point adds a default goal budget.
 
 ## Daemon methods

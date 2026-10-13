@@ -1114,6 +1114,7 @@ pub struct AppState {
     pub last_task_panel_hitmap: crate::task_panel::TaskPanelHitMap,
     pub tick: u64,
     pub last_goal_rect: Option<ratatui::layout::Rect>,
+    pub goal_click_origin: Option<(u16, u16)>,
     pub last_plan_rect: Option<ratatui::layout::Rect>,
     pub last_todo_rect: Option<ratatui::layout::Rect>,
     pub last_goal_hdr_rect: Option<ratatui::layout::Rect>,

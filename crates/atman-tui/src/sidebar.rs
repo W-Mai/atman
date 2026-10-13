@@ -157,13 +157,15 @@ pub fn render(
 
     // Calculate content needs
     let goal_lines = if inputs.goal_collapsed {
-        0
+        2
     } else {
-        6 + if inputs.goal_state.is_some_and(|s| s.goal.is_some()) {
-            4
-        } else {
-            0
-        }
+        GOAL_MAX_LINES as u16
+            + 4
+            + if inputs.goal_state.is_some_and(|s| s.goal.is_some()) {
+                5
+            } else {
+                0
+            }
     };
     let plan_steps = inputs
         .plans
@@ -715,41 +717,57 @@ fn render_upper_content(
         .add_modifier(Modifier::BOLD);
 
     let mut lines: Vec<Line<'_>> = Vec::new();
+    let goal_has_control = inputs.goal_state.is_some_and(|s| s.goal.is_some());
+    let goal_preview_rows =
+        GOAL_MAX_LINES.min(
+            area.height
+                .saturating_sub(if goal_has_control { 11 } else { 5 }) as usize,
+        );
 
     // ── Goal section ──
+    lines.push(Line::from(""));
     let goal_glyph = if inputs.goal_collapsed { "›" } else { "⌄" };
     let goal_hdr = format!("{goal_glyph} Goal");
     result.goal_hdr_rect = Some(Rect {
         x: area.x,
         y: area.y + lines.len() as u16,
-        width: area.width,
+        width: 2.min(area.width),
         height: 1,
     });
-    lines.push(Line::from(Span::styled(goal_hdr, accent)));
+    let hint = "Open · :goal";
+    let gap = content_w
+        .saturating_sub(crate::width::width(&goal_hdr) + crate::width::width(hint) + 2)
+        .max(1);
+    lines.push(Line::from(vec![
+        Span::styled(goal_hdr, accent),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(hint, Style::default().fg(t.subtle_fg.into())),
+    ]));
+    lines.push(Line::from(""));
 
     if !inputs.goal_collapsed {
-        let goal_text = inputs.goal.unwrap_or("(none)");
+        let goal_text = inputs.goal.unwrap_or("No goal yet. Click to create one.");
         let goal_w = content_w.saturating_sub(4); // "  " indent
         let wrapped = crate::width::word_wrap(goal_text, goal_w);
-        let max_lines = 6usize;
-        for (i, l) in wrapped.iter().enumerate() {
-            if i >= max_lines {
-                lines.push(Line::from(Span::styled(
-                    "  …",
-                    Style::default().fg(t.subtle_fg.into()),
-                )));
-                break;
-            }
+        for l in wrapped.iter().take(goal_preview_rows) {
             lines.push(Line::from(Span::styled(
                 format!("  {l}"),
                 Style::default().fg(t.tinted_fg.into()),
             )));
         }
+        if wrapped.len() > goal_preview_rows {
+            lines.push(Line::from(Span::styled(
+                "  …",
+                Style::default().fg(t.subtle_fg.into()),
+            )));
+        }
         if let Some(snapshot) = inputs.goal_state.filter(|s| s.goal.is_some()) {
+            lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 format!("  {}", crate::window::goal_panel::status(snapshot)),
                 Style::default().fg(t.subtle_fg.into()),
             )));
+            lines.push(Line::from(""));
             let action = Rect::new(
                 area.x + 1,
                 area.y + lines.len() as u16,
@@ -761,16 +779,18 @@ fn render_upper_content(
             }
             lines.extend([Line::from(""), Line::from(""), Line::from("")]);
         }
-        result.goal_rect = Some(Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: lines.len() as u16,
-        });
-    } else {
-        result.goal_rect = None;
     }
-
+    lines.push(Line::from(""));
+    result.goal_rect =
+        Some(Rect::new(area.x, area.y, area.width, lines.len() as u16).intersection(area));
+    let goal_bg = if matches!(inputs.hovered_row, Some("goal-card" | "goal-control")) {
+        content_bg_hover
+    } else {
+        content_bg
+    };
+    for line in &mut lines {
+        line.style = line.style.bg(goal_bg);
+    }
     lines.push(Line::from(""));
 
     // ── Plan section ──
@@ -1018,12 +1038,15 @@ fn render_upper_content(
 
     // Build source-aware body projections from the same visible row geometry.
     if !inputs.goal_collapsed {
-        let goal = inputs.goal.unwrap_or("(none)");
+        let goal = inputs.goal.unwrap_or("No goal yet. Click to create one.");
         let wrapped = crate::width::word_wrap(goal, content_w.saturating_sub(4));
         let mut atoms = Vec::new();
         let mut source_start = 0;
-        for (index, line) in wrapped.iter().take(6).enumerate() {
-            let row = area.y.saturating_add(1 + index as u16);
+        for (index, line) in wrapped.iter().take(goal_preview_rows).enumerate() {
+            let row = area.y.saturating_add(3 + index as u16);
+            if row >= area.bottom() {
+                break;
+            }
             let rect = Rect {
                 x: area.x,
                 y: row,
@@ -1048,7 +1071,7 @@ fn render_upper_content(
             .push(crate::sidebar_selection::SidebarSurface::goal(
                 wrapped
                     .iter()
-                    .take(6)
+                    .take(goal_preview_rows)
                     .cloned()
                     .collect::<Vec<_>>()
                     .join("\n"),
@@ -1114,6 +1137,12 @@ fn render_upper_content(
     }
 
     // Render all lines, clipped to area
+    if let Some(rect) = result.goal_rect {
+        f.render_widget(
+            ratatui::widgets::Block::default().style(Style::default().bg(goal_bg)),
+            rect,
+        );
+    }
     let visible: Vec<Line<'_>> = lines.into_iter().take(area.height as usize).collect();
     f.render_widget(ratatui::widgets::Paragraph::new(visible), area);
     if let Some(rect) = result.strip_rects.get("goal-control")

@@ -455,6 +455,10 @@ pub(crate) async fn run_frames(
                                 break;
                             }
                             if !consumed {
+                                if handle_goal_card_mouse(&mut app, &me, handle.control_tx.as_ref()) {
+                                    interrupt_prompt = None;
+                                    break;
+                                }
                                 if app.wm.interaction.resize_target.is_none()
                                     && app.wm.interaction.drag_target.is_none()
                                     && (handle_sidebar_selection_mouse(&mut app.app, &me)
@@ -1328,7 +1332,10 @@ pub(crate) async fn run_frames(
                                     .last_sidebar_strip_rects
                                     .iter()
                                     .find(|(_, r)| rect_contains(**r, me.column, me.row))
-                                    .map(|(k, _)| k.clone());
+                                    .map(|(k, _)| k.clone())
+                                    .or_else(|| app.app.last_goal_rect
+                                        .filter(|r| rect_contains(*r, me.column, me.row))
+                                        .map(|_| "goal-card".to_string()));
                                 if app.app.hovered_sidebar_row != sidebar_hover {
                                     app.app.hovered_sidebar_row = sidebar_hover;
                                 }
@@ -2421,6 +2428,51 @@ pub(crate) async fn poll_update_check(
     handle.await.ok().flatten()
 }
 
+fn handle_goal_card_mouse(
+    ui: &mut crate::ui_state::UiState,
+    event: &crossterm::event::MouseEvent,
+    tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) -> bool {
+    let point = (event.column, event.row);
+    let blocked = ui.wm.any_modal_open()
+        || ui.app.modal_notification.is_some()
+        || ui.wm.hit_test_panel(point.0, point.1).is_some()
+        || ui.wm.interaction.drag_target.is_some()
+        || ui.wm.interaction.resize_target.is_some();
+    let on_card = !blocked
+        && ui
+            .app
+            .last_goal_rect
+            .is_some_and(|r| r.contains(point.into()))
+        && !ui
+            .app
+            .last_goal_hdr_rect
+            .is_some_and(|r| r.contains(point.into()))
+        && !ui
+            .app
+            .last_sidebar_strip_rects
+            .get("goal-control")
+            .is_some_and(|r| r.contains(point.into()));
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            ui.app.goal_click_origin = on_card.then_some(point);
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if ui.app.goal_click_origin != Some(point) {
+                ui.app.goal_click_origin = None;
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            if ui.app.goal_click_origin.take() == Some(point) && on_card {
+                ui.app.selection = None;
+                return ui.wm.dispatch_meta_command(":goal", &mut ui.app, tx);
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
 fn handle_sidebar_selection_mouse(
     app: &mut AppState,
     event: &crossterm::event::MouseEvent,
@@ -3097,6 +3149,100 @@ fn handle_transcript_selection_mouse(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn goal_card_click_preserves_controls_and_text_selection() {
+        use ratatui::{Terminal, backend::TestBackend};
+        for (width, height) in [(160, 45), (220, 60)] {
+            let mut ui = UiState::new(AppState::new("goal-card".into(), None));
+            let session = std::sync::Arc::new(atman_runtime::Session::open_ephemeral());
+            session
+                .goal_control
+                .set(
+                    &"Verify goal lifecycle and inspect the result. 验证目标状态与交互。".repeat(8),
+                    None,
+                )
+                .unwrap();
+            ui.app.session = Some(session);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let editor = InputEditor::default();
+            terminal
+                .draw(|frame| crate::render::render_frame(frame, &mut ui, &editor))
+                .unwrap();
+            let card = ui.app.last_goal_rect.expect("visible goal card");
+            let arrow = ui.app.last_goal_hdr_rect.unwrap();
+            let control = ui.app.last_sidebar_strip_rects["goal-control"];
+            assert_eq!(control.height, 3);
+            assert!(card.contains((control.x, control.bottom() - 1).into()));
+            let before = terminal.backend().buffer()[(card.x, card.y)].bg;
+            ui.app.hovered_sidebar_row = Some("goal-card".into());
+            terminal
+                .draw(|frame| crate::render::render_frame(frame, &mut ui, &editor))
+                .unwrap();
+            assert_ne!(terminal.backend().buffer()[(card.x, card.y)].bg, before);
+            let mouse = |kind, column, row| crossterm::event::MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            };
+            for rect in [arrow, control] {
+                for kind in [
+                    MouseEventKind::Down(MouseButton::Left),
+                    MouseEventKind::Up(MouseButton::Left),
+                ] {
+                    assert!(!handle_goal_card_mouse(
+                        &mut ui,
+                        &mouse(kind, rect.x, rect.y),
+                        None
+                    ));
+                }
+                assert!(
+                    ui.wm.panels.is_empty(),
+                    "nested controls must not open the panel"
+                );
+            }
+            let x = card.x + 3;
+            let y = card.y + 3;
+            let down = mouse(MouseEventKind::Down(MouseButton::Left), x, y);
+            assert!(!handle_goal_card_mouse(&mut ui, &down, None));
+            handle_sidebar_selection_mouse(&mut ui.app, &down);
+            let drag = mouse(MouseEventKind::Drag(MouseButton::Left), x + 4, y);
+            assert!(!handle_goal_card_mouse(&mut ui, &drag, None));
+            handle_sidebar_selection_mouse(&mut ui.app, &drag);
+            assert!(
+                ui.app
+                    .selection
+                    .as_ref()
+                    .is_some_and(crate::selection::selection_is_non_empty)
+            );
+            assert!(!handle_goal_card_mouse(
+                &mut ui,
+                &mouse(MouseEventKind::Up(MouseButton::Left), x + 4, y),
+                None
+            ));
+            assert!(ui.wm.panels.is_empty());
+            // Padding and body text both use the card's actual rendered hitbox.
+            for (column, row) in [(card.x + 1, card.y), (x, y)] {
+                handle_goal_card_mouse(
+                    &mut ui,
+                    &mouse(MouseEventKind::Down(MouseButton::Left), column, row),
+                    None,
+                );
+                assert!(handle_goal_card_mouse(
+                    &mut ui,
+                    &mouse(MouseEventKind::Up(MouseButton::Left), column, row),
+                    None
+                ));
+                assert!(matches!(
+                    ui.wm.panels[0].content_key,
+                    crate::wm::ContentKey::Goal
+                ));
+                let id = ui.wm.panels[0].id;
+                ui.wm.close(id);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn drag_events_coalesce_without_losing_mouse_up() {
