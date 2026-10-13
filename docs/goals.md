@@ -1,0 +1,28 @@
+# Managed agent goals
+
+A goal is a persistent objective with `active` or `paused` state. A managed agent completes its current turn normally. An active goal permits another turn; `memory.goal.pause` stops automatic continuation and lets the current turn finish its response. Ordinary custom flows remain single executions unless they declare `contract { invocation { goal: true } }` and run through a goal-aware host.
+
+## Goal tools
+
+`memory.goal.get` returns `{goal, execution, paused_by, running_operations}`. `goal` is null when no objective exists. Records include `id`, `revision`, `objective`, `owner`, `parent_goal_id`, `status`, and `pause`.
+
+| Tool | Arguments | Effect |
+| --- | --- | --- |
+| `memory.goal.get` | Optional `target_handle` | Read the current agent or a descendant |
+| `memory.goal.set` | `text`; existing goals require `goal_id`, `expected_revision` | Create an objective or edit its text without resuming it |
+| `memory.goal.pause` | `goal_id`, `expected_revision`, `reason`, `summary` | Report completion, blocked work, or missing input and stop continuation |
+| `memory.goal.resume` | `goal_id`, `expected_revision` | Resume a descendant, or an agent-paused goal after real user input |
+
+Pause reasons accepted from agents are `completed`, `needs_input`, `blocked`, and `user_requested`. All tools accept an optional `target_handle`. A child cannot address its parent or siblings. Stale revisions fail without changing the goal. A new user request can replace an agent-completed goal with a new identity; editing unfinished work preserves its state. User pauses cannot be overridden by agent tools. Managed agents use pause rather than `memory.goal.clear`.
+
+## Execution boundaries
+
+User Pause stops new requests and tool starts. An in-flight model request finishes and its reply is recorded before execution waits. Already running tools can finish; undispatched work waits. Resume continues the suspended execution without replaying its reply or completed tools. Pause does not close the current turn or return its pending input to the submission queue. Esc cancels the turn and pauses its goal.
+
+Root and child goals use the same controller. Pausing an ancestor adds a restriction to descendants without changing their own states. Resuming an ancestor leaves completed or separately paused children paused. Child goal changes are recorded as revisioned events and delivered through the parent's versioned context records. Child continuation preserves its handle and private context while assigning each execution a distinct run identity.
+
+## Persistence and recovery
+
+Root state is stored in `<session>/goal.json`; child records are stored in `<session>/goals/<goal-id>.json`. Writes are atomic and revision checked. Existing `goal.txt` records load paused. Clearing writes a tombstone so legacy text cannot reappear. Opening a session with an interrupted active goal pauses it; recovery requires explicit control and does not replay past side effects.
+
+No default turn, token, fuel, or time budget is added. Provider retries retain their existing limits; exhausted retries pause the goal instead of silently starting another attempt.

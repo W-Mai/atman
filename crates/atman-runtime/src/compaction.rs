@@ -289,6 +289,9 @@ pub async fn maybe_auto_compact_with_budget(
     providers: &crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
 ) {
+    let Some(_goal_operation) = session.goal_control.try_enter() else {
+        return;
+    };
     let _compact_guard = session.acquire_compact_lock().await;
     maybe_auto_compact_locked(session, model, providers, budget_context).await;
 }
@@ -332,8 +335,12 @@ pub async fn start_auto_compact_with_budget(
     providers: crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
 ) {
+    let Some(goal_operation) = session.goal_control.try_enter() else {
+        return;
+    };
     let compact_guard = session.acquire_compact_lock_owned().await;
     tokio::task::spawn_blocking(move || {
+        let _goal_operation = goal_operation;
         let Ok(rt) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

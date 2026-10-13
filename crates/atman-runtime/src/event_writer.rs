@@ -462,6 +462,7 @@ pub(crate) fn extract_ts(envelope: &EventEnvelope) -> String {
 
 pub(crate) fn event_kind(event: &Event) -> &'static str {
     match event {
+        Event::GoalChanged { .. } => "goal_changed",
         Event::FlowStart { .. } => "flow_start",
         Event::FlowEnd { .. } => "flow_end",
         Event::WorkspaceLifecycle { .. } => "workspace_lifecycle",
@@ -515,6 +516,7 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
 
 pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>) {
     match event {
+        Event::GoalChanged { .. } => (None, None),
         Event::FlowStart { run_id, .. }
         | Event::FlowEnd { run_id, .. }
         | Event::WorkspaceLifecycle { run_id, .. } => (None, Some(run_id.0.to_string())),

@@ -6,7 +6,7 @@ use crate::git_workspace::{
 use crate::message::Message;
 use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::tool_schedule::{AccessMode, ResourceAccess, ResourceKey, SchedulingClaims};
-use crate::value::Value;
+use crate::value::{Value, ValueJson};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -55,6 +55,7 @@ pub enum FlowEvent {
 }
 
 pub struct FlowEntry {
+    pub goal_control: std::sync::OnceLock<Arc<crate::goal::GoalController>>,
     pub handle: String,
     pub goal: String,
     pub display_label: String,
@@ -686,6 +687,7 @@ impl FlowRegistry {
     ) -> Arc<FlowEntry> {
         let (stream_tx, _) = tokio::sync::broadcast::channel(64);
         let entry = Arc::new(FlowEntry {
+            goal_control: std::sync::OnceLock::new(),
             handle: handle.clone(),
             goal,
             display_label,
@@ -741,6 +743,32 @@ impl FlowRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.entries.lock().unwrap().is_empty()
+    }
+
+    pub fn cancel_managed_agents(&self) {
+        for entry in self.entries.lock().unwrap().values() {
+            if entry.goal_control.get().is_some() {
+                entry.cancel.cancel();
+            }
+        }
+    }
+
+    pub fn managed_goals(&self) -> Vec<(String, Arc<crate::goal::GoalController>)> {
+        let mut goals: Vec<_> = self
+            .entries
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| entry.handle != "root")
+            .filter_map(|entry| {
+                entry
+                    .goal_control
+                    .get()
+                    .map(|control| (entry.handle.clone(), control.clone()))
+            })
+            .collect();
+        goals.sort_by(|a, b| a.0.cmp(&b.0));
+        goals
     }
 }
 
@@ -1086,6 +1114,61 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let flow = extract_flow(&args)?.unwrap_or_else(|| "subagent.at".to_string());
     let version = extract_flow_version(&args)?;
     let prepared = prepare_flow_agent(&flow, version.as_deref(), ctx).await?;
+    if crate::goal::is_managed(&prepared.flow) {
+        let spawned = run_sub_agent_async(args, ctx).await?;
+        let Value::Struct(fields) = &spawned else {
+            return Ok(spawned);
+        };
+        let handle = fields
+            .iter()
+            .find_map(|(key, value)| match value {
+                Value::Str(handle) if key == "handle" => Some(handle.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| RuntimeError::ToolFailed("managed agent handle missing".into()))?;
+        let entry = ctx
+            .flow_registry
+            .as_ref()
+            .expect("spawn registered")
+            .lookup(&handle)?;
+        let control = entry
+            .goal_control
+            .get()
+            .expect("managed goal installed before spawn");
+        let mut changes = control.subscribe();
+        let mut events = entry.stream_tx.subscribe();
+        loop {
+            let snapshot = control.snapshot();
+            if snapshot.goal.as_ref().is_some_and(|g| {
+                g.status == crate::memory::goal::GoalStatus::Paused
+                    && (g.pause.as_ref().is_none_or(|p| {
+                        p.reason != crate::memory::goal::GoalPauseReason::Completed
+                    }) || !control.turn_running())
+            }) || snapshot.paused_by.is_some()
+                || !entry.status.lock().unwrap().is_running()
+            {
+                return Ok(Value::Struct(vec![
+                    ("handle".into(), Value::Str(handle)),
+                    (
+                        "goal_state".into(),
+                        Value::from_json(
+                            serde_json::to_value(snapshot)
+                                .map_err(|e| RuntimeError::ToolFailed(e.to_string()))?,
+                        ),
+                    ),
+                    (
+                        "output".into(),
+                        Value::Str(entry.output.lock().unwrap().clone()),
+                    ),
+                ]));
+            }
+            tokio::select! {
+                _ = ctx.cancel.cancelled() => return Err(RuntimeError::Cancelled("flow cancelled by user".into())),
+                _ = changes.changed() => {},
+                _ = events.recv() => {},
+            }
+        }
+    }
     let flow_args = resolve_flow_arguments(&prepared.flow, &args)?;
     let inherit_context = should_inherit_context(&args);
     let run_id = FlowRunId::now();
@@ -1208,6 +1291,27 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         child_run_id.clone(),
         workspace.clone(),
     );
+    if crate::goal::is_managed(&prepared.flow) {
+        let parent = ctx
+            .goal_control
+            .clone()
+            .or_else(|| ctx.session_runtime.as_ref().map(|s| s.goal_control.clone()))
+            .ok_or_else(|| {
+                RuntimeError::ToolFailed("managed subagent requires a session goal context".into())
+            })?;
+        let objective = invocation_user_message(&prepared.flow, &flow_args)?
+            .unwrap_or_else(|| entry.goal.clone());
+        let control = parent
+            .child(
+                entry.handle.clone(),
+                objective,
+                ctx.session_dir
+                    .as_deref()
+                    .filter(|p| !p.as_os_str().is_empty()),
+            )
+            .map_err(|e| RuntimeError::ToolFailed(format!("child goal: {e}")))?;
+        let _ = entry.goal_control.set(control);
+    }
     workspace_guard = workspace_guard.with_projections(
         Arc::clone(&entry.workspace_state),
         Arc::clone(&entry.cleanup_error),
@@ -1262,6 +1366,8 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         ctx_for_flow.cancel = entry_clone.cancel.clone();
         ctx_for_flow.call_intent = None;
         ctx_for_flow.agent_entry = Some(Arc::clone(&entry_clone));
+        ctx_for_flow.goal_control = entry_clone.goal_control.get().cloned();
+        ctx_for_flow.goal_resume_allowed = false;
         ctx_for_flow.flow_run_id = Some(child_run_id.clone());
         ctx_for_flow.flow_identity = Some(child_identity);
         ctx_for_flow.compact_lock_handle = Some(Arc::clone(&entry_clone.compact_lock));
@@ -1385,6 +1491,15 @@ impl Tool for AgentStatus {
                 ("status".into(), Value::Str(st.kind_str().into())),
                 ("goal".into(), Value::Str(goal)),
             ];
+            if let Some(control) = entry.goal_control.get() {
+                fields.push((
+                    "goal_state".into(),
+                    Value::from_json(
+                        serde_json::to_value(control.snapshot())
+                            .map_err(|e| RuntimeError::ToolFailed(e.to_string()))?,
+                    ),
+                ));
+            }
             if let FlowRunStatus::Err { message, .. } = &st {
                 fields.push(("error".into(), Value::Str(message.clone())));
             }
@@ -1684,26 +1799,120 @@ async fn run_prepared_flow_agent(
                 if let Some(prompt) = initial_prompt {
                     seed_child_message_context(&child_ctx, prompt)?;
                 }
-                crate::exec::exec_flow_with_linked_siblings(
-                    &flow,
-                    flow_args,
-                    registry.as_ref(),
-                    &child_ctx,
-                    providers.as_ref(),
-                    &flows,
-                    child_ctx.events.as_ref(),
-                    child_ctx.turn_id.clone(),
-                    Some(run_id.clone()),
-                    None,
-                    child_ctx.cancel.clone(),
-                    None,
-                    program
-                        .source_dir(&flow_id)
-                        .map(std::path::Path::to_path_buf),
-                    Some(&program),
-                    Some(flow_id.module),
-                )
-                .await
+                let mut iteration = 0u64;
+                loop {
+                    if let Some(control) = &child_ctx.goal_control {
+                        control.wait_active(&child_ctx.cancel).await?;
+                        if iteration > 0 {
+                            let turn_id = crate::event::TurnId::now();
+                            let mut message = Message::user_text(
+                                turn_id.clone(),
+                                crate::goal::continuation_prompt(control),
+                            );
+                            message.origin = crate::message::MessageOrigin::Internal;
+                            child_ctx.turn_id = Some(turn_id);
+                            crate::tools::session::append_message_to_context(&child_ctx, message)?;
+                        }
+                    }
+                    let turn_run = if child_ctx.goal_control.is_some() {
+                        let next = FlowRunId::now();
+                        let identity = ctx
+                            .flow_registry
+                            .as_ref()
+                            .expect("managed flow registry")
+                            .register_child(
+                            &run_id,
+                            next.clone(),
+                            crate::flow_authority::InvocationKind::SpawnAsync,
+                            ctx.flow_identity
+                                .as_ref()
+                                .is_some_and(|i| i.effective_authority.shell),
+                            crate::flow_authority::ChildWorkspaceAuthority::Inherit,
+                        )?;
+                        child_ctx.flow_identity = Some(identity);
+                        child_ctx.flow_run_id = Some(next.clone());
+                        next
+                    } else {
+                        run_id.clone()
+                    };
+                    let goal_turn = child_ctx.goal_control.as_ref().map(|g| g.start_turn());
+                    let turn_lifecycle = child_ctx.goal_control.as_ref().map(|_| {
+                        let start = child_flow_start(&child_ctx, &turn_run, &flow.name.name);
+                        emit_flow_agent_start(&child_ctx, start);
+                        ctx.flow_registry
+                            .as_ref()
+                            .expect("managed flow registry")
+                            .lifecycle_guard(&turn_run)
+                    });
+                    let mut turn_args = flow_args.clone();
+                    if iteration > 0
+                        && let Some(control) = &child_ctx.goal_control
+                    {
+                        let recipe = crate::goal::GoalTurn {
+                            program: program.clone(),
+                            flow_name: flow.name.name.clone(),
+                            args: turn_args,
+                            env: ctx.invocation_env.clone(),
+                        };
+                        turn_args =
+                            recipe.continuation_args(&crate::goal::continuation_prompt(control));
+                    }
+                    let result = crate::exec::exec_flow_with_linked_siblings(
+                        &flow,
+                        turn_args,
+                        registry.as_ref(),
+                        &child_ctx,
+                        providers.as_ref(),
+                        &flows,
+                        child_ctx.events.as_ref(),
+                        child_ctx.turn_id.clone(),
+                        Some(turn_run.clone()),
+                        None,
+                        child_ctx.cancel.clone(),
+                        None,
+                        program
+                            .source_dir(&flow_id)
+                            .map(std::path::Path::to_path_buf),
+                        Some(&program),
+                        Some(flow_id.module),
+                    )
+                    .await;
+                    if turn_lifecycle.is_some() {
+                        mark_terminal_and_emit_child_flow_end(
+                            &child_ctx,
+                            atman_rt::FlowEndFact {
+                                run_id: turn_run,
+                                flow_name: flow.name.name.clone(),
+                                status: match &result {
+                                    Ok(_) => FlowStatus::Ok,
+                                    Err(RuntimeError::Cancelled(_)) => FlowStatus::Cancelled,
+                                    Err(error) => FlowStatus::Errored {
+                                        message: error.to_string(),
+                                    },
+                                },
+                            },
+                        );
+                    }
+                    drop(turn_lifecycle);
+                    drop(goal_turn);
+                    let Some(control) = &child_ctx.goal_control else {
+                        return result;
+                    };
+                    if let Err(error) = &result {
+                        let _ = control.pause(
+                            crate::memory::goal::GoalActor::Runtime,
+                            crate::memory::goal::GoalPauseReason::RunFailed,
+                            error.to_string(),
+                            None,
+                        );
+                        if child_ctx.cancel.is_cancelled() {
+                            return result;
+                        }
+                    }
+                    iteration = iteration.saturating_add(1);
+                    // A paused goal keeps its stable handle and context available for resume.
+                    // Waiting is event-driven and does not issue a model request.
+                }
             },
             |out| match out {
                 Ok(_) => FlowStatus::Ok,
@@ -2220,6 +2429,141 @@ mod tests {
             ),
         ));
         args
+    }
+
+    #[tokio::test]
+    async fn managed_goal_reuses_child_handle_with_distinct_turns_and_parent_updates() {
+        use crate::tool::{BoxFut, ToolResult};
+        use crate::value::ValueJson;
+        use std::sync::Mutex;
+        struct Tick(Arc<Mutex<Vec<FlowRunId>>>);
+        impl Tool for Tick {
+            fn name(&self) -> &str {
+                "tick"
+            }
+            fn tier(&self) -> Tier {
+                Tier::Zero
+            }
+            fn call<'a>(&'a self, _: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+                Box::pin(async move {
+                    let count = {
+                        let mut runs = self.0.lock().unwrap();
+                        runs.push(ctx.flow_run_id.clone().unwrap());
+                        runs.len()
+                    };
+                    if count >= 2 {
+                        ctx.goal_control
+                            .as_ref()
+                            .unwrap()
+                            .pause(
+                                crate::memory::goal::GoalActor::Agent,
+                                crate::memory::goal::GoalPauseReason::Completed,
+                                format!("Completed turn {count}"),
+                                None,
+                            )
+                            .unwrap();
+                    }
+                    Ok(Value::Str(format!("turn {count}")))
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("child.at");
+        std::fs::write(
+            &path,
+            r#"flow child(prompt: string) -> string {
+            contract { invocation { goal: true, user_message: prompt } }
+            return tick()
+        }"#,
+        )
+        .unwrap();
+        let runs = Arc::new(Mutex::new(Vec::new()));
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(Tick(runs.clone())));
+        let registry = Arc::new(FlowRegistry::new());
+        let identity = root_identity(&registry, "goal-session");
+        let parent = crate::goal::GoalController::ephemeral("parent".into());
+        parent.set("parent work", None).unwrap();
+        let mut ctx = ToolCtx::new()
+            .with_registry(tools)
+            .with_providers(Arc::new(ProviderRegistry::new()))
+            .with_flow_registry(registry.clone());
+        ctx.flow_run_id = Some(identity.run_id.clone());
+        ctx.flow_identity = Some(identity);
+        ctx.goal_control = Some(parent.clone());
+        ctx.permission_broker = Some(crate::permission::PermissionBroker::shared(
+            registry.clone(),
+        ));
+        ctx.trust = Some(Default::default());
+        ctx.session_id = Some("goal-session".into());
+        let result = AgentSpawn
+            .call(
+                admitted_args(
+                    &registry,
+                    &ctx,
+                    ToolArgs {
+                        positional: vec![],
+                        named: vec![
+                            ("flow".into(), Value::Str(path.display().to_string())),
+                            (
+                                "arguments".into(),
+                                Value::Struct(vec![("prompt".into(), Value::Str("work".into()))]),
+                            ),
+                        ],
+                    },
+                ),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let handle = result.to_json().unwrap()["handle"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let entry = registry.lookup(&handle).unwrap();
+        let control = entry.goal_control.get().unwrap();
+        let mut changes = control.subscribe();
+        for expected in [2, 3] {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    if !control.should_continue()
+                        && !control.turn_running()
+                        && runs.lock().unwrap().len() == expected
+                    {
+                        break;
+                    }
+                    changes.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{e}: runs={:?}, status={:?}, goal={:?}",
+                    runs.lock().unwrap(),
+                    entry.status.lock().unwrap(),
+                    control.snapshot()
+                )
+            });
+            assert_eq!(
+                parent.descendant_updates()[0]
+                    .pause
+                    .as_ref()
+                    .unwrap()
+                    .summary,
+                format!("Completed turn {expected}")
+            );
+            if expected == 2 {
+                registry.mark_terminal(&ctx.flow_run_id.clone().unwrap());
+                control
+                    .resume(crate::memory::goal::GoalActor::Parent, None)
+                    .unwrap();
+            }
+        }
+        let recorded = runs.lock().unwrap();
+        assert!(recorded.windows(2).all(|pair| pair[0] != pair[1]));
+        drop(recorded);
+        assert!(Arc::ptr_eq(&entry, &registry.lookup(&handle).unwrap()));
+        entry.cancel.cancel();
     }
 
     #[test]

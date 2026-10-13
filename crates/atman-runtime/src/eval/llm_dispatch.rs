@@ -29,6 +29,11 @@ impl Drop for ReservedInjections {
 /// Core LLM dispatch with all side effects.
 /// Used as the single implementation behind `llm.call` and higher-level LLM tools.
 pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
+    if let Some(control) = &ctx.goal_control
+        && let Err(error) = control.wait(&ctx.cancel).await
+    {
+        return Value::Err(error);
+    }
     let Some(model) = args.model.clone() else {
         return Value::Err(RuntimeError::MissingArg("llm.model".into()));
     };
@@ -372,6 +377,25 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let mut signature_retries: u32 = 0;
     'llm_attempts: loop {
         for attempt in 0..=retry_count {
+            let goal_operation = if let Some(control) = &ctx.goal_control {
+                let held_context = compact_guard.take().is_some();
+                let operation = match control.enter(&ctx.cancel).await {
+                    Ok(operation) => operation,
+                    Err(error) => return Value::Err(error),
+                };
+                if held_context {
+                    compact_guard = if let Some(session) = ctx.session_runtime.as_ref() {
+                        Some(session.acquire_compact_lock().await)
+                    } else if let Some(lock) = ctx.compact_lock_handle.as_ref() {
+                        Some(lock.lock().await)
+                    } else {
+                        None
+                    };
+                }
+                Some(operation)
+            } else {
+                None
+            };
             let mut sanitized_messages =
                 crate::message::normalize_tool_pairs_for_model(&final_messages);
             for message in &mut sanitized_messages {
@@ -635,12 +659,20 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         }
                         drop(compact_guard.take());
                     }
+                    drop(compact_guard.take());
+                    drop(goal_operation);
+                    if let Some(control) = &ctx.goal_control
+                        && let Err(error) = control.wait(&ctx.cancel).await
+                    {
+                        return Value::Err(error);
+                    }
                     if !matches!(context_mode, ContextMode::None) {
                         return Value::Host(AtmanPayload::Message(am.message.clone()));
                     }
                     return crate::provider::assistant_message_to_value(&am);
                 }
                 Err(e) => {
+                    drop(goal_operation);
                     if matches!(
                         e,
                         RuntimeError::Cancelled(_)
@@ -942,9 +974,31 @@ fn request_working_directory(ctx: &ToolCtx) -> Option<std::path::PathBuf> {
 }
 
 async fn sync_runtime_context_records(ctx: &ToolCtx, turn_id: &crate::event::TurnId) {
+    let mut goal_specs = Vec::new();
+    if let Some(control) = &ctx.goal_control {
+        goal_specs.push(crate::context_plan::ContextRecordSpec::new(
+            "agent.goal",
+            crate::context_plan::ContextRecordAuthority::Runtime,
+            crate::context_plan::ContextRecordRetention::Latest,
+            crate::context_plan::ContextRecordBody::text(
+                serde_json::to_string(&control.record()).expect("goal record serialization"),
+            ),
+        ));
+        for update in control.descendant_updates() {
+            goal_specs.push(crate::context_plan::ContextRecordSpec::new(
+                format!("agent.child_goal.{}", update.id),
+                crate::context_plan::ContextRecordAuthority::Runtime,
+                crate::context_plan::ContextRecordRetention::Latest,
+                crate::context_plan::ContextRecordBody::text(
+                    serde_json::to_string(&update).expect("goal record serialization"),
+                ),
+            ));
+        }
+    }
     if let Some(session) = ctx.session_runtime.as_ref() {
-        session
-            .append_context_records(turn_id.clone(), session_context_record_specs(session).await);
+        let mut specs = session_context_record_specs(session).await;
+        specs.extend(goal_specs);
+        session.append_context_records(turn_id.clone(), specs);
         return;
     }
     if !matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned) {
@@ -953,7 +1007,7 @@ async fn sync_runtime_context_records(ctx: &ToolCtx, turn_id: &crate::event::Tur
     let Some(messages) = ctx.session_messages_handle.as_ref() else {
         return;
     };
-    let specs = if let Some(session) = ctx.context_records_session.as_ref() {
+    let mut specs = if let Some(session) = ctx.context_records_session.as_ref() {
         session_context_record_specs(session).await
     } else {
         let workspace = tool_context_working_directory_context(ctx);
@@ -967,6 +1021,7 @@ async fn sync_runtime_context_records(ctx: &ToolCtx, turn_id: &crate::event::Tur
             ),
         )]
     };
+    specs.extend(goal_specs);
     let mut messages = messages.lock().unwrap();
     let records = crate::context_plan::compile_context_records(&messages, specs);
     messages.extend(

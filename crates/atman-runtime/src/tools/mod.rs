@@ -255,6 +255,8 @@ pub fn register_memory(
         store: goal_store.clone(),
     }));
     reg.register(Arc::new(memory::MemoryGoalClear { store: goal_store }));
+    reg.register(Arc::new(memory::MemoryGoalControl { resume: false }));
+    reg.register(Arc::new(memory::MemoryGoalControl { resume: true }));
     reg.register(Arc::new(memory::MemoryRecentTurns));
     reg.register(Arc::new(memory::MemoryHistorySearch));
     reg.register(Arc::new(memory::MemoryHistoryRead));

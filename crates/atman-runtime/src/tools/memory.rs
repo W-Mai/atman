@@ -4,9 +4,11 @@ use crate::error::RuntimeError;
 use crate::memory::MemoryId;
 use crate::memory::confession::{Confession, ConfessionStore};
 use crate::memory::goal::GoalStore;
+use crate::memory::goal::{GoalActor, GoalPauseReason};
 use crate::memory::spec::SpecStore;
 use crate::memory::todo::{Todo, TodoStatus, TodoStore};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::value::ValueJson;
 use crate::value::{AtmanPayload, Value};
 
 pub struct MemoryGoalGet {
@@ -24,17 +26,28 @@ impl Tool for MemoryGoalGet {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Return the current session goal (persistent, exposed to models as an append-only context record). Empty string when unset.",
+            "Read the current agent's goal, state and revision. Use target_handle to inspect a descendant's goal.",
         )
     }
 
-    fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn input_schema(&self) -> serde_json::Value {
+        goal_schema(false)
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let text = self
-                .store
-                .get()
-                .map_err(|e| RuntimeError::ToolFailed(format!("goal.get: {e}")))?;
-            Ok(Value::Str(text))
+            if let Some(control) = goal_target(&args, ctx)? {
+                return goal_value(&control);
+            }
+            Ok(Value::from_json(
+                serde_json::to_value(crate::goal::GoalSnapshot {
+                    goal: self.store.load().map_err(goal_error)?,
+                    execution: crate::goal::GoalExecution::Idle,
+                    paused_by: None,
+                    running_operations: 0,
+                })
+                .map_err(goal_error)?,
+            ))
         })
     }
 }
@@ -54,41 +67,254 @@ impl Tool for MemoryGoalSet {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Set the session goal — a short directive (1-2 sentences) that atman appends \
-             to model history as a versioned context record. It persists across turns; \
-             unchanged content is not appended again.\n\n\
-             Best practice: set the goal early (right after understanding the user's request), \
-             keep it concise and actionable. Update it if the user's intent changes. Clear it \
-             when the task is complete. Example: 'Fix the login bug in auth.rs and add a \
-             regression test.'",
+            "Create a goal for an actionable request, or update its objective. Updates require goal_id and expected_revision from goal.get and preserve pause state. target_handle addresses a descendant. Use goal.pause when complete or waiting for input.",
         )
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "text": {
-                    "type": "string",
-                    "description": "The goal text, 1-2 sentences. Be specific: what to do, where, and what 'done' looks like."
-                }
-            },
-            "required": ["text"]
-        })
+        let mut schema = goal_schema(false);
+        schema["properties"]["text"] = serde_json::json!({"type":"string", "description":"Concrete objective and acceptance criteria."});
+        schema["required"] = serde_json::json!(["text"]);
+        schema
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let text = required_string(&args, "text")?;
+            if let Some(control) = goal_target(&args, ctx)? {
+                let expected = goal_expected(&args, control.record().is_some())?;
+                if ctx.goal_resume_allowed
+                    && control.record().is_some_and(|g| {
+                        g.pause.as_ref().is_some_and(|p| {
+                            p.actor == GoalActor::Agent && p.reason == GoalPauseReason::Completed
+                        })
+                    })
+                {
+                    control
+                        .replace_completed(&text, expected)
+                        .map_err(goal_error)?;
+                } else {
+                    control.set(&text, expected).map_err(goal_error)?;
+                }
+                return goal_value(&control);
+            }
             self.store
                 .set(&text)
                 .map_err(|e| RuntimeError::ToolFailed(format!("goal.set: {e}")))?;
-            Ok(Value::Unit)
+            Ok(Value::from_json(
+                serde_json::to_value(crate::goal::GoalSnapshot {
+                    goal: self.store.load().map_err(goal_error)?,
+                    execution: crate::goal::GoalExecution::Idle,
+                    paused_by: None,
+                    running_operations: 0,
+                })
+                .map_err(goal_error)?,
+            ))
+        })
+    }
+}
+
+fn goal_error(error: impl std::fmt::Display) -> RuntimeError {
+    RuntimeError::ToolFailed(format!("goal: {error}"))
+}
+
+fn goal_value(control: &crate::goal::GoalController) -> ToolResult {
+    Ok(Value::from_json(
+        serde_json::to_value(control.snapshot()).map_err(goal_error)?,
+    ))
+}
+
+fn goal_schema(required_revision: bool) -> serde_json::Value {
+    serde_json::json!({
+        "type":"object",
+        "properties":{
+            "target_handle":{"type":"string", "description":"Optional descendant agent handle; defaults to this agent."},
+            "goal_id":{"type":"string"},
+            "expected_revision":{"type":"integer", "minimum":1}
+        },
+        "required": if required_revision { vec!["goal_id", "expected_revision"] } else { vec![] }
+    })
+}
+
+fn goal_expected(args: &ToolArgs, required: bool) -> Result<Option<(&str, u64)>, RuntimeError> {
+    match (args.named("goal_id"), args.named("expected_revision")) {
+        (Some(Value::Str(id)), Some(Value::Int(revision))) if *revision > 0 => {
+            Ok(Some((id, *revision as u64)))
+        }
+        (None, None) if !required => Ok(None),
+        _ => Err(goal_error(
+            "goal_id and expected_revision are required; read goal.get first",
+        )),
+    }
+}
+
+fn goal_target(
+    args: &ToolArgs,
+    ctx: &ToolCtx,
+) -> Result<Option<Arc<crate::goal::GoalController>>, RuntimeError> {
+    let own = ctx
+        .goal_control
+        .clone()
+        .or_else(|| ctx.session_runtime.as_ref().map(|s| s.goal_control.clone()));
+    let Some(target) = args.named("target_handle") else {
+        return Ok(own);
+    };
+    let Value::Str(handle) = target else {
+        return Err(goal_error("target_handle must be a string"));
+    };
+    let own = own.ok_or_else(|| goal_error("no managed agent goal context"))?;
+    let entry = ctx
+        .flow_registry
+        .as_ref()
+        .ok_or_else(|| goal_error("no flow registry"))?
+        .lookup(handle)?;
+    let target = entry
+        .goal_control
+        .get()
+        .ok_or_else(|| goal_error("target has no managed goal"))?
+        .clone();
+    if !Arc::ptr_eq(&own, &target) && !own.is_ancestor_of(&target) {
+        return Err(goal_error("target is not this agent or its descendant"));
+    }
+    Ok(Some(target))
+}
+
+pub struct MemoryGoalControl {
+    pub resume: bool,
+}
+
+impl Tool for MemoryGoalControl {
+    fn name(&self) -> &str {
+        if self.resume {
+            "memory.goal.resume"
+        } else {
+            "memory.goal.pause"
+        }
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some(if self.resume {
+            "Resume a descendant goal, or your own agent-paused goal after new user input. User-paused goals require user controls. Read goal.get first."
+        } else {
+            "Pause this goal when completed, blocked, or awaiting input. This stops automatic continuation and allows your final response. With target_handle, pause a descendant at its next execution boundary. Read goal.get first."
+        })
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        let mut schema = goal_schema(true);
+        if !self.resume {
+            schema["properties"]["reason"] = serde_json::json!({"type":"string", "enum":["completed","needs_input","blocked","user_requested"]});
+            schema["properties"]["summary"] = serde_json::json!({"type":"string", "minLength":1});
+            schema["required"] =
+                serde_json::json!(["goal_id", "expected_revision", "reason", "summary"]);
+        }
+        schema
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let control = goal_target(&args, ctx)?.ok_or_else(|| goal_error("no goal context"))?;
+            let own = ctx
+                .goal_control
+                .as_ref()
+                .or_else(|| ctx.session_runtime.as_ref().map(|s| &s.goal_control))
+                .ok_or_else(|| goal_error("no goal context"))?;
+            let actor = if Arc::ptr_eq(own, &control) {
+                GoalActor::Agent
+            } else {
+                GoalActor::Parent
+            };
+            let expected = goal_expected(&args, true)?;
+            if self.resume {
+                if actor == GoalActor::Agent && !ctx.goal_resume_allowed {
+                    return Err(goal_error("self resume requires new user or parent input"));
+                }
+                control.resume(actor, expected).map_err(goal_error)?;
+            } else {
+                let reason = required_string(&args, "reason")?;
+                let reason = match reason.as_str() {
+                    "completed" => GoalPauseReason::Completed,
+                    "needs_input" => GoalPauseReason::NeedsInput,
+                    "blocked" => GoalPauseReason::Blocked,
+                    "user_requested" => GoalPauseReason::UserRequested,
+                    _ => return Err(goal_error("invalid pause reason")),
+                };
+                let summary = required_string(&args, "summary")?;
+                if summary.trim().is_empty() {
+                    return Err(goal_error("pause summary is required"));
+                }
+                control
+                    .pause(actor, reason, summary, expected)
+                    .map_err(goal_error)?;
+            }
+            goal_value(&control)
         })
     }
 }
 
 pub struct MemoryRecentTurns;
+
+#[cfg(test)]
+mod goal_control_tests {
+    use super::*;
+    use crate::goal::GoalController;
+
+    #[tokio::test]
+    async fn goal_tools_use_current_owner_and_reject_sibling_targets() {
+        let root = GoalController::ephemeral("root".into());
+        root.set("root objective", None).unwrap();
+        let child = root
+            .child("child".into(), "child objective".into(), None)
+            .unwrap();
+        let sibling = root
+            .child("sibling".into(), "other objective".into(), None)
+            .unwrap();
+        let registry = Arc::new(crate::tools::agent_ctrl::FlowRegistry::new());
+        let child_entry = registry.create_entry(
+            "child".into(),
+            "child".into(),
+            String::new(),
+            crate::event::FlowRunId::now(),
+        );
+        child_entry.goal_control.set(child.clone()).ok().unwrap();
+        let peer_entry = registry.create_entry(
+            "sibling".into(),
+            "other".into(),
+            String::new(),
+            crate::event::FlowRunId::now(),
+        );
+        peer_entry.goal_control.set(sibling.clone()).ok().unwrap();
+        let mut ctx = ToolCtx::new().with_flow_registry(registry);
+        ctx.goal_control = Some(child.clone());
+        assert!(Arc::ptr_eq(
+            &goal_target(&ToolArgs::default(), &ctx).unwrap().unwrap(),
+            &child
+        ));
+        let mut args = ToolArgs {
+            positional: vec![],
+            named: vec![("target_handle".into(), Value::Str("sibling".into()))],
+        };
+        assert!(goal_target(&args, &ctx).is_err());
+        ctx.goal_control = Some(root.clone());
+        let saved = sibling.record().unwrap();
+        args.named.extend([
+            ("goal_id".into(), Value::Str(saved.id)),
+            (
+                "expected_revision".into(),
+                Value::Int(saved.revision as i64),
+            ),
+            ("reason".into(), Value::Str("blocked".into())),
+            ("summary".into(), Value::Str("Need a decision".into())),
+        ]);
+        MemoryGoalControl { resume: false }
+            .call(args, &ctx)
+            .await
+            .unwrap();
+        assert!(!sibling.should_continue());
+        assert!(root.should_continue());
+        assert!(child.should_continue());
+    }
+}
 
 const RECENT_EXCERPT_MESSAGE_CHARS: usize = 2_000;
 
@@ -473,8 +699,17 @@ impl Tool for MemoryGoalClear {
         serde_json::json!({"type": "object"})
     }
 
-    fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
+            if ctx.goal_control.is_some() {
+                return Err(goal_error(
+                    "managed goals must be paused; clearing requires user control",
+                ));
+            }
+            if let Some(session) = &ctx.session_runtime {
+                session.goal_control.clear().map_err(goal_error)?;
+                return Ok(Value::Unit);
+            }
             self.store
                 .clear()
                 .map_err(|e| RuntimeError::ToolFailed(format!("goal.clear: {e}")))?;

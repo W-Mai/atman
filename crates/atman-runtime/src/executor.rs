@@ -207,6 +207,19 @@ impl Executor {
         invocation: RootInvocation,
     ) -> Result<Value, RuntimeError> {
         let flows = program.flatten_flows();
+        if let Some(session) = &invocation.session
+            && program
+                .entry_flow(flow_name)
+                .and_then(|id| program.flow(&id))
+                .is_some_and(crate::goal::is_managed)
+        {
+            *session.goal_turn.lock().unwrap() = Some(crate::goal::GoalTurn {
+                program: program.clone(),
+                flow_name: flow_name.into(),
+                args: args.clone(),
+                env: invocation.env.clone(),
+            });
+        }
         let mut next_run_id = invocation.first_run_id.clone();
         match atman_rt::run_redirects(
             flow_name.to_string(),
@@ -385,6 +398,19 @@ impl Executor {
                     tool_ctx.flow_run_id = Some(body_run_id.clone());
                     tool_ctx.session_id = Some(session_id);
                     if let Some(sess) = body_session.as_ref() {
+                        if crate::goal::is_managed(flow) {
+                            tool_ctx.goal_control = Some(sess.goal_control.clone());
+                            tool_ctx.goal_resume_allowed = sess
+                                .messages_handle()
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .rev()
+                                .find(|message| message.role == crate::message::MessageRole::User)
+                                .is_some_and(|message| {
+                                    message.origin == crate::message::MessageOrigin::User
+                                });
+                        }
                         tool_ctx.stream_tx = Some(sess.stream_tx());
                         tool_ctx.session_messages_handle = Some(sess.messages_handle());
                         // Register root so flow.output/interject("root") work. Root's llm
@@ -396,9 +422,13 @@ impl Executor {
                             String::new(),
                             body_run_id.clone(),
                         );
+                        if let Some(control) = &tool_ctx.goal_control {
+                            let _ = root_entry.goal_control.set(control.clone());
+                        }
                         tool_ctx.agent_entry = Some(std::sync::Arc::clone(&root_entry));
                         sess.set_current_root("root".to_string());
                     }
+                    let _goal_turn = tool_ctx.goal_control.as_ref().map(|g| g.start_turn());
                     let result = exec_flow_with_linked_siblings(
                         flow,
                         args,

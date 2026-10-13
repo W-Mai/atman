@@ -267,6 +267,8 @@ impl InteractionServices {
 }
 
 pub struct Session {
+    pub goal_control: std::sync::Arc<crate::goal::GoalController>,
+    pub goal_turn: Mutex<Option<crate::goal::GoalTurn>>,
     id: SessionId,
     dir: PathBuf,
     writer: std::sync::Mutex<Option<EventWriter>>,
@@ -1125,7 +1127,14 @@ impl Session {
         let (flow_registry, permission_broker) = new_permission_pipeline(&sink, &stream_tx);
         let deferred_form_inbox =
             std::sync::Arc::new(DeferredFormInbox::new(sink.clone(), Vec::new()));
+        let goal_control = crate::goal::GoalController::open(
+            crate::memory::goal::GoalStore::at(&dir).with_notify(goal_watch.clone()),
+            id.to_string(),
+        )?;
+        goal_control.bind_events(sink.clone());
         Ok(Self {
+            goal_control,
+            goal_turn: Mutex::new(None),
             id,
             dir,
             writer: std::sync::Mutex::new(Some(writer)),
@@ -1343,7 +1352,18 @@ impl Session {
             sink.clone(),
             replay.deferred_form_answers,
         ));
+        let goal_control = crate::goal::GoalController::open(
+            crate::memory::goal::GoalStore::at(&dir).with_notify(goal_watch.clone()),
+            id.to_string(),
+        )
+        .map_err(|source| SessionOpenError::Replay {
+            path: dir.join("goal.json"),
+            source,
+        })?;
+        goal_control.bind_events(sink.clone());
         Ok(Self {
+            goal_control,
+            goal_turn: Mutex::new(None),
             id,
             dir,
             writer: std::sync::Mutex::new(Some(writer)),
@@ -1421,8 +1441,13 @@ impl Session {
         let (flow_registry, permission_broker) = new_permission_pipeline(&sink, &stream_tx);
         let deferred_form_inbox =
             std::sync::Arc::new(DeferredFormInbox::new(sink.clone(), Vec::new()));
+        let id = SessionId::now();
+        let goal_control = crate::goal::GoalController::ephemeral(id.to_string());
+        goal_control.bind_events(sink.clone());
         Self {
-            id: SessionId::now(),
+            goal_control,
+            goal_turn: Mutex::new(None),
+            id,
             dir: PathBuf::new(),
             writer: std::sync::Mutex::new(None),
             sink,
@@ -2594,6 +2619,9 @@ impl Session {
         user_msg: Message,
         presentation: Option<crate::user_input::UserInputPresentation>,
     ) -> TurnId {
+        if user_msg.origin == crate::message::MessageOrigin::User {
+            self.goal_control.begin_user_turn();
+        }
         BeginTurnCommand {
             user_msg,
             presentation,
@@ -3114,7 +3142,67 @@ impl Session {
         claimed
     }
 
+    pub fn control_goal(
+        &self,
+        target: Option<&str>,
+        action: crate::goal::GoalAction,
+        expected: Option<(&str, u64)>,
+    ) -> std::io::Result<crate::goal::GoalSnapshot> {
+        use crate::goal::GoalAction;
+        use crate::memory::goal::{GoalActor, GoalPauseReason};
+        let entry = target
+            .filter(|h| *h != "root")
+            .map(|handle| self.flow_registry.lookup(handle))
+            .transpose()
+            .map_err(std::io::Error::other)?;
+        let control = match &entry {
+            Some(entry) => entry
+                .goal_control
+                .get()
+                .ok_or_else(|| std::io::Error::other("agent has no goal"))?,
+            None => &self.goal_control,
+        };
+        if !std::sync::Arc::ptr_eq(control, &self.goal_control)
+            && !self.goal_control.is_ancestor_of(control)
+        {
+            return Err(std::io::Error::other("goal belongs to another session"));
+        }
+        match action {
+            GoalAction::Pause => control.pause(
+                GoalActor::User,
+                GoalPauseReason::UserRequested,
+                "Paused by user".into(),
+                expected,
+            )?,
+            GoalAction::Resume => control.resume(GoalActor::User, expected)?,
+            GoalAction::Set { text } => control.set(&text, expected)?,
+            GoalAction::Clear => {
+                control.pause(
+                    GoalActor::User,
+                    GoalPauseReason::Cancelled,
+                    "Cleared by user".into(),
+                    expected,
+                )?;
+                if let Some(entry) = &entry {
+                    entry.cancel.cancel();
+                } else {
+                    self.cancel_flow();
+                }
+                control.clear()?;
+            }
+        }
+        Ok(control.snapshot())
+    }
+
     pub fn cancel_flow(&self) {
+        if self.goal_control.record().is_some() {
+            let _ = self.goal_control.pause(
+                crate::memory::goal::GoalActor::User,
+                crate::memory::goal::GoalPauseReason::Cancelled,
+                "Cancelled by user".into(),
+                None,
+            );
+        }
         self.turn.flow_cancel.lock().unwrap().cancel();
     }
 
@@ -3123,6 +3211,7 @@ impl Session {
     }
 
     pub async fn shutdown(&self) {
+        self.flow_registry.cancel_managed_agents();
         let writer = self.writer.lock().unwrap().take();
         if let Some(writer) = writer {
             writer.shutdown().await;

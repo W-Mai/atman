@@ -572,6 +572,14 @@ fn execution_future(index: usize, call: &PreparedCall, call_ctx: ToolCtx) -> Exe
     let call_args = call.call_args.clone();
     let tool = std::sync::Arc::clone(&call.tool);
     Box::pin(async move {
+        let _operation = if let Some(control) = &call_ctx.goal_control {
+            match control.enter(&call_ctx.cancel).await {
+                Ok(operation) => Some(operation),
+                Err(error) => return (index, Err(error)),
+            }
+        } else {
+            None
+        };
         let result = tool.call(call_args, &call_ctx).await;
         (index, result)
     })

@@ -334,6 +334,11 @@ async fn dispatch_tool_call(
     if name == "env" {
         return eval_invocation_env(call_args, ctx);
     }
+    if let Some(control) = &ctx.tool_ctx.goal_control
+        && let Err(error) = control.wait(&ctx.flow_cancel).await
+    {
+        return Value::Err(error);
+    }
     match authorize_tool_invocation(name, call_args, watch_rules, ctx).await {
         Ok(permit) => execute_tool_invocation(permit).await,
         Err(error) => Value::Err(error),

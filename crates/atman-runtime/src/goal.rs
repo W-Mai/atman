@@ -10,6 +10,65 @@ use tokio_util::sync::CancellationToken;
 use crate::error::RuntimeError;
 use crate::memory::goal::{GoalActor, GoalPauseReason, GoalRecord, GoalStatus, GoalStore};
 
+/// Product contract for managed agents; ordinary language flows remain single runs.
+pub fn is_managed(flow: &atman_rt::ast::FlowDecl) -> bool {
+    flow.contract.as_ref().is_some_and(|contract| {
+        contract.blocks.iter().any(|block| {
+            block.name.name == "invocation"
+                && block.kwargs.iter().any(|(name, value)| {
+                    name.name == "goal"
+                        && matches!(
+                            value,
+                            atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Bool(true))
+                        )
+                })
+        })
+    })
+}
+
+pub fn continuation_prompt(control: &GoalController) -> String {
+    format!(
+        "Goal continuation control, not a new user request. Continue the existing objective from the recorded context. Do not repeat completed effects. Explicitly call memory.goal.pause with a result or blocker when no autonomous work remains. Current goal data: {}",
+        serde_json::to_string(&control.record()).expect("goal serialization"),
+    )
+}
+
+/// Invocation recipe for subsequent turns; model history stays in its owning session.
+#[derive(Clone)]
+pub struct GoalTurn {
+    pub program: crate::source_program::LinkedProgram,
+    pub flow_name: String,
+    pub args: Vec<(String, crate::Value)>,
+    pub env: crate::InvocationEnv,
+}
+
+impl GoalTurn {
+    pub fn continuation_args(&self, prompt: &str) -> Vec<(String, crate::Value)> {
+        let mut args = self.args.clone();
+        let parameter = self
+            .program
+            .entry_flow(&self.flow_name)
+            .and_then(|id| self.program.flow(&id))
+            .and_then(|flow| flow.contract.as_ref())
+            .and_then(|contract| contract.blocks.iter().find(|b| b.name.name == "invocation"))
+            .and_then(|block| {
+                block
+                    .kwargs
+                    .iter()
+                    .find(|(name, _)| name.name == "user_message")
+            })
+            .and_then(|(_, value)| match value {
+                atman_rt::ast::Expr::Ident(name) => Some(name.name.as_str()),
+                _ => None,
+            });
+        if let Some(parameter) = parameter {
+            args.retain(|(name, _)| name != parameter);
+            args.push((parameter.into(), crate::Value::Str(prompt.into())));
+        }
+        args
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GoalSnapshot {
     pub goal: Option<GoalRecord>,
@@ -28,6 +87,15 @@ pub enum GoalExecution {
     Finishing,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum GoalAction {
+    Pause,
+    Resume,
+    Set { text: String },
+    Clear,
+}
+
 struct State {
     record: Option<GoalRecord>,
     execution_paused: bool,
@@ -42,6 +110,9 @@ pub struct GoalController {
     changes: Arc<watch::Sender<u64>>,
     transition: Arc<Mutex<()>>,
     operations: AtomicUsize,
+    turns: AtomicUsize,
+    descendant_updates: Mutex<std::collections::BTreeMap<String, GoalRecord>>,
+    events: std::sync::OnceLock<crate::event::EventSink>,
 }
 
 impl GoalController {
@@ -87,7 +158,11 @@ impl GoalController {
                 Ok(())
             })?;
         }
-        Ok(Self::build(store, owner, Some(self.clone()), Some(record)))
+        let child = Self::build(store, owner, Some(self.clone()), Some(record));
+        if let Some(sink) = self.events.get() {
+            child.bind_events(sink.clone());
+        }
+        Ok(child)
     }
 
     fn build(
@@ -121,11 +196,75 @@ impl GoalController {
             changes,
             transition,
             operations: AtomicUsize::new(0),
+            turns: AtomicUsize::new(0),
+            descendant_updates: Mutex::new(Default::default()),
+            events: Default::default(),
         })
     }
 
     pub fn owner(&self) -> &str {
         &self.owner
+    }
+
+    pub fn bind_events(&self, sink: crate::event::EventSink) {
+        if self.events.set(sink).is_ok() && self.record().is_some() {
+            self.emit_state();
+        }
+    }
+
+    fn emit_state(&self) {
+        if let Some(sink) = self.events.get() {
+            sink.emit(crate::event::Event::GoalChanged {
+                owner: self.owner.clone(),
+                goal: self.record(),
+            });
+        }
+    }
+
+    pub fn turn_running(&self) -> bool {
+        self.turns.load(Ordering::Acquire) != 0
+    }
+
+    pub fn begin_user_turn(&self) {
+        let _transition = self.transition.lock().unwrap();
+        if !self.turn_running() {
+            self.state.lock().unwrap().execution_paused = false;
+            self.changed();
+        }
+    }
+
+    pub fn replace_completed(&self, text: &str, expected: Option<(&str, u64)>) -> io::Result<()> {
+        let _transition = self.transition.lock().unwrap();
+        if text.trim().is_empty() {
+            return Err(io::Error::other("goal objective must not be empty"));
+        }
+        self.mutate(expected, |record| {
+            let previous = record
+                .as_ref()
+                .ok_or_else(|| io::Error::other("no goal set"))?;
+            if !previous.pause.as_ref().is_some_and(|p| {
+                p.actor == GoalActor::Agent && p.reason == GoalPauseReason::Completed
+            }) {
+                return Err(io::Error::other(
+                    "only an agent-completed goal can be replaced by new input",
+                ));
+            }
+            *record = Some(GoalRecord::new(
+                text.trim().into(),
+                self.owner.clone(),
+                previous.parent_goal_id.clone(),
+            ));
+            Ok(())
+        })?;
+        self.state.lock().unwrap().execution_paused = false;
+        self.changed();
+        Ok(())
+    }
+
+    pub fn start_turn(self: &Arc<Self>) -> GoalTurnGuard {
+        self.turns.fetch_add(1, Ordering::AcqRel);
+        self.changed();
+        GoalTurnGuard(self.clone())
     }
 
     pub fn is_ancestor_of(&self, other: &Self) -> bool {
@@ -143,6 +282,31 @@ impl GoalController {
         self.state.lock().unwrap().record.clone()
     }
 
+    pub fn descendant_updates(&self) -> Vec<GoalRecord> {
+        self.descendant_updates
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub async fn wait_active(&self, cancel: &CancellationToken) -> Result<(), RuntimeError> {
+        let mut changes = self.subscribe();
+        loop {
+            if cancel.is_cancelled() {
+                return Err(RuntimeError::Cancelled("flow cancelled by user".into()));
+            }
+            if self.should_continue() {
+                return Ok(());
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = changes.changed() => {},
+            }
+        }
+    }
+
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.changes.subscribe()
     }
@@ -157,9 +321,13 @@ impl GoalController {
             return Some(self.owner.clone());
         }
         let mut next = self.parent.as_deref();
+        let mut parent_goal_id = self.record().and_then(|g| g.parent_goal_id);
         while let Some(parent) = next {
             let state = parent.state.lock().unwrap();
             if state.execution_paused
+                || parent_goal_id
+                    .as_ref()
+                    .is_some_and(|id| state.record.as_ref().is_none_or(|g| &g.id != id))
                 || state
                     .record
                     .as_ref()
@@ -167,6 +335,7 @@ impl GoalController {
             {
                 return Some(parent.owner.clone());
             }
+            parent_goal_id = state.record.as_ref().and_then(|g| g.parent_goal_id.clone());
             next = parent.parent.as_deref();
         }
         None
@@ -186,7 +355,7 @@ impl GoalController {
             .as_ref()
             .is_some_and(|g| g.status == GoalStatus::Paused)
         {
-            if running_operations == 0 {
+            if !self.turn_running() {
                 GoalExecution::Paused
             } else {
                 GoalExecution::Finishing
@@ -245,8 +414,18 @@ impl GoalController {
             }
             goal.updated_at = chrono::Utc::now();
         }
-        state.record = record;
+        state.record = record.clone();
         drop(state);
+        self.emit_state();
+        if let Some(parent) = &self.parent
+            && let Some(record) = record
+        {
+            parent
+                .descendant_updates
+                .lock()
+                .unwrap()
+                .insert(self.owner.clone(), record);
+        }
         self.changed();
         Ok(())
     }
@@ -351,7 +530,10 @@ impl GoalController {
         self.mutate(None, |record| {
             *record = None;
             Ok(())
-        })
+        })?;
+        self.state.lock().unwrap().execution_paused = false;
+        self.changed();
+        Ok(())
     }
 
     pub async fn wait(&self, cancel: &CancellationToken) -> Result<(), RuntimeError> {
@@ -384,6 +566,15 @@ impl GoalController {
         }
     }
 
+    pub fn try_enter(self: &Arc<Self>) -> Option<GoalOperation> {
+        let _transition = self.transition.lock().unwrap();
+        if self.blocked_by().is_some() {
+            return None;
+        }
+        self.adjust_operations(true);
+        Some(GoalOperation(self.clone()))
+    }
+
     fn adjust_operations(&self, started: bool) {
         let mut next = Some(self);
         while let Some(control) = next {
@@ -395,6 +586,15 @@ impl GoalController {
             next = control.parent.as_deref();
         }
         self.changed();
+    }
+}
+
+pub struct GoalTurnGuard(Arc<GoalController>);
+
+impl Drop for GoalTurnGuard {
+    fn drop(&mut self) {
+        self.0.turns.fetch_sub(1, Ordering::AcqRel);
+        self.0.changed();
     }
 }
 

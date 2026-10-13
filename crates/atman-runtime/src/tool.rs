@@ -96,6 +96,8 @@ pub struct ResolvedPath {
 
 #[derive(Clone, Default)]
 pub struct ToolCtx {
+    pub goal_control: Option<Arc<crate::goal::GoalController>>,
+    pub(crate) goal_resume_allowed: bool,
     pub cancel: CancellationToken,
     pub turn_id: Option<crate::event::TurnId>,
     pub flow_run_id: Option<crate::event::FlowRunId>,
