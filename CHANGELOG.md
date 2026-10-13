@@ -9,6 +9,7 @@ All notable changes to atman are documented in this file.
 ### ✨ Features
 
 - **Goal persistence** — Goal records store identity, revision, ownership, and pause state atomically. Revision checks reject stale updates; existing text goals remain readable without enabling automatic execution, and cleared goals cannot reappear from legacy files.
+- **Goal execution control** — Shared parent and child controllers provide cooperative pause gates, cancellation-aware waits, operation tracking, and explicit recovery after interruption. Parent resume preserves each child's own pause state.
 
 ### 🐛 Fixes
 

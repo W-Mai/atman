@@ -25,6 +25,7 @@ pub mod form;
 pub mod fs_access;
 pub mod git;
 pub mod git_workspace;
+pub mod goal;
 pub mod help;
 pub mod history_store;
 pub mod humanize;
