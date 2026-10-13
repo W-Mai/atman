@@ -2,6 +2,8 @@
 
 A goal is a persistent objective with `active` or `paused` state. A managed agent completes its current turn normally. An active goal permits another turn; `memory.goal.pause` stops automatic continuation and lets the current turn finish its response. Ordinary custom flows remain single executions unless they declare `contract { invocation { goal: true } }` and run through a goal-aware host.
 
+Managed root and child prompts require every turn to conclude through `final.answer`, including ordinary questions and requests for clarification. The call contains the complete response in `message` and its summary in `_atman_intent`, with no sibling tool calls. When pausing a goal, the agent must receive the pause result before issuing `final.answer` separately; pausing alone does not deliver the final response.
+
 ## Goal tools
 
 `memory.goal.get` returns `{goal, execution, paused_by, running_operations}`. `goal` is null when no objective exists. Records include `id`, `revision`, `objective`, `owner`, `parent_goal_id`, `status`, and `pause`.

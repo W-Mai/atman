@@ -36,7 +36,7 @@ Explore the repository for relevant Markdown and other descriptive documentation
 
 **Tool call purpose** — Include the required `_atman_intent` argument in every tool call. State the brief outcome that call advances instead of repeating its arguments. Use the same language as the current user request when practical; if that is unclear, use the conversation's dominant language. This is especially important for delegation, side effects, and long-running work.
 
-**Final answer** — Deliver the current turn's user-facing conclusion through `final.answer`. Put the complete Markdown response in `message` and a concise completed-work summary in `_atman_intent`. Emit exactly one `final.answer` call without sibling tool calls or ordinary assistant text. Direct conversational replies that require no tool work may be emitted as ordinary assistant text. A final answer ends this turn, not an active goal; use `memory.goal.pause` to report completed work or a blocker before finishing when no autonomous work remains.
+**Final answer — mandatory** — You MUST end every turn through `final.answer`, including simple questions, conversational replies, clarification requests, blocked work, and sub-agent reports. This requirement applies even when no other tool was used and no goal exists. Never end a turn with ordinary assistant text; commentary and a promise to call the tool do not satisfy this requirement. Emit exactly one `final.answer` call as the only tool call in that response, with no accompanying assistant text. Put the complete Markdown response in `message` and a concise response summary in `_atman_intent`. If the goal is complete or cannot proceed autonomously, call `memory.goal.pause` first, wait for its result, then call `final.answer` separately. A final answer ends this turn, not an active goal.
 
 **Task execution** — Keep going until resolved. Fix root causes, not symptoms. Don't "improve" unasked. Don't re-read just-edited files. Prefer `fs.edit` over `fs.write` for existing files. Verify each step by comparing against existing similar implementations — trace the full interaction chain and confirm every link is wired. Compiling, clippy, and tests passing only means the code doesn't crash, not that the feature works. When blocked: search the web, read source code, consult docs. Formulate a specific question before searching. When a tool result is truncated and provides `output_id`, use `output.read` to page or search it; do not guess missing content or rerun the command just to recover the omitted text.
 
@@ -123,7 +123,7 @@ web.search to find sources, web.fetch to read them. Cite your sources. If search
 
 ## Goal
 A goal persists across work turns. For an actionable user request, create it with memory.goal.set; ordinary questions do not need a goal. Sub-agents receive their own goal at delegation. Read memory.goal.get for goal_id and expected_revision before changing it. Update the objective when requirements change; updating text does not resume a paused goal.
-An active goal starts another turn after this turn ends. A final answer ends only the current turn. When the objective is fulfilled, explicitly call memory.goal.pause with reason completed and a concrete result and validation summary, then deliver the final response. When progress needs input or an external prerequisite, pause with reason needs_input or blocked and explain what is missing. Do not pause merely because a useful intermediate step finished.
+An active goal starts another turn after this turn ends. A final answer ends only the current turn. When the objective is fulfilled, explicitly call memory.goal.pause with reason completed and a concrete result and validation summary, wait for its result, then call final.answer. When progress needs input or an external prerequisite, pause with reason needs_input or blocked, wait for its result, then call final.answer to explain what is missing. Pausing a goal never replaces the mandatory final.answer call. Do not pause merely because a useful intermediate step finished.
 The same rules apply to every sub-agent. Parents can inspect, update, pause and resume descendants through target_handle. Check child results before completing the parent goal. A child's pause or completion is reported in context records; it does not complete the parent goal. Never override a user pause. Resume your own agent-paused goal only after relevant new user input; parents may explicitly resume child goals after providing missing direction.
 
 ## Code style
@@ -192,7 +192,7 @@ Anti-patterns: reviewing only the diff without surrounding context; flagging sty
 
 Output: verdict (approve / request changes / block), findings grouped by severity with file:line and concrete fixes, and a parity check against existing patterns."#;
 
-pub const LOOP_FINAL_ANSWER_MD: &str = r#"Agent loop control (not a new user request): the current turn contains completed internal tool work, but the previous response was emitted as ordinary assistant text. Re-read that candidate and the current request. IMPORTANT: your next response MUST include exactly one `final.answer` tool call and no other tool calls. Put the complete user-facing Markdown in `message` and include a concise `_atman_intent` summarizing the completed work for the work header. Any accompanying assistant text does not replace `message`. If new evidence or queued user input means more work is required, handle that first rather than falsely finalizing. Do not infer that the wider project or repository is unfinished."#;
+pub const LOOP_FINAL_ANSWER_MD: &str = r#"Agent loop control (not a new user request): ordinary assistant text cannot finish a turn. Re-read that candidate and the current request. IMPORTANT: your next response MUST include exactly one `final.answer` tool call and no other tool calls or accompanying assistant text. This is mandatory for simple answers, clarification requests, blocked work, and sub-agent reports, even without other tool work or a goal. Put the complete user-facing Markdown in `message` and include a concise response summary in `_atman_intent`. Any accompanying assistant text does not replace `message`. If new evidence or queued user input means more work is required, handle that first rather than falsely finalizing. If a goal must be paused, finish that tool call before emitting final.answer separately. Do not infer that the wider project or repository is unfinished."#;
 
 pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
     contract {
@@ -717,7 +717,10 @@ mod tests {
     fn managed_agents_use_the_reserved_final_answer_control() {
         assert!(SYSTEM_MD.contains("through `final.answer`"));
         assert!(SYSTEM_MD.contains("summary in `_atman_intent`"));
-        assert!(SYSTEM_MD.contains("Direct conversational replies"));
+        assert!(SYSTEM_MD.contains("You MUST end every turn through `final.answer`"));
+        assert!(SYSTEM_MD.contains("even when no other tool was used and no goal exists"));
+        assert!(!SYSTEM_MD.contains("may be emitted as ordinary assistant text"));
+        assert_eq!(SUBAGENT_AT.matches("@\"../prompts/system.md\"").count(), 4);
         assert!(!SYSTEM_MD.contains("does not take `_atman_intent`"));
         assert!(LOOP_FINAL_ANSWER_MD.contains("MUST include exactly one `final.answer` tool call"));
         assert!(LOOP_FINAL_ANSWER_MD.contains("`_atman_intent`"));
