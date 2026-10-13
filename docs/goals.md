@@ -21,7 +21,7 @@ Pause reasons accepted from agents are `completed`, `needs_input`, `blocked`, an
 
 ## Execution boundaries
 
-Watcher registration validates its target before adding an active watch. Unwatch stops future results from that registration; notifications already queued remain available. Watcher completion and notification enqueue share one state lock, and changes wake every waiter, including hosts waiting for all watches to finish.
+Watcher registration validates its target before adding an active watch. Before returning success, it establishes the source subscription and captures the terminal screen baseline; subsequent screen updates remain available even before the background consumer is first polled. Unwatch stops future results from that registration; notifications already queued remain available. Watcher completion and notification enqueue share one state lock, and changes wake every waiter, including hosts waiting for all watches to finish.
 
 Persistent watchers retain their output subscription and consumed position. Flow and background-command matches advance through available output, including patterns split across updates. Terminal watchers report newly visible matching positions; an unchanged match does not repeat on unrelated output, but removing and displaying it again can trigger another notification. A watcher can match existing output at registration. Source exit ends the watch after remaining matches; broadcast lag recovers from the available output snapshot. An empty pattern is rejected. Match notifications contain the matched text rather than a copy of the complete output history. Use the source output tools when more context is needed.
 

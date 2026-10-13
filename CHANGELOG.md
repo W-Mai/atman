@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Watcher registration** — Source subscriptions and terminal screen baselines are ready before registration succeeds, preserving transient matches that arrive before the background task is first polled.
+
 - **Flow watcher payloads** — Match notifications contain the matched text instead of copying the complete output history for every occurrence.
 
 - **Persistent watchers** — Output subscriptions and read positions survive matches. Historical output is consumed once, terminal matches do not repeat while unchanged, and cancellation remains responsive when buffered results are immediately available.

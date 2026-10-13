@@ -1057,7 +1057,7 @@ impl crate::watch::Watchable for TermEntry {
         pattern: String,
     ) -> futures::stream::BoxStream<'static, crate::watch::WatchResult> {
         let rx = self.stream_tx.subscribe();
-        let watch = TerminalWatch {
+        let mut watch = TerminalWatch {
             entry: self,
             rx,
             pattern,
@@ -1066,6 +1066,8 @@ impl crate::watch::Watchable for TermEntry {
             pending: std::collections::VecDeque::new(),
             ended: false,
         };
+        let (screen, revision) = watch.snapshot();
+        watch.observe(screen, revision);
         Box::pin(futures::stream::unfold(watch, |mut watch| async move {
             let result = watch.next().await?;
             Some((result, watch))
@@ -1093,8 +1095,32 @@ impl TerminalWatch {
         )
     }
 
-    async fn next(&mut self) -> Option<crate::watch::WatchResult> {
+    fn observe(&mut self, screen: TerminalScreen, revision: u64) {
         use crate::watch::WatchResult;
+        // Ignore broadcasts already included in the initial/recovery snapshot.
+        if self.revision.is_none_or(|seen| revision > seen) {
+            let mut matches = std::collections::HashSet::new();
+            for row in 0..screen.rows {
+                for col in find_pattern_columns(&screen, row, &self.pattern) {
+                    if !self.matches.contains(&(row, col)) {
+                        self.pending.push_back(WatchResult::Matched {
+                            row: Some(row),
+                            col: Some(col),
+                            text: self.pattern.clone(),
+                        });
+                    }
+                    matches.insert((row, col));
+                }
+            }
+            self.matches = matches;
+            self.revision = Some(revision);
+        }
+        if self.ended {
+            self.pending.push_back(WatchResult::SourceExited);
+        }
+    }
+
+    async fn next(&mut self) -> Option<crate::watch::WatchResult> {
         loop {
             if let Some(result) = self.pending.pop_front() {
                 return Some(result);
@@ -1102,43 +1128,18 @@ impl TerminalWatch {
             if self.ended {
                 return None;
             }
-            let (screen, revision) = if self.revision.is_none() {
-                self.snapshot()
-            } else {
-                match self.rx.recv().await {
-                    Ok(TermStreamEvent::Chunk {
-                        screen, revision, ..
-                    }) => (screen, revision),
-                    Ok(TermStreamEvent::Exited { .. })
-                    | Err(broadcast::error::RecvError::Closed) => {
-                        let snapshot = self.snapshot();
-                        self.ended = true;
-                        snapshot
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => self.snapshot(),
+            let (screen, revision) = match self.rx.recv().await {
+                Ok(TermStreamEvent::Chunk {
+                    screen, revision, ..
+                }) => (screen, revision),
+                Ok(TermStreamEvent::Exited { .. }) | Err(broadcast::error::RecvError::Closed) => {
+                    let snapshot = self.snapshot();
+                    self.ended = true;
+                    snapshot
                 }
+                Err(broadcast::error::RecvError::Lagged(_)) => self.snapshot(),
             };
-            // Ignore broadcasts already included in the initial/recovery snapshot.
-            if self.revision.is_none_or(|seen| revision > seen) {
-                let mut matches = std::collections::HashSet::new();
-                for row in 0..screen.rows {
-                    for col in find_pattern_columns(&screen, row, &self.pattern) {
-                        if !self.matches.contains(&(row, col)) {
-                            self.pending.push_back(WatchResult::Matched {
-                                row: Some(row),
-                                col: Some(col),
-                                text: self.pattern.clone(),
-                            });
-                        }
-                        matches.insert((row, col));
-                    }
-                }
-                self.matches = matches;
-                self.revision = Some(revision);
-            }
-            if self.ended {
-                self.pending.push_back(WatchResult::SourceExited);
-            }
+            self.observe(screen, revision);
         }
     }
 }
@@ -3253,8 +3254,10 @@ mod tests {
                 state: entry.state.lock().unwrap().clone(),
             });
         }
-        emit(&entry, b"done");
         let mut stream = Arc::clone(&entry).watch_output("done".into());
+        // Registration captures its initial screen before the first stream poll.
+        emit(&entry, b"done");
+        emit(&entry, b"\r\x1b[2K");
         assert!(matches!(
             stream.next().await,
             Some(WatchResult::Matched { .. })

@@ -290,7 +290,7 @@ impl WatchHub {
 }
 
 pub trait Watchable: Send + Sync {
-    /// Keep the subscription and consumed output alive for the entire watch.
+    /// Establish subscriptions before returning. Sources with replaceable state must also capture their initial snapshot here. Keep the subscription and consumed output alive for the entire watch.
     fn watch_output(self: Arc<Self>, pattern: String) -> BoxStream<'static, WatchResult>;
 }
 
@@ -566,8 +566,8 @@ fn spawn_watcher(
     watchable: Arc<dyn Watchable>,
 ) {
     let cancel = hub.get_cancel(&wid);
+    let mut output = watchable.watch_output(pattern.clone());
     tokio::spawn(async move {
-        let mut output = watchable.watch_output(pattern.clone());
         loop {
             let result = tokio::select! {
                 biased;
@@ -935,6 +935,53 @@ mod tests {
             }),
         )
         .await;
+        assert!(!hub.has_work());
+    }
+
+    #[tokio::test]
+    async fn watch_registration_subscribes_before_acknowledging_success() {
+        use crate::tools::agent_ctrl::FlowRegistry;
+        let flows = Arc::new(FlowRegistry::new());
+        let entry = flows.create_entry(
+            "job".into(),
+            String::new(),
+            String::new(),
+            crate::event::FlowRunId::now(),
+        );
+        let tasks = crate::task_registry::TaskRegistry::new();
+        tasks.register(
+            crate::task_registry::TaskKind::Flow,
+            crate::task_registry::TaskDisplay {
+                label: "job".into(),
+                command: None,
+            },
+            "job".into(),
+            "session".into(),
+            CancellationToken::new(),
+        );
+        let hub = Arc::new(WatchHub::new());
+        let ctx = ToolCtx::new()
+            .with_session_id("session")
+            .with_task_registry(tasks)
+            .with_flow_registry(flows)
+            .with_watch_hub(hub.clone());
+        let result = Watch
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Str("job".into()), Value::Str("done".into())],
+                    named: vec![],
+                },
+                &ctx,
+            )
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(entry.stream_tx.receiver_count(), 1);
+        let active = hub.list_active();
+        assert_eq!(active.len(), 1);
+        // Cancellation before the producer first polls still releases its subscription.
+        hub.unregister(&active[0].id);
+        tokio::task::yield_now().await;
+        assert_eq!(entry.stream_tx.receiver_count(), 0);
         assert!(!hub.has_work());
     }
 
