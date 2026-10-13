@@ -146,8 +146,8 @@ pub const META_COMMANDS: &[MetaCommand] = &[
     },
     MetaCommand {
         name: "goal",
-        desc: "get / set / clear session goal",
-        usage: ":goal | :goal <text> | :goal clear",
+        desc: "manage goals and pause / resume agents",
+        usage: ":goal | :goal set <text> | :goal pause | :goal resume | :goal clear",
         aliases: &[],
     },
     MetaCommand {

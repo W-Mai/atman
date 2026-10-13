@@ -25,6 +25,7 @@ pub enum ContentKey {
     Cheatsheet,
     Mcp,
     Knowledge,
+    Goal,
     Projects,
 }
 
@@ -66,6 +67,7 @@ pub enum WindowContent {
     Cheatsheet,
     Mcp,
     Knowledge,
+    Goal,
     Projects,
 }
 
@@ -80,6 +82,7 @@ impl WindowContent {
             WindowContent::Cheatsheet => ContentKey::Cheatsheet,
             WindowContent::Mcp => ContentKey::Mcp,
             WindowContent::Knowledge => ContentKey::Knowledge,
+            WindowContent::Goal => ContentKey::Goal,
             WindowContent::Projects => ContentKey::Projects,
         }
     }
@@ -98,6 +101,7 @@ impl WindowContent {
             WindowContent::Cheatsheet => "?",
             WindowContent::Mcp => "⚡",
             WindowContent::Knowledge => "§",
+            WindowContent::Goal => "◎",
             WindowContent::Projects => "▦",
         }
     }

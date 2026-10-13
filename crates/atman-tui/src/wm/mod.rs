@@ -660,7 +660,7 @@ impl WindowManager {
 
         if matches!(
             panel.content_kind,
-            WindowContent::Projects | WindowContent::Knowledge
+            WindowContent::Projects | WindowContent::Knowledge | WindowContent::Goal
         ) && matches!(
             action,
             crate::keys::KeyAction::PageUp
@@ -882,6 +882,29 @@ impl WindowManager {
                     ));
                 }
             }
+            PaletteEntryId::ManageGoal => {
+                if let Some(session) = app.session.clone() {
+                    let canvas = app.maximized_canvas();
+                    let id = self.open_with_size(
+                        "goal",
+                        ContentKey::Goal,
+                        OpenPolicy::ReuseExisting,
+                        WindowContent::Goal,
+                        "Goal",
+                        canvas,
+                        92,
+                        26,
+                        false,
+                    );
+                    if let Some(panel) = self.panels.iter_mut().find(|p| p.id == id)
+                        && panel.content.is_none()
+                    {
+                        panel.content = Some(Box::new(
+                            crate::window::goal_panel::GoalPanelContent::new(session),
+                        ));
+                    }
+                }
+            }
             PaletteEntryId::ManageKnowledge => {
                 let canvas = app.last_transcript_rect.unwrap_or_default();
                 self.open_with_size(
@@ -1053,6 +1076,21 @@ impl WindowManager {
                 WmCommand::TermResize { handle, rows, cols } => {
                     if let Some(tx) = control_tx {
                         let _ = tx.send(crate::TuiControl::TermResize { handle, rows, cols });
+                    }
+                }
+                WmCommand::GoalControl {
+                    target,
+                    goal_id,
+                    revision,
+                    action,
+                } => {
+                    if let Some(tx) = control_tx {
+                        let _ = tx.send(crate::TuiControl::GoalControl {
+                            target,
+                            goal_id,
+                            revision,
+                            action,
+                        });
                     }
                 }
                 WmCommand::OpenTaskPanel { handle, maximized } => {
@@ -1249,7 +1287,7 @@ pub fn render(
     for panel in &mut panels.panels {
         if matches!(
             panel.content_kind,
-            WindowContent::Mcp | WindowContent::Knowledge
+            WindowContent::Mcp | WindowContent::Knowledge | WindowContent::Goal
         ) && (canvas.width < 55 || canvas.height < 22)
         {
             panel.rect = canvas;
@@ -1305,7 +1343,7 @@ pub fn render(
         if content_area.height > 0 && content_area.width > 0 {
             let content_bg: Color = if matches!(
                 panel.content_kind,
-                WindowContent::Mcp | WindowContent::Knowledge
+                WindowContent::Mcp | WindowContent::Knowledge | WindowContent::Goal
             ) {
                 shell::surface_bg(&t)
             } else {

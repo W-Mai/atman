@@ -12,6 +12,7 @@ All notable changes to atman are documented in this file.
 - **Goal execution control** — Shared parent and child controllers provide cooperative pause gates, cancellation-aware waits, operation tracking, and explicit recovery after interruption. Parent resume preserves each child's own pause state.
 - **Managed agent goals** — Scoped goal tools and revisioned state events connect root and child execution. User pauses preserve in-flight replies and tool results; child continuation retains its handle and context across distinct runs, and child goal outcomes enter the parent's context.
 - **Daemon goal control** — `goal.run` drives managed agents across turns while `run_flow` remains a single execution. Goal state and revision-checked controls are available to the owning client for root and child agents.
+- **Goal interface** — Root and child panels provide padded Pause / Resume buttons and `Ctrl+Y`. The goal panel supports agent selection, editing, revision checks, and confirmed clearing with keyboard and mouse controls. Managed CLI templates use goal-driven continuation without completion classifiers.
 
 ### 🐛 Fixes
 

@@ -23,11 +23,21 @@ Root and child goals use the same controller. Pausing an ancestor adds a restric
 
 ## Persistence and recovery
 
+Managed child agents retain their handle, context, and workspace while paused, including completion pauses, so an explicit Resume can use the same instance. Clear, `flow.kill`, or session shutdown cancels that instance and releases its live resources. A cancelled child cannot be resumed. Process restart restores goal records, not suspended Rust execution or external side effects.
+
+`goal_turn_started` events associate an agent owner and its current goal identity with each turn and run. The goal identity can be absent when the first user turn has not created an objective yet; subsequent `goal_changed` events identify that objective under the same owner.
+
 Root state is stored in `<session>/goal.json`; child records are stored in `<session>/goals/<goal-id>.json`. Writes are atomic and revision checked. Existing `goal.txt` records load paused. Clearing writes a tombstone so legacy text cannot reappear. Opening a session with an interrupted active goal pauses it; recovery requires explicit control and does not replay past side effects.
 
 No default turn, token, fuel, or time budget is added. Provider retries retain their existing limits; exhausted retries pause the goal instead of silently starting another attempt.
 
-## Daemon control
+## TUI and CLI controls
+
+The root Goal section and child flow panels display padded **Pause / Resume** buttons with `Ctrl+Y`. `:goal` or **Manage Goal** in `Ctrl+P` opens the goal panel. Its agent selector addresses the root or an existing managed child; `Tab` / `Shift+Tab`, `Enter`, and mouse clicks operate the same controls. `Space` toggles the selected goal outside editing. `Ctrl+S` saves the objective; `Esc` leaves editing. Clear requires a second activation. Saving keeps the draft visible, including when a revision conflict rejects it.
+
+Plain REPL commands are `:goal`, `:goal set <text>`, `:goal pause`, `:goal resume`, and `:goal clear`. Controls run immediately instead of entering the prompt queue. Managed `atman run` invocations continue while active and exit when paused or failed; interactive REPL and daemon owners remain available for explicit Resume. No entry point adds a default goal budget.
+
+## Daemon methods
 
 `goal.run` accepts the same parameters as `run_flow` and requires a managed invocation contract with a `user_message` string parameter. It creates an active goal from that parameter and returns `session_id`, the initial `run_id`, and `goal_id`. Subsequent turns have separate run IDs in the event stream. The owner stays live while paused so the authenticated client can resume it. `run_flow` retains its single-execution contract.
 

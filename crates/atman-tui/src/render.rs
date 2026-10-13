@@ -656,11 +656,17 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         let goal_scroll = app.goal_scroll;
         let plans_scroll = app.plans_scroll;
         let todos_scroll = app.todos_scroll;
+        let goal_state = app.session.as_ref().map(|s| s.goal_control.snapshot());
         let sr = sidebar::render(
             f,
             area,
             sidebar::SidebarInputs {
-                goal: app.goal.as_deref(),
+                goal: goal_state
+                    .as_ref()
+                    .and_then(|s| s.goal.as_ref())
+                    .map(|g| g.objective.as_str())
+                    .or(app.goal.as_deref()),
+                goal_state: goal_state.as_ref(),
                 context: &app.context,
                 attach_count: app.attach_count,
                 session_id: &app.session_id,

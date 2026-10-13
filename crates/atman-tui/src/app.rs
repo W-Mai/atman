@@ -1844,6 +1844,13 @@ impl AppState {
             }
             atman_runtime::TaskKind::Flow => {
                 Box::new(crate::window::flow_panel::FlowPanelContent {
+                    goal_control: self
+                        .session
+                        .as_ref()
+                        .and_then(|s| s.flow_registry.lookup(handle).ok())
+                        .and_then(|e| e.goal_control.get().cloned()),
+                    goal_rect: ratatui::layout::Rect::default(),
+                    goal_hover: false,
                     handle: handle.to_string(),
                     scroll: 0,
                     render_cache: None,
@@ -3674,6 +3681,49 @@ impl AppState {
         true
     }
 
+    pub(crate) fn refresh_goal_activity(&mut self) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        for (handle, control) in session.flow_registry.managed_goals() {
+            let Ok(entry) = session.flow_registry.lookup(&handle) else {
+                continue;
+            };
+            if entry.cancel.is_cancelled() {
+                continue;
+            }
+            let snapshot = control.snapshot();
+            let Some(goal) = &snapshot.goal else {
+                continue;
+            };
+            let label = crate::window::goal_panel::status(&snapshot);
+            let idle = matches!(
+                snapshot.execution,
+                atman_runtime::goal::GoalExecution::Paused
+            );
+            self.mutate_routed_sub_agent(
+                &entry.child_run_id.to_string(),
+                OutputMutation::Semantic,
+                |item| {
+                    let OutputItem::SubAgentActivity {
+                        status,
+                        done,
+                        goal: text,
+                        ..
+                    } = item
+                    else {
+                        return false;
+                    };
+                    let changed = *status != label || *done != idle || *text != goal.objective;
+                    *status = label;
+                    *done = idle;
+                    *text = goal.objective.clone();
+                    changed
+                },
+            );
+        }
+    }
+
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
         self.apply_permission_projection(&frame);
         match &frame {
@@ -4733,6 +4783,7 @@ impl AppState {
                     }
                 };
                 self.sub_agent_run_ids.insert(child_run_id, route);
+                self.refresh_goal_activity();
             }
             StreamFrame::SubAgentDone {
                 handle,
@@ -7749,6 +7800,53 @@ mod terminal_stream_tests {
             OutputItem::Terminal { done, .. } => assert!(*done),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn goal_activity_tracks_pauses_without_finishing_the_child_instance() {
+        use atman_runtime::memory::goal::{GoalActor, GoalPauseReason};
+        let session = std::sync::Arc::new(atman_runtime::Session::open_ephemeral());
+        session.goal_control.set("parent", None).unwrap();
+        let child = session
+            .goal_control
+            .child("child".into(), "work".into(), None)
+            .unwrap();
+        let run = atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now();
+        let entry = session.flow_registry.create_entry(
+            "child".into(),
+            "work".into(),
+            String::new(),
+            run.clone(),
+        );
+        entry.goal_control.set(child.clone()).ok().unwrap();
+        let mut app = AppState::new("s".into(), None);
+        app.session = Some(session);
+        app.apply_stream_frame(StreamFrame::SubAgentStarted {
+            handle: "child".into(),
+            goal: "work".into(),
+            child_run_id: run.to_string(),
+            model: "mock".into(),
+            tool_use_id: None,
+        });
+        child
+            .pause(
+                GoalActor::User,
+                GoalPauseReason::UserRequested,
+                "Pause".into(),
+                None,
+            )
+            .unwrap();
+        app.refresh_goal_activity();
+        assert!(
+            matches!(&app.items[0], OutputItem::SubAgentActivity { done: true, status, .. } if status == "Paused")
+        );
+        assert!(!entry.cancel.is_cancelled());
+        child.resume(GoalActor::User, None).unwrap();
+        app.refresh_goal_activity();
+        assert!(matches!(
+            &app.items[0],
+            OutputItem::SubAgentActivity { done: false, .. }
+        ));
     }
 
     #[test]

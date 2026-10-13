@@ -1459,6 +1459,21 @@ pub(crate) fn handle_key(
             }
             *interrupt_prompt = None;
         }
+        KeyAction::ToggleGoal => {
+            if let Some(session) = &app.session {
+                let control = &session.goal_control;
+                if let Some(goal) = control.record()
+                    && let Some(tx) = control_tx
+                {
+                    let _ = tx.send(TuiControl::GoalControl {
+                        target: None,
+                        goal_id: Some(goal.id),
+                        revision: Some(goal.revision),
+                        action: crate::window::goal_panel::toggle(&control.snapshot()),
+                    });
+                }
+            }
+        }
         KeyAction::NudgePrefill => {
             editor.prefill("!nudge ");
             *interrupt_prompt = None;

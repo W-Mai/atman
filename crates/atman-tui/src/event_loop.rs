@@ -150,6 +150,7 @@ pub(crate) async fn run_frames(
     toast_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     selection_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending_input_event = None;
+    let mut goal_changes = handle.session.as_ref().map(|s| s.goal_control.subscribe());
 
     let _reader_guard = ReaderGuard(reader_shutdown);
     let mut update_check = tokio::spawn(check_latest_release());
@@ -823,7 +824,14 @@ pub(crate) async fn run_frames(
                                     .iter()
                                     .find(|(_, r)| rect_contains(**r, me.column, me.row))
                                 {
-                                    if let Some(idx) = key
+                                    if key == "goal-control" {
+                                        if let Some(session) = &app.app.session && let Some(tx) = handle.control_tx.as_ref() {
+                                            let control = &session.goal_control;
+                                            if let Some(goal) = control.record() {
+                                                let _ = tx.send(crate::TuiControl::GoalControl { target: None, goal_id: Some(goal.id), revision: Some(goal.revision), action: crate::window::goal_panel::toggle(&control.snapshot()) });
+                                            }
+                                        }
+                                    } else if let Some(idx) = key
                                         .strip_prefix("plan:")
                                         .and_then(|s| s.parse::<usize>().ok())
                                     {
@@ -1564,6 +1572,16 @@ pub(crate) async fn run_frames(
                 if let Some(rx) = handle.goal_rx.as_mut() {
                     app.app.goal = rx.borrow().clone();
                 }
+            }
+            _ = async {
+                match goal_changes.as_mut() {
+                    Some(changes) => { let _ = changes.changed().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                app.app.refresh_goal_activity();
+                app.app.mark_visual_dirty();
+                app.wm_visual_version = app.wm_visual_version.wrapping_add(1);
             }
             _ = wait_context_change(handle.context_rx.as_mut()) => {
                 if let Some(rx) = handle.context_rx.as_mut() {

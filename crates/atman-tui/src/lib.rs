@@ -106,6 +106,12 @@ pub enum TuiControl {
     Submit(TuiSubmission),
     UpdateTrust(atman_runtime::trust::TrustConfig),
     CancelFlow,
+    GoalControl {
+        target: Option<String>,
+        goal_id: Option<String>,
+        revision: Option<u64>,
+        action: atman_runtime::goal::GoalAction,
+    },
     HardStop,
     EditQueuedSubmission {
         id: atman_runtime::SubmissionId,

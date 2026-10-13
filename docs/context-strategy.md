@@ -190,6 +190,7 @@ Different stores solve different retention problems:
 | Store | Prompt behavior | Intended use |
 |---|---|---|
 | Goal | Runtime synchronizes it to the versioned `session.goal` record | The current objective |
+| Child goals | Runtime synchronizes descendant revisions before the parent's next model request | Delegated objectives, pause reasons, and completion summaries |
 | Plan | Runtime synchronizes it to the versioned `session.plan` record | High-level ordered route |
 | Todos | Not automatically injected as a list; available through tools and UI | Concrete execution items inside a plan step |
 | Confessions | Managed agent selects relevant records before its main loop | Avoid repeating known failures |

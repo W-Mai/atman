@@ -301,7 +301,7 @@ HTTP MCP connections accept JSON and streaming SSE responses, apply configured h
 | `git` | diff, show, log, status (0), add, commit, branch (2), push (3) | 0–3 |
 | `test` | run | 2 |
 | `hunk` | review (0), apply (1), plan_edit (2) | 0–2 |
-| `memory` | todo.list, goal.clear, recent_turns, history, fetch_confessions, spec.status/read (0), todo.set/done/cancel/delete, goal.get/set, confess, spec.update/deviate/materialize/review (1) | 0–1 |
+| `memory` | todo.list, goal.get/pause/resume, recent_turns, history, fetch_confessions, spec.status/read (0), todo.set/done/cancel/delete, goal.set/clear, confess, spec.update/deviate/materialize/review (1) | 0–1 |
 | `plan` | read (0), write, tick (1) | 0–1 |
 | `agent` | spawn | 2 |
 | `form` | ask | 0 |
@@ -353,6 +353,8 @@ atman doctor [--fix]
 ```
 
 REPL builtins: `:help`, `:cost`, `:goal`, `:suggest`, `:compact`, `:copy`, `:attach`, …
+
+Managed agents continue across turns while their goal is active. Root and child agents share revision-checked pause and resume controls; parent pauses preserve each child's own state. The TUI shows clickable Pause / Resume buttons, with `Ctrl+Y` for the focused agent and `:goal` for details. See [Goal controls](docs/goals.md).
 
 In the TUI, `:panel` opens the same command palette as `Ctrl+P`, including when the terminal intercepts that shortcut. Every palette action has a colon command shown beside it. Direct panel commands include `:providers`, `:models`, `:aliases`, `:mcp`, `:memory`, `:history`, `:formula`, and `:keybindings`. Panel commands open immediately during a running flow and preserve pending quotes and attachments. Enter accepts a command completion first; press Enter again to execute it.
 

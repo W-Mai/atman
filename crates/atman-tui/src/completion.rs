@@ -324,6 +324,11 @@ pub fn cheatsheet_lines() -> Vec<Line<'static>> {
         kv("F1", "this cheatsheet"),
         kv("F2 / :sidebar", "toggle sidebar"),
         kv("Ctrl+P / :panel", "command palette"),
+        kv(
+            "Ctrl+Y / Goal button",
+            "pause or resume the displayed agent goal",
+        ),
+        kv(":goal", "edit and inspect root or child goals"),
         kv("Ctrl+K / :history", "search history"),
         Line::from(""),
         Line::from(section("Search History (Ctrl+K)")),

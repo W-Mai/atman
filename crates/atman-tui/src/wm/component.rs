@@ -49,6 +49,12 @@ pub enum WmCommand {
         project_root: std::path::PathBuf,
     },
     MutateProject(crate::ProjectMutation),
+    GoalControl {
+        target: Option<String>,
+        goal_id: Option<String>,
+        revision: Option<u64>,
+        action: atman_runtime::goal::GoalAction,
+    },
 }
 
 #[derive(Debug, Clone)]

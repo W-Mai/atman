@@ -17,6 +17,9 @@ use crate::wm::component::{
 };
 
 pub struct FlowPanelContent {
+    pub(crate) goal_control: Option<std::sync::Arc<atman_runtime::goal::GoalController>>,
+    pub(crate) goal_rect: Rect,
+    pub(crate) goal_hover: bool,
     pub handle: String,
     pub scroll: u32,
     pub render_cache: Option<PanelRenderCache>,
@@ -26,12 +29,42 @@ pub struct FlowPanelContent {
 
 impl WindowComponent for FlowPanelContent {
     fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion> {
-        let area = Rect::new(
+        let mut area = Rect::new(
             area.x + 1,
             area.y,
             area.width.saturating_sub(2),
             area.height,
         );
+        self.goal_rect = Rect::default();
+        if let Some(control) = &self.goal_control
+            && control.record().is_some()
+            && area.height >= 6
+        {
+            let snapshot = control.snapshot();
+            self.goal_rect = Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 3);
+            let verb = if matches!(
+                super::goal_panel::toggle(&snapshot),
+                atman_runtime::goal::GoalAction::Pause
+            ) {
+                "Pause"
+            } else {
+                "Resume"
+            };
+            crate::settings_form::render_action(
+                frame,
+                self.goal_rect,
+                &crate::settings_form::Action {
+                    label: &format!("{} · {verb}", super::goal_panel::status(&snapshot)),
+                    shortcut: "Ctrl+Y",
+                    focused: false,
+                    hovered: self.goal_hover,
+                    disabled: false,
+                },
+                &crate::theme::theme(),
+            );
+            area.y += 4;
+            area.height -= 4;
+        }
         self.selection_projection = None;
         let mut hitmap_out: Vec<HitRegion> = Vec::new();
 
@@ -238,7 +271,30 @@ impl WindowComponent for FlowPanelContent {
         self.selection_projection.clone()
     }
 
-    fn handle_event(&mut self, _event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
+    fn handle_event(&mut self, event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
+        let was_hovered = self.goal_hover;
+        let activate = match event {
+            WmEvent::Key(crate::keys::KeyAction::ToggleGoal) => true,
+            WmEvent::Mouse(mouse) => {
+                self.goal_hover = self.goal_rect.contains((mouse.column, mouse.row).into());
+                self.goal_hover
+                    && mouse.kind
+                        == crossterm::event::MouseEventKind::Down(
+                            crossterm::event::MouseButton::Left,
+                        )
+            }
+            _ => false,
+        };
+        if activate && let Some(control) = &self.goal_control {
+            return WmEventResult::Consumed(vec![super::goal_panel::command(
+                control,
+                Some(self.handle.clone()),
+                super::goal_panel::toggle(&control.snapshot()),
+            )]);
+        }
+        if was_hovered != self.goal_hover {
+            return WmEventResult::Consumed(Vec::new());
+        }
         WmEventResult::Ignored
     }
 
@@ -363,6 +419,7 @@ pub(crate) fn render_sub_agent_panel(
         "err" => "✗",
         "killed" => "⊘",
         "interrupted" => "⚠",
+        "Paused" | "Paused by parent" | "Waiting for input" | "Blocked · paused" => "Ⅱ",
         _ if done => "✓",
         _ => "◐",
     };
@@ -753,6 +810,9 @@ mod tests {
             prompts: &prompts,
         };
         let mut panel = FlowPanelContent {
+            goal_control: None,
+            goal_rect: ratatui::layout::Rect::default(),
+            goal_hover: false,
             handle: run_id,
             scroll: 0,
             render_cache: None,

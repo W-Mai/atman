@@ -14,6 +14,7 @@ pub enum SidebarPopupKind {
 
 pub struct SidebarInputs<'a> {
     pub goal: Option<&'a str>,
+    pub goal_state: Option<&'a atman_runtime::goal::GoalSnapshot>,
     pub context: &'a ContextSnapshot,
     pub attach_count: usize,
     pub session_id: &'a str,
@@ -155,7 +156,15 @@ pub fn render(
     };
 
     // Calculate content needs
-    let goal_lines = if inputs.goal_collapsed { 0 } else { 6 };
+    let goal_lines = if inputs.goal_collapsed {
+        0
+    } else {
+        6 + if inputs.goal_state.is_some_and(|s| s.goal.is_some()) {
+            4
+        } else {
+            0
+        }
+    };
     let plan_steps = inputs
         .plans
         .iter()
@@ -736,6 +745,22 @@ fn render_upper_content(
                 Style::default().fg(t.tinted_fg.into()),
             )));
         }
+        if let Some(snapshot) = inputs.goal_state.filter(|s| s.goal.is_some()) {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", crate::window::goal_panel::status(snapshot)),
+                Style::default().fg(t.subtle_fg.into()),
+            )));
+            let action = Rect::new(
+                area.x + 1,
+                area.y + lines.len() as u16,
+                area.width.saturating_sub(2),
+                3,
+            );
+            if action.bottom() <= area.bottom() {
+                result.strip_rects.insert("goal-control".into(), action);
+            }
+            lines.extend([Line::from(""), Line::from(""), Line::from("")]);
+        }
         result.goal_rect = Some(Rect {
             x: area.x,
             y: area.y,
@@ -1091,6 +1116,29 @@ fn render_upper_content(
     // Render all lines, clipped to area
     let visible: Vec<Line<'_>> = lines.into_iter().take(area.height as usize).collect();
     f.render_widget(ratatui::widgets::Paragraph::new(visible), area);
+    if let Some(rect) = result.strip_rects.get("goal-control")
+        && let Some(snapshot) = inputs.goal_state
+    {
+        crate::settings_form::render_action(
+            f,
+            *rect,
+            &crate::settings_form::Action {
+                label: if matches!(
+                    crate::window::goal_panel::toggle(snapshot),
+                    atman_runtime::goal::GoalAction::Pause
+                ) {
+                    "Pause"
+                } else {
+                    "Resume"
+                },
+                shortcut: "Ctrl+Y",
+                focused: false,
+                hovered: inputs.hovered_row == Some("goal-control"),
+                disabled: false,
+            },
+            t,
+        );
+    }
     result
 }
 

@@ -850,17 +850,50 @@ async fn cmd_run_loaded(
         let _compact_guard = session.acquire_compact_lock().await;
         session.begin_turn(user_msg);
     }
-    let outcome = executor
-        .run_linked_in_turn_with_env(
-            program,
-            &flow_name,
-            args,
-            Some(turn_id),
-            Some(session.clone()),
-            invocation_env,
-        )
-        .await;
-    session.end_turn();
+    let goal_recipe = atman_runtime::goal::GoalTurn {
+        program: program.clone(),
+        flow_name: flow_name.clone(),
+        args: args.clone(),
+        env: invocation_env.clone(),
+    };
+    let mut current_args = args;
+    let mut current_turn = turn_id;
+    let outcome = loop {
+        let outcome = executor
+            .run_linked_in_turn_with_env(
+                program,
+                &flow_name,
+                current_args,
+                Some(current_turn),
+                Some(session.clone()),
+                invocation_env.clone(),
+            )
+            .await;
+        session.end_turn();
+        if let Err(error) = &outcome
+            && session.goal_control.record().is_some()
+        {
+            let _ = session.goal_control.pause(
+                atman_runtime::memory::goal::GoalActor::Runtime,
+                atman_runtime::memory::goal::GoalPauseReason::RunFailed,
+                error.to_string(),
+                None,
+            );
+        }
+        if outcome.is_err()
+            || !atman_runtime::goal::is_managed(target_flow)
+            || !session.goal_control.should_continue()
+        {
+            break outcome;
+        }
+        let prompt = atman_runtime::goal::continuation_prompt(&session.goal_control);
+        current_turn = atman_rt::TurnId::now();
+        let mut message =
+            atman_runtime::message::Message::user_text(current_turn.clone(), prompt.clone());
+        message.origin = atman_runtime::message::MessageOrigin::Internal;
+        session.begin_turn(message);
+        current_args = goal_recipe.continuation_args(&prompt);
+    };
     if outcome.is_ok() && session.record_successful_flow().is_some() {
         let _ =
             atman_runtime::session_naming::maybe_generate_session_name(&executor, &session).await;
@@ -2282,6 +2315,20 @@ async fn cmd_repl_once(
                         }
                     }
                     atman_tui::TuiControl::CancelFlow => session_for_ctrl.cancel_flow(),
+                    atman_tui::TuiControl::GoalControl {
+                        target,
+                        goal_id,
+                        revision,
+                        action,
+                    } => {
+                        if let Err(error) = session_for_ctrl.control_goal(
+                            target.as_deref(),
+                            action,
+                            goal_id.as_deref().zip(revision),
+                        ) {
+                            reporter_for_ctrl.error(format!("Goal: {error}"));
+                        }
+                    }
                     atman_tui::TuiControl::HardStop => {
                         session_for_ctrl.cancel_flow();
                         let _ = session_for_ctrl.enqueue_injection_with_level(
@@ -3066,12 +3113,56 @@ async fn cmd_repl_once(
         (None, None, None, None)
     };
     let sid = session.id().to_string();
+    let mut goal_changes = session.goal_control.subscribe();
 
     loop {
         let mut line = if let Some(submission) = session.pop_queued_submission() {
             ReplInput::from_queued(submission)
+        } else if let Ok(line) = input_rx.try_recv() {
+            line
+        } else if session.goal_control.should_continue() {
+            let saved = session.goal_turn.lock().unwrap().clone();
+            let recipe = match saved {
+                Some(recipe) => recipe,
+                None => match resolve_slash_command("/agent continue") {
+                    Ok((program, flow_name, args, _)) => atman_runtime::goal::GoalTurn {
+                        program,
+                        flow_name,
+                        args,
+                        env: Default::default(),
+                    },
+                    Err(error) => {
+                        let _ = session.goal_control.pause(
+                            atman_runtime::memory::goal::GoalActor::Runtime,
+                            atman_runtime::memory::goal::GoalPauseReason::RunFailed,
+                            error.to_string(),
+                            None,
+                        );
+                        reporter.error(format!("Goal could not continue: {error}"));
+                        continue;
+                    }
+                },
+            };
+            let prompt = atman_runtime::goal::continuation_prompt(&session.goal_control);
+            reporter.info("Goal continued");
+            run_turn_with_interjection(
+                session.clone(),
+                &executor,
+                &lifecycles,
+                &prompt,
+                Some(Vec::new()),
+                recipe.env.clone(),
+                atman_runtime::message::MessageOrigin::Internal,
+                None,
+                TurnKind::Goal(recipe),
+                &mut input_rx,
+                &reporter,
+            )
+            .await;
+            continue;
         } else {
             tokio::select! {
+                _ = goal_changes.changed() => continue,
                 l = input_rx.recv() => match l {
                     Some(l) => l,
                     None => break,
@@ -3259,11 +3350,16 @@ async fn cmd_repl_once(
         )
         .await;
 
-        while session.watch_hub.has_active_watchers() {
+        while session.watch_hub.has_active_watchers() && !session.goal_control.should_continue() {
             let timeout = std::time::Duration::from_secs(300);
             tokio::select! {
                 biased;
+                _ = goal_changes.changed() => break,
                 Some(mut line) = input_rx.recv() => {
+                    if line.trim() == ":goal" || line.trim().starts_with(":goal ") {
+                        handle_goal_builtin(line.trim().trim_start_matches(':'), &session, &reporter);
+                        break;
+                    }
                     if let Err(error) = line.enqueue(&session) {
                         line.restore_images(&session);
                         reporter.error(format!("[atman] could not queue input: {error}"));
@@ -4779,6 +4875,7 @@ fn emit(printer: &mut Option<ExternalPrinter>, s: String) {
 enum TurnKind {
     Slash,
     Bare(atman_runtime::routing::RouteMatch),
+    Goal(atman_runtime::goal::GoalTurn),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4795,7 +4892,11 @@ async fn run_turn_with_interjection(
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ReplInput>,
     reporter: &Reporter,
 ) {
-    let (text, inline_attachments) = extract_at_paths(raw_line);
+    let (text, inline_attachments) = if matches!(kind, TurnKind::Goal(_)) {
+        (raw_line.to_string(), Vec::new())
+    } else {
+        extract_at_paths(raw_line)
+    };
     let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
     let user_msg = match build_user_message(
         &session,
@@ -4824,6 +4925,17 @@ async fn run_turn_with_interjection(
 
     let flow_fut = async {
         match kind {
+            TurnKind::Goal(recipe) => executor
+                .run_linked_in_turn_with_env(
+                    &recipe.program,
+                    &recipe.flow_name,
+                    recipe.continuation_args(&text),
+                    Some(turn_id),
+                    Some(session.clone()),
+                    invocation_env,
+                )
+                .await
+                .map_err(Into::into),
             TurnKind::Slash => {
                 run_slash_command_in_turn(&text, executor, session.clone(), turn_id, invocation_env)
                     .await
@@ -4871,7 +4983,17 @@ async fn run_turn_with_interjection(
                 }
             }
         }
-        Err(e) => reporter.error(format!("error: {e}")),
+        Err(e) => {
+            if session.goal_control.record().is_some() {
+                let _ = session.goal_control.pause(
+                    atman_runtime::memory::goal::GoalActor::Runtime,
+                    atman_runtime::memory::goal::GoalPauseReason::RunFailed,
+                    e.to_string(),
+                    None,
+                );
+            }
+            reporter.error(format!("error: {e}"));
+        }
     }
     lifecycles
         .fire(executor, atman_rt::ast::LifecycleEvent::TurnEnd)
@@ -4887,6 +5009,12 @@ async fn run_turn_with_interjection(
 fn consume_interjection_input(line: &str, session: &Session, reporter: &Reporter) -> bool {
     use atman_runtime::injection::InjectionLevel;
     let trimmed = line.trim();
+    if let Some(command) = trimmed.strip_prefix(':')
+        && (command == "goal" || command.starts_with("goal "))
+    {
+        handle_goal_builtin(command, session, reporter);
+        return true;
+    }
     if trimmed.is_empty() {
         return true;
     }
@@ -5308,32 +5436,43 @@ async fn parse_todo_id(
 }
 
 fn handle_goal_builtin(cmd: &str, session: &Session, reporter: &Reporter) {
-    let store = atman_runtime::memory::goal::GoalStore::at(session.dir());
+    use atman_runtime::memory::goal::{GoalActor, GoalPauseReason};
     let rest = cmd.strip_prefix("goal").unwrap_or(cmd).trim();
+    let control = &session.goal_control;
     if rest.is_empty() {
-        match store.get() {
-            Ok(s) if s.is_empty() => reporter.info("[atman] no session goal set"),
-            Ok(s) => reporter.info(format!("[atman] goal: {s}")),
-            Err(e) => reporter.error(format!("[atman] :goal: read failed: {e}")),
+        match control.record() {
+            Some(goal) => reporter.info(format!(
+                "[atman] Goal · {:?}: {}{}",
+                goal.status,
+                goal.objective,
+                goal.pause
+                    .map(|p| format!("\n{}", p.summary))
+                    .unwrap_or_default()
+            )),
+            None => reporter.info("[atman] no goal set"),
         }
         return;
     }
-    if rest == "clear" {
-        match store.clear() {
-            Ok(()) => {
-                session.set_goal(None);
-                reporter.info("[atman] goal cleared");
-            }
-            Err(e) => reporter.error(format!("[atman] :goal clear: {e}")),
+    let result = match rest {
+        "pause" => control.pause(
+            GoalActor::User,
+            GoalPauseReason::UserRequested,
+            "Paused by user".into(),
+            None,
+        ),
+        "resume" => control.resume(GoalActor::User, None),
+        "clear" => {
+            session.cancel_flow();
+            control.clear()
         }
-        return;
-    }
-    match store.set(rest) {
+        text => control.set(text.strip_prefix("set ").unwrap_or(text), None),
+    };
+    match result {
         Ok(()) => {
-            session.set_goal(Some(rest.to_string()));
-            reporter.info(format!("[atman] goal set: {rest}"));
+            session.set_goal(control.record().map(|g| g.objective));
+            reporter.info("[atman] goal updated");
         }
-        Err(e) => reporter.error(format!("[atman] :goal set: {e}")),
+        Err(error) => reporter.error(format!("[atman] goal: {error}")),
     }
 }
 

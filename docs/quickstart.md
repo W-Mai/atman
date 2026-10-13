@@ -246,20 +246,22 @@ Command Palette and Search History keep long queries in a horizontal input viewp
 
 Choose **Set Project Storage Scope** from `Ctrl+P` or run `:storage` to select where new sessions for the current project store Atman data. `global` uses the central Atman data directory; `local` uses `<project>/.atman`. `:storage global` and `:storage local` apply the choice directly. The setting is saved in the project's `.atman/config.toml` and takes effect for new sessions.
 
-## 6. Anchor the agent on a session goal
+## 6. Control a persistent goal
 
-The default agent uses the active session message window. As the conversation grows, automatic compaction replaces older ranges with an operational summary while retaining recent turns. Put the objective that must remain explicit outside that lossy window in the session goal:
+The default agent creates a goal for actionable requests. After a turn finishes, an active goal starts another turn until the agent reports completion, needs input, encounters a blocker, or receives a pause. Ordinary questions do not require a goal. The objective remains explicit when older conversation ranges are compacted.
 
 ```
-atman> :goal ship the atman agent MVP by friday
-[atman] goal set: ship the atman agent MVP by friday
-atman> :goal
-[atman] goal: ship the atman agent MVP by friday
+atman> :goal set finish the requested changes
+atman> :goal pause
+atman> :goal resume
 atman> :goal clear
-[atman] goal cleared
 ```
 
-`:goal` is stored in `<session_dir>/goal.json` with an identity, revision, and state. Existing `goal.txt` records remain readable and load as paused goals; clearing a goal prevents the old text from reappearing. Goal text enters model history through versioned context records, without repeating unchanged content. See `docs/context-strategy.md` for the complete request structure and compaction model.
+In the TUI, click **Pause / Resume** beside the goal or press `Ctrl+Y`. `:goal` and **Manage Goal** in `Ctrl+P` open goal details, editing, and controls for the root agent and its children. Child flow panels have their own Pause / Resume button and use `Ctrl+Y` while focused. `Tab` / `Shift+Tab` selects controls, `Enter` activates them, and `Ctrl+S` saves an edited objective. Mouse controls use the same actions.
+
+User Pause lets the current model request finish and saves its reply, then suspends new requests and tool starts. Resume continues from that boundary. Agent completion pauses automatic continuation while allowing its final response to finish. A parent pause restricts descendants without replacing their individual states. `Esc` cancels the current turn and pauses its goal; clearing removes the goal and cancels its execution. Changing the objective text does not resume it.
+
+Goals are stored in `<session_dir>/goal.json` with an identity, revision, and state. Existing `goal.txt` records remain readable and load paused; clearing prevents the old text from reappearing. Goal text and child outcomes enter model history through versioned context records without repeating unchanged content. See [Goal controls](./goals.md) for execution semantics and daemon methods, and [Context strategy](./context-strategy.md) for request composition.
 
 Use the goal for the objective, `plan.write` / `plan.tick` for the high-level ordered route, and `memory.todo.*` for concrete execution items inside the current plan step. Goal and active plan are reassembled into the system context; todos remain available through tools and the UI.
 

@@ -4301,6 +4301,7 @@ fn render_sub_agent_activity(
         "err" => "✗",
         "killed" => "⊘",
         "interrupted" => "⚠",
+        "Paused" | "Paused by parent" | "Waiting for input" | "Blocked · paused" => "Ⅱ",
         _ if done => "✓",
         _ => spinner_char(animation_frame),
     };
