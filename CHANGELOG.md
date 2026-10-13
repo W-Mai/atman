@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### 🐛 Fixes
+
+- **Agent turn completion** — Valid final answers end the current turn without waiting for watcher events. Hosts deliver queued watcher notifications in arrival order in a separate turn, retain invocation settings, and respect execution pauses.
+
 ## [1.16.0] — 2026-10-13
 
 ### ✨ Features

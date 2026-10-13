@@ -213,10 +213,10 @@ The default agent currently follows this sequence:
 5. Load the stable managed system prompt from `prompts/system.md`.
 6. Enter a `loop` whose main call uses `context: "session"` and the managed system prompt.
 7. Dispatch tool calls and push their results into session history.
-8. When no tools are requested, check the current flow's pending interjections, classify structured task/transcript/response evidence as complete, awaiting user input, missing an intended action, or incomplete work, then continue or terminate accordingly.
-9. Before the root flow terminates, wait for an active watcher event, append a fired event to session history, and continue the loop.
+8. Accept a valid `final.answer`, publish its complete response, and end the turn. Without a valid final answer, handle pending interjections and request a final answer after tool work.
+9. After the turn ends, the host prioritizes queued user input, then delivers pending watcher notifications in a new turn or continues an active goal. Watcher notifications are batched in arrival order, retain their watcher origin, and respect execution pauses.
 
-The managed `.at` files own these continuation and termination decisions. The shared classification contract and scoped action/work nudges are loaded from managed prompt files, while the runtime supplies message, watcher, and pending-input primitives without deciding whether an agent loop is finished. Managed templates are compared byte-for-byte and atomically replaced only when bundled content changes.
+The managed `.at` files own tool loops and final-answer acceptance. The host owns turn boundaries and background wakeups; watcher events do not keep a finished loop alive. Managed templates are compared byte-for-byte and atomically replaced only when bundled content changes.
 
 This is retrieval before the main loop plus full active-session context inside the loop. It is not a fixed ten-message sliding window and not automatic semantic recall.
 

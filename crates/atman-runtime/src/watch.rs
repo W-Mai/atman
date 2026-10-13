@@ -1,5 +1,5 @@
 use crate::value::AtmanPayload;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -89,7 +89,7 @@ pub struct WatcherInfo {
 
 pub struct WatchHub {
     watchers: Mutex<HashMap<WatcherId, Watcher>>,
-    pending_events: Mutex<Vec<WatchEvent>>,
+    pending_events: Mutex<VecDeque<WatchEvent>>,
     notify: Notify,
 }
 
@@ -103,7 +103,7 @@ impl WatchHub {
     pub fn new() -> Self {
         Self {
             watchers: Mutex::new(HashMap::new()),
-            pending_events: Mutex::new(Vec::new()),
+            pending_events: Mutex::new(VecDeque::new()),
             notify: Notify::new(),
         }
     }
@@ -133,6 +133,7 @@ impl WatchHub {
     pub fn unregister(&self, id: &WatcherId) -> bool {
         if let Some(w) = self.watchers.lock().unwrap().remove(id) {
             w.cancel.cancel();
+            self.notify.notify_one();
             true
         } else {
             false
@@ -141,6 +142,12 @@ impl WatchHub {
 
     pub fn has_active_watchers(&self) -> bool {
         !self.watchers.lock().unwrap().is_empty()
+    }
+
+    /// Include queued events from watches that have already completed.
+    pub fn has_work(&self) -> bool {
+        let pending = self.pending_events.lock().unwrap();
+        !pending.is_empty() || self.has_active_watchers()
     }
 
     pub fn list_active(&self) -> Vec<WatcherInfo> {
@@ -177,6 +184,8 @@ impl WatchHub {
     }
 
     pub fn enqueue_event(&self, event: WatchEvent) {
+        // Retiring a one-shot watch and publishing its event must not expose an idle gap.
+        let mut pending = self.pending_events.lock().unwrap();
         let should_remove = {
             let watchers = self.watchers.lock().unwrap();
             watchers
@@ -189,19 +198,58 @@ impl WatchHub {
                 w.cancel.cancel();
             }
         }
-        self.pending_events.lock().unwrap().push(event);
+        pending.push_back(event);
+        drop(pending);
         self.notify.notify_one();
     }
 
+    /// Wait without consuming events so a competing input or pause cannot lose them.
+    pub async fn wait_for_pending(&self) {
+        loop {
+            let notified = self.notify.notified();
+            if !self.pending_events.lock().unwrap().is_empty() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// A batch host may exit when all watches have been removed without an event.
+    pub async fn wait_for_pending_or_idle(&self) {
+        loop {
+            let notified = self.notify.notified();
+            if !self.pending_events.lock().unwrap().is_empty() || !self.has_active_watchers() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Deliver the current notification batch in arrival order, including retired watchers.
+    pub fn take_pending_prompt(&self) -> Option<String> {
+        let events: Vec<_> = self.pending_events.lock().unwrap().drain(..).collect();
+        if events.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "Watcher notifications, not a new user request. Process these events using the recorded context; do not repeat completed work.\n\n{}",
+            events
+                .iter()
+                .map(format_watch_event_text)
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        ))
+    }
+
     pub async fn wait_for_event(&self, timeout: Duration) -> Option<WatchEvent> {
-        if let Some(evt) = self.pending_events.lock().unwrap().pop() {
+        if let Some(evt) = self.pending_events.lock().unwrap().pop_front() {
             return Some(evt);
         }
         if !self.has_active_watchers() {
             return None;
         }
-        let _ = tokio::time::timeout(timeout, self.notify.notified()).await;
-        self.pending_events.lock().unwrap().pop()
+        let _ = tokio::time::timeout(timeout, self.wait_for_pending_or_idle()).await;
+        self.pending_events.lock().unwrap().pop_front()
     }
 }
 

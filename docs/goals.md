@@ -4,6 +4,8 @@ A goal is a persistent objective with `active` or `paused` state. A managed agen
 
 Managed root and child prompts require every turn to conclude through `final.answer`, including ordinary questions and requests for clarification. The call contains the complete response in `message` and its summary in `_atman_intent`, with no sibling tool calls. When pausing a goal, the agent must receive the pause result before issuing `final.answer` separately; pausing alone does not deliver the final response.
 
+A valid `final.answer` is published immediately and ends the current turn. Watcher notifications cannot discard or delay that answer. The interactive host, managed `atman run`, and daemon `goal.run` deliver queued watcher notifications together, in arrival order, in a new turn with a new turn ID and `watcher` origin. A completed one-shot watcher can still have a pending notification. Watcher turns retain the managed invocation settings and do not resume a paused goal; user, parent, cancellation, and failure pauses prevent background turns. The interactive host handles queued user input before watcher or goal continuation. Canonical sub-agent roles do not expose watcher tools; their final answers already end their current turn.
+
 ## Goal tools
 
 `memory.goal.get` returns `{goal, execution, paused_by, running_operations}`. `goal` is null when no objective exists. Records include `id`, `revision`, `objective`, `owner`, `parent_goal_id`, `status`, and `pause`.
@@ -43,7 +45,7 @@ The **Agent** selector chooses the root or a managed child, each with one curren
 
 The sidebar Goal card highlights on hover. Click its title, objective, or padding to open the goal panel; drag across the objective to select text. The small left arrow only collapses the preview, and the separate Pause / Resume button only changes execution state. The header displays `:goal` as the keyboard entry point.
 
-Plain REPL commands are `:goal`, `:goal set <text>`, `:goal pause`, `:goal resume`, and `:goal clear`. Controls run immediately instead of entering the prompt queue. Managed `atman run` invocations continue while active and exit when paused or failed; interactive REPL and daemon owners remain available for explicit Resume. No entry point adds a default goal budget.
+Plain REPL commands are `:goal`, `:goal set <text>`, `:goal pause`, `:goal resume`, and `:goal clear`. Controls run immediately instead of entering the prompt queue. Managed `atman run` invocations continue while the goal is active or watchers need handling, and exit on an execution pause or failure, or when neither source has work remaining. Interactive REPL and daemon owners remain available for explicit Resume. No entry point adds a default goal budget.
 
 ## Daemon methods
 

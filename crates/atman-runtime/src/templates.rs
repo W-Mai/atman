@@ -114,7 +114,7 @@ watch(handle, pattern) registers a background watcher on any running task (termi
 Use this instead of polling term.capture/bash.output in a loop. Watchers are free until they fire.
 - `mode: "once"` (default) auto-removes after first match. `mode: "persist"` fires on every match.
 - `timeout_ms` defaults to 120s. On timeout, a notification suggests checking state manually.
-- The managed agent flow calls `wait_for_watcher` before exit — active watchers keep it alive.
+- After a turn ends, the host delivers pending watcher notifications in a new turn. Always finish the current turn through `final.answer`; do not wait for watchers before answering.
 - `watcher.list` shows all active watchers. `watcher.unwatch(id)` cancels any watcher.
 Prefer watchers over polling. Polling wastes tokens and context; watchers are free until they fire.
 
@@ -274,6 +274,10 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
             ],
         )
         final_answer = extract_final_answer(reply)
+        when final_answer {
+            session.push(finalize_response(reply))
+            return final_answer
+        }
         tool_uses = extract_tool_uses(reply)
         final_answer_attempt = list.any(tool_uses, |call| call.name == "final.answer")
         when is_empty(tool_uses) {
@@ -284,33 +288,6 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                 continue
             }
             candidate_response = text_concat(reply)
-            when final_answer {
-                candidate_response = final_answer
-            }
-            when has_pending_injections() {
-                when completion_state == "reminded" {
-                    completion_state = "worked"
-                }
-                continue
-            }
-            watcher_event = wait_for_watcher(timeout_ms: 30000)
-            when watcher_event {
-                when completion_state == "reminded" {
-                    completion_state = "worked"
-                }
-                session.push(watcher_event)
-                continue
-            }
-            when has_pending_injections() {
-                when completion_state == "reminded" {
-                    completion_state = "worked"
-                }
-                continue
-            }
-            when final_answer {
-                session.push(finalize_response(reply))
-                return final_answer
-            }
             when completion_state == "worked" {
                 completion_state = "reminded"
                 session.push(message.user(@"../prompts/loop-final-answer.md"))
@@ -697,7 +674,7 @@ mod tests {
             );
         }
         assert!(AGENT_AT.contains("has_pending_injections()"));
-        assert!(AGENT_AT.contains("wait_for_watcher("));
+        assert!(!AGENT_AT.contains("wait_for_watcher("));
     }
 
     #[test]

@@ -858,6 +858,7 @@ async fn cmd_run_loaded(
     };
     let mut current_args = args;
     let mut current_turn = turn_id;
+    let mut goal_changes = session.goal_control.subscribe();
     let outcome = loop {
         let outcome = executor
             .run_linked_in_turn_with_env(
@@ -880,17 +881,30 @@ async fn cmd_run_loaded(
                 None,
             );
         }
-        if outcome.is_err()
-            || !atman_runtime::goal::is_managed(target_flow)
-            || !session.goal_control.should_continue()
-        {
+        if outcome.is_err() || !atman_runtime::goal::is_managed(target_flow) {
             break outcome;
         }
-        let prompt = atman_runtime::goal::continuation_prompt(&session.goal_control);
+        let wake = loop {
+            if let Some(wake) =
+                atman_runtime::goal::next_turn(&session.goal_control, &session.watch_hub)
+            {
+                break Some(wake);
+            }
+            if !session.goal_control.allows_background_turn() || !session.watch_hub.has_work() {
+                break None;
+            }
+            tokio::select! {
+                _ = goal_changes.changed() => {},
+                _ = session.watch_hub.wait_for_pending_or_idle() => {},
+            }
+        };
+        let Some((prompt, origin)) = wake else {
+            break outcome;
+        };
         current_turn = atman_rt::TurnId::now();
         let mut message =
             atman_runtime::message::Message::user_text(current_turn.clone(), prompt.clone());
-        message.origin = atman_runtime::message::MessageOrigin::Internal;
+        message.origin = origin;
         session.begin_turn(message);
         current_args = goal_recipe.continuation_args(&prompt);
     };
@@ -3128,7 +3142,9 @@ async fn cmd_repl_once(
             ReplInput::from_queued(submission)
         } else if let Ok(line) = input_rx.try_recv() {
             line
-        } else if session.goal_control.should_continue() {
+        } else if let Some((prompt, origin)) =
+            atman_runtime::goal::next_turn(&session.goal_control, &session.watch_hub)
+        {
             let saved = session.goal_turn.lock().unwrap().clone();
             let recipe = match saved {
                 Some(recipe) => recipe,
@@ -3151,8 +3167,13 @@ async fn cmd_repl_once(
                     }
                 },
             };
-            let prompt = atman_runtime::goal::continuation_prompt(&session.goal_control);
-            reporter.info("Goal continued");
+            reporter.info(
+                if origin == atman_runtime::message::MessageOrigin::Watcher {
+                    "Watcher notifications"
+                } else {
+                    "Goal continued"
+                },
+            );
             run_turn_with_interjection(
                 session.clone(),
                 &executor,
@@ -3160,7 +3181,7 @@ async fn cmd_repl_once(
                 &prompt,
                 Some(Vec::new()),
                 recipe.env.clone(),
-                atman_runtime::message::MessageOrigin::Internal,
+                origin,
                 None,
                 TurnKind::Goal(recipe),
                 &mut input_rx,
@@ -3170,11 +3191,14 @@ async fn cmd_repl_once(
             continue;
         } else {
             tokio::select! {
+                biased;
                 _ = goal_changes.changed() => continue,
                 l = input_rx.recv() => match l {
                     Some(l) => l,
                     None => break,
                 },
+                _ = session.watch_hub.wait_for_pending(),
+                    if session.goal_control.allows_background_turn() => continue,
                 Some(ev) = lifecycle_rx.recv() => {
                     lifecycles.fire(&executor, ev).await;
                     continue;
@@ -3357,55 +3381,6 @@ async fn cmd_repl_once(
             &reporter,
         )
         .await;
-
-        while session.watch_hub.has_active_watchers() && !session.goal_control.should_continue() {
-            let timeout = std::time::Duration::from_secs(300);
-            tokio::select! {
-                biased;
-                _ = goal_changes.changed() => break,
-                Some(mut line) = input_rx.recv() => {
-                    if line.trim() == ":goal" || line.trim().starts_with(":goal ") {
-                        handle_goal_builtin(line.trim().trim_start_matches(':'), &session, &reporter);
-                        break;
-                    }
-                    if let Err(error) = line.enqueue(&session) {
-                        line.restore_images(&session);
-                        reporter.error(format!("[atman] could not queue input: {error}"));
-                    }
-                    break;
-                }
-                evt = session.watch_hub.wait_for_event(timeout) => {
-                    if let Some(evt) = evt {
-                        let event_text = atman_runtime::watch::format_watch_event_text(&evt);
-                        reporter.info(&event_text);
-                        match resolve_route(&event_text) {
-                            Ok(Some(route)) => {
-                                run_turn_with_interjection(
-                                    session.clone(),
-                                    &executor,
-                                    &lifecycles,
-                                    &event_text,
-                                    None,
-                                    atman_runtime::InvocationEnv::default(),
-                                    atman_runtime::message::MessageOrigin::Watcher,
-                                    None,
-                                    TurnKind::Bare(route),
-                                    &mut input_rx,
-                                    &reporter,
-                                )
-                                .await;
-                            }
-                            Ok(None) => reporter.info(
-                                "[atman] no route matched. add a route to ~/.config/atman/routes.at, or use `/name args...`.",
-                            ),
-                            Err(error) => reporter.error(format!("error: {error}")),
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
     }
 
     lifecycles

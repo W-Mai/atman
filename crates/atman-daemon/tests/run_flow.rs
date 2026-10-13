@@ -49,7 +49,7 @@ async fn goal_driver_finishes_turns_and_resumes_without_replacing_the_session() 
         .authorized_live_session(&spawned.session_id, "goal-owner")
         .unwrap();
     let mut changes = session.goal_control.subscribe();
-    for count in [2, 3] {
+    for count in [2, 3, 4] {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let ended = session.sink().snapshot().iter().filter(|e| matches!(e, atman_runtime::Event::FlowEnd { .. })).count();
@@ -72,6 +72,25 @@ async fn goal_driver_finishes_turns_and_resumes_without_replacing_the_session() 
                 .control_goal(None, atman_runtime::goal::GoalAction::Resume, None)
                 .unwrap();
         }
+        if count == 3 {
+            // A retired watcher still starts a separate turn after an agent completion pause.
+            session
+                .watch_hub
+                .enqueue_event(atman_runtime::watch::WatchEvent {
+                    watcher_id: "completed-watch".into(),
+                    source: atman_runtime::watch::WatchSource::Bash {
+                        handle: "job".into(),
+                    },
+                    pattern: "ready".into(),
+                    row: None,
+                    col: None,
+                    text: "ready".into(),
+                    timestamp: chrono::Utc::now(),
+                    timed_out: false,
+                    exited: false,
+                    timeout: Duration::from_secs(1),
+                });
+        }
     }
     let runs: Vec<_> = session
         .sink()
@@ -82,8 +101,16 @@ async fn goal_driver_finishes_turns_and_resumes_without_replacing_the_session() 
             _ => None,
         })
         .collect();
-    assert_eq!(runs.len(), 3);
+    assert_eq!(runs.len(), 4);
     assert!(runs.windows(2).all(|p| p[0] != p[1]));
+    let messages = session.messages();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| m.origin == atman_runtime::message::MessageOrigin::Watcher)
+            .count(),
+        1
+    );
     assert!(state.cancel_run(&spawned.run_id));
 }
 

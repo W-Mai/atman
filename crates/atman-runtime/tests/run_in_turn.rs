@@ -320,6 +320,163 @@ async fn root_final_answer_without_provider_intent_is_persisted_after_explicit_a
 }
 
 #[tokio::test]
+async fn managed_final_answer_ends_before_watcher_notifications_start_a_new_turn() {
+    use atman_runtime::memory::goal::{GoalActor, GoalPauseReason};
+    use atman_runtime::watch::{WatchEvent, WatchMode, WatchSource};
+    use std::time::Duration;
+
+    let _registry = common::ModelRegistryGuard::acquire(common::config([
+        common::model_for_provider("smart", "final-model", 131_072, None),
+        common::mock_model("cheap"),
+    ]))
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    atman_runtime::templates::ensure_managed_agent_at(dir.path()).unwrap();
+    // Keep the shipped control flow; limit the provider catalog to this test's tools.
+    let mut source = atman_runtime::templates::AGENT_AT.to_string();
+    let tools_start = source.find("tools: [").unwrap() + "tools: [".len();
+    let tools_end = tools_start + source[tools_start..].find(']').unwrap();
+    source.replace_range(tools_start..tools_end, "\"final.answer\"");
+    let file = parse_file(&source).unwrap();
+    let mut executor = Executor::new();
+    executor.source_dir = Some(dir.path().join("commands"));
+    atman_runtime::tools::register_tier_zero(&executor.tools);
+    atman_runtime::tools::register_watch(&executor.tools);
+    executor
+        .tools
+        .register(Arc::new(atman_runtime::tools::memory::MemoryRecentTurns));
+    executor.tools.register(Arc::new(
+        atman_runtime::tools::memory::MemoryFetchConfessions {
+            store: Arc::new(atman_runtime::memory::confession::ConfessionStore::at(
+                dir.path(),
+            )),
+        },
+    ));
+    executor.providers.register(Arc::new(FinalAnswerProvider));
+    executor
+        .providers
+        .register(Arc::new(MockProvider::new("cheap").with_fallback(
+            Value::Str(r#"{"rule_names":[],"confession_triggers":[]}"#.into()),
+        )));
+    let session = Arc::new(Session::open_ephemeral());
+    executor.tool_ctx.watch_hub = Some(session.watch_hub.clone());
+    session.goal_control.set("Finish the task", None).unwrap();
+    session
+        .goal_control
+        .pause(
+            GoalActor::Agent,
+            GoalPauseReason::Completed,
+            "Done".into(),
+            None,
+        )
+        .unwrap();
+    for index in 0..9 {
+        let source = WatchSource::Bash {
+            handle: format!("job-{index}"),
+        };
+        let id = session.watch_hub.register(
+            source.clone(),
+            "done".into(),
+            WatchMode::Once,
+            Duration::from_secs(1),
+        );
+        session.watch_hub.enqueue_event(WatchEvent {
+            watcher_id: id,
+            source,
+            pattern: "done".into(),
+            row: None,
+            col: None,
+            text: format!("result-{index}"),
+            timestamp: chrono::Utc::now(),
+            timed_out: false,
+            exited: false,
+            timeout: Duration::from_secs(1),
+        });
+    }
+    assert!(!session.watch_hub.has_active_watchers());
+    let first = TurnId::now();
+    session.begin_turn(user_msg(first.clone(), "finish"));
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        executor.run_in_turn(
+            &file,
+            "agent",
+            vec![("user_prompt".into(), Value::Str("finish".into()))],
+            Some(first.clone()),
+            Some(session.clone()),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(output, Value::Str(text) if text == "Done."));
+    session.end_turn();
+    let messages = session.messages();
+    let finals: Vec<_> = messages
+        .iter()
+        .filter(|m| m.origin == MessageOrigin::FinalAnswer)
+        .collect();
+    assert_eq!(finals.len(), 1);
+    assert_eq!(finals[0].turn_id, first);
+    assert!(!messages.iter().any(|m| m.origin == MessageOrigin::Watcher));
+
+    // An explicit pause must leave the complete event batch available for Resume.
+    session
+        .goal_control
+        .pause(
+            GoalActor::User,
+            GoalPauseReason::UserRequested,
+            "Wait".into(),
+            None,
+        )
+        .unwrap();
+    assert!(atman_runtime::goal::next_turn(&session.goal_control, &session.watch_hub).is_none());
+    session.goal_control.resume(GoalActor::User, None).unwrap();
+    session
+        .goal_control
+        .pause(
+            GoalActor::Agent,
+            GoalPauseReason::Completed,
+            "Done".into(),
+            None,
+        )
+        .unwrap();
+    let (prompt, origin) =
+        atman_runtime::goal::next_turn(&session.goal_control, &session.watch_hub).unwrap();
+    assert_eq!(origin, MessageOrigin::Watcher);
+    let offsets: Vec<_> = (0..9)
+        .map(|i| prompt.find(&format!("result-{i}")).unwrap())
+        .collect();
+    assert!(offsets.windows(2).all(|p| p[0] < p[1]));
+    assert!(atman_runtime::goal::next_turn(&session.goal_control, &session.watch_hub).is_none());
+    let second = TurnId::now();
+    let mut message = user_msg(second.clone(), &prompt);
+    message.origin = origin;
+    session.begin_turn(message);
+    let output = executor
+        .run_in_turn(
+            &file,
+            "agent",
+            vec![("user_prompt".into(), Value::Str(prompt))],
+            Some(second.clone()),
+            Some(session.clone()),
+        )
+        .await
+        .unwrap();
+    session.end_turn();
+    assert!(matches!(output, Value::Str(text) if text == "Done."));
+    let messages = session.messages();
+    let finals: Vec<_> = messages
+        .iter()
+        .filter(|m| m.origin == MessageOrigin::FinalAnswer)
+        .collect();
+    assert_eq!(finals.len(), 2);
+    assert_eq!(finals[1].turn_id, second);
+    assert_ne!(first, second);
+    assert!(!session.goal_control.should_continue());
+}
+
+#[tokio::test]
 async fn run_without_turn_does_not_touch_session() {
     let _registry = common::ModelRegistryGuard::mock("mock").await;
     let src = r#"flow ask() -> string {

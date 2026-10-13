@@ -33,6 +33,26 @@ pub fn continuation_prompt(control: &GoalController) -> String {
     )
 }
 
+/// Select a new background turn after the previous turn has fully ended. Pending watcher events do not resume a paused goal or bypass execution pauses.
+pub fn next_turn(
+    control: &GoalController,
+    watchers: &crate::watch::WatchHub,
+) -> Option<(String, crate::message::MessageOrigin)> {
+    let _transition = control.transition.lock().unwrap();
+    if !control.allows_background_turn() {
+        return None;
+    }
+    if let Some(prompt) = watchers.take_pending_prompt() {
+        return Some((prompt, crate::message::MessageOrigin::Watcher));
+    }
+    control.should_continue().then(|| {
+        (
+            continuation_prompt(control),
+            crate::message::MessageOrigin::Internal,
+        )
+    })
+}
+
 /// Invocation recipe for subsequent turns; model history stays in its owning session.
 #[derive(Clone)]
 pub struct GoalTurn {
@@ -390,10 +410,15 @@ impl GoalController {
     }
 
     pub fn should_continue(&self) -> bool {
-        self.blocked_by().is_none()
+        self.allows_background_turn()
             && self
                 .record()
                 .is_some_and(|g| g.status == GoalStatus::Active)
+    }
+
+    /// Agent completion allows event handling; user, parent, and failure gates do not.
+    pub fn allows_background_turn(&self) -> bool {
+        self.blocked_by().is_none()
     }
 
     fn mutate(
