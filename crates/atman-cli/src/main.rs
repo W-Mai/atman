@@ -885,10 +885,10 @@ async fn cmd_run_loaded(
             break outcome;
         }
         let wake = loop {
-            if let Some(wake) =
-                atman_runtime::goal::next_turn(&session.goal_control, &session.watch_hub)
+            if atman_runtime::goal::has_next_turn(&session.goal_control, &session.watch_hub)
+                && let Some(message) = atman_runtime::goal::begin_background_turn(&session).await
             {
-                break Some(wake);
+                break Some(message);
             }
             if !session.goal_control.allows_background_turn() || !session.watch_hub.has_work() {
                 break None;
@@ -898,15 +898,11 @@ async fn cmd_run_loaded(
                 _ = session.watch_hub.wait_for_pending_or_idle() => {},
             }
         };
-        let Some((prompt, origin)) = wake else {
+        let Some(message) = wake else {
             break outcome;
         };
-        current_turn = atman_rt::TurnId::now();
-        let mut message =
-            atman_runtime::message::Message::user_text(current_turn.clone(), prompt.clone());
-        message.origin = origin;
-        session.begin_turn(message);
-        current_args = goal_recipe.continuation_args(&prompt);
+        current_turn = message.turn_id.clone();
+        current_args = goal_recipe.continuation_args(&message.text_concat());
     };
     if outcome.is_ok() && session.record_successful_flow().is_some() {
         let _ =
@@ -3142,9 +3138,7 @@ async fn cmd_repl_once(
             ReplInput::from_queued(submission)
         } else if let Ok(line) = input_rx.try_recv() {
             line
-        } else if let Some((prompt, origin)) =
-            atman_runtime::goal::next_turn(&session.goal_control, &session.watch_hub)
-        {
+        } else if atman_runtime::goal::has_next_turn(&session.goal_control, &session.watch_hub) {
             let saved = session.goal_turn.lock().unwrap().clone();
             let recipe = match saved {
                 Some(recipe) => recipe,
@@ -3162,26 +3156,19 @@ async fn cmd_repl_once(
                             error.to_string(),
                             None,
                         );
-                        reporter.error(format!("Goal could not continue: {error}"));
+                        reporter.error(format!("Agent could not continue: {error}"));
                         continue;
                     }
                 },
             };
-            reporter.info(
-                if origin == atman_runtime::message::MessageOrigin::Watcher {
-                    "Watcher notifications"
-                } else {
-                    "Goal continued"
-                },
-            );
             run_turn_with_interjection(
                 session.clone(),
                 &executor,
                 &lifecycles,
-                &prompt,
+                "",
                 Some(Vec::new()),
                 recipe.env.clone(),
-                origin,
+                atman_runtime::message::MessageOrigin::Internal,
                 None,
                 TurnKind::Goal(recipe),
                 &mut input_rx,
@@ -4875,33 +4862,53 @@ async fn run_turn_with_interjection(
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ReplInput>,
     reporter: &Reporter,
 ) {
-    let (text, inline_attachments) = if matches!(kind, TurnKind::Goal(_)) {
-        (raw_line.to_string(), Vec::new())
-    } else {
-        extract_at_paths(raw_line)
-    };
-    let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
-    let user_msg = match build_user_message(
-        &session,
-        &text,
-        &inline_attachments,
-        submitted_images.as_deref(),
-        turn_id.clone(),
-        origin,
-    ) {
-        Ok(message) => message,
-        Err(error) => {
-            if let Some(images) = submitted_images {
-                session.restore_pending_images(images);
-            }
-            reporter.error(format!("[atman] {error}"));
+    let (text, turn_id) = if matches!(kind, TurnKind::Goal(_)) {
+        let message = tokio::select! {
+            biased;
+            Some(mut line) = input_rx.recv() => {
+                if let Err(error) = line.enqueue(&session) {
+                    line.restore_images(&session);
+                    reporter.error(format!("[atman] could not queue input: {error}"));
+                }
+                return;
+            },
+            message = atman_runtime::goal::begin_background_turn(&session) => message,
+        };
+        let Some(message) = message else {
             return;
-        }
-    };
-    {
+        };
+        reporter.info(
+            if message.origin == atman_runtime::message::MessageOrigin::Watcher {
+                "Watcher notifications"
+            } else {
+                "Goal continued"
+            },
+        );
+        (message.text_concat(), message.turn_id)
+    } else {
+        let (text, inline_attachments) = extract_at_paths(raw_line);
+        let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
+        let user_msg = match build_user_message(
+            &session,
+            &text,
+            &inline_attachments,
+            submitted_images.as_deref(),
+            turn_id.clone(),
+            origin,
+        ) {
+            Ok(message) => message,
+            Err(error) => {
+                if let Some(images) = submitted_images {
+                    session.restore_pending_images(images);
+                }
+                reporter.error(format!("[atman] {error}"));
+                return;
+            }
+        };
         let _compact_guard = session.acquire_compact_lock().await;
         session.begin_turn_with_presentation(user_msg, presentation);
-    }
+        (text, turn_id)
+    };
     lifecycles
         .fire(executor, atman_rt::ast::LifecycleEvent::TurnStart)
         .await;
@@ -4967,14 +4974,12 @@ async fn run_turn_with_interjection(
             }
         }
         Err(e) => {
-            if session.goal_control.record().is_some() {
-                let _ = session.goal_control.pause(
-                    atman_runtime::memory::goal::GoalActor::Runtime,
-                    atman_runtime::memory::goal::GoalPauseReason::RunFailed,
-                    e.to_string(),
-                    None,
-                );
-            }
+            let _ = session.goal_control.pause(
+                atman_runtime::memory::goal::GoalActor::Runtime,
+                atman_runtime::memory::goal::GoalPauseReason::RunFailed,
+                e.to_string(),
+                None,
+            );
             reporter.error(format!("error: {e}"));
         }
     }

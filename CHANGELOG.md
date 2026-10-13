@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Background turn startup** — Watcher notifications remain queued until a turn can start. Shared startup rechecks pauses after context waits, prevents overlapping background turns, and preserves notifications when input or cancellation takes priority. Cancellation and failures block automatic wakeups without requiring a goal.
+
 - **Watcher lifecycle** — Failed target resolution leaves no active watch. State changes wake every waiter, completed watches retire atomically with their notifications, and unwatched producers cannot publish late results.
 
 - **Agent turn completion** — Valid final answers end the current turn without waiting for watcher events. Hosts deliver queued watcher notifications in arrival order in a separate turn, retain invocation settings, and respect execution pauses.

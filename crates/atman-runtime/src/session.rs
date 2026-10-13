@@ -3203,14 +3203,12 @@ impl Session {
     }
 
     pub fn cancel_flow(&self) {
-        if self.goal_control.record().is_some() {
-            let _ = self.goal_control.pause(
-                crate::memory::goal::GoalActor::User,
-                crate::memory::goal::GoalPauseReason::Cancelled,
-                "Cancelled by user".into(),
-                None,
-            );
-        }
+        let _ = self.goal_control.pause(
+            crate::memory::goal::GoalActor::User,
+            crate::memory::goal::GoalPauseReason::Cancelled,
+            "Cancelled by user".into(),
+            None,
+        );
         self.turn.flow_cancel.lock().unwrap().cancel();
     }
 

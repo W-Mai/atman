@@ -430,7 +430,15 @@ async fn managed_final_answer_ends_before_watcher_notifications_start_a_new_turn
             None,
         )
         .unwrap();
-    assert!(atman_runtime::goal::next_turn(&session.goal_control, &session.watch_hub).is_none());
+    assert!(!atman_runtime::goal::has_next_turn(
+        &session.goal_control,
+        &session.watch_hub
+    ));
+    assert!(
+        atman_runtime::goal::begin_background_turn(&session)
+            .await
+            .is_none()
+    );
     session.goal_control.resume(GoalActor::User, None).unwrap();
     session
         .goal_control
@@ -441,18 +449,25 @@ async fn managed_final_answer_ends_before_watcher_notifications_start_a_new_turn
             None,
         )
         .unwrap();
-    let (prompt, origin) =
-        atman_runtime::goal::next_turn(&session.goal_control, &session.watch_hub).unwrap();
-    assert_eq!(origin, MessageOrigin::Watcher);
+    assert!(atman_runtime::goal::has_next_turn(
+        &session.goal_control,
+        &session.watch_hub
+    ));
+    assert!(session.watch_hub.has_pending_events());
+    let message = atman_runtime::goal::begin_background_turn(&session)
+        .await
+        .unwrap();
+    let prompt = message.text_concat();
+    let second = message.turn_id;
+    assert_eq!(message.origin, MessageOrigin::Watcher);
     let offsets: Vec<_> = (0..9)
         .map(|i| prompt.find(&format!("result-{i}")).unwrap())
         .collect();
     assert!(offsets.windows(2).all(|p| p[0] < p[1]));
-    assert!(atman_runtime::goal::next_turn(&session.goal_control, &session.watch_hub).is_none());
-    let second = TurnId::now();
-    let mut message = user_msg(second.clone(), &prompt);
-    message.origin = origin;
-    session.begin_turn(message);
+    assert!(!atman_runtime::goal::has_next_turn(
+        &session.goal_control,
+        &session.watch_hub
+    ));
     let output = executor
         .run_in_turn(
             &file,

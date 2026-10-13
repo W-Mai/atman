@@ -590,10 +590,15 @@ async fn run_flow_inner(
             if owner_cancel.is_cancelled() || session.goal_control.record().is_none() {
                 break None;
             }
-            if let Some(wake) =
-                atman_runtime::goal::next_turn(&session.goal_control, &session.watch_hub)
-            {
-                break Some(wake);
+            if atman_runtime::goal::has_next_turn(&session.goal_control, &session.watch_hub) {
+                let message = tokio::select! {
+                    biased;
+                    _ = owner_cancel.cancelled() => break None,
+                    message = atman_runtime::goal::begin_background_turn(&session) => message,
+                };
+                if let Some(message) = message {
+                    break Some(message);
+                }
             }
             tokio::select! {
                 biased;
@@ -603,22 +608,18 @@ async fn run_flow_inner(
                     if session.goal_control.allows_background_turn() => {},
             }
         };
-        let Some((prompt, origin)) = wake else {
+        let Some(message) = wake else {
             break;
         };
-        turn_id = atman_rt::TurnId::now();
-        let mut message =
-            atman_runtime::message::Message::user_text(turn_id.clone(), prompt.clone());
-        message.origin = origin;
-        session.begin_turn(message);
+        turn_id = message.turn_id.clone();
         session.push_system_note(
-            if origin == atman_runtime::message::MessageOrigin::Watcher {
+            if message.origin == atman_runtime::message::MessageOrigin::Watcher {
                 "Watcher notifications".into()
             } else {
                 "Goal continued".into()
             },
         );
-        turn_args = recipe.continuation_args(&prompt);
+        turn_args = recipe.continuation_args(&message.text_concat());
     }
     lifecycles
         .fire(&executor, atman_rt::ast::LifecycleEvent::SessionEnd)

@@ -33,24 +33,36 @@ pub fn continuation_prompt(control: &GoalController) -> String {
     )
 }
 
-/// Select a new background turn after the previous turn has fully ended. Pending watcher events do not resume a paused goal or bypass execution pauses.
-pub fn next_turn(
-    control: &GoalController,
-    watchers: &crate::watch::WatchHub,
-) -> Option<(String, crate::message::MessageOrigin)> {
+/// Inspect readiness without claiming notifications or starting a turn.
+pub fn has_next_turn(control: &GoalController, watchers: &crate::watch::WatchHub) -> bool {
+    control.allows_background_turn() && (watchers.has_pending_events() || control.should_continue())
+}
+
+/// Begin a background turn only after context access is available. Cancellation while waiting leaves notifications queued; pause and readiness are checked again before consuming anything.
+pub async fn begin_background_turn(
+    session: &crate::session::Session,
+) -> Option<crate::message::Message> {
+    let _compact = session.acquire_compact_lock().await;
+    let control = &session.goal_control;
     let _transition = control.transition.lock().unwrap();
-    if !control.allows_background_turn() {
+    if !control.allows_background_turn() || session.current_turn().is_some() {
         return None;
     }
-    if let Some(prompt) = watchers.take_pending_prompt() {
-        return Some((prompt, crate::message::MessageOrigin::Watcher));
-    }
-    control.should_continue().then(|| {
+    let (prompt, origin) = if let Some(prompt) = session.watch_hub.take_pending_prompt() {
+        (prompt, crate::message::MessageOrigin::Watcher)
+    } else if control.should_continue() {
         (
             continuation_prompt(control),
             crate::message::MessageOrigin::Internal,
         )
-    })
+    } else {
+        return None;
+    };
+    let mut message = crate::message::Message::user_text(crate::event::TurnId::now(), prompt);
+    message.origin = origin;
+    // No await separates notification consumption from its insertion into history.
+    session.begin_turn(message.clone());
+    Some(message)
 }
 
 /// Invocation recipe for subsequent turns; model history stays in its owning session.
@@ -539,8 +551,8 @@ impl GoalController {
                 "stale goal: read its current state before updating",
             ));
         }
-        // User control stops local execution even if persistence fails.
-        if actor == GoalActor::User {
+        // External control stops execution even without a goal or when persistence fails.
+        if actor != GoalActor::Agent {
             self.state.lock().unwrap().execution_paused = true;
             self.changed();
         }
@@ -559,10 +571,6 @@ impl GoalController {
             goal.pause(actor, reason, summary);
             Ok(())
         })?;
-        if actor != GoalActor::Agent {
-            self.state.lock().unwrap().execution_paused = true;
-            self.changed();
-        }
         Ok(())
     }
 
@@ -591,15 +599,11 @@ impl GoalController {
 
     pub fn clear(&self) -> io::Result<()> {
         let _transition = self.transition.lock().unwrap();
-        self.state.lock().unwrap().execution_paused = true;
-        self.changed();
+        // Removing an objective must not release an existing execution pause.
         self.mutate(None, |record| {
             *record = None;
             Ok(())
-        })?;
-        self.state.lock().unwrap().execution_paused = false;
-        self.changed();
-        Ok(())
+        })
     }
 
     pub async fn wait(&self, cancel: &CancellationToken) -> Result<(), RuntimeError> {
@@ -675,6 +679,103 @@ impl Drop for GoalOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn background_start_preserves_events_until_context_and_execution_are_ready() {
+        use crate::watch::{WatchEvent, WatchMode, WatchSource};
+        use std::time::Duration;
+        let session = crate::session::Session::open_ephemeral();
+        let source = WatchSource::Bash {
+            handle: "job".into(),
+        };
+        let id = session.watch_hub.register(
+            source.clone(),
+            "done".into(),
+            WatchMode::Once,
+            Duration::from_secs(1),
+        );
+        session.watch_hub.enqueue_event(WatchEvent {
+            watcher_id: id,
+            source,
+            pattern: "done".into(),
+            row: None,
+            col: None,
+            text: "finished".into(),
+            timestamp: chrono::Utc::now(),
+            timed_out: false,
+            exited: false,
+            timeout: Duration::from_secs(1),
+        });
+        let compact = session.acquire_compact_lock().await;
+        {
+            let start = begin_background_turn(&session);
+            tokio::pin!(start);
+            tokio::select! {
+                biased;
+                _ = &mut start => panic!("context is locked"),
+                _ = std::future::ready(()) => {},
+            }
+        } // Dropping a pending start must not consume the notification.
+        assert!(session.watch_hub.has_pending_events());
+        assert!(session.current_turn().is_none());
+        let start = begin_background_turn(&session);
+        tokio::pin!(start);
+        tokio::select! {
+            biased;
+            _ = &mut start => panic!("context is locked"),
+            _ = std::future::ready(()) => {},
+        }
+        // Cancel without a goal must also stop background wakeups.
+        session.cancel_flow();
+        drop(compact);
+        assert!(start.await.is_none());
+        assert!(session.watch_hub.has_pending_events());
+        assert!(!has_next_turn(&session.goal_control, &session.watch_hub));
+        session.begin_turn(crate::message::Message::user_text(
+            crate::event::TurnId::now(),
+            "continue",
+        ));
+        assert!(begin_background_turn(&session).await.is_none());
+        session.end_turn();
+        let (first, second) = tokio::join!(
+            begin_background_turn(&session),
+            begin_background_turn(&session)
+        );
+        assert_eq!(
+            usize::from(first.is_some()) + usize::from(second.is_some()),
+            1
+        );
+        assert!(!session.watch_hub.has_pending_events());
+        assert_eq!(
+            session
+                .messages()
+                .iter()
+                .filter(|m| m.origin == crate::message::MessageOrigin::Watcher)
+                .count(),
+            1
+        );
+        session.end_turn();
+        assert!(begin_background_turn(&session).await.is_none());
+        assert!(
+            session
+                .goal_control
+                .pause(
+                    GoalActor::Runtime,
+                    GoalPauseReason::RunFailed,
+                    "failed".into(),
+                    None
+                )
+                .is_err()
+        );
+        assert!(!session.goal_control.allows_background_turn());
+        session.goal_control.set("new task", None).unwrap();
+        session.control_goal(None, GoalAction::Clear, None).unwrap();
+        assert!(session.goal_control.record().is_none());
+        assert!(!session.goal_control.allows_background_turn());
+        session.goal_control.begin_user_turn();
+        session.goal_control.clear().unwrap();
+        assert!(session.goal_control.allows_background_turn());
+    }
 
     #[tokio::test]
     async fn pause_keeps_work_and_parent_resume_preserves_child_pause() {
