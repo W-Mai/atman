@@ -211,7 +211,7 @@ The default agent currently follows this sequence:
 
 1. Push the user request into session history.
 2. Load the rule index, confession index, and five recent messages.
-3. Ask a cheap extraction call which rules and confession triggers are relevant.
+3. Ask a cheap extraction call which rules and confession triggers are relevant. Its system instruction treats conversation and context records as selection data, not tasks to execute. If extraction fails, the flow explicitly falls back to all available rule names and confession triggers so the main loop can continue without silently dropping that guidance.
 4. Append each selected full rule and matching confession as an independently keyed
    retrieved context record; unchanged items are not appended again.
 5. Load the stable managed system prompt from `prompts/system.md`.

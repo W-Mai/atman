@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Agent rule selection** — Failed preliminary extraction preserves available rules and confessions and continues into the main agent loop. Selection instructions distinguish reference context from tasks to execute.
+
 - **Extraction fallback** — `llm.extract` honors an explicit, field-validated fallback for provider and response parsing failures while preserving cancellation and execution controls.
 
 - **Idle child rendering** — Tool cards use child execution activity to drive animations. Paused and waiting child flows no longer keep the document repainting, and resume restores the running indicator.

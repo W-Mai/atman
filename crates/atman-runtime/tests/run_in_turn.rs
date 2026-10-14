@@ -689,6 +689,35 @@ async fn assert_final_answer_boundary(
     finalized: bool,
     first_responses: usize,
 ) {
+    assert_final_answer_boundary_with_extraction(
+        source,
+        provider,
+        finalized,
+        first_responses,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn managed_agent_preserves_rules_and_completes_turns_after_extraction_failure() {
+    assert_final_answer_boundary_with_extraction(
+        atman_runtime::templates::AGENT_AT,
+        Arc::new(FinalAnswerProvider::default()),
+        true,
+        1,
+        true,
+    )
+    .await;
+}
+
+async fn assert_final_answer_boundary_with_extraction(
+    source: &str,
+    provider: Arc<dyn Provider>,
+    finalized: bool,
+    first_responses: usize,
+    extraction_fails: bool,
+) {
     use atman_runtime::memory::goal::{GoalActor, GoalPauseReason};
     use atman_runtime::watch::{WatchEvent, WatchMode, WatchSource};
     use std::time::Duration;
@@ -713,18 +742,48 @@ async fn assert_final_answer_boundary(
     executor
         .tools
         .register(Arc::new(atman_runtime::tools::memory::MemoryRecentTurns));
+    let store = Arc::new(atman_runtime::memory::confession::ConfessionStore::at(
+        dir.path(),
+    ));
+    if extraction_fails {
+        let rules = atman_runtime::tools::memory_stubs::RuleFetch::new();
+        rules
+            .set_migrated(vec![atman_runtime::migration::MigratedRule {
+                name: "test-rule".into(),
+                source_tool: "test".into(),
+                source_path: dir.path().join("AGENTS.md"),
+                scope: atman_runtime::migration::RuleScope::Project,
+                content: "Preserve task evidence".into(),
+                description: Some("Evidence handling".into()),
+            }])
+            .await;
+        executor.tools.register(Arc::new(rules));
+        store
+            .append(atman_runtime::memory::confession::Confession {
+                id: atman_runtime::memory::MemoryId::now(),
+                trigger: "task evidence".into(),
+                rule_violated: "test-rule".into(),
+                what_i_did: "lost evidence".into(),
+                why: "omitted records".into(),
+                mitigation: "Keep the original evidence".into(),
+                anchors: vec![],
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+    }
     executor.tools.register(Arc::new(
-        atman_runtime::tools::memory::MemoryFetchConfessions {
-            store: Arc::new(atman_runtime::memory::confession::ConfessionStore::at(
-                dir.path(),
-            )),
-        },
+        atman_runtime::tools::memory::MemoryFetchConfessions { store },
     ));
     executor.providers.register(provider);
     executor
         .providers
         .register(Arc::new(MockProvider::new("cheap").with_fallback(
-            Value::Str(r#"{"rule_names":[],"confession_triggers":[]}"#.into()),
+            Value::Str(if extraction_fails {
+                "<tool_call><function=bash>invalid extraction</function></tool_call>".into()
+            } else {
+                r#"{"rule_names":[],"confession_triggers":[]}"#.into()
+            }),
         )));
     let session = Arc::new(Session::open_ephemeral());
     executor.tool_ctx.watch_hub = Some(session.watch_hub.clone());
@@ -780,6 +839,15 @@ async fn assert_final_answer_boundary(
     assert!(matches!(output, Value::Str(text) if text == "Done."));
     session.end_turn();
     let messages = session.messages();
+    if extraction_fails {
+        for expected in ["Preserve task evidence", "Keep the original evidence"] {
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.text_concat().contains(expected))
+            );
+        }
+    }
     let finals: Vec<_> = messages
         .iter()
         .filter(|m| m.origin == MessageOrigin::FinalAnswer)
