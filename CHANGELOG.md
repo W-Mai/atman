@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Flow stop controls** — Sidebar, task-window close, and Escape actions share immediate flow cancellation. Stopping tasks keep their elapsed timer until termination; stopped tasks leave the active list and remain in history.
+
 - **Task cancellation events** — Task lifecycle events follow registry state order even when cancellation finishes immediately. Stopped tasks cannot reappear as stopping, and repeated cancellation does not replay state transitions.
 
 - **Subagent shell authority** — Role flows preserve inherited shell capability across inline calls, allowing their declared process tools to execute. Parent authority limits and role tool exposure remain enforced.

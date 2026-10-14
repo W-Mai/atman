@@ -599,16 +599,11 @@ pub(crate) async fn run_frames(
                                         )
                                     });
                                     match (close_handle, task) {
-                                        (Some(handle), Some(task))
+                                        (Some(_), Some(task))
                                             if task.is_running()
                                                 && task.kind == atman_runtime::TaskKind::Flow =>
                                         {
-                                            if let Some(registry) = &app.app.task_registry {
-                                                let _ = registry.kill_by_handle_from_operator(
-                                                    &handle,
-                                                    &app.app.session_id,
-                                                );
-                                            }
+                                            app.app.request_task_kill(task.id);
                                             app.wm.clear_panel_close_arm();
                                             app.wm.request_close(close_id, &mut app.app);
                                         }
@@ -898,26 +893,7 @@ pub(crate) async fn run_frames(
                                         .find(|(_, kr)| rect_contains(*kr, me.column, me.row))
                                         .map(|(t, _)| t.clone());
                                     if let Some(tid) = hit_kill {
-                                        if app.app.kill_armed_id == Some(tid.clone())
-                                            && !app.app.kill_arm_expired()
-                                        {
-                                            if let Some(tr) = &app.app.task_registry {
-                                                let _ = tr.kill_from_operator(&tid);
-                                            }
-                                            app.app.clear_kill_arm();
-                                        } else {
-                                            let label = app
-                                                .task_snapshots
-                                                .iter()
-                                                .find(|s| s.id == tid)
-                                                .map(|s| s.label.clone())
-                                                .unwrap_or_default();
-                                            app.app.arm_kill(tid.clone());
-                                            app.app.push_note(
-                                                format!("press ✕ again to kill {label}"),
-                                                app::NoteLevel::Warn,
-                                            );
-                                        }
+                                        app.app.request_task_kill(tid);
                                     } else if let Some((handle, _)) = hm
                                         .insert_rects
                                         .iter()

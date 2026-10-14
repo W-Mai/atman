@@ -716,12 +716,15 @@ impl WindowManager {
                     handle,
                     kind: atman_runtime::TaskKind::Flow,
                 } = &panel.content_kind
-                    && let Some(registry) = &app.task_registry
-                    && registry
-                        .lookup_by_handle_in_session(handle, &app.session_id)
-                        .is_some_and(|task| task.is_running())
+                    && let Some(task) = app
+                        .task_registry
+                        .as_ref()
+                        .and_then(|registry| {
+                            registry.lookup_by_handle_in_session(handle, &app.session_id)
+                        })
+                        .filter(|task| task.is_running())
                 {
-                    let _ = registry.kill_by_handle_from_operator(handle, &app.session_id);
+                    app.request_task_kill(task.id);
                 }
                 return (true, vec![WmCommand::CloseWindow(id)]);
             }

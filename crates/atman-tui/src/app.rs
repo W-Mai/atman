@@ -2001,6 +2001,31 @@ impl AppState {
         self.kill_armed_at = Some(Instant::now());
     }
 
+    pub(crate) fn request_task_kill(&mut self, id: atman_runtime::TaskId) {
+        let Some(registry) = self.task_registry.clone() else {
+            return;
+        };
+        let Some(task) = registry
+            .lookup(&id)
+            .filter(|task| task.session_id == self.session_id && task.is_running())
+        else {
+            self.clear_kill_arm();
+            return;
+        };
+        if task.kind == atman_runtime::TaskKind::Flow
+            || (self.kill_armed_id.as_ref() == Some(&id) && !self.kill_arm_expired())
+        {
+            let _ = registry.kill_from_operator(&id);
+            self.clear_kill_arm();
+        } else {
+            self.arm_kill(id);
+            self.push_note(
+                format!("press ✕ again to kill {}", task.label),
+                NoteLevel::Warn,
+            );
+        }
+    }
+
     pub fn clear_kill_arm(&mut self) {
         if self.kill_armed_id.is_some() {
             self.kill_armed_id = None;
@@ -2724,7 +2749,7 @@ impl AppState {
                 {
                     s.status = new;
                     s.termination = termination;
-                    s.ended_at = Some(std::time::Instant::now());
+                    s.ended_at = new.is_terminal().then(std::time::Instant::now);
                     self.task_snapshots_revision = self.task_snapshots_revision.wrapping_add(1);
                     self.mark_visual_dirty();
                 }
@@ -8176,6 +8201,43 @@ mod terminal_stream_tests {
         match &app.items[0] {
             OutputItem::Terminal { done, .. } => assert!(*done),
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn task_stop_actions_preserve_confirmation_and_terminal_projection() {
+        use atman_runtime::{TaskKind, TaskRegistry, TaskStatus};
+        for kind in [TaskKind::Flow, TaskKind::Bash, TaskKind::Terminal] {
+            let registry = TaskRegistry::new();
+            let mut events = registry.subscribe();
+            let token = tokio_util::sync::CancellationToken::new();
+            let id = registry.register(
+                kind,
+                "task".into(),
+                "child".into(),
+                "s".into(),
+                token.clone(),
+            );
+            let mut app = AppState::new("s".into(), None).with_task_registry(registry.clone());
+            app.apply_task_event(events.try_recv().unwrap());
+            app.request_task_kill(id.clone());
+            if kind != TaskKind::Flow {
+                assert!(!token.is_cancelled());
+                assert_eq!(app.kill_armed_id, Some(id.clone()));
+                app.request_task_kill(id.clone());
+            }
+            assert!(token.is_cancelled());
+            assert!(app.kill_armed_id.is_none());
+            app.apply_task_event(events.try_recv().unwrap());
+            assert_eq!(app.task_snapshots[0].status, TaskStatus::Killing);
+            assert!(app.task_snapshots[0].ended_at.is_none());
+            registry.finish(&id, TaskStatus::Ok);
+            app.apply_task_event(events.try_recv().unwrap());
+            assert_eq!(app.task_snapshots[0].status, TaskStatus::Killed);
+            assert!(!app.task_snapshots.iter().any(|task| task.is_running()));
+            assert!(app.task_snapshots[0].ended_at.is_some());
+            app.request_task_kill(id);
+            assert!(events.try_recv().is_err());
         }
     }
 
