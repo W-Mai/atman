@@ -215,7 +215,7 @@ The default agent currently follows this sequence:
 5. Load the stable managed system prompt from `prompts/system.md`.
 6. Enter a `loop` whose main call uses `context: "session"` and the managed system prompt.
 7. Dispatch tool calls and push their results into session history.
-8. Explicitly call `final.answer(message: reply)` and return for a valid final control or a normally completed, non-empty reply without tool calls. Persist ordinary tool-call replies before dispatching tools. Preserve interrupted or truncated replies without marking them final.
+8. Explicitly call `final.answer(message: reply)` and return for a valid final control. A normally completed, non-empty plain-text reply is accepted only before any model tool calls in the current turn. After tool calls, record the candidate and request an explicit `final.answer` until a valid call arrives. Persist ordinary tool-call replies before dispatching tools. Preserve interrupted or truncated replies without marking them final.
 9. After the turn ends, the host prioritizes queued user input, then delivers pending watcher notifications in a new turn or continues an active goal. Watcher notifications are batched in arrival order, retain their watcher origin, and respect execution pauses.
 
 The managed `.at` files own tool loops and final-answer acceptance. The host owns turn boundaries and background wakeups; watcher events do not keep a finished loop alive. Managed templates are compared byte-for-byte and atomically replaced only when bundled content changes.

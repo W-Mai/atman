@@ -33,14 +33,51 @@ struct MissingIntentProvider {
 #[derive(Default)]
 struct FinalAnswerProvider {
     plain_stop: Option<StopReason>,
+    tools_before_final: bool,
+    tool_fails: bool,
+    calls: AtomicU32,
 }
 
 impl FinalAnswerProvider {
-    fn response(&self, turn_id: TurnId) -> AssistantMessage {
+    fn response(&self, req: &LlmRequest) -> AssistantMessage {
+        let turn_id = req
+            .messages
+            .first()
+            .map(|message| message.turn_id.clone())
+            .unwrap_or_else(TurnId::now);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.tools_before_final && matches!(call, 2 | 3) {
+            let reminder = req.messages.last().unwrap();
+            assert_eq!(reminder.role, MessageRole::User);
+            assert!(
+                reminder.text_concat().starts_with("Agent loop control"),
+                "request messages: {:#?}",
+                req.messages
+            );
+            assert!(reminder.text_concat().contains("final.answer"));
+            assert!(req.messages.iter().any(|message| {
+                message.role == MessageRole::Assistant
+                    && message.origin != MessageOrigin::FinalAnswer
+                    && message.text_concat() == "Done."
+            }));
+            assert!(req.messages.iter().any(|message| message.parts.iter().any(
+                |part| matches!(part, MessagePart::ToolResult { tool_use_id, is_error, .. }
+                    if tool_use_id == "read-rules" && *is_error == self.tool_fails)
+            )));
+        }
         AssistantMessage {
             message: Message {
                 role: MessageRole::Assistant,
-                parts: if self.plain_stop.is_some() {
+                parts: if self.tools_before_final && call == 0 {
+                    vec![MessagePart::ToolUse {
+                        id: "read-rules".into(),
+                        name: "rule.fetch".into(),
+                        input: serde_json::json!({}),
+                        intent: (!self.tool_fails).then(|| {
+                            atman_runtime::message::ToolCallIntent::new("Read rules").unwrap()
+                        }),
+                    }]
+                } else if self.plain_stop.is_some() || (self.tools_before_final && call != 3) {
                     vec![MessagePart::Text {
                         text: "Done.".into(),
                     }]
@@ -70,23 +107,11 @@ impl Provider for FinalAnswerProvider {
     }
 
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
-        Box::pin(async move {
-            let turn_id = req
-                .messages
-                .first()
-                .map(|message| message.turn_id.clone())
-                .unwrap_or_else(TurnId::now);
-            Ok(self.response(turn_id))
-        })
+        Box::pin(async move { Ok(self.response(&req)) })
     }
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
-        let turn_id = req
-            .messages
-            .first()
-            .map(|message| message.turn_id.clone())
-            .unwrap_or_else(TurnId::now);
-        let response = self.response(turn_id);
+        let response = self.response(&req);
         let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
         let cancel = CancellationToken::new();
         let output = Box::pin(async move {
@@ -352,6 +377,7 @@ async fn managed_flow_does_not_finalize_truncated_or_cancelled_text() {
         assert_managed_final_answer_boundary(
             Arc::new(FinalAnswerProvider {
                 plain_stop: Some(reason),
+                ..Default::default()
             }),
             false,
         )
@@ -361,7 +387,23 @@ async fn managed_flow_does_not_finalize_truncated_or_cancelled_text() {
 
 #[tokio::test]
 async fn every_managed_subagent_role_delivers_plain_text_through_final_answer() {
-    let _registry = common::ModelRegistryGuard::mock("final-model").await;
+    assert_subagent_final_answer_policy(false).await;
+}
+
+#[tokio::test]
+async fn every_managed_subagent_role_requires_explicit_final_answer_after_tools() {
+    assert_subagent_final_answer_policy(true).await;
+}
+
+async fn assert_subagent_final_answer_policy(tools_before_final: bool) {
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "final-model",
+            "final-model",
+            131_072,
+            None,
+        )]))
+        .await;
     let dir = tempfile::tempdir().unwrap();
     atman_runtime::templates::ensure_managed_agent_at(dir.path()).unwrap();
     let mut source = atman_runtime::templates::SUBAGENT_AT.to_string();
@@ -369,22 +411,26 @@ async fn every_managed_subagent_role_delivers_plain_text_through_final_answer() 
     while let Some(start) = source[offset..].find("tools: [") {
         let start = offset + start + "tools: [".len();
         let end = start + source[start..].find(']').unwrap();
-        source.replace_range(start..end, "\"final.answer\"");
-        offset = start + "\"final.answer\"".len();
+        let catalog = "\"final.answer\", \"rule.fetch\"";
+        source.replace_range(start..end, catalog);
+        offset = start + catalog.len();
     }
     let file = parse_file(&source).unwrap();
     let mut executor = Executor::new();
     executor.source_dir = Some(dir.path().join("commands"));
     atman_runtime::tools::register_tier_zero(&executor.tools);
-    executor.providers.register(Arc::new(FinalAnswerProvider {
-        plain_stop: Some(StopReason::End),
-    }));
     for entry in [
         "research_loop",
         "verify_loop",
         "implement_loop",
         "review_loop",
     ] {
+        let provider = Arc::new(FinalAnswerProvider {
+            plain_stop: (!tools_before_final).then_some(StopReason::End),
+            tools_before_final,
+            ..Default::default()
+        });
+        executor.providers.register(provider.clone());
         let session = Arc::new(Session::open_ephemeral());
         let turn = TurnId::now();
         session.begin_turn(user_msg(turn.clone(), "finish"));
@@ -408,8 +454,21 @@ async fn every_managed_subagent_role_delivers_plain_text_through_final_answer() 
             .iter()
             .filter(|m| m.role == MessageRole::Assistant)
             .collect();
-        assert_eq!(assistants.len(), 1, "{entry}");
-        assert_eq!(assistants[0].origin, MessageOrigin::FinalAnswer, "{entry}");
+        let expected_calls = if tools_before_final { 4 } else { 1 };
+        assert_eq!(provider.calls.load(Ordering::SeqCst), expected_calls);
+        assert_eq!(assistants.len(), expected_calls as usize, "{entry}");
+        assert_eq!(
+            assistants.last().unwrap().origin,
+            MessageOrigin::FinalAnswer,
+            "{entry}"
+        );
+        assert_eq!(
+            assistants
+                .iter()
+                .filter(|m| m.origin == MessageOrigin::FinalAnswer)
+                .count(),
+            1
+        );
         session.end_turn();
     }
 }
@@ -462,7 +521,35 @@ flow parent() -> [string] {
     session.end_turn();
 }
 
+#[tokio::test]
+async fn managed_tool_turns_require_explicit_final_until_the_next_turn() {
+    for source in [
+        atman_runtime::templates::AGENT_AT,
+        include_str!("../../../examples/agent.at"),
+    ] {
+        for tool_fails in [false, true] {
+            let provider = Arc::new(FinalAnswerProvider {
+                tools_before_final: true,
+                tool_fails,
+                ..Default::default()
+            });
+            assert_final_answer_boundary(source, provider.clone(), true, 4).await;
+            // The new watcher turn has no tool calls and accepts plain text immediately.
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 5);
+        }
+    }
+}
+
 async fn assert_managed_final_answer_boundary(provider: Arc<dyn Provider>, finalized: bool) {
+    assert_final_answer_boundary(atman_runtime::templates::AGENT_AT, provider, finalized, 1).await;
+}
+
+async fn assert_final_answer_boundary(
+    source: &str,
+    provider: Arc<dyn Provider>,
+    finalized: bool,
+    first_responses: usize,
+) {
     use atman_runtime::memory::goal::{GoalActor, GoalPauseReason};
     use atman_runtime::watch::{WatchEvent, WatchMode, WatchSource};
     use std::time::Duration;
@@ -475,10 +562,10 @@ async fn assert_managed_final_answer_boundary(provider: Arc<dyn Provider>, final
     let dir = tempfile::tempdir().unwrap();
     atman_runtime::templates::ensure_managed_agent_at(dir.path()).unwrap();
     // Keep the shipped control flow; limit the provider catalog to this test's tools.
-    let mut source = atman_runtime::templates::AGENT_AT.to_string();
+    let mut source = source.to_string();
     let tools_start = source.find("tools: [").unwrap() + "tools: [".len();
     let tools_end = tools_start + source[tools_start..].find(']').unwrap();
-    source.replace_range(tools_start..tools_end, "\"final.answer\"");
+    source.replace_range(tools_start..tools_end, "\"final.answer\", \"rule.fetch\"");
     let file = parse_file(&source).unwrap();
     let mut executor = Executor::new();
     executor.source_dir = Some(dir.path().join("commands"));
@@ -567,7 +654,7 @@ async fn assert_managed_final_answer_boundary(provider: Arc<dyn Provider>, final
             .iter()
             .filter(|m| m.role == MessageRole::Assistant)
             .count(),
-        1
+        first_responses
     );
     assert!(!messages.iter().any(|m| m.origin == MessageOrigin::Watcher));
 

@@ -3,10 +3,10 @@ flow agent(user_prompt: string) -> string {
         capabilities { shell: true }
         invocation { user_message: user_prompt, goal: true }
     }
-    return agent_loop().await
+    return agent_loop(false).await
 }
 
-flow agent_loop() -> string {
+flow agent_loop(tools_called: bool) -> string {
     response = llm.call(
         record: false,
         output: "response",
@@ -46,6 +46,11 @@ flow agent_loop() -> string {
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
         when response.stop_reason == "end" {
+            when tools_called {
+                session.push(reply)
+                session.push(message.user("Agent loop control (not a new user request): tool calls occurred in this turn. Deliver the complete answer through exactly one final.answer call without sibling calls or accompanying text. Put the full response in message and a concise summary in _atman_intent. If more work or a goal pause is required, finish it first, then call final.answer separately."))
+                return agent_loop(tools_called).await
+            }
             when !is_empty(text_concat(reply)) {
                 return final.answer(message: reply)
             }
@@ -56,5 +61,5 @@ flow agent_loop() -> string {
     session.push(reply)
     tool_results = dispatch_all(tool_uses)
     session.push(tool_results)
-    return agent_loop().await
+    return agent_loop(true).await
 }

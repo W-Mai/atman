@@ -8,9 +8,11 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Final answers after tool calls** — Managed root and child flows require an explicit model `final.answer` after tool calls in the current turn. Plain-text delivery remains available for turns without model tool calls.
+
 - **Child goals after parent completion** — An agent completing its own goal no longer blocks active descendants. User pauses, explicit parent controls, failure gates, and child-owned pauses remain effective.
 
-- **Flow-controlled final answers** — Managed root and child flows explicitly call `final.answer` to publish completed replies, including plain-text responses without tool calls. Manual response recording and stop-reason inspection prevent duplicate history entries and keep completion policy out of LLM dispatch.
+- **Flow-controlled final answers** — Managed root and child flows explicitly call `final.answer` to publish completed replies, including plain-text responses in turns without model tool calls. Manual response recording and stop-reason inspection prevent duplicate history entries and keep completion policy out of LLM dispatch.
 
 - **Agent time context** — Root and child agents receive the runtime host's local date, time, and UTC offset, with instructions to distinguish UTC storage timestamps from user-facing times.
 

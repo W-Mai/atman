@@ -234,6 +234,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
         ),
     )
     system_prompt = @"../prompts/system.md"
+    tools_called = false
     loop {
         response = llm.call(
             record: false,
@@ -282,6 +283,11 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
             when response.stop_reason == "end" {
+                when tools_called {
+                    session.push(reply)
+                    session.push(message.user(@"../prompts/loop-final-answer.md"))
+                    continue
+                }
                 when !is_empty(text_concat(reply)) {
                     return final.answer(message: reply)
                 }
@@ -292,6 +298,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
             }
             return text_concat(reply)
         }
+        tools_called = true
         session.push(reply)
         tool_results = dispatch_all(tool_uses)
         session.push(tool_results)
@@ -329,6 +336,7 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
         invocation { user_message: goal, goal: true }
     }
     i = 0
+    tools_called = false
     loop {
         i = i + 1
         when i > max_iter {
@@ -364,6 +372,11 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
             when response.stop_reason == "end" {
+                when tools_called {
+                    session.push(reply)
+                    session.push(message.user(@"../prompts/loop-final-answer.md"))
+                    continue
+                }
                 when !is_empty(text_concat(reply)) {
                     return final.answer(message: reply)
                 }
@@ -374,6 +387,7 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
             }
             break
         }
+        tools_called = true
         session.push(reply)
         tool_results = dispatch_all(tool_uses)
         session.push(tool_results)
@@ -386,6 +400,7 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
         invocation { user_message: goal, goal: true }
     }
     i = 0
+    tools_called = false
     loop {
         i = i + 1
         when i > max_iter {
@@ -423,6 +438,11 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
             when response.stop_reason == "end" {
+                when tools_called {
+                    session.push(reply)
+                    session.push(message.user(@"../prompts/loop-final-answer.md"))
+                    continue
+                }
                 when !is_empty(text_concat(reply)) {
                     return final.answer(message: reply)
                 }
@@ -433,6 +453,7 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
             }
             break
         }
+        tools_called = true
         session.push(reply)
         tool_results = dispatch_all(tool_uses)
         session.push(tool_results)
@@ -445,6 +466,7 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
         invocation { user_message: goal, goal: true }
     }
     i = 0
+    tools_called = false
     loop {
         i = i + 1
         when i > max_iter {
@@ -482,6 +504,11 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
             when response.stop_reason == "end" {
+                when tools_called {
+                    session.push(reply)
+                    session.push(message.user(@"../prompts/loop-final-answer.md"))
+                    continue
+                }
                 when !is_empty(text_concat(reply)) {
                     return final.answer(message: reply)
                 }
@@ -492,6 +519,7 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
             }
             break
         }
+        tools_called = true
         session.push(reply)
         tool_results = dispatch_all(tool_uses)
         session.push(tool_results)
@@ -504,6 +532,7 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
         invocation { user_message: goal, goal: true }
     }
     i = 0
+    tools_called = false
     loop {
         i = i + 1
         when i > max_iter {
@@ -536,6 +565,11 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
             when response.stop_reason == "end" {
+                when tools_called {
+                    session.push(reply)
+                    session.push(message.user(@"../prompts/loop-final-answer.md"))
+                    continue
+                }
                 when !is_empty(text_concat(reply)) {
                     return final.answer(message: reply)
                 }
@@ -546,6 +580,7 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
             }
             break
         }
+        tools_called = true
         session.push(reply)
         tool_results = dispatch_all(tool_uses)
         session.push(tool_results)
@@ -751,7 +786,7 @@ mod tests {
         assert!(!AGENT_AT.contains("completion_state"));
         assert!(!AGENT_AT.contains("final_answer_reminded"));
         let example = include_str!("../../../examples/agent.at");
-        assert!(example.contains("agent_loop().await"));
+        assert!(example.contains("agent_loop(false).await"));
         assert!(!example.contains("final_answer_reminded"));
         for flow in [AGENT_AT, SUBAGENT_AT, example] {
             assert!(flow.contains("record: false"));
