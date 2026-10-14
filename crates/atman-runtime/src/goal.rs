@@ -51,10 +51,20 @@ pub async fn begin_background_turn(
     if !control.allows_background_turn() || session.current_turn().is_some() {
         return None;
     }
-    if let Some(receipt) = control.child_results.reserve() {
-        let mut message =
-            crate::message::Message::user_text(crate::event::TurnId::now(), receipt.prompt());
-        message.origin = crate::message::MessageOrigin::ChildResult;
+    let receipt = control.reserve_notification();
+    let message = if let Some(receipt) = &receipt {
+        receipt.message(crate::event::TurnId::now())
+    } else if control.should_continue() {
+        let mut message = crate::message::Message::user_text(
+            crate::event::TurnId::now(),
+            continuation_prompt(control),
+        );
+        message.origin = crate::message::MessageOrigin::Internal;
+        message
+    } else {
+        return None;
+    };
+    if let Some(receipt) = receipt {
         let committed = receipt
             .commit(|| {
                 session.begin_turn(message.clone());
@@ -63,21 +73,35 @@ pub async fn begin_background_turn(
             .unwrap();
         return committed.then_some(message);
     }
-    let (prompt, origin) = if let Some(prompt) = session.watch_hub.take_pending_prompt() {
-        (prompt, crate::message::MessageOrigin::Watcher)
-    } else if control.should_continue() {
-        (
-            continuation_prompt(control),
-            crate::message::MessageOrigin::Internal,
-        )
-    } else {
-        return None;
-    };
-    let mut message = crate::message::Message::user_text(crate::event::TurnId::now(), prompt);
-    message.origin = origin;
     // No await separates notification consumption from its insertion into history.
     session.begin_turn(message.clone());
     Some(message)
+}
+
+/// A single-consumer receipt with its persisted message classification.
+pub(crate) enum NotificationReceipt {
+    Child(crate::agent_results::ResultReceipt),
+    Watcher(crate::watch::WatchReceipt),
+}
+
+impl NotificationReceipt {
+    pub(crate) fn message(&self, turn_id: crate::event::TurnId) -> crate::message::Message {
+        use crate::message::{Message, MessageOrigin};
+        let (text, origin) = match self {
+            Self::Child(receipt) => (receipt.prompt(), MessageOrigin::ChildResult),
+            Self::Watcher(receipt) => (receipt.prompt(), MessageOrigin::Watcher),
+        };
+        let mut message = Message::user_text(turn_id, text);
+        message.origin = origin;
+        message
+    }
+
+    pub(crate) fn commit<E>(&self, publish: impl FnOnce() -> Result<(), E>) -> Result<bool, E> {
+        match self {
+            Self::Child(receipt) => receipt.commit(publish),
+            Self::Watcher(receipt) => receipt.commit(publish),
+        }
+    }
 }
 
 /// Invocation recipe for subsequent turns; model history stays in its owning session.
@@ -170,6 +194,7 @@ struct State {
 /// One stable agent owner, independent of the identifiers of its individual runs.
 pub struct GoalController {
     pub child_results: Arc<crate::agent_results::ResultInbox>,
+    pub watch_hub: Arc<crate::watch::WatchHub>,
     owner: String,
     parent: Option<Arc<GoalController>>,
     store: Option<GoalStore>,
@@ -255,6 +280,7 @@ impl GoalController {
             .unwrap_or_default();
         Arc::new(Self {
             child_results: crate::agent_results::ResultInbox::new(changes.clone()),
+            watch_hub: Arc::new(crate::watch::WatchHub::with_changes(changes.clone())),
             owner,
             parent,
             store,
@@ -375,6 +401,13 @@ impl GoalController {
             .collect()
     }
 
+    pub(crate) fn reserve_notification(&self) -> Option<NotificationReceipt> {
+        self.child_results
+            .reserve()
+            .map(NotificationReceipt::Child)
+            .or_else(|| self.watch_hub.reserve().map(NotificationReceipt::Watcher))
+    }
+
     pub async fn wait_active(&self, cancel: &CancellationToken) -> Result<(), RuntimeError> {
         let mut changes = self.subscribe();
         loop {
@@ -382,7 +415,9 @@ impl GoalController {
                 return Err(RuntimeError::Cancelled("flow cancelled by user".into()));
             }
             if self.allows_background_turn()
-                && (self.should_continue() || self.child_results.has_pending())
+                && (self.should_continue()
+                    || self.child_results.has_pending()
+                    || self.watch_hub.has_pending_events())
             {
                 return Ok(());
             }
@@ -462,6 +497,11 @@ impl GoalController {
     pub fn allows_background_turn(&self) -> bool {
         let open = self.state.lock().unwrap().execution_pause == ExecutionPause::Open;
         open && self.blocked_by().is_none()
+    }
+
+    /// Acknowledged user pauses permit final delivery, but defer new background input.
+    pub(crate) fn is_finishing(&self) -> bool {
+        self.state.lock().unwrap().execution_pause == ExecutionPause::Finishing
     }
 
     /// Serialize message pickup with execution pauses and task replacement.
@@ -759,8 +799,11 @@ mod tests {
         let mut message = Message::user_text(turn, reserved.prompt());
         message.origin = MessageOrigin::ChildResult;
         session.end_turn();
-        assert!(session.commit_child_results(&reserved, message).is_err());
-        drop(reserved);
+        assert!(
+            session
+                .commit_notification(&NotificationReceipt::Child(reserved), message)
+                .is_err()
+        );
 
         let lock = session.acquire_compact_lock().await;
         let start = begin_background_turn(&session);

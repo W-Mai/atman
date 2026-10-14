@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Watcher message pickup** — Root and child agents receive watcher events in their next general model call. Owned queues preserve notifications across pauses and preparation failures, prevent competing consumers from repeating delivery, and stop child watchers on cancellation. Finishing a user pause defers new notifications without blocking the final response.
+
 - **Flow watcher delivery** — Published final answers notify output watchers while managed child flows remain alive. Cumulative output preserves cursors across turns and delayed consumers; repeated delivery within a turn and flow exit do not replay answer matches.
 
 - **Flow panel Escape** — Escape closes the floating window without cancelling its child flow. Explicit task-stop controls retain their cancellation behavior.

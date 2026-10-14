@@ -91,7 +91,7 @@ pub struct WatcherInfo {
 
 pub struct WatchHub {
     state: Mutex<WatchState>,
-    changes: watch::Sender<u64>,
+    changes: Arc<watch::Sender<u64>>,
 }
 
 #[derive(Default)]
@@ -108,10 +108,25 @@ impl Default for WatchHub {
 
 impl WatchHub {
     pub fn new() -> Self {
+        Self::with_changes(Arc::new(watch::channel(0).0))
+    }
+
+    pub(crate) fn with_changes(changes: Arc<watch::Sender<u64>>) -> Self {
         Self {
             state: Mutex::new(WatchState::default()),
-            changes: watch::channel(0).0,
+            changes,
         }
+    }
+
+    /// Stop producers when their owning flow terminates.
+    pub(crate) fn cancel_all(&self) {
+        let mut state = self.state.lock().unwrap();
+        for (_, watcher) in state.watchers.drain() {
+            watcher.cancel.cancel();
+        }
+        state.pending_events.clear();
+        drop(state);
+        self.changed();
     }
 
     pub fn register(

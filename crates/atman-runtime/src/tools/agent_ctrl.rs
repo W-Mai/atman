@@ -794,7 +794,8 @@ impl FlowRegistry {
                     control.allows_background_turn()
                         && (control.turn_running()
                             || control.should_continue()
-                            || control.child_results.has_pending())
+                            || control.child_results.has_pending()
+                            || control.watch_hub.has_work())
                 })
         })
     }
@@ -1273,6 +1274,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     child_ctx.flow_run_id = Some(run_id.clone());
     child_ctx.flow_identity = Some(child_identity);
     child_ctx.call_intent = None;
+    child_ctx.watch_hub = Some(Arc::new(crate::watch::WatchHub::new()));
     child_ctx.agent_entry = None;
     child_ctx.result_route = None;
     child_ctx.child_results = Some(
@@ -1452,6 +1454,13 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx, notify_parent: bool)
         ctx_for_flow.call_intent = None;
         ctx_for_flow.agent_entry = Some(Arc::clone(&entry_clone));
         ctx_for_flow.goal_control = entry_clone.goal_control.get().cloned();
+        ctx_for_flow.watch_hub = Some(
+            ctx_for_flow
+                .goal_control
+                .as_ref()
+                .map(|control| control.watch_hub.clone())
+                .unwrap_or_else(|| Arc::new(crate::watch::WatchHub::new())),
+        );
         ctx_for_flow.result_route = entry_clone.result_route.get().cloned();
         ctx_for_flow.child_results = Some(
             ctx_for_flow
@@ -1882,6 +1891,15 @@ async fn run_prepared_flow_agent(
     let managed = crate::goal::is_managed(&flow);
     let flows = program.flatten_flows();
     let initial_prompt = invocation_user_message(&flow, &flow_args)?;
+    struct StopWatchers(Option<Arc<crate::watch::WatchHub>>);
+    impl Drop for StopWatchers {
+        fn drop(&mut self) {
+            if let Some(hub) = &self.0 {
+                hub.cancel_all();
+            }
+        }
+    }
+    let _watchers = StopWatchers(ctx.watch_hub.clone());
     let lifecycle = atman_rt::FlowLifecycle::new(child_flow_start(ctx, &run_id, &flow.name.name));
     lifecycle
         .run(
@@ -1925,24 +1943,23 @@ async fn run_prepared_flow_agent(
                                         ));
                                     }
                                     if iteration > 0 {
-                                        let receipt = control.child_results.reserve();
+                                        let receipt = control.reserve_notification();
                                         if receipt.is_none() && !control.should_continue() {
                                             return Ok(None);
                                         }
-                                        let prompt = receipt
-                                            .as_ref()
-                                            .map(|receipt| receipt.prompt())
-                                            .unwrap_or_else(|| {
-                                                crate::goal::continuation_prompt(&control)
-                                            });
                                         let turn_id = crate::event::TurnId::now();
-                                        let mut message =
-                                            Message::user_text(turn_id.clone(), prompt.clone());
-                                        message.origin = if receipt.is_some() {
-                                            crate::message::MessageOrigin::ChildResult
+                                        let message = if let Some(receipt) = &receipt {
+                                            receipt.message(turn_id.clone())
                                         } else {
-                                            crate::message::MessageOrigin::Internal
+                                            let mut message = Message::user_text(
+                                                turn_id.clone(),
+                                                crate::goal::continuation_prompt(&control),
+                                            );
+                                            message.origin =
+                                                crate::message::MessageOrigin::Internal;
+                                            message
                                         };
+                                        let prompt = message.text_concat();
                                         child_ctx.turn_id = Some(turn_id);
                                         if let Some(receipt) = receipt {
                                             if !receipt.commit(|| {
@@ -2586,6 +2603,186 @@ mod tests {
             ),
         ));
         args
+    }
+
+    #[tokio::test]
+    async fn child_watcher_delivery_is_owned_retained_across_pauses_and_stops_on_kill() {
+        use crate::memory::goal::{GoalActor, GoalPauseReason};
+        use crate::tool::{BoxFut, ToolResult};
+        use crate::value::ValueJson;
+        use std::time::Duration;
+        struct Work;
+        impl Tool for Work {
+            fn name(&self) -> &str {
+                "watch_work"
+            }
+            fn tier(&self) -> Tier {
+                Tier::Zero
+            }
+            fn call<'a>(&'a self, _: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+                Box::pin(async move {
+                    let control = ctx.goal_control.as_ref().unwrap();
+                    let entry = ctx.agent_entry.as_ref().unwrap();
+                    let delivered = ctx
+                        .session_messages_handle
+                        .as_ref()
+                        .unwrap()
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|m| m.origin == MessageOrigin::Watcher)
+                        .count();
+                    if delivered == 0 {
+                        crate::watch::Watch
+                            .call(
+                                ToolArgs {
+                                    positional: vec![
+                                        Value::Str(entry.handle.clone()),
+                                        Value::Str("ready".into()),
+                                    ],
+                                    named: vec![("mode".into(), Value::Str("persist".into()))],
+                                },
+                                ctx,
+                            )
+                            .await?;
+                        control
+                            .pause(
+                                GoalActor::Agent,
+                                GoalPauseReason::UserRequested,
+                                "hold after final".into(),
+                                None,
+                            )
+                            .unwrap();
+                        Ok(Value::Str("ready".into()))
+                    } else {
+                        assert_eq!(delivered, 1);
+                        control
+                            .pause(
+                                GoalActor::Agent,
+                                GoalPauseReason::Completed,
+                                "handled".into(),
+                                None,
+                            )
+                            .unwrap();
+                        Ok(Value::Str("handled watcher".into()))
+                    }
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("child.at");
+        std::fs::write(
+            &path,
+            r#"flow child(prompt: string) -> string {
+            contract { invocation { goal: true, user_message: prompt } }
+            answer = watch_work()
+            return final.answer(message: answer)
+        }"#,
+        )
+        .unwrap();
+        let session = Arc::new(crate::session::Session::open_ephemeral());
+        session.goal_control.set("parent task", None).unwrap();
+        let registry = session.flow_registry.clone();
+        let identity = root_identity(&registry, "watch-session");
+        let tools = Arc::new(ToolRegistry::new());
+        crate::tools::register_tier_zero(&tools);
+        tools.register(Arc::new(Work));
+        let mut ctx = ToolCtx::new()
+            .with_registry(tools)
+            .with_providers(Arc::new(ProviderRegistry::new()))
+            .with_flow_registry(registry.clone())
+            .with_task_registry(crate::task_registry::TaskRegistry::new())
+            .with_watch_hub(session.watch_hub.clone())
+            .with_session_runtime(session.clone());
+        ctx.goal_control = Some(session.goal_control.clone());
+        ctx.flow_run_id = Some(identity.run_id.clone());
+        ctx.flow_identity = Some(identity);
+        ctx.session_id = Some("watch-session".into());
+        ctx.permission_broker = Some(crate::permission::PermissionBroker::shared(
+            registry.clone(),
+        ));
+        ctx.trust = Some(Default::default());
+        let spawned = AgentSpawn
+            .call(
+                admitted_args(
+                    &registry,
+                    &ctx,
+                    ToolArgs {
+                        positional: vec![],
+                        named: vec![
+                            ("flow".into(), Value::Str(path.display().to_string())),
+                            (
+                                "arguments".into(),
+                                Value::Struct(vec![(
+                                    "prompt".into(),
+                                    Value::Str("watch self".into()),
+                                )]),
+                            ),
+                        ],
+                    },
+                ),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let entry = registry
+            .lookup(spawned.to_json().unwrap()["handle"].as_str().unwrap())
+            .unwrap();
+        let control = entry.goal_control.get().unwrap();
+        let hub = &control.watch_hub;
+        tokio::time::timeout(Duration::from_secs(3), hub.wait_for_pending())
+            .await
+            .unwrap();
+        let mut changes = control.subscribe();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while control.turn_running() {
+                changes.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!control.allows_background_turn());
+        assert!(hub.has_pending_events());
+        assert!(!session.watch_hub.has_work());
+        session
+            .goal_control
+            .pause(
+                GoalActor::User,
+                GoalPauseReason::UserRequested,
+                "parent pause".into(),
+                None,
+            )
+            .unwrap();
+        control.resume(GoalActor::User, None).unwrap();
+        assert!(!control.allows_background_turn());
+        assert!(hub.has_pending_events());
+        session.goal_control.resume(GoalActor::User, None).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !entry.output().contains("handled watcher") || control.turn_running() {
+                changes.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!hub.has_pending_events());
+        assert_eq!(
+            entry
+                .messages
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.origin == MessageOrigin::Watcher)
+                .count(),
+            1
+        );
+        assert!(!session.watch_hub.has_work());
+        assert!(registry.has_background_work());
+        let cancel = hub.get_cancel(&hub.list_active()[0].id);
+        entry.cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(3), cancel.cancelled())
+            .await
+            .unwrap();
+        assert!(!hub.has_work());
     }
 
     #[tokio::test]

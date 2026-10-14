@@ -114,7 +114,7 @@ watch(handle, pattern) registers a background watcher on any running task (termi
 Use this instead of polling term.capture/bash.output in a loop. Watchers are free until they fire.
 - `mode: "once"` (default) auto-removes after first match. `mode: "persist"` fires on every match.
 - `timeout_ms` defaults to 120s. On timeout, a notification suggests checking state manually.
-- After a turn ends, the host delivers pending watcher notifications in a new turn. Always finish the current turn through `final.answer`; do not wait for watchers before answering.
+- During a turn, the next general model call receives pending watcher notifications. Events still pending after the turn ends start a new turn. Always finish the current turn through `final.answer`; do not wait for watchers before answering.
 - `watcher.list` shows all active watchers. `watcher.unwatch(id)` cancels any watcher.
 Prefer watchers over polling. Polling wastes tokens and context; watchers are free until they fire.
 

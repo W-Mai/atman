@@ -263,12 +263,15 @@ fn user_msg(turn_id: TurnId, text: &str) -> Message {
 }
 
 #[tokio::test]
-async fn running_root_and_child_consume_results_in_the_current_turn_once() {
+async fn running_root_and_child_consume_notifications_in_the_current_turn_once() {
     use atman_runtime::agent_results::ResultRoute;
     type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
     use std::sync::Mutex;
     struct ResultsProvider {
         route: ResultRoute,
+        hub: Arc<atman_runtime::watch::WatchHub>,
+        finishing: bool,
+        control: Arc<atman_runtime::goal::GoalController>,
         requests: Mutex<Vec<Vec<Message>>>,
     }
     impl ResultsProvider {
@@ -281,6 +284,26 @@ async fn running_root_and_child_consume_results_in_the_current_turn_once() {
             let mut requests = self.requests.lock().unwrap();
             requests.push(req.messages);
             if requests.len() == 1 {
+                use atman_runtime::watch::{WatchEvent, WatchMode, WatchSource};
+                let source = WatchSource::Bash {
+                    handle: "background-job".into(),
+                };
+                let timeout = std::time::Duration::from_secs(30);
+                let id =
+                    self.hub
+                        .register(source.clone(), "matched".into(), WatchMode::Once, timeout);
+                self.hub.enqueue_event(WatchEvent {
+                    watcher_id: id,
+                    source,
+                    pattern: "matched".into(),
+                    text: "matched".into(),
+                    row: None,
+                    col: None,
+                    timestamp: chrono::Utc::now(),
+                    timed_out: false,
+                    exited: false,
+                    timeout,
+                });
                 let turn = TurnId::now();
                 self.route
                     .publish(FlowRunId::now(), turn.clone(), "first result".into());
@@ -288,6 +311,17 @@ async fn running_root_and_child_consume_results_in_the_current_turn_once() {
                     .publish(FlowRunId::now(), turn, "duplicate".into());
                 self.route
                     .publish(FlowRunId::now(), TurnId::now(), "second result".into());
+                if self.finishing {
+                    use atman_runtime::memory::goal::{GoalActor, GoalPauseReason};
+                    self.control
+                        .pause(
+                            GoalActor::Agent,
+                            GoalPauseReason::UserRequested,
+                            "finish current turn".into(),
+                            None,
+                        )
+                        .unwrap();
+                }
             }
             AssistantMessage {
                 message: Message::assistant_text(turn_id, "ack"),
@@ -337,16 +371,23 @@ async fn running_root_and_child_consume_results_in_the_current_turn_once() {
     }"#,
     )
     .unwrap();
-    for spawned in [false, true] {
+    for (spawned, finishing) in [(false, false), (true, false), (false, true), (true, true)] {
         let session = Arc::new(Session::open_ephemeral());
         let turn_id = session.begin_turn(user_msg(TurnId::now(), "work"));
         let control = session.goal_control.clone();
+        if finishing {
+            control.set("task", None).unwrap();
+        }
         let provider = Arc::new(ResultsProvider {
             route: control.child_results.route("direct-child".into(), true),
+            hub: control.watch_hub.clone(),
+            finishing,
+            control: control.clone(),
             requests: Mutex::new(Vec::new()),
         });
         let mut executor = Executor::new();
         executor.tool_ctx.goal_control = Some(control.clone());
+        executor.tool_ctx.watch_hub = Some(control.watch_hub.clone());
         let child_messages = Arc::new(Mutex::new(vec![user_msg(turn_id.clone(), "work")]));
         if spawned {
             executor.tool_ctx.history_segment = atman_runtime::tool::HistorySegment::Spawned;
@@ -355,19 +396,33 @@ async fn running_root_and_child_consume_results_in_the_current_turn_once() {
         }
         atman_runtime::tools::register_tier_zero(&executor.tools);
         executor.providers.register(provider.clone());
-        executor
-            .run_in_turn(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            executor.run_in_turn(
                 &file,
                 "calls",
                 vec![],
                 Some(turn_id.clone()),
                 (!spawned).then_some(session.clone()),
-            )
-            .await
-            .unwrap();
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let requests = provider.requests.lock().unwrap();
         assert_eq!(requests.len(), 4);
-        for (request, expected) in requests.iter().zip([0, 0, 1, 1]) {
+        for (request, expected) in requests.iter().zip(if finishing {
+            [0, 0, 0, 0]
+        } else {
+            [0, 0, 1, 1]
+        }) {
+            assert_eq!(
+                request
+                    .iter()
+                    .filter(|m| m.origin == MessageOrigin::Watcher)
+                    .count(),
+                expected
+            );
             let results = request
                 .iter()
                 .filter(|m| m.origin == MessageOrigin::ChildResult)
@@ -390,9 +445,17 @@ async fn running_root_and_child_consume_results_in_the_current_turn_once() {
                 .iter()
                 .filter(|m| m.origin == MessageOrigin::ChildResult)
                 .count(),
-            1
+            usize::from(!finishing)
         );
-        assert!(!control.child_results.has_pending());
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.origin == MessageOrigin::Watcher)
+                .count(),
+            usize::from(!finishing)
+        );
+        assert_eq!(control.watch_hub.has_pending_events(), finishing);
+        assert_eq!(control.child_results.has_pending(), finishing);
         session.end_turn();
         assert!(!atman_runtime::goal::has_next_turn(
             &control,
@@ -864,6 +927,7 @@ async fn assert_final_answer_boundary_with_extraction(
             None,
         )
         .unwrap();
+    let mut late_events = Vec::new();
     for index in 0..9 {
         let source = WatchSource::Bash {
             handle: format!("job-{index}"),
@@ -874,7 +938,7 @@ async fn assert_final_answer_boundary_with_extraction(
             WatchMode::Once,
             Duration::from_secs(1),
         );
-        session.watch_hub.enqueue_event(WatchEvent {
+        late_events.push(WatchEvent {
             watcher_id: id,
             source,
             pattern: "done".into(),
@@ -887,7 +951,7 @@ async fn assert_final_answer_boundary_with_extraction(
             timeout: Duration::from_secs(1),
         });
     }
-    assert!(!session.watch_hub.has_active_watchers());
+    assert!(session.watch_hub.has_active_watchers());
     let first = TurnId::now();
     session.begin_turn(user_msg(first.clone(), "finish"));
     let output = tokio::time::timeout(
@@ -978,6 +1042,11 @@ async fn assert_final_answer_boundary_with_extraction(
     );
     assert!(!messages.iter().any(|m| m.origin == MessageOrigin::Watcher));
 
+    // Events arriving after final delivery belong to a new turn.
+    for event in late_events {
+        session.watch_hub.enqueue_event(event);
+    }
+    assert!(!session.watch_hub.has_active_watchers());
     // An explicit pause must leave the complete event batch available for Resume.
     session
         .goal_control
@@ -1205,11 +1274,38 @@ async fn exhausted_llm_failure_releases_context_lock() {
     });
     executor.providers.register(provider.clone());
     let session = Arc::new(Session::open_ephemeral());
+    use atman_runtime::watch::{WatchEvent, WatchMode, WatchSource};
+    let source = WatchSource::Bash {
+        handle: "completed-job".into(),
+    };
+    let timeout = std::time::Duration::from_secs(1);
+    let watcher_id =
+        session
+            .watch_hub
+            .register(source.clone(), "done".into(), WatchMode::Once, timeout);
+    session.watch_hub.enqueue_event(WatchEvent {
+        watcher_id,
+        source,
+        pattern: "done".into(),
+        row: None,
+        col: None,
+        text: "done".into(),
+        timestamp: chrono::Utc::now(),
+        timed_out: false,
+        exited: false,
+        timeout,
+    });
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        executor.run_in_turn(&file, "ask", vec![], Some(turn_id), Some(session.clone())),
+        executor.run_in_turn(
+            &file,
+            "ask",
+            vec![],
+            Some(turn_id.clone()),
+            Some(session.clone()),
+        ),
     )
     .await
     .expect("failed call must not wait on its own context lock")
@@ -1223,6 +1319,20 @@ async fn exhausted_llm_failure_releases_context_lock() {
     .await
     .expect("context lock must remain available after failure");
     drop(guard);
+    assert!(!session.watch_hub.has_pending_events());
+    executor
+        .run_in_turn(&file, "ask", vec![], Some(turn_id), Some(session.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .messages_full()
+            .iter()
+            .filter(|m| m.origin == MessageOrigin::Watcher)
+            .count(),
+        1
+    );
+    assert!(!session.watch_hub.has_pending_events());
     session.end_turn();
 }
 

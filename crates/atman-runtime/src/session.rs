@@ -1133,6 +1133,7 @@ impl Session {
         )?;
         goal_control.bind_events(sink.clone());
         Ok(Self {
+            watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
             id,
@@ -1153,7 +1154,6 @@ impl Session {
                 plans: plans_watch,
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
-            watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             flow_registry,
             permission_broker,
             trust: watch::channel(crate::trust::TrustConfig::default()).0,
@@ -1362,6 +1362,7 @@ impl Session {
         })?;
         goal_control.bind_events(sink.clone());
         Ok(Self {
+            watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
             id,
@@ -1386,7 +1387,6 @@ impl Session {
                 plans: plans_watch,
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
-            watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             flow_registry,
             permission_broker,
             trust: watch::channel(crate::trust::TrustConfig::default()).0,
@@ -1445,6 +1445,7 @@ impl Session {
         let goal_control = crate::goal::GoalController::ephemeral(id.to_string());
         goal_control.bind_events(sink.clone());
         Self {
+            watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
             id,
@@ -1465,7 +1466,6 @@ impl Session {
                 plans: plans_watch,
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
-            watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             flow_registry,
             permission_broker,
             trust: watch::channel(crate::trust::TrustConfig::default()).0,
@@ -2691,15 +2691,15 @@ impl Session {
         self.turn.current_turn.lock().unwrap().clone()
     }
 
-    pub(crate) fn commit_child_results(
+    pub(crate) fn commit_notification(
         &self,
-        receipt: &crate::agent_results::ResultReceipt,
+        receipt: &crate::goal::NotificationReceipt,
         message: Message,
     ) -> Result<bool, crate::error::RuntimeError> {
         let current = self.turn.current_turn.lock().unwrap();
         if current.as_ref() != Some(&message.turn_id) {
             return Err(crate::error::RuntimeError::Cancelled(
-                "turn ended before child result pickup".into(),
+                "turn ended before notification pickup".into(),
             ));
         }
         receipt.commit(|| {
