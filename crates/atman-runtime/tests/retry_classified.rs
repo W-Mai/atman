@@ -511,6 +511,9 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
     assert!(tokens.last().copied().unwrap_or(0) <= tokens[0]);
     let requests = provider.requests.lock().unwrap().clone();
     assert!(requests.len() >= 2);
+    assert!(session.messages().iter().any(|message| message.parts.iter().any(|part| {
+        matches!(part, atman_runtime::message::MessagePart::ContextRecord(record) if record.key() == "agent.rule.retained")
+    })), "request projection must not remove retained records during compaction");
     assert!(
         requests
             .iter()

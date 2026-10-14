@@ -752,7 +752,7 @@ async fn build_budgeted_turn_rewrite(
             );
         }
         rewritten_count += output.len();
-        replacement.splice(start + 1..end, [summary_message]);
+        replace_turn_output(&mut replacement, start + 1, end, summary_message);
         group_index += 1;
     }
     filter_orphan_tool_messages(&mut replacement);
@@ -806,7 +806,7 @@ async fn build_budgeted_replacement(
                 deterministic_turn_omission(&output),
             );
         }
-        replacement.splice(start + 1..end, [summary_message]);
+        replace_turn_output(&mut replacement, start + 1, end, summary_message);
         group_index += 1;
     }
 
@@ -815,13 +815,11 @@ async fn build_budgeted_replacement(
         for (start, end) in groups.into_iter().rev() {
             let output = replacement[start + 1..end].to_vec();
             if !output.is_empty() {
-                replacement.splice(
-                    start + 1..end,
-                    [Message::assistant_text(
-                        replacement[start].turn_id.clone(),
-                        deterministic_turn_omission(&output),
-                    )],
+                let summary = Message::assistant_text(
+                    replacement[start].turn_id.clone(),
+                    deterministic_turn_omission(&output),
                 );
+                replace_turn_output(&mut replacement, start + 1, end, summary);
             }
         }
     }
@@ -832,6 +830,11 @@ async fn build_budgeted_replacement(
 
     filter_orphan_tool_messages(&mut replacement);
     replacement
+}
+
+fn replace_turn_output(messages: &mut Vec<Message>, start: usize, end: usize, summary: Message) {
+    let records = latest_context_records_before(&messages[start..], end - start);
+    messages.splice(start..end, std::iter::once(summary).chain(records));
 }
 
 fn user_turn_ranges(messages: &[Message]) -> Vec<(usize, usize)> {
@@ -1345,6 +1348,67 @@ mod tests {
             })
         }));
         assert_eq!(user_turn_ranges(&replacement).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn budgeted_turn_rewrites_preserve_latest_records_and_tombstones() {
+        fn records(
+            messages: &[Message],
+        ) -> std::collections::BTreeMap<String, crate::context_plan::ContextRecord> {
+            messages
+                .iter()
+                .flat_map(|message| &message.parts)
+                .filter_map(|part| match part {
+                    MessagePart::ContextRecord(record) => {
+                        Some((record.key().to_owned(), record.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+        let messages = vec![
+            system("old system"),
+            context_record("agent.rule.selected", 1, "old guidance"),
+            user("first user"),
+            assistant(&"large output".repeat(4000)),
+            context_record("agent.rule.selected", 2, "current guidance"),
+            context_record("agent.selection.matches", 1, "selected names"),
+            user("current user"),
+            context_tombstone("agent.selection.matches", 2),
+            context_record("agent.mistake.selected", 1, "mitigation"),
+            assistant(&"more output".repeat(4000)),
+        ];
+        let expected = records(&messages);
+        let providers = crate::provider::ProviderRegistry::default();
+        for budget in [500, 1] {
+            let (rewritten, _) =
+                build_budgeted_turn_rewrite(&messages, budget, "missing-provider", &providers)
+                    .await;
+            let compacted = build_budgeted_replacement(
+                &messages,
+                &CompactRange {
+                    start: 0,
+                    end: 2,
+                    tokens_saved_estimate: 1,
+                },
+                "anchor",
+                budget,
+                "missing-provider",
+                &providers,
+            )
+            .await;
+            for result in [rewritten, compacted] {
+                assert_eq!(records(&result), expected);
+                assert_eq!(
+                    result
+                        .iter()
+                        .filter(|m| m.role == MessageRole::User)
+                        .map(Message::text_concat)
+                        .collect::<Vec<_>>(),
+                    ["first user", "current user"]
+                );
+            }
+        }
     }
 
     #[tokio::test]
