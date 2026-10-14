@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Final answer previews** — Draft previews use the same presentation as published and restored replies. Child streams preserve root previews, and resumed-turn retries and workflow restarts leave earlier turns intact.
+
 - **Goal continuation history** — Final replies keep resumed turns in separate, expandable work sections. Live messages and restored history share final-answer presentation and fold metadata.
 
 - **Final answer folding** — Published final answers collapse preceding work even when the reply streamed as ordinary text before a direct flow call. The answer remains visible, and earlier turns keep their own summaries.

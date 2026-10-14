@@ -285,15 +285,22 @@ impl WorkFoldState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 enum FinalAnswerPhase {
+    Preview,
     Published,
     Restored,
 }
 
+#[derive(Clone, Copy)]
+enum FinalAnswerText<'a> {
+    Append(&'a str),
+    Replace(&'a str),
+}
+
 struct FinalAnswerUpdate<'a> {
     assistant_id: Option<u64>,
-    text: &'a str,
+    text: FinalAnswerText<'a>,
     summary: Option<&'a str>,
     work_start: Option<usize>,
     work_end: usize,
@@ -1396,7 +1403,7 @@ impl AppState {
             let text = md.clone();
             self.present_final_answer(FinalAnswerUpdate {
                 assistant_id: self.item_id(answer_index),
-                text: &text,
+                text: FinalAnswerText::Replace(&text),
                 summary: summary.as_deref(),
                 work_start: persisted_start_index,
                 work_end: marker_index,
@@ -3028,37 +3035,8 @@ impl AppState {
         }
         let disclosure_key = llm_disclosure_key(run_id);
         self.finish_tracked_thinking(&disclosure_key, false);
-        if !self.final_answer_drafts.contains_key(&key) {
-            let work_fold_id = self.begin_work_fold(None);
-            self.push_item(OutputItem::AssistantMd {
-                md: String::new(),
-                streaming: true,
-                retried: false,
-            });
-            let assistant_id = self
-                .items
-                .len()
-                .checked_sub(1)
-                .and_then(|idx| self.item_id(idx));
-            self.final_answer_drafts.insert(
-                key.clone(),
-                FinalAnswerDraftState {
-                    preview: ToolDraftPreview::default(),
-                    summary_preview: ToolDraftPreview::for_field(
-                        atman_runtime::message::TOOL_CALL_INTENT_FIELD,
-                        Some(atman_runtime::message::TOOL_CALL_INTENT_MAX_CHARS),
-                    ),
-                    assistant_id,
-                    work_fold_id,
-                },
-            );
-            self.llm_disclosures
-                .entry(disclosure_key)
-                .or_default()
-                .assistant_id = assistant_id;
-        }
-        let (assistant_id, work_fold_id, suffix, summary) = {
-            let draft = self.final_answer_drafts.get_mut(&key).unwrap();
+        let (assistant_id, suffix, summary) = {
+            let draft = self.final_answer_drafts.entry(key.clone()).or_default();
             let before = draft.preview.text().len();
             draft.preview.push(
                 atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL,
@@ -3069,28 +3047,29 @@ impl AppState {
             let suffix = text.get(before..).unwrap_or_default().to_owned();
             (
                 draft.assistant_id,
-                draft.work_fold_id,
                 suffix,
                 draft.summary_preview.text().to_owned(),
             )
         };
-        if let Some(summary) = atman_runtime::message::ToolCallIntent::new(summary)
-            && let Some(fold) = work_fold_id
-                .and_then(|id| self.work_folds.iter_mut().find(|fold| fold.start_id == id))
-        {
-            fold.title = summary.as_str().to_owned();
-        }
-        if !suffix.is_empty()
-            && let Some(item_index) = assistant_id.and_then(|id| self.items.index_by_id(id))
-        {
-            self.mutate_item(item_index, OutputMutation::SemanticPreserveSource, |item| {
-                let OutputItem::AssistantMd { md, .. } = item else {
-                    return false;
-                };
-                md.push_str(&suffix);
-                true
-            });
-        }
+        let summary = atman_runtime::message::ToolCallIntent::new(summary);
+        let work_end = assistant_id
+            .and_then(|id| self.items.index_by_id(id))
+            .unwrap_or(self.items.len());
+        let (assistant_id, work_fold_id) = self.present_final_answer(FinalAnswerUpdate {
+            assistant_id,
+            text: FinalAnswerText::Append(&suffix),
+            summary: summary.as_ref().map(|summary| summary.as_str()),
+            work_start: None,
+            work_end,
+            phase: FinalAnswerPhase::Preview,
+        });
+        let draft = self.final_answer_drafts.get_mut(&key).unwrap();
+        draft.assistant_id = assistant_id;
+        draft.work_fold_id = work_fold_id;
+        self.llm_disclosures
+            .entry(disclosure_key)
+            .or_default()
+            .assistant_id = assistant_id;
         self.waiting_for_llm = false;
         self.streaming = true;
         self.reset_lag_state();
@@ -3136,26 +3115,18 @@ impl AppState {
             .collect::<Vec<_>>();
         for id in assistant_ids {
             if let Some(index) = self.items.index_by_id(id) {
-                self.mutate_item(index, OutputMutation::SemanticPreserveSource, |item| {
-                    let OutputItem::AssistantMd { streaming, .. } = item else {
-                        return false;
-                    };
-                    let changed = *streaming;
-                    *streaming = false;
-                    changed
+                self.present_final_answer(FinalAnswerUpdate {
+                    assistant_id: Some(id),
+                    text: FinalAnswerText::Append(""),
+                    summary: None,
+                    work_start: None,
+                    work_end: index,
+                    phase: FinalAnswerPhase::Published,
                 });
             }
         }
         self.final_answer_drafts.clear();
         self.final_answer_drafts_completed = false;
-    }
-
-    fn begin_work_fold(&mut self, summary: Option<&str>) -> Option<u64> {
-        self.begin_work_fold_before(self.items.len(), summary)
-    }
-
-    fn begin_work_fold_before(&mut self, end: usize, summary: Option<&str>) -> Option<u64> {
-        self.upsert_work_fold(self.current_work_start(end)..end, summary, false)
     }
 
     fn current_work_start(&self, end: usize) -> usize {
@@ -3279,7 +3250,7 @@ impl AppState {
             .filter(|index| *index >= self.current_work_start(self.items.len()));
         self.present_final_answer(FinalAnswerUpdate {
             assistant_id: existing.and_then(|index| self.item_id(index)),
-            text: &text,
+            text: FinalAnswerText::Replace(&text),
             summary: summary.as_deref(),
             work_start: None,
             work_end: existing.unwrap_or(self.items.len()),
@@ -3304,22 +3275,40 @@ impl AppState {
         let existing = update
             .assistant_id
             .and_then(|id| self.items.index_by_id(id));
+        let preview = matches!(update.phase, FinalAnswerPhase::Preview);
+        let mutation = match update.text {
+            FinalAnswerText::Append(_) => OutputMutation::SemanticPreserveSource,
+            FinalAnswerText::Replace(_) => OutputMutation::Semantic,
+        };
         if let Some(index) = existing {
-            self.mutate_item(index, OutputMutation::Semantic, |item| {
+            self.mutate_item(index, mutation, |item| {
                 let OutputItem::AssistantMd { md, streaming, .. } = item else {
                     return false;
                 };
-                let changed = *md != update.text || *streaming;
-                if *md != update.text {
-                    *md = update.text.to_owned();
+                let mut changed = *streaming != preview;
+                match update.text {
+                    FinalAnswerText::Append(suffix) => {
+                        changed |= !suffix.is_empty();
+                        md.push_str(suffix);
+                    }
+                    FinalAnswerText::Replace(text) => {
+                        if *md != text {
+                            *md = text.to_owned();
+                            changed = true;
+                        }
+                    }
                 }
-                *streaming = false;
+                *streaming = preview;
                 changed
             });
         } else {
             self.push_item(OutputItem::AssistantMd {
-                md: update.text.to_owned(),
-                streaming: false,
+                md: match update.text {
+                    FinalAnswerText::Append(text) | FinalAnswerText::Replace(text) => {
+                        text.to_owned()
+                    }
+                },
+                streaming: preview,
                 retried: false,
             });
         }
@@ -3793,6 +3782,16 @@ impl AppState {
             }
             _ => {}
         }
+        // Only a new root response supersedes an uncommitted root preview.
+        if let StreamFrame::ThinkingChunk { run_id, .. }
+        | StreamFrame::LlmChunk { run_id, .. }
+        | StreamFrame::ToolCallDraft { run_id, .. } = &frame
+            && run_id
+                .as_ref()
+                .is_none_or(|id| !self.sub_agent_run_ids.contains_key(id))
+        {
+            self.discard_completed_final_answer_draft();
+        }
         match frame {
             StreamFrame::TurnStarted { .. } => {
                 self.work_start_after_id = self.items.next_id;
@@ -3823,7 +3822,6 @@ impl AppState {
                 });
             }
             StreamFrame::ThinkingChunk { text, run_id, .. } => {
-                self.discard_completed_final_answer_draft();
                 let disclosure_key = llm_disclosure_key(run_id.as_deref());
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
@@ -3876,7 +3874,6 @@ impl AppState {
                 model: chunk_model,
                 run_id,
             } => {
-                self.discard_completed_final_answer_draft();
                 let disclosure_key = llm_disclosure_key(run_id.as_deref());
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
@@ -3971,11 +3968,7 @@ impl AppState {
                 for key in disclosure_keys {
                     self.finish_llm_disclosure(&key, true);
                 }
-                let attempt_start = self
-                    .items
-                    .iter()
-                    .rposition(|item| matches!(item, OutputItem::UserTurn { .. }))
-                    .map_or(0, |index| index + 1);
+                let attempt_start = self.current_work_start(self.items.len());
                 for index in attempt_start..self.items.len() {
                     self.mutate_item(index, OutputMutation::Semantic, |item| match item {
                         OutputItem::Thinking { done, retried, .. } => {
@@ -4016,7 +4009,6 @@ impl AppState {
                 arguments_delta,
                 run_id,
             } => {
-                self.discard_completed_final_answer_draft();
                 self.apply_tool_call_draft(
                     run_id.as_deref(),
                     index,
@@ -5050,9 +5042,15 @@ impl AppState {
             self.route_to_workflow_panel(frame);
             return;
         }
-        let mut panel_after_user_turn = false;
+        let mut panel_in_turn = false;
         let mut reopen_idx: Option<usize> = None;
-        for (i, it) in self.items.iter().enumerate().rev() {
+        for (i, it) in self
+            .items
+            .iter()
+            .enumerate()
+            .skip(self.current_work_start(self.items.len()))
+            .rev()
+        {
             match it {
                 OutputItem::WorkflowPanel { ended_at: None, .. } => {
                     // FlowGraph reuses an open panel; FlowStart creates a new one
@@ -5061,7 +5059,7 @@ impl AppState {
                         || matches!(frame, StreamFrame::FlowStart { run_id, .. }
                             if self.workflow_run_to_panel.contains_key(run_id))
                     {
-                        panel_after_user_turn = true;
+                        panel_in_turn = true;
                     }
                     break;
                 }
@@ -5071,7 +5069,7 @@ impl AppState {
                     ..
                 } => {
                     reopen_idx = Some(i);
-                    panel_after_user_turn = true;
+                    panel_in_turn = true;
                     break;
                 }
                 OutputItem::WorkflowPanel { .. } => {}
@@ -5099,7 +5097,7 @@ impl AppState {
                 self.top_level_run_ids.insert(run_id.clone());
             }
         }
-        if !panel_after_user_turn {
+        if !panel_in_turn {
             let turn_index = self
                 .items
                 .iter()
@@ -5387,6 +5385,163 @@ mod tests {
     }
 
     #[test]
+    fn final_answer_sources_produce_the_same_presentation() {
+        use atman_runtime::message::{MessageOrigin, MessagePart};
+        let mut signatures = Vec::new();
+        for source in ["direct", "text", "draft", "replay"] {
+            let mut call = completed_tool_call("edit");
+            call.applied_edit = Some((
+                "file.rs".into(),
+                atman_runtime::activity::EditMetrics {
+                    hunks: 1,
+                    insertions: 2,
+                    deletions: 1,
+                },
+            ));
+            let base = vec![
+                OutputItem::UserTurn {
+                    text: "work".into(),
+                    presentation: None,
+                },
+                OutputItem::Thinking {
+                    text: "checking".into(),
+                    done: true,
+                    disclosure: Disclosure::Summary,
+                    retried: false,
+                },
+                OutputItem::ToolDispatch { calls: vec![call] },
+            ];
+            let mut app = AppState::new(source.into(), None);
+            if source == "replay" {
+                let mut items = base;
+                items.push(OutputItem::WorkFoldMarker {
+                    summary: Some("Checked.".into()),
+                    start_index: Some(1),
+                });
+                items.push(OutputItem::AssistantMd {
+                    md: "Done.".into(),
+                    streaming: false,
+                    retried: false,
+                });
+                app = app.with_initial_items(items);
+            } else {
+                for item in base {
+                    app.push_item(item);
+                }
+                if source == "text" {
+                    app.apply_stream_frame(StreamFrame::LlmChunk {
+                        text: "Done.".into(),
+                        model: "test".into(),
+                        run_id: None,
+                    });
+                } else if source == "draft" {
+                    app.apply_stream_frame(StreamFrame::ToolCallDraft {
+                        index: 0,
+                        call_id: "final".into(),
+                        name: "final.answer".into(),
+                        arguments_delta: "{\"_atman_intent\":\"Checked.\",\"message\":\"Do".into(),
+                        run_id: None,
+                    });
+                    let generation = app.items.revisions().last().unwrap().source_generation;
+                    app.apply_stream_frame(StreamFrame::ToolCallDraft {
+                        index: 0,
+                        call_id: "final".into(),
+                        name: String::new(),
+                        arguments_delta: "ne.\"}".into(),
+                        run_id: None,
+                    });
+                    assert_eq!(
+                        app.items.revisions().last().unwrap().source_generation,
+                        generation
+                    );
+                }
+                app.apply_stream_frame(StreamFrame::LlmDone {
+                    total_tokens: 1,
+                    run_id: None,
+                });
+                let mut message = Message::assistant_text(
+                    atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
+                    "Done.",
+                );
+                message.origin = MessageOrigin::FinalAnswer;
+                message.parts.push(MessagePart::FinalAnswerSummary {
+                    text: "Checked.".into(),
+                });
+                app.apply_stream_frame(StreamFrame::AssistantMsg {
+                    flow_run_id: None,
+                    message,
+                });
+                app.cancel_running_activities();
+                app.discard_completed_final_answer_draft();
+            }
+            assert_eq!(app.work_folds.len(), 1);
+            let fold = &mut app.work_folds[0];
+            fold.started_at = Instant::now().checked_sub(fold.duration).unwrap();
+            let fold = app.work_fold_projections().remove(0);
+            assert!(
+                matches!(app.items.last(), Some(OutputItem::AssistantMd { md, streaming: false, retried: false }) if md == "Done.")
+            );
+            signatures.push((
+                fold.start_index,
+                fold.end_index,
+                fold.total_members,
+                fold.visible_members,
+                fold.title,
+                fold.completed_steps,
+                fold.total_steps,
+                fold.stats,
+            ));
+        }
+        assert!(signatures.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(signatures[0].7, "1 files · +2 −1");
+    }
+
+    #[test]
+    fn child_streams_do_not_retract_a_root_final_answer_preview() {
+        let mut app = AppState::new("session".into(), None);
+        app.apply_stream_frame(StreamFrame::SubAgentStarted {
+            handle: "child".into(),
+            goal: "work".into(),
+            child_run_id: "child-run".into(),
+            model: "test".into(),
+            tool_use_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "answer".into(),
+            name: "final.answer".into(),
+            arguments_delta: "{\"message\":\"Done.\"}".into(),
+            run_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::LlmDone {
+            total_tokens: 1,
+            run_id: None,
+        });
+        for frame in [
+            StreamFrame::ThinkingChunk {
+                text: "child thinking".into(),
+                run_id: Some("child-run".into()),
+            },
+            StreamFrame::LlmChunk {
+                text: "child text".into(),
+                model: "test".into(),
+                run_id: Some("child-run".into()),
+            },
+            StreamFrame::ToolCallDraft {
+                index: 0,
+                call_id: "child tool".into(),
+                name: "read_file".into(),
+                arguments_delta: "{}".into(),
+                run_id: Some("child-run".into()),
+            },
+        ] {
+            app.apply_stream_frame(frame);
+            assert_eq!(app.final_answer_drafts.len(), 1);
+            assert_eq!(app.work_folds.len(), 1);
+        }
+    }
+
+    #[test]
     fn published_final_answer_folds_work_without_a_tool_draft() {
         for streamed in [false, true] {
             let mut app = AppState::new("session".into(), None);
@@ -5565,9 +5720,8 @@ mod tests {
                 retried: false,
             },
         ]);
-        app.push_item(OutputItem::UserTurn {
-            text: "new turn".into(),
-            presentation: None,
+        app.apply_stream_frame(StreamFrame::TurnStarted {
+            turn_id: "resumed-turn".into(),
         });
         app.push_item(OutputItem::Thinking {
             text: "new work".into(),
@@ -5588,6 +5742,10 @@ mod tests {
 
         assert_eq!(app.work_folds.len(), 1);
         assert!(app.final_answer_drafts.is_empty());
+        assert!(matches!(
+            &app.items[3],
+            OutputItem::AssistantMd { retried: false, .. }
+        ));
         assert!(matches!(
             app.items.last(),
             Some(OutputItem::AssistantMd {
@@ -7622,6 +7780,21 @@ mod tests {
         app.apply_stream_frame(subflow_start("orphan", "r2", "nonexistent"));
         let panels = workflow_panels(&app);
         assert_eq!(panels.len(), 1, "orphan subflow creates new panel");
+    }
+
+    #[test]
+    fn resumed_turn_keeps_the_previous_workflow_panel_closed() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(flow_start("agent", "r1"));
+        app.apply_stream_frame(flow_done("r1", true));
+        app.apply_stream_frame(StreamFrame::TurnStarted {
+            turn_id: "resumed-turn".into(),
+        });
+        app.apply_stream_frame(flow_start("agent", "r2"));
+        let panels = workflow_panels(&app);
+        assert_eq!(panels.len(), 2);
+        assert!(!panels[0].1);
+        assert!(panels[1].1);
     }
 
     #[test]

@@ -37,7 +37,7 @@ Root and child goals use the same controller. An agent pausing its own goal with
 
 The TUI folds preceding work when a final answer is published, including direct `.at` calls after ordinary text streaming. The answer stays outside the fold. A streamed final-answer tool draft can preview the same fold; publication does not require that draft.
 
-Live publication and history restoration share final-answer presentation, work-range selection, summaries, and per-fold tool/edit statistics. Work ranges respect turn boundaries, including Goal resume and background turns without a new user message. Each turn's execution records remain independently expandable; restoring history skips the folding animation.
+Draft previews, live publication, and history restoration share final-answer presentation, work-range selection, summaries, and per-fold tool/edit statistics. Publication finalizes the preview in place; child streams cannot retract a root preview. Work ranges respect turn boundaries, including Goal resume and background turns without a new user message. Each turn's execution records remain independently expandable, and retries or workflow restarts stay within their own turn; restoring history skips the folding animation.
 
 ## Child results
 
