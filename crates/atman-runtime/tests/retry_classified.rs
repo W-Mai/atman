@@ -142,6 +142,56 @@ fn run_with(provider: Arc<ScriptedProvider>, src: &str) -> (Result<Value, Runtim
 }
 
 #[test]
+fn isolated_call_failure_does_not_compact_managed_history() {
+    let _registry = common::SyncModelRegistryGuard::mock("m");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    for input in [
+        r#"context: "none", prompt: "small auxiliary request""#,
+        r#"messages: [message.user("small auxiliary request")]"#,
+    ] {
+        let provider = Arc::new(ScriptedProvider::new(
+            "m",
+            vec![Err(RuntimeError::ToolFailed("provider unavailable".into()))],
+        ));
+        let session = Arc::new(Session::open_ephemeral());
+        build_long_history(&session, 30);
+        let turn_id = TurnId::now();
+        session.begin_turn(Message::user_text(turn_id.clone(), "run"));
+        let before: Vec<_> = session
+            .messages()
+            .iter()
+            .map(Message::text_concat)
+            .collect();
+        let file = parse_file(&format!(
+            r#"flow t() {{ return llm.call(model: "m", {input}, retry: 0) }}"#,
+        ))
+        .unwrap();
+        let ex = Executor::with_events(session.sink().clone());
+        ex.providers.register(provider.clone());
+        rt.block_on(async {
+            let result = ex
+                .run_in_turn(&file, "t", vec![], Some(turn_id), Some(session.clone()))
+                .await;
+            assert!(result.is_err());
+            // Any scheduled compaction owns this lock before dispatch returns.
+            let _guard = session.acquire_compact_lock().await;
+            assert_eq!(provider.call_count(), 1, "unexpected compaction model call");
+            let after: Vec<_> = session
+                .messages()
+                .iter()
+                .filter(|message| !message.contains_context_record())
+                .map(Message::text_concat)
+                .collect();
+            assert!(
+                after == before,
+                "isolated failure changed conversation history"
+            );
+        });
+        session.end_turn();
+    }
+}
+
+#[test]
 fn retry_classified_only_retries_on_listed_kinds() {
     let provider = Arc::new(ScriptedProvider::new(
         "m",

@@ -979,6 +979,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         return fb;
     }
     if let Some(session) = ctx.session_runtime.as_ref()
+        && uses_managed_context
         && !saw_context_overflow
     {
         drop(compact_guard.take());
