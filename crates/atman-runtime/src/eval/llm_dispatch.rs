@@ -815,6 +815,10 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                                 &retry_base_messages[session_messages_len
                                     ..retry_base_messages.len() - reserved_suffix_len],
                             );
+                            llm_context::filter_context_records(
+                                &mut final_messages,
+                                args.context_records.as_deref(),
+                            );
                             last_err = Some(e);
                             continue 'llm_attempts;
                         }

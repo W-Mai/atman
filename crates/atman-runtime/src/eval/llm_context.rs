@@ -72,6 +72,7 @@ pub fn build_llm_context(
         (messages, prompt_text)
     };
     let mut final_messages = final_messages;
+    filter_context_records(&mut final_messages, args.context_records.as_deref());
     move_current_turn_interjections_to_tail(&mut final_messages, turn_id);
     let session_messages_len = final_messages.len();
 
@@ -80,6 +81,23 @@ pub fn build_llm_context(
         budget_text: prompt_for_budget,
         session_messages_len,
     })
+}
+
+pub(super) fn filter_context_records(
+    messages: &mut Vec<crate::message::Message>,
+    keys: Option<&[String]>,
+) {
+    let Some(keys) = keys else { return };
+    messages.retain_mut(|message| {
+        let had_records = message.contains_context_record();
+        message.parts.retain(|part| match part {
+            crate::message::MessagePart::ContextRecord(record) => {
+                keys.iter().any(|key| key == record.key())
+            }
+            _ => true,
+        });
+        !had_records || !message.parts.is_empty()
+    });
 }
 
 pub(super) fn move_current_turn_interjections_to_tail(
@@ -178,6 +196,7 @@ mod tests {
             cache_prompt: false,
             context_budget: None,
             context_mode: "session".into(),
+            context_records: None,
             record_response: true,
             return_response: false,
             fallback_value: None,
@@ -196,6 +215,96 @@ mod tests {
             turn_id: TurnId::now(),
             origin: MessageOrigin::User,
         }
+    }
+
+    #[test]
+    fn record_selection_is_request_local_for_root_child_and_explicit_contexts() {
+        let turn = TurnId::now();
+        let record = |key| {
+            Message::context_record(
+                turn.clone(),
+                crate::context_plan::ContextRecord::new(
+                    key,
+                    1,
+                    crate::context_plan::ContextRecordAuthority::User,
+                    crate::context_plan::ContextRecordRetention::Latest,
+                    crate::context_plan::ContextRecordBody::text(key),
+                ),
+            )
+        };
+        let original = vec![
+            record("session.goal"),
+            record("agent.rule.full"),
+            message("conversation"),
+        ];
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        for message in &original {
+            session.append_message(message.clone(), None);
+        }
+        let local = std::sync::Arc::new(std::sync::Mutex::new(original.clone()));
+        for root in [false, true] {
+            for mode in [
+                ContextMode::None,
+                ContextMode::Session,
+                ContextMode::SessionRecent(1),
+            ] {
+                for keys in [None, Some(vec![]), Some(vec!["session.goal".to_string()])] {
+                    let mut arguments = args();
+                    arguments.prompt = Some("current request".into());
+                    arguments.context_records = keys.clone();
+                    let context = build_llm_context(
+                        &arguments,
+                        mode,
+                        root.then_some(&session),
+                        Some(&local),
+                        &turn,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                    let record_count = context
+                        .messages
+                        .iter()
+                        .filter(|message| message.contains_context_record())
+                        .count();
+                    assert_eq!(record_count, keys.as_ref().map_or(2, Vec::len));
+                    assert!(
+                        context
+                            .messages
+                            .iter()
+                            .any(|message| message.text_concat() == "current request")
+                    );
+                    arguments.prompt = None;
+                    arguments.messages_override = Some(original.clone());
+                    let context = build_llm_context(
+                        &arguments,
+                        ContextMode::None,
+                        root.then_some(&session),
+                        Some(&local),
+                        &turn,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                    assert!(
+                        context
+                            .messages
+                            .iter()
+                            .any(|message| message.text_concat() == "conversation")
+                    );
+                    assert_eq!(
+                        context
+                            .messages
+                            .iter()
+                            .filter(|message| message.contains_context_record())
+                            .count(),
+                        keys.as_ref().map_or(4, |keys| 2 * keys.len())
+                    );
+                }
+            }
+        }
+        assert_eq!(local.lock().unwrap().len(), original.len());
+        assert_eq!(session.messages().len(), original.len());
     }
 
     #[test]

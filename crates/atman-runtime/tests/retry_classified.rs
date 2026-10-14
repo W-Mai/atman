@@ -395,11 +395,25 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
     });
     let session = std::sync::Arc::new(Session::open_ephemeral());
     build_long_history(&session, 30);
+    session.append_message(
+        Message::context_record(
+            TurnId::now(),
+            atman_runtime::context_plan::ContextRecord::new(
+                "agent.rule.retained",
+                1,
+                atman_runtime::context_plan::ContextRecordAuthority::Retrieved,
+                atman_runtime::context_plan::ContextRecordRetention::Latest,
+                atman_runtime::context_plan::ContextRecordBody::text("Retained across compaction"),
+            ),
+        ),
+        None,
+    );
     let file = parse_file(
         r#"flow t() -> string {
     reply = llm.call(
         model: "m",
         context: "session",
+        context_records: [],
         prompt: "continue",
         retry: 10,
     )
@@ -447,6 +461,12 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
     assert!(tokens.last().copied().unwrap_or(0) <= tokens[0]);
     let requests = provider.requests.lock().unwrap().clone();
     assert!(requests.len() >= 2);
+    assert!(
+        requests
+            .iter()
+            .flatten()
+            .all(|message| !message.contains_context_record())
+    );
     for request in &requests {
         assert_eq!(
             request

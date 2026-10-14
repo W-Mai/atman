@@ -14,6 +14,7 @@ pub struct LlmNodeArgs {
     pub cache_prompt: bool,
     pub context_budget: Option<u64>,
     pub context_mode: String,
+    pub context_records: Option<Vec<String>>,
     pub record_response: bool,
     pub return_response: bool,
     pub fallback_value: Option<crate::value::Value>,
@@ -38,6 +39,7 @@ pub fn parse_llm_args_from_toolargs(
     let mut cache_prompt = false;
     let mut context_budget: Option<u64> = None;
     let mut context_mode = String::from("none");
+    let mut context_records = None;
     let mut record_response = true;
     let mut return_response = false;
     let mut tool_specs: Vec<crate::tool::ToolSpec> = Vec::new();
@@ -49,6 +51,26 @@ pub fn parse_llm_args_from_toolargs(
     let mut fallback_value: Option<crate::value::Value> = None;
     for (k, v) in &args.named {
         match k.as_str() {
+            "context_records" => {
+                let Value::List(keys) = v else {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "list of context record keys".into(),
+                        actual: v.kind_name().into(),
+                    });
+                };
+                context_records = Some(
+                    keys.iter()
+                        .map(|key| match key {
+                            Value::Str(key) => Ok(key.clone()),
+                            other => Err(RuntimeError::TypeMismatch {
+                                expected: "string context record key".into(),
+                                actual: other.kind_name().into(),
+                            }),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+                continue;
+            }
             "record" => {
                 let Value::Bool(enabled) = v else {
                     return Err(RuntimeError::TypeMismatch {
@@ -319,6 +341,7 @@ pub fn parse_llm_args_from_toolargs(
         cache_prompt,
         context_budget,
         context_mode,
+        context_records,
         record_response,
         return_response,
         fallback_value,
@@ -487,6 +510,20 @@ mod tests {
             },
             &crate::tool::ToolRegistry::new(),
         )
+    }
+
+    #[test]
+    fn record_selection_requires_an_explicit_string_list() {
+        assert!(parse(vec![]).unwrap().context_records.is_none());
+        assert_eq!(
+            parse(vec![("context_records".into(), Value::List(vec![]))])
+                .unwrap()
+                .context_records,
+            Some(vec![])
+        );
+        for value in [Value::Bool(false), Value::List(vec![Value::Int(1)])] {
+            assert!(parse(vec![("context_records".into(), value)]).is_err());
+        }
     }
 
     #[test]
