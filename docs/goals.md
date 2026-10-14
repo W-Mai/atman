@@ -4,6 +4,8 @@ A goal is a persistent objective with `active` or `paused` state. A managed agen
 
 Managed root and child prompts require every turn to conclude through `final.answer`, including ordinary questions and requests for clarification. The call contains the complete response in `message` and its summary in `_atman_intent`, with no sibling tool calls. When pausing a goal, the agent must receive the pause result before issuing `final.answer` separately; pausing alone does not deliver the final response.
 
+If a general model call exposes `final.answer` but ends normally with non-empty text and no tool calls, the runtime promotes the original response to a final answer and derives its activity summary from the text. Root and child agents use the same completion path without another model request. Empty, interrupted, truncated, and tool-bearing responses are not promoted. This fallback ends the current turn; it does not pause or complete an active goal, and watcher notifications still start a separate turn.
+
 A valid `final.answer` is published immediately and ends the current turn. Watcher notifications cannot discard or delay that answer. The interactive host, managed `atman run`, and daemon `goal.run` deliver queued watcher notifications together, in arrival order, in a new turn with a new turn ID and `watcher` origin. A completed one-shot watcher can still have a pending notification. Watcher turns retain the managed invocation settings and do not resume a paused goal; user, parent, cancellation, and failure pauses prevent background turns. The interactive host handles queued user input before watcher or goal continuation. Canonical sub-agent roles do not expose watcher tools; their final answers already end their current turn.
 
 ## Goal tools

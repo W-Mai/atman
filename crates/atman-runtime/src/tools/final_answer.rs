@@ -120,6 +120,26 @@ pub fn extract(message: &Message) -> Option<String> {
         .map(|candidate| candidate.answer.to_owned())
 }
 
+pub(crate) fn promote_plain_response(message: &mut Message) {
+    if message.role != crate::message::MessageRole::Assistant
+        || message.origin == crate::message::MessageOrigin::FinalAnswer
+        || message
+            .parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::ToolUse { .. }))
+    {
+        return;
+    }
+    let answer = message.text_concat();
+    if answer.trim().is_empty() {
+        return;
+    }
+    message.origin = crate::message::MessageOrigin::FinalAnswer;
+    message.parts.push(MessagePart::FinalAnswerSummary {
+        text: fallback_summary(&answer),
+    });
+}
+
 pub fn normalized_for_history(message: &Message) -> Option<Message> {
     if message.origin == crate::message::MessageOrigin::FinalAnswer {
         return extract(message)
@@ -290,6 +310,52 @@ mod tests {
                 intent: None,
             }],
             origin: crate::message::MessageOrigin::User,
+        }
+    }
+
+    #[test]
+    fn plain_response_promotion_preserves_content_and_is_idempotent() {
+        let mut message = Message::assistant_text(TurnId::now(), "\n# Done\n\n原文 **不变**。\n");
+        message.parts.insert(
+            0,
+            MessagePart::Thinking {
+                thinking: "Checked the result".into(),
+                signature: Some("signature".into()),
+            },
+        );
+        let original_parts = message.parts.clone();
+        promote_plain_response(&mut message);
+        assert_eq!(message.origin, crate::message::MessageOrigin::FinalAnswer);
+        assert_eq!(&message.parts[..original_parts.len()], &original_parts);
+        assert_eq!(
+            extract(&message).as_deref(),
+            Some("\n# Done\n\n原文 **不变**。\n")
+        );
+        assert_eq!(summary(&message).as_deref(), Some("Done"));
+        let normalized = normalized_for_history(&message).unwrap();
+        promote_plain_response(&mut message);
+        assert_eq!(message, normalized);
+    }
+
+    #[test]
+    fn plain_response_promotion_excludes_tool_calls_empty_text_and_user_messages() {
+        let mut tool_reply = control_message();
+        tool_reply.parts.push(MessagePart::Text {
+            text: "commentary".into(),
+        });
+        let mut thinking_only = Message::assistant_text(TurnId::now(), " \n ");
+        thinking_only.parts.push(MessagePart::Thinking {
+            thinking: "Still thinking".into(),
+            signature: None,
+        });
+        for mut message in [
+            tool_reply,
+            thinking_only,
+            Message::user_text(TurnId::now(), "hello"),
+        ] {
+            let original = message.clone();
+            promote_plain_response(&mut message);
+            assert_eq!(message, original);
         }
     }
 

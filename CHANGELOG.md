@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Plain-text final answers** — Normally completed agent replies without tool calls become final answers automatically, preserving the response and avoiding an extra model request. Root and child agents retain goal and watcher turn boundaries.
+
 - **Agent time context** — Root and child agents receive the runtime host's local date, time, and UTC offset, with instructions to distinguish UTC storage timestamps from user-facing times.
 
 - **Watcher registration** — Source subscriptions and terminal screen baselines are ready before registration succeeds, preserving transient matches that arrive before the background task is first polled.

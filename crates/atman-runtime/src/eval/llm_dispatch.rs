@@ -496,6 +496,15 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 ctx.watch_rules.clone(),
             )
             .await;
+            if context_call_purpose == crate::context_plan::ContextCallPurpose::General
+                && tool_specs
+                    .iter()
+                    .any(|tool| tool.name == crate::tools::final_answer::FINAL_ANSWER_TOOL)
+                && let Ok(message) = &mut outcome
+                && message.stop_reason == crate::provider::StopReason::End
+            {
+                crate::tools::final_answer::promote_plain_response(&mut message.message);
+            }
             let defer_final_candidate =
                 matches!(ctx.history_segment, crate::tool::HistorySegment::Root)
                     && outcome.as_ref().is_ok_and(|message| {

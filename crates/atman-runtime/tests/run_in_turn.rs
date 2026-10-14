@@ -259,6 +259,7 @@ async fn run_in_turn_appends_assistant_message_to_session() {
     );
     assert_eq!(ordinary[0].role, MessageRole::User);
     assert_eq!(ordinary[1].role, MessageRole::Assistant);
+    assert_ne!(ordinary[1].origin, MessageOrigin::FinalAnswer);
     assert_eq!(ordinary[1].text_concat(), "hello world");
 
     let has_correlated_assistant = session.sink().snapshot().iter().any(|event| {
@@ -321,6 +322,66 @@ async fn root_final_answer_without_provider_intent_is_persisted_after_explicit_a
 
 #[tokio::test]
 async fn managed_final_answer_ends_before_watcher_notifications_start_a_new_turn() {
+    assert_managed_final_answer_boundary(Arc::new(FinalAnswerProvider)).await;
+}
+
+#[tokio::test]
+async fn managed_plain_response_uses_the_same_final_answer_boundary() {
+    assert_managed_final_answer_boundary(Arc::new(
+        MockProvider::new("final-model").with_fallback(Value::Str("Done.".into())),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn spawned_plain_response_is_finalized_once_in_its_own_context() {
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
+    let executor = Executor::new();
+    atman_runtime::tools::register_tier_zero(&executor.tools);
+    executor.providers.register(Arc::new(
+        MockProvider::new("mock").with_fallback(Value::Str("Complete answer.".into())),
+    ));
+    let session = Arc::new(Session::open_ephemeral());
+    let turn = TurnId::now();
+    session.begin_turn(user_msg(turn.clone(), "start"));
+    let file = parse_file(
+        r#"
+flow child() -> string {
+    reply = llm.call(model: "mock", context: "session", tools: ["final.answer"])
+    return extract_final_answer(reply)
+}
+flow parent() -> [string] {
+    return fanout [child()]
+}
+"#,
+    )
+    .unwrap();
+    let result = executor
+        .run_in_turn(&file, "parent", vec![], Some(turn), Some(session.clone()))
+        .await
+        .unwrap();
+    assert!(matches!(result, Value::List(items)
+        if matches!(items.as_slice(), [Value::Str(answer)] if answer == "Complete answer.")));
+    let finals = executor
+        .events
+        .snapshot()
+        .into_iter()
+        .filter(|event| {
+            matches!(event, atman_runtime::event::Event::AssistantMsg { message, .. }
+            if message.origin == MessageOrigin::FinalAnswer)
+        })
+        .count();
+    assert_eq!(finals, 1);
+    assert!(
+        !session
+            .messages()
+            .iter()
+            .any(|message| message.role == MessageRole::Assistant)
+    );
+    session.end_turn();
+}
+
+async fn assert_managed_final_answer_boundary(provider: Arc<dyn Provider>) {
     use atman_runtime::memory::goal::{GoalActor, GoalPauseReason};
     use atman_runtime::watch::{WatchEvent, WatchMode, WatchSource};
     use std::time::Duration;
@@ -352,7 +413,7 @@ async fn managed_final_answer_ends_before_watcher_notifications_start_a_new_turn
             )),
         },
     ));
-    executor.providers.register(Arc::new(FinalAnswerProvider));
+    executor.providers.register(provider);
     executor
         .providers
         .register(Arc::new(MockProvider::new("cheap").with_fallback(
@@ -418,6 +479,13 @@ async fn managed_final_answer_ends_before_watcher_notifications_start_a_new_turn
         .collect();
     assert_eq!(finals.len(), 1);
     assert_eq!(finals[0].turn_id, first);
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| m.role == MessageRole::Assistant)
+            .count(),
+        1
+    );
     assert!(!messages.iter().any(|m| m.origin == MessageOrigin::Watcher));
 
     // An explicit pause must leave the complete event batch available for Resume.
