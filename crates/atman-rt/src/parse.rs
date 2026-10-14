@@ -775,7 +775,7 @@ fn parse_expr_primary(input: ParseStream) -> Result<Expr> {
         return Ok(expr);
     }
 
-    if input.peek(syn::Ident) {
+    if input.peek(syn::Ident) || (peek_any_ident(input) && input.peek2(Token![.])) {
         return parse_ident_expr(input);
     }
 
@@ -800,7 +800,7 @@ fn parse_struct_literal(input: ParseStream) -> Result<Expr> {
 }
 
 fn parse_ident_expr(input: ParseStream) -> Result<Expr> {
-    let first = to_ident(input.parse::<syn::Ident>()?);
+    let first = to_ident(<syn::Ident as syn::ext::IdentExt>::parse_any(input)?);
 
     if input.peek(Token![.]) {
         let mut path = vec![first];
@@ -1225,12 +1225,15 @@ mod tests {
     }
 
     #[test]
-    fn tool_paths_reject_keyword_roots_and_accept_keyword_members() {
+    fn tool_paths_reserve_language_keywords_but_not_rust_keywords() {
         assert!(parse_file("flow main() { loop.host() }").is_err());
         assert!(parse_file("flow main() { when.host() }").is_err());
         assert!(parse_file("flow main() { fanout.host() }").is_err());
 
-        let file = parse_file("flow main() { host.loop() flow.host() }").unwrap();
+        let file = parse_file(
+            "flow main() { host.loop() flow.host() final.answer(message: \"Done\") type.info() }",
+        )
+        .unwrap();
         assert!(matches!(
             &file.flows[0].body[0],
             Stmt::Expr(Expr::Node(Node::ToolCall { path, .. }))
@@ -1243,5 +1246,14 @@ mod tests {
                 if path.iter().map(|part| part.name.as_str()).collect::<Vec<_>>()
                     == ["flow", "host"]
         ));
+        for (index, namespace) in [(2, "final"), (3, "type")] {
+            assert!(matches!(
+                &file.flows[0].body[index],
+                Stmt::Expr(Expr::Node(Node::ToolCall { path, .. }))
+                    if path[0].name == namespace
+            ));
+        }
+        let printed = crate::print_file(&file);
+        assert_eq!(printed, crate::print_file(&parse_file(&printed).unwrap()));
     }
 }

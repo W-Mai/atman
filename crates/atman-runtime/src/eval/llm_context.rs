@@ -171,6 +171,8 @@ mod tests {
             cache_prompt: false,
             context_budget: None,
             context_mode: "session".into(),
+            record_response: true,
+            return_response: false,
             fallback_value: None,
             tool_specs: Vec::new(),
             mcp_scope: Default::default(),

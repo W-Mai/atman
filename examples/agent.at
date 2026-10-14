@@ -3,11 +3,13 @@ flow agent(user_prompt: string) -> string {
         capabilities { shell: true }
         invocation { user_message: user_prompt, goal: true }
     }
-    return agent_loop("direct").await
+    return agent_loop().await
 }
 
-flow agent_loop(completion_state: string) -> string {
-    reply = llm.call(
+flow agent_loop() -> string {
+    response = llm.call(
+        record: false,
+        output: "response",
         model: "smart",
         effort: env("effort"),
         context: "session",
@@ -37,29 +39,22 @@ flow agent_loop(completion_state: string) -> string {
             "mcp.status", "mcp.tools", "mcp.await", "mcp.call"
         ],
     )
-    final_answer = extract_final_answer(reply)
-    tool_uses = extract_tool_uses(reply)
-    final_answer_attempt = list.any(tool_uses, |call| call.name == "final.answer")
-    when is_empty(tool_uses) {
-        candidate = text_concat(reply)
-        when final_answer {
-            candidate = final_answer
-        }
-        when final_answer {
-            session.push(finalize_response(reply))
-            return final_answer
-        }
-        when completion_state == "worked" {
-            session.push(message.user("Agent loop control: your next response MUST include exactly one final.answer tool call and no other tool calls. Put the complete user-facing Markdown in message and include a concise _atman_intent for the work header. Any accompanying assistant text does not replace message."))
-            return agent_loop("reminded").await
-        }
-        return candidate
+    reply = response.message
+    when extract_final_answer(reply) {
+        return final.answer(message: reply)
     }
+    tool_uses = extract_tool_uses(reply)
+    when is_empty(tool_uses) {
+        when response.stop_reason == "end" {
+            when !is_empty(text_concat(reply)) {
+                return final.answer(message: reply)
+            }
+        }
+        session.push(reply)
+        return text_concat(reply)
+    }
+    session.push(reply)
     tool_results = dispatch_all(tool_uses)
     session.push(tool_results)
-    completion_state = "worked"
-    when final_answer_attempt {
-        completion_state = "reminded"
-    }
-    return agent_loop(completion_state).await
+    return agent_loop().await
 }

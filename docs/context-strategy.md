@@ -100,7 +100,7 @@ The flow chooses one message source:
 
 The managed `commands/agent.at` uses `context: "session"`. It does **not** feed `memory.recent_turns` to the main model as a fixed sliding window.
 
-At the start of the managed flow, `memory.recent_turns(n: 5, excerpt: { head: 12000, tail: 12000 })` provides a bounded excerpt to the cheap rule/confession selector. The same bounded view is used later to judge a candidate final answer against the current request and recent transcript. `head` and `tail` are independent character budgets; when the middle is omitted, `excerpt` keeps both edges in transcript order. The lossless `items` remain available to explicit callers, and these helper calls do not define the main model's session context. The older `excerpt_chars` input remains available for recent-first excerpts and cannot be combined with `excerpt`.
+At the start of the managed flow, `memory.recent_turns(n: 5, excerpt: { head: 12000, tail: 12000 })` provides a bounded excerpt to the cheap rule/confession selector. `head` and `tail` are independent character budgets; when the middle is omitted, `excerpt` keeps both edges in transcript order. The lossless `items` remain available to explicit callers, and these helper calls do not define the main model's session context. The older `excerpt_chars` input remains available for recent-first excerpts and cannot be combined with `excerpt`.
 
 ## Session history and active window
 
@@ -115,7 +115,7 @@ message handle, so subsequent `context: "session"` calls use the compacted windo
 
 Spawned flows keep a separate message segment. With `inherit_context: true`, the child starts from a copy of the parent's active window and then appends its invocation message. That copy contains only complete tool-use/result pairs, so the active parent `flow.spawn` transaction and other concurrently executing tools do not become orphaned requests in the child context.
 
-Successful managed `llm.call(context: "session")` calls append their assistant message to the active root or child segment through the same runtime contract. Flow code uses `session.push` for tool results, interjections, and other explicit messages rather than re-appending the returned assistant message.
+By default, successful `llm.call(context: "session")` calls append their assistant message to the active root or child segment. Flows using `record: false` take responsibility for recording that response. Managed templates use `session.push(reply)` for ordinary responses and `final.answer(message: reply)` for final delivery, then separately record tool results and interjections.
 
 Child segments use the same token-aware, transaction-aligned compaction and checkpoint mechanism as root history. No message-count trim rewrites the child prefix outside compaction; each child retains its own context epoch and cache-prefix observations.
 
@@ -215,10 +215,12 @@ The default agent currently follows this sequence:
 5. Load the stable managed system prompt from `prompts/system.md`.
 6. Enter a `loop` whose main call uses `context: "session"` and the managed system prompt.
 7. Dispatch tool calls and push their results into session history.
-8. Accept a valid `final.answer`, publish its complete response, and end the turn. Without a valid final answer, handle pending interjections and request a final answer after tool work.
+8. Explicitly call `final.answer(message: reply)` and return for a valid final control or a normally completed, non-empty reply without tool calls. Persist ordinary tool-call replies before dispatching tools. Preserve interrupted or truncated replies without marking them final.
 9. After the turn ends, the host prioritizes queued user input, then delivers pending watcher notifications in a new turn or continues an active goal. Watcher notifications are batched in arrival order, retain their watcher origin, and respect execution pauses.
 
 The managed `.at` files own tool loops and final-answer acceptance. The host owns turn boundaries and background wakeups; watcher events do not keep a finished loop alive. Managed templates are compared byte-for-byte and atomically replaced only when bundled content changes.
+
+`llm.call(record: false)` leaves the returned assistant response unrecorded and unnormalized so a flow can choose how to publish it. Context reads, queued input pickup, usage accounting, and pre-request compaction retain their usual behavior. `output: "response"` returns `{message, stop_reason}` instead of the default value; stop reasons are `end`, `tool_use`, `length`, and `cancelled`. These options are independent and default to `record: true` and `output: "value"`. Managed templates select both to avoid recording the same reply as ordinary text and as a final answer. Custom flows must explicitly persist any unrecorded reply they intend to retain, using `session.push` or `final.answer`.
 
 This is retrieval before the main loop plus full active-session context inside the loop. It is not a fixed ten-message sliding window and not automatic semantic recall.
 

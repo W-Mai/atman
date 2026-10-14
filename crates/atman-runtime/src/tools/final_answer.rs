@@ -120,7 +120,7 @@ pub fn extract(message: &Message) -> Option<String> {
         .map(|candidate| candidate.answer.to_owned())
 }
 
-pub(crate) fn promote_plain_response(message: &mut Message) {
+fn promote_plain_response(message: &mut Message) {
     if message.role != crate::message::MessageRole::Assistant
         || message.origin == crate::message::MessageOrigin::FinalAnswer
         || message
@@ -194,18 +194,57 @@ impl Tool for FinalAnswer {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn scheduling_claims(
+        &self,
+        _args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::tool_schedule::SchedulingClaims, RuntimeError> {
+        Ok(super::session::session_scheduling_claim(ctx))
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            match args.named("message").or_else(|| args.positional.first()) {
-                Some(Value::Str(message)) => Ok(Value::Str(message.clone())),
-                Some(other) => Err(RuntimeError::TypeMismatch {
-                    expected: "string".into(),
-                    actual: other.kind_name().into(),
-                }),
-                None => Err(RuntimeError::ToolFailed(
-                    "final.answer: missing `message`".into(),
-                )),
+            let mut message = match args.named("message").or_else(|| args.positional.first()) {
+                Some(Value::Str(text)) => Message::assistant_text(
+                    ctx.turn_id
+                        .clone()
+                        .unwrap_or_else(crate::event::TurnId::now),
+                    text.clone(),
+                ),
+                Some(Value::Host(AtmanPayload::Message(message))) => message.clone(),
+                Some(other) => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "string or assistant message".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+                None => {
+                    return Err(RuntimeError::ToolFailed(
+                        "final.answer: missing `message`".into(),
+                    ));
+                }
+            };
+            if message.role != crate::message::MessageRole::Assistant {
+                return Err(RuntimeError::ToolFailed(
+                    "final.answer requires an assistant message".into(),
+                ));
             }
+            if let Some(error) = validation_error(&message) {
+                return Err(RuntimeError::ToolFailed(error.into()));
+            }
+            promote_plain_response(&mut message);
+            let normalized = normalized_for_history(&message).ok_or_else(|| {
+                RuntimeError::ToolFailed(
+                    "final.answer requires non-empty text without other tool calls".into(),
+                )
+            })?;
+            let answer = normalized.text_concat();
+            let _compact_guard = match &ctx.compact_lock_handle {
+                Some(lock) => Some(lock.lock().await),
+                None => None,
+            };
+            super::session::append_message_to_context(ctx, normalized)?;
+            Ok(Value::Str(answer))
         })
     }
 }
@@ -380,6 +419,60 @@ mod tests {
                 "pattern": "\\S"
             })
         );
+    }
+
+    #[tokio::test]
+    async fn direct_final_answer_publishes_in_the_calling_context_and_rejects_invalid_input() {
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ctx = ToolCtx::new()
+            .with_history_segment(crate::tool::HistorySegment::Spawned)
+            .with_session_messages_handle(messages.clone());
+        for value in [
+            Value::Str("Direct answer.".into()),
+            Value::Host(AtmanPayload::Message(control_message())),
+        ] {
+            let result = FinalAnswer
+                .call(
+                    ToolArgs {
+                        positional: vec![value],
+                        named: Vec::new(),
+                    },
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(result, Value::Str(_)));
+        }
+        let published = messages.lock().unwrap().clone();
+        assert_eq!(published.len(), 2);
+        assert_eq!(published[0].text_concat(), "Direct answer.");
+        assert_eq!(published[1].text_concat(), "Done.");
+        assert!(
+            published
+                .iter()
+                .all(|message| message.origin == crate::message::MessageOrigin::FinalAnswer)
+        );
+        for value in [
+            Value::Str(" \n ".into()),
+            Value::Host(AtmanPayload::Message(Message::user_text(
+                TurnId::now(),
+                "user",
+            ))),
+        ] {
+            assert!(
+                FinalAnswer
+                    .call(
+                        ToolArgs {
+                            positional: vec![value],
+                            named: Vec::new()
+                        },
+                        &ctx
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(*messages.lock().unwrap(), published);
     }
 
     #[test]

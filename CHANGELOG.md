@@ -8,7 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
-- **Plain-text final answers** — Normally completed agent replies without tool calls become final answers automatically, preserving the response and avoiding an extra model request. Root and child agents retain goal and watcher turn boundaries.
+- **Flow-controlled final answers** — Managed root and child flows explicitly call `final.answer` to publish completed replies, including plain-text responses without tool calls. Manual response recording and stop-reason inspection prevent duplicate history entries and keep completion policy out of LLM dispatch.
 
 - **Agent time context** — Root and child agents receive the runtime host's local date, time, and UTC offset, with instructions to distinguish UTC storage timestamps from user-facing times.
 

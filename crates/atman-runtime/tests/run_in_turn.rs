@@ -30,23 +30,32 @@ struct MissingIntentProvider {
     requests: std::sync::Mutex<Vec<Vec<Message>>>,
 }
 
-struct FinalAnswerProvider;
+#[derive(Default)]
+struct FinalAnswerProvider {
+    plain_stop: Option<StopReason>,
+}
 
 impl FinalAnswerProvider {
     fn response(&self, turn_id: TurnId) -> AssistantMessage {
         AssistantMessage {
             message: Message {
                 role: MessageRole::Assistant,
-                parts: vec![MessagePart::ToolUse {
-                    id: "final-1".into(),
-                    name: atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL.into(),
-                    input: serde_json::json!({"message": "Done."}),
-                    intent: None,
-                }],
+                parts: if self.plain_stop.is_some() {
+                    vec![MessagePart::Text {
+                        text: "Done.".into(),
+                    }]
+                } else {
+                    vec![MessagePart::ToolUse {
+                        id: "final-1".into(),
+                        name: atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL.into(),
+                        input: serde_json::json!({"message": "Done."}),
+                        intent: None,
+                    }]
+                },
                 turn_id,
                 origin: MessageOrigin::User,
             },
-            stop_reason: StopReason::End,
+            stop_reason: self.plain_stop.clone().unwrap_or(StopReason::End),
             token_usage: TokenUsage::default(),
             timing: CallTiming::default(),
             model: "final-model".into(),
@@ -213,11 +222,12 @@ fn user_msg(turn_id: TurnId, text: &str) -> Message {
 async fn run_in_turn_appends_assistant_message_to_session() {
     let _registry = common::ModelRegistryGuard::mock("mock").await;
     let src = r#"flow ask() -> message {
-    return llm.call(model: "mock", prompt: "hi", context: "session")
+    return llm.call(model: "mock", prompt: "hi", context: "session", tools: ["final.answer"])
 }
 "#;
     let file = parse_file(src).unwrap();
     let executor = Executor::new();
+    atman_runtime::tools::register_tier_zero(&executor.tools);
     executor.providers.register(Arc::new(
         MockProvider::new("mock").with_model("mock", Value::Str("hello world".into())),
     ));
@@ -293,7 +303,9 @@ async fn root_final_answer_without_provider_intent_is_persisted_after_explicit_a
     let file = parse_file(src).unwrap();
     let executor = Executor::new();
     atman_runtime::tools::register_tier_zero(&executor.tools);
-    executor.providers.register(Arc::new(FinalAnswerProvider));
+    executor
+        .providers
+        .register(Arc::new(FinalAnswerProvider::default()));
     let session = Arc::new(Session::open_ephemeral());
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
@@ -322,15 +334,84 @@ async fn root_final_answer_without_provider_intent_is_persisted_after_explicit_a
 
 #[tokio::test]
 async fn managed_final_answer_ends_before_watcher_notifications_start_a_new_turn() {
-    assert_managed_final_answer_boundary(Arc::new(FinalAnswerProvider)).await;
+    assert_managed_final_answer_boundary(Arc::new(FinalAnswerProvider::default()), true).await;
 }
 
 #[tokio::test]
 async fn managed_plain_response_uses_the_same_final_answer_boundary() {
-    assert_managed_final_answer_boundary(Arc::new(
-        MockProvider::new("final-model").with_fallback(Value::Str("Done.".into())),
-    ))
+    assert_managed_final_answer_boundary(
+        Arc::new(MockProvider::new("final-model").with_fallback(Value::Str("Done.".into()))),
+        true,
+    )
     .await;
+}
+
+#[tokio::test]
+async fn managed_flow_does_not_finalize_truncated_or_cancelled_text() {
+    for reason in [StopReason::Length, StopReason::Cancelled] {
+        assert_managed_final_answer_boundary(
+            Arc::new(FinalAnswerProvider {
+                plain_stop: Some(reason),
+            }),
+            false,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn every_managed_subagent_role_delivers_plain_text_through_final_answer() {
+    let _registry = common::ModelRegistryGuard::mock("final-model").await;
+    let dir = tempfile::tempdir().unwrap();
+    atman_runtime::templates::ensure_managed_agent_at(dir.path()).unwrap();
+    let mut source = atman_runtime::templates::SUBAGENT_AT.to_string();
+    let mut offset = 0;
+    while let Some(start) = source[offset..].find("tools: [") {
+        let start = offset + start + "tools: [".len();
+        let end = start + source[start..].find(']').unwrap();
+        source.replace_range(start..end, "\"final.answer\"");
+        offset = start + "\"final.answer\"".len();
+    }
+    let file = parse_file(&source).unwrap();
+    let mut executor = Executor::new();
+    executor.source_dir = Some(dir.path().join("commands"));
+    atman_runtime::tools::register_tier_zero(&executor.tools);
+    executor.providers.register(Arc::new(FinalAnswerProvider {
+        plain_stop: Some(StopReason::End),
+    }));
+    for entry in [
+        "research_loop",
+        "verify_loop",
+        "implement_loop",
+        "review_loop",
+    ] {
+        let session = Arc::new(Session::open_ephemeral());
+        let turn = TurnId::now();
+        session.begin_turn(user_msg(turn.clone(), "finish"));
+        let output = executor
+            .run_in_turn(
+                &file,
+                entry,
+                vec![
+                    ("goal".into(), Value::Str("finish".into())),
+                    ("model".into(), Value::Str("final-model".into())),
+                    ("max_iter".into(), Value::Int(200)),
+                ],
+                Some(turn),
+                Some(session.clone()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(output, Value::Str(text) if text == "Done."));
+        let messages = session.messages();
+        let assistants: Vec<_> = messages
+            .iter()
+            .filter(|m| m.role == MessageRole::Assistant)
+            .collect();
+        assert_eq!(assistants.len(), 1, "{entry}");
+        assert_eq!(assistants[0].origin, MessageOrigin::FinalAnswer, "{entry}");
+        session.end_turn();
+    }
 }
 
 #[tokio::test]
@@ -347,8 +428,8 @@ async fn spawned_plain_response_is_finalized_once_in_its_own_context() {
     let file = parse_file(
         r#"
 flow child() -> string {
-    reply = llm.call(model: "mock", context: "session", tools: ["final.answer"])
-    return extract_final_answer(reply)
+    response = llm.call(model: "mock", context: "session", record: false, output: "response")
+    return final.answer(message: response.message)
 }
 flow parent() -> [string] {
     return fanout [child()]
@@ -381,7 +462,7 @@ flow parent() -> [string] {
     session.end_turn();
 }
 
-async fn assert_managed_final_answer_boundary(provider: Arc<dyn Provider>) {
+async fn assert_managed_final_answer_boundary(provider: Arc<dyn Provider>, finalized: bool) {
     use atman_runtime::memory::goal::{GoalActor, GoalPauseReason};
     use atman_runtime::watch::{WatchEvent, WatchMode, WatchSource};
     use std::time::Duration;
@@ -477,8 +558,10 @@ async fn assert_managed_final_answer_boundary(provider: Arc<dyn Provider>) {
         .iter()
         .filter(|m| m.origin == MessageOrigin::FinalAnswer)
         .collect();
-    assert_eq!(finals.len(), 1);
-    assert_eq!(finals[0].turn_id, first);
+    assert_eq!(finals.len(), usize::from(finalized));
+    if finalized {
+        assert_eq!(finals[0].turn_id, first);
+    }
     assert_eq!(
         messages
             .iter()
@@ -553,8 +636,10 @@ async fn assert_managed_final_answer_boundary(provider: Arc<dyn Provider>) {
         .iter()
         .filter(|m| m.origin == MessageOrigin::FinalAnswer)
         .collect();
-    assert_eq!(finals.len(), 2);
-    assert_eq!(finals[1].turn_id, second);
+    assert_eq!(finals.len(), 2 * usize::from(finalized));
+    if finalized {
+        assert_eq!(finals[1].turn_id, second);
+    }
     assert_ne!(first, second);
     assert!(!session.goal_control.should_continue());
 }

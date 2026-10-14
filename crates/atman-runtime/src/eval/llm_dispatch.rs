@@ -496,22 +496,14 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 ctx.watch_rules.clone(),
             )
             .await;
-            if context_call_purpose == crate::context_plan::ContextCallPurpose::General
-                && tool_specs
-                    .iter()
-                    .any(|tool| tool.name == crate::tools::final_answer::FINAL_ANSWER_TOOL)
-                && let Ok(message) = &mut outcome
-                && message.stop_reason == crate::provider::StopReason::End
-            {
-                crate::tools::final_answer::promote_plain_response(&mut message.message);
-            }
             let defer_final_candidate =
                 matches!(ctx.history_segment, crate::tool::HistorySegment::Root)
                     && outcome.as_ref().is_ok_and(|message| {
                         crate::tools::final_answer::normalized_for_history(&message.message)
                             .is_some()
                     });
-            if !defer_final_candidate
+            if args.record_response
+                && !defer_final_candidate
                 && let Ok(message) = &mut outcome
                 && let Some(normalized) =
                     crate::tools::final_answer::normalized_for_history(&message.message)
@@ -646,6 +638,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         );
                     }
                     if let Some(session) = ctx.session_runtime.as_ref()
+                        && args.record_response
                         && !matches!(context_mode, ContextMode::None)
                         && !defer_final_candidate
                     {
@@ -662,7 +655,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             compaction_budget,
                         )
                         .await;
-                    } else if uses_spawned_context && !defer_final_candidate {
+                    } else if args.record_response && uses_spawned_context && !defer_final_candidate
+                    {
                         if let Err(error) = crate::tools::session::append_message_to_context(
                             ctx,
                             am.message.clone(),
@@ -677,6 +671,21 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         && let Err(error) = control.wait(&ctx.cancel).await
                     {
                         return Value::Err(error);
+                    }
+                    if args.return_response {
+                        let stop_reason = match am.stop_reason {
+                            crate::provider::StopReason::End => "end",
+                            crate::provider::StopReason::ToolUse => "tool_use",
+                            crate::provider::StopReason::Length => "length",
+                            crate::provider::StopReason::Cancelled => "cancelled",
+                        };
+                        return Value::Struct(vec![
+                            (
+                                "message".into(),
+                                Value::Host(AtmanPayload::Message(am.message)),
+                            ),
+                            ("stop_reason".into(), Value::Str(stop_reason.into())),
+                        ]);
                     }
                     if !matches!(context_mode, ContextMode::None) {
                         return Value::Host(AtmanPayload::Message(am.message.clone()));

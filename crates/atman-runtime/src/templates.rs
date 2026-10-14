@@ -234,9 +234,10 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
         ),
     )
     system_prompt = @"../prompts/system.md"
-    completion_state = "direct"
     loop {
-        reply = llm.call(
+        response = llm.call(
+            record: false,
+            output: "response",
             model: "smart",
             effort: env("effort"),
             context: "session",
@@ -273,34 +274,27 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                 "mcp.status", "mcp.tools", "mcp.await", "mcp.call"
             ],
         )
+        reply = response.message
         final_answer = extract_final_answer(reply)
         when final_answer {
-            session.push(finalize_response(reply))
-            return final_answer
+            return final.answer(message: reply)
         }
         tool_uses = extract_tool_uses(reply)
-        final_answer_attempt = list.any(tool_uses, |call| call.name == "final.answer")
         when is_empty(tool_uses) {
-            when has_pending_injections() {
-                when completion_state == "reminded" {
-                    completion_state = "worked"
+            when response.stop_reason == "end" {
+                when !is_empty(text_concat(reply)) {
+                    return final.answer(message: reply)
                 }
+            }
+            session.push(reply)
+            when has_pending_injections() {
                 continue
             }
-            candidate_response = text_concat(reply)
-            when completion_state == "worked" {
-                completion_state = "reminded"
-                session.push(message.user(@"../prompts/loop-final-answer.md"))
-                continue
-            }
-            return candidate_response
+            return text_concat(reply)
         }
+        session.push(reply)
         tool_results = dispatch_all(tool_uses)
         session.push(tool_results)
-        completion_state = "worked"
-        when final_answer_attempt {
-            completion_state = "reminded"
-        }
     }
     return text_concat(reply)
 }
@@ -340,7 +334,9 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
         when i > max_iter {
             return "[sub-agent: max iterations reached]"
         }
-        reply = llm.call(
+        response = llm.call(
+            record: false,
+            output: "response",
             model: model,
             effort: env("effort"),
             context: "session",
@@ -360,17 +356,25 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
                 "memory.goal.get", "memory.goal.set", "memory.goal.pause", "memory.goal.resume",
             ],
         )
+        reply = response.message
         final_answer = extract_final_answer(reply)
         when final_answer {
-            return final_answer
+            return final.answer(message: reply)
         }
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
+            when response.stop_reason == "end" {
+                when !is_empty(text_concat(reply)) {
+                    return final.answer(message: reply)
+                }
+            }
+            session.push(reply)
             when has_pending_injections() {
                 continue
             }
             break
         }
+        session.push(reply)
         tool_results = dispatch_all(tool_uses)
         session.push(tool_results)
     }
@@ -387,7 +391,9 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
         when i > max_iter {
             return "[sub-agent: max iterations reached]"
         }
-        reply = llm.call(
+        response = llm.call(
+            record: false,
+            output: "response",
             model: model,
             effort: env("effort"),
             context: "session",
@@ -409,17 +415,25 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
                 "memory.goal.get", "memory.goal.set", "memory.goal.pause", "memory.goal.resume",
             ],
         )
+        reply = response.message
         final_answer = extract_final_answer(reply)
         when final_answer {
-            return final_answer
+            return final.answer(message: reply)
         }
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
+            when response.stop_reason == "end" {
+                when !is_empty(text_concat(reply)) {
+                    return final.answer(message: reply)
+                }
+            }
+            session.push(reply)
             when has_pending_injections() {
                 continue
             }
             break
         }
+        session.push(reply)
         tool_results = dispatch_all(tool_uses)
         session.push(tool_results)
     }
@@ -436,7 +450,9 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
         when i > max_iter {
             return "[sub-agent: max iterations reached]"
         }
-        reply = llm.call(
+        response = llm.call(
+            record: false,
+            output: "response",
             model: model,
             effort: env("effort"),
             context: "session",
@@ -458,17 +474,25 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
                 "memory.goal.get", "memory.goal.set", "memory.goal.pause", "memory.goal.resume",
             ],
         )
+        reply = response.message
         final_answer = extract_final_answer(reply)
         when final_answer {
-            return final_answer
+            return final.answer(message: reply)
         }
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
+            when response.stop_reason == "end" {
+                when !is_empty(text_concat(reply)) {
+                    return final.answer(message: reply)
+                }
+            }
+            session.push(reply)
             when has_pending_injections() {
                 continue
             }
             break
         }
+        session.push(reply)
         tool_results = dispatch_all(tool_uses)
         session.push(tool_results)
     }
@@ -485,7 +509,9 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
         when i > max_iter {
             return "[sub-agent: max iterations reached]"
         }
-        reply = llm.call(
+        response = llm.call(
+            record: false,
+            output: "response",
             model: model,
             effort: env("effort"),
             context: "session",
@@ -502,17 +528,25 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
                 "memory.goal.get", "memory.goal.set", "memory.goal.pause", "memory.goal.resume",
             ],
         )
+        reply = response.message
         final_answer = extract_final_answer(reply)
         when final_answer {
-            return final_answer
+            return final.answer(message: reply)
         }
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
+            when response.stop_reason == "end" {
+                when !is_empty(text_concat(reply)) {
+                    return final.answer(message: reply)
+                }
+            }
+            session.push(reply)
             when has_pending_injections() {
                 continue
             }
             break
         }
+        session.push(reply)
         tool_results = dispatch_all(tool_uses)
         session.push(tool_results)
     }
@@ -707,25 +741,25 @@ mod tests {
         let extract = AGENT_AT
             .find("final_answer = extract_final_answer(reply)")
             .unwrap();
-        let accepted = AGENT_AT.find("return final_answer").unwrap();
+        let accepted = AGENT_AT
+            .find("return final.answer(message: reply)")
+            .unwrap();
         assert!(extract < accepted);
-        assert!(AGENT_AT.contains("session.push(finalize_response(reply))"));
+        assert!(!AGENT_AT.contains("finalize_response"));
         assert!(!AGENT_AT.contains("iteration >="));
         assert!(!include_str!("../../../examples/agent.at").contains("iteration >="));
-        assert!(AGENT_AT.contains("completion_state = \"direct\""));
+        assert!(!AGENT_AT.contains("completion_state"));
         assert!(!AGENT_AT.contains("final_answer_reminded"));
-        let worked = AGENT_AT
-            .find("when completion_state == \"worked\"")
-            .unwrap();
-        let reminder = AGENT_AT
-            .find("session.push(message.user(@\"../prompts/loop-final-answer.md\"))")
-            .unwrap();
-        let direct_return = AGENT_AT.rfind("return candidate_response").unwrap();
-        assert!(worked < reminder && reminder < direct_return);
         let example = include_str!("../../../examples/agent.at");
-        assert!(example.contains("agent_loop(\"direct\").await"));
-        assert!(example.contains("flow agent_loop(completion_state: string)"));
+        assert!(example.contains("agent_loop().await"));
         assert!(!example.contains("final_answer_reminded"));
+        for flow in [AGENT_AT, SUBAGENT_AT, example] {
+            assert!(flow.contains("record: false"));
+            assert!(flow.contains("output: \"response\""));
+            assert!(flow.contains("when response.stop_reason == \"end\""));
+            assert!(flow.contains("return final.answer(message: reply)"));
+            assert!(flow.contains("session.push(reply)"));
+        }
         assert_eq!(SUBAGENT_AT.matches("\"final.answer\"").count(), 4);
         assert_eq!(SUBAGENT_AT.matches("\"preview.push\"").count(), 4);
         assert_eq!(

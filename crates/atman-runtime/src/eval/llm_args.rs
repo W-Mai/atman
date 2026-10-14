@@ -14,6 +14,8 @@ pub struct LlmNodeArgs {
     pub cache_prompt: bool,
     pub context_budget: Option<u64>,
     pub context_mode: String,
+    pub record_response: bool,
+    pub return_response: bool,
     pub fallback_value: Option<crate::value::Value>,
     pub tool_specs: Vec<crate::tool::ToolSpec>,
     pub(crate) mcp_scope: crate::tool::McpToolScope,
@@ -36,6 +38,8 @@ pub fn parse_llm_args_from_toolargs(
     let mut cache_prompt = false;
     let mut context_budget: Option<u64> = None;
     let mut context_mode = String::from("none");
+    let mut record_response = true;
+    let mut return_response = false;
     let mut tool_specs: Vec<crate::tool::ToolSpec> = Vec::new();
     let mut mcp_scope = crate::tool::McpToolScope::default();
     let mut reasoning: Option<crate::provider::ReasoningSelection> = None;
@@ -45,6 +49,28 @@ pub fn parse_llm_args_from_toolargs(
     let mut fallback_value: Option<crate::value::Value> = None;
     for (k, v) in &args.named {
         match k.as_str() {
+            "record" => {
+                let Value::Bool(enabled) = v else {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "bool (record assistant response)".into(),
+                        actual: v.kind_name().into(),
+                    });
+                };
+                record_response = *enabled;
+                continue;
+            }
+            "output" => {
+                return_response = match v {
+                    Value::Str(mode) if mode == "value" => false,
+                    Value::Str(mode) if mode == "response" => true,
+                    _ => {
+                        return Err(RuntimeError::ToolFailed(
+                            "llm.output: expected value or response".into(),
+                        ));
+                    }
+                };
+                continue;
+            }
             "retry_classified" => {
                 let items = match v {
                     Value::List(items) => items,
@@ -293,6 +319,8 @@ pub fn parse_llm_args_from_toolargs(
         cache_prompt,
         context_budget,
         context_mode,
+        record_response,
+        return_response,
         fallback_value,
         tool_specs,
         mcp_scope,
