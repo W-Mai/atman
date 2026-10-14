@@ -2831,6 +2831,16 @@ mod tests {
         let identity = root_identity(&registry, "goal-session");
         let parent = crate::goal::GoalController::ephemeral("parent".into());
         parent.set("parent work", None).unwrap();
+        parent
+            .pause(
+                crate::memory::goal::GoalActor::Agent,
+                crate::memory::goal::GoalPauseReason::NeedsInput,
+                "Previous objective needs input".into(),
+                None,
+            )
+            .unwrap();
+        parent.begin_user_turn();
+        assert!(!parent.should_continue());
         let mut ctx = ToolCtx::new()
             .with_registry(tools)
             .with_providers(Arc::new(ProviderRegistry::new()))

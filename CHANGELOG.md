@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Goal execution boundaries** — Goal completion, missing input, and blocked objectives stop automatic continuation without freezing child tasks. Explicit execution pauses still constrain descendants, and user-requested pauses allow the current final response before stopping background work.
+
 - **Runtime message history** — Restored goal continuation controls stay hidden, while watcher notifications appear as status notes instead of user messages. Model requests retain their original message roles and content.
 
 - **Final answer previews** — Draft previews use the same presentation as published and restored replies. Child streams preserve root previews, and resumed-turn retries and workflow restarts leave earlier turns intact.

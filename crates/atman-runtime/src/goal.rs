@@ -144,9 +144,27 @@ pub enum GoalAction {
     Clear,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExecutionPause {
+    Open,
+    // An agent acknowledging a user pause can still deliver this turn's answer.
+    Finishing,
+    Paused,
+}
+
+impl ExecutionPause {
+    fn for_pause(actor: GoalActor, reason: GoalPauseReason) -> Self {
+        match (actor, reason) {
+            (GoalActor::Agent, GoalPauseReason::UserRequested) => Self::Finishing,
+            (GoalActor::Agent, _) => Self::Open,
+            _ => Self::Paused,
+        }
+    }
+}
+
 struct State {
     record: Option<GoalRecord>,
-    execution_paused: bool,
+    execution_pause: ExecutionPause,
 }
 
 /// One stable agent owner, independent of the identifiers of its individual runs.
@@ -220,12 +238,13 @@ impl GoalController {
         parent: Option<Arc<Self>>,
         record: Option<GoalRecord>,
     ) -> Arc<Self> {
-        let execution_paused = record.as_ref().is_some_and(|g| {
-            g.status == GoalStatus::Paused
-                && g.pause
-                    .as_ref()
-                    .is_some_and(|p| p.actor != GoalActor::Agent)
-        });
+        let execution_pause = record
+            .as_ref()
+            .filter(|g| g.status == GoalStatus::Paused)
+            .and_then(|g| g.pause.as_ref())
+            .map_or(ExecutionPause::Open, |p| {
+                ExecutionPause::for_pause(p.actor, p.reason)
+            });
         let changes = parent
             .as_ref()
             .map(|p| p.changes.clone())
@@ -241,7 +260,7 @@ impl GoalController {
             store,
             state: Mutex::new(State {
                 record,
-                execution_paused,
+                execution_pause,
             }),
             changes,
             transition,
@@ -278,7 +297,7 @@ impl GoalController {
     pub fn begin_user_turn(&self) {
         let _transition = self.transition.lock().unwrap();
         if !self.turn_running() {
-            self.state.lock().unwrap().execution_paused = false;
+            self.state.lock().unwrap().execution_pause = ExecutionPause::Open;
             self.changed();
         }
     }
@@ -306,7 +325,7 @@ impl GoalController {
             ));
             Ok(())
         })?;
-        self.state.lock().unwrap().execution_paused = false;
+        self.state.lock().unwrap().execution_pause = ExecutionPause::Open;
         self.changed();
         Ok(())
     }
@@ -384,24 +403,20 @@ impl GoalController {
     }
 
     fn blocked_by(&self) -> Option<String> {
-        if self.state.lock().unwrap().execution_paused {
+        let execution_pause = self.state.lock().unwrap().execution_pause;
+        if execution_pause == ExecutionPause::Paused
+            || (execution_pause == ExecutionPause::Finishing && !self.turn_running())
+        {
             return Some(self.owner.clone());
         }
         let mut next = self.parent.as_deref();
         let mut parent_goal_id = self.record().and_then(|g| g.parent_goal_id);
         while let Some(parent) = next {
             let state = parent.state.lock().unwrap();
-            if state.execution_paused
+            if state.execution_pause != ExecutionPause::Open
                 || parent_goal_id
                     .as_ref()
                     .is_some_and(|id| state.record.as_ref().is_none_or(|g| &g.id != id))
-                || state.record.as_ref().is_some_and(|g| {
-                    g.status == GoalStatus::Paused
-                        && !g.pause.as_ref().is_some_and(|pause| {
-                            pause.actor == GoalActor::Agent
-                                && pause.reason == GoalPauseReason::Completed
-                        })
-                })
             {
                 return Some(parent.owner.clone());
             }
@@ -452,7 +467,8 @@ impl GoalController {
 
     /// Agent completion allows event handling; user, parent, and failure gates do not.
     pub fn allows_background_turn(&self) -> bool {
-        self.blocked_by().is_none()
+        let open = self.state.lock().unwrap().execution_pause == ExecutionPause::Open;
+        open && self.blocked_by().is_none()
     }
 
     /// Serialize message pickup with execution pauses and task replacement.
@@ -536,7 +552,7 @@ impl GoalController {
             ));
             Ok(())
         })?;
-        self.state.lock().unwrap().execution_paused = false;
+        self.state.lock().unwrap().execution_pause = ExecutionPause::Open;
         self.changed();
         Ok(())
     }
@@ -561,7 +577,7 @@ impl GoalController {
             Ok(())
         })?;
         if creating {
-            self.state.lock().unwrap().execution_paused = false;
+            self.state.lock().unwrap().execution_pause = ExecutionPause::Open;
             self.changed();
         }
         Ok(())
@@ -586,7 +602,7 @@ impl GoalController {
         }
         // External control stops execution even without a goal or when persistence fails.
         if actor != GoalActor::Agent {
-            self.state.lock().unwrap().execution_paused = true;
+            self.state.lock().unwrap().execution_pause = ExecutionPause::Paused;
             self.changed();
         }
         self.mutate(expected, |record| {
@@ -604,6 +620,14 @@ impl GoalController {
             goal.pause(actor, reason, summary);
             Ok(())
         })?;
+        if ExecutionPause::for_pause(actor, reason) == ExecutionPause::Finishing {
+            let mut state = self.state.lock().unwrap();
+            if state.execution_pause == ExecutionPause::Open {
+                state.execution_pause = ExecutionPause::Finishing;
+            }
+            drop(state);
+            self.changed();
+        }
         Ok(())
     }
 
@@ -625,7 +649,7 @@ impl GoalController {
             goal.pause = None;
             Ok(())
         })?;
-        self.state.lock().unwrap().execution_paused = false;
+        self.state.lock().unwrap().execution_pause = ExecutionPause::Open;
         self.changed();
         Ok(())
     }
@@ -935,14 +959,14 @@ mod tests {
     }
 
     #[test]
-    fn ancestor_completion_is_local_but_execution_pauses_reach_descendants() {
+    fn goal_suspension_is_local_but_execution_pauses_reach_descendants() {
         for (actor, reason, permits_children) in [
             (GoalActor::Agent, GoalPauseReason::Completed, true),
             (GoalActor::User, GoalPauseReason::Completed, false),
             (GoalActor::Parent, GoalPauseReason::Completed, false),
             (GoalActor::Runtime, GoalPauseReason::Completed, false),
-            (GoalActor::Agent, GoalPauseReason::NeedsInput, false),
-            (GoalActor::Agent, GoalPauseReason::Blocked, false),
+            (GoalActor::Agent, GoalPauseReason::NeedsInput, true),
+            (GoalActor::Agent, GoalPauseReason::Blocked, true),
             (GoalActor::Agent, GoalPauseReason::UserRequested, false),
             (GoalActor::Parent, GoalPauseReason::ParentRequested, false),
             (GoalActor::Runtime, GoalPauseReason::Cancelled, false),
@@ -982,6 +1006,77 @@ mod tests {
             assert!(!child.should_continue());
             assert_eq!(grandchild.should_continue(), permits_children);
         }
+    }
+
+    #[tokio::test]
+    async fn user_request_runs_descendants_without_resuming_the_old_goal() {
+        for reason in [
+            GoalPauseReason::NeedsInput,
+            GoalPauseReason::Blocked,
+            GoalPauseReason::Completed,
+        ] {
+            let root = GoalController::ephemeral("root".into());
+            root.set("old objective", None).unwrap();
+            root.pause(GoalActor::Agent, reason, "old turn ended".into(), None)
+                .unwrap();
+            let old_goal = root.record().unwrap();
+            root.begin_user_turn();
+            let child = root
+                .child("child".into(), "new request".into(), None)
+                .unwrap();
+            let grandchild = child
+                .child("grandchild".into(), "nested work".into(), None)
+                .unwrap();
+            assert!(!root.should_continue());
+            assert_eq!(root.record().unwrap(), old_goal);
+            assert!(child.should_continue());
+            assert!(grandchild.try_enter().is_some());
+            root.pause(
+                GoalActor::User,
+                GoalPauseReason::UserRequested,
+                "stop".into(),
+                None,
+            )
+            .unwrap();
+            assert!(grandchild.try_enter().is_none());
+            let cancel = CancellationToken::new();
+            let pending = grandchild.enter(&cancel);
+            tokio::pin!(pending);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), &mut pending)
+                    .await
+                    .is_err()
+            );
+            root.begin_user_turn();
+            tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!root.should_continue());
+        }
+    }
+
+    #[test]
+    fn agent_acknowledged_user_pause_allows_only_the_current_turn_to_finish() {
+        let root = GoalController::ephemeral("root".into());
+        root.set("work", None).unwrap();
+        let child = root.child("child".into(), "work".into(), None).unwrap();
+        let turn = root.start_turn();
+        root.pause(
+            GoalActor::Agent,
+            GoalPauseReason::UserRequested,
+            "user paused".into(),
+            None,
+        )
+        .unwrap();
+        assert!(root.try_enter().is_some());
+        assert!(child.try_enter().is_none());
+        assert!(!root.allows_background_turn());
+        drop(turn);
+        assert!(root.try_enter().is_none());
+        root.begin_user_turn();
+        assert!(child.try_enter().is_some());
+        assert!(!root.should_continue());
     }
 
     #[tokio::test]
