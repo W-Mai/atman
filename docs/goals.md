@@ -39,6 +39,8 @@ The TUI folds preceding work when a final answer is published, including direct 
 
 Draft previews, live publication, and history restoration share final-answer presentation, work-range selection, summaries, and per-fold tool/edit statistics. Publication finalizes the preview in place; child streams cannot retract a root preview. Work ranges respect turn boundaries, including Goal resume and background turns without a new user message. Each turn's execution records remain independently expandable, and retries or workflow restarts stay within their own turn; restoring history skips the folding animation.
 
+Message origin and model protocol role are independent. Goal continuation controls carry `internal` origin and remain hidden in the transcript after restoration. Watcher and child-result messages appear as status notes rather than user requests. These messages retain the `user` role when submitted to the model, and hidden controls still establish their turn boundaries during history restoration.
+
 ## Child results
 
 Async child agents automatically deliver each published `final.answer` to their direct parent. A running parent receives pending results as a FIFO batch in its next general model call, without cancelling an in-flight request or waiting for another turn. An idle managed parent starts a new `child_result` turn with its retained invocation settings. Nested agents use the same behavior: a grandchild notifies its own parent, which can process the result and deliver its answer upward. No watcher or model polling is required for final results. Child messages are data, not new user instructions or authorization.

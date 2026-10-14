@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Runtime message history** — Restored goal continuation controls stay hidden, while watcher notifications appear as status notes instead of user messages. Model requests retain their original message roles and content.
+
 - **Final answer previews** — Draft previews use the same presentation as published and restored replies. Child streams preserve root previews, and resumed-turn retries and workflow restarts leave earlier turns intact.
 
 - **Goal continuation history** — Final replies keep resumed turns in separate, expandable work sections. Live messages and restored history share final-answer presentation and fold metadata.

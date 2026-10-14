@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use atman_runtime::TranscriptEntry;
-use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::projection::workflow::WorkflowProjection;
 use atman_runtime::stream::StreamFrame;
 use atman_runtime::workflow::{WorkflowPermissionIdentity, WorkflowPermissionState};
@@ -1058,15 +1058,24 @@ pub(crate) fn flatten_message_with_output_store(
         MessageRole::User => {
             let text = msg.text_concat();
             if !text.trim().is_empty() {
-                if msg.origin == atman_runtime::message::MessageOrigin::ChildResult {
-                    out.push(OutputItem::SystemNote {
-                        text: "Child results".into(),
-                        level: crate::app::NoteLevel::Info,
-                    });
-                } else if msg.origin == atman_runtime::message::MessageOrigin::Interjection {
-                    out.push(OutputItem::Interjection { text, presentation });
-                } else {
-                    out.push(OutputItem::UserTurn { text, presentation });
+                // Origin classifies transcript content; role is the model protocol role.
+                match msg.origin {
+                    MessageOrigin::User => out.push(OutputItem::UserTurn { text, presentation }),
+                    MessageOrigin::Interjection => {
+                        out.push(OutputItem::Interjection { text, presentation });
+                    }
+                    MessageOrigin::ChildResult | MessageOrigin::Watcher => {
+                        out.push(OutputItem::SystemNote {
+                            text: if msg.origin == MessageOrigin::ChildResult {
+                                "Child results"
+                            } else {
+                                "Watcher notifications"
+                            }
+                            .into(),
+                            level: NoteLevel::Info,
+                        });
+                    }
+                    MessageOrigin::Internal | MessageOrigin::FinalAnswer => {}
                 }
             }
         }
@@ -1801,6 +1810,57 @@ mod tests {
         let out = flatten_messages(&[user("hi")]);
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], OutputItem::UserTurn { .. }));
+    }
+
+    #[test]
+    fn user_role_origins_preserve_model_role_and_transcript_identity() {
+        let provider = atman_runtime::providers::openai::OpenAiProvider::new("openai", "test-key");
+        for origin in [
+            MessageOrigin::User,
+            MessageOrigin::Interjection,
+            MessageOrigin::Internal,
+            MessageOrigin::Watcher,
+            MessageOrigin::ChildResult,
+        ] {
+            let mut message = user("runtime or user input");
+            message.origin = origin;
+            let encoded = serde_json::to_string(&message).unwrap();
+            let restored: Message = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(restored.origin, origin);
+            assert_eq!(restored.role, MessageRole::User);
+            let items = flatten_messages(std::slice::from_ref(&restored));
+            match origin {
+                MessageOrigin::User => {
+                    assert!(matches!(items.as_slice(), [OutputItem::UserTurn { .. }]))
+                }
+                MessageOrigin::Interjection => assert!(matches!(
+                    items.as_slice(),
+                    [OutputItem::Interjection { .. }]
+                )),
+                MessageOrigin::Internal => assert!(items.is_empty()),
+                MessageOrigin::Watcher | MessageOrigin::ChildResult => assert!(matches!(
+                    items.as_slice(),
+                    [OutputItem::SystemNote { text, .. }] if text == if origin == MessageOrigin::Watcher { "Watcher notifications" } else { "Child results" }
+                )),
+                MessageOrigin::FinalAnswer => unreachable!(),
+            }
+            let request = atman_runtime::provider::LlmRequest {
+                model: "test-model".into(),
+                messages: vec![restored],
+                system: None,
+                input: atman_runtime::Value::Unit,
+                schema: None,
+                cache_prompt: false,
+                prompt_cache_key: None,
+                tools: Vec::new(),
+                reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
+                stall_timeout_secs: 0,
+            };
+            let wire: serde_json::Value =
+                serde_json::from_slice(&provider.wire_body_bytes(&request, false)).unwrap();
+            assert_eq!(wire["messages"][0]["role"], "user");
+            assert_eq!(wire["messages"][0]["content"], "runtime or user input");
+        }
     }
 
     #[test]
