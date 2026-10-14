@@ -3106,7 +3106,6 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             status,
             output,
             iteration,
-            done,
             expanded,
             ..
         } => render_sub_agent_activity(
@@ -3115,7 +3114,6 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             status,
             output,
             *iteration,
-            *done,
             *expanded,
             ctx.panel_width,
             ctx.animation_frame,
@@ -4287,30 +4285,25 @@ fn render_activity_summary(
 fn render_sub_agent_activity(
     handle: &str,
     goal: &str,
-    status: &str,
+    status: &crate::agent_presentation::AgentState,
     output: &str,
     iteration: u64,
-    done: bool,
     expanded: bool,
     panel_width: u16,
     animation_frame: u32,
     fullscreen_hovered: bool,
 ) -> Vec<Line<'static>> {
-    let glyph = match status {
-        "ok" => "✓",
-        "err" => "✗",
-        "killed" => "⊘",
-        "interrupted" => "⚠",
-        "Paused" | "Paused by parent" | "Waiting for input" | "Blocked · paused" => "Ⅱ",
-        _ if done => "✓",
-        _ => spinner_char(animation_frame),
+    let glyph = if status.is_running() {
+        spinner_char(animation_frame)
+    } else {
+        status.glyph()
     };
-    let iter_str = if done {
+    let iter_str = if !status.is_running() {
         String::new()
     } else {
         format!(" iter {iteration}")
     };
-    let metadata = format!("flow[{handle}]{iter_str}");
+    let metadata = format!("{} · flow[{handle}]{iter_str}", status.label());
     render_output_block(
         goal,
         Some(metadata.as_str()),
@@ -11644,10 +11637,9 @@ mod tests {
         let lines = render_sub_agent_activity(
             "flow_s_1",
             "审计上下文缓存",
-            "running",
+            &crate::agent_presentation::AgentState::Running,
             "",
             2,
-            false,
             false,
             80,
             0,

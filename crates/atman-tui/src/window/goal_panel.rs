@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use atman_runtime::goal::{GoalAction, GoalController, GoalExecution, GoalSnapshot};
-use atman_runtime::memory::goal::GoalStatus;
+use atman_runtime::goal::{GoalAction, GoalController, GoalSnapshot};
 use crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::{
     Frame,
@@ -18,48 +17,11 @@ use crate::wm::component::{
 };
 
 pub(crate) fn status(snapshot: &GoalSnapshot) -> String {
-    if let Some(owner) = &snapshot.paused_by
-        && snapshot.goal.as_ref().is_some_and(|g| &g.owner != owner)
-    {
-        return "Paused by parent".into();
-    }
-    match snapshot.execution {
-        GoalExecution::Pausing => format!("Pausing · {} in flight", snapshot.running_operations),
-        GoalExecution::Finishing => "Paused · finishing turn".into(),
-        GoalExecution::Running => "Running".into(),
-        GoalExecution::Paused => snapshot
-            .goal
-            .as_ref()
-            .and_then(|g| g.pause.as_ref())
-            .map(|p| {
-                match p.reason {
-                    atman_runtime::memory::goal::GoalPauseReason::Completed => "Completed · paused",
-                    atman_runtime::memory::goal::GoalPauseReason::NeedsInput => "Waiting for input",
-                    atman_runtime::memory::goal::GoalPauseReason::Blocked => "Blocked · paused",
-                    _ => "Paused",
-                }
-                .into()
-            })
-            .unwrap_or_else(|| "Paused".into()),
-        GoalExecution::Idle => if snapshot.goal.is_some() {
-            "Active · ready"
-        } else {
-            "No goal"
-        }
-        .into(),
-    }
+    crate::agent_presentation::GoalPresentation::new(snapshot).status
 }
 
-pub(crate) fn toggle(snapshot: &GoalSnapshot) -> GoalAction {
-    if snapshot
-        .goal
-        .as_ref()
-        .is_some_and(|g| g.status == GoalStatus::Active)
-    {
-        GoalAction::Pause
-    } else {
-        GoalAction::Resume
-    }
+pub(crate) fn toggle(snapshot: &GoalSnapshot) -> Option<GoalAction> {
+    crate::agent_presentation::GoalPresentation::new(snapshot).action
 }
 
 pub(crate) fn command(
@@ -128,6 +90,20 @@ impl GoalPanelContent {
         entries
     }
 
+    fn presentation(
+        &self,
+        target: &Option<String>,
+        control: &GoalController,
+    ) -> crate::agent_presentation::GoalPresentation {
+        target
+            .as_ref()
+            .and_then(|handle| self.session.flow_registry.lookup(handle).ok())
+            .and_then(|entry| crate::agent_presentation::GoalPresentation::for_flow(&entry))
+            .unwrap_or_else(|| {
+                crate::agent_presentation::GoalPresentation::new(&control.snapshot())
+            })
+    }
+
     fn activate(&mut self, index: usize) -> Vec<WmCommand> {
         if self.pending_save.is_some() {
             return vec![];
@@ -141,11 +117,11 @@ impl GoalPanelContent {
                 self.confirm_clear = false;
                 vec![]
             }
-            1 if self.editor.is_none() && control.record().is_some() => vec![command(
-                control,
-                target.clone(),
-                toggle(&control.snapshot()),
-            )],
+            1 if self.editor.is_none() && control.record().is_some() => self
+                .presentation(target, control)
+                .action
+                .map(|action| vec![command(control, target.clone(), action)])
+                .unwrap_or_default(),
             2 => {
                 if let Some(editor) = self.editor.as_ref() {
                     if editor.buf().trim().is_empty() {
@@ -233,6 +209,7 @@ impl WindowComponent for GoalPanelContent {
         self.selected = self.selected.min(choices.len() - 1);
         let (target, control) = &choices[self.selected];
         let snapshot = control.snapshot();
+        let presentation = self.presentation(target, control);
         let name = target.as_deref().unwrap_or("Main agent");
         render_action(
             frame,
@@ -297,7 +274,7 @@ impl WindowComponent for GoalPanelContent {
                 let goal = snapshot.goal.as_ref();
                 format!(
                     "{}\n\n{}{}",
-                    status(&snapshot),
+                    presentation.status,
                     goal.map(|g| g.objective.as_str())
                         .unwrap_or("Create a goal for work that should continue across turns."),
                     goal.and_then(|g| g.pause.as_ref())
@@ -337,11 +314,7 @@ impl WindowComponent for GoalPanelContent {
             self.text_rect,
         );
         let labels = [
-            if matches!(toggle(&snapshot), GoalAction::Pause) {
-                "Pause"
-            } else {
-                "Resume"
-            },
+            presentation.action_label,
             if self.pending_save.is_some() {
                 "Saving…"
             } else if self.editor.is_some() {
@@ -376,7 +349,8 @@ impl WindowComponent for GoalPanelContent {
                     },
                     focused: self.focus == index,
                     hovered: self.hover == Some(index),
-                    disabled: self.pending_save.is_some()
+                    disabled: (index == 1 && presentation.action.is_none())
+                        || self.pending_save.is_some()
                         || (index == 2 && self.editor.is_none() && snapshot.goal.is_none())
                         || (index != 2 && (snapshot.goal.is_none() || self.editor.is_some())),
                 },
@@ -583,6 +557,70 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    #[test]
+    fn parent_pause_disables_the_same_keyboard_and_mouse_action() {
+        use atman_runtime::memory::goal::{GoalActor, GoalPauseReason};
+        let session = Arc::new(atman_runtime::Session::open_ephemeral());
+        session.goal_control.set("parent", None).unwrap();
+        let child = session
+            .goal_control
+            .child("child".into(), "child".into(), None)
+            .unwrap();
+        let entry = session.flow_registry.create_entry(
+            "child".into(),
+            "child".into(),
+            String::new(),
+            atman_rt::RunId::now(),
+        );
+        entry.goal_control.set(child).ok().unwrap();
+        let mut panel = GoalPanelContent::new(session.clone());
+        panel.selected = 1;
+        let mut terminal = Terminal::new(TestBackend::new(92, 26)).unwrap();
+        let mut scroll = 0;
+        let mut horizontal = 0;
+        let mut ctx = EventCtx {
+            scroll: &mut scroll,
+            h_scroll: &mut horizontal,
+        };
+        for paused in [true, false] {
+            if paused {
+                session
+                    .goal_control
+                    .pause(
+                        GoalActor::User,
+                        GoalPauseReason::UserRequested,
+                        "stop".into(),
+                        None,
+                    )
+                    .unwrap();
+            } else {
+                session.goal_control.resume(GoalActor::User, None).unwrap();
+            }
+            draw(&mut panel, &mut terminal);
+            let (_, rect) = *panel.hits.iter().find(|(index, _)| *index == 1).unwrap();
+            for event in [
+                WmEvent::Key(KeyAction::ToggleGoal),
+                WmEvent::Mouse(crossterm::event::MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x + 1,
+                    row: rect.y + 1,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                }),
+            ] {
+                let WmEventResult::Consumed(commands) = panel.handle_event(&event, &mut ctx) else {
+                    panic!("goal action ignored");
+                };
+                if paused {
+                    assert!(commands.is_empty());
+                } else {
+                    assert!(
+                        matches!(commands.as_slice(), [WmCommand::GoalControl { target: Some(target), action: GoalAction::Pause, .. }] if target == "child")
+                    );
+                }
+            }
+        }
     }
 
     #[test]

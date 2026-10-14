@@ -831,8 +831,8 @@ pub(crate) async fn run_frames(
                                     if key == "goal-control" {
                                         if let Some(session) = &app.app.session && let Some(tx) = handle.control_tx.as_ref() {
                                             let control = &session.goal_control;
-                                            if let Some(goal) = control.record() {
-                                                let _ = tx.send(crate::TuiControl::GoalControl { request_id: None, target: None, goal_id: Some(goal.id), revision: Some(goal.revision), action: crate::window::goal_panel::toggle(&control.snapshot()) });
+                                            if let Some(goal) = control.record() && let Some(action) = crate::window::goal_panel::toggle(&control.snapshot()) {
+                                                let _ = tx.send(crate::TuiControl::GoalControl { request_id: None, target: None, goal_id: Some(goal.id), revision: Some(goal.revision), action });
                                             }
                                         }
                                     } else if let Some(idx) = key

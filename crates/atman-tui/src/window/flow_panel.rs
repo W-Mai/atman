@@ -17,7 +17,7 @@ use crate::wm::component::{
 };
 
 pub struct FlowPanelContent {
-    pub(crate) goal_control: Option<std::sync::Arc<atman_runtime::goal::GoalController>>,
+    pub(crate) goal_entry: Option<std::sync::Arc<atman_runtime::tools::agent_ctrl::FlowEntry>>,
     pub(crate) goal_rect: Rect,
     pub(crate) goal_hover: bool,
     pub handle: String,
@@ -36,29 +36,28 @@ impl WindowComponent for FlowPanelContent {
             area.height,
         );
         self.goal_rect = Rect::default();
-        if let Some(control) = &self.goal_control
-            && control.record().is_some()
+        if let Some(entry) = &self.goal_entry
+            && let Some(presentation) = crate::agent_presentation::GoalPresentation::for_flow(entry)
             && area.height >= 6
         {
-            let snapshot = control.snapshot();
             self.goal_rect = Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 3);
-            let verb = if matches!(
-                super::goal_panel::toggle(&snapshot),
-                atman_runtime::goal::GoalAction::Pause
-            ) {
-                "Pause"
-            } else {
-                "Resume"
-            };
             crate::settings_form::render_action(
                 frame,
                 self.goal_rect,
                 &crate::settings_form::Action {
-                    label: &format!("{} · {verb}", super::goal_panel::status(&snapshot)),
-                    shortcut: "Ctrl+Y",
+                    label: &if presentation.action.is_some() {
+                        format!("{} · {}", presentation.status, presentation.action_label)
+                    } else {
+                        presentation.status.clone()
+                    },
+                    shortcut: if presentation.action.is_some() {
+                        "Ctrl+Y"
+                    } else {
+                        ""
+                    },
                     focused: false,
                     hovered: self.goal_hover,
-                    disabled: false,
+                    disabled: presentation.action.is_none(),
                 },
                 &crate::theme::theme(),
             );
@@ -81,7 +80,6 @@ impl WindowComponent for FlowPanelContent {
                 status,
                 output,
                 iteration,
-                done,
                 messages,
                 workflow_graph,
                 expanded_nodes,
@@ -99,7 +97,6 @@ impl WindowComponent for FlowPanelContent {
                 status,
                 output,
                 *iteration,
-                *done,
                 messages,
                 workflow_graph,
                 expanded_nodes,
@@ -285,12 +282,18 @@ impl WindowComponent for FlowPanelContent {
             }
             _ => false,
         };
-        if activate && let Some(control) = &self.goal_control {
-            return WmEventResult::Consumed(vec![super::goal_panel::command(
-                control,
-                Some(self.handle.clone()),
-                super::goal_panel::toggle(&control.snapshot()),
-            )]);
+        if activate
+            && let Some(entry) = &self.goal_entry
+            && let Some(control) = entry.goal_control.get()
+        {
+            let commands = crate::agent_presentation::GoalPresentation::for_flow(entry)
+                .and_then(|p| p.action)
+                .map(|action| {
+                    super::goal_panel::command(control, Some(self.handle.clone()), action)
+                })
+                .into_iter()
+                .collect();
+            return WmEventResult::Consumed(commands);
         }
         if was_hovered != self.goal_hover
             && matches!(event, WmEvent::Mouse(mouse) if mouse.kind == crossterm::event::MouseEventKind::Moved)
@@ -324,10 +327,9 @@ pub(crate) fn render_sub_agent_panel(
     handle: &str,
     goal: &str,
     model: &str,
-    status: &str,
+    status: &crate::agent_presentation::AgentState,
     _output: &str,
     iteration: u64,
-    done: bool,
     messages: &[Message],
     workflow_graph: &WorkflowProjection,
     expanded_nodes: &HashSet<String>,
@@ -416,15 +418,8 @@ pub(crate) fn render_sub_agent_panel(
     let accent_style = Style::default().fg(t.accent.into());
 
     // Section 1: Header table
-    let icon = match status {
-        "ok" => "✓",
-        "err" => "✗",
-        "killed" => "⊘",
-        "interrupted" => "⚠",
-        "Paused" | "Paused by parent" | "Waiting for input" | "Blocked · paused" => "Ⅱ",
-        _ if done => "✓",
-        _ => "◐",
-    };
+    let icon = status.glyph();
+    let done = !status.is_running();
     let iter_str = if done {
         String::new()
     } else {
@@ -446,7 +441,7 @@ pub(crate) fn render_sub_agent_panel(
     ]));
     lines.push(Line::from(vec![
         Span::styled(" status: ", label_style),
-        Span::styled(subagent_status_label(status, done), value_style),
+        Span::styled(status.label(), value_style),
     ]));
     lines.push(Line::from(""));
 
@@ -461,7 +456,7 @@ pub(crate) fn render_sub_agent_panel(
         workflow_graph,
         expanded_nodes,
         workflow_expanded,
-        status == "killed",
+        *status == crate::agent_presentation::AgentState::Stopped,
         render_frame,
         area.width.max(300),
         crate::output::MAX_COLLAPSED_BODY_ROWS,
@@ -599,19 +594,6 @@ pub(crate) fn render_sub_agent_panel(
     f.render_widget(Paragraph::new(visible_lines), area);
 }
 
-fn subagent_status_label(status: &str, done: bool) -> String {
-    match status {
-        "running" => "running",
-        "ok" => "completed",
-        "err" => "failed",
-        "killed" => "stopped",
-        "interrupted" => "interrupted",
-        _ if done => "completed",
-        _ => status,
-    }
-    .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use crate::wm::{EventCtx, WmEvent, WmEventResult};
@@ -629,13 +611,62 @@ mod tests {
     use crate::app::OutputItem;
     use crate::wm::WindowComponent;
 
-    use super::{FlowPanelContent, render_sub_agent_panel, subagent_status_label};
+    use super::{FlowPanelContent, render_sub_agent_panel};
 
     #[test]
-    fn subagent_status_uses_task_style_labels() {
-        assert_eq!(subagent_status_label("ok", true), "completed");
-        assert_eq!(subagent_status_label("err", true), "failed");
-        assert_eq!(subagent_status_label("killed", true), "stopped");
+    fn blocked_child_toggle_does_not_fall_through_to_the_parent() {
+        use atman_runtime::memory::goal::{GoalActor, GoalPauseReason};
+        let session = atman_runtime::Session::open_ephemeral();
+        session.goal_control.set("parent", None).unwrap();
+        let child = session
+            .goal_control
+            .child("child".into(), "child".into(), None)
+            .unwrap();
+        let entry = session.flow_registry.create_entry(
+            "child".into(),
+            "child".into(),
+            String::new(),
+            atman_rt::RunId::now(),
+        );
+        entry.goal_control.set(child).ok().unwrap();
+        session
+            .goal_control
+            .pause(
+                GoalActor::User,
+                GoalPauseReason::UserRequested,
+                "stop".into(),
+                None,
+            )
+            .unwrap();
+        let mut panel = FlowPanelContent {
+            goal_entry: Some(entry),
+            goal_rect: ratatui::layout::Rect::new(1, 1, 40, 3),
+            goal_hover: false,
+            handle: "child".into(),
+            scroll: 0,
+            render_cache: None,
+            output_store: None,
+            selection_projection: None,
+        };
+        let mut scroll = 0;
+        let mut h_scroll = 0;
+        let mut ctx = EventCtx {
+            scroll: &mut scroll,
+            h_scroll: &mut h_scroll,
+        };
+        for event in [
+            WmEvent::Key(crate::keys::KeyAction::ToggleGoal),
+            WmEvent::Mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 2,
+                row: 2,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+        ] {
+            assert!(
+                matches!(panel.handle_event(&event, &mut ctx), WmEventResult::Consumed(commands) if commands.is_empty())
+            );
+        }
     }
 
     #[test]
@@ -677,10 +708,9 @@ mod tests {
                     "child",
                     "inspect",
                     "model",
-                    "running",
+                    &crate::agent_presentation::AgentState::Running,
                     "",
                     1,
-                    false,
                     &[],
                     &graph,
                     &expanded,
@@ -724,10 +754,9 @@ mod tests {
                     "child",
                     "inspect",
                     "model",
-                    "running",
+                    &crate::agent_presentation::AgentState::Running,
                     "",
                     1,
-                    false,
                     &[],
                     &graph,
                     &expanded,
@@ -813,7 +842,7 @@ mod tests {
             prompts: &prompts,
         };
         let mut panel = FlowPanelContent {
-            goal_control: None,
+            goal_entry: None,
             goal_rect: ratatui::layout::Rect::default(),
             goal_hover: false,
             handle: run_id,

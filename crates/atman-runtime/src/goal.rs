@@ -436,16 +436,9 @@ impl GoalController {
             } else {
                 GoalExecution::Pausing
             }
-        } else if goal
-            .as_ref()
-            .is_some_and(|g| g.status == GoalStatus::Paused)
-        {
-            if !self.turn_running() {
-                GoalExecution::Paused
-            } else {
-                GoalExecution::Finishing
-            }
-        } else if running_operations != 0 {
+        } else if self.state.lock().unwrap().execution_pause == ExecutionPause::Finishing {
+            GoalExecution::Finishing
+        } else if self.turn_running() || running_operations != 0 {
             GoalExecution::Running
         } else {
             GoalExecution::Idle

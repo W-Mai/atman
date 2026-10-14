@@ -384,7 +384,24 @@ pub fn render(
             let bar_color: Color = t.subtle_fg.into();
             let bar = if is_task_hovered { "▌" } else { "▎" };
 
-            let icon = status_icon(snap.status, snap.termination);
+            let agent_state = crate::app::resolve_task_detail(
+                &snap.source_handle,
+                items,
+                handle_index,
+                detached_task_details,
+            )
+            .and_then(|(_, item)| match item {
+                crate::app::OutputItem::SubAgentActivity { status, .. } => Some(*status),
+                _ => None,
+            });
+            let icon = if snap.status == TaskStatus::Running {
+                agent_state.map_or_else(
+                    || status_icon(snap.status, snap.termination),
+                    |state| state.glyph(),
+                )
+            } else {
+                status_icon(snap.status, snap.termination)
+            };
             let elapsed = fmt_elapsed(snap.elapsed_ms());
             let elapsed_w = crate::width::width(&elapsed);
             // layout: bar(1) sp(1) icon(1) sp(1) label(...) pad sp(2) elapsed sp(1) insert(1) sp(1) kill(1) sp(1)
@@ -392,13 +409,16 @@ pub fn render(
             let left_w = 1 + 1 + 1 + 1; // bar + sp + icon + sp
 
             // compute content lines (used for both collapsed summary and expanded view)
-            let content_lines: Vec<String> = compute_content_lines(
+            let mut content_lines: Vec<String> = compute_content_lines(
                 snap,
                 activity_nodes,
                 items,
                 handle_index,
                 detached_task_details,
             );
+            if let Some(state) = agent_state {
+                content_lines.push(state.label().into());
+            }
             let watcher_lines: Vec<String> = if let Some(hub) = watch_hub {
                 let watchers = hub.list_watchers_for_handle(&snap.source_handle);
                 if watchers.is_empty() {

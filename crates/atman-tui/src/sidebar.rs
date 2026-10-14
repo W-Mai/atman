@@ -1152,18 +1152,11 @@ fn render_upper_content(
             f,
             *rect,
             &crate::settings_form::Action {
-                label: if matches!(
-                    crate::window::goal_panel::toggle(snapshot),
-                    atman_runtime::goal::GoalAction::Pause
-                ) {
-                    "Pause"
-                } else {
-                    "Resume"
-                },
+                label: crate::agent_presentation::GoalPresentation::new(snapshot).action_label,
                 shortcut: "Ctrl+Y",
                 focused: false,
                 hovered: inputs.hovered_row == Some("goal-control"),
-                disabled: false,
+                disabled: crate::window::goal_panel::toggle(snapshot).is_none(),
             },
             t,
         );

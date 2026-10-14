@@ -1463,6 +1463,7 @@ pub(crate) fn handle_key(
             if let Some(session) = &app.session {
                 let control = &session.goal_control;
                 if let Some(goal) = control.record()
+                    && let Some(action) = crate::window::goal_panel::toggle(&control.snapshot())
                     && let Some(tx) = control_tx
                 {
                     let _ = tx.send(TuiControl::GoalControl {
@@ -1470,7 +1471,7 @@ pub(crate) fn handle_key(
                         target: None,
                         goal_id: Some(goal.id),
                         revision: Some(goal.revision),
-                        action: crate::window::goal_panel::toggle(&control.snapshot()),
+                        action,
                     });
                 }
             }

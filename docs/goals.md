@@ -12,6 +12,8 @@ A valid `final.answer` is published immediately and ends the current turn. Watch
 
 `memory.goal.get` returns `{goal, execution, paused_by, running_operations}`. `goal` is null when no objective exists. Records include `id`, `revision`, `objective`, `owner`, `parent_goal_id`, `status`, and `pause`.
 
+`goal.status` controls automatic objective continuation; `execution` describes current activity and execution pauses. A paused goal can have `running` execution during a new user turn, and an active goal can be `idle` between turns. `finishing` identifies an agent acknowledging a user-requested pause while delivering its current final response. A paused goal alone does not imply that the flow has completed.
+
 Goal timestamps remain stored in UTC. Root and child agents receive a runtime clock context record containing the host's local date, time, and UTC offset, refreshed at minute precision before model calls without changing the system prompt. The host timezone can differ from the user's timezone, especially on remote servers; agents are instructed to use the user's timezone when known and otherwise label times with their UTC offset. Pause summaries are model-authored text displayed unchanged; existing summaries are not rewritten by this clock context.
 
 | Tool | Arguments | Effect |
@@ -62,6 +64,8 @@ Root state is stored in `<session>/goal.json`; child records are stored in `<ses
 No default turn, token, fuel, or time budget is added. Provider retries retain their existing limits; exhausted retries pause the goal instead of silently starting another attempt.
 
 ## TUI and CLI controls
+
+Task lists, child details, and Goal controls share execution-state labels. A parent execution pause displays **Paused by parent** and disables the child's toggle until that restriction is lifted. A new user turn under a paused objective displays **Goal paused · running** and offers **Pause** for the running work. Idle paused goals offer **Resume**. Completed, failed, stopped, or interrupted flow instances remain terminal; retained goal records do not expose a resume action for exited children. Returning a spawn handle does not mark its child task complete.
 
 The root Goal section and child flow panels display padded **Pause / Resume** buttons with `Ctrl+Y`. `:goal` or **Manage Goal** in `Ctrl+P` opens the goal panel. Its agent selector addresses the root or an existing managed child; `Tab` / `Shift+Tab`, `Enter`, and mouse clicks operate the same controls. `Space` toggles the selected goal outside editing. **Save** and `Ctrl+S` submit the objective and return to the goal details after persistence succeeds. A pending save displays **Saving…** and prevents duplicate submissions. Failed saves retain the draft and show the error in the panel. `Esc` discards editing when no save is pending. Clear requires a second activation.
 

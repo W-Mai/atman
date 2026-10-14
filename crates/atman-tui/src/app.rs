@@ -541,10 +541,9 @@ pub enum OutputItem {
         goal: String,
         child_run_id: String,
         model: String,
-        status: String,
+        status: crate::agent_presentation::AgentState,
         output: String,
         iteration: u64,
-        done: bool,
         expanded: bool,
         messages: Vec<Message>,
         workflow_graph: WorkflowProjection,
@@ -567,9 +566,8 @@ impl OutputItem {
         match self {
             Self::AssistantMd { streaming, .. } => *streaming,
             Self::Thinking { done, .. } => !done,
-            Self::Terminal { done, .. }
-            | Self::Bash { done, .. }
-            | Self::SubAgentActivity { done, .. } => !done,
+            Self::Terminal { done, .. } | Self::Bash { done, .. } => !done,
+            Self::SubAgentActivity { status, .. } => status.is_running(),
             Self::WorkflowPanel { ended_at, .. } => ended_at.is_none(),
             Self::CompactionSummary { phase, .. } => {
                 matches!(phase, CompactionPhase::Running)
@@ -1844,11 +1842,10 @@ impl AppState {
             }
             atman_runtime::TaskKind::Flow => {
                 Box::new(crate::window::flow_panel::FlowPanelContent {
-                    goal_control: self
+                    goal_entry: self
                         .session
                         .as_ref()
-                        .and_then(|s| s.flow_registry.lookup(handle).ok())
-                        .and_then(|e| e.goal_control.get().cloned()),
+                        .and_then(|s| s.flow_registry.lookup(handle).ok()),
                     goal_rect: ratatui::layout::Rect::default(),
                     goal_hover: false,
                     handle: handle.to_string(),
@@ -3406,20 +3403,15 @@ impl AppState {
                     }
                 }
                 let call_done = call.status != ToolCallStatus::Running;
-                if let Some(
-                    OutputItem::Bash { done, .. }
-                    | OutputItem::Terminal { done, .. }
-                    | OutputItem::SubAgentActivity { done, .. },
-                ) = restored.as_mut()
+                if let Some(OutputItem::Bash { done, .. } | OutputItem::Terminal { done, .. }) =
+                    restored.as_mut()
                 {
                     *done = call_done;
                 }
                 if call.detail.is_none() {
                     call.detail = restored.map(Box::new);
                 } else if let Some(
-                    OutputItem::Bash { done, .. }
-                    | OutputItem::Terminal { done, .. }
-                    | OutputItem::SubAgentActivity { done, .. },
+                    OutputItem::Bash { done, .. } | OutputItem::Terminal { done, .. },
                 ) = call.detail.as_deref_mut()
                 {
                     *done = call_done;
@@ -3651,11 +3643,8 @@ impl AppState {
         self.mutate_tool_call(tool_use_id, OutputMutation::Semantic, |call| {
             call.status = status;
             call.ended_at = Some(Instant::now());
-            if let Some(
-                OutputItem::Terminal { done, .. }
-                | OutputItem::Bash { done, .. }
-                | OutputItem::SubAgentActivity { done, .. },
-            ) = call.detail.as_deref_mut()
+            if let Some(OutputItem::Terminal { done, .. } | OutputItem::Bash { done, .. }) =
+                call.detail.as_deref_mut()
             {
                 *done = true;
             }
@@ -3728,27 +3717,27 @@ impl AppState {
             let Some(goal) = &snapshot.goal else {
                 continue;
             };
-            let label = crate::window::goal_panel::status(&snapshot);
-            let idle = matches!(
-                snapshot.execution,
-                atman_runtime::goal::GoalExecution::Paused
-            );
+            let lifecycle = entry.status.lock().unwrap().clone();
+            let next = if lifecycle.is_running() {
+                crate::agent_presentation::AgentState::from_goal(&snapshot)
+            } else {
+                crate::agent_presentation::AgentState::from_result(lifecycle.kind_str())
+            };
             self.mutate_routed_sub_agent(
                 &entry.child_run_id.to_string(),
                 OutputMutation::Semantic,
                 |item| {
                     let OutputItem::SubAgentActivity {
-                        status,
-                        done,
-                        goal: text,
-                        ..
+                        status, goal: text, ..
                     } = item
                     else {
                         return false;
                     };
-                    let changed = *status != label || *done != idle || *text != goal.objective;
-                    *status = label;
-                    *done = idle;
+                    if status.is_terminal() {
+                        return false;
+                    }
+                    let changed = *status != next || *text != goal.objective;
+                    *status = next;
                     *text = goal.objective.clone();
                     changed
                 },
@@ -4797,10 +4786,9 @@ impl AppState {
                     goal,
                     child_run_id: child_run_id.clone(),
                     model,
-                    status: "running".into(),
+                    status: crate::agent_presentation::AgentState::Running,
                     output: String::new(),
                     iteration: 0,
-                    done: false,
                     expanded: false,
                     messages: Vec::new(),
                     workflow_graph: WorkflowProjection::new(atman_rt::TurnId::<
@@ -4860,18 +4848,18 @@ impl AppState {
                         .sub_agent_run_ids
                         .get(&run_id)
                         .and_then(|route| route.tool_use_id.clone());
+                    let status = crate::agent_presentation::AgentState::from_result(&status);
                     self.mutate_routed_sub_agent(&run_id, OutputMutation::Semantic, |item| {
                         let OutputItem::SubAgentActivity {
                             status: current_status,
                             output,
-                            done,
                             ..
                         } = item
                         else {
                             return false;
                         };
                         let output_changed = !final_text.is_empty() && *output != final_text;
-                        let changed = *current_status != status || output_changed || !*done;
+                        let changed = *current_status != status || output_changed;
                         if !changed {
                             return false;
                         }
@@ -4879,7 +4867,6 @@ impl AppState {
                         if output_changed {
                             *output = final_text;
                         }
-                        *done = true;
                         true
                     });
                     if let Some(tool_use_id) = tool_use_id {
@@ -6582,6 +6569,12 @@ mod tests {
                 origin: MessageOrigin::User,
             },
         });
+        let OutputItem::ToolDispatch { calls } = &app.items[0] else {
+            panic!("expected grouped tool dispatch");
+        };
+        assert!(
+            matches!(calls[0].detail.as_deref(), Some(OutputItem::SubAgentActivity { status, .. }) if !status.is_terminal())
+        );
         app.apply_stream_frame(StreamFrame::SubAgentDone {
             handle: "agent_1".into(),
             status: "ok".into(),
@@ -6595,7 +6588,7 @@ mod tests {
         assert!(calls[0].ended_at.is_some());
         assert!(matches!(
             calls[0].detail.as_deref(),
-            Some(OutputItem::SubAgentActivity { done: true, .. })
+            Some(OutputItem::SubAgentActivity { status, .. }) if status.is_terminal()
         ));
     }
 
@@ -7423,10 +7416,9 @@ mod tests {
                 goal: String::new(),
                 child_run_id: String::new(),
                 model: String::new(),
-                status: "ok".into(),
+                status: crate::agent_presentation::AgentState::Completed,
                 output: String::new(),
                 iteration: 1,
-                done: true,
                 expanded: false,
                 messages: Vec::new(),
                 workflow_graph: WorkflowProjection::new(atman_rt::TurnId::<
@@ -8205,7 +8197,7 @@ mod terminal_stream_tests {
         );
         entry.goal_control.set(child.clone()).ok().unwrap();
         let mut app = AppState::new("s".into(), None);
-        app.session = Some(session);
+        app.session = Some(session.clone());
         app.apply_stream_frame(StreamFrame::SubAgentStarted {
             handle: "child".into(),
             goal: "work".into(),
@@ -8222,15 +8214,61 @@ mod terminal_stream_tests {
             )
             .unwrap();
         app.refresh_goal_activity();
-        assert!(
-            matches!(&app.items[0], OutputItem::SubAgentActivity { done: true, status, .. } if status == "Paused")
-        );
+        assert!(matches!(
+            &app.items[0],
+            OutputItem::SubAgentActivity {
+                status: crate::agent_presentation::AgentState::Paused { by_parent: false },
+                ..
+            }
+        ));
         assert!(!entry.cancel.is_cancelled());
         child.resume(GoalActor::User, None).unwrap();
         app.refresh_goal_activity();
         assert!(matches!(
             &app.items[0],
-            OutputItem::SubAgentActivity { done: false, .. }
+            OutputItem::SubAgentActivity {
+                status: crate::agent_presentation::AgentState::Ready,
+                ..
+            }
+        ));
+        session
+            .goal_control
+            .pause(
+                GoalActor::User,
+                GoalPauseReason::UserRequested,
+                "pause descendants".into(),
+                None,
+            )
+            .unwrap();
+        app.refresh_goal_activity();
+        assert!(matches!(
+            &app.items[0],
+            OutputItem::SubAgentActivity {
+                status: crate::agent_presentation::AgentState::Paused { by_parent: true },
+                ..
+            }
+        ));
+        session.goal_control.begin_user_turn();
+        app.refresh_goal_activity();
+        assert!(matches!(
+            &app.items[0],
+            OutputItem::SubAgentActivity {
+                status: crate::agent_presentation::AgentState::Ready,
+                ..
+            }
+        ));
+        app.apply_stream_frame(StreamFrame::SubAgentDone {
+            handle: "child".into(),
+            status: "ok".into(),
+            final_text: "done".into(),
+        });
+        app.refresh_goal_activity();
+        assert!(matches!(
+            &app.items[0],
+            OutputItem::SubAgentActivity {
+                status: crate::agent_presentation::AgentState::Completed,
+                ..
+            }
         ));
     }
 

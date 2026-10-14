@@ -315,14 +315,11 @@ fn flatten_transcript_impl(
                 }
                 if let Some(root_id) = spawned_root {
                     if !sub_agent_indices.contains_key(&root_id) {
-                        let (ok, cancelled) =
-                            flow_dones.get(&root_id).cloned().unwrap_or((false, false));
-                        let status = if cancelled {
-                            "killed".into()
-                        } else if ok {
-                            "ok".into()
-                        } else {
-                            "running".into()
+                        let status = match flow_dones.get(&root_id) {
+                            Some((_, true)) => crate::agent_presentation::AgentState::Stopped,
+                            Some((true, false)) => crate::agent_presentation::AgentState::Completed,
+                            Some((false, false)) => crate::agent_presentation::AgentState::Failed,
+                            None => crate::agent_presentation::AgentState::Running,
                         };
                         let model = llm_models.get(&root_id).cloned().unwrap_or_default();
                         out.push(OutputItem::SubAgentActivity {
@@ -333,7 +330,6 @@ fn flatten_transcript_impl(
                             status,
                             output: String::new(),
                             iteration: 0,
-                            done: flow_dones.contains_key(&root_id),
                             expanded: false,
                             messages: Vec::new(),
                             workflow_graph: WorkflowProjection::new(atman_rt::TurnId::<
@@ -932,16 +928,14 @@ fn flatten_transcript_impl(
             }
         }
         if let OutputItem::SubAgentActivity {
-            done,
             status,
             workflow_graph,
             ..
         } = item
         {
             workflow_graph.interrupt_pending_permissions();
-            if !*done {
-                *done = true;
-                *status = "interrupted".into();
+            if !status.is_terminal() {
+                *status = crate::agent_presentation::AgentState::Interrupted;
             }
         }
     }
@@ -2546,13 +2540,16 @@ mod tests {
         let sub = out
             .iter()
             .find_map(|it| match it {
-                OutputItem::SubAgentActivity { done, status, .. } => Some((*done, status.clone())),
+                OutputItem::SubAgentActivity { status, .. } => {
+                    Some((status.is_terminal(), *status))
+                }
                 _ => None,
             })
             .expect("SubAgentActivity item");
         assert!(sub.0, "orphan sub-agent must be marked done on restore");
         assert_eq!(
-            sub.1, "interrupted",
+            sub.1,
+            crate::agent_presentation::AgentState::Interrupted,
             "orphan sub-agent status must be 'interrupted'"
         );
     }
@@ -3086,7 +3083,7 @@ mod tests {
                 messages.len(),
                 goal.clone(),
                 model.clone(),
-                status.clone(),
+                *status,
                 workflow_graph.root.len(),
                 workflow_graph
                     .find_node(&format!("tool:{research_run}:spawned-tool"))
@@ -3099,7 +3096,11 @@ mod tests {
         assert_eq!(msg_count, 2, "should have 2 messages (user + assistant)");
         assert_eq!(goal, "read Cargo.toml", "goal from first user message");
         assert_eq!(model, "primary-model");
-        assert_eq!(status, "ok", "status from FlowDone");
+        assert_eq!(
+            status,
+            crate::agent_presentation::AgentState::Completed,
+            "status from FlowDone"
+        );
         assert!(
             graph_nodes > 0,
             "workflow_graph should have nodes after rebuild, got {graph_nodes}"
@@ -3108,6 +3109,29 @@ mod tests {
             approval,
             Some(atman_runtime::workflow::ApprovalState::Approved)
         );
+        for (cancelled, expected) in [
+            (false, crate::agent_presentation::AgentState::Failed),
+            (true, crate::agent_presentation::AgentState::Stopped),
+        ] {
+            let mut ended = entries.clone();
+            for entry in &mut ended {
+                if let TranscriptEntry::FlowDone {
+                    run_id,
+                    ok,
+                    cancelled: was_cancelled,
+                    ..
+                } = entry
+                    && run_id == &sub_run
+                {
+                    *ok = false;
+                    *was_cancelled = cancelled;
+                }
+            }
+            assert!(flatten_transcript(&ended).iter().any(|item| matches!(item,
+                OutputItem::SubAgentActivity { child_run_id, status, .. }
+                    if child_run_id == &sub_run && *status == expected
+            )));
+        }
     }
 
     #[test]
@@ -3382,14 +3406,14 @@ mod tests {
                     workflow_graph,
                     status,
                     ..
-                } => Some((handle.clone(), workflow_graph.root.len(), status.clone())),
+                } => Some((handle.clone(), workflow_graph.root.len(), *status)),
                 _ => None,
             })
             .collect();
 
         eprintln!("=== SubAgentActivity items: {}", sub_items.len());
         for (handle, nodes, status) in &sub_items {
-            eprintln!("  handle={} nodes={} status={}", handle, nodes, status);
+            eprintln!("  handle={} nodes={} status={:?}", handle, nodes, status);
         }
 
         // Check main workflow panel for sub-agent nodes
@@ -3414,7 +3438,12 @@ mod tests {
                 handle,
                 nodes
             );
-            assert_eq!(status, "ok", "SubAgentActivity {} should be done", handle);
+            assert_eq!(
+                *status,
+                crate::agent_presentation::AgentState::Completed,
+                "SubAgentActivity {} should be done",
+                handle
+            );
         }
 
         // CRITICAL: verify no main workflow panel contains a Flow node
@@ -3481,7 +3510,7 @@ mod tests {
             {
                 let node_count = count_workflow_nodes(&workflow_graph.root);
                 eprintln!(
-                    "  SUB[{}] handle={} nodes={} status={}",
+                    "  SUB[{}] handle={} nodes={} status={:?}",
                     i, handle, node_count, status
                 );
             }
