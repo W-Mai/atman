@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Subagent shell authority** — Role flows preserve inherited shell capability across inline calls, allowing their declared process tools to execute. Parent authority limits and role tool exposure remain enforced.
+
 - **Goal status controls** — Task lists, child details, and Goal panels distinguish paused objectives from running or exited flows. Parent-blocked and exited children no longer expose ineffective toggles, and spawn results do not mark child tasks complete.
 
 - **Goal execution boundaries** — Goal completion, missing input, and blocked objectives stop automatic continuation without freezing child tasks. Explicit execution pauses still constrain descendants, and user-requested pauses allow the current final response before stopping background work.

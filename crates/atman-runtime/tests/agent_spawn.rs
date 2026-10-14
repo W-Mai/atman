@@ -43,6 +43,7 @@ impl Tool for Probe {
 struct ToolLoopProvider {
     calls: Arc<Mutex<Vec<LlmRequest>>>,
     next: AtomicUsize,
+    shell_probe: bool,
 }
 
 impl ToolLoopProvider {
@@ -58,9 +59,28 @@ impl ToolLoopProvider {
             (
                 vec![MessagePart::ToolUse {
                     id: "probe-call".into(),
-                    name: "probe".into(),
-                    input: serde_json::json!({}),
+                    name: if self.shell_probe {
+                        "bash.spawn"
+                    } else {
+                        "probe"
+                    }
+                    .into(),
+                    input: if self.shell_probe {
+                        serde_json::json!({"cmd":"printf shell-authority-ok", "block":true, "block_timeout_ms":5000})
+                    } else {
+                        serde_json::json!({})
+                    },
                     intent: atman_runtime::message::ToolCallIntent::new("Run probe"),
+                }],
+                StopReason::ToolUse,
+            )
+        } else if self.shell_probe {
+            (
+                vec![MessagePart::ToolUse {
+                    id: format!("final-{index}"),
+                    name: "final.answer".into(),
+                    input: serde_json::json!({"message":"child finished"}),
+                    intent: atman_runtime::message::ToolCallIntent::new("Report probe result"),
                 }],
                 StopReason::ToolUse,
             )
@@ -199,6 +219,200 @@ fn admitted_args(registry: &FlowRegistry, ctx: &ToolCtx, mut args: ToolArgs) -> 
         Value::Str(registry.issue_spawn_permit(identity)),
     ));
     args
+}
+
+#[tokio::test]
+async fn managed_roles_preserve_shell_authority_through_the_spawn_and_inner_loop() {
+    use atman_runtime::{
+        memory, tools,
+        trust::{TrustConfig, TrustMode},
+    };
+    let _models =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "tool-loop",
+            "tool-loop",
+            131_072,
+            None,
+        )]))
+        .await;
+    let temp = tempfile::tempdir().unwrap();
+    atman_runtime::templates::ensure_managed_agent_at(temp.path()).unwrap();
+    let path = temp.path().join("commands/subagent.at");
+    for shell in [true, false] {
+        for role in ["research", "verify", "implement", "review"] {
+            let flow_registry = Arc::new(FlowRegistry::new());
+            let trust = TrustConfig {
+                mode: TrustMode::Reckless,
+                ..Default::default()
+            };
+            let tools = ToolRegistry::new();
+            tools::register_tier_zero(&tools);
+            tools::register_git_ops(&tools);
+            tools::register_watch(&tools);
+            let bash = tools::register_bash_bg(&tools);
+            let terminal = tools::register_terminal(&tools);
+            tools::register_web(&tools, Default::default());
+            tools::register_web_search(&tools, &Default::default());
+            tools::register_preview(&tools, Default::default());
+            tools::register_memory(
+                &tools,
+                Arc::new(memory::todo::TodoStore::at(temp.path())),
+                Arc::new(memory::confession::ConfessionStore::at(temp.path())),
+                Arc::new(memory::goal::GoalStore::at(temp.path())),
+                Arc::new(memory::plan::PlanStore::at(temp.path())),
+            );
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let providers = ProviderRegistry::new();
+            providers.register(Arc::new(ToolLoopProvider {
+                calls: calls.clone(),
+                next: AtomicUsize::new(0),
+                shell_probe: true,
+            }));
+            let events = EventSink::new();
+            let mut ctx = ToolCtx::new()
+                .with_flow_registry(flow_registry.clone())
+                .with_approval(Arc::new(atman_runtime::session::ApprovalRegistry::new()))
+                .with_bg_registry(bash)
+                .with_term_registry(terminal)
+                .with_session_dir(temp.path().to_path_buf())
+                .with_trust(trust)
+                .with_events(events.clone());
+            ctx.goal_control = Some(atman_runtime::goal::GoalController::ephemeral(
+                "shell-chain".into(),
+            ));
+            let executor = atman_runtime::Executor {
+                tools,
+                providers,
+                events: events.clone(),
+                tool_ctx: ctx,
+                safety: None,
+                source_dir: None,
+            };
+            let parent = atman_rt::parse_file(&format!(
+                r#"flow parent(target: string, role: string) {{
+                    contract {{ capabilities {{ shell: {shell} }} }}
+                    inventory = flow.instances()
+                    return flow.spawn(
+                        flow: target, spawn_token: inventory.spawn_token, async: true,
+                        arguments: {{goal: "Run the harmless shell probe and report its result", role: role, model: "tool-loop"}},
+                    )
+                }}"#,
+            ))
+            .unwrap();
+            let result = executor
+                .run(
+                    &parent,
+                    "parent",
+                    vec![
+                        (
+                            "target".into(),
+                            Value::Str(format!("{}@subagent", path.display())),
+                        ),
+                        ("role".into(), Value::Str(role.into())),
+                    ],
+                )
+                .await
+                .unwrap();
+            let Value::Struct(fields) = result else {
+                panic!("spawn handle missing")
+            };
+            let handle = fields
+                .iter()
+                .find_map(|(name, value)| match (name.as_str(), value) {
+                    ("handle", Value::Str(handle)) => Some(handle),
+                    _ => None,
+                })
+                .unwrap();
+            let entry = flow_registry.lookup(handle).unwrap();
+            let finished = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if entry
+                        .messages
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|m| m.origin == MessageOrigin::FinalAnswer)
+                        || !entry.status.lock().unwrap().is_running()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await;
+            flow_registry.cancel_managed_agents();
+            assert!(!wait_for_status(&flow_registry, handle).await.is_running());
+            finished.expect("managed role did not finish its probe");
+            let recorded = calls.lock().unwrap();
+            let (content, is_error) = recorded
+                .iter()
+                .flat_map(|r| &r.messages)
+                .flat_map(|m| &m.parts)
+                .find_map(|part| match part {
+                    MessagePart::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } if tool_use_id == "probe-call" => Some((content, *is_error)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{role}, shell={shell}: no probe result; status={:?}",
+                        entry.status.lock().unwrap()
+                    )
+                });
+            if role == "review" {
+                assert!(is_error && content.contains("was not exposed"), "{content}");
+            } else if shell {
+                assert!(
+                    !is_error && content.contains("shell-authority-ok"),
+                    "{role}: {content}"
+                );
+                let result: serde_json::Value = serde_json::from_str(content).unwrap();
+                assert_eq!(result["exit_code"], 0, "{role}: {content}");
+            } else {
+                assert!(
+                    is_error && content.contains("requested grant exceeds actor authority"),
+                    "{role}: {content}"
+                );
+            }
+            let loop_name = format!("{role}_loop");
+            let snapshot = events.snapshot();
+            let (loop_run, parent_run) = snapshot
+                .iter()
+                .find_map(|event| match event {
+                    Event::FlowStart {
+                        run_id,
+                        flow_name,
+                        parent_run_id: Some(parent),
+                        spawned: false,
+                        ..
+                    } if flow_name == &loop_name => Some((run_id, parent)),
+                    _ => None,
+                })
+                .expect("the real role loop must execute as an inline child");
+            for run in [loop_run, parent_run] {
+                assert_eq!(
+                    flow_registry
+                        .lookup_run(run)
+                        .unwrap()
+                        .effective_authority
+                        .shell,
+                    shell,
+                    "{role}"
+                );
+            }
+            assert!(
+                entry
+                    .messages
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.origin == MessageOrigin::FinalAnswer)
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -415,6 +629,7 @@ async fn spawned_managed_context_persists_assistant_tool_transactions() {
     providers.register(Arc::new(ToolLoopProvider {
         calls: Arc::clone(&calls),
         next: AtomicUsize::new(0),
+        shell_probe: false,
     }));
     let events = EventSink::new();
     let broker = atman_runtime::permission::PermissionBroker::shared(Arc::clone(&flow_registry));

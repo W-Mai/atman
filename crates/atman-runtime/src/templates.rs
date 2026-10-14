@@ -333,6 +333,7 @@ flow subagent(goal: string, role: string = "research", model: string = "smart", 
 
 flow research_loop(goal: string, model: string, max_iter: int) -> string {
     contract {
+        capabilities { shell: true }
         invocation { user_message: goal, goal: true }
     }
     i = 0
@@ -397,6 +398,7 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
 
 flow verify_loop(goal: string, model: string, max_iter: int) -> string {
     contract {
+        capabilities { shell: true }
         invocation { user_message: goal, goal: true }
     }
     i = 0
@@ -463,6 +465,7 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
 
 flow implement_loop(goal: string, model: string, max_iter: int) -> string {
     contract {
+        capabilities { shell: true }
         invocation { user_message: goal, goal: true }
     }
     i = 0
@@ -529,6 +532,7 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
 
 flow review_loop(goal: string, model: string, max_iter: int) -> string {
     contract {
+        capabilities { shell: true }
         invocation { user_message: goal, goal: true }
     }
     i = 0
@@ -830,28 +834,17 @@ mod tests {
         let file = parse_file(SUBAGENT_AT).expect("SUBAGENT_AT must parse");
         assert!(!SUBAGENT_AT.contains("llm.classify("));
         assert_eq!(SUBAGENT_AT.matches("memory.goal.pause").count(), 4);
-        let subagent = file
+        for flow in file
             .flows
             .iter()
-            .find(|f| f.name.name == "subagent")
-            .expect("subagent flow must exist");
-        assert!(
-            subagent.contract.as_ref().is_some_and(|contract| {
-                contract.blocks.iter().any(|block| {
-                    block.name.name == "capabilities"
-                        && block.kwargs.iter().any(|(name, value)| {
-                            name.name == "shell"
-                                && matches!(
-                                    value,
-                                    atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Bool(
-                                        true
-                                    ))
-                                )
-                        })
-                })
-            }),
-            "subagent entry must enable shell for inherited Tier Four tools"
-        );
+            .filter(|flow| flow.name.name != "describe")
+        {
+            assert!(
+                crate::flow_authority::contract_allows_shell(flow.contract.as_ref()),
+                "{} must preserve inherited shell authority",
+                flow.name.name
+            );
+        }
     }
 
     #[test]

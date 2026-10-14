@@ -171,6 +171,8 @@ A Flow also receives an authority ceiling when it starts. The ceiling preserves 
 
 This prevents a running Flow from creating a broad authority and then widening itself through a runtime trust update.
 
+Shell authority is intersected at every Flow boundary, including inline calls. Both the caller and callee must allow `contract { capabilities { shell: true } }`; a callee declaration cannot restore authority denied by its parent. Managed subagent entry and role Flows declare this capability so their existing process tools remain usable. Tool exposure is checked separately: the review role does not expose Bash, and a shell capability does not add tools to its model request.
+
 ## Fail-closed behavior
 
 Controlled execution requires a complete trusted invocation context. Missing broker, Flow identity, registry binding, trust snapshot, or run identity causes denial. The runtime does not fall back to an older automatic-approval path.
