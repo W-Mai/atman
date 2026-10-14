@@ -96,6 +96,8 @@ pub struct ResolvedPath {
 
 #[derive(Clone, Default)]
 pub struct ToolCtx {
+    pub(crate) child_results: Option<Arc<crate::agent_results::ResultInbox>>,
+    pub(crate) result_route: Option<Arc<crate::agent_results::ResultRoute>>,
     pub goal_control: Option<Arc<crate::goal::GoalController>>,
     pub(crate) goal_resume_allowed: bool,
     pub cancel: CancellationToken,
@@ -341,6 +343,42 @@ impl ToolExposureRegistry {
 }
 
 impl ToolCtx {
+    pub(crate) fn result_inbox(&self) -> Option<Arc<crate::agent_results::ResultInbox>> {
+        self.child_results
+            .clone()
+            .or_else(|| {
+                self.goal_control
+                    .as_ref()
+                    .map(|control| control.child_results.clone())
+            })
+            .or_else(|| {
+                self.session_runtime
+                    .as_ref()
+                    .map(|session| session.goal_control.child_results.clone())
+            })
+    }
+
+    pub(crate) fn publish_child_result(&self, message: &crate::message::Message) {
+        if message.origin == crate::message::MessageOrigin::FinalAnswer
+            && let Some(answer) = crate::tools::final_answer::extract(message)
+        {
+            if let Some(entry) = &self.agent_entry {
+                *entry.output.lock().unwrap() = answer.clone();
+            }
+            if let Some(route) = &self.result_route
+                && let Some(run_id) = &self.flow_run_id
+            {
+                route.publish(
+                    run_id.clone(),
+                    self.turn_id
+                        .clone()
+                        .unwrap_or_else(|| message.turn_id.clone()),
+                    answer,
+                );
+            }
+        }
+    }
+
     pub(crate) async fn enter_goal_operation(
         &self,
         tool: &dyn Tool,

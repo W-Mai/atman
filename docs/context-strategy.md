@@ -119,6 +119,8 @@ By default, successful `llm.call(context: "session")` calls append their assista
 
 Child segments use the same token-aware, transaction-aligned compaction and checkpoint mechanism as root history. No message-count trim rewrites the child prefix outside compaction; each child retains its own context epoch and cache-prefix observations.
 
+Published async child final answers enter a scope-bound inbox belonging to the direct parent. A general model request reserves the pending FIFO batch and records it with `child_result` origin at pickup; isolated and auxiliary calls do not consume it. Root and child requests use the same ownership mechanism. If the parent is idle, the host records the batch in a new turn instead. Request preparation failure releases reservations, and ending a turn does not discard unread child results. Results remain untrusted task data and cannot authorize a goal resume or a privileged operation as user input.
+
 Tool results use the same configured line, byte, and per-line budget in dispatch,
 `session.push`, child segments, and direct Session appends. The Executor projects the
 active budget into the Session at root-flow start, while spawned ToolCtx values inherit

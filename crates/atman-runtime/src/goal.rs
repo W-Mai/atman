@@ -35,7 +35,10 @@ pub fn continuation_prompt(control: &GoalController) -> String {
 
 /// Inspect readiness without claiming notifications or starting a turn.
 pub fn has_next_turn(control: &GoalController, watchers: &crate::watch::WatchHub) -> bool {
-    control.allows_background_turn() && (watchers.has_pending_events() || control.should_continue())
+    control.allows_background_turn()
+        && (watchers.has_pending_events()
+            || control.child_results.has_pending()
+            || control.should_continue())
 }
 
 /// Begin a background turn only after context access is available. Cancellation while waiting leaves notifications queued; pause and readiness are checked again before consuming anything.
@@ -47,6 +50,18 @@ pub async fn begin_background_turn(
     let _transition = control.transition.lock().unwrap();
     if !control.allows_background_turn() || session.current_turn().is_some() {
         return None;
+    }
+    if let Some(receipt) = control.child_results.reserve() {
+        let mut message =
+            crate::message::Message::user_text(crate::event::TurnId::now(), receipt.prompt());
+        message.origin = crate::message::MessageOrigin::ChildResult;
+        let committed = receipt
+            .commit(|| {
+                session.begin_turn(message.clone());
+                Ok::<_, std::convert::Infallible>(())
+            })
+            .unwrap();
+        return committed.then_some(message);
     }
     let (prompt, origin) = if let Some(prompt) = session.watch_hub.take_pending_prompt() {
         (prompt, crate::message::MessageOrigin::Watcher)
@@ -136,6 +151,7 @@ struct State {
 
 /// One stable agent owner, independent of the identifiers of its individual runs.
 pub struct GoalController {
+    pub child_results: Arc<crate::agent_results::ResultInbox>,
     owner: String,
     parent: Option<Arc<GoalController>>,
     store: Option<GoalStore>,
@@ -219,6 +235,7 @@ impl GoalController {
             .map(|p| p.transition.clone())
             .unwrap_or_default();
         Arc::new(Self {
+            child_results: crate::agent_results::ResultInbox::new(changes.clone()),
             owner,
             parent,
             store,
@@ -345,7 +362,9 @@ impl GoalController {
             if cancel.is_cancelled() {
                 return Err(RuntimeError::Cancelled("flow cancelled by user".into()));
             }
-            if self.should_continue() {
+            if self.allows_background_turn()
+                && (self.should_continue() || self.child_results.has_pending())
+            {
                 return Ok(());
             }
             tokio::select! {
@@ -436,6 +455,12 @@ impl GoalController {
         self.blocked_by().is_none()
     }
 
+    /// Serialize message pickup with execution pauses and task replacement.
+    pub(crate) fn with_background_gate<T>(&self, action: impl FnOnce() -> T) -> Option<T> {
+        let _transition = self.transition.lock().unwrap();
+        self.allows_background_turn().then(action)
+    }
+
     fn mutate(
         &self,
         expected: Option<(&str, u64)>,
@@ -469,6 +494,11 @@ impl GoalController {
                     .ok_or_else(|| io::Error::other("goal revision exhausted"))?;
             }
             goal.updated_at = chrono::Utc::now();
+        }
+        if state.record.is_some()
+            && state.record.as_ref().map(|g| &g.id) != record.as_ref().map(|g| &g.id)
+        {
+            self.child_results.invalidate();
         }
         state.record = record.clone();
         drop(state);
@@ -606,7 +636,9 @@ impl GoalController {
         self.mutate(None, |record| {
             *record = None;
             Ok(())
-        })
+        })?;
+        self.child_results.invalidate();
+        Ok(())
     }
 
     pub async fn wait(&self, cancel: &CancellationToken) -> Result<(), RuntimeError> {
@@ -682,6 +714,93 @@ impl Drop for GoalOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn child_results_survive_turn_end_and_pause_without_duplicate_background_turns() {
+        use crate::event::{FlowRunId, TurnId};
+        use crate::message::{Message, MessageOrigin};
+        let session = crate::session::Session::open_ephemeral();
+        session.goal_control.set("parent", None).unwrap();
+        session
+            .goal_control
+            .pause(
+                GoalActor::Agent,
+                GoalPauseReason::Completed,
+                "done".into(),
+                None,
+            )
+            .unwrap();
+        let turn = session.begin_turn(Message::user_text(TurnId::now(), "original"));
+        let route = session
+            .goal_control
+            .child_results
+            .route("child".into(), true);
+        route.publish(FlowRunId::now(), TurnId::now(), "first".into());
+        route.publish(FlowRunId::now(), TurnId::now(), "second".into());
+        assert!(begin_background_turn(&session).await.is_none());
+        let reserved = session.goal_control.child_results.reserve().unwrap();
+        let mut message = Message::user_text(turn, reserved.prompt());
+        message.origin = MessageOrigin::ChildResult;
+        session.end_turn();
+        assert!(session.commit_child_results(&reserved, message).is_err());
+        drop(reserved);
+
+        let lock = session.acquire_compact_lock().await;
+        let start = begin_background_turn(&session);
+        tokio::pin!(start);
+        tokio::select! {
+            biased;
+            _ = &mut start => panic!("must wait for context"),
+            _ = std::future::ready(()) => {},
+        }
+        session
+            .goal_control
+            .pause(
+                GoalActor::User,
+                GoalPauseReason::UserRequested,
+                "pause".into(),
+                None,
+            )
+            .unwrap();
+        drop(lock);
+        assert!(start.await.is_none());
+        assert!(session.goal_control.child_results.has_pending());
+        session.goal_control.resume(GoalActor::User, None).unwrap();
+        session
+            .goal_control
+            .pause(
+                GoalActor::Agent,
+                GoalPauseReason::Completed,
+                "done".into(),
+                None,
+            )
+            .unwrap();
+        let (a, b) = tokio::join!(
+            begin_background_turn(&session),
+            begin_background_turn(&session)
+        );
+        assert_eq!(usize::from(a.is_some()) + usize::from(b.is_some()), 1);
+        let message = a.or(b).unwrap();
+        assert_eq!(message.origin, MessageOrigin::ChildResult);
+        assert!(
+            message.text_concat().find("first").unwrap()
+                < message.text_concat().find("second").unwrap()
+        );
+        session.end_turn();
+        assert!(!has_next_turn(&session.goal_control, &session.watch_hub));
+        assert_eq!(
+            session
+                .messages_full()
+                .iter()
+                .filter(|m| m.origin == MessageOrigin::ChildResult)
+                .count(),
+            1
+        );
+        route.publish(FlowRunId::now(), TurnId::now(), "late".into());
+        session.goal_control.clear().unwrap();
+        route.publish(FlowRunId::now(), TurnId::now(), "obsolete".into());
+        assert!(!has_next_turn(&session.goal_control, &session.watch_hub));
+    }
 
     #[tokio::test]
     async fn background_start_preserves_events_until_context_and_execution_are_ready() {

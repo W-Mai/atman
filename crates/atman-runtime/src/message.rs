@@ -81,6 +81,7 @@ pub enum MessageOrigin {
     #[default]
     User,
     Watcher,
+    ChildResult,
     Interjection,
     FinalAnswer,
     Internal,

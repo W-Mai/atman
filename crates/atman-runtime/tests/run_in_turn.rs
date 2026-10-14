@@ -244,6 +244,145 @@ fn user_msg(turn_id: TurnId, text: &str) -> Message {
 }
 
 #[tokio::test]
+async fn running_root_and_child_consume_results_in_the_current_turn_once() {
+    use atman_runtime::agent_results::ResultRoute;
+    type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
+    use std::sync::Mutex;
+    struct ResultsProvider {
+        route: ResultRoute,
+        requests: Mutex<Vec<Vec<Message>>>,
+    }
+    impl ResultsProvider {
+        fn respond(&self, req: LlmRequest) -> AssistantMessage {
+            let turn_id = req
+                .messages
+                .first()
+                .map(|m| m.turn_id.clone())
+                .unwrap_or_else(TurnId::now);
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(req.messages);
+            if requests.len() == 1 {
+                let turn = TurnId::now();
+                self.route
+                    .publish(FlowRunId::now(), turn.clone(), "first result".into());
+                self.route
+                    .publish(FlowRunId::now(), turn, "duplicate".into());
+                self.route
+                    .publish(FlowRunId::now(), TurnId::now(), "second result".into());
+            }
+            AssistantMessage {
+                message: Message::assistant_text(turn_id, "ack"),
+                stop_reason: StopReason::End,
+                token_usage: TokenUsage::default(),
+                timing: CallTiming::default(),
+                model: "results".into(),
+                response_id: None,
+            }
+        }
+    }
+    impl Provider for ResultsProvider {
+        fn name(&self) -> &str {
+            "results"
+        }
+        fn call<'a>(
+            &'a self,
+            req: LlmRequest,
+        ) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
+            Box::pin(async move { Ok(self.respond(req)) })
+        }
+        fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
+            let response = self.respond(req);
+            let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
+            Observable {
+                events,
+                cancel: CancellationToken::new(),
+                output: Box::pin(async move {
+                    let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });
+                    Ok(response)
+                }),
+            }
+        }
+    }
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "results", "results", 131_072, None,
+        )]))
+        .await;
+    let file = parse_file(
+        r#"flow calls() -> string {
+        llm.call(model: "results", prompt: "first", context: "session")
+        llm.call(model: "results", prompt: "isolated", context: "none")
+        llm.call(model: "results", prompt: "pick up", context: "session")
+        llm.call(model: "results", prompt: "retained", context: "session")
+        return "done"
+    }"#,
+    )
+    .unwrap();
+    for spawned in [false, true] {
+        let session = Arc::new(Session::open_ephemeral());
+        let turn_id = session.begin_turn(user_msg(TurnId::now(), "work"));
+        let control = session.goal_control.clone();
+        let provider = Arc::new(ResultsProvider {
+            route: control.child_results.route("direct-child".into(), true),
+            requests: Mutex::new(Vec::new()),
+        });
+        let mut executor = Executor::new();
+        executor.tool_ctx.goal_control = Some(control.clone());
+        let child_messages = Arc::new(Mutex::new(vec![user_msg(turn_id.clone(), "work")]));
+        if spawned {
+            executor.tool_ctx.history_segment = atman_runtime::tool::HistorySegment::Spawned;
+            executor.tool_ctx.session_messages_handle = Some(child_messages.clone());
+            executor.tool_ctx.compact_lock_handle = Some(Arc::new(tokio::sync::Mutex::new(())));
+        }
+        atman_runtime::tools::register_tier_zero(&executor.tools);
+        executor.providers.register(provider.clone());
+        executor
+            .run_in_turn(
+                &file,
+                "calls",
+                vec![],
+                Some(turn_id.clone()),
+                (!spawned).then_some(session.clone()),
+            )
+            .await
+            .unwrap();
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        for (request, expected) in requests.iter().zip([0, 0, 1, 1]) {
+            let results = request
+                .iter()
+                .filter(|m| m.origin == MessageOrigin::ChildResult)
+                .collect::<Vec<_>>();
+            assert_eq!(results.len(), expected, "spawned={spawned}");
+            if let Some(result) = results.first() {
+                assert_eq!(result.turn_id, turn_id);
+                let text = result.text_concat();
+                assert!(text.find("first result").unwrap() < text.find("second result").unwrap());
+                assert!(!text.contains("duplicate"));
+            }
+        }
+        let messages = if spawned {
+            child_messages.lock().unwrap().clone()
+        } else {
+            session.messages_full().to_vec()
+        };
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.origin == MessageOrigin::ChildResult)
+                .count(),
+            1
+        );
+        assert!(!control.child_results.has_pending());
+        session.end_turn();
+        assert!(!atman_runtime::goal::has_next_turn(
+            &control,
+            &session.watch_hub
+        ));
+    }
+}
+
+#[tokio::test]
 async fn run_in_turn_appends_assistant_message_to_session() {
     let _registry = common::ModelRegistryGuard::mock("mock").await;
     let src = r#"flow ask() -> message {

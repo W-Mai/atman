@@ -612,13 +612,16 @@ async fn run_flow_inner(
             break;
         };
         turn_id = message.turn_id.clone();
-        session.push_system_note(
-            if message.origin == atman_runtime::message::MessageOrigin::Watcher {
-                "Watcher notifications".into()
-            } else {
-                "Goal continued".into()
-            },
-        );
+        // Child-result delivery already emits its own transcript marker.
+        if message.origin != atman_runtime::message::MessageOrigin::ChildResult {
+            session.push_system_note(
+                if message.origin == atman_runtime::message::MessageOrigin::Watcher {
+                    "Watcher notifications".into()
+                } else {
+                    "Goal continued".into()
+                },
+            );
+        }
         turn_args = recipe.continuation_args(&message.text_concat());
     }
     lifecycles

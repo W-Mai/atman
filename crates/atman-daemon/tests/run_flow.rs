@@ -49,7 +49,7 @@ async fn goal_driver_finishes_turns_and_resumes_without_replacing_the_session() 
         .authorized_live_session(&spawned.session_id, "goal-owner")
         .unwrap();
     let mut changes = session.goal_control.subscribe();
-    for count in [2, 3, 4] {
+    for count in [2, 3, 4, 5] {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let ended = session.sink().snapshot().iter().filter(|e| matches!(e, atman_runtime::Event::FlowEnd { .. })).count();
@@ -98,6 +98,17 @@ async fn goal_driver_finishes_turns_and_resumes_without_replacing_the_session() 
                     timeout: Duration::from_secs(1),
                 });
         }
+        if count == 4 {
+            let route = session
+                .goal_control
+                .child_results
+                .route("delayed-child".into(), true);
+            route.publish(
+                atman_rt::RunId::now(),
+                atman_rt::TurnId::now(),
+                "delivered after completion".into(),
+            );
+        }
     }
     let runs: Vec<_> = session
         .sink()
@@ -108,13 +119,20 @@ async fn goal_driver_finishes_turns_and_resumes_without_replacing_the_session() 
             _ => None,
         })
         .collect();
-    assert_eq!(runs.len(), 4);
+    assert_eq!(runs.len(), 5);
     assert!(runs.windows(2).all(|p| p[0] != p[1]));
     let messages = session.messages();
     assert_eq!(
         messages
             .iter()
             .filter(|m| m.origin == atman_runtime::message::MessageOrigin::Watcher)
+            .count(),
+        1
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| m.origin == atman_runtime::message::MessageOrigin::ChildResult)
             .count(),
         1
     );

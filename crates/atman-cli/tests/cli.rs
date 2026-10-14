@@ -16,6 +16,62 @@ fn version_subcommand_prints_semver() {
 }
 
 #[test]
+fn managed_run_waits_for_child_results_after_its_final_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("config.toml"), "[trust]\nmode = \"reckless\"\n").unwrap();
+    std::fs::write(dir.path().join("child.at"), r#"flow child(prompt: string) -> string {
+        contract { invocation { goal: true, user_message: prompt } }
+        sleep(ms: 150)
+        goal = memory.goal.get()
+        memory.goal.pause(goal_id: goal.goal.id, expected_revision: goal.goal.revision, reason: "completed", summary: "Delivered")
+        return final.answer(message: "delayed child delivery")
+    }"#).unwrap();
+    std::fs::write(dir.path().join("main.at"), r#"flow main(prompt: string) -> string {
+        contract { invocation { goal: true, user_message: prompt } }
+        when prompt == "start" {
+            inventory = flow.instances()
+            flow.spawn(flow: "child.at", spawn_token: inventory.spawn_token, arguments: {prompt: "work"})
+        }
+        goal = memory.goal.get()
+        when goal.goal {
+            memory.goal.pause(goal_id: goal.goal.id, expected_revision: goal.goal.revision, reason: "completed", summary: "Turn delivered")
+        }
+        return final.answer(message: prompt)
+    }"#).unwrap();
+    let mut child = Command::new(atman_binary())
+        .current_dir(dir.path())
+        .env("ATMAN_CONFIG_DIR", &config)
+        .env("ATMAN_DATA_DIR", dir.path().join("data"))
+        .args(["run", "main.at", "prompt=start"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "managed run did not exit: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("delayed child delivery"), "{stdout}");
+}
+
+#[test]
 fn run_executes_pure_flow_and_prints_return_value() {
     let dir = tempfile::tempdir().unwrap();
     let flow_path = dir.path().join("hello.at");

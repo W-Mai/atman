@@ -4127,8 +4127,19 @@ impl AppState {
                         self.append_tool_dispatch(message);
                     }
                 }
-                if let StreamFrame::ToolResultMsg { message, .. } = &frame {
+                if let StreamFrame::ToolResultMsg {
+                    message,
+                    flow_run_id,
+                } = &frame
+                {
                     self.apply_tool_result_to_dispatch(message);
+                    if message.origin == atman_runtime::message::MessageOrigin::ChildResult
+                        && flow_run_id
+                            .as_ref()
+                            .is_none_or(|run_id| !self.sub_agent_run_ids.contains_key(run_id))
+                    {
+                        self.push_note("Child results", NoteLevel::Info);
+                    }
                 }
                 match &frame {
                     StreamFrame::FlowNodeStart {

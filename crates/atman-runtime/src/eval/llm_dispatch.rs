@@ -269,7 +269,21 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             committed: false,
         })
     });
-    let reserved_suffix_len = reserved_messages.len();
+    let child_receipt = if uses_managed_context
+        && args.call_purpose == crate::context_plan::ContextCallPurpose::General
+    {
+        ctx.result_inbox().and_then(|inbox| inbox.reserve())
+    } else {
+        None
+    };
+    let child_message = child_receipt.as_ref().map(|receipt| {
+        let mut message = crate::message::Message::user_text(turn_id.clone(), receipt.prompt());
+        message.origin = crate::message::MessageOrigin::ChildResult;
+        final_messages.push(message.clone());
+        message
+    });
+    let mut child_results_committed = false;
+    let reserved_suffix_len = reserved_messages.len() + usize::from(child_message.is_some());
     let prompt = prompt_for_budget;
     let mut rewrite_used = false;
     if let Some(safety) = ctx.safety.as_ref()
@@ -472,6 +486,57 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             };
             let estimated_input = context_plan.estimated_input_tokens();
             let start = std::time::Instant::now();
+            if !child_results_committed
+                && let Some(receipt) = &child_receipt
+                && let Some(message) = &child_message
+            {
+                let publish = || {
+                    if ctx.cancel.is_cancelled() {
+                        return Err(RuntimeError::Cancelled(
+                            "turn ended before child result pickup".into(),
+                        ));
+                    }
+                    if let Some(session) = &ctx.session_runtime {
+                        session.commit_child_results(receipt, message.clone())
+                    } else {
+                        receipt.commit(|| {
+                            crate::tools::session::append_message_to_context(ctx, message.clone())
+                        })
+                    }
+                };
+                let committed = if let Some(control) = &ctx.goal_control {
+                    control.with_background_gate(publish)
+                } else {
+                    Some(publish())
+                };
+                match committed {
+                    Some(Ok(true)) => child_results_committed = true,
+                    Some(Ok(false)) => {
+                        return Value::Err(RuntimeError::Cancelled(
+                            "child result scope changed before pickup".into(),
+                        ));
+                    }
+                    Some(Err(error)) => return Value::Err(error),
+                    None => {
+                        // Pause may race with acquiring the context lock. Never await its gate while holding that lock.
+                        drop(compact_guard.take());
+                        drop(goal_operation);
+                        if let Err(error) =
+                            ctx.goal_control.as_ref().unwrap().wait(&ctx.cancel).await
+                        {
+                            return Value::Err(error);
+                        }
+                        compact_guard = if let Some(session) = &ctx.session_runtime {
+                            Some(session.acquire_compact_lock().await)
+                        } else if let Some(lock) = &ctx.compact_lock_handle {
+                            Some(lock.lock().await)
+                        } else {
+                            None
+                        };
+                        continue 'llm_attempts;
+                    }
+                }
+            }
             if let Some(guard) = reserved_guard.as_mut()
                 && !guard.committed
             {

@@ -1060,7 +1060,12 @@ pub(crate) fn flatten_message_with_output_store(
         MessageRole::User => {
             let text = msg.text_concat();
             if !text.trim().is_empty() {
-                if msg.origin == atman_runtime::message::MessageOrigin::Interjection {
+                if msg.origin == atman_runtime::message::MessageOrigin::ChildResult {
+                    out.push(OutputItem::SystemNote {
+                        text: "Child results".into(),
+                        level: crate::app::NoteLevel::Info,
+                    });
+                } else if msg.origin == atman_runtime::message::MessageOrigin::Interjection {
                     out.push(OutputItem::Interjection { text, presentation });
                 } else {
                     out.push(OutputItem::UserTurn { text, presentation });
@@ -1798,6 +1803,32 @@ mod tests {
         let out = flatten_messages(&[user("hi")]);
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], OutputItem::UserTurn { .. }));
+    }
+
+    #[test]
+    fn child_result_origin_is_not_presented_as_user_authority() {
+        let mut message = user("Child results: delivered");
+        message.origin = atman_runtime::message::MessageOrigin::ChildResult;
+        let items = flatten_messages(std::slice::from_ref(&message));
+        assert!(
+            matches!(items.as_slice(), [OutputItem::SystemNote { text, .. }] if text == "Child results")
+        );
+        let decoded: Message =
+            serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
+        assert_eq!(decoded.origin, message.origin);
+        let mut app = crate::app::AppState::new("session".into(), None);
+        app.apply_stream_frame(atman_runtime::stream::StreamFrame::ToolResultMsg {
+            flow_run_id: None,
+            message,
+        });
+        assert!(app.items.iter().any(
+            |item| matches!(item, OutputItem::SystemNote { text, .. } if text == "Child results")
+        ));
+        assert!(
+            !app.items
+                .iter()
+                .any(|item| matches!(item, OutputItem::UserTurn { .. }))
+        );
     }
 
     #[test]

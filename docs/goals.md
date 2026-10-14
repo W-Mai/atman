@@ -35,6 +35,16 @@ User Pause stops new requests and tool starts. An in-flight model request finish
 
 Root and child goals use the same controller. An agent pausing its own goal with `completed` stops that goal's continuation without blocking descendants, so scheduled child work can continue after the parent delivers its answer. User pauses, explicit parent controls, runtime failures, other ancestor pause reasons, and replacement or removal of the parent goal still restrict descendants without changing their own goal states. Resuming an ancestor leaves completed or separately paused children paused. Child goal changes are recorded as revisioned events and delivered through the parent's versioned context records. Child continuation preserves its handle and private context while assigning each execution a distinct run identity. Background execution still requires a live host; this behavior does not detach tasks from session shutdown or restore timers after process exit.
 
+## Child results
+
+Async child agents automatically deliver each published `final.answer` to their direct parent. A running parent receives pending results as a FIFO batch in its next general model call, without cancelling an in-flight request or waiting for another turn. An idle managed parent starts a new `child_result` turn with its retained invocation settings. Nested agents use the same behavior: a grandchild notifies its own parent, which can process the result and deliver its answer upward. No watcher or model polling is required for final results. Child messages are data, not new user instructions or authorization.
+
+Both delivery paths share one inbox. Reserving a batch does not remove it; history accepts it before consumption commits. If request preparation fails or the parent ends before pickup, the unread batch remains available. A result already picked up is not delivered again; pickup means inclusion in a model request or new-turn history, not successful completion of the parent's work. User, parent, cancellation, and failure gates retain unread results until execution is allowed again. Replacing or clearing the parent's task invalidates queued and late results from the previous task scope. Completing the parent's goal does not activate that goal or prevent result handling.
+
+Synchronous delegation returns its initial result through the waiting call. Resuming that retained child instance permits new results to notify the parent. Pending delivery is process-local; consumed messages and original child final answers are recorded in their respective histories. Restart does not replay unconsumed notifications or recreate suspended execution.
+
+The document stream marks consumed batches as **Child results**. Full answers remain available in the child conversations; the parent model receives each batch's complete answers and source identities.
+
 ## Persistence and recovery
 
 Managed child agents retain their handle, context, and workspace while paused, including completion pauses, so an explicit Resume can use the same instance. Clear, `flow.kill`, or session shutdown cancels that instance and releases its live resources. A cancelled child cannot be resumed. Process restart restores goal records, not suspended Rust execution or external side effects.
@@ -55,7 +65,7 @@ The **Agent** selector chooses the root or a managed child, each with one curren
 
 The sidebar Goal card highlights on hover. Click its title, objective, or padding to open the goal panel; drag across the objective to select text. The small left arrow only collapses the preview, and the separate Pause / Resume button only changes execution state. The header displays `:goal` as the keyboard entry point.
 
-Plain REPL commands are `:goal`, `:goal set <text>`, `:goal pause`, `:goal resume`, and `:goal clear`. Controls run immediately instead of entering the prompt queue. Managed `atman run` invocations continue while the goal is active or watchers need handling, and exit on an execution pause or failure, or when neither source has work remaining. Interactive REPL and daemon owners remain available for explicit Resume. No entry point adds a default goal budget.
+Plain REPL commands are `:goal`, `:goal set <text>`, `:goal pause`, `:goal resume`, and `:goal clear`. Controls run immediately instead of entering the prompt queue. Managed `atman run` invocations continue while the goal is active, watchers need handling, child results are pending, or active child work can still deliver. A retained, paused child instance alone does not keep the command alive. The command exits on an execution pause or failure, or when no source has work remaining. Interactive REPL and daemon owners remain available for explicit Resume. No entry point adds a default goal budget.
 
 ## Daemon methods
 

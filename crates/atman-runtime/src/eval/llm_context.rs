@@ -93,7 +93,11 @@ pub(super) fn move_current_turn_interjections_to_tail(
     let mut index = 0;
     messages.retain(|message| {
         let move_to_tail = last_reply.is_none_or(|reply| index > reply)
-            && message.origin == crate::message::MessageOrigin::Interjection
+            && matches!(
+                message.origin,
+                crate::message::MessageOrigin::Interjection
+                    | crate::message::MessageOrigin::ChildResult
+            )
             && message.turn_id == *turn_id;
         index += 1;
         if move_to_tail {
@@ -140,8 +144,11 @@ pub(super) fn project_session_messages(
             projected.extend(ordinary.into_iter().enumerate().filter_map(
                 |(index, (source_index, message))| {
                     (index >= start
-                        || (message.origin == crate::message::MessageOrigin::Interjection
-                            && message.turn_id == *current_turn_id
+                        || (matches!(
+                            message.origin,
+                            crate::message::MessageOrigin::Interjection
+                                | crate::message::MessageOrigin::ChildResult
+                        ) && message.turn_id == *current_turn_id
                             && last_reply.is_none_or(|reply| source_index > reply)))
                     .then_some(message)
                 },

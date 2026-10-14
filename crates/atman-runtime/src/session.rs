@@ -2691,6 +2691,23 @@ impl Session {
         self.turn.current_turn.lock().unwrap().clone()
     }
 
+    pub(crate) fn commit_child_results(
+        &self,
+        receipt: &crate::agent_results::ResultReceipt,
+        message: Message,
+    ) -> Result<bool, crate::error::RuntimeError> {
+        let current = self.turn.current_turn.lock().unwrap();
+        if current.as_ref() != Some(&message.turn_id) {
+            return Err(crate::error::RuntimeError::Cancelled(
+                "turn ended before child result pickup".into(),
+            ));
+        }
+        receipt.commit(|| {
+            self.append_message(message, None);
+            Ok(())
+        })
+    }
+
     pub fn enqueue_injection(&self, text: impl Into<String>) -> Result<InjectionId, EnqueueError> {
         self.enqueue_injection_with_level(text, crate::injection::InjectionLevel::L1Nudge, None)
     }
@@ -3339,6 +3356,12 @@ impl AppendMessageCommand {
                 },
             };
         let seq = session.sink.emit_returning_seq(event);
+        if msg.origin == crate::message::MessageOrigin::ChildResult {
+            let _ = session.stream_tx().send(StreamFrame::ToolResultMsg {
+                flow_run_id: flow_run_id_str.clone(),
+                message: msg.clone(),
+            });
+        }
         if matches!(msg.role, MessageRole::User)
             && msg.origin == crate::message::MessageOrigin::Interjection
         {

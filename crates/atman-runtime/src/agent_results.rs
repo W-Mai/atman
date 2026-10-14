@@ -30,6 +30,10 @@ pub struct ResultInbox {
 }
 
 impl ResultInbox {
+    pub(crate) fn child(&self) -> Arc<Self> {
+        Self::new(self.changes.clone())
+    }
+
     pub fn new(changes: Arc<tokio::sync::watch::Sender<u64>>) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(State::default()),
@@ -94,6 +98,14 @@ pub struct ResultRoute {
 }
 
 impl ResultRoute {
+    pub(crate) fn is_current(&self) -> bool {
+        self.inbox.state.lock().unwrap().generation == self.generation
+    }
+
+    pub(crate) fn wake_receiver(&self) {
+        self.inbox.changed();
+    }
+
     /// Synchronous delegation returns its initial results directly. Later resumed turns notify.
     pub fn enable(&self) {
         self.enabled

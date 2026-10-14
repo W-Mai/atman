@@ -55,6 +55,7 @@ pub enum FlowEvent {
 }
 
 pub struct FlowEntry {
+    result_route: std::sync::OnceLock<Arc<crate::agent_results::ResultRoute>>,
     pub goal_control: std::sync::OnceLock<Arc<crate::goal::GoalController>>,
     pub handle: String,
     pub goal: String,
@@ -668,6 +669,7 @@ impl FlowRegistry {
     ) -> Arc<FlowEntry> {
         let (stream_tx, _) = tokio::sync::broadcast::channel(64);
         let entry = Arc::new(FlowEntry {
+            result_route: Default::default(),
             goal_control: std::sync::OnceLock::new(),
             handle: handle.clone(),
             goal,
@@ -724,6 +726,24 @@ impl FlowRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.entries.lock().unwrap().is_empty()
+    }
+
+    /// Retained completed instances are not live work; executing descendants are.
+    pub fn has_background_work(&self) -> bool {
+        self.entries.lock().unwrap().values().any(|entry| {
+            !entry.cancel.is_cancelled()
+                && entry
+                    .result_route
+                    .get()
+                    .is_some_and(|route| route.is_current())
+                && entry.status.lock().unwrap().is_running()
+                && entry.goal_control.get().is_none_or(|control| {
+                    control.allows_background_turn()
+                        && (control.turn_running()
+                            || control.should_continue()
+                            || control.child_results.has_pending())
+                })
+        })
     }
 
     pub fn cancel_managed_agents(&self) {
@@ -832,7 +852,7 @@ impl Tool for AgentSpawn {
                 })
                 .unwrap_or(true);
             if is_async {
-                run_sub_agent_async(args, ctx).await
+                run_sub_agent_async(args, ctx, true).await
             } else {
                 run_sub_agent(args, ctx).await
             }
@@ -1099,7 +1119,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let version = extract_flow_version(&args)?;
     let prepared = prepare_flow_agent(&flow, version.as_deref(), ctx).await?;
     if crate::goal::is_managed(&prepared.flow) {
-        let spawned = run_sub_agent_async(args, ctx).await?;
+        let spawned = run_sub_agent_async(args, ctx, false).await?;
         let Value::Struct(fields) = &spawned else {
             return Ok(spawned);
         };
@@ -1115,6 +1135,15 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             .as_ref()
             .expect("spawn registered")
             .lookup(&handle)?;
+        struct EnableResults(Option<Arc<crate::agent_results::ResultRoute>>);
+        impl Drop for EnableResults {
+            fn drop(&mut self) {
+                if let Some(route) = &self.0 {
+                    route.enable();
+                }
+            }
+        }
+        let _enable_results = EnableResults(entry.result_route.get().cloned());
         let control = entry
             .goal_control
             .get()
@@ -1125,9 +1154,11 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             let snapshot = control.snapshot();
             if snapshot.goal.as_ref().is_some_and(|g| {
                 g.status == crate::memory::goal::GoalStatus::Paused
-                    && (g.pause.as_ref().is_none_or(|p| {
-                        p.reason != crate::memory::goal::GoalPauseReason::Completed
-                    }) || !control.turn_running())
+                    && (g
+                        .pause
+                        .as_ref()
+                        .is_none_or(|p| p.actor != crate::memory::goal::GoalActor::Agent)
+                        || !control.turn_running())
             }) || snapshot.paused_by.is_some()
                 || !entry.status.lock().unwrap().is_running()
             {
@@ -1187,6 +1218,16 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     child_ctx.flow_run_id = Some(run_id.clone());
     child_ctx.flow_identity = Some(child_identity);
     child_ctx.call_intent = None;
+    child_ctx.agent_entry = None;
+    child_ctx.result_route = None;
+    child_ctx.child_results = Some(
+        ctx.result_inbox()
+            .map(|inbox| inbox.child())
+            .unwrap_or_else(|| {
+                crate::agent_results::ResultInbox::new(Arc::new(tokio::sync::watch::channel(0).0))
+            }),
+    );
+    child_ctx.turn_id = Some(crate::event::TurnId::now());
     let child_messages = Arc::new(Mutex::new(Vec::new()));
     if inherit_context && let Some(parent) = &ctx.session_messages_handle {
         *child_messages.lock().unwrap() = inherited_context_snapshot(parent);
@@ -1203,7 +1244,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     .await
 }
 
-async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
+async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx, notify_parent: bool) -> ToolResult {
     // Use the first string-typed argument as a display label for the FlowEntry.
     let goal = match args.named("arguments") {
         Some(Value::Struct(fields)) => fields.iter().find_map(|(_, value)| match value {
@@ -1275,6 +1316,11 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         child_run_id.clone(),
         workspace.clone(),
     );
+    if let Some(inbox) = ctx.result_inbox() {
+        let _ = entry
+            .result_route
+            .set(Arc::new(inbox.route(handle.clone(), notify_parent)));
+    }
     if crate::goal::is_managed(&prepared.flow) {
         let parent = ctx
             .goal_control
@@ -1351,6 +1397,24 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         ctx_for_flow.call_intent = None;
         ctx_for_flow.agent_entry = Some(Arc::clone(&entry_clone));
         ctx_for_flow.goal_control = entry_clone.goal_control.get().cloned();
+        ctx_for_flow.result_route = entry_clone.result_route.get().cloned();
+        ctx_for_flow.child_results = Some(
+            ctx_for_flow
+                .goal_control
+                .as_ref()
+                .map(|control| control.child_results.clone())
+                .unwrap_or_else(|| {
+                    ctx_for_flow
+                        .result_inbox()
+                        .map(|inbox| inbox.child())
+                        .unwrap_or_else(|| {
+                            crate::agent_results::ResultInbox::new(Arc::new(
+                                tokio::sync::watch::channel(0).0,
+                            ))
+                        })
+                }),
+        );
+        ctx_for_flow.turn_id = Some(crate::event::TurnId::now());
         ctx_for_flow.goal_resume_allowed = false;
         ctx_for_flow.flow_run_id = Some(child_run_id.clone());
         ctx_for_flow.flow_identity = Some(child_identity);
@@ -1389,6 +1453,9 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         };
 
         *entry_clone.status.lock().unwrap() = status.clone();
+        if let Some(route) = entry_clone.result_route.get() {
+            route.wake_receiver();
+        }
 
         // Send SubAgentDone so the TUI updates the SubAgentActivity item.
         if let Some(tx) = &parent_stream_tx {
@@ -1758,6 +1825,7 @@ async fn run_prepared_flow_agent(
         flow_id,
         program,
     } = prepared;
+    let managed = crate::goal::is_managed(&flow);
     let flows = program.flatten_flows();
     let initial_prompt = invocation_user_message(&flow, &flow_args)?;
     let lifecycle = atman_rt::FlowLifecycle::new(child_flow_start(ctx, &run_id, &flow.name.name));
@@ -1766,7 +1834,7 @@ async fn run_prepared_flow_agent(
             |start| emit_flow_agent_start(ctx, start),
             || async {
                 let mut child_ctx = sanitize_child_ctx(ctx);
-                if child_ctx.goal_control.is_some() {
+                if managed {
                     child_ctx.turn_id = Some(crate::event::TurnId::now());
                 }
                 child_ctx.session_messages_handle = Some(child_messages);
@@ -1788,20 +1856,66 @@ async fn run_prepared_flow_agent(
                 }
                 let mut iteration = 0u64;
                 loop {
-                    if let Some(control) = &child_ctx.goal_control {
-                        control.wait_active(&child_ctx.cancel).await?;
-                        if iteration > 0 {
-                            let turn_id = crate::event::TurnId::now();
-                            let mut message = Message::user_text(
-                                turn_id.clone(),
-                                crate::goal::continuation_prompt(control),
-                            );
-                            message.origin = crate::message::MessageOrigin::Internal;
-                            child_ctx.turn_id = Some(turn_id);
-                            crate::tools::session::append_message_to_context(&child_ctx, message)?;
+                    let mut turn_prompt = None;
+                    let goal_turn = if managed && let Some(control) = child_ctx.goal_control.clone()
+                    {
+                        loop {
+                            control.wait_active(&child_ctx.cancel).await?;
+                            let lock = child_ctx.compact_lock_handle.clone().unwrap();
+                            let _compact = lock.lock().await;
+                            let started = control
+                                .with_background_gate(|| {
+                                    if child_ctx.cancel.is_cancelled() {
+                                        return Err(RuntimeError::Cancelled(
+                                            "flow cancelled by user".into(),
+                                        ));
+                                    }
+                                    if iteration > 0 {
+                                        let receipt = control.child_results.reserve();
+                                        if receipt.is_none() && !control.should_continue() {
+                                            return Ok(None);
+                                        }
+                                        let prompt = receipt
+                                            .as_ref()
+                                            .map(|receipt| receipt.prompt())
+                                            .unwrap_or_else(|| {
+                                                crate::goal::continuation_prompt(&control)
+                                            });
+                                        let turn_id = crate::event::TurnId::now();
+                                        let mut message =
+                                            Message::user_text(turn_id.clone(), prompt.clone());
+                                        message.origin = if receipt.is_some() {
+                                            crate::message::MessageOrigin::ChildResult
+                                        } else {
+                                            crate::message::MessageOrigin::Internal
+                                        };
+                                        child_ctx.turn_id = Some(turn_id);
+                                        if let Some(receipt) = receipt {
+                                            if !receipt.commit(|| {
+                                                crate::tools::session::append_message_to_context(
+                                                    &child_ctx, message,
+                                                )
+                                            })? {
+                                                return Ok(None);
+                                            }
+                                        } else {
+                                            crate::tools::session::append_message_to_context(
+                                                &child_ctx, message,
+                                            )?;
+                                        }
+                                        turn_prompt = Some(prompt);
+                                    }
+                                    Ok(Some(control.start_turn()))
+                                })
+                                .transpose()?;
+                            if let Some(Some(guard)) = started {
+                                break Some(guard);
+                            }
                         }
-                    }
-                    let turn_run = if child_ctx.goal_control.is_some() {
+                    } else {
+                        None
+                    };
+                    let turn_run = if managed {
                         let next = FlowRunId::now();
                         let identity = ctx
                             .flow_registry
@@ -1822,11 +1936,10 @@ async fn run_prepared_flow_agent(
                     } else {
                         run_id.clone()
                     };
-                    let goal_turn = child_ctx.goal_control.as_ref().map(|g| g.start_turn());
-                    if let Some(control) = &child_ctx.goal_control {
+                    if managed && let Some(control) = &child_ctx.goal_control {
                         control.record_turn(child_ctx.turn_id.clone(), turn_run.clone());
                     }
-                    let turn_lifecycle = child_ctx.goal_control.as_ref().map(|_| {
+                    let turn_lifecycle = managed.then(|| {
                         let start = child_flow_start(&child_ctx, &turn_run, &flow.name.name);
                         emit_flow_agent_start(&child_ctx, start);
                         ctx.flow_registry
@@ -1835,17 +1948,14 @@ async fn run_prepared_flow_agent(
                             .lifecycle_guard(&turn_run)
                     });
                     let mut turn_args = flow_args.clone();
-                    if iteration > 0
-                        && let Some(control) = &child_ctx.goal_control
-                    {
+                    if let Some(prompt) = turn_prompt {
                         let recipe = crate::goal::GoalTurn {
                             program: program.clone(),
                             flow_name: flow.name.name.clone(),
                             args: turn_args,
                             env: ctx.invocation_env.clone(),
                         };
-                        turn_args =
-                            recipe.continuation_args(&crate::goal::continuation_prompt(control));
+                        turn_args = recipe.continuation_args(&prompt);
                     }
                     let result = crate::exec::exec_flow_with_linked_siblings(
                         &flow,
@@ -1885,6 +1995,9 @@ async fn run_prepared_flow_agent(
                     }
                     drop(turn_lifecycle);
                     drop(goal_turn);
+                    if !managed {
+                        return result;
+                    }
                     let Some(control) = &child_ctx.goal_control else {
                         return result;
                     };
@@ -2419,6 +2532,248 @@ mod tests {
             ),
         ));
         args
+    }
+
+    #[tokio::test]
+    async fn child_final_answers_wake_direct_parents_and_sync_returns_are_not_replayed() {
+        use crate::memory::goal::{GoalActor, GoalPauseReason};
+        use crate::tool::{BoxFut, ToolResult};
+        use crate::value::ValueJson;
+        use std::time::Duration;
+        struct Work {
+            path: std::path::PathBuf,
+            release: Arc<tokio::sync::Notify>,
+        }
+        impl Tool for Work {
+            fn name(&self) -> &str {
+                "child_work"
+            }
+            fn tier(&self) -> Tier {
+                Tier::Zero
+            }
+            fn call<'a>(&'a self, _: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+                Box::pin(async move {
+                    let entry = ctx.agent_entry.as_ref().unwrap();
+                    let has_result = ctx
+                        .session_messages_handle
+                        .as_ref()
+                        .unwrap()
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|m| m.origin == MessageOrigin::ChildResult);
+                    let answer = if entry.goal == "branch" && !has_result {
+                        let registry = ctx.flow_registry.as_ref().unwrap();
+                        AgentSpawn
+                            .call(
+                                admitted_args(
+                                    registry,
+                                    ctx,
+                                    ToolArgs {
+                                        positional: vec![],
+                                        named: vec![
+                                            (
+                                                "flow".into(),
+                                                Value::Str(self.path.display().to_string()),
+                                            ),
+                                            (
+                                                "arguments".into(),
+                                                Value::Struct(vec![(
+                                                    "prompt".into(),
+                                                    Value::Str("leaf".into()),
+                                                )]),
+                                            ),
+                                        ],
+                                    },
+                                ),
+                                ctx,
+                            )
+                            .await?;
+                        "branch waiting"
+                    } else if entry.goal == "leaf" {
+                        self.release.notified().await;
+                        "leaf delivered"
+                    } else if entry.goal == "branch" {
+                        "branch handled leaf"
+                    } else {
+                        "sync delivered"
+                    };
+                    ctx.goal_control
+                        .as_ref()
+                        .unwrap()
+                        .pause(
+                            GoalActor::Agent,
+                            GoalPauseReason::Completed,
+                            answer.into(),
+                            None,
+                        )
+                        .unwrap();
+                    Ok(Value::Str(answer.into()))
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("child.at");
+        std::fs::write(
+            &path,
+            r#"flow child(prompt: string) -> string {
+            contract { invocation { goal: true, user_message: prompt } }
+            answer = child_work()
+            return final.answer(message: answer)
+        }"#,
+        )
+        .unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let tools = Arc::new(ToolRegistry::new());
+        crate::tools::register_tier_zero(&tools);
+        tools.register(Arc::new(Work {
+            path: path.clone(),
+            release: release.clone(),
+        }));
+        let session = Arc::new(crate::session::Session::open_ephemeral());
+        let registry = session.flow_registry.clone();
+        let identity = root_identity(&registry, "result-session");
+        session.goal_control.set("parent", None).unwrap();
+        session
+            .goal_control
+            .pause(
+                GoalActor::Agent,
+                GoalPauseReason::Completed,
+                "parent ended".into(),
+                None,
+            )
+            .unwrap();
+        let mut ctx = ToolCtx::new()
+            .with_registry(tools)
+            .with_providers(Arc::new(ProviderRegistry::new()))
+            .with_flow_registry(registry.clone())
+            .with_session_runtime(session.clone());
+        ctx.goal_control = Some(session.goal_control.clone());
+        ctx.flow_run_id = Some(identity.run_id.clone());
+        ctx.flow_identity = Some(identity);
+        ctx.session_id = Some("result-session".into());
+        ctx.permission_broker = Some(crate::permission::PermissionBroker::shared(
+            registry.clone(),
+        ));
+        ctx.trust = Some(Default::default());
+        let args = |prompt: &str, asynchronous| {
+            admitted_args(
+                &registry,
+                &ctx,
+                ToolArgs {
+                    positional: vec![],
+                    named: vec![
+                        ("flow".into(), Value::Str(path.display().to_string())),
+                        ("async".into(), Value::Bool(asynchronous)),
+                        (
+                            "arguments".into(),
+                            Value::Struct(vec![("prompt".into(), Value::Str(prompt.into()))]),
+                        ),
+                    ],
+                },
+            )
+        };
+        let branch = AgentSpawn.call(args("branch", true), &ctx).await.unwrap();
+        let branch = registry
+            .lookup(branch.to_json().unwrap()["handle"].as_str().unwrap())
+            .unwrap();
+        let mut changes = session.goal_control.subscribe();
+        for expected in ["branch waiting", "branch handled leaf"] {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while !crate::goal::has_next_turn(&session.goal_control, &session.watch_hub) {
+                    changes.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            let message = crate::goal::begin_background_turn(&session).await.unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_str(message.text_concat().split_once('\n').unwrap().1).unwrap();
+            assert_eq!(payload.as_array().unwrap().len(), 1);
+            assert_eq!(payload[0]["handle"], branch.handle);
+            assert_eq!(payload[0]["answer"], expected);
+            session.end_turn();
+            if expected == "branch waiting" {
+                assert!(registry.has_background_work());
+                release.notify_one();
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while registry.has_background_work() {
+                changes.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let branch_messages = branch.messages.lock().unwrap().clone();
+        assert_eq!(
+            branch_messages
+                .iter()
+                .filter(|m| m.origin == MessageOrigin::FinalAnswer)
+                .count(),
+            2
+        );
+        assert_eq!(
+            branch_messages
+                .iter()
+                .filter(|m| m.origin == MessageOrigin::ChildResult)
+                .count(),
+            1
+        );
+
+        let sync = AgentSpawn
+            .call(args("sync", false), &ctx)
+            .await
+            .unwrap()
+            .to_json()
+            .unwrap();
+        assert_eq!(sync["output"], "sync delivered");
+        assert!(!session.goal_control.child_results.has_pending());
+        let sync = registry.lookup(sync["handle"].as_str().unwrap()).unwrap();
+        sync.goal_control
+            .get()
+            .unwrap()
+            .resume(GoalActor::Parent, None)
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !session.goal_control.child_results.has_pending() {
+                changes.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let message = crate::goal::begin_background_turn(&session).await.unwrap();
+        assert!(message.text_concat().contains("sync delivered"));
+        session.end_turn();
+        let plain = dir.path().join("plain.at");
+        std::fs::write(
+            &plain,
+            "flow plain() -> string { return final.answer(message: \"plain return\") }",
+        )
+        .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            AgentSpawn.call(
+                admitted_args(
+                    &registry,
+                    &ctx,
+                    ToolArgs {
+                        positional: vec![],
+                        named: vec![
+                            ("flow".into(), Value::Str(plain.display().to_string())),
+                            ("async".into(), Value::Bool(false)),
+                        ],
+                    },
+                ),
+                &ctx,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.to_json().unwrap(), "plain return");
+        assert!(!session.goal_control.child_results.has_pending());
+        registry.cancel_managed_agents();
     }
 
     #[tokio::test]

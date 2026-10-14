@@ -110,10 +110,11 @@ pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(
             MessageRole::User | MessageRole::System => None,
         };
         session.append_message_with_stream_scope(
-            msg,
+            msg.clone(),
             ctx.message_flow_run_id(),
             stream_flow_run_id,
         );
+        ctx.publish_child_result(&msg);
         return Ok(());
     }
     let Some(handle) = &ctx.session_messages_handle else {
@@ -147,7 +148,9 @@ pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(
         let _ = tx.send(frame);
     }
     let mut messages = handle.lock().unwrap();
-    messages.push(msg);
+    messages.push(msg.clone());
+    drop(messages);
+    ctx.publish_child_result(&msg);
     Ok(())
 }
 

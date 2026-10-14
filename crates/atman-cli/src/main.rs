@@ -890,12 +890,19 @@ async fn cmd_run_loaded(
             {
                 break Some(message);
             }
-            if !session.goal_control.allows_background_turn() || !session.watch_hub.has_work() {
+            if !session.goal_control.allows_background_turn() {
+                break None;
+            }
+            if !session.flow_registry.has_background_work() && !session.watch_hub.has_work() {
+                // The last child can publish between the readiness check and its exit.
+                if atman_runtime::goal::has_next_turn(&session.goal_control, &session.watch_hub) {
+                    continue;
+                }
                 break None;
             }
             tokio::select! {
                 _ = goal_changes.changed() => {},
-                _ = session.watch_hub.wait_for_pending_or_idle() => {},
+                _ = session.watch_hub.wait_for_pending_or_idle(), if session.watch_hub.has_work() => {},
             }
         };
         let Some(message) = wake else {
@@ -4877,13 +4884,16 @@ async fn run_turn_with_interjection(
         let Some(message) = message else {
             return;
         };
-        reporter.info(
-            if message.origin == atman_runtime::message::MessageOrigin::Watcher {
-                "Watcher notifications"
-            } else {
-                "Goal continued"
-            },
-        );
+        // Child-result delivery already emits its own transcript marker.
+        if message.origin != atman_runtime::message::MessageOrigin::ChildResult {
+            reporter.info(
+                if message.origin == atman_runtime::message::MessageOrigin::Watcher {
+                    "Watcher notifications"
+                } else {
+                    "Goal continued"
+                },
+            );
+        }
         (message.text_concat(), message.turn_id)
     } else {
         let (text, inline_attachments) = extract_at_paths(raw_line);
