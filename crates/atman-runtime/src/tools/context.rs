@@ -3,7 +3,7 @@ use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::tool_schedule::SchedulingClaims;
 use crate::value::Value;
 
-const RETRIEVED_RECORD_PREFIXES: [&str; 2] = ["agent.rule.", "agent.mistake."];
+const RETRIEVED_RECORD_PREFIXES: [&str; 3] = ["agent.rule.", "agent.mistake.", "agent.selection."];
 const MAX_RECORD_KEY_BYTES: usize = 512;
 
 pub struct ContextRecordAppend;
@@ -19,7 +19,7 @@ impl Tool for ContextRecordAppend {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Append retrieved workflow context as a versioned internal record. Keys must use the agent.rule.* or agent.mistake.* namespace. Repeating identical content is a no-op; empty content clears an existing key. Returns true when a revision is appended.",
+            "Append retrieved workflow context as a versioned internal record. Keys must use the agent.rule.*, agent.mistake.*, or agent.selection.* namespace. Repeating identical content is a no-op; empty content clears an existing key. Returns true when a revision is appended.",
         )
     }
 
@@ -29,7 +29,7 @@ impl Tool for ContextRecordAppend {
             "properties": {
                 "key": {
                     "type": "string",
-                    "description": "Stable per-item key in the agent.rule.* or agent.mistake.* namespace."
+                    "description": "Stable per-item key in the agent.rule.*, agent.mistake.*, or agent.selection.* namespace."
                 },
                 "content": {
                     "type": "string",
@@ -95,7 +95,8 @@ fn validate_retrieved_record_key(key: &str) -> Result<(), RuntimeError> {
         .find(|prefix| key.starts_with(**prefix));
     let Some(prefix) = valid_prefix else {
         return Err(RuntimeError::ToolFailed(
-            "context.record: key must use agent.rule.* or agent.mistake.*".into(),
+            "context.record: key must use agent.rule.*, agent.mistake.*, or agent.selection.*"
+                .into(),
         ));
     };
     let suffix = &key[prefix.len()..];

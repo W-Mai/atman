@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Agent selection context** — Rule selection retains recent dialogue and task state while sending compact guidance catalogs instead of full records. Failed selection continues with existing guidance and on-demand retrieval; unknown selections cannot trigger lookups.
+
 - **Auxiliary call isolation** — Failed model calls with isolated input no longer trigger compaction of the main session history using the auxiliary model's context budget.
 
 - **Conversation excerpts** — Recent-turn excerpts can preserve dialogue, saved answer summaries, and tool errors while excluding large outputs and internal records. Full history remains available in the returned message items.

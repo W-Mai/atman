@@ -25,6 +25,25 @@ struct EmptyThenGoodProvider {
     calls: AtomicU32,
 }
 
+struct SelectionProvider {
+    inner: MockProvider,
+    requests: std::sync::Mutex<Vec<Vec<Message>>>,
+}
+
+impl Provider for SelectionProvider {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
+        self.requests.lock().unwrap().push(req.messages.clone());
+        self.inner.call(req)
+    }
+    fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
+        self.requests.lock().unwrap().push(req.messages.clone());
+        self.inner.call_streaming(req)
+    }
+}
+
 struct MissingIntentProvider {
     calls: AtomicU32,
     requests: std::sync::Mutex<Vec<Vec<Message>>>,
@@ -694,21 +713,35 @@ async fn assert_final_answer_boundary(
         provider,
         finalized,
         first_responses,
-        false,
+        None,
     )
     .await;
 }
 
 #[tokio::test]
 async fn managed_agent_preserves_rules_and_completes_turns_after_extraction_failure() {
+    for reply in [
+        "<tool_call><function=bash>invalid extraction</function></tool_call>",
+        "",
+    ] {
+        assert_final_answer_boundary_with_extraction(
+            atman_runtime::templates::AGENT_AT,
+            Arc::new(FinalAnswerProvider::default()),
+            true,
+            1,
+            Some(reply),
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn managed_selection_keeps_dialogue_and_loads_only_known_catalog_entries() {
     assert_final_answer_boundary_with_extraction(
         atman_runtime::templates::AGENT_AT,
-        Arc::new(FinalAnswerProvider::default()),
-        true,
-        1,
-        true,
-    )
-    .await;
+        Arc::new(FinalAnswerProvider::default()), true, 1,
+        Some(r#"{"rule_names":["test-rule","test-rule","unknown"],"confession_triggers":["task evidence","unknown"]}"#),
+    ).await;
 }
 
 async fn assert_final_answer_boundary_with_extraction(
@@ -716,7 +749,7 @@ async fn assert_final_answer_boundary_with_extraction(
     provider: Arc<dyn Provider>,
     finalized: bool,
     first_responses: usize,
-    extraction_fails: bool,
+    selection_reply: Option<&str>,
 ) {
     use atman_runtime::memory::goal::{GoalActor, GoalPauseReason};
     use atman_runtime::watch::{WatchEvent, WatchMode, WatchSource};
@@ -745,7 +778,7 @@ async fn assert_final_answer_boundary_with_extraction(
     let store = Arc::new(atman_runtime::memory::confession::ConfessionStore::at(
         dir.path(),
     ));
-    if extraction_fails {
+    if selection_reply.is_some() {
         let rules = atman_runtime::tools::memory_stubs::RuleFetch::new();
         rules
             .set_migrated(vec![atman_runtime::migration::MigratedRule {
@@ -776,16 +809,48 @@ async fn assert_final_answer_boundary_with_extraction(
         atman_runtime::tools::memory::MemoryFetchConfessions { store },
     ));
     executor.providers.register(provider);
-    executor
-        .providers
-        .register(Arc::new(MockProvider::new("cheap").with_fallback(
-            Value::Str(if extraction_fails {
-                "<tool_call><function=bash>invalid extraction</function></tool_call>".into()
-            } else {
-                r#"{"rule_names":[],"confession_triggers":[]}"#.into()
-            }),
-        )));
+    let selector = Arc::new(SelectionProvider {
+        inner: if selection_reply == Some("") {
+            // A missing mock response returns a provider error.
+            MockProvider::new("cheap")
+        } else {
+            MockProvider::new("cheap").with_fallback(Value::Str(
+                selection_reply
+                    .unwrap_or(r#"{"rule_names":[],"confession_triggers":[]}"#)
+                    .into(),
+            ))
+        },
+        requests: Default::default(),
+    });
+    executor.providers.register(selector.clone());
     let session = Arc::new(Session::open_ephemeral());
+    if selection_reply.is_some() {
+        let prior = TurnId::now();
+        session.append_message(
+            Message::user_text(prior.clone(), "保留聊天 HISTORY-REQUEST"),
+            None,
+        );
+        let mut answer = Message::assistant_text(prior.clone(), "LARGE-ANSWER ".repeat(3000));
+        answer.parts.push(MessagePart::FinalAnswerSummary {
+            text: "HISTORY-CONCLUSION".into(),
+        });
+        session.append_message(answer, None);
+        session.append_message(
+            Message::context_record(
+                prior,
+                atman_runtime::context_plan::ContextRecord::new(
+                    "agent.rule.retained",
+                    1,
+                    atman_runtime::context_plan::ContextRecordAuthority::Retrieved,
+                    atman_runtime::context_plan::ContextRecordRetention::Latest,
+                    atman_runtime::context_plan::ContextRecordBody::text(
+                        "RETAINED-GUIDANCE ".repeat(3000),
+                    ),
+                ),
+            ),
+            None,
+        );
+    }
     executor.tool_ctx.watch_hub = Some(session.watch_hub.clone());
     session.goal_control.set("Finish the task", None).unwrap();
     session
@@ -839,14 +904,61 @@ async fn assert_final_answer_boundary_with_extraction(
     assert!(matches!(output, Value::Str(text) if text == "Done."));
     session.end_turn();
     let messages = session.messages();
-    if extraction_fails {
+    if let Some(reply) = selection_reply {
+        let request = selector.requests.lock().unwrap()[0].clone();
+        let text = request
+            .iter()
+            .map(Message::text_concat)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "HISTORY-REQUEST",
+            "HISTORY-CONCLUSION",
+            "test-rule",
+            "task evidence",
+            "finish",
+            "Finish the task",
+        ] {
+            assert!(text.contains(expected), "{expected} missing: {text}");
+        }
+        for excluded in [
+            "LARGE-ANSWER",
+            "RETAINED-GUIDANCE",
+            "Keep the original evidence",
+            "Preserve task evidence",
+            "omitted records",
+        ] {
+            assert!(!text.contains(excluded), "unexpected {excluded}");
+        }
+        assert!(
+            text.len() < 8000,
+            "compact selection input: {} bytes",
+            text.len()
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.text_concat().contains("RETAINED-GUIDANCE"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.text_concat().contains("Available guidance index"))
+        );
+        let selected = reply.starts_with('{');
         for expected in ["Preserve task evidence", "Keep the original evidence"] {
-            assert!(
+            assert_eq!(
                 messages
                     .iter()
-                    .any(|message| message.text_concat().contains(expected))
+                    .any(|message| message.text_concat().contains(expected)),
+                selected
             );
         }
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.text_concat().contains("agent.rule.unknown"))
+        );
     }
     let finals: Vec<_> = messages
         .iter()
@@ -859,7 +971,7 @@ async fn assert_final_answer_boundary_with_extraction(
     assert_eq!(
         messages
             .iter()
-            .filter(|m| m.role == MessageRole::Assistant)
+            .filter(|m| m.role == MessageRole::Assistant && m.turn_id == first)
             .count(),
         first_responses
     );
@@ -925,6 +1037,13 @@ async fn assert_final_answer_boundary_with_extraction(
         .unwrap();
     session.end_turn();
     assert!(matches!(output, Value::Str(text) if text == "Done."));
+    if selection_reply.is_some() {
+        let requests = selector.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].iter().any(|message| message.parts.iter().any(|part| {
+            matches!(part, MessagePart::ContextRecord(record) if record.key() == "agent.selection.matches")
+        })));
+    }
     let messages = session.messages();
     let finals: Vec<_> = messages
         .iter()

@@ -102,7 +102,7 @@ The flow chooses one message source:
 
 The managed `commands/agent.at` uses `context: "session"`. It does **not** feed `memory.recent_turns` to the main model as a fixed sliding window.
 
-At the start of the managed flow, `memory.recent_turns(n: 5, excerpt: { head: 12000, tail: 12000 })` provides a bounded excerpt to the cheap rule/confession selector. `head` and `tail` are independent character budgets; when the middle is omitted, `excerpt` keeps both edges in transcript order. The lossless `items` remain available to explicit callers, and these helper calls do not define the main model's session context. The older `excerpt_chars` input remains available for recent-first excerpts and cannot be combined with `excerpt`.
+At the start of the managed flow, `memory.recent_turns(n: 5, excerpt_mode: "conversation", excerpt: { head: 4000, tail: 8000 })` provides a bounded conversation excerpt to the cheap rule/confession selector. `head` and `tail` are independent character budgets selected in `agent.at`; when the middle is omitted, `excerpt` keeps both edges in transcript order. The current request is supplied separately in full. The lossless `items` remain available to explicit callers, and these helper calls do not define the main model's session context. The older `excerpt_chars` input remains available for recent-first excerpts and cannot be combined with `excerpt`.
 
 ## Session history and active window
 
@@ -214,8 +214,8 @@ record per live key, and clearing either store appends a tombstone.
 The default agent currently follows this sequence:
 
 1. Push the user request into session history.
-2. Load the rule index, confession index, and five recent messages.
-3. Ask a cheap extraction call which rules and confession triggers are relevant. Its system instruction treats conversation and context records as selection data, not tasks to execute. If extraction fails, the flow explicitly falls back to all available rule names and confession triggers so the main loop can continue without silently dropping that guidance.
+2. Load the rule index, confession records, and a conversation excerpt from five recent turns. Project rule names/descriptions and confession triggers/violated rules into a compact catalog, also stored under `agent.selection.catalog` for on-demand retrieval by the main model.
+3. Ask a cheap extraction call which rules and confession triggers are relevant. The request includes only `agent.goal`, `session.plan`, and `agent.selection.matches` records alongside the compact catalog, conversation excerpt, and current request. Its system instruction treats this material as selection data and prioritizes the current request over older tasks. Validate selected identifiers against the catalog and save them under `agent.selection.matches`. If extraction fails, `agent.at` explicitly falls back to an empty selection and continues; existing retrieved rules remain intact and the main model can fetch relevant content from the compact catalog. Failure does not trigger full-catalog expansion or another summarization call.
 4. Append each selected full rule and matching confession as an independently keyed
    retrieved context record; unchanged items are not appended again.
 5. Load the stable managed system prompt from `prompts/system.md`.
