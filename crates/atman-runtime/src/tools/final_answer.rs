@@ -423,10 +423,26 @@ mod tests {
 
     #[tokio::test]
     async fn direct_final_answer_publishes_in_the_calling_context_and_rejects_invalid_input() {
-        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let ctx = ToolCtx::new()
+        use crate::watch::{WatchResult, Watchable};
+        use futures::{FutureExt, StreamExt};
+        let entry = crate::tools::agent_ctrl::FlowRegistry::new().create_entry(
+            "child".into(),
+            String::new(),
+            String::new(),
+            crate::event::FlowRunId::now(),
+        );
+        let messages = entry.messages.clone();
+        let parent = crate::goal::GoalController::ephemeral("parent".into());
+        let mut ctx = ToolCtx::new()
             .with_history_segment(crate::tool::HistorySegment::Spawned)
             .with_session_messages_handle(messages.clone());
+        ctx.agent_entry = Some(entry.clone());
+        ctx.flow_run_id = Some(entry.child_run_id.clone());
+        ctx.result_route = Some(std::sync::Arc::new(
+            parent.child_results.route("child".into(), true),
+        ));
+        let mut direct = entry.clone().watch_output("Direct answer.".into());
+        let mut control = entry.clone().watch_output("Done.".into());
         for value in [
             Value::Str("Direct answer.".into()),
             Value::Host(AtmanPayload::Message(control_message())),
@@ -452,6 +468,26 @@ mod tests {
                 .iter()
                 .all(|message| message.origin == crate::message::MessageOrigin::FinalAnswer)
         );
+        for output in [&mut direct, &mut control] {
+            assert!(matches!(
+                output.next().now_or_never(),
+                Some(Some(WatchResult::Matched { .. }))
+            ));
+            assert!(output.next().now_or_never().is_none());
+        }
+        let receipt = parent.child_results.reserve().unwrap();
+        let batch: serde_json::Value =
+            serde_json::from_str(receipt.prompt().split_once('\n').unwrap().1).unwrap();
+        assert_eq!(batch.as_array().unwrap().len(), 2);
+        assert_eq!(batch[0]["answer"], "Direct answer.");
+        assert_eq!(batch[1]["answer"], "Done.");
+        receipt.commit(|| Ok::<_, ()>(())).unwrap();
+        for message in &published {
+            ctx.publish_final_answer(message);
+        }
+        assert!(!parent.child_results.has_pending());
+        assert!(direct.next().now_or_never().is_none());
+        assert!(control.next().now_or_never().is_none());
         for value in [
             Value::Str(" \n ".into()),
             Value::Host(AtmanPayload::Message(Message::user_text(
@@ -473,6 +509,8 @@ mod tests {
             );
         }
         assert_eq!(*messages.lock().unwrap(), published);
+        assert_eq!(entry.output(), "Direct answer.\nDone.");
+        assert!(!parent.child_results.has_pending());
     }
 
     #[test]

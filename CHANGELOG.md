@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Flow watcher delivery** — Published final answers notify output watchers while managed child flows remain alive. Cumulative output preserves cursors across turns and delayed consumers; repeated delivery within a turn and flow exit do not replay answer matches.
+
 - **Flow panel Escape** — Escape closes the floating window without cancelling its child flow. Explicit task-stop controls retain their cancellation behavior.
 
 - **Tool preview latency** — Opening a tool preview or collapsing full output no longer renders the complete result to decide the disclosure state.

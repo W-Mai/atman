@@ -114,7 +114,7 @@ pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(
             ctx.message_flow_run_id(),
             stream_flow_run_id,
         );
-        ctx.publish_child_result(&msg);
+        ctx.publish_final_answer(&msg);
         return Ok(());
     }
     let Some(handle) = &ctx.session_messages_handle else {
@@ -150,7 +150,7 @@ pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(
     let mut messages = handle.lock().unwrap();
     messages.push(msg.clone());
     drop(messages);
-    ctx.publish_child_result(&msg);
+    ctx.publish_final_answer(&msg);
     Ok(())
 }
 

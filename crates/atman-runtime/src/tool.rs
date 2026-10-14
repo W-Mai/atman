@@ -358,23 +358,19 @@ impl ToolCtx {
             })
     }
 
-    pub(crate) fn publish_child_result(&self, message: &crate::message::Message) {
+    pub(crate) fn publish_final_answer(&self, message: &crate::message::Message) {
         if message.origin == crate::message::MessageOrigin::FinalAnswer
             && let Some(answer) = crate::tools::final_answer::extract(message)
         {
-            if let Some(entry) = &self.agent_entry {
-                *entry.output.lock().unwrap() = answer.clone();
-            }
+            let turn = self.turn_id.as_ref().unwrap_or(&message.turn_id);
             if let Some(route) = &self.result_route
                 && let Some(run_id) = &self.flow_run_id
             {
-                route.publish(
-                    run_id.clone(),
-                    self.turn_id
-                        .clone()
-                        .unwrap_or_else(|| message.turn_id.clone()),
-                    answer,
-                );
+                route.publish(run_id.clone(), turn.clone(), answer.clone());
+            }
+            // Make the result claimable before waking synchronous flow waiters.
+            if let Some(entry) = &self.agent_entry {
+                entry.publish_final_answer(turn, &answer);
             }
         }
     }

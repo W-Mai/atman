@@ -1,5 +1,5 @@
 use crate::error::RuntimeError;
-use crate::event::{Event, FlowRunId, FlowStatus};
+use crate::event::{Event, FlowRunId, FlowStatus, TurnId};
 use crate::git_workspace::{
     WorkspaceBinding, WorkspaceFinalizeOutcome, WorkspacePolicy, WorkspaceState,
 };
@@ -50,8 +50,35 @@ impl FlowRunStatus {
 
 #[derive(Debug, Clone)]
 pub enum FlowEvent {
-    AssistantDone { text: String },
+    OutputReady,
     Exited { status: FlowRunStatus },
+}
+
+#[derive(Default)]
+struct FlowOutput {
+    text: String,
+    turn: Option<TurnId>,
+    turn_start: usize,
+    delivered: std::collections::HashSet<TurnId>,
+}
+
+impl FlowOutput {
+    fn enter_turn(&mut self, turn: Option<&TurnId>) {
+        if self.turn.as_ref() != turn {
+            self.turn = turn.cloned();
+            self.turn_start = self.text.len();
+        }
+    }
+
+    fn append_answer(&mut self, answer: &str) {
+        // A final delivery of already streamed text must not replay its matches.
+        if !answer.is_empty() && !self.text[self.turn_start..].ends_with(answer) {
+            if !self.text.is_empty() {
+                self.text.push('\n');
+            }
+            self.text.push_str(answer);
+        }
+    }
 }
 
 pub struct FlowEntry {
@@ -61,7 +88,7 @@ pub struct FlowEntry {
     pub goal: String,
     pub display_label: String,
     pub status: Arc<Mutex<FlowRunStatus>>,
-    pub output: Arc<Mutex<String>>,
+    output: Mutex<FlowOutput>,
     pub cancel: tokio_util::sync::CancellationToken,
     pub stream_tx: tokio::sync::broadcast::Sender<FlowEvent>,
     pub messages: Arc<Mutex<Vec<Message>>>,
@@ -79,36 +106,62 @@ pub struct FlowEntry {
     pub cleanup_error: Arc<Mutex<Option<String>>>,
 }
 
+impl FlowEntry {
+    /// Cumulative output keeps stream and watcher cursors valid across turns.
+    pub fn output(&self) -> String {
+        self.output.lock().unwrap().text.clone()
+    }
+
+    pub(crate) fn append_output(&self, turn: Option<&TurnId>, text: &str) {
+        let mut output = self.output.lock().unwrap();
+        output.enter_turn(turn);
+        output.text.push_str(text);
+    }
+
+    pub(crate) fn complete_output(&self) {
+        let _ = self.stream_tx.send(FlowEvent::OutputReady);
+    }
+
+    pub(crate) fn publish_final_answer(&self, turn: &TurnId, answer: &str) {
+        let mut output = self.output.lock().unwrap();
+        if !output.delivered.insert(turn.clone()) {
+            return;
+        }
+        output.enter_turn(Some(turn));
+        output.append_answer(answer);
+        let _ = self.stream_tx.send(FlowEvent::OutputReady);
+    }
+
+    pub(crate) fn finish(&self, status: FlowRunStatus) {
+        let mut output = self.output.lock().unwrap();
+        if let FlowRunStatus::Ok { final_text, .. } = &status {
+            output.append_answer(final_text);
+        }
+        *self.status.lock().unwrap() = status.clone();
+        let _ = self.stream_tx.send(FlowEvent::Exited { status });
+    }
+}
+
 impl crate::watch::Watchable for FlowEntry {
     fn watch_output(
         self: Arc<Self>,
         pattern: String,
     ) -> futures::stream::BoxStream<'static, crate::watch::WatchResult> {
         use crate::watch::{OutputCursor, WatchResult};
-        // Subscribe before the initial snapshot and retain the receiver across matches.
+        // Output is append-only, so the initial history also survives a delayed
+        // first poll or broadcast lag. Keep the subscription across all matches.
         let rx = self.stream_tx.subscribe();
-        let state = Some((self, rx, OutputCursor::default(), pattern, false));
+        let state = Some((self, rx, OutputCursor::default(), pattern));
         Box::pin(futures::stream::unfold(state, |state| async move {
-            let (entry, mut rx, mut cursor, pattern, mut final_checked) = state?;
+            let (entry, mut rx, mut cursor, pattern) = state?;
             loop {
                 // Observe status first so an exit racing with the output snapshot
                 // is either included here or delivered through the receiver.
                 let running = entry.status.lock().unwrap().is_running();
-                let mut matched = {
+                let matched = {
                     let output = entry.output.lock().unwrap();
-                    cursor.find(output.as_bytes(), 0, &pattern).is_some()
+                    cursor.find(output.text.as_bytes(), 0, &pattern).is_some()
                 };
-                if !matched && !final_checked && !running {
-                    final_checked = true;
-                    let final_text = match &*entry.status.lock().unwrap() {
-                        FlowRunStatus::Ok { final_text, .. } => Some(final_text.clone()),
-                        _ => None,
-                    };
-                    if let Some(final_text) = final_text {
-                        matched = final_text.contains(&pattern)
-                            && !entry.output.lock().unwrap().contains(&final_text);
-                    }
-                }
                 if matched {
                     return Some((
                         WatchResult::Matched {
@@ -116,7 +169,7 @@ impl crate::watch::Watchable for FlowEntry {
                             col: None,
                             text: pattern.clone(),
                         },
-                        Some((entry, rx, cursor, pattern, final_checked)),
+                        Some((entry, rx, cursor, pattern)),
                     ));
                 }
                 if !running {
@@ -677,7 +730,7 @@ impl FlowRegistry {
             status: Arc::new(Mutex::new(FlowRunStatus::Running {
                 started_at: chrono::Utc::now(),
             })),
-            output: Arc::new(Mutex::new(String::new())),
+            output: Mutex::new(FlowOutput::default()),
             cancel: tokio_util::sync::CancellationToken::new(),
             stream_tx,
             messages: Arc::new(Mutex::new(Vec::new())),
@@ -1166,7 +1219,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
                     .result_route
                     .get()
                     .map(|route| route.finish_sync().unwrap_or_default())
-                    .unwrap_or_else(|| entry.output.lock().unwrap().clone());
+                    .unwrap_or_else(|| entry.output());
                 return Ok(Value::Struct(vec![
                     ("handle".into(), Value::Str(handle)),
                     (
@@ -1454,7 +1507,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx, notify_parent: bool)
             },
         };
 
-        *entry_clone.status.lock().unwrap() = status.clone();
+        entry_clone.finish(status.clone());
         if let Some(route) = entry_clone.result_route.get() {
             route.wake_receiver();
         }
@@ -1472,7 +1525,6 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx, notify_parent: bool)
             });
         }
 
-        let _ = entry_clone.stream_tx.send(FlowEvent::Exited { status });
         if let (Some(tr), Some(tid)) = (&task_registry, &task_id) {
             let ts = if killed {
                 crate::task_registry::TaskStatus::Killed
@@ -1636,7 +1688,7 @@ impl Tool for AgentOutput {
                 .clone()
                 .ok_or_else(|| RuntimeError::ToolFailed("flow.output: no agent registry".into()))?;
             let entry = reg.lookup(&handle)?;
-            let output = entry.output.lock().unwrap().clone();
+            let output = entry.output();
             let chunk = output.chars().skip(cursor).take(limit).collect::<String>();
             let next_cursor = cursor + chunk.chars().count();
             let eof = next_cursor >= output.chars().count();
@@ -2649,6 +2701,8 @@ mod tests {
             .with_registry(tools)
             .with_providers(Arc::new(ProviderRegistry::new()))
             .with_flow_registry(registry.clone())
+            .with_task_registry(crate::task_registry::TaskRegistry::new())
+            .with_watch_hub(session.watch_hub.clone())
             .with_session_runtime(session.clone());
         ctx.goal_control = Some(session.goal_control.clone());
         ctx.flow_run_id = Some(identity.run_id.clone());
@@ -2679,6 +2733,19 @@ mod tests {
         let branch = registry
             .lookup(branch.to_json().unwrap()["handle"].as_str().unwrap())
             .unwrap();
+        crate::watch::Watch
+            .call(
+                ToolArgs {
+                    positional: vec![
+                        Value::Str(branch.handle.clone()),
+                        Value::Str("branch".into()),
+                    ],
+                    named: vec![("mode".into(), Value::Str("persist".into()))],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
         let mut changes = session.goal_control.subscribe();
         for expected in ["branch waiting", "branch handled leaf"] {
             tokio::time::timeout(Duration::from_secs(3), async {
@@ -2688,13 +2755,58 @@ mod tests {
             })
             .await
             .unwrap();
+            tokio::time::timeout(Duration::from_secs(3), session.watch_hub.wait_for_pending())
+                .await
+                .unwrap();
+            // Both delivery channels retain their notifications across a user pause.
+            session
+                .goal_control
+                .pause(
+                    GoalActor::User,
+                    GoalPauseReason::UserRequested,
+                    "hold notifications".into(),
+                    None,
+                )
+                .unwrap();
+            assert!(crate::goal::begin_background_turn(&session).await.is_none());
+            assert!(session.goal_control.child_results.has_pending());
+            assert!(session.watch_hub.has_pending_events());
+            session.goal_control.resume(GoalActor::User, None).unwrap();
+            session
+                .goal_control
+                .pause(
+                    GoalActor::Agent,
+                    GoalPauseReason::Completed,
+                    "parent ended".into(),
+                    None,
+                )
+                .unwrap();
             let message = crate::goal::begin_background_turn(&session).await.unwrap();
+            assert_eq!(message.origin, MessageOrigin::ChildResult);
             let payload: serde_json::Value =
                 serde_json::from_str(message.text_concat().split_once('\n').unwrap().1).unwrap();
             assert_eq!(payload.as_array().unwrap().len(), 1);
             assert_eq!(payload[0]["handle"], branch.handle);
             assert_eq!(payload[0]["answer"], expected);
+            assert!(crate::goal::begin_background_turn(&session).await.is_none());
             session.end_turn();
+            let (a, b) = tokio::join!(
+                crate::goal::begin_background_turn(&session),
+                crate::goal::begin_background_turn(&session)
+            );
+            assert_eq!(usize::from(a.is_some()) + usize::from(b.is_some()), 1);
+            let notification = a.or(b).unwrap();
+            assert_eq!(notification.origin, MessageOrigin::Watcher);
+            assert_eq!(
+                notification
+                    .text_concat()
+                    .matches("matched 'branch'")
+                    .count(),
+                1
+            );
+            session.end_turn();
+            assert!(!session.watch_hub.has_pending_events());
+            assert!(!session.goal_control.child_results.has_pending());
             if expected == "branch waiting" {
                 assert!(registry.has_background_work());
                 release.notify_one();
@@ -2722,6 +2834,9 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(branch.output(), "branch waiting\nbranch handled leaf");
+        let watch = session.watch_hub.list_active().pop().unwrap();
+        session.watch_hub.unregister(&watch.id);
 
         let sync = AgentSpawn
             .call(args("sync", false), &ctx)

@@ -13,7 +13,7 @@ use crate::event::{EventSink, FlowRunId, NodeEvent, TurnId};
 use crate::provider::{AssistantMessage, CallTiming, LlmRequest, Provider};
 use crate::session::Session;
 use crate::stream::StreamFrame;
-use crate::tools::agent_ctrl::{FlowEntry, FlowEvent};
+use crate::tools::agent_ctrl::FlowEntry;
 
 pub(crate) struct LlmStream<'a> {
     pub(crate) provider: &'a dyn Provider,
@@ -405,7 +405,7 @@ impl<'a> StreamingLlmStream<'a> {
             self.frame_tx.as_ref(),
         );
         if let Some(entry) = self.entry {
-            entry.output.lock().unwrap().push_str(text);
+            entry.append_output(self.base.turn_id.as_ref(), text);
         }
     }
 
@@ -432,8 +432,7 @@ impl<'a> StreamingLlmStream<'a> {
             entry
                 .iteration
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let out = entry.output.lock().unwrap().clone();
-            let _ = entry.stream_tx.send(FlowEvent::AssistantDone { text: out });
+            entry.complete_output();
         }
     }
 }
@@ -593,7 +592,9 @@ pub(crate) fn handle_pending_injections(
                     ));
                 RuntimeError::L2Restart {
                     correction_text: inj.text.clone(),
-                    partial_output: entry.output.lock().unwrap().clone(),
+                    // StreamMonitor supplies this request's draft; cumulative flow
+                    // output includes completed turns and must not be replayed here.
+                    partial_output: String::new(),
                     partial_tokens: 0,
                 }
             }
@@ -981,6 +982,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_before_tokens_does_not_replay_cumulative_flow_output() {
+        let provider = ScriptProvider::new(vec![
+            vec![Step::WaitCancel],
+            vec![Step::Chunk("good", 1), Step::Done(1)],
+        ]);
+        let entry = entry();
+        entry.publish_final_answer(&TurnId::now(), "completed prior answer");
+        push_injection(&entry, InjectionLevel::L2CourseCorrect, "fix", None);
+        let (stream_tx, _) = broadcast::channel(16);
+        let mut stream = LlmStream::new(&provider, req(1))
+            .with_stream_tx(stream_tx)
+            .with_entry(&entry);
+        assert_eq!(stream.run().await.unwrap().text_concat(), "good");
+        assert_eq!(stream.base.prior_partial.as_deref(), Some(""));
+        assert!(entry.output().contains("completed prior answer"));
+    }
+
+    #[tokio::test]
     async fn l2_restart_exhaustion_cancels() {
         let provider = ScriptProvider::new(vec![
             vec![Step::WaitCancel],
@@ -1109,11 +1128,12 @@ mod tests {
             .with_stream_tx(stream_tx)
             .with_entry(&entry);
         stream.run().await.unwrap();
-        assert_eq!(*entry.output.lock().unwrap(), "hi");
+        assert_eq!(entry.output(), "hi");
         assert_eq!(entry.iteration.load(Ordering::SeqCst), 1);
-        assert!(
-            matches!(flow_rx.recv().await.unwrap(), FlowEvent::AssistantDone { text } if text == "hi")
-        );
+        assert!(matches!(
+            flow_rx.recv().await.unwrap(),
+            crate::tools::agent_ctrl::FlowEvent::OutputReady
+        ));
     }
 
     #[tokio::test]

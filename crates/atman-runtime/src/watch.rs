@@ -806,11 +806,11 @@ mod tests {
         );
         let pattern = "完成";
         let history = format!("{pattern}{}", "x".repeat(58)).repeat(128);
-        *entry.output.lock().unwrap() = history;
-        *entry.status.lock().unwrap() = FlowRunStatus::Ok {
+        entry.append_output(None, &history);
+        entry.finish(FlowRunStatus::Ok {
             ended_at: chrono::Utc::now(),
             final_text: String::new(),
-        };
+        });
         let mut stream = Arc::clone(&entry).watch_output(pattern.into());
         let mut matches = 0;
         while let Some(result) = stream.next().await {
@@ -821,11 +821,16 @@ mod tests {
         }
         assert_eq!(matches, 128);
         // Tool-only final responses use the same bounded payload contract.
-        entry.output.lock().unwrap().clear();
-        *entry.status.lock().unwrap() = FlowRunStatus::Ok {
+        let entry = FlowRegistry::new().create_entry(
+            "final-only".into(),
+            String::new(),
+            String::new(),
+            crate::event::FlowRunId::now(),
+        );
+        entry.finish(FlowRunStatus::Ok {
             ended_at: chrono::Utc::now(),
             final_text: format!("{}{pattern}", "x".repeat(8192)),
-        };
+        });
         let mut stream = entry.watch_output(pattern.into());
         assert!(
             matches!(stream.next().await, Some(WatchResult::Matched { text, .. }) if text == pattern)
@@ -839,7 +844,7 @@ mod tests {
 
     #[tokio::test]
     async fn flow_watch_consumes_history_once_and_keeps_its_subscription() {
-        use crate::tools::agent_ctrl::{FlowEvent, FlowRegistry, FlowRunStatus};
+        use crate::tools::agent_ctrl::{FlowRegistry, FlowRunStatus};
         use futures::FutureExt;
         let entry = FlowRegistry::new().create_entry(
             "watch-flow".into(),
@@ -847,7 +852,7 @@ mod tests {
             String::new(),
             crate::event::FlowRunId::now(),
         );
-        entry.output.lock().unwrap().push_str("done");
+        entry.append_output(None, "done");
         let mut output = Arc::clone(&entry).watch_output("done".into());
         assert!(matches!(
             output.next().await,
@@ -855,13 +860,8 @@ mod tests {
         ));
         assert!(output.next().now_or_never().is_none());
         // Output arrives between polls, while the subscription stays alive.
-        entry.output.lock().unwrap().push_str(" done");
-        entry
-            .stream_tx
-            .send(FlowEvent::AssistantDone {
-                text: "done done".into(),
-            })
-            .unwrap();
+        entry.append_output(None, " done");
+        entry.complete_output();
         assert!(matches!(
             output.next().await,
             Some(WatchResult::Matched { .. })
@@ -871,8 +871,7 @@ mod tests {
             ended_at: chrono::Utc::now(),
             final_text: "done".into(),
         };
-        *entry.status.lock().unwrap() = status.clone();
-        entry.stream_tx.send(FlowEvent::Exited { status }).unwrap();
+        entry.finish(status);
         assert!(matches!(
             output.next().await,
             Some(WatchResult::SourceExited)
@@ -880,7 +879,16 @@ mod tests {
         assert!(output.next().await.is_none());
 
         // A completed flow with only a final tool response also terminates.
-        entry.output.lock().unwrap().clear();
+        let entry = FlowRegistry::new().create_entry(
+            "final-only".into(),
+            String::new(),
+            String::new(),
+            crate::event::FlowRunId::now(),
+        );
+        entry.finish(FlowRunStatus::Ok {
+            ended_at: chrono::Utc::now(),
+            final_text: "done".into(),
+        });
         let mut output = entry.watch_output("done".into());
         assert!(matches!(
             output.next().await,
@@ -891,6 +899,65 @@ mod tests {
             Some(WatchResult::SourceExited)
         ));
         assert!(output.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn flow_final_delivery_preserves_cursors_across_turns_and_lag() {
+        use crate::event::{FlowRunId, TurnId};
+        use crate::tools::agent_ctrl::{FlowRegistry, FlowRunStatus};
+        use futures::FutureExt;
+        let entry = FlowRegistry::new().create_entry(
+            "job".into(),
+            String::new(),
+            String::new(),
+            FlowRunId::now(),
+        );
+        let first = TurnId::now();
+        entry.append_output(Some(&first), "long preliminary output ");
+        let mut output = Arc::clone(&entry).watch_output("完成".into());
+        assert!(output.next().now_or_never().is_none());
+        entry.publish_final_answer(&first, "完成");
+        assert!(matches!(
+            output.next().await,
+            Some(WatchResult::Matched { .. })
+        ));
+        entry.publish_final_answer(&first, "完成");
+        assert!(output.next().now_or_never().is_none());
+
+        // Delayed polling must retain every delivery, including identical answers
+        // in later turns and enough notifications to overflow the broadcast queue.
+        for _ in 0..128 {
+            entry.publish_final_answer(&TurnId::now(), "完成");
+        }
+        for _ in 0..128 {
+            assert!(matches!(
+                output.next().await,
+                Some(WatchResult::Matched { .. })
+            ));
+        }
+        assert!(output.next().now_or_never().is_none());
+        let streamed = TurnId::now();
+        entry.append_output(Some(&streamed), "完");
+        entry.complete_output();
+        assert!(output.next().now_or_never().is_none());
+        entry.append_output(Some(&streamed), "成");
+        entry.complete_output();
+        assert!(matches!(
+            output.next().await,
+            Some(WatchResult::Matched { .. })
+        ));
+        entry.publish_final_answer(&streamed, "完成");
+        assert!(output.next().now_or_never().is_none());
+        entry.finish(FlowRunStatus::Ok {
+            ended_at: chrono::Utc::now(),
+            final_text: "完成".into(),
+        });
+        assert!(matches!(
+            output.next().await,
+            Some(WatchResult::SourceExited)
+        ));
+        assert!(output.next().await.is_none());
+        assert_eq!(entry.output().matches("完成").count(), 130);
     }
 
     #[tokio::test]
