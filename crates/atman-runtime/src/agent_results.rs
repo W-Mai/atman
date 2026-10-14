@@ -52,7 +52,10 @@ impl ResultInbox {
             inbox: self.clone(),
             generation: self.state.lock().unwrap().generation,
             handle,
-            enabled: std::sync::atomic::AtomicBool::new(enabled),
+            delivery: Mutex::new(Delivery {
+                enabled,
+                buffered: None,
+            }),
         }
     }
 
@@ -94,7 +97,12 @@ pub struct ResultRoute {
     inbox: Arc<ResultInbox>,
     generation: u64,
     handle: String,
-    enabled: std::sync::atomic::AtomicBool,
+    delivery: Mutex<Delivery>,
+}
+
+struct Delivery {
+    enabled: bool,
+    buffered: Option<ChildResult>,
 }
 
 impl ResultRoute {
@@ -106,26 +114,50 @@ impl ResultRoute {
         self.inbox.changed();
     }
 
-    /// Synchronous delegation returns its initial results directly. Later resumed turns notify.
+    /// Release a synchronous waiter without discarding an answer it did not return.
     pub fn enable(&self) {
-        self.enabled
-            .store(true, std::sync::atomic::Ordering::Release);
+        let mut delivery = self.delivery.lock().unwrap();
+        delivery.enabled = true;
+        if let Some(result) = delivery.buffered.take() {
+            let mut state = self.inbox.state.lock().unwrap();
+            if state.generation == self.generation {
+                state.pending.push_back(result);
+                drop(state);
+                self.inbox.changed();
+            }
+        }
+    }
+
+    /// Claim the synchronous answer and enable later notifications in one publication boundary.
+    pub(crate) fn finish_sync(&self) -> Option<String> {
+        let mut delivery = self.delivery.lock().unwrap();
+        delivery.enabled = true;
+        let result = delivery.buffered.take();
+        self.is_current()
+            .then_some(result)
+            .flatten()
+            .map(|result| result.answer)
     }
 
     pub fn publish(&self, run_id: FlowRunId, turn_id: TurnId, answer: String) {
+        let mut delivery = self.delivery.lock().unwrap();
         let mut state = self.inbox.state.lock().unwrap();
         if state.generation != self.generation
             || !state.seen.insert((self.handle.clone(), turn_id.clone()))
-            || !self.enabled.load(std::sync::atomic::Ordering::Acquire)
         {
             return;
         }
-        state.pending.push_back(ChildResult {
+        let result = ChildResult {
             handle: self.handle.clone(),
             run_id,
             turn_id,
             answer,
-        });
+        };
+        if !delivery.enabled {
+            delivery.buffered = Some(result);
+            return;
+        }
+        state.pending.push_back(result);
         drop(state);
         self.inbox.changed();
     }
@@ -225,10 +257,41 @@ mod tests {
         let route = inbox.route("new".into(), false);
         let turn = TurnId::now();
         route.publish(FlowRunId::now(), turn.clone(), "sync return".into());
-        route.enable();
+        assert_eq!(route.finish_sync().as_deref(), Some("sync return"));
         route.publish(FlowRunId::now(), turn, "replayed sync return".into());
         assert!(!inbox.has_pending());
         route.publish(FlowRunId::now(), TurnId::now(), "resumed".into());
         assert!(inbox.has_pending());
+    }
+
+    #[test]
+    fn synchronous_handoff_preserves_unreturned_answers_and_deduplicates_returned_answers() {
+        let inbox = ResultInbox::new(Arc::new(tokio::sync::watch::channel(0).0));
+        let route = inbox.route("child".into(), false);
+        let turn = TurnId::now();
+        route.publish(FlowRunId::now(), turn.clone(), "before return".into());
+        assert_eq!(route.finish_sync().as_deref(), Some("before return"));
+        route.enable();
+        route.publish(FlowRunId::now(), turn, "duplicate".into());
+        assert!(!inbox.has_pending());
+        route.publish(FlowRunId::now(), TurnId::now(), "after return".into());
+        let receipt = inbox.reserve().unwrap();
+        assert_eq!(receipt.results[0].answer, "after return");
+        receipt.commit(|| Ok::<_, ()>(())).unwrap();
+
+        let abandoned = inbox.route("cancelled waiter".into(), false);
+        abandoned.publish(FlowRunId::now(), TurnId::now(), "unreturned".into());
+        abandoned.enable();
+        abandoned.enable();
+        let receipt = inbox.reserve().unwrap();
+        assert_eq!(receipt.results.len(), 1);
+        assert_eq!(receipt.results[0].answer, "unreturned");
+        receipt.commit(|| Ok::<_, ()>(())).unwrap();
+
+        let stale = inbox.route("stale".into(), false);
+        stale.publish(FlowRunId::now(), TurnId::now(), "old task".into());
+        inbox.invalidate();
+        stale.enable();
+        assert!(!inbox.has_pending());
     }
 }

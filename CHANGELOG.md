@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Synchronous child handoff** — Returning or cancelling a synchronous wait preserves final answers published at the return boundary without replaying the returned answer.
+
 - **Child result delivery** — Async child final answers reach the direct parent's next model call during an active turn, or start a new turn when it is idle. Root and nested agents share batch delivery, pause gates, and task scope invalidation. Managed command-line runs wait for active child work; synchronous results are not delivered twice.
 
 - **Final answers after tool calls** — Managed root and child flows require an explicit model `final.answer` after tool calls in the current turn. Plain-text delivery remains available for turns without model tool calls.

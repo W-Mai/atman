@@ -1162,6 +1162,11 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             }) || snapshot.paused_by.is_some()
                 || !entry.status.lock().unwrap().is_running()
             {
+                let output = entry
+                    .result_route
+                    .get()
+                    .map(|route| route.finish_sync().unwrap_or_default())
+                    .unwrap_or_else(|| entry.output.lock().unwrap().clone());
                 return Ok(Value::Struct(vec![
                     ("handle".into(), Value::Str(handle)),
                     (
@@ -1171,10 +1176,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
                                 .map_err(|e| RuntimeError::ToolFailed(e.to_string()))?,
                         ),
                     ),
-                    (
-                        "output".into(),
-                        Value::Str(entry.output.lock().unwrap().clone()),
-                    ),
+                    ("output".into(), Value::Str(output)),
                 ]));
             }
             tokio::select! {
