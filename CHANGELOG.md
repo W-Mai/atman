@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Flow panel Escape** — Escape closes the floating window without cancelling its child flow. Explicit task-stop controls retain their cancellation behavior.
+
 - **Tool preview latency** — Opening a tool preview or collapsing full output no longer renders the complete result to decide the disclosure state.
 
 - **Child panel controls** — Tool groups, previews, and full output use the same disclosure behavior as the document stream. Click regions follow their rendered positions through scrolling and caching; nested and detached flow panels own their interaction state and support Tab / Enter navigation.

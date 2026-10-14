@@ -711,20 +711,6 @@ impl WindowManager {
                 {
                     return (true, Vec::new());
                 }
-                if let WindowContent::Task {
-                    handle,
-                    kind: atman_runtime::TaskKind::Flow,
-                } = &panel.content_kind
-                    && let Some(task) = app
-                        .task_registry
-                        .as_ref()
-                        .and_then(|registry| {
-                            registry.lookup_by_handle_in_session(handle, &app.session_id)
-                        })
-                        .filter(|task| task.is_running())
-                {
-                    app.request_task_kill(task.id);
-                }
                 return (true, vec![WmCommand::CloseWindow(id)]);
             }
             _ => {}
@@ -1483,6 +1469,53 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[test]
+    fn escape_closes_task_windows_without_cancelling_execution() {
+        for kind in [
+            atman_runtime::TaskKind::Flow,
+            atman_runtime::TaskKind::Bash,
+            atman_runtime::TaskKind::Terminal,
+        ] {
+            let registry = atman_runtime::TaskRegistry::new();
+            let token = tokio_util::sync::CancellationToken::new();
+            registry.register(
+                kind,
+                "task".into(),
+                "child".into(),
+                "session".into(),
+                token.clone(),
+            );
+            let mut app = crate::app::AppState::new("session".into(), None)
+                .with_task_registry(registry.clone());
+            let mut wm = WindowManager::default();
+            let id = wm.open(
+                "child",
+                ContentKey::Task("child".into()),
+                WindowContent::Task {
+                    handle: "child".into(),
+                    kind,
+                },
+                "Child",
+                canvas(),
+            );
+            let (consumed, commands) =
+                wm.dispatch_key(&crate::keys::KeyAction::Escape, &mut app, None);
+            assert!(consumed);
+            assert!(
+                matches!(commands.as_slice(), [WmCommand::CloseWindow(window)] if *window == id)
+            );
+            wm.apply_commands(&mut app, commands, None);
+            assert!(wm.panels.is_empty());
+            assert!(!token.is_cancelled());
+            assert!(
+                registry
+                    .lookup_by_handle_in_session("child", "session")
+                    .unwrap()
+                    .is_running()
+            );
+        }
+    }
 
     #[test]
     fn transcript_commands_and_arguments_remain_runtime_owned() {
