@@ -209,6 +209,8 @@ record per live key, and clearing either store appends a tombstone.
 
 ## Managed agent composition
 
+`memory.recent_turns(..., excerpt_mode: "conversation")` produces an excerpt from user messages, assistant conclusions (using saved final-answer summaries when available), tool-call intent, compact summaries, and bounded tool errors. It omits successful tool-result bodies, thinking, and context records. The existing `excerpt` head/tail bounds or `excerpt_chars` budget apply after this projection. Returned `items` and stored history remain lossless; the default `transcript` mode is unchanged. No model call is made to produce this projection.
+
 The default agent currently follows this sequence:
 
 1. Push the user request into session history.

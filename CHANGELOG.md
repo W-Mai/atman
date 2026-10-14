@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Conversation excerpts** — Recent-turn excerpts can preserve dialogue, saved answer summaries, and tool errors while excluding large outputs and internal records. Full history remains available in the returned message items.
+
 - **LLM context selection** — Flows can select exact context-record keys for individual calls without removing conversation messages or modifying stored context.
 
 - **Streaming retries** — SSE response-body transport failures use the configured transient-error retry policy instead of immediately ending the flow. Malformed stream data remains an error.

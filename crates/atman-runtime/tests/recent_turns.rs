@@ -8,6 +8,101 @@ type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::Runtime
 type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 
 #[tokio::test]
+async fn conversation_excerpt_keeps_dialogue_and_summaries_without_changing_items() {
+    use atman_runtime::message::MessagePart;
+    use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
+    let turn = TurnId::now();
+    let mut answer = Message::assistant_text(turn.clone(), "LONG-ANSWER ".repeat(500));
+    answer.parts.push(MessagePart::FinalAnswerSummary {
+        text: "agreed conclusion".into(),
+    });
+    answer.parts.push(MessagePart::Thinking {
+        thinking: "private reasoning".into(),
+        signature: None,
+    });
+    let tools = Message {
+        role: MessageRole::Tool,
+        turn_id: turn.clone(),
+        origin: MessageOrigin::User,
+        parts: vec![
+            MessagePart::ToolResult {
+                tool_use_id: "ok".into(),
+                content: "LARGE-OUTPUT ".repeat(500),
+                is_error: false,
+            },
+            MessagePart::ToolResult {
+                tool_use_id: "failed".into(),
+                content: "file not found".into(),
+                is_error: true,
+            },
+        ],
+    };
+    let record = Message::context_record(
+        turn.clone(),
+        atman_runtime::context_plan::ContextRecord::new(
+            "agent.rule.full",
+            1,
+            atman_runtime::context_plan::ContextRecordAuthority::Retrieved,
+            atman_runtime::context_plan::ContextRecordRetention::Latest,
+            atman_runtime::context_plan::ContextRecordBody::text("FULL-RULE ".repeat(500)),
+        ),
+    );
+    let messages = Arc::new(vec![
+        Message::user_text(turn, "保留聊天，继续刚才的任务"),
+        tools,
+        answer,
+        record,
+    ]);
+    let ctx = ToolCtx::new().with_session_messages(messages.clone());
+    let result = atman_runtime::tools::memory::MemoryRecentTurns
+        .call(
+            ToolArgs {
+                positional: vec![],
+                named: vec![
+                    ("n".into(), Value::Int(5)),
+                    ("excerpt_mode".into(), Value::Str("conversation".into())),
+                    (
+                        "excerpt".into(),
+                        Value::Struct(vec![
+                            ("head".into(), Value::Int(2000)),
+                            ("tail".into(), Value::Int(2000)),
+                        ]),
+                    ),
+                ],
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let Some(Value::Str(excerpt)) = result.field("excerpt") else {
+        panic!("missing excerpt")
+    };
+    for text in ["保留聊天", "agreed conclusion", "file not found"] {
+        assert!(excerpt.contains(text), "{excerpt}");
+    }
+    for text in [
+        "LONG-ANSWER",
+        "LARGE-OUTPUT",
+        "private reasoning",
+        "FULL-RULE",
+    ] {
+        assert!(!excerpt.contains(text), "{excerpt}");
+    }
+    let Some(Value::List(items)) = result.field("items") else {
+        panic!("missing lossless items")
+    };
+    // Recent turns already exclude internal records in both excerpt modes.
+    assert_eq!(items.len(), 3);
+    assert_eq!(messages.len(), 4);
+    for (item, original) in items.iter().zip(messages.iter()) {
+        let Value::Host(atman_runtime::AtmanPayload::Message(message)) = item else {
+            panic!("message expected")
+        };
+        assert_eq!(message, original);
+    }
+}
+
+#[tokio::test]
 async fn recent_turns_returns_empty_before_any_message() {
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());

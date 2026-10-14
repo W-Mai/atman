@@ -350,15 +350,88 @@ enum RecentExcerpt {
     HeadTail { head: usize, tail: usize },
 }
 
+#[derive(Clone, Copy, Default)]
+enum RecentExcerptMode {
+    #[default]
+    Transcript,
+    Conversation,
+}
+
+fn conversation_excerpt_messages(
+    messages: &[crate::message::Message],
+) -> Vec<crate::message::Message> {
+    use crate::message::{MessageOrigin, MessagePart, MessageRole};
+    messages
+        .iter()
+        .filter_map(|message| {
+            let summary = (message.role == MessageRole::Assistant)
+                .then(|| crate::tools::final_answer::summary(message))
+                .flatten();
+            let parts = if let Some(text) = summary {
+                vec![MessagePart::Text { text }]
+            } else {
+                message
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        MessagePart::CompactSummary { .. } => Some(part.clone()),
+                        MessagePart::Text { .. } | MessagePart::Image { .. }
+                            if message.origin != MessageOrigin::Internal
+                                && message.role != MessageRole::System =>
+                        {
+                            Some(part.clone())
+                        }
+                        MessagePart::ToolUse {
+                            id, name, intent, ..
+                        } => Some(MessagePart::ToolUse {
+                            id: id.clone(),
+                            name: name.clone(),
+                            intent: intent.clone(),
+                            input: serde_json::Value::Null,
+                        }),
+                        MessagePart::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error: true,
+                        } => Some(MessagePart::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content: content.chars().take(RECENT_EXCERPT_MESSAGE_CHARS).collect(),
+                            is_error: true,
+                        }),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            (!parts.is_empty()).then(|| crate::message::Message {
+                parts,
+                role: message.role,
+                turn_id: message.turn_id.clone(),
+                origin: message.origin,
+            })
+        })
+        .collect()
+}
+
 fn recent_turns_value(
     message_count: u64,
     turn_count: u64,
     messages: Vec<crate::message::Message>,
     excerpt: Option<RecentExcerpt>,
+    excerpt_mode: RecentExcerptMode,
 ) -> Value {
-    let excerpt = excerpt.map(|mode| match mode {
-        RecentExcerpt::LegacyRecent(limit) => bounded_recent_excerpt(&messages, limit),
-        RecentExcerpt::HeadTail { head, tail } => bounded_head_tail_excerpt(&messages, head, tail),
+    let excerpt = excerpt.map(|mode| {
+        let projected;
+        let source = match excerpt_mode {
+            RecentExcerptMode::Transcript => &messages,
+            RecentExcerptMode::Conversation => {
+                projected = conversation_excerpt_messages(&messages);
+                &projected
+            }
+        };
+        match mode {
+            RecentExcerpt::LegacyRecent(limit) => bounded_recent_excerpt(source, limit),
+            RecentExcerpt::HeadTail { head, tail } => bounded_head_tail_excerpt(source, head, tail),
+        }
     });
     let items = messages
         .into_iter()
@@ -613,7 +686,9 @@ impl Tool for MemoryRecentTurns {
              current context so a flow can hand the code agent a sliding \
              history window. `items` remain lossless; `excerpt: {head, tail}` returns a \
              bounded text excerpt retaining independently selected transcript edges. \
-             `excerpt_chars` selects a recent-first budget.",
+             `excerpt_chars` selects a recent-first budget. `excerpt_mode: conversation` \
+             keeps conversation, available answer summaries, tool intents and bounded errors \
+             without full tool outputs, thinking, or context records.",
         )
     }
 
@@ -622,6 +697,7 @@ impl Tool for MemoryRecentTurns {
             "type": "object",
             "properties": {
                 "n": {"type": "integer", "description": "Max complete turns to return (default 10)"},
+                "excerpt_mode": {"type": "string", "enum": ["transcript", "conversation"], "description": "Excerpt projection only; items remain lossless. Defaults to transcript."},
                 "excerpt": {
                     "type": "object",
                     "description": "Also return an `excerpt` retaining independently bounded transcript edges without changing lossless `items`.",
@@ -649,11 +725,22 @@ impl Tool for MemoryRecentTurns {
                 None => 10,
             };
             let excerpt = recent_excerpt_arg(&args)?;
+            let excerpt_mode = match args.named("excerpt_mode") {
+                None => RecentExcerptMode::Transcript,
+                Some(Value::Str(mode)) if mode == "transcript" => RecentExcerptMode::Transcript,
+                Some(Value::Str(mode)) if mode == "conversation" => RecentExcerptMode::Conversation,
+                _ => {
+                    return Err(RuntimeError::ToolFailed(
+                        "memory.recent_turns: excerpt_mode must be transcript or conversation"
+                            .into(),
+                    ));
+                }
+            };
             if n == 0 {
                 if let Some(cb) = &ctx.on_memory_recent {
                     cb(0);
                 }
-                return Ok(recent_turns_value(0, 0, Vec::new(), excerpt));
+                return Ok(recent_turns_value(0, 0, Vec::new(), excerpt, excerpt_mode));
             }
             if matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned)
                 && let Some(handle) = ctx.session_messages_handle.as_ref()
@@ -668,6 +755,7 @@ impl Tool for MemoryRecentTurns {
                     total,
                     recent,
                     excerpt,
+                    excerpt_mode,
                 ));
             }
             // Sub-agent path: session_messages has the child's local message list.
@@ -681,6 +769,7 @@ impl Tool for MemoryRecentTurns {
                     total,
                     recent,
                     excerpt,
+                    excerpt_mode,
                 ));
             }
             // Main-agent path: delegate to HistoryStore.
@@ -696,7 +785,13 @@ impl Tool for MemoryRecentTurns {
             if let Some(cb) = &ctx.on_memory_recent {
                 cb(msgs.len() as u16);
             }
-            Ok(recent_turns_value(message_count, turn_count, msgs, excerpt))
+            Ok(recent_turns_value(
+                message_count,
+                turn_count,
+                msgs,
+                excerpt,
+                excerpt_mode,
+            ))
         })
     }
 }
