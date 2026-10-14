@@ -292,7 +292,18 @@ fn coerce_string(value: Value) -> Result<Value, String> {
 
 fn coerce_list(value: Value, declared_type: &str) -> Result<Value, String> {
     match value {
-        Value::List(_) => Ok(value),
+        Value::List(items) => items
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let result = match declared_type {
+                    "list of string" => coerce_string(item),
+                    _ => coerce_int(item),
+                };
+                result.map_err(|error| format!("{declared_type} element {index}: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::List),
         Value::Unit => Ok(Value::List(Vec::new())),
         Value::Str(s) if declared_type == "list of string" => Ok(Value::List(vec![Value::Str(s)])),
         other => Err(format!(

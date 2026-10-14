@@ -225,6 +225,80 @@ fn parse_extract_result(result: &Value, field_defs: &[FieldDef]) -> Result<Value
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn extraction_rejects_invalid_fallback_elements_before_calling_a_provider() {
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("prompt".into(), Value::Str("select names".into())),
+                (
+                    "fields".into(),
+                    Value::Struct(vec![(
+                        "names".into(),
+                        Value::Struct(vec![
+                            ("type".into(), Value::Str("list of string".into())),
+                            ("desc".into(), Value::Str("names".into())),
+                        ]),
+                    )]),
+                ),
+                (
+                    "fallback".into(),
+                    Value::Struct(vec![(
+                        "names".into(),
+                        Value::List(vec![Value::Struct(vec![])]),
+                    )]),
+                ),
+            ],
+        };
+        let mut ctx = ToolCtx::new();
+        ctx.registry = Some(std::sync::Arc::new(crate::tool::ToolRegistry::new()));
+        let error = LlmExtractTool.call(args, &ctx).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid fallback: list of string element 0"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn extraction_coerces_each_list_element_with_its_declared_scalar_type() {
+        for (ty, input, expected) in [
+            (
+                "list of string",
+                r#"{"items":[1,true,"text"]}"#,
+                vec![
+                    Value::Str("1".into()),
+                    Value::Str("true".into()),
+                    Value::Str("text".into()),
+                ],
+            ),
+            (
+                "list of int",
+                r#"{"items":["2",3,true]}"#,
+                vec![Value::Int(2), Value::Int(3), Value::Int(1)],
+            ),
+        ] {
+            let fields = vec![FieldDef {
+                name: "items".into(),
+                ty: ty.into(),
+                description: String::new(),
+            }];
+            let result = parse_extract_result(&Value::Str(input.into()), &fields).unwrap();
+            assert_eq!(
+                result.field("items").unwrap().to_json().unwrap(),
+                Value::List(expected).to_json().unwrap()
+            );
+            for malformed in [r#"{"items":["2",{}]}"#, r#"{"items":["2",[]]}"#] {
+                assert!(
+                    parse_extract_result(&Value::Str(malformed.into()), &fields)
+                        .unwrap_err()
+                        .contains("element 1")
+                );
+            }
+        }
+    }
+
     #[test]
     fn extraction_fallback_preserves_control_flow_errors() {
         let ctx = ToolCtx::new();

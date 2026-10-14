@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Extraction list validation** — Structured extraction validates and coerces every array element against its declared type. Invalid elements use the configured extraction fallback; invalid fallback values are rejected before calling the model.
+
 - **Compaction record retention** — Budgeted turn-output rewrites preserve current guidance records and tombstones, including records inserted after the current user request.
 
 - **Agent selection context** — Rule selection retains recent dialogue and task state while sending compact guidance catalogs instead of full records. Failed selection continues with existing guidance and on-demand retrieval; unknown selections cannot trigger lookups.

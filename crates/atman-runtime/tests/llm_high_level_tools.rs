@@ -233,6 +233,8 @@ flow test() -> string {
     for provider in [
         MockProvider::new("mock")
             .with_model("m", Value::Str("<tool_call>invalid</tool_call>".into())),
+        MockProvider::new("mock")
+            .with_model("m", Value::Str(r#"{"names":["selected",{}]}"#.into())),
         MockProvider::new("mock"),
     ] {
         assert!(matches!(run(source, provider), Value::Str(text) if text == "available"));

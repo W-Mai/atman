@@ -723,13 +723,14 @@ async fn managed_agent_preserves_rules_and_completes_turns_after_extraction_fail
     for reply in [
         "<tool_call><function=bash>invalid extraction</function></tool_call>",
         "",
+        r#"{"rule_names":["test-rule",{}],"confession_triggers":["task evidence"]}"#,
     ] {
         assert_final_answer_boundary_with_extraction(
             atman_runtime::templates::AGENT_AT,
             Arc::new(FinalAnswerProvider::default()),
             true,
             1,
-            Some(reply),
+            Some((reply, false)),
         )
         .await;
     }
@@ -740,7 +741,7 @@ async fn managed_selection_keeps_dialogue_and_loads_only_known_catalog_entries()
     assert_final_answer_boundary_with_extraction(
         atman_runtime::templates::AGENT_AT,
         Arc::new(FinalAnswerProvider::default()), true, 1,
-        Some(r#"{"rule_names":["test-rule","test-rule","unknown"],"confession_triggers":["task evidence","unknown"]}"#),
+        Some((r#"{"rule_names":["test-rule","test-rule","unknown"],"confession_triggers":["task evidence","unknown"]}"#, true)),
     ).await;
 }
 
@@ -749,7 +750,7 @@ async fn assert_final_answer_boundary_with_extraction(
     provider: Arc<dyn Provider>,
     finalized: bool,
     first_responses: usize,
-    selection_reply: Option<&str>,
+    selection_reply: Option<(&str, bool)>,
 ) {
     use atman_runtime::memory::goal::{GoalActor, GoalPauseReason};
     use atman_runtime::watch::{WatchEvent, WatchMode, WatchSource};
@@ -810,12 +811,13 @@ async fn assert_final_answer_boundary_with_extraction(
     ));
     executor.providers.register(provider);
     let selector = Arc::new(SelectionProvider {
-        inner: if selection_reply == Some("") {
+        inner: if selection_reply.is_some_and(|(reply, _)| reply.is_empty()) {
             // A missing mock response returns a provider error.
             MockProvider::new("cheap")
         } else {
             MockProvider::new("cheap").with_fallback(Value::Str(
                 selection_reply
+                    .map(|(reply, _)| reply)
                     .unwrap_or(r#"{"rule_names":[],"confession_triggers":[]}"#)
                     .into(),
             ))
@@ -904,7 +906,7 @@ async fn assert_final_answer_boundary_with_extraction(
     assert!(matches!(output, Value::Str(text) if text == "Done."));
     session.end_turn();
     let messages = session.messages();
-    if let Some(reply) = selection_reply {
+    if let Some((_, selected)) = selection_reply {
         let request = selector.requests.lock().unwrap()[0].clone();
         let text = request
             .iter()
@@ -945,7 +947,6 @@ async fn assert_final_answer_boundary_with_extraction(
                 .iter()
                 .any(|message| message.text_concat().contains("Available guidance index"))
         );
-        let selected = reply.starts_with('{');
         for expected in ["Preserve task evidence", "Keep the original evidence"] {
             assert_eq!(
                 messages
