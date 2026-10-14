@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Synchronous child results** — Waiting for a child across multiple turns preserves every unreturned final answer. Switching to asynchronous delivery retains publication order and excludes the answer already returned to the caller.
+
 - **Watcher message pickup** — Root and child agents receive watcher events in their next general model call. Owned queues preserve notifications across pauses and preparation failures, prevent competing consumers from repeating delivery, and stop child watchers on cancellation. Finishing a user pause defers new notifications without blocking the final response.
 
 - **Flow watcher delivery** — Published final answers notify output watchers while managed child flows remain alive. Cumulative output preserves cursors across turns and delayed consumers; repeated delivery within a turn and flow exit do not replay answer matches.

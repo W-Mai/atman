@@ -1,7 +1,7 @@
 //! Scoped, single-consumer delivery of child-agent final answers.
 
 use crate::pending_batch::{Batch, PendingBatch};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use crate::event::{FlowRunId, TurnId};
@@ -53,7 +53,7 @@ impl ResultInbox {
             handle,
             delivery: Mutex::new(Delivery {
                 enabled,
-                buffered: None,
+                buffered: VecDeque::new(),
             }),
         }
     }
@@ -93,7 +93,7 @@ pub struct ResultRoute {
 
 struct Delivery {
     enabled: bool,
-    buffered: Option<ChildResult>,
+    buffered: VecDeque<ChildResult>,
 }
 
 impl ResultRoute {
@@ -108,23 +108,32 @@ impl ResultRoute {
     /// Release a synchronous waiter without discarding an answer it did not return.
     pub fn enable(&self) {
         let mut delivery = self.delivery.lock().unwrap();
+        self.release_buffered(&mut delivery);
+    }
+
+    // Keep the delivery lock through handoff so later publications cannot overtake the buffer.
+    fn release_buffered(&self, delivery: &mut Delivery) -> bool {
         delivery.enabled = true;
-        if let Some(result) = delivery.buffered.take() {
-            let mut state = self.inbox.state.lock().unwrap();
-            if state.generation == self.generation {
+        let mut state = self.inbox.state.lock().unwrap();
+        let current = state.generation == self.generation;
+        let notify = current && !delivery.buffered.is_empty();
+        for result in delivery.buffered.drain(..) {
+            if current {
                 state.pending.push_back(result);
-                drop(state);
-                self.inbox.changed();
             }
         }
+        drop(state);
+        if notify {
+            self.inbox.changed();
+        }
+        current
     }
 
     /// Claim the synchronous answer and enable later notifications in one publication boundary.
     pub(crate) fn finish_sync(&self) -> Option<String> {
         let mut delivery = self.delivery.lock().unwrap();
-        delivery.enabled = true;
-        let result = delivery.buffered.take();
-        self.is_current()
+        let result = delivery.buffered.pop_back();
+        self.release_buffered(&mut delivery)
             .then_some(result)
             .flatten()
             .map(|result| result.answer)
@@ -145,7 +154,7 @@ impl ResultRoute {
             answer,
         };
         if !delivery.enabled {
-            delivery.buffered = Some(result);
+            delivery.buffered.push_back(result);
             return;
         }
         state.pending.push_back(result);
@@ -191,6 +200,42 @@ impl Drop for ResultReceipt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synchronous_wait_preserves_every_unclaimed_turn_in_publication_order() {
+        for returned in [false, true] {
+            let inbox = ResultInbox::new(Arc::new(tokio::sync::watch::channel(0).0));
+            let route = inbox.route("child".into(), false);
+            let run = FlowRunId::now();
+            for answer in ["first", "second", "latest"] {
+                route.publish(run.clone(), TurnId::now(), answer.into());
+            }
+            if returned {
+                assert_eq!(route.finish_sync().as_deref(), Some("latest"));
+            } else {
+                route.enable();
+            }
+            route.enable();
+            route.publish(run, TurnId::now(), "after handoff".into());
+            let receipt = inbox.reserve().unwrap();
+            let answers = receipt
+                .batch
+                .items
+                .iter()
+                .map(|result| result.answer.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                answers,
+                if returned {
+                    vec!["first", "second", "after handoff"]
+                } else {
+                    vec!["first", "second", "latest", "after handoff"]
+                }
+            );
+            assert_eq!(receipt.commit(|| Ok::<_, ()>(())), Ok(true));
+            assert!(!inbox.has_pending());
+        }
+    }
 
     #[test]
     fn reservation_preserves_fifo_on_failure_and_excludes_competing_consumers() {
