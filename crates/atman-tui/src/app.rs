@@ -3466,10 +3466,6 @@ impl AppState {
     }
 
     pub fn toggle_tool_call_content(&mut self, item_index: usize, tool_use_id: &str) {
-        let panel_width = self
-            .last_transcript_rect
-            .map(|area| area.width)
-            .unwrap_or(80);
         self.mutate_item(item_index, OutputMutation::Interaction, |item| {
             let OutputItem::ToolDispatch { calls } = item else {
                 return false;
@@ -3477,7 +3473,7 @@ impl AppState {
             let Some(call) = calls.iter_mut().find(|call| call.id == tool_use_id) else {
                 return false;
             };
-            call.disclosure = crate::output::toggle_tool_call_content_disclosure(call, panel_width);
+            call.disclosure = crate::output::toggle_tool_call_content_disclosure(call);
             true
         });
     }

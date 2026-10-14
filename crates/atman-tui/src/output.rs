@@ -3445,16 +3445,12 @@ fn tool_disclosure_depth(call: &ToolCallView, panel_width: u16) -> ToolDisclosur
     }
 }
 
-pub(crate) fn toggle_tool_call_content_disclosure(
-    call: &ToolCallView,
-    panel_width: u16,
-) -> Disclosure {
+pub(crate) fn toggle_tool_call_content_disclosure(call: &ToolCallView) -> Disclosure {
     match call.disclosure {
-        Disclosure::Summary => match tool_disclosure_depth(call, panel_width) {
-            ToolDisclosureDepth::Summary => Disclosure::Summary,
-            ToolDisclosureDepth::Preview | ToolDisclosureDepth::Full => Disclosure::Preview,
-        },
-        Disclosure::Preview | Disclosure::Full => Disclosure::Summary,
+        Disclosure::Summary if call.detail.is_some() || tool_input_body(call).is_some() => {
+            Disclosure::Preview
+        }
+        _ => Disclosure::Summary,
     }
 }
 
@@ -3462,9 +3458,13 @@ pub(crate) fn toggle_tool_call_detail_disclosure(
     call: &ToolCallView,
     panel_width: u16,
 ) -> Disclosure {
-    match (call.disclosure, tool_disclosure_depth(call, panel_width)) {
-        (Disclosure::Preview, ToolDisclosureDepth::Full) => Disclosure::Full,
-        (Disclosure::Full, _) => Disclosure::Preview,
+    match call.disclosure {
+        Disclosure::Preview
+            if tool_disclosure_depth(call, panel_width) == ToolDisclosureDepth::Full =>
+        {
+            Disclosure::Full
+        }
+        Disclosure::Full => Disclosure::Preview,
         _ => call.disclosure,
     }
 }
@@ -12783,19 +12783,19 @@ mod tests {
         };
 
         assert_eq!(
-            toggle_tool_call_content_disclosure(&base, 80),
+            toggle_tool_call_content_disclosure(&base),
             Disclosure::Summary
         );
 
         let mut short = base.clone();
         short.input = serde_json::json!({"path": "README.md"});
         assert_eq!(
-            toggle_tool_call_content_disclosure(&short, 80),
+            toggle_tool_call_content_disclosure(&short),
             Disclosure::Preview
         );
         short.disclosure = Disclosure::Preview;
         assert_eq!(
-            toggle_tool_call_content_disclosure(&short, 80),
+            toggle_tool_call_content_disclosure(&short),
             Disclosure::Summary
         );
         assert_eq!(
@@ -12816,12 +12816,12 @@ mod tests {
             expanded: false,
         }));
         assert_eq!(
-            toggle_tool_call_content_disclosure(&long, 80),
+            toggle_tool_call_content_disclosure(&long),
             Disclosure::Preview
         );
         long.disclosure = Disclosure::Preview;
         assert_eq!(
-            toggle_tool_call_content_disclosure(&long, 80),
+            toggle_tool_call_content_disclosure(&long),
             Disclosure::Summary
         );
         assert_eq!(
@@ -12830,7 +12830,7 @@ mod tests {
         );
         long.disclosure = Disclosure::Full;
         assert_eq!(
-            toggle_tool_call_content_disclosure(&long, 80),
+            toggle_tool_call_content_disclosure(&long),
             Disclosure::Summary
         );
         assert_eq!(
@@ -12953,7 +12953,7 @@ mod tests {
             ended_at: Some(now),
         };
         assert_eq!(
-            toggle_tool_call_content_disclosure(&call, 80),
+            toggle_tool_call_content_disclosure(&call),
             Disclosure::Summary
         );
         assert_eq!(
@@ -12972,7 +12972,7 @@ mod tests {
             expanded: false,
         }));
         assert_eq!(
-            toggle_tool_call_content_disclosure(&call, 80),
+            toggle_tool_call_content_disclosure(&call),
             Disclosure::Summary
         );
         assert_eq!(

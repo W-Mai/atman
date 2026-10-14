@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Tool preview latency** — Opening a tool preview or collapsing full output no longer renders the complete result to decide the disclosure state.
+
 - **Child panel controls** — Tool groups, previews, and full output use the same disclosure behavior as the document stream. Click regions follow their rendered positions through scrolling and caching; nested and detached flow panels own their interaction state and support Tab / Enter navigation.
 
 - **Child panel rendering** — Expanding or resizing a child-flow panel reuses its restored messages instead of replaying history and rereading tool logs. Detached task panels track their own content revisions.

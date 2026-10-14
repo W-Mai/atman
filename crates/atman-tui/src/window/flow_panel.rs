@@ -202,8 +202,7 @@ impl FlowPanelContent {
                                 }];
                             }
                         } else if content.is_some() {
-                            call.disclosure =
-                                toggle_tool_call_content_disclosure(call, self.interaction.width);
+                            call.disclosure = toggle_tool_call_content_disclosure(call);
                         } else {
                             call.disclosure =
                                 toggle_tool_call_detail_disclosure(call, self.interaction.width);
