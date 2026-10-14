@@ -196,6 +196,27 @@ fn retry_classified_gives_up_immediately_on_kind_not_in_list() {
 }
 
 #[test]
+fn retry_recovers_from_sse_transport_failure() {
+    let provider = Arc::new(ScriptedProvider::new(
+        "m",
+        vec![
+            Err(RuntimeError::ToolFailed(
+                "sse: Transport error: error decoding response body".into(),
+            )),
+            Ok("recovered".into()),
+        ],
+    ));
+    let (result, calls) = run_with(
+        provider,
+        r#"flow t() -> string {
+        return llm.call(model: "m", prompt: "hi", retry: 1)
+    }"#,
+    );
+    assert!(matches!(result, Ok(Value::Str(text)) if text == "recovered"));
+    assert_eq!(calls, 2);
+}
+
+#[test]
 fn retry_without_classified_stops_on_permanent_errors() {
     let src = r#"flow t() -> string {
     return llm.call(
@@ -209,6 +230,7 @@ fn retry_without_classified_stops_on_permanent_errors() {
         "openai http 401: unauthorized",
         "openai http 400: invalid request",
         "tool schema unsupported",
+        "sse: UTF8 error: invalid utf-8 sequence",
     ] {
         let provider = Arc::new(ScriptedProvider::new(
             "m",

@@ -171,6 +171,7 @@ fn classify_tool_failed(msg: &str) -> ErrorKind {
         return ErrorKind::ProviderDown;
     }
     if m.contains("network")
+        || m.starts_with("sse: transport error:")
         || m.contains("connection")
         || m.contains("connect ")
         || m.contains("reset by peer")
@@ -197,6 +198,14 @@ mod tests {
     #[test]
     fn classify_covers_common_provider_error_strings() {
         let cases: &[(&str, ErrorKind)] = &[
+            (
+                "sse: Transport error: error decoding response body",
+                ErrorKind::Transient,
+            ),
+            (
+                "sse: UTF8 error: invalid utf-8 sequence",
+                ErrorKind::ToolError,
+            ),
             (
                 "responses net: error sending request for url (https://gateway.example/v1/responses)",
                 ErrorKind::Transient,

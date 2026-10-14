@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Streaming retries** — SSE response-body transport failures use the configured transient-error retry policy instead of immediately ending the flow. Malformed stream data remains an error.
+
 - **Agent rule selection** — Failed preliminary extraction preserves available rules and confessions and continues into the main agent loop. Selection instructions distinguish reference context from tasks to execute.
 
 - **Extraction fallback** — `llm.extract` honors an explicit, field-validated fallback for provider and response parsing failures while preserving cancellation and execution controls.
