@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Notification readiness** — Watcher and child-result scheduling waits for reserved batches to become available instead of repeatedly attempting consumption. Reserved notifications keep their owner alive until delivery resolves.
+
 - **Synchronous child results** — Waiting for a child across multiple turns preserves every unreturned final answer. Switching to asynchronous delivery retains publication order and excludes the answer already returned to the caller.
 
 - **Watcher message pickup** — Root and child agents receive watcher events in their next general model call. Owned queues preserve notifications across pauses and preparation failures, prevent competing consumers from repeating delivery, and stop child watchers on cancellation. Finishing a user pause defers new notifications without blocking the final response.

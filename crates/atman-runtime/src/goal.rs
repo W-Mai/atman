@@ -36,8 +36,8 @@ pub fn continuation_prompt(control: &GoalController) -> String {
 /// Inspect readiness without claiming notifications or starting a turn.
 pub fn has_next_turn(control: &GoalController, watchers: &crate::watch::WatchHub) -> bool {
     control.allows_background_turn()
-        && (watchers.has_pending_events()
-            || control.child_results.has_pending()
+        && (watchers.has_ready_events()
+            || control.child_results.has_ready()
             || control.should_continue())
 }
 
@@ -416,8 +416,8 @@ impl GoalController {
             }
             if self.allows_background_turn()
                 && (self.should_continue()
-                    || self.child_results.has_pending()
-                    || self.watch_hub.has_pending_events())
+                    || self.child_results.has_ready()
+                    || self.watch_hub.has_ready_events())
             {
                 return Ok(());
             }
@@ -771,6 +771,103 @@ impl Drop for GoalOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn notification_readiness_respects_reservations_and_execution_gates() {
+        use crate::event::{FlowRunId, TurnId};
+        use crate::watch::{WatchEvent, WatchMode, WatchSource};
+        use futures::FutureExt;
+        use std::time::Duration;
+
+        for nested in [false, true] {
+            let root = GoalController::ephemeral("root".into());
+            root.set("parent", None).unwrap();
+            let control = if nested {
+                root.child("child".into(), "work".into(), None).unwrap()
+            } else {
+                root.clone()
+            };
+            control
+                .pause(
+                    GoalActor::Agent,
+                    GoalPauseReason::Completed,
+                    "done".into(),
+                    None,
+                )
+                .unwrap();
+            let route = control.child_results.route("sender".into(), true);
+            route.publish(FlowRunId::now(), TurnId::now(), "answer".into());
+            let hub = &control.watch_hub;
+            let source = WatchSource::Bash {
+                handle: "job".into(),
+            };
+            let id = hub.register(
+                source.clone(),
+                "done".into(),
+                WatchMode::Once,
+                Duration::from_secs(1),
+            );
+            hub.enqueue_event(WatchEvent {
+                watcher_id: id,
+                source,
+                pattern: "done".into(),
+                row: None,
+                col: None,
+                text: "done".into(),
+                timestamp: chrono::Utc::now(),
+                timed_out: false,
+                exited: false,
+                timeout: Duration::from_secs(1),
+            });
+            let child = control.child_results.reserve().unwrap();
+            let watcher = hub.reserve().unwrap();
+            assert!(control.child_results.has_pending());
+            assert!(hub.has_work());
+            assert!(!has_next_turn(&control, hub));
+            let cancel = CancellationToken::new();
+            let active = control.wait_active(&cancel);
+            let pending = hub.wait_for_pending();
+            let idle = hub.wait_for_pending_or_idle();
+            tokio::pin!(active, pending, idle);
+            assert!(active.as_mut().now_or_never().is_none());
+            assert!(pending.as_mut().now_or_never().is_none());
+            assert!(idle.as_mut().now_or_never().is_none());
+
+            // Releasing one queue must not release the other or lose a later publication.
+            route.publish(FlowRunId::now(), TurnId::now(), "later".into());
+            assert!(!has_next_turn(&control, hub));
+            drop(child);
+            assert!(has_next_turn(&control, hub));
+            active.await.unwrap();
+            let child = control.child_results.reserve().unwrap();
+            assert!(child.prompt().contains("later"));
+            assert_eq!(child.commit(|| Ok::<_, ()>(())), Ok(true));
+            assert!(!has_next_turn(&control, hub));
+            assert!(pending.as_mut().now_or_never().is_none());
+            assert!(idle.as_mut().now_or_never().is_none());
+
+            root.pause(
+                GoalActor::User,
+                GoalPauseReason::UserRequested,
+                "pause".into(),
+                None,
+            )
+            .unwrap();
+            drop(watcher);
+            pending.await;
+            idle.await;
+            assert!(!has_next_turn(&control, hub));
+            assert!(control.wait_active(&cancel).now_or_never().is_none());
+            root.begin_user_turn();
+            assert!(has_next_turn(&control, hub));
+            control.wait_active(&cancel).await.unwrap();
+            let watcher = hub.reserve().unwrap();
+            assert_eq!(watcher.commit(|| Ok::<_, ()>(())), Ok(true));
+            assert!(!has_next_turn(&control, hub));
+            assert!(!hub.has_work());
+            assert!(hub.wait_for_pending_or_idle().now_or_never().is_some());
+        }
+    }
 
     #[tokio::test]
     async fn child_results_survive_turn_end_and_pause_without_duplicate_background_turns() {

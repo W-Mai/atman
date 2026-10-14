@@ -72,6 +72,10 @@ impl ResultInbox {
         !self.state.lock().unwrap().pending.is_empty()
     }
 
+    pub(crate) fn has_ready(&self) -> bool {
+        self.state.lock().unwrap().pending.is_ready()
+    }
+
     /// Only one request or background-turn starter may own a batch at a time.
     pub fn reserve(self: &Arc<Self>) -> Option<ResultReceipt> {
         let mut state = self.state.lock().unwrap();

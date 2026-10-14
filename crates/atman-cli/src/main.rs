@@ -896,7 +896,10 @@ async fn cmd_run_loaded(
             if !session.goal_control.allows_background_turn() {
                 break None;
             }
-            if !session.flow_registry.has_background_work() && !session.watch_hub.has_work() {
+            if !session.flow_registry.has_background_work()
+                && !session.watch_hub.has_work()
+                && !session.goal_control.child_results.has_pending()
+            {
                 if atman_runtime::goal::has_next_turn(&session.goal_control, &session.watch_hub)
                     || goal_changes.has_changed().unwrap_or(false)
                 {

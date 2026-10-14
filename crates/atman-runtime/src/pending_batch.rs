@@ -28,6 +28,10 @@ impl<T> PendingBatch<T> {
         self.pending.is_empty()
     }
 
+    pub fn is_ready(&self) -> bool {
+        !self.reserved && !self.pending.is_empty()
+    }
+
     pub fn push_back(&mut self, item: T) {
         self.pending.push_back(item);
     }
@@ -72,7 +76,7 @@ impl<T> PendingBatch<T> {
 
 impl<T: Clone> PendingBatch<T> {
     pub fn reserve(&mut self) -> Option<Batch<T>> {
-        if self.reserved || self.pending.is_empty() {
+        if !self.is_ready() {
             return None;
         }
         self.token = self.token.wrapping_add(1);

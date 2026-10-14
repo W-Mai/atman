@@ -181,6 +181,10 @@ impl WatchHub {
         !self.state.lock().unwrap().pending_events.is_empty()
     }
 
+    pub(crate) fn has_ready_events(&self) -> bool {
+        self.state.lock().unwrap().pending_events.is_ready()
+    }
+
     fn changed(&self) {
         self.changes
             .send_modify(|revision| *revision = revision.wrapping_add(1));
@@ -258,7 +262,10 @@ impl WatchHub {
         loop {
             let ready = {
                 let state = self.state.lock().unwrap();
-                !state.pending_events.is_empty() || (include_idle && state.watchers.is_empty())
+                state.pending_events.is_ready()
+                    || (include_idle
+                        && state.watchers.is_empty()
+                        && state.pending_events.is_empty())
             };
             if ready {
                 return;
