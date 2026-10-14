@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Nested child wakeups** — Managed command-line runs recheck idle scans when descendant state changes, preserving results transferred from grandchildren to their parents during turn completion.
+
 - **Synchronous child handoff** — Returning or cancelling a synchronous wait preserves final answers published at the return boundary without replaying the returned answer.
 
 - **Child result delivery** — Async child final answers reach the direct parent's next model call during an active turn, or start a new turn when it is idle. Root and nested agents share batch delivery, pause gates, and task scope invalidation. Managed command-line runs wait for active child work; synchronous results are not delivered twice.

@@ -28,11 +28,22 @@ fn managed_run_waits_for_child_results_after_its_final_answer() {
         memory.goal.pause(goal_id: goal.goal.id, expected_revision: goal.goal.revision, reason: "completed", summary: "Delivered")
         return final.answer(message: "delayed child delivery")
     }"#).unwrap();
+    std::fs::write(dir.path().join("branch.at"), r#"flow branch(prompt: string) -> string {
+        contract { invocation { goal: true, user_message: prompt } }
+        when prompt == "work" {
+            inventory = flow.instances()
+            flow.spawn(flow: "child.at", spawn_token: inventory.spawn_token, arguments: {prompt: "leaf"})
+        }
+        goal = memory.goal.get()
+        memory.goal.pause(goal_id: goal.goal.id, expected_revision: goal.goal.revision, reason: "completed", summary: "Turn delivered")
+        when prompt == "work" { return final.answer(message: "branch waiting") }
+        return final.answer(message: "branch processed: " + prompt)
+    }"#).unwrap();
     std::fs::write(dir.path().join("main.at"), r#"flow main(prompt: string) -> string {
         contract { invocation { goal: true, user_message: prompt } }
         when prompt == "start" {
             inventory = flow.instances()
-            flow.spawn(flow: "child.at", spawn_token: inventory.spawn_token, arguments: {prompt: "work"})
+            flow.spawn(flow: "branch.at", spawn_token: inventory.spawn_token, arguments: {prompt: "work"})
         }
         goal = memory.goal.get()
         when goal.goal {
@@ -69,6 +80,7 @@ fn managed_run_waits_for_child_results_after_its_final_answer() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("delayed child delivery"), "{stdout}");
+    assert!(stdout.contains("branch processed:"), "{stdout}");
 }
 
 #[test]

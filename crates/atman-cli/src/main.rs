@@ -885,6 +885,9 @@ async fn cmd_run_loaded(
             break outcome;
         }
         let wake = loop {
+            // Descendants can transfer work between inboxes during the liveness scan.
+            // Only a scan with no intervening state changes may conclude that work is over.
+            goal_changes.borrow_and_update();
             if atman_runtime::goal::has_next_turn(&session.goal_control, &session.watch_hub)
                 && let Some(message) = atman_runtime::goal::begin_background_turn(&session).await
             {
@@ -894,8 +897,9 @@ async fn cmd_run_loaded(
                 break None;
             }
             if !session.flow_registry.has_background_work() && !session.watch_hub.has_work() {
-                // The last child can publish between the readiness check and its exit.
-                if atman_runtime::goal::has_next_turn(&session.goal_control, &session.watch_hub) {
+                if atman_runtime::goal::has_next_turn(&session.goal_control, &session.watch_hub)
+                    || goal_changes.has_changed().unwrap_or(false)
+                {
                     continue;
                 }
                 break None;

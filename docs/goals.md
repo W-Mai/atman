@@ -47,7 +47,7 @@ The document stream marks consumed batches as **Child results**. Full answers re
 
 ## Persistence and recovery
 
-Managed child agents retain their handle, context, and workspace while paused, including completion pauses, so an explicit Resume can use the same instance. Clear, `flow.kill`, or session shutdown cancels that instance and releases its live resources. A cancelled child cannot be resumed. Process restart restores goal records, not suspended Rust execution or external side effects.
+Managed child agents retain their handle, context, and workspace while paused, including completion pauses, so an explicit Resume can use the same instance. Managed command-line runs confirm that the shared notification revision remains unchanged during an idle scan before exiting, including when a grandchild transfers work to its parent. Clear, `flow.kill`, or session shutdown cancels that instance and releases its live resources. A cancelled child cannot be resumed. Process restart restores goal records, not suspended Rust execution or external side effects.
 
 `goal_turn_started` events associate an agent owner and its current goal identity with each turn and run. The goal identity can be absent when the first user turn has not created an objective yet; subsequent `goal_changed` events identify that objective under the same owner.
 
