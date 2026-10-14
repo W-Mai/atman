@@ -41,6 +41,10 @@ pub enum WmCommand {
         handle: String,
         maximized: bool,
     },
+    OpenOutputSnapshot {
+        id: String,
+        item: Box<crate::app::OutputItem>,
+    },
     OpenContentPanel {
         label: String,
         key: ContentKey,
@@ -112,7 +116,7 @@ pub enum HitTarget {
     WorkflowNode(usize, String),
     McpRow(String),
     McpAction(McpPanelAction),
-    ToolHeader(String),
+    DocumentNode(usize, String),
 }
 
 /// Immutable render data passed to `WindowComponent::render_content`.

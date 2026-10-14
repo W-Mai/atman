@@ -23,6 +23,52 @@ pub(crate) struct FlowDocument {
     items: Vec<OutputItem>,
 }
 
+#[derive(Default)]
+pub(crate) struct FlowInteraction {
+    hits: Vec<HitRegion>,
+    focused: Option<usize>,
+    width: u16,
+    expanded_nodes: Option<HashSet<String>>,
+    workflow_expanded: Option<bool>,
+    expanded_groups: HashSet<String>,
+}
+
+fn panel_hit_regions(
+    cache: &PanelRenderCache,
+    area: Rect,
+    scroll: u32,
+    item_idx: usize,
+) -> Vec<HitRegion> {
+    let end = scroll.saturating_add(area.height as u32);
+    cache
+        .regions
+        .iter()
+        .map(|region| (region, false))
+        .chain(cache.document_regions.iter().map(|region| (region, true)))
+        .filter_map(|(region, document)| {
+            let start_row = region.start_row.max(scroll);
+            let end_row = region.end_row.min(end);
+            let col_end = region.col_end.min(area.width);
+            if start_row >= end_row || region.col_start >= col_end {
+                return None;
+            }
+            Some(HitRegion {
+                target: if document {
+                    HitTarget::DocumentNode(region.panel_item_index, region.path_key.clone())
+                } else {
+                    HitTarget::WorkflowNode(item_idx, region.path_key.clone())
+                },
+                rect: Rect::new(
+                    area.x + region.col_start,
+                    area.y + (start_row - scroll) as u16,
+                    col_end - region.col_start,
+                    (end_row - start_row) as u16,
+                ),
+            })
+        })
+        .collect()
+}
+
 impl FlowDocument {
     fn restore(
         &mut self,
@@ -69,6 +115,28 @@ impl FlowDocument {
         }
         crate::history::dedup_by_handle(&mut items);
 
+        let disclosures: HashMap<_, _> = self
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let OutputItem::ToolDispatch { calls } = item {
+                    Some(calls)
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .map(|call| (call.id.as_str(), call.disclosure))
+            .collect();
+        for item in &mut items {
+            if let OutputItem::ToolDispatch { calls } = item {
+                for call in calls {
+                    if let Some(disclosure) = disclosures.get(call.id.as_str()) {
+                        call.disclosure = *disclosure;
+                    }
+                }
+            }
+        }
         self.items = items;
         self.revision = Some(key);
     }
@@ -76,6 +144,7 @@ impl FlowDocument {
 
 pub struct FlowPanelContent {
     pub(crate) document: FlowDocument,
+    pub(crate) interaction: FlowInteraction,
     pub(crate) goal_entry: Option<std::sync::Arc<atman_runtime::tools::agent_ctrl::FlowEntry>>,
     pub(crate) goal_rect: Rect,
     pub(crate) goal_hover: bool,
@@ -84,6 +153,68 @@ pub struct FlowPanelContent {
     pub render_cache: Option<PanelRenderCache>,
     pub output_store: Option<atman_runtime::tools::tool_output::OutputStore>,
     pub(crate) selection_projection: Option<crate::selection::VisibleSelectionProjection>,
+}
+
+impl FlowPanelContent {
+    fn activate(&mut self, target: HitTarget) -> Vec<crate::wm::WmCommand> {
+        use crate::output::*;
+        self.render_cache = None;
+        match target {
+            HitTarget::WorkflowNode(_, path) => {
+                if path.is_empty() {
+                    let expanded = self.interaction.workflow_expanded.get_or_insert(true);
+                    *expanded = !*expanded;
+                } else {
+                    let nodes = self.interaction.expanded_nodes.get_or_insert_default();
+                    if !nodes.remove(&path) {
+                        nodes.insert(path);
+                    }
+                }
+            }
+            HitTarget::DocumentNode(index, path) => {
+                if path.starts_with(WORKING_GROUP_REGION_PREFIX) {
+                    if !self.interaction.expanded_groups.remove(&path) {
+                        self.interaction.expanded_groups.insert(path);
+                    }
+                } else if let Some(OutputItem::ToolDispatch { calls }) =
+                    self.document.items.get_mut(index)
+                {
+                    let content = path.strip_prefix(TOOL_CALL_REGION_PREFIX);
+                    let detail = path.strip_prefix(TOOL_DETAIL_REGION_PREFIX);
+                    let fullscreen = path
+                        .strip_prefix(TOOL_FULLSCREEN_REGION_PREFIX)
+                        .or_else(|| path.strip_prefix(TOOL_DETAIL_FULLSCREEN_REGION_PREFIX));
+                    if let Some(call) = calls
+                        .iter_mut()
+                        .find(|call| Some(call.id.as_str()) == content.or(detail).or(fullscreen))
+                    {
+                        if fullscreen.is_some() {
+                            if let Some(output) = call.detail.as_deref() {
+                                if let Some(handle) = output.handle() {
+                                    return vec![crate::wm::WmCommand::OpenTaskPanel {
+                                        handle: handle.to_owned(),
+                                        maximized: true,
+                                    }];
+                                }
+                                return vec![crate::wm::WmCommand::OpenOutputSnapshot {
+                                    id: format!("{}:{}", self.handle, call.id),
+                                    item: Box::new(output.clone()),
+                                }];
+                            }
+                        } else if content.is_some() {
+                            call.disclosure =
+                                toggle_tool_call_content_disclosure(call, self.interaction.width);
+                        } else {
+                            call.disclosure =
+                                toggle_tool_call_detail_disclosure(call, self.interaction.width);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
 }
 
 impl WindowComponent for FlowPanelContent {
@@ -158,9 +289,14 @@ impl WindowComponent for FlowPanelContent {
                 *iteration,
                 messages,
                 workflow_graph,
-                expanded_nodes,
-                *workflow_expanded,
-                ctx.expanded_tools,
+                self.interaction
+                    .expanded_nodes
+                    .get_or_insert_with(|| expanded_nodes.clone()),
+                *self
+                    .interaction
+                    .workflow_expanded
+                    .get_or_insert(*workflow_expanded),
+                &self.interaction.expanded_groups,
                 &mut self.scroll,
                 ctx.animation_frame,
                 &mut hitmap_out,
@@ -216,12 +352,13 @@ impl WindowComponent for FlowPanelContent {
                 .get(panel_idx)
                 .copied()
                 .unwrap_or_default();
+            let workflow_expanded = *self.interaction.workflow_expanded.get_or_insert(true);
             let cache_hit = self.render_cache.as_ref().is_some_and(|cache| {
                 cache.item_id == revision.id
                     && cache.content_revision == revision.layout
                     && cache.interaction_revision == ctx.interaction_revision
                     && cache.width == area.width
-                    && cache.workflow_expanded
+                    && cache.workflow_expanded == workflow_expanded
             });
             if !cache_hit {
                 let render_width = area.width.max(300);
@@ -232,53 +369,33 @@ impl WindowComponent for FlowPanelContent {
                 };
                 let (lines, regions) = crate::output::render_workflow_projection_with_regions(
                     graph,
-                    expanded_nodes,
-                    true,
+                    self.interaction
+                        .expanded_nodes
+                        .get_or_insert_with(|| expanded_nodes.clone()),
+                    workflow_expanded,
                     false,
                     render_frame,
                     render_width,
                     crate::output::MAX_COLLAPSED_BODY_ROWS,
                 );
-                let dynamic_paint = crate::output::workflow_dynamic_paint(graph, true, &lines, 0);
+                let dynamic_paint =
+                    crate::output::workflow_dynamic_paint(graph, workflow_expanded, &lines, 0);
                 self.render_cache = Some(PanelRenderCache {
                     item_id: revision.id,
                     content_revision: revision.layout,
                     interaction_revision: ctx.interaction_revision,
                     width: area.width,
-                    workflow_expanded: true,
+                    workflow_expanded,
                     lines,
                     dynamic_paint,
                     regions,
-                    tool_headers: Vec::new(),
-                    wf_offset: 0,
+                    document_regions: Vec::new(),
                 });
             }
             let cache = self.render_cache.as_ref().unwrap();
             let max_scroll = (cache.lines.len() as u32).saturating_sub(area.height as u32);
             self.scroll = self.scroll.min(max_scroll);
-            let visible_end = self.scroll.saturating_add(area.height as u32);
-            for r in cache
-                .regions
-                .iter()
-                .skip_while(|region| region.end_row <= self.scroll)
-                .take_while(|region| region.start_row < visible_end)
-            {
-                let row0 = area.y as u32 + r.start_row.saturating_sub(self.scroll);
-                let row1 = area.y as u32 + r.end_row.min(visible_end).saturating_sub(self.scroll);
-                let col0 = area.x + r.col_start;
-                let col1 = area.x + r.col_end;
-                if col1 > col0 && row1 > row0 {
-                    hitmap_out.push(HitRegion {
-                        target: HitTarget::WorkflowNode(panel_idx, r.path_key.clone()),
-                        rect: Rect {
-                            x: col0,
-                            y: row0 as u16,
-                            width: col1 - col0,
-                            height: (row1 - row0) as u16,
-                        },
-                    });
-                }
-            }
+            hitmap_out.extend(panel_hit_regions(cache, area, self.scroll, panel_idx));
             let start = self.scroll as usize;
             let end = start
                 .saturating_add(area.height as usize)
@@ -315,7 +432,18 @@ impl WindowComponent for FlowPanelContent {
             super::common::render_placeholder(frame, area, &self.handle);
         }
 
-        hitmap_out
+        self.interaction.hits = hitmap_out;
+        self.interaction.width = area.width;
+        if let Some(hit) = self
+            .interaction
+            .focused
+            .and_then(|index| self.interaction.hits.get(index))
+        {
+            frame.buffer_mut()[(hit.rect.x, hit.rect.y)]
+                .set_symbol("▎")
+                .set_fg(crate::theme::theme().accent.into());
+        }
+        Vec::new()
     }
 
     fn selection_projection(&self) -> Option<crate::selection::VisibleSelectionProjection> {
@@ -354,7 +482,47 @@ impl WindowComponent for FlowPanelContent {
         {
             return WmEventResult::Consumed(Vec::new());
         }
+        let focus = match event {
+            WmEvent::Mouse(mouse)
+                if mouse.kind
+                    == crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Left,
+                    ) =>
+            {
+                self.interaction
+                    .hits
+                    .iter()
+                    .rposition(|hit| hit.rect.contains((mouse.column, mouse.row).into()))
+            }
+            WmEvent::Key(crate::keys::KeyAction::Submit | crate::keys::KeyAction::Char(' ')) => {
+                self.interaction.focused
+            }
+            WmEvent::Key(key @ (crate::keys::KeyAction::Tab | crate::keys::KeyAction::BackTab))
+                if !self.interaction.hits.is_empty() =>
+            {
+                let count = self.interaction.hits.len();
+                self.interaction.focused = Some(match (self.interaction.focused, key) {
+                    (Some(index), crate::keys::KeyAction::Tab) => (index + 1) % count,
+                    (Some(index), _) => (index + count - 1) % count,
+                    (None, crate::keys::KeyAction::Tab) => 0,
+                    _ => count - 1,
+                });
+                return WmEventResult::Consumed(Vec::new());
+            }
+            _ => None,
+        };
+        if let Some(index) = focus
+            && let Some(hit) = self.interaction.hits.get(index)
+        {
+            let target = hit.target.clone();
+            self.interaction.focused = Some(index);
+            return WmEventResult::Consumed(self.activate(target));
+        }
         WmEventResult::Ignored
+    }
+
+    fn title_suffix(&self) -> Option<String> {
+        Some("Tab: focus · Enter: toggle".into())
     }
 
     fn sync_state(&mut self, scroll: u32, _h_scroll: u16, _split: bool) {
@@ -409,49 +577,7 @@ pub(crate) fn render_sub_agent_panel(
         let cache = render_cache.as_ref().unwrap();
         let max_scroll = (cache.lines.len() as u32).saturating_sub(area.height as u32);
         *scroll = (*scroll).min(max_scroll);
-        let visible_end = scroll.saturating_add(area.height as u32);
-        for r in cache
-            .regions
-            .iter()
-            .skip_while(|region| region.end_row + cache.wf_offset <= *scroll)
-            .take_while(|region| region.start_row + cache.wf_offset < visible_end)
-        {
-            let row0 = area.y as u32 + (r.start_row + cache.wf_offset).saturating_sub(*scroll);
-            let row1 = area.y as u32
-                + (r.end_row + cache.wf_offset)
-                    .min(visible_end)
-                    .saturating_sub(*scroll);
-            let col0 = area.x + r.col_start;
-            let col1 = area.x + r.col_end;
-            if col1 > col0 && row1 > row0 {
-                hitmap_out.push(HitRegion {
-                    target: HitTarget::WorkflowNode(item_idx, r.path_key.clone()),
-                    rect: Rect {
-                        x: col0,
-                        y: row0 as u16,
-                        width: col1 - col0,
-                        height: (row1 - row0) as u16,
-                    },
-                });
-            }
-        }
-        for r in cache
-            .tool_headers
-            .iter()
-            .skip_while(|header| header.row + cache.wf_offset < *scroll)
-            .take_while(|header| header.row + cache.wf_offset < visible_end)
-        {
-            let row = area.y as u32 + (r.row + cache.wf_offset).saturating_sub(*scroll);
-            hitmap_out.push(HitRegion {
-                target: HitTarget::ToolHeader(r.tool_id.clone()),
-                rect: Rect {
-                    x: area.x,
-                    y: row as u16,
-                    width: area.width,
-                    height: 1,
-                },
-            });
-        }
+        hitmap_out.extend(panel_hit_regions(cache, area, *scroll, item_idx));
         let start = *scroll as usize;
         let end = start
             .saturating_add(area.height as usize)
@@ -507,7 +633,7 @@ pub(crate) fn render_sub_agent_panel(
     } else {
         crate::output::LAYOUT_ANIMATION_FRAME
     };
-    let (wf_lines, regions) = crate::output::render_workflow_projection_with_regions(
+    let (wf_lines, mut regions) = crate::output::render_workflow_projection_with_regions(
         workflow_graph,
         expanded_nodes,
         workflow_expanded,
@@ -516,6 +642,10 @@ pub(crate) fn render_sub_agent_panel(
         area.width.max(300),
         crate::output::MAX_COLLAPSED_BODY_ROWS,
     );
+    for region in &mut regions {
+        region.start_row += wf_offset;
+        region.end_row += wf_offset;
+    }
     lines.extend(wf_lines);
     lines.push(Line::from(""));
 
@@ -532,8 +662,13 @@ pub(crate) fn render_sub_agent_panel(
         hovered_thinking_idx: None,
         hovered_output_node: None,
     };
-    let (doc_lines, tool_headers) =
-        crate::output::build_lines_with_tool_headers(&document.items, &render_ctx);
+    let (doc_lines, _, mut document_regions, _) =
+        crate::output::build_lines_with_ranges(&document.items, area.width, &render_ctx);
+    let doc_offset = lines.len() as u32;
+    for region in &mut document_regions {
+        region.start_row += doc_offset;
+        region.end_row += doc_offset;
+    }
     lines.extend(doc_lines);
     let dynamic_paint = if done {
         Default::default()
@@ -548,48 +683,6 @@ pub(crate) fn render_sub_agent_panel(
 
     let max_scroll = (lines.len() as u32).saturating_sub(area.height as u32);
     *scroll = (*scroll).min(max_scroll);
-
-    let visible_end = scroll.saturating_add(area.height as u32);
-    for r in regions
-        .iter()
-        .skip_while(|region| region.end_row + wf_offset <= *scroll)
-        .take_while(|region| region.start_row + wf_offset < visible_end)
-    {
-        let row0 = area.y as u32 + (r.start_row + wf_offset).saturating_sub(*scroll);
-        let row1 = area.y as u32
-            + (r.end_row + wf_offset)
-                .min(visible_end)
-                .saturating_sub(*scroll);
-        let col0 = area.x + r.col_start;
-        let col1 = area.x + r.col_end;
-        if col1 > col0 && row1 > row0 {
-            hitmap_out.push(HitRegion {
-                target: HitTarget::WorkflowNode(item_idx, r.path_key.clone()),
-                rect: Rect {
-                    x: col0,
-                    y: row0 as u16,
-                    width: col1 - col0,
-                    height: (row1 - row0) as u16,
-                },
-            });
-        }
-    }
-    for r in tool_headers
-        .iter()
-        .skip_while(|header| header.row + wf_offset < *scroll)
-        .take_while(|header| header.row + wf_offset < visible_end)
-    {
-        let row = area.y as u32 + (r.row + wf_offset).saturating_sub(*scroll);
-        hitmap_out.push(HitRegion {
-            target: HitTarget::ToolHeader(r.tool_id.clone()),
-            rect: Rect {
-                x: area.x,
-                y: row as u16,
-                width: area.width,
-                height: 1,
-            },
-        });
-    }
 
     let start = *scroll as usize;
     let end = start.saturating_add(area.height as usize).min(lines.len());
@@ -609,10 +702,15 @@ pub(crate) fn render_sub_agent_panel(
         lines,
         dynamic_paint,
         regions,
-        tool_headers,
-        wf_offset,
+        document_regions,
     });
 
+    hitmap_out.extend(panel_hit_regions(
+        render_cache.as_ref().unwrap(),
+        area,
+        *scroll,
+        item_idx,
+    ));
     f.render_widget(Paragraph::new(visible_lines), area);
 }
 
@@ -629,6 +727,189 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::text::Line;
+
+    #[test]
+    fn detached_child_disclosure_uses_rendered_regions_and_survives_updates() {
+        use crate::keys::KeyAction;
+        use crate::wm::component::HitTarget;
+        use atman_runtime::message::{Message, MessagePart};
+        let turn = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
+        let mut call = Message::assistant_text(turn.clone(), "");
+        call.parts = vec![MessagePart::ToolUse {
+            id: "call".into(),
+            name: "bash.spawn".into(),
+            input: serde_json::json!({"command":"echo output"}),
+            intent: None,
+        }];
+        let mut result = call.clone();
+        result.role = atman_runtime::message::MessageRole::Tool;
+        result.parts = vec![MessagePart::ToolResult {
+            tool_use_id: "call".into(),
+            is_error: false,
+            content: serde_json::json!({"handle":"process", "output": "line\n".repeat(40)})
+                .to_string(),
+        }];
+        let mut tasks = HashMap::from([(
+            "child".into(),
+            crate::app::DetachedTaskDetail {
+                revision: 1,
+                item: OutputItem::SubAgentActivity {
+                    handle: "child".into(),
+                    goal: "inspect".into(),
+                    child_run_id: "child".into(),
+                    model: "model".into(),
+                    status: crate::agent_presentation::AgentState::Completed,
+                    output: String::new(),
+                    iteration: 1,
+                    expanded: false,
+                    messages: vec![call, result],
+                    workflow_graph: WorkflowProjection::new(turn),
+                    expanded_nodes: HashSet::new(),
+                    workflow_expanded: true,
+                },
+            },
+        )]);
+        let mut panel = FlowPanelContent {
+            document: Default::default(),
+            interaction: Default::default(),
+            goal_entry: None,
+            goal_rect: Default::default(),
+            goal_hover: false,
+            handle: "child".into(),
+            scroll: 0,
+            render_cache: None,
+            output_store: None,
+            selection_projection: None,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 50)).unwrap();
+        let draw = |panel: &mut FlowPanelContent,
+                    terminal: &mut Terminal<TestBackend>,
+                    tasks: &HashMap<String, crate::app::DetachedTaskDetail>| {
+            let resources = HashMap::new();
+            let prompts = HashMap::new();
+            let browser = crate::mcp_manager::McpBrowserState {
+                tab: Default::default(),
+                content_revision: 0,
+                hovered_action: None,
+                remove_armed: None,
+                resources: &resources,
+                prompts: &prompts,
+            };
+            terminal
+                .draw(|frame| {
+                    panel.render_content(
+                        ratatui::layout::Rect::new(3, 2, 70, 45),
+                        frame,
+                        &crate::wm::RenderCtx {
+                            window_id: crate::wm::WindowId(1),
+                            snapshots: &[],
+                            items: &[],
+                            item_revisions: &[],
+                            handle_index: &HashMap::new(),
+                            detached_task_details: tasks,
+                            task_handle_index: &HashMap::new(),
+                            workflow_run_to_panel: &HashMap::new(),
+                            task_snapshots_revision: 0,
+                            interaction_revision: 0,
+                            animation_frame: 0,
+                            expanded_tools: &HashSet::new(),
+                            activity_nodes: &[],
+                            mcp_servers: &[],
+                            expanded_mcp_servers: &HashSet::new(),
+                            mcp_selected: 0,
+                            hovered_mcp_row: &None,
+                            mcp_browser: &browser,
+                            hovered_history_row: &None,
+                        },
+                    );
+                })
+                .unwrap();
+        };
+        let mut scroll = 0;
+        let mut h_scroll = 0;
+        let mut event_ctx = EventCtx {
+            scroll: &mut scroll,
+            h_scroll: &mut h_scroll,
+        };
+        draw(&mut panel, &mut terminal, &tasks);
+        assert!(panel.selection_projection.is_some());
+        let restored = panel.document.items.as_ptr();
+        for prefix in [
+            crate::output::WORKING_GROUP_REGION_PREFIX,
+            crate::output::TOOL_CALL_REGION_PREFIX,
+            crate::output::TOOL_DETAIL_REGION_PREFIX,
+        ] {
+            let hit = panel.interaction.hits.iter().find(|hit| matches!(&hit.target, HitTarget::DocumentNode(_, key) if key.starts_with(prefix))).unwrap();
+            let row = hit.rect.y;
+            if prefix == crate::output::WORKING_GROUP_REGION_PREFIX {
+                let text: String = (hit.rect.x..hit.rect.right())
+                    .map(|x| terminal.backend().buffer()[(x, row + 1)].symbol())
+                    .collect();
+                assert!(text.contains("working"), "{text}");
+            }
+            let event = WmEvent::Mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: hit.rect.x,
+                row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            });
+            assert!(matches!(
+                panel.handle_event(&event, &mut event_ctx),
+                WmEventResult::Consumed(_)
+            ));
+            draw(&mut panel, &mut terminal, &tasks);
+            assert_eq!(restored, panel.document.items.as_ptr());
+        }
+        let OutputItem::ToolDispatch { calls } = &panel.document.items[0] else {
+            panic!()
+        };
+        assert_eq!(calls[0].disclosure, crate::app::Disclosure::Full);
+        tasks.get_mut("child").unwrap().revision += 1;
+        draw(&mut panel, &mut terminal, &tasks);
+        let OutputItem::ToolDispatch { calls } = &panel.document.items[0] else {
+            panic!()
+        };
+        assert_eq!(calls[0].disclosure, crate::app::Disclosure::Full);
+        // The cached layout must project the same scrolled, clipped hit boxes.
+        panel.scroll = 2;
+        draw(&mut panel, &mut terminal, &tasks);
+        let cached: Vec<_> = panel.interaction.hits.iter().map(|hit| hit.rect).collect();
+        panel.render_cache = None;
+        draw(&mut panel, &mut terminal, &tasks);
+        assert_eq!(
+            cached,
+            panel
+                .interaction
+                .hits
+                .iter()
+                .map(|hit| hit.rect)
+                .collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            panel.handle_event(&WmEvent::Key(KeyAction::Tab), &mut event_ctx),
+            WmEventResult::Consumed(_)
+        ));
+        assert!(matches!(
+            panel.handle_event(&WmEvent::Key(KeyAction::Submit), &mut event_ctx),
+            WmEventResult::Consumed(_)
+        ));
+        let commands = panel.activate(HitTarget::DocumentNode(
+            0,
+            format!("{}call", crate::output::TOOL_FULLSCREEN_REGION_PREFIX),
+        ));
+        assert!(
+            matches!(commands.as_slice(), [crate::wm::WmCommand::OpenTaskPanel { handle, maximized: true }] if handle == "process")
+        );
+        panel.activate(HitTarget::WorkflowNode(usize::MAX, "node".into()));
+        assert!(
+            panel
+                .interaction
+                .expanded_nodes
+                .as_ref()
+                .unwrap()
+                .contains("node")
+        );
+    }
 
     use crate::app::OutputItem;
     use crate::wm::WindowComponent;
@@ -683,6 +964,7 @@ mod tests {
             .unwrap();
         let mut panel = FlowPanelContent {
             document: Default::default(),
+            interaction: Default::default(),
             goal_entry: Some(entry),
             goal_rect: ratatui::layout::Rect::new(1, 1, 40, 3),
             goal_hover: false,
@@ -890,6 +1172,7 @@ mod tests {
         };
         let mut panel = FlowPanelContent {
             document: Default::default(),
+            interaction: Default::default(),
             goal_entry: None,
             goal_rect: ratatui::layout::Rect::default(),
             goal_hover: false,

@@ -78,8 +78,7 @@ pub struct PanelRenderCache {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) dynamic_paint: crate::output::DynamicPaint,
     pub(crate) regions: Vec<crate::output::NodeRegion>,
-    pub(crate) tool_headers: Vec<crate::output::ToolHeaderSpot>,
-    pub(crate) wf_offset: u32,
+    pub(crate) document_regions: Vec<crate::output::NodeRegion>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1155,6 +1154,32 @@ impl WindowManager {
                 WmCommand::OpenTaskPanel { handle, maximized } => {
                     app.open_task_panel(self, &handle, app.maximized_canvas(), maximized, false);
                 }
+                WmCommand::OpenOutputSnapshot { id, item } => {
+                    let title = match item.as_ref() {
+                        crate::app::OutputItem::DiffPreview { title, .. } => title.clone(),
+                        crate::app::OutputItem::FsDetail { view, .. } => view.title(),
+                        _ => "Tool output".into(),
+                    };
+                    let canvas = app.maximized_canvas();
+                    let window = self.open_with_size(
+                        &id,
+                        ContentKey::Output(id.clone()),
+                        OpenPolicy::ReuseExisting,
+                        WindowContent::Output {
+                            item_id: id.clone(),
+                        },
+                        &title,
+                        canvas,
+                        canvas.width,
+                        canvas.height,
+                        true,
+                    );
+                    if let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == window) {
+                        panel.content = Some(Box::new(
+                            crate::window::output_panel::OutputPanelContent::snapshot(item),
+                        ));
+                    }
+                }
                 WmCommand::OpenContentPanel {
                     label,
                     key,
@@ -1441,9 +1466,6 @@ pub fn render(
             all_hitmap
                 .mcp_row_rects
                 .append(&mut panel_hitmap.mcp_row_rects);
-            all_hitmap
-                .tool_header_rects
-                .append(&mut panel_hitmap.tool_header_rects);
             all_hitmap
                 .selection_projections
                 .append(&mut panel_hitmap.selection_projections);

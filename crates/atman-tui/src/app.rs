@@ -1860,6 +1860,7 @@ impl AppState {
             atman_runtime::TaskKind::Flow => {
                 Box::new(crate::window::flow_panel::FlowPanelContent {
                     document: Default::default(),
+                    interaction: Default::default(),
                     goal_entry: self
                         .session
                         .as_ref()

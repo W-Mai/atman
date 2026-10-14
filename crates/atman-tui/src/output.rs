@@ -183,61 +183,6 @@ pub fn build_lines(items: &[OutputItem], ctx: &RenderCtx<'_>) -> Vec<Line<'stati
     out
 }
 
-/// A collapsible tool-output block rendered into the transcript. `row` is the
-/// block's header line relative to the enclosing `build_lines` output, and
-/// `tool_id` identifies the block for hit-testing (expand/collapse).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolHeaderSpot {
-    pub row: u32,
-    pub tool_id: String,
-}
-
-/// Like [`build_lines`] but also reports the header row of every collapsible
-/// tool-output block so callers can build clickable hit regions.
-pub fn build_lines_with_tool_headers(
-    items: &[OutputItem],
-    ctx: &RenderCtx<'_>,
-) -> (Vec<Line<'static>>, Vec<ToolHeaderSpot>) {
-    let mut out = Vec::with_capacity(items.len() * 3);
-    let mut spots = Vec::new();
-    for (item_index, item) in items.iter().enumerate() {
-        let start = out.len() as u32;
-        let (lines, regions) = render_item_with_regions(item, ctx, item_index);
-        out.extend(lines);
-        if matches!(item, OutputItem::ToolDispatch { .. }) {
-            spots.extend(regions.iter().filter_map(|region| {
-                region
-                    .path_key
-                    .strip_prefix(TOOL_CALL_REGION_PREFIX)
-                    .map(|tool_id| ToolHeaderSpot {
-                        row: start.saturating_add(region.start_row).saturating_add(1),
-                        tool_id: tool_id.to_string(),
-                    })
-            }));
-            continue;
-        }
-        if let Some(tool_id) = tool_block_id(item) {
-            // Every collapsible block renderer emits a blank row at `start`,
-            // then its header at `start + 1`.
-            spots.push(ToolHeaderSpot {
-                row: start.saturating_add(1),
-                tool_id,
-            });
-        }
-    }
-    (out, spots)
-}
-
-fn tool_block_id(item: &OutputItem) -> Option<String> {
-    match item {
-        OutputItem::Bash { handle, .. } | OutputItem::Terminal { handle, .. } => {
-            Some(handle.clone())
-        }
-        OutputItem::DiffPreview { title, .. } => Some(title.clone()),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ItemRange {
     pub item_index: usize,
@@ -3432,7 +3377,7 @@ fn tool_input_visual_rows(body: &str, panel_width: u16) -> usize {
         .sum()
 }
 
-fn set_detail_expanded(detail: &mut OutputItem, expanded: bool) {
+pub(crate) fn set_detail_expanded(detail: &mut OutputItem, expanded: bool) {
     match detail {
         OutputItem::Terminal {
             expanded: value, ..
@@ -12117,10 +12062,11 @@ mod tests {
         };
         let mut second_call = call.clone();
         second_call.id = "edit-2".into();
-        let (_, tool_headers) = build_lines_with_tool_headers(
+        let (_, _, tool_regions, _) = build_lines_with_ranges(
             &[OutputItem::ToolDispatch {
                 calls: vec![call.clone(), second_call],
             }],
+            ctx.panel_width,
             &ctx,
         );
         let mut summary_call = call.clone();
@@ -12192,9 +12138,9 @@ mod tests {
                 .any(|span| { span.style.bg == Some(crate::theme::theme().work_output_bg.into()) })
         );
         assert_eq!(
-            tool_headers
+            tool_regions
                 .iter()
-                .map(|header| header.tool_id.as_str())
+                .filter_map(|region| region.path_key.strip_prefix(TOOL_CALL_REGION_PREFIX))
                 .collect::<Vec<_>>(),
             vec!["edit-1", "edit-2"]
         );

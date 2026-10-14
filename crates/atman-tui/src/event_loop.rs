@@ -732,27 +732,6 @@ pub(crate) async fn run_frames(
                                         } else {
                                             app.app.toggle_workflow_node(panel_idx, &path);
                                         }
-                                    } else if let Some((_pid, tool_id, _)) = app.wm.interaction.last_hitmap
-                                        .tool_header_rects
-                                        .iter()
-                                        .find(|(pid, _, r)| {
-                                            pid == &panel_id
-                                                && rect_contains(*r, me.column, me.row)
-                                        })
-                                        .cloned()
-                                    {
-                                        if let Some(panel) = app
-                                            .wm
-                                            .panels
-                                            .iter_mut()
-                                            .find(|panel| panel.id == panel_id)
-                                        {
-                                            if !panel.expanded_tools.remove(&tool_id) {
-                                                panel.expanded_tools.insert(tool_id);
-                                            }
-                                            panel.interaction_revision =
-                                                panel.interaction_revision.wrapping_add(1);
-                                        }
                                     } else {
                                         app.wm.focus(panel_id);
                                     }

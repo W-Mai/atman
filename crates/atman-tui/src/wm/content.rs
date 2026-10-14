@@ -94,9 +94,6 @@ pub fn render_panel_content(
                 crate::wm::component::HitTarget::McpAction(action) => hitmap_out
                     .mcp_action_rects
                     .push((panel.id, action, region.rect)),
-                crate::wm::component::HitTarget::ToolHeader(s) => hitmap_out
-                    .tool_header_rects
-                    .push((panel.id, s, region.rect)),
                 _ => {}
             }
         }

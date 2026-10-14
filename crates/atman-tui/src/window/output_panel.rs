@@ -10,6 +10,7 @@ use crate::wm::component::{
 };
 
 pub struct OutputPanelContent {
+    snapshot: Option<Box<OutputItem>>,
     item_index: usize,
     tool_use_id: String,
     scroll: u32,
@@ -19,10 +20,19 @@ pub struct OutputPanelContent {
 impl OutputPanelContent {
     pub fn new(item_index: usize, tool_use_id: String) -> Self {
         Self {
+            snapshot: None,
             item_index,
             tool_use_id,
             scroll: 0,
             selection_projection: None,
+        }
+    }
+
+    pub(crate) fn snapshot(mut item: Box<OutputItem>) -> Self {
+        crate::output::set_detail_expanded(&mut item, true);
+        Self {
+            snapshot: Some(item),
+            ..Self::new(0, String::new())
         }
     }
 }
@@ -36,14 +46,15 @@ impl WindowComponent for OutputPanelContent {
             area.height,
         );
         self.selection_projection = None;
-        let Some(OutputItem::ToolDispatch { calls }) = ctx.items.get(self.item_index) else {
-            return Vec::new();
-        };
-        let Some(item) = calls
-            .iter()
-            .find(|call| call.id == self.tool_use_id)
-            .and_then(|call| call.detail.as_deref())
-        else {
+        let Some(item) = self.snapshot.as_deref().or_else(|| {
+            let OutputItem::ToolDispatch { calls } = ctx.items.get(self.item_index)? else {
+                return None;
+            };
+            calls
+                .iter()
+                .find(|call| call.id == self.tool_use_id)
+                .and_then(|call| call.detail.as_deref())
+        }) else {
             return Vec::new();
         };
         let expanded_tools = HashSet::new();
@@ -66,10 +77,14 @@ impl WindowComponent for OutputPanelContent {
         self.selection_projection = Some(crate::window::common::window_text_projection(
             ctx.window_id,
             "tool-output",
-            ctx.item_revisions
-                .get(self.item_index)
-                .copied()
-                .unwrap_or_default(),
+            if self.snapshot.is_some() {
+                Default::default()
+            } else {
+                ctx.item_revisions
+                    .get(self.item_index)
+                    .copied()
+                    .unwrap_or_default()
+            },
             &lines,
             area,
             self.scroll,
