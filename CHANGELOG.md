@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Child panel rendering** — Expanding or resizing a child-flow panel reuses its restored messages instead of replaying history and rereading tool logs. Detached task panels track their own content revisions.
+
 - **Extraction list validation** — Structured extraction validates and coerces every array element against its declared type. Invalid elements use the configured extraction fallback; invalid fallback values are rejected before calling the model.
 
 - **Compaction record retention** — Budgeted turn-output rewrites preserve current guidance records and tombstones, including records inserted after the current user request.

@@ -16,7 +16,66 @@ use crate::wm::component::{
     EventCtx, HitRegion, HitTarget, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
 
+/// Message restoration is independent of viewport and disclosure changes.
+#[derive(Default)]
+pub(crate) struct FlowDocument {
+    revision: Option<(u64, u64)>,
+    items: Vec<OutputItem>,
+}
+
+impl FlowDocument {
+    fn restore(
+        &mut self,
+        revision: crate::app::OutputRevision,
+        messages: &[Message],
+        output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
+    ) {
+        let key = (revision.id, revision.semantic);
+        if self.revision == Some(key) {
+            return;
+        }
+        let mut tool_map: HashMap<String, crate::history::ToolDisplayMeta> = HashMap::new();
+        for msg in messages {
+            if matches!(msg.role, atman_runtime::message::MessageRole::Assistant) {
+                for part in &msg.parts {
+                    if let atman_runtime::message::MessagePart::ToolUse {
+                        id,
+                        name,
+                        input,
+                        intent,
+                    } = part
+                    {
+                        tool_map.insert(
+                            id.clone(),
+                            crate::history::ToolDisplayMeta::from_tool_use(
+                                name,
+                                input,
+                                intent.as_ref(),
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        let mut items: Vec<OutputItem> = Vec::new();
+        for msg in messages {
+            crate::history::flatten_message_with_output_store(
+                msg,
+                &mut items,
+                &tool_map,
+                output_store,
+                None,
+            );
+        }
+        crate::history::dedup_by_handle(&mut items);
+
+        self.items = items;
+        self.revision = Some(key);
+    }
+}
+
 pub struct FlowPanelContent {
+    pub(crate) document: FlowDocument,
     pub(crate) goal_entry: Option<std::sync::Arc<atman_runtime::tools::agent_ctrl::FlowEntry>>,
     pub(crate) goal_rect: Rect,
     pub(crate) goal_hover: bool,
@@ -69,8 +128,7 @@ impl WindowComponent for FlowPanelContent {
 
         let found = ctx
             .task_detail(&self.handle)
-            .map(|(index, item, _)| (index, item))
-            .filter(|(_, item)| matches!(item, OutputItem::SubAgentActivity { .. }));
+            .filter(|(_, item, _)| matches!(item, OutputItem::SubAgentActivity { .. }));
 
         if let Some((
             item_idx,
@@ -86,6 +144,7 @@ impl WindowComponent for FlowPanelContent {
                 workflow_expanded,
                 ..
             },
+            revision,
         )) = found
         {
             render_sub_agent_panel(
@@ -106,18 +165,13 @@ impl WindowComponent for FlowPanelContent {
                 ctx.animation_frame,
                 &mut hitmap_out,
                 item_idx,
-                ctx.item_revisions
-                    .get(item_idx)
-                    .copied()
-                    .unwrap_or_default(),
+                revision,
                 ctx.interaction_revision,
                 &mut self.render_cache,
+                &mut self.document,
                 self.output_store.as_ref(),
             );
-            if let (Some(cache), Some(revision)) = (
-                self.render_cache.as_ref(),
-                ctx.item_revisions.get(item_idx).copied(),
-            ) {
+            if let Some(cache) = self.render_cache.as_ref() {
                 self.selection_projection = Some(crate::window::common::window_text_projection(
                     ctx.window_id,
                     "working-output",
@@ -342,6 +396,7 @@ pub(crate) fn render_sub_agent_panel(
     item_revision: crate::app::OutputRevision,
     interaction_revision: u64,
     render_cache: &mut Option<PanelRenderCache>,
+    document: &mut FlowDocument,
     output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
 ) {
     if render_cache.as_ref().is_some_and(|cache| {
@@ -467,40 +522,7 @@ pub(crate) fn render_sub_agent_panel(
     // Section 3: Sub-document flow — use flatten_message for proper OutputItem
     // types (Bash/DiffPreview/Terminal with collapse support), identical to
     // the main transcript rendering.
-    let mut tool_map: HashMap<String, crate::history::ToolDisplayMeta> = HashMap::new();
-    for msg in messages {
-        if matches!(msg.role, atman_runtime::message::MessageRole::Assistant) {
-            for part in &msg.parts {
-                if let atman_runtime::message::MessagePart::ToolUse {
-                    id,
-                    name,
-                    input,
-                    intent,
-                } = part
-                {
-                    tool_map.insert(
-                        id.clone(),
-                        crate::history::ToolDisplayMeta::from_tool_use(
-                            name,
-                            input,
-                            intent.as_ref(),
-                        ),
-                    );
-                }
-            }
-        }
-    }
-    let mut items: Vec<OutputItem> = Vec::new();
-    for msg in messages {
-        crate::history::flatten_message_with_output_store(
-            msg,
-            &mut items,
-            &tool_map,
-            output_store,
-            None,
-        );
-    }
-    crate::history::dedup_by_handle(&mut items);
+    document.restore(item_revision, messages, output_store);
 
     let render_ctx = crate::output::RenderCtx {
         expanded_tools,
@@ -511,7 +533,7 @@ pub(crate) fn render_sub_agent_panel(
         hovered_output_node: None,
     };
     let (doc_lines, tool_headers) =
-        crate::output::build_lines_with_tool_headers(&items, &render_ctx);
+        crate::output::build_lines_with_tool_headers(&document.items, &render_ctx);
     lines.extend(doc_lines);
     let dynamic_paint = if done {
         Default::default()
@@ -614,6 +636,27 @@ mod tests {
     use super::{FlowPanelContent, render_sub_agent_panel};
 
     #[test]
+    fn document_restoration_tracks_content_not_layout() {
+        let mut document = super::FlowDocument::default();
+        let turn = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
+        let mut revision = crate::app::OutputRevision {
+            id: 1,
+            semantic: 1,
+            layout: 1,
+            ..Default::default()
+        };
+        let messages = vec![atman_runtime::message::Message::user_text(turn, "first")];
+        document.restore(revision, &messages, None);
+        let items = document.items.as_ptr();
+        revision.layout += 1;
+        document.restore(revision, &messages, None);
+        assert_eq!(items, document.items.as_ptr());
+        revision.semantic += 1;
+        document.restore(revision, &[], None);
+        assert!(document.items.is_empty());
+    }
+
+    #[test]
     fn blocked_child_toggle_does_not_fall_through_to_the_parent() {
         use atman_runtime::memory::goal::{GoalActor, GoalPauseReason};
         let session = atman_runtime::Session::open_ephemeral();
@@ -639,6 +682,7 @@ mod tests {
             )
             .unwrap();
         let mut panel = FlowPanelContent {
+            document: Default::default(),
             goal_entry: Some(entry),
             goal_rect: ratatui::layout::Rect::new(1, 1, 40, 3),
             goal_hover: false,
@@ -699,6 +743,7 @@ mod tests {
         let mut scroll = 0;
         let mut hitmap = Vec::new();
         let mut cache = None;
+        let mut document = super::FlowDocument::default();
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         terminal
             .draw(|frame| {
@@ -727,6 +772,7 @@ mod tests {
                     },
                     1,
                     &mut cache,
+                    &mut document,
                     None,
                 );
             })
@@ -773,6 +819,7 @@ mod tests {
                     },
                     1,
                     &mut cache,
+                    &mut document,
                     None,
                 );
             })
@@ -842,6 +889,7 @@ mod tests {
             prompts: &prompts,
         };
         let mut panel = FlowPanelContent {
+            document: Default::default(),
             goal_entry: None,
             goal_rect: ratatui::layout::Rect::default(),
             goal_hover: false,
