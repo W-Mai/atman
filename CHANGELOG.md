@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Final answer folding** — Published final answers collapse preceding work even when the reply streamed as ordinary text before a direct flow call. The answer remains visible, and earlier turns keep their own summaries.
+
 - **Nested child wakeups** — Managed command-line runs recheck idle scans when descendant state changes, preserving results transferred from grandchildren to their parents during turn completion.
 
 - **Synchronous child handoff** — Returning or cancelling a synchronous wait preserves final answers published at the return boundary without replaying the returned answer.

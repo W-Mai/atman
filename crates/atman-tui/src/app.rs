@@ -3159,12 +3159,16 @@ impl AppState {
     }
 
     fn begin_work_fold(&mut self, summary: Option<&str>) -> Option<u64> {
+        self.begin_work_fold_before(self.items.len(), summary)
+    }
+
+    fn begin_work_fold_before(&mut self, end: usize, summary: Option<&str>) -> Option<u64> {
         let start_index = self
             .items
             .iter()
             .rposition(|item| matches!(item, OutputItem::UserTurn { .. }))
             .map_or(0, |index| index.saturating_add(1));
-        let end_index = self.items.len().checked_sub(1)?;
+        let end_index = end.checked_sub(1)?;
         if start_index > end_index {
             return None;
         }
@@ -3260,16 +3264,23 @@ impl AppState {
     fn commit_final_answer_message(&mut self, message: &Message) {
         let text = message.text_concat();
         let summary = atman_runtime::tools::final_answer::summary(message);
-        if let Some(summary) = summary.as_deref()
-            && let Some(fold) = self.work_folds.last_mut()
-        {
-            fold.title = summary.to_owned();
-        }
         let existing = self
             .items
             .last()
             .is_some_and(|item| matches!(item, OutputItem::AssistantMd { .. }))
             .then(|| self.items.len() - 1);
+        // Final publication commits the work boundary even without a streamed tool draft.
+        // Keep an already streamed answer outside that boundary.
+        let fold_id =
+            self.begin_work_fold_before(existing.unwrap_or(self.items.len()), summary.as_deref());
+        if let Some(summary) = summary.as_deref()
+            && let Some(fold) = self
+                .work_folds
+                .iter_mut()
+                .find(|fold| Some(fold.start_id) == fold_id)
+        {
+            fold.title = summary.to_owned();
+        }
         if let Some(index) = existing {
             self.mutate_item(index, OutputMutation::Semantic, |item| {
                 let OutputItem::AssistantMd { md, streaming, .. } = item else {
@@ -3281,7 +3292,6 @@ impl AppState {
                 changed
             });
         } else {
-            let _ = self.begin_work_fold(summary.as_deref());
             self.push_item(OutputItem::AssistantMd {
                 md: text,
                 streaming: false,
@@ -5249,6 +5259,71 @@ mod tests {
         assert!(app.toggle_latest_work_fold());
         app.work_folds[0].started_at = Instant::now().checked_sub(duration).unwrap();
         assert_eq!(app.work_fold_projections()[0].visible_members, 1);
+    }
+
+    #[test]
+    fn published_final_answer_folds_work_without_a_tool_draft() {
+        for streamed in [false, true] {
+            let mut app = AppState::new("session".into(), None);
+            app.push_item(OutputItem::UserTurn {
+                text: "hello".into(),
+                presentation: None,
+            });
+            app.apply_stream_frame(StreamFrame::ThinkingChunk {
+                text: "checking context".into(),
+                run_id: None,
+            });
+            let work_end = app.item_id(app.items.len() - 1).unwrap();
+            if streamed {
+                app.apply_stream_frame(StreamFrame::LlmChunk {
+                    text: "Hello.".into(),
+                    model: "test".into(),
+                    run_id: None,
+                });
+            }
+            app.apply_stream_frame(StreamFrame::LlmDone {
+                total_tokens: 1,
+                run_id: None,
+            });
+            assert!(app.work_folds.is_empty());
+            let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
+            let mut message = Message::assistant_text(turn_id.clone(), "Hello.");
+            message.origin = atman_runtime::message::MessageOrigin::FinalAnswer;
+            app.apply_stream_frame(StreamFrame::AssistantMsg {
+                flow_run_id: None,
+                message,
+            });
+            app.apply_stream_frame(StreamFrame::TurnEnded {
+                turn_id: turn_id.to_string(),
+            });
+            assert_eq!(app.work_folds.len(), 1);
+            let fold = &mut app.work_folds[0];
+            assert_eq!(fold.end_id, work_end);
+            assert_eq!(fold.title, "Hello.");
+            fold.started_at = Instant::now().checked_sub(fold.duration).unwrap();
+            assert_eq!(app.work_fold_projections()[0].visible_members, 0);
+            assert_eq!(
+                app.items.iter().filter(|item| matches!(item, OutputItem::AssistantMd { md, streaming: false, .. } if md == "Hello.")).count(),
+                1
+            );
+
+            // An answer with no preceding work must not rename the previous turn's fold.
+            app.push_item(OutputItem::UserTurn {
+                text: "again".into(),
+                presentation: None,
+            });
+            let mut message = Message::assistant_text(
+                atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
+                "Again.",
+            );
+            message.origin = atman_runtime::message::MessageOrigin::FinalAnswer;
+            app.apply_stream_frame(StreamFrame::AssistantMsg {
+                flow_run_id: None,
+                message,
+            });
+            assert_eq!(app.work_folds.len(), 1);
+            assert_eq!(app.work_folds[0].title, "Hello.");
+        }
     }
 
     #[test]
