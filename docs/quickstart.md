@@ -212,6 +212,8 @@ Tool-call purposes become the primary labels in output blocks, workflow nodes, a
 
 Click a Flow task's sidebar cross once to stop it. Closing its task window or pressing `Esc` in that window uses the same cancellation action. Bash and Terminal crosses retain two-click confirmation. A stopping task stays visible until execution exits, then moves out of the active list while its details remain available in History.
 
+Child flows can remain available after delivering a final answer. Their task cards show execution activity separately from handle lifetime: paused or idle children use a static waiting indicator, and running children animate. Waiting does not mark an unfinished child complete or prevent later resumption.
+
 `Ctrl+Tab` / `Ctrl+Shift+Tab` cycles floating-window focus in creation order on terminals that report those modified keys. Theme and trust-mode pickers accept arrow keys, wheel navigation, and clicks anywhere in a padded option; `Enter` applies the selection, and **Cancel** or `Esc` closes the picker.
 
 Try the smoke test first:

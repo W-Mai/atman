@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Idle child rendering** — Tool cards use child execution activity to drive animations. Paused and waiting child flows no longer keep the document repainting, and resume restores the running indicator.
+
 - **Flow stop controls** — Sidebar, task-window close, and Escape actions share immediate flow cancellation. Stopping tasks keep their elapsed timer until termination; stopped tasks leave the active list and remain in history.
 
 - **Task cancellation events** — Task lifecycle events follow registry state order even when cancellation finishes immediately. Stopped tasks cannot reappear as stopping, and repeated cancellation does not replay state transitions.

@@ -3871,13 +3871,19 @@ fn render_tool_dispatch(
         .bg(header_bg)
         .add_modifier(Modifier::BOLD);
     let running = finished < calls.len();
-    let header_glyph = if running {
+    let animating = calls.iter().any(ToolCallView::has_dynamic_paint);
+    let waiting = running && !animating;
+    let header_glyph = if animating {
         spinner_char(ctx.animation_frame)
+    } else if waiting {
+        "Ⅱ"
     } else {
         "⣿"
     };
-    let header_glyph_color = if running {
+    let header_glyph_color = if animating {
         t.accent
+    } else if waiting {
+        t.subtle_fg
     } else if calls
         .iter()
         .any(|call| call.status == ToolCallStatus::Error)
@@ -3922,7 +3928,10 @@ fn render_tool_dispatch(
     lines.push(aligned_ticker_document_row_with_control(
         vec![
             Span::styled(format!("{header_glyph}{DOCUMENT_PAD}"), header_glyph_style),
-            Span::styled("working", header_title_style),
+            Span::styled(
+                if waiting { "waiting" } else { "working" },
+                header_title_style,
+            ),
         ],
         working_intent_spans(calls, header_bg),
         " · ",
@@ -3954,6 +3963,11 @@ fn render_tool_dispatch(
 
     for call in calls {
         let (glyph, color) = match call.status {
+            ToolCallStatus::Running
+                if call.agent_state().is_some_and(|state| !state.is_running()) =>
+            {
+                (call.agent_state().unwrap().glyph(), t.subtle_fg)
+            }
             ToolCallStatus::Running => (spinner_char(ctx.animation_frame), t.accent),
             ToolCallStatus::Ok => ("✓", t.success),
             ToolCallStatus::Error => ("✗", t.error),

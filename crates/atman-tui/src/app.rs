@@ -218,6 +218,29 @@ pub struct ToolCallView {
     pub ended_at: Option<Instant>,
 }
 
+impl ToolCallView {
+    pub(crate) fn agent_state(&self) -> Option<crate::agent_presentation::AgentState> {
+        match self.detail.as_deref() {
+            Some(OutputItem::SubAgentActivity { status, .. }) => Some(*status),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn has_dynamic_paint(&self) -> bool {
+        // A retained child handle is not evidence of executing work.
+        self.agent_state().map_or_else(
+            || {
+                self.status == ToolCallStatus::Running
+                    || self
+                        .detail
+                        .as_deref()
+                        .is_some_and(OutputItem::has_dynamic_paint)
+            },
+            |state| state.is_running(),
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SubAgentRoute {
     pub item_index: usize,
@@ -572,13 +595,7 @@ impl OutputItem {
             Self::CompactionSummary { phase, .. } => {
                 matches!(phase, CompactionPhase::Running)
             }
-            Self::ToolDispatch { calls } => calls.iter().any(|call| {
-                call.status == ToolCallStatus::Running
-                    || call
-                        .detail
-                        .as_deref()
-                        .is_some_and(OutputItem::has_dynamic_paint)
-            }),
+            Self::ToolDispatch { calls } => calls.iter().any(ToolCallView::has_dynamic_paint),
             _ => false,
         }
     }
@@ -6599,6 +6616,48 @@ mod tests {
         };
         assert!(
             matches!(calls[0].detail.as_deref(), Some(OutputItem::SubAgentActivity { status, .. }) if !status.is_terminal())
+        );
+        assert!(app.has_active_animation());
+        for next in [
+            crate::agent_presentation::AgentState::GoalPaused(
+                atman_runtime::memory::goal::GoalPauseReason::Blocked,
+            ),
+            crate::agent_presentation::AgentState::Ready,
+            crate::agent_presentation::AgentState::Paused { by_parent: true },
+        ] {
+            app.mutate_routed_sub_agent("child", OutputMutation::Semantic, |item| {
+                let OutputItem::SubAgentActivity { status, .. } = item else {
+                    unreachable!()
+                };
+                *status = next;
+                true
+            });
+            assert!(
+                !app.has_active_animation(),
+                "idle child must not keep its dispatch animated: {next:?}"
+            );
+            let (lines, _) = crate::output::render_item_with_regions(
+                &app.items[0],
+                &crate::output::RenderCtx::empty(),
+                0,
+            );
+            let header = lines[1]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert!(header.contains("waiting"), "{header}");
+        }
+        app.mutate_routed_sub_agent("child", OutputMutation::Semantic, |item| {
+            let OutputItem::SubAgentActivity { status, .. } = item else {
+                unreachable!()
+            };
+            *status = crate::agent_presentation::AgentState::Running;
+            true
+        });
+        assert!(
+            app.has_active_animation(),
+            "resuming work must restore animation"
         );
         app.apply_stream_frame(StreamFrame::SubAgentDone {
             handle: "agent_1".into(),
