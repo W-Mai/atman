@@ -1,5 +1,6 @@
+use crate::pending_batch::{Batch, PendingBatch};
 use crate::value::AtmanPayload;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -96,7 +97,7 @@ pub struct WatchHub {
 #[derive(Default)]
 struct WatchState {
     watchers: HashMap<WatcherId, Watcher>,
-    pending_events: VecDeque<WatchEvent>,
+    pending_events: PendingBatch<WatchEvent>,
 }
 
 impl Default for WatchHub {
@@ -251,20 +252,27 @@ impl WatchHub {
         }
     }
 
+    /// Reserve the FIFO batch without consuming it until history accepts it.
+    pub fn reserve(self: &Arc<Self>) -> Option<WatchReceipt> {
+        let batch = self.state.lock().unwrap().pending_events.reserve()?;
+        Some(WatchReceipt {
+            hub: self.clone(),
+            batch,
+        })
+    }
+
     /// Deliver the current notification batch in arrival order, including retired watchers.
     pub fn take_pending_prompt(&self) -> Option<String> {
-        let events = std::mem::take(&mut self.state.lock().unwrap().pending_events);
-        if events.is_empty() {
-            return None;
-        }
-        Some(format!(
-            "Watcher notifications, not a new user request. Process these events using the recorded context; do not repeat completed work.\n\n{}",
-            events
-                .iter()
-                .map(format_watch_event_text)
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        ))
+        let mut state = self.state.lock().unwrap();
+        let batch = state.pending_events.reserve()?;
+        let prompt = format_watch_batch(&batch.items);
+        state
+            .pending_events
+            .commit(&batch, || Ok::<_, std::convert::Infallible>(()))
+            .unwrap();
+        drop(state);
+        self.changed();
+        Some(prompt)
     }
 
     pub async fn wait_for_event(&self, timeout: Duration) -> Option<WatchEvent> {
@@ -276,7 +284,7 @@ impl WatchHub {
                     if let Some(event) = state.pending_events.pop_front() {
                         return Some(event);
                     }
-                    if state.watchers.is_empty() {
+                    if state.watchers.is_empty() && state.pending_events.is_empty() {
                         return None;
                     }
                 }
@@ -287,6 +295,57 @@ impl WatchHub {
         .ok()
         .flatten()
     }
+}
+
+/// Exclusive batch ownership shared by model pickup, background turns, and explicit waits.
+pub struct WatchReceipt {
+    hub: Arc<WatchHub>,
+    batch: Batch<WatchEvent>,
+}
+
+impl WatchReceipt {
+    pub fn prompt(&self) -> String {
+        format_watch_batch(&self.batch.items)
+    }
+
+    /// The callback must not reenter this hub and must publish synchronously.
+    pub fn commit<E>(&self, publish: impl FnOnce() -> Result<(), E>) -> Result<bool, E> {
+        let committed = self
+            .hub
+            .state
+            .lock()
+            .unwrap()
+            .pending_events
+            .commit(&self.batch, publish)?;
+        self.hub.changed();
+        Ok(committed)
+    }
+}
+
+impl Drop for WatchReceipt {
+    fn drop(&mut self) {
+        if self
+            .hub
+            .state
+            .lock()
+            .unwrap()
+            .pending_events
+            .release(&self.batch)
+        {
+            self.hub.changed();
+        }
+    }
+}
+
+fn format_watch_batch(events: &[WatchEvent]) -> String {
+    format!(
+        "Watcher notifications, not a new user request. Process these events using the recorded context; do not repeat completed work.\n\n{}",
+        events
+            .iter()
+            .map(format_watch_event_text)
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    )
 }
 
 pub trait Watchable: Send + Sync {
@@ -781,6 +840,46 @@ impl Tool for HasPendingInjections {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn reserved_watch_batch_excludes_other_consumers_and_rolls_back_without_loss() {
+        let hub = Arc::new(WatchHub::new());
+        let source = WatchSource::Bash {
+            handle: "job".into(),
+        };
+        let id = hub.register(
+            source.clone(),
+            "match".into(),
+            WatchMode::Once,
+            Duration::from_secs(10),
+        );
+        hub.enqueue_event(WatchEvent {
+            watcher_id: id,
+            source,
+            pattern: "match".into(),
+            row: None,
+            col: None,
+            text: "first".into(),
+            timestamp: chrono::Utc::now(),
+            timed_out: false,
+            exited: false,
+            timeout: Duration::from_secs(10),
+        });
+        let receipt = hub.reserve().unwrap();
+        assert!(hub.reserve().is_none());
+        assert!(hub.take_pending_prompt().is_none());
+        assert!(hub.wait_for_event(Duration::from_millis(1)).await.is_none());
+        assert_eq!(
+            receipt.commit(|| Err("history failed")),
+            Err("history failed")
+        );
+        assert!(hub.has_pending_events());
+        drop(receipt);
+        let event = hub.wait_for_event(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(event.text, "first");
+        assert!(!hub.has_pending_events());
+        assert!(hub.reserve().is_none());
+    }
 
     #[test]
     fn output_cursor_consumes_matches_and_preserves_split_patterns() {

@@ -50,6 +50,7 @@ pub mod notify;
 pub mod oauth;
 pub mod oauth_server;
 mod panic_capture;
+mod pending_batch;
 
 /// Reports whether the current thread is inside an active panic-capture
 /// boundary. Panic hooks can use this to skip side effects for a panic that
