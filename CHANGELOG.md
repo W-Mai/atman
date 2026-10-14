@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Goal continuation history** — Final replies keep resumed turns in separate, expandable work sections. Live messages and restored history share final-answer presentation and fold metadata.
+
 - **Final answer folding** — Published final answers collapse preceding work even when the reply streamed as ordinary text before a direct flow call. The answer remains visible, and earlier turns keep their own summaries.
 
 - **Nested child wakeups** — Managed command-line runs recheck idle scans when descendant state changes, preserving results transferred from grandchildren to their parents during turn completion.

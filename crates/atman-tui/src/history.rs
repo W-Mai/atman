@@ -350,9 +350,7 @@ fn flatten_transcript_impl(
                         .or_default()
                         .push(msg.clone());
                 } else {
-                    let starts_root_turn = msg.role == MessageRole::User
-                        && msg.origin == atman_runtime::message::MessageOrigin::User
-                        && flow_run_id.is_none();
+                    let starts_root_turn = msg.role == MessageRole::User && flow_run_id.is_none();
                     let finishes_root_turn = msg.role == MessageRole::Assistant
                         && msg.origin == atman_runtime::message::MessageOrigin::FinalAnswer;
                     let first_new_item = out.len();

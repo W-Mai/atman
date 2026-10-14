@@ -286,6 +286,21 @@ impl WorkFoldState {
 }
 
 #[derive(Debug, Clone)]
+enum FinalAnswerPhase {
+    Published,
+    Restored,
+}
+
+struct FinalAnswerUpdate<'a> {
+    assistant_id: Option<u64>,
+    text: &'a str,
+    summary: Option<&'a str>,
+    work_start: Option<usize>,
+    work_end: usize,
+    phase: FinalAnswerPhase,
+}
+
+#[derive(Debug, Clone)]
 struct FinalAnswerDraftState {
     preview: ToolDraftPreview,
     summary_preview: ToolDraftPreview,
@@ -1070,6 +1085,7 @@ pub struct AppState {
     pub sub_agent_run_ids: std::collections::HashMap<String, SubAgentRoute>,
     llm_disclosures: std::collections::HashMap<String, LlmDisclosureState>,
     work_folds: Vec<WorkFoldState>,
+    work_start_after_id: u64,
     work_fold_scroll_anchor: Option<(u64, u32)>,
     final_answer_drafts: std::collections::HashMap<String, FinalAnswerDraftState>,
     final_answer_drafts_completed: bool,
@@ -1359,6 +1375,7 @@ impl AppState {
         self.final_answer_drafts_completed = false;
         let structure_revision = self.items.structure_revision();
         self.items.replace(items);
+        self.work_start_after_id = 0;
         let marker_indices = self
             .items
             .iter()
@@ -1372,46 +1389,21 @@ impl AppState {
             })
             .collect::<Vec<_>>();
         for (marker_index, summary, persisted_start_index) in marker_indices {
-            let start_index = persisted_start_index
-                .filter(|start_index| *start_index < marker_index)
-                .or_else(|| {
-                    self.items[..marker_index]
-                        .iter()
-                        .rposition(|item| matches!(item, OutputItem::UserTurn { .. }))
-                        .map(|index| index + 1)
-                });
-            let Some(start_index) = start_index else {
+            let answer_index = marker_index + 1;
+            let Some(OutputItem::AssistantMd { md, .. }) = self.items.get(answer_index) else {
                 continue;
             };
-            let Some(end_index) = marker_index.checked_sub(1) else {
-                continue;
-            };
-            if start_index > end_index {
-                continue;
-            }
-            let Some(start_id) = self.item_id(start_index) else {
-                continue;
-            };
-            let Some(end_id) = self.item_id(end_index) else {
-                continue;
-            };
-            let member_count = end_index - start_index + 1;
-            let (completed_steps, total_steps, title, stats) =
-                self.work_fold_metadata(start_index, end_index, summary.as_deref(), None);
-            self.work_folds.push(WorkFoldState {
-                start_id,
-                end_id,
-                member_count,
-                completed_steps,
-                total_steps,
-                title,
-                stats,
-                from_visible: 0.0,
-                target_visible: 0.0,
-                started_at: Instant::now(),
-                duration: Duration::ZERO,
+            let text = md.clone();
+            self.present_final_answer(FinalAnswerUpdate {
+                assistant_id: self.item_id(answer_index),
+                text: &text,
+                summary: summary.as_deref(),
+                work_start: persisted_start_index,
+                work_end: marker_index,
+                phase: FinalAnswerPhase::Restored,
             });
         }
+        self.work_start_after_id = self.items.next_id;
         debug_assert_ne!(self.items.structure_revision(), structure_revision);
         self.inline_note_indices.clear();
         self.handle_index.clear();
@@ -3163,27 +3155,46 @@ impl AppState {
     }
 
     fn begin_work_fold_before(&mut self, end: usize, summary: Option<&str>) -> Option<u64> {
-        let start_index = self
-            .items
+        self.upsert_work_fold(self.current_work_start(end)..end, summary, false)
+    }
+
+    fn current_work_start(&self, end: usize) -> usize {
+        let turn_start = self.items.revisions()[..end]
+            .iter()
+            .position(|revision| revision.id > self.work_start_after_id)
+            .unwrap_or(end);
+        self.items[turn_start..end]
             .iter()
             .rposition(|item| matches!(item, OutputItem::UserTurn { .. }))
-            .map_or(0, |index| index.saturating_add(1));
-        let end_index = end.checked_sub(1)?;
+            .map_or(turn_start, |index| turn_start + index + 1)
+    }
+
+    fn upsert_work_fold(
+        &mut self,
+        work: std::ops::Range<usize>,
+        summary: Option<&str>,
+        restored: bool,
+    ) -> Option<u64> {
+        let start_index = work.start;
+        let end_index = work.end.checked_sub(1)?;
         if start_index > end_index {
             return None;
         }
         let start_id = self.item_id(start_index)?;
         let end_id = self.item_id(end_index)?;
-        if self
+        if let Some(fold) = self
             .work_folds
-            .iter()
-            .any(|fold| fold.start_id == start_id && fold.end_id == end_id)
+            .iter_mut()
+            .find(|fold| fold.start_id == start_id && fold.end_id == end_id)
         {
+            if let Some(summary) = summary {
+                fold.title = summary.to_owned();
+            }
             return Some(start_id);
         }
         let member_count = end_index - start_index + 1;
         let (completed_steps, total_steps, title, stats) =
-            self.work_fold_metadata(start_index, end_index, summary, Some(&self.turn_activity));
+            self.work_fold_metadata(start_index, end_index, summary);
         let duration_ms = (400 + member_count as u64 * 40).clamp(400, 700);
         self.work_folds.push(WorkFoldState {
             start_id,
@@ -3193,10 +3204,14 @@ impl AppState {
             total_steps,
             title,
             stats,
-            from_visible: member_count as f32,
+            from_visible: if restored { 0.0 } else { member_count as f32 },
             target_visible: 0.0,
             started_at: Instant::now(),
-            duration: Duration::from_millis(duration_ms),
+            duration: if restored {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(duration_ms)
+            },
         });
         Some(start_id)
     }
@@ -3206,7 +3221,6 @@ impl AppState {
         start_index: usize,
         end_index: usize,
         summary: Option<&str>,
-        activity: Option<&ActivityTotals>,
     ) -> (usize, usize, String, String) {
         let mut call_ids = HashSet::new();
         let mut intents = Vec::new();
@@ -3243,14 +3257,7 @@ impl AppState {
                 }
             });
         let total_steps = call_ids.len().max(1);
-        let (file_count, insertions, deletions) =
-            activity.map_or((files.len(), insertions, deletions), |activity| {
-                (
-                    activity.file_count(),
-                    activity.insertions,
-                    activity.deletions,
-                )
-            });
+        let file_count = files.len();
         let mut stats = Vec::new();
         if file_count > 0 {
             stats.push(format!("{file_count} files"));
@@ -3268,38 +3275,63 @@ impl AppState {
             .items
             .last()
             .is_some_and(|item| matches!(item, OutputItem::AssistantMd { .. }))
-            .then(|| self.items.len() - 1);
-        // Final publication commits the work boundary even without a streamed tool draft.
-        // Keep an already streamed answer outside that boundary.
-        let fold_id =
-            self.begin_work_fold_before(existing.unwrap_or(self.items.len()), summary.as_deref());
-        if let Some(summary) = summary.as_deref()
-            && let Some(fold) = self
-                .work_folds
-                .iter_mut()
-                .find(|fold| Some(fold.start_id) == fold_id)
-        {
-            fold.title = summary.to_owned();
-        }
+            .then(|| self.items.len() - 1)
+            .filter(|index| *index >= self.current_work_start(self.items.len()));
+        self.present_final_answer(FinalAnswerUpdate {
+            assistant_id: existing.and_then(|index| self.item_id(index)),
+            text: &text,
+            summary: summary.as_deref(),
+            work_start: None,
+            work_end: existing.unwrap_or(self.items.len()),
+            phase: FinalAnswerPhase::Published,
+        });
+        self.final_answer_drafts.clear();
+        self.final_answer_drafts_completed = false;
+    }
+
+    fn present_final_answer(
+        &mut self,
+        update: FinalAnswerUpdate<'_>,
+    ) -> (Option<u64>, Option<u64>) {
+        let start = update
+            .work_start
+            .unwrap_or_else(|| self.current_work_start(update.work_end));
+        let fold_id = self.upsert_work_fold(
+            start..update.work_end,
+            update.summary,
+            matches!(update.phase, FinalAnswerPhase::Restored),
+        );
+        let existing = update
+            .assistant_id
+            .and_then(|id| self.items.index_by_id(id));
         if let Some(index) = existing {
             self.mutate_item(index, OutputMutation::Semantic, |item| {
                 let OutputItem::AssistantMd { md, streaming, .. } = item else {
                     return false;
                 };
-                let changed = *md != text || *streaming;
-                *md = text;
+                let changed = *md != update.text || *streaming;
+                if *md != update.text {
+                    *md = update.text.to_owned();
+                }
                 *streaming = false;
                 changed
             });
         } else {
             self.push_item(OutputItem::AssistantMd {
-                md: text,
+                md: update.text.to_owned(),
                 streaming: false,
                 retried: false,
             });
         }
-        self.final_answer_drafts.clear();
-        self.final_answer_drafts_completed = false;
+        (
+            existing.and_then(|index| self.item_id(index)).or_else(|| {
+                self.items
+                    .len()
+                    .checked_sub(1)
+                    .and_then(|index| self.item_id(index))
+            }),
+            fold_id,
+        )
     }
 
     fn mutate_tool_call(
@@ -3763,6 +3795,7 @@ impl AppState {
         }
         match frame {
             StreamFrame::TurnStarted { .. } => {
+                self.work_start_after_id = self.items.next_id;
                 let now = Instant::now();
                 for fold in &mut self.work_folds {
                     fold.from_visible = fold.target_visible;
@@ -5259,6 +5292,98 @@ mod tests {
         assert!(app.toggle_latest_work_fold());
         app.work_folds[0].started_at = Instant::now().checked_sub(duration).unwrap();
         assert_eq!(app.work_fold_projections()[0].visible_members, 1);
+    }
+
+    #[test]
+    fn resumed_turn_final_answers_keep_disjoint_live_and_replayed_work() {
+        use atman_runtime::message::{MessageOrigin, MessagePart};
+        use atman_runtime::projection::message_window::TranscriptEntry;
+        let mut live = AppState::new("live".into(), None);
+        let mut entries = Vec::new();
+        for (index, answer) in ["Hello.", "Goal done."].into_iter().enumerate() {
+            let turn = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
+            let mut input =
+                Message::user_text(turn.clone(), if index == 0 { "hi" } else { "resume" });
+            if index > 0 {
+                input.origin = MessageOrigin::Internal;
+            }
+            entries.push(TranscriptEntry::Message {
+                message: input,
+                flow_run_id: None,
+                presentation: None,
+            });
+            live.apply_stream_frame(StreamFrame::TurnStarted {
+                turn_id: turn.to_string(),
+            });
+            if index == 0 {
+                live.push_item(OutputItem::UserTurn {
+                    text: "hi".into(),
+                    presentation: None,
+                });
+            }
+            let work = format!("work {index}");
+            live.apply_stream_frame(StreamFrame::ThinkingChunk {
+                text: work.clone(),
+                run_id: None,
+            });
+            live.apply_stream_frame(StreamFrame::LlmChunk {
+                text: answer.into(),
+                model: "test".into(),
+                run_id: None,
+            });
+            live.apply_stream_frame(StreamFrame::LlmDone {
+                total_tokens: 1,
+                run_id: None,
+            });
+            let mut final_message = Message::assistant_text(turn.clone(), answer);
+            final_message.parts.insert(
+                0,
+                MessagePart::Thinking {
+                    thinking: work,
+                    signature: None,
+                },
+            );
+            final_message.origin = MessageOrigin::FinalAnswer;
+            entries.push(TranscriptEntry::Message {
+                message: final_message.clone(),
+                flow_run_id: None,
+                presentation: None,
+            });
+            live.apply_stream_frame(StreamFrame::AssistantMsg {
+                flow_run_id: None,
+                message: final_message,
+            });
+            live.apply_stream_frame(StreamFrame::TurnEnded {
+                turn_id: turn.to_string(),
+            });
+        }
+        let mut replay = AppState::new("replay".into(), None)
+            .with_initial_items(crate::history::flatten_transcript(&entries));
+        for app in [&mut live, &mut replay] {
+            assert_eq!(app.work_folds.len(), 2);
+            let folds = app.work_fold_projections();
+            assert!(folds[0].end_index < folds[1].start_index);
+            assert_ne!(folds[0].key, folds[1].key);
+            for (index, fold) in folds.iter().enumerate() {
+                assert!(
+                    matches!(&app.items[fold.end_index], OutputItem::Thinking { text, .. } if text == &format!("work {index}"))
+                );
+                assert!(
+                    !app.items[fold.start_index..=fold.end_index]
+                        .iter()
+                        .any(|item| matches!(item, OutputItem::AssistantMd { .. }))
+                );
+            }
+            assert!(app.toggle_latest_work_fold());
+            assert!(app.work_fold_projections()[1].expanded);
+            assert_eq!(
+                app.items
+                    .iter()
+                    .filter(|item| matches!(item, OutputItem::AssistantMd { .. }))
+                    .count(),
+                2
+            );
+        }
     }
 
     #[test]
