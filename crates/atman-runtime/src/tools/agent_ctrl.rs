@@ -2544,6 +2544,16 @@ mod tests {
             );
             if expected == 2 {
                 registry.mark_terminal(&ctx.flow_run_id.clone().unwrap());
+                parent
+                    .pause(
+                        crate::memory::goal::GoalActor::Agent,
+                        crate::memory::goal::GoalPauseReason::Completed,
+                        "Parent delivered its answer; child work remains available".into(),
+                        None,
+                    )
+                    .unwrap();
+                assert!(!parent.should_continue());
+                assert!(!control.should_continue());
                 control
                     .resume(crate::memory::goal::GoalActor::Parent, None)
                     .unwrap();

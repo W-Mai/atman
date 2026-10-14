@@ -376,10 +376,13 @@ impl GoalController {
                 || parent_goal_id
                     .as_ref()
                     .is_some_and(|id| state.record.as_ref().is_none_or(|g| &g.id != id))
-                || state
-                    .record
-                    .as_ref()
-                    .is_some_and(|g| g.status == GoalStatus::Paused)
+                || state.record.as_ref().is_some_and(|g| {
+                    g.status == GoalStatus::Paused
+                        && !g.pause.as_ref().is_some_and(|pause| {
+                            pause.actor == GoalActor::Agent
+                                && pause.reason == GoalPauseReason::Completed
+                        })
+                })
             {
                 return Some(parent.owner.clone());
             }
@@ -810,6 +813,97 @@ mod tests {
         assert!(!child.should_continue());
         // The child's own final response remains possible after its pause tool.
         child.wait(&cancel).await.unwrap();
+    }
+
+    #[test]
+    fn ancestor_completion_is_local_but_execution_pauses_reach_descendants() {
+        for (actor, reason, permits_children) in [
+            (GoalActor::Agent, GoalPauseReason::Completed, true),
+            (GoalActor::User, GoalPauseReason::Completed, false),
+            (GoalActor::Parent, GoalPauseReason::Completed, false),
+            (GoalActor::Runtime, GoalPauseReason::Completed, false),
+            (GoalActor::Agent, GoalPauseReason::NeedsInput, false),
+            (GoalActor::Agent, GoalPauseReason::Blocked, false),
+            (GoalActor::Agent, GoalPauseReason::UserRequested, false),
+            (GoalActor::Parent, GoalPauseReason::ParentRequested, false),
+            (GoalActor::Runtime, GoalPauseReason::Cancelled, false),
+            (GoalActor::Runtime, GoalPauseReason::RunFailed, false),
+        ] {
+            let root = GoalController::ephemeral("root".into());
+            root.set("parent work", None).unwrap();
+            let child = root
+                .child("child".into(), "child work".into(), None)
+                .unwrap();
+            let grandchild = child
+                .child("grandchild".into(), "delayed work".into(), None)
+                .unwrap();
+            root.pause(actor, reason, "parent state".into(), None)
+                .unwrap();
+            assert!(!root.should_continue());
+            assert_eq!(
+                child.should_continue(),
+                permits_children,
+                "{actor:?}/{reason:?}"
+            );
+            assert_eq!(
+                grandchild.should_continue(),
+                permits_children,
+                "{actor:?}/{reason:?}"
+            );
+            assert_eq!(child.snapshot().paused_by.is_none(), permits_children);
+
+            child
+                .pause(
+                    GoalActor::Agent,
+                    GoalPauseReason::Completed,
+                    "child done".into(),
+                    None,
+                )
+                .unwrap();
+            assert!(!child.should_continue());
+            assert_eq!(grandchild.should_continue(), permits_children);
+        }
+    }
+
+    #[tokio::test]
+    async fn delayed_child_can_finish_after_parent_completion_but_still_obeys_user_pause() {
+        let root = GoalController::ephemeral("root".into());
+        root.set("parent work", None).unwrap();
+        let child = root
+            .child("child".into(), "delayed work".into(), None)
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let pending_cancel = cancel.clone();
+        let pending_child = child.clone();
+        let (release, delayed) = tokio::sync::oneshot::channel();
+        let pending = tokio::spawn(async move {
+            delayed.await.unwrap();
+            pending_child.wait_active(&pending_cancel).await.unwrap();
+            pending_child.enter(&pending_cancel).await.unwrap()
+        });
+        root.pause(
+            GoalActor::Agent,
+            GoalPauseReason::Completed,
+            "parent done".into(),
+            None,
+        )
+        .unwrap();
+        release.send(()).unwrap();
+        let operation = tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(operation);
+        root.pause(
+            GoalActor::User,
+            GoalPauseReason::UserRequested,
+            "stop children".into(),
+            None,
+        )
+        .unwrap();
+        assert!(!child.should_continue());
+        cancel.cancel();
+        assert!(child.wait(&cancel).await.is_err());
     }
 
     #[tokio::test]
