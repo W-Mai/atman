@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Task cancellation events** — Task lifecycle events follow registry state order even when cancellation finishes immediately. Stopped tasks cannot reappear as stopping, and repeated cancellation does not replay state transitions.
+
 - **Subagent shell authority** — Role flows preserve inherited shell capability across inline calls, allowing their declared process tools to execute. Parent authority limits and role tool exposure remain enforced.
 
 - **Goal status controls** — Task lists, child details, and Goal panels distinguish paused objectives from running or exited flows. Parent-blocked and exited children no longer expose ineffective toggles, and spawn results do not mark child tasks complete.

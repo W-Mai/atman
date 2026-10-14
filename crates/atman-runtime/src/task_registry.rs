@@ -339,7 +339,8 @@ impl TaskRegistry {
             cancel,
             kill_hook,
         };
-        self.inner.lock().unwrap().insert(id.clone(), entry);
+        let mut inner = self.inner.lock().unwrap();
+        inner.insert(id.clone(), entry);
         let _ = self.event_tx.send(TaskEvent::Registered(snapshot));
         id
     }
@@ -421,6 +422,14 @@ impl TaskRegistry {
         if self_targeting && !suicide {
             return KillOutcome::SelfKillRejected;
         }
+        if entry.snapshot.status == TaskStatus::Killing {
+            return KillOutcome::Killed {
+                termination: entry
+                    .snapshot
+                    .termination
+                    .unwrap_or(TaskTermination::Killed),
+            };
+        }
         let termination = if self_targeting {
             TaskTermination::Suicide
         } else {
@@ -432,11 +441,8 @@ impl TaskRegistry {
         entry.snapshot.termination = Some(termination);
         let cancel = entry.cancel.clone();
         let hook = entry.kill_hook.clone();
-        drop(inner);
-        cancel.cancel();
-        if let Some(hook) = hook {
-            hook();
-        }
+        // Publish while holding the state lock, before cancellation can finish
+        // the task. Consumers must observe the same lifecycle order as readers.
         let _ = self.event_tx.send(TaskEvent::StatusChanged {
             id: id.clone(),
             kind,
@@ -444,6 +450,11 @@ impl TaskRegistry {
             new: TaskStatus::Killing,
             termination: Some(termination),
         });
+        drop(inner);
+        cancel.cancel();
+        if let Some(hook) = hook {
+            hook();
+        }
         KillOutcome::Killed { termination }
     }
 
@@ -467,7 +478,6 @@ impl TaskRegistry {
         entry.snapshot.ended_at = Some(Instant::now());
         let kind = entry.snapshot.kind;
         let termination = entry.snapshot.termination;
-        drop(inner);
         let _ = self.event_tx.send(TaskEvent::StatusChanged {
             id: id.clone(),
             kind,
@@ -485,7 +495,6 @@ impl TaskRegistry {
             .unwrap_or(false);
         if should_remove {
             inner.remove(id);
-            drop(inner);
             let _ = self.event_tx.send(TaskEvent::Reaped { id: id.clone() });
         }
     }
@@ -510,6 +519,52 @@ mod tests {
 
     fn cancel() -> CancellationToken {
         CancellationToken::new()
+    }
+
+    #[test]
+    fn cancellation_events_preserve_lifecycle_order_when_cleanup_finishes_inline() {
+        let reg = Arc::new(TaskRegistry::new());
+        let mut events = reg.subscribe();
+        let cleanup = Arc::downgrade(&reg);
+        let id = reg.register_with_kill_hook(
+            TaskKind::Flow,
+            "child".into(),
+            "child".into(),
+            "session".into(),
+            cancel(),
+            Some(Arc::new(move || {
+                let reg = cleanup.upgrade().unwrap();
+                let id = reg.lookup_by_handle("child").unwrap().id;
+                reg.finish(&id, TaskStatus::Ok);
+                reg.reap(&id);
+            })),
+        );
+        reg.kill_from_operator(&id);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            TaskEvent::Registered(_)
+        ));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            TaskEvent::StatusChanged {
+                old: TaskStatus::Running,
+                new: TaskStatus::Killing,
+                ..
+            }
+        ));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            TaskEvent::StatusChanged {
+                old: TaskStatus::Killing,
+                new: TaskStatus::Killed,
+                ..
+            }
+        ));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            TaskEvent::Reaped { .. }
+        ));
+        assert!(events.try_recv().is_err());
     }
 
     #[test]
@@ -679,6 +734,7 @@ mod tests {
             None,
             target_run_id,
         );
+        let mut events = reg.subscribe();
 
         assert_eq!(
             reg.kill_from_operator(&id),
@@ -689,6 +745,18 @@ mod tests {
         assert_eq!(
             reg.lookup(&id).unwrap().termination,
             Some(TaskTermination::Killed)
+        );
+        reg.kill_from_operator(&id);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            TaskEvent::StatusChanged {
+                new: TaskStatus::Killing,
+                ..
+            }
+        ));
+        assert!(
+            events.try_recv().is_err(),
+            "repeated cancellation must not replay a transition"
         );
     }
 

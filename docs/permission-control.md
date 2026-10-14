@@ -187,6 +187,8 @@ Each record includes its stable request or grant identity, Flow ancestry, policy
 
 Records produced by one broker operation are emitted only after the operation commits. Failed atomic batches emit no partial records, and a successful approval is emitted immediately before its corresponding persistent grant. Lifecycle cleanup records identify a system component rather than inheriting the original decision actor.
 
+Task registration, stopping, terminal status, and removal events are published in the same order as their registry state transitions. Cancellation publishes the stopping event before waking task cleanup; duplicate cancellation requests do not emit another transition. UI consumers can retain terminal history without returning stopped tasks to the active list.
+
 New invocations write the canonical permission lifecycle only. Legacy tool approval and denial records remain replay-compatible for existing session logs.
 
 The broker keeps complete state only for unresolved coordination work and retains the 256 most recent terminal requests for short-lived diagnostics. The persisted event log remains the durable complete history; a terminal request returns `RequestNotFound` from direct broker lookup after it leaves the recent window.
