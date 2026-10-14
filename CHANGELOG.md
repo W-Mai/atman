@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Extraction fallback** — `llm.extract` honors an explicit, field-validated fallback for provider and response parsing failures while preserving cancellation and execution controls.
+
 - **Idle child rendering** — Tool cards use child execution activity to drive animations. Paused and waiting child flows no longer keep the document repainting, and resume restores the running indicator.
 
 - **Flow stop controls** — Sidebar, task-window close, and Escape actions share immediate flow cancellation. Stopping tasks keep their elapsed timer until termination; stopped tasks leave the active list and remain in history.

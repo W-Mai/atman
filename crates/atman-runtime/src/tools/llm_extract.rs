@@ -64,6 +64,14 @@ impl Tool for LlmExtractTool {
 
             let field_defs = parse_field_definitions(&fields_raw)
                 .map_err(|e| RuntimeError::ToolFailed(format!("llm.extract: {e}")))?;
+            let fallback = args
+                .named("fallback")
+                .map(|value| {
+                    parse_extract_result(value, &field_defs).map_err(|error| {
+                        RuntimeError::ToolFailed(format!("llm.extract: invalid fallback: {error}"))
+                    })
+                })
+                .transpose()?;
 
             // Construct prompt
             let field_descs: Vec<String> = field_defs
@@ -103,7 +111,7 @@ impl Tool for LlmExtractTool {
 
                 let result = dispatch_llm(llm_args, ctx).await;
                 if let Value::Err(e) = result {
-                    return Err(e);
+                    return extraction_failure(e, fallback.as_ref(), ctx);
                 }
 
                 match parse_extract_result(&result, &field_defs) {
@@ -113,13 +121,38 @@ impl Tool for LlmExtractTool {
                         continue;
                     }
                     Err(e) => {
-                        return Err(RuntimeError::ToolFailed(format!("llm.extract: {e}")));
+                        return extraction_failure(
+                            RuntimeError::ToolFailed(format!("llm.extract: {e}")),
+                            fallback.as_ref(),
+                            ctx,
+                        );
                     }
                 }
             }
 
             Err(RuntimeError::ToolFailed("llm.extract: unreachable".into()))
         })
+    }
+}
+
+fn extraction_failure(error: RuntimeError, fallback: Option<&Value>, ctx: &ToolCtx) -> ToolResult {
+    if ctx.cancel.is_cancelled()
+        || matches!(
+            error,
+            RuntimeError::Cancelled(_)
+                | RuntimeError::Aborted(_)
+                | RuntimeError::Redirect(_)
+                | RuntimeError::L2Restart { .. }
+        )
+    {
+        return Err(error);
+    }
+    match fallback {
+        Some(value) => {
+            crate::notify!(warn, "{error}; using configured extraction fallback");
+            Ok(value.clone())
+        }
+        None => Err(error),
     }
 }
 
@@ -191,6 +224,42 @@ fn parse_extract_result(result: &Value, field_defs: &[FieldDef]) -> Result<Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extraction_fallback_preserves_control_flow_errors() {
+        let ctx = ToolCtx::new();
+        let fallback = Value::Struct(vec![]);
+        for error in [
+            RuntimeError::Cancelled("stopped".into()),
+            RuntimeError::Aborted("watch".into()),
+            RuntimeError::Redirect("other".into()),
+            RuntimeError::L2Restart {
+                correction_text: "correction".into(),
+                partial_output: String::new(),
+                partial_tokens: 0,
+            },
+        ] {
+            let expected = error.to_string();
+            assert_eq!(
+                extraction_failure(error, Some(&fallback), &ctx)
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+        }
+        assert!(
+            extraction_failure(RuntimeError::ToolFailed("invalid".into()), None, &ctx).is_err()
+        );
+        ctx.cancel.cancel();
+        assert!(
+            extraction_failure(
+                RuntimeError::ToolFailed("invalid".into()),
+                Some(&fallback),
+                &ctx
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn json_parse_error_preview_is_utf8_safe() {

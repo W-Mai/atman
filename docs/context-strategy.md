@@ -222,6 +222,8 @@ The default agent currently follows this sequence:
 
 The managed `.at` files own tool loops and final-answer acceptance. The host owns turn boundaries and background wakeups; watcher events do not keep a finished loop alive. Managed templates are compared byte-for-byte and atomically replaced only when bundled content changes.
 
+`llm.extract(fallback: {...})` lets a flow explicitly select a replacement result when the provider fails or the response still fails field parsing after any configured parse retries. The replacement is validated against `fields` before the request. Without `fallback`, extraction errors propagate. Cancellation, watcher aborts, redirects, and turn restarts always propagate; a fallback does not suppress execution controls. Using a fallback emits a warning and does not convert the invalid model response into a tool invocation.
+
 `llm.call(record: false)` leaves the returned assistant response unrecorded and unnormalized so a flow can choose how to publish it. Context reads, queued input pickup, usage accounting, and pre-request compaction retain their usual behavior. `output: "response"` returns `{message, stop_reason}` instead of the default value; stop reasons are `end`, `tool_use`, `length`, and `cancelled`. These options are independent and default to `record: true` and `output: "value"`. Managed templates select both to avoid recording the same reply as ordinary text and as a final answer. Custom flows must explicitly persist any unrecorded reply they intend to retain, using `session.push` or `final.answer`.
 
 This is retrieval before the main loop plus full active-session context inside the loop. It is not a fixed ten-message sliding window and not automatic semantic recall.

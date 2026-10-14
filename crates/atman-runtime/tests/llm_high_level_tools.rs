@@ -219,6 +219,30 @@ flow test() -> string {
 // === llm.extract ===
 
 #[test]
+fn extract_uses_explicit_fallback_for_invalid_output_and_provider_failure() {
+    let source = r#"
+flow test() -> string {
+    result = llm.extract(
+        model: "m", prompt: "Select applicable names",
+        fields: { names: [string] -- "names" },
+        fallback: { names: ["available"] },
+    )
+    return result.names[0]
+}
+"#;
+    for provider in [
+        MockProvider::new("mock")
+            .with_model("m", Value::Str("<tool_call>invalid</tool_call>".into())),
+        MockProvider::new("mock"),
+    ] {
+        assert!(matches!(run(source, provider), Value::Str(text) if text == "available"));
+    }
+    let provider =
+        MockProvider::new("mock").with_model("m", Value::Str(r#"{"names":["selected"]}"#.into()));
+    assert!(matches!(run(source, provider), Value::Str(text) if text == "selected"));
+}
+
+#[test]
 fn extract_basic() {
     let src = r#"
 flow test() -> string {
