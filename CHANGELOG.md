@@ -6,87 +6,27 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.17.0] — 2026-10-14
+
+### ✨ Features
+
+- **Child result delivery** — Async child final answers reach their direct parent's next general model call during an active turn, or start a new turn when it is idle. Root and nested agents share FIFO delivery, execution gates, and task-scope invalidation. Managed command-line runs wait for active descendants and pending results.
+- **Context selection** — Flows can select context-record keys per model call. Recent-turn excerpts retain dialogue, answer summaries, and tool errors while excluding large outputs; full history remains available.
+- **Extraction fallback** — `llm.extract` accepts an explicit, type-validated fallback for provider and parsing failures. Array elements are validated individually, and cancellation and execution controls remain effective.
+
 ### 🐛 Fixes
 
-- **Notification readiness** — Watcher and child-result scheduling waits for reserved batches to become available instead of repeatedly attempting consumption. Reserved notifications keep their owner alive until delivery resolves.
-
-- **Synchronous child results** — Waiting for a child across multiple turns preserves every unreturned final answer. Switching to asynchronous delivery retains publication order and excludes the answer already returned to the caller.
-
-- **Watcher message pickup** — Root and child agents receive watcher events in their next general model call. Owned queues preserve notifications across pauses and preparation failures, prevent competing consumers from repeating delivery, and stop child watchers on cancellation. Finishing a user pause defers new notifications without blocking the final response.
-
-- **Flow watcher delivery** — Published final answers notify output watchers while managed child flows remain alive. Cumulative output preserves cursors across turns and delayed consumers; repeated delivery within a turn and flow exit do not replay answer matches.
-
-- **Flow panel Escape** — Escape closes the floating window without cancelling its child flow. Explicit task-stop controls retain their cancellation behavior.
-
-- **Tool preview latency** — Opening a tool preview or collapsing full output no longer renders the complete result to decide the disclosure state.
-
-- **Child panel controls** — Tool groups, previews, and full output use the same disclosure behavior as the document stream. Click regions follow their rendered positions through scrolling and caching; nested and detached flow panels own their interaction state and support Tab / Enter navigation.
-
-- **Child panel rendering** — Expanding or resizing a child-flow panel reuses its restored messages instead of replaying history and rereading tool logs. Detached task panels track their own content revisions.
-
-- **Extraction list validation** — Structured extraction validates and coerces every array element against its declared type. Invalid elements use the configured extraction fallback; invalid fallback values are rejected before calling the model.
-
-- **Compaction record retention** — Budgeted turn-output rewrites preserve current guidance records and tombstones, including records inserted after the current user request.
-
-- **Agent selection context** — Rule selection retains recent dialogue and task state while sending compact guidance catalogs instead of full records. Failed selection continues with existing guidance and on-demand retrieval; unknown selections cannot trigger lookups.
-
-- **Auxiliary call isolation** — Failed model calls with isolated input no longer trigger compaction of the main session history using the auxiliary model's context budget.
-
-- **Conversation excerpts** — Recent-turn excerpts can preserve dialogue, saved answer summaries, and tool errors while excluding large outputs and internal records. Full history remains available in the returned message items.
-
-- **LLM context selection** — Flows can select exact context-record keys for individual calls without removing conversation messages or modifying stored context.
-
-- **Streaming retries** — SSE response-body transport failures use the configured transient-error retry policy instead of immediately ending the flow. Malformed stream data remains an error.
-
-- **Agent rule selection** — Failed preliminary extraction preserves available rules and confessions and continues into the main agent loop. Selection instructions distinguish reference context from tasks to execute.
-
-- **Extraction fallback** — `llm.extract` honors an explicit, field-validated fallback for provider and response parsing failures while preserving cancellation and execution controls.
-
-- **Idle child rendering** — Tool cards use child execution activity to drive animations. Paused and waiting child flows no longer keep the document repainting, and resume restores the running indicator.
-
-- **Flow stop controls** — Sidebar, task-window close, and Escape actions share immediate flow cancellation. Stopping tasks keep their elapsed timer until termination; stopped tasks leave the active list and remain in history.
-
-- **Task cancellation events** — Task lifecycle events follow registry state order even when cancellation finishes immediately. Stopped tasks cannot reappear as stopping, and repeated cancellation does not replay state transitions.
-
-- **Subagent shell authority** — Role flows preserve inherited shell capability across inline calls, allowing their declared process tools to execute. Parent authority limits and role tool exposure remain enforced.
-
-- **Goal status controls** — Task lists, child details, and Goal panels distinguish paused objectives from running or exited flows. Parent-blocked and exited children no longer expose ineffective toggles, and spawn results do not mark child tasks complete.
-
-- **Goal execution boundaries** — Goal completion, missing input, and blocked objectives stop automatic continuation without freezing child tasks. Explicit execution pauses still constrain descendants, and user-requested pauses allow the current final response before stopping background work.
-
-- **Runtime message history** — Restored goal continuation controls stay hidden, while watcher notifications appear as status notes instead of user messages. Model requests retain their original message roles and content.
-
-- **Final answer previews** — Draft previews use the same presentation as published and restored replies. Child streams preserve root previews, and resumed-turn retries and workflow restarts leave earlier turns intact.
-
-- **Goal continuation history** — Final replies keep resumed turns in separate, expandable work sections. Live messages and restored history share final-answer presentation and fold metadata.
-
-- **Final answer folding** — Published final answers collapse preceding work even when the reply streamed as ordinary text before a direct flow call. The answer remains visible, and earlier turns keep their own summaries.
-
-- **Nested child wakeups** — Managed command-line runs recheck idle scans when descendant state changes, preserving results transferred from grandchildren to their parents during turn completion.
-
-- **Synchronous child handoff** — Returning or cancelling a synchronous wait preserves final answers published at the return boundary without replaying the returned answer.
-
-- **Child result delivery** — Async child final answers reach the direct parent's next model call during an active turn, or start a new turn when it is idle. Root and nested agents share batch delivery, pause gates, and task scope invalidation. Managed command-line runs wait for active child work; synchronous results are not delivered twice.
-
-- **Final answers after tool calls** — Managed root and child flows require an explicit model `final.answer` after tool calls in the current turn. Plain-text delivery remains available for turns without model tool calls.
-
-- **Child goals after parent completion** — An agent completing its own goal no longer blocks active descendants. User pauses, explicit parent controls, failure gates, and child-owned pauses remain effective.
-
-- **Flow-controlled final answers** — Managed root and child flows explicitly call `final.answer` to publish completed replies, including plain-text responses in turns without model tool calls. Manual response recording and stop-reason inspection prevent duplicate history entries and keep completion policy out of LLM dispatch.
-
-- **Agent time context** — Root and child agents receive the runtime host's local date, time, and UTC offset, with instructions to distinguish UTC storage timestamps from user-facing times.
-
-- **Watcher registration** — Source subscriptions and terminal screen baselines are ready before registration succeeds, preserving transient matches that arrive before the background task is first polled.
-
-- **Flow watcher payloads** — Match notifications contain the matched text instead of copying the complete output history for every occurrence.
-
-- **Persistent watchers** — Output subscriptions and read positions survive matches. Historical output is consumed once, terminal matches do not repeat while unchanged, and cancellation remains responsive when buffered results are immediately available.
-
-- **Background turn startup** — Watcher notifications remain queued until a turn can start. Shared startup rechecks pauses after context waits, prevents overlapping background turns, and preserves notifications when input or cancellation takes priority. Cancellation and failures block automatic wakeups without requiring a goal.
-
-- **Watcher lifecycle** — Failed target resolution leaves no active watch. State changes wake every waiter, completed watches retire atomically with their notifications, and unwatched producers cannot publish late results.
-
-- **Agent turn completion** — Valid final answers end the current turn without waiting for watcher events. Hosts deliver queued watcher notifications in arrival order in a separate turn, retain invocation settings, and respect execution pauses.
+- **Watcher delivery** — Root and child agents receive owned watcher notifications during active turns. Reserved batches remain queued until history accepts them, competing consumers wait without spinning, and pauses preserve unread events. Final answers remain visible and end their turn; remaining notifications can start another turn.
+- **Watcher lifecycle** — Registration establishes subscriptions before returning. Persistent watchers retain read positions, recover delayed output, and emit matched text without copying full history. One-shot completion and source exit preserve queued delivery; unwatch rejects late results, and timeout or cancellation stops producers.
+- **Synchronous child results** — Synchronous waits preserve all unreturned final answers across turns and cancellation. Returning an answer and enabling asynchronous delivery share one boundary; the returned answer is not replayed.
+- **Goal execution** — Goal completion, missing input, and blocked objectives stop goal continuation without freezing child tasks. User and parent execution pauses still constrain descendants. New user requests can run without resuming an old objective; acknowledged user pauses allow the current final response to finish.
+- **Final-answer handling** — Managed flows explicitly publish final answers through one delivery path. Model tool use requires an explicit final-answer call; turns without model tool calls can deliver completed plain text through the flow. Drafts, live replies, and restored history share presentation, and resumed turns retain separate work sections.
+- **Child-flow panels** — Escape closes the panel without cancelling its flow. Explicit stop controls cancel promptly and preserve terminal-state ordering. Tool disclosure uses rendered click regions, supports keyboard navigation, and avoids full-output rendering or history replay when opening previews. Idle tasks no longer animate continuously.
+- **Goal controls** — Task lists, child details, and Goal panels distinguish goal state from flow execution. Parent-blocked and exited children no longer expose ineffective pause or resume controls.
+- **Agent context filtering** — Preliminary selection retains recent dialogue and task state with compact guidance catalogs. Selection failures preserve existing guidance and continue the main flow; unknown selections cannot trigger lookups. Isolated auxiliary calls cannot compact the main session history.
+- **Context retention** — Compaction preserves current guidance records and tombstones. Restored continuation controls remain hidden, and watcher notifications appear as status notes while retaining their model-facing roles.
+- **Streaming recovery** — SSE response-body transport failures use the configured transient retry policy. Malformed stream data remains an error.
+- **Subagent authority and time** — Role flows preserve inherited shell capability while enforcing parent authority and tool exposure. Root and child agents receive local date, time, and UTC offset.
 
 ## [1.16.0] — 2026-10-13
 
