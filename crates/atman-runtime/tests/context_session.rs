@@ -648,6 +648,7 @@ async fn session_state_changes_append_records_and_clear_with_a_tombstone() {
             "session.workspace",
             "session.plan",
             "session.models",
+            "runtime.clock",
         ])
     );
     assert!(
@@ -783,6 +784,7 @@ flow parent() -> [string] {
         assert!(record_keys.contains("session.goal"));
         assert!(record_keys.contains("session.plan"));
         assert!(record_keys.contains("session.models"));
+        assert!(record_keys.contains("runtime.clock"));
         assert!(!request.iter().any(|message| {
             message.role == MessageRole::Assistant && message.text_concat().starts_with("branch-")
         }));

@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Agent time context** — Root and child agents receive the runtime host's local date, time, and UTC offset, with instructions to distinguish UTC storage timestamps from user-facing times.
+
 - **Watcher registration** — Source subscriptions and terminal screen baselines are ready before registration succeeds, preserving transient matches that arrive before the background task is first polled.
 
 - **Flow watcher payloads** — Match notifications contain the matched text instead of copying the complete output history for every occurrence.

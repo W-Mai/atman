@@ -75,6 +75,8 @@ message lists receive only the latest live runtime records, not conversational
 history. The managed agent selects relevant rules and past confessions as independently
 keyed retrieved records instead of rewriting its system prompt.
 
+Root and spawned contexts also receive `runtime.clock`: the runtime host's local date, time, and numeric UTC offset at minute precision. It refreshes before model calls when the minute or offset changes, including after session recovery. Repeated calls within the same minute reuse the record; clock updates append to history without rewriting the stable system prefix. The record distinguishes UTC timestamps from local time and identifies its timezone as the host's, which may differ from the user's. It is a current clock sample, not evidence of when a past action occurred.
+
 The stable system template retains the agent identity, voice, durable work contract,
 and general tool-use workflow. Because this prefix is stable across calls, its length
 affects cold-start input and the context window but does not invalidate later cache

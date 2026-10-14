@@ -10,6 +10,8 @@ A valid `final.answer` is published immediately and ends the current turn. Watch
 
 `memory.goal.get` returns `{goal, execution, paused_by, running_operations}`. `goal` is null when no objective exists. Records include `id`, `revision`, `objective`, `owner`, `parent_goal_id`, `status`, and `pause`.
 
+Goal timestamps remain stored in UTC. Root and child agents receive a runtime clock context record containing the host's local date, time, and UTC offset, refreshed at minute precision before model calls without changing the system prompt. The host timezone can differ from the user's timezone, especially on remote servers; agents are instructed to use the user's timezone when known and otherwise label times with their UTC offset. Pause summaries are model-authored text displayed unchanged; existing summaries are not rewritten by this clock context.
+
 | Tool | Arguments | Effect |
 | --- | --- | --- |
 | `memory.goal.get` | Optional `target_handle` | Read the current agent or a descendant |

@@ -990,10 +990,34 @@ fn request_working_directory(ctx: &ToolCtx) -> Option<std::path::PathBuf> {
         .or_else(|| ctx.resolve_cwd(None).ok())
 }
 
+fn clock_context_record(
+    now: chrono::DateTime<chrono::FixedOffset>,
+) -> crate::context_plan::ContextRecordSpec {
+    use crate::context_plan::{
+        ContextRecordAuthority, ContextRecordBody, ContextRecordRetention, ContextRecordSpec,
+    };
+
+    ContextRecordSpec::new(
+        "runtime.clock",
+        ContextRecordAuthority::Runtime,
+        ContextRecordRetention::Latest,
+        ContextRecordBody::text(format!(
+            "Current runtime host local time (minute precision): {}. UTC offset: {}. \
+             Timestamps ending in Z are UTC, not local time. Convert timestamps to the intended \
+             timezone before reporting a time or relative date such as today or yesterday. \
+             The host timezone may differ from the user's timezone; use the user's timezone when \
+             known, otherwise label reported times with their UTC offset. This is a clock snapshot, \
+             not the time of a goal update or a past action; do not infer action times from it.",
+            now.format("%Y-%m-%dT%H:%M%:z"),
+            now.format("%:z"),
+        )),
+    )
+}
+
 async fn sync_runtime_context_records(ctx: &ToolCtx, turn_id: &crate::event::TurnId) {
-    let mut goal_specs = Vec::new();
+    let mut runtime_specs = vec![clock_context_record(chrono::Local::now().fixed_offset())];
     if let Some(control) = &ctx.goal_control {
-        goal_specs.push(crate::context_plan::ContextRecordSpec::new(
+        runtime_specs.push(crate::context_plan::ContextRecordSpec::new(
             "agent.goal",
             crate::context_plan::ContextRecordAuthority::Runtime,
             crate::context_plan::ContextRecordRetention::Latest,
@@ -1002,7 +1026,7 @@ async fn sync_runtime_context_records(ctx: &ToolCtx, turn_id: &crate::event::Tur
             ),
         ));
         for update in control.descendant_updates() {
-            goal_specs.push(crate::context_plan::ContextRecordSpec::new(
+            runtime_specs.push(crate::context_plan::ContextRecordSpec::new(
                 format!("agent.child_goal.{}", update.id),
                 crate::context_plan::ContextRecordAuthority::Runtime,
                 crate::context_plan::ContextRecordRetention::Latest,
@@ -1014,7 +1038,7 @@ async fn sync_runtime_context_records(ctx: &ToolCtx, turn_id: &crate::event::Tur
     }
     if let Some(session) = ctx.session_runtime.as_ref() {
         let mut specs = session_context_record_specs(session).await;
-        specs.extend(goal_specs);
+        specs.extend(runtime_specs);
         session.append_context_records(turn_id.clone(), specs);
         return;
     }
@@ -1038,7 +1062,7 @@ async fn sync_runtime_context_records(ctx: &ToolCtx, turn_id: &crate::event::Tur
             ),
         )]
     };
-    specs.extend(goal_specs);
+    specs.extend(runtime_specs);
     let mut messages = messages.lock().unwrap();
     let records = crate::context_plan::compile_context_records(&messages, specs);
     messages.extend(
@@ -1224,6 +1248,68 @@ mod tests {
         assert_eq!(ctx.context_epoch_seed().as_deref(), Some("generation:1"));
     }
 
+    #[test]
+    fn clock_context_preserves_local_date_and_offset_and_deduplicates_within_a_minute() {
+        use crate::context_plan::compile_context_records;
+
+        let utc = chrono::DateTime::parse_from_rfc3339("2026-10-13T17:24:10Z").unwrap();
+        for (offset_seconds, expected) in [
+            (8 * 3600, "2026-10-14T01:24+08:00"),
+            (-7 * 3600, "2026-10-13T10:24-07:00"),
+            (5 * 3600 + 45 * 60, "2026-10-13T23:09+05:45"),
+        ] {
+            let local = utc.with_timezone(&chrono::FixedOffset::east_opt(offset_seconds).unwrap());
+            let record = compile_context_records(&[], [clock_context_record(local)])
+                .pop()
+                .unwrap();
+            assert!(record.render_for_model().contains(expected));
+            let messages = vec![crate::message::Message::context_record(
+                crate::event::TurnId::now(),
+                record,
+            )];
+            assert!(
+                compile_context_records(
+                    &messages,
+                    [clock_context_record(local + chrono::Duration::seconds(20))],
+                )
+                .is_empty()
+            );
+            let updated = compile_context_records(
+                &messages,
+                [clock_context_record(local + chrono::Duration::minutes(1))],
+            );
+            assert_eq!(updated.len(), 1);
+            assert_eq!(updated[0].revision(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_clock_reaches_root_and_spawned_contexts() {
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        let root = ToolCtx::new().with_session_runtime(session.clone());
+        let child_messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let child = ToolCtx::new()
+            .with_history_segment(crate::tool::HistorySegment::Spawned)
+            .with_session_messages_handle(child_messages.clone());
+        let turn = crate::event::TurnId::now();
+        sync_runtime_context_records(&root, &turn).await;
+        sync_runtime_context_records(&child, &turn).await;
+        for messages in [
+            session.messages().to_vec(),
+            child_messages.lock().unwrap().clone(),
+        ] {
+            assert!(
+                messages
+                    .iter()
+                    .flat_map(|message| &message.parts)
+                    .any(|part| {
+                        matches!(part, crate::message::MessagePart::ContextRecord(record)
+                    if record.key() == "runtime.clock")
+                    })
+            );
+        }
+    }
+
     #[tokio::test]
     async fn spawned_workspace_context_is_append_only_per_local_history() {
         let first = tempfile::tempdir().unwrap();
@@ -1251,7 +1337,11 @@ mod tests {
             .iter()
             .flat_map(|message| &message.parts)
             .filter_map(|part| match part {
-                crate::message::MessagePart::ContextRecord(record) => Some(record),
+                crate::message::MessagePart::ContextRecord(record)
+                    if record.key() == "session.workspace" =>
+                {
+                    Some(record)
+                }
                 _ => None,
             })
             .collect();
