@@ -30,6 +30,7 @@ pub struct InstanceInvocation {
     pub lease: atman_rt::TurnLease<crate::event::AtmanUuid>,
     pub authority: crate::flow_authority::EffectiveAuthority,
     pub cancellation: tokio_util::sync::CancellationToken,
+    storage: Option<crate::flow_store::worker::FlowWorker>,
     started: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -43,8 +44,23 @@ impl InstanceInvocation {
             lease,
             authority,
             cancellation,
+            storage: None,
             started: Default::default(),
         }
+    }
+
+    /// Bind execution to the journal's owned context and durable message publication.
+    pub fn with_storage(
+        mut self,
+        storage: crate::flow_store::worker::FlowWorker,
+    ) -> Result<Self, RuntimeError> {
+        if storage.address() != &self.lease.flow {
+            return Err(RuntimeError::ToolFailed(
+                "instance storage does not match its lease".into(),
+            ));
+        }
+        self.storage = Some(storage);
+        Ok(self)
     }
 
     fn claim(&self) -> Result<(), RuntimeError> {
@@ -248,6 +264,23 @@ impl Executor {
         mut invocation: RootInvocation,
     ) -> Result<Value, RuntimeError> {
         if let Some(binding) = &invocation.instance {
+            if let Some(storage) = &binding.storage {
+                let context = storage.context();
+                if invocation
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| !std::sync::Arc::ptr_eq(session, &context))
+                {
+                    return Err(RuntimeError::ToolFailed(
+                        "instance storage owns a different context".into(),
+                    ));
+                }
+                storage
+                    .validate_execution(binding.lease.clone())
+                    .await
+                    .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
+                invocation.session = Some(context);
+            }
             if invocation
                 .turn_id
                 .as_ref()
@@ -475,6 +508,15 @@ impl Executor {
                     // Root's tool_ctx carries session stream_tx so emit sites use
                     // tool_ctx.stream_tx uniformly.
                     let mut tool_ctx = self.tool_ctx.clone().with_invocation_env(invocation_env);
+                    tool_ctx.instance_publication =
+                        invocation.instance.as_ref().and_then(|binding| {
+                            binding.storage.clone().map(|worker| {
+                                crate::flow_store::worker::InstancePublication {
+                                    worker,
+                                    lease: binding.lease.clone(),
+                                }
+                            })
+                        });
                     tool_ctx.model_tool_exposures = Some(Default::default());
                     tool_ctx.flow_registry = Some(std::sync::Arc::clone(&flow_registry));
                     tool_ctx.permission_broker = Some(std::sync::Arc::clone(&permission_broker));

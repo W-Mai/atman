@@ -17,6 +17,8 @@ use atman_runtime::message::Message;
 use atman_runtime::source_program::RevisionBundle;
 use uuid::Uuid;
 
+mod common;
+
 fn descriptor(session: Uuid) -> FlowDescriptor {
     FlowDescriptor {
         address: FlowRef {
@@ -83,6 +85,7 @@ fn publications_preserve_input_order_and_fence_stale_delivery_across_recovery() 
         id: Uuid::new_v4(),
         lease: lease.clone(),
         run: RunId::now(),
+        context_run: None,
         message: Message::assistant_text(lease.turn.clone(), "working"),
     };
     let first_record = flow.publish_message(first.clone()).unwrap();
@@ -1487,4 +1490,175 @@ async fn recorded_source_and_committed_input_execute_with_the_persistent_instanc
     assert!(flow.state().can_start_turn());
     assert_eq!(flow.committed_inputs().len(), 1);
     assert!(flow.pending_inputs().next().is_none());
+}
+
+#[tokio::test]
+async fn instance_worker_persists_real_tool_delivery_and_restores_only_shared_context() {
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
+    use atman_runtime::flow_store::worker::FlowWorker;
+    use atman_runtime::message::MessageOrigin;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let lease = start(&mut flow);
+    let worker = FlowWorker::start(flow).await.unwrap();
+    let context = worker.context();
+    let mut stream = context.stream_subscribe();
+    let executor = atman_runtime::Executor::new();
+    let file = atman_rt::parse_file(
+        r#"
+        flow inline() -> string {
+            context.record(key: "agent.rule.example", content: "Keep records")
+            return final.answer(message: "inline delivery")
+        }
+        flow branch() -> string { return final.answer(message: "isolated delivery") }
+        flow main() -> string {
+            inline().await
+            fanout [branch()]
+            return final.answer(message: "shared delivery")
+        }
+    "#,
+    )
+    .unwrap();
+    let authority =
+        atman_runtime::flow_authority::EffectiveAuthority::root(&Default::default(), false, None);
+    let binding =
+        atman_runtime::InstanceInvocation::new(lease.clone(), authority, Default::default())
+            .with_storage(worker.clone())
+            .unwrap();
+    let result = executor
+        .run_with_invocation(
+            &file,
+            "main",
+            vec![],
+            atman_runtime::RootInvocation {
+                instance: Some(binding),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, atman_runtime::Value::Str(text) if text == "shared delivery"));
+    let messages = context.messages().to_vec();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains_context_record())
+    );
+    let answers: Vec<_> = messages
+        .iter()
+        .filter(|message| message.origin == MessageOrigin::FinalAnswer)
+        .map(Message::text_concat)
+        .collect();
+    assert_eq!(answers, ["inline delivery", "shared delivery"]);
+    let mut streamed = Vec::new();
+    while let Ok(frame) = stream.try_recv() {
+        if let atman_runtime::stream::StreamFrame::AssistantMsg { message, .. } = frame {
+            streamed.push(message.text_concat());
+        }
+    }
+    assert_eq!(
+        streamed,
+        ["inline delivery", "isolated delivery", "shared delivery"]
+    );
+    let revision = worker.state().await.unwrap().revision();
+    worker
+        .transition(
+            revision,
+            FlowTransition::TurnFinished {
+                lease,
+                outcome: TurnOutcome::Completed,
+            },
+        )
+        .await
+        .unwrap();
+    let flow = worker.shutdown().await.unwrap();
+    assert_eq!(flow.published_messages().len(), 4);
+    assert_eq!(flow.context_messages(), messages);
+    assert_eq!(
+        flow.published_messages()
+            .iter()
+            .filter(|record| record.publication.context_run.is_some())
+            .count(),
+        1
+    );
+    drop(flow);
+    let flow = session.open_flow(&description.address.instance_id).unwrap();
+    let worker = FlowWorker::start(flow).await.unwrap();
+    assert_eq!(worker.context().messages().to_vec(), messages);
+    assert!(worker.context().stream_subscribe().try_recv().is_err());
+    assert!(worker.state().await.unwrap().can_start_turn());
+    let state = worker.state().await.unwrap();
+    let next = state
+        .clone()
+        .begin_turn(TurnId::now(), RunId::now())
+        .unwrap();
+    worker
+        .transition(
+            state.revision(),
+            FlowTransition::TurnStarted {
+                turn: next.turn.clone(),
+                run: next.run.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    executor.providers.register(std::sync::Arc::new(
+        atman_runtime::providers::mock::MockProvider::new("mock")
+            .with_model("mock", atman_runtime::Value::Str("model record".into())),
+    ));
+    let file = atman_rt::parse_file(
+        r#"flow main() -> string {
+        llm.call(model: "mock", prompt: "continue", context: "session")
+        session.push(message.user("explicit input"))
+        return final.answer(message: "after restart")
+    }"#,
+    )
+    .unwrap();
+    let authority =
+        atman_runtime::flow_authority::EffectiveAuthority::root(&Default::default(), false, None);
+    executor
+        .run_with_invocation(
+            &file,
+            "main",
+            vec![],
+            atman_runtime::RootInvocation {
+                instance: Some(
+                    atman_runtime::InstanceInvocation::new(next, authority, Default::default())
+                        .with_storage(worker.clone())
+                        .unwrap(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let restored = worker.context();
+    assert!(restored.messages().len() > messages.len() + 1);
+    assert_eq!(
+        &restored.messages().to_vec()[..messages.len()],
+        messages.as_slice()
+    );
+    assert_eq!(
+        restored.messages().last().unwrap().text_concat(),
+        "after restart"
+    );
+    assert!(
+        restored
+            .messages()
+            .iter()
+            .any(|message| message.text_concat() == "model record")
+    );
+    assert!(
+        restored
+            .messages()
+            .iter()
+            .any(|message| message.text_concat() == "explicit input")
+    );
+    let store = worker.shutdown().await.unwrap();
+    assert_eq!(store.context_messages(), restored.messages().to_vec());
 }

@@ -1494,6 +1494,13 @@ impl Session {
 
     /// Isolated execution context for one persistent instance. Persistence is owned by its FlowStore.
     pub fn open_instance_context(address: crate::flow_store::FlowRef) -> Self {
+        Self::restore_instance_context(address, Vec::new())
+    }
+
+    pub(crate) fn restore_instance_context(
+        address: crate::flow_store::FlowRef,
+        messages: Vec<Message>,
+    ) -> Self {
         let mut context = Self::open_ephemeral();
         context.id = SessionId(address.session_id.0);
         context.goal_control =
@@ -1501,6 +1508,21 @@ impl Session {
         context.goal_control.bind_events(context.sink.clone());
         context.watch_hub = context.goal_control.watch_hub.clone();
         context.flow_instance = Some(address);
+        // Seed the same message projection used by live delivery without emitting new events or notifications.
+        // These sequence numbers are local projection positions, not authoritative journal cursors.
+        let initial: Vec<_> = messages
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, message)| ((index + 1) as u64, message))
+            .collect();
+        context.sink.restore_seq(messages.len() as u64);
+        context.message_stream = crate::message_stream::MessageStream::with_initial(
+            context.sink.events_handle(),
+            initial.clone(),
+            initial,
+        );
+        *context.messages.lock().unwrap() = messages;
         context
     }
 

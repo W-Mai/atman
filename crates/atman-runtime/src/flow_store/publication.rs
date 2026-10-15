@@ -19,6 +19,8 @@ pub struct MessagePublication {
     pub lease: TurnLease<AtmanUuid>,
     /// The producing invocation, including inline calls within the owning turn.
     pub run: FlowRunId,
+    /// Isolated invocation context; absent for the instance's shared conversation.
+    pub context_run: Option<FlowRunId>,
     pub message: Message,
 }
 
@@ -51,6 +53,10 @@ impl Publications {
             || active.phase == TurnPhase::Cancelling
             || publication.message.turn_id != publication.lease.turn
             || publication.id.is_nil()
+            || publication
+                .context_run
+                .as_ref()
+                .is_some_and(|run| run != &publication.run)
             || self.indices.contains_key(&publication.id)
         {
             return Err(invalid("stale or invalid message publication"));
@@ -114,12 +120,17 @@ impl FlowStore {
                 }
                 InputContent::WaitingContinuation { .. } => None,
             });
-        let publications = self.publications.records.iter().map(|record| {
-            (
-                record.receipt.sequence,
-                std::slice::from_ref(&record.publication.message),
-            )
-        });
+        let publications = self
+            .publications
+            .records
+            .iter()
+            .filter(|record| record.publication.context_run.is_none())
+            .map(|record| {
+                (
+                    record.receipt.sequence,
+                    std::slice::from_ref(&record.publication.message),
+                )
+            });
         let mut batches: Vec<_> = inputs.chain(publications).collect();
         batches.sort_by_key(|(sequence, _)| *sequence);
         batches

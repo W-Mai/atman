@@ -6,9 +6,9 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
-- Persist flow messages with idempotent publication receipts and restore input/output context in journal order.
-
 ### ✨ Features
+
+- **Persistent messages** — Flow journals retain idempotent publication receipts and restore input/output context in journal order. Instance storage workers commit message delivery before context and live projection, preserve accepted writes across caller cancellation, and isolate fanout publications from shared conversation history.
 
 - **Embedded instance lifecycle** — `atman-rt` exposes persistent instance identities and a portable state machine with independent execution pauses, explicit interruption recovery, cleanup-aware closure, and turn leases that reject stale callbacks. Reply admission targets a live waiting turn without bypassing execution pauses. Hosts supply scheduling and persistence.
 - **Inbox ownership** — `atman-rt` provides filtered FIFO reservations with opaque ownership receipts and publication-before-consumption. Dropping an unused receipt releases ownership without consuming messages. Runtime watcher and child-result queues share this implementation.

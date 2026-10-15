@@ -72,7 +72,7 @@ impl Tool for ContextRecordAppend {
                 Some(lock) => Some(lock.lock().await),
                 None => None,
             };
-            let records = append_context_records(ctx, turn_id, [spec])?;
+            let records = append_context_records(ctx, turn_id, [spec]).await?;
             Ok(Value::Bool(!records.is_empty()))
         })
     }
@@ -110,11 +110,27 @@ fn validate_retrieved_record_key(key: &str) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-fn append_context_records(
+pub(crate) async fn append_context_records(
     ctx: &ToolCtx,
     turn_id: crate::event::TurnId,
     specs: impl IntoIterator<Item = crate::context_plan::ContextRecordSpec>,
 ) -> Result<Vec<crate::context_plan::ContextRecord>, RuntimeError> {
+    if let Some(binding) = &ctx.instance_publication {
+        if binding.lease.turn != turn_id {
+            return Err(RuntimeError::ToolFailed(
+                "context record does not match its turn lease".into(),
+            ));
+        }
+        return binding
+            .worker
+            .record_context(
+                binding.lease.clone(),
+                ctx.clone(),
+                specs.into_iter().collect(),
+            )
+            .await
+            .map_err(|error| RuntimeError::ToolFailed(format!("context commit failed: {error}")));
+    }
     if let Some(session) = ctx.session_runtime.as_ref() {
         return Ok(session.append_context_records(turn_id, specs));
     }

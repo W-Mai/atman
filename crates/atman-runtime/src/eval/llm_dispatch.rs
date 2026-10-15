@@ -139,7 +139,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             &mut system,
             vec![crate::context_plan::CONTEXT_RECORD_INSTRUCTIONS.to_string()],
         );
-        sync_runtime_context_records(ctx, &turn_id).await;
+        if let Err(error) = sync_runtime_context_records(ctx, &turn_id).await {
+            return Value::Err(error);
+        }
     }
     if let Some(budget) = args.context_budget {
         if let Some(p) = args.prompt.as_mut() {
@@ -724,7 +726,18 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             drop(compact_guard.take());
                         }
                         let _append_compact_guard = session.acquire_compact_lock().await;
-                        session.append_message(am.message.clone(), ctx.flow_run_id.clone());
+                        if ctx.instance_publication.is_some() {
+                            if let Err(error) = crate::tools::session::commit_message_to_context(
+                                ctx,
+                                am.message.clone(),
+                            )
+                            .await
+                            {
+                                return Value::Err(error);
+                            }
+                        } else {
+                            session.append_message(am.message.clone(), ctx.flow_run_id.clone());
+                        }
                         drop(_append_compact_guard);
                         crate::compaction::start_auto_compact_with_budget(
                             session.clone(),
@@ -735,10 +748,12 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         .await;
                     } else if args.record_response && uses_spawned_context && !defer_final_candidate
                     {
-                        if let Err(error) = crate::tools::session::append_message_to_context(
+                        if let Err(error) = crate::tools::session::commit_message_to_context(
                             ctx,
                             am.message.clone(),
-                        ) {
+                        )
+                        .await
+                        {
                             return Value::Err(error);
                         }
                         drop(compact_guard.take());
@@ -1125,7 +1140,10 @@ fn clock_context_record(
     )
 }
 
-async fn sync_runtime_context_records(ctx: &ToolCtx, turn_id: &crate::event::TurnId) {
+async fn sync_runtime_context_records(
+    ctx: &ToolCtx,
+    turn_id: &crate::event::TurnId,
+) -> Result<(), RuntimeError> {
     let mut runtime_specs = vec![clock_context_record(chrono::Local::now().fixed_offset())];
     if let Some(control) = &ctx.goal_control {
         runtime_specs.push(crate::context_plan::ContextRecordSpec::new(
@@ -1150,14 +1168,14 @@ async fn sync_runtime_context_records(ctx: &ToolCtx, turn_id: &crate::event::Tur
     if let Some(session) = ctx.session_runtime.as_ref() {
         let mut specs = session_context_record_specs(session).await;
         specs.extend(runtime_specs);
-        session.append_context_records(turn_id.clone(), specs);
-        return;
+        crate::tools::context::append_context_records(ctx, turn_id.clone(), specs).await?;
+        return Ok(());
     }
     if !matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned) {
-        return;
+        return Ok(());
     }
-    let Some(messages) = ctx.session_messages_handle.as_ref() else {
-        return;
+    if ctx.session_messages_handle.is_none() {
+        return Ok(());
     };
     let mut specs = if let Some(session) = ctx.context_records_session.as_ref() {
         session_context_record_specs(session).await
@@ -1174,13 +1192,8 @@ async fn sync_runtime_context_records(ctx: &ToolCtx, turn_id: &crate::event::Tur
         )]
     };
     specs.extend(runtime_specs);
-    let mut messages = messages.lock().unwrap();
-    let records = crate::context_plan::compile_context_records(&messages, specs);
-    messages.extend(
-        records
-            .into_iter()
-            .map(|record| crate::message::Message::context_record(turn_id.clone(), record)),
-    );
+    crate::tools::context::append_context_records(ctx, turn_id.clone(), specs).await?;
+    Ok(())
 }
 
 fn normalize_working_directory_context(system: &mut Option<String>, cwd: Option<&std::path::Path>) {
@@ -1403,8 +1416,8 @@ mod tests {
             .with_history_segment(crate::tool::HistorySegment::Spawned)
             .with_session_messages_handle(child_messages.clone());
         let turn = crate::event::TurnId::now();
-        sync_runtime_context_records(&root, &turn).await;
-        sync_runtime_context_records(&child, &turn).await;
+        sync_runtime_context_records(&root, &turn).await.unwrap();
+        sync_runtime_context_records(&child, &turn).await.unwrap();
         for messages in [
             session.messages().to_vec(),
             child_messages.lock().unwrap().clone(),
@@ -1439,9 +1452,15 @@ mod tests {
         };
         let turn_id = crate::event::TurnId::now();
 
-        sync_runtime_context_records(&context(first.path()), &turn_id).await;
-        sync_runtime_context_records(&context(first.path()), &turn_id).await;
-        sync_runtime_context_records(&context(second.path()), &turn_id).await;
+        sync_runtime_context_records(&context(first.path()), &turn_id)
+            .await
+            .unwrap();
+        sync_runtime_context_records(&context(first.path()), &turn_id)
+            .await
+            .unwrap();
+        sync_runtime_context_records(&context(second.path()), &turn_id)
+            .await
+            .unwrap();
 
         let messages = messages.lock().unwrap();
         let records: Vec<_> = messages

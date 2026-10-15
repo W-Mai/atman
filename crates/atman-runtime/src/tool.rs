@@ -96,6 +96,7 @@ pub struct ResolvedPath {
 
 #[derive(Clone, Default)]
 pub struct ToolCtx {
+    pub(crate) instance_publication: Option<crate::flow_store::worker::InstancePublication>,
     pub(crate) child_results: Option<Arc<crate::agent_results::ResultInbox>>,
     pub(crate) result_route: Option<Arc<crate::agent_results::ResultRoute>>,
     pub goal_control: Option<Arc<crate::goal::GoalController>>,

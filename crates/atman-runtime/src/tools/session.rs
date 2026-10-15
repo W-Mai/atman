@@ -85,7 +85,7 @@ impl Tool for SessionPush {
                     ctx.output_store.as_deref(),
                     ctx.tool_output_budget,
                 );
-                append_message_to_context(ctx, msg)?;
+                commit_message_to_context(ctx, msg).await?;
             }
             Ok(Value::Unit)
         })
@@ -93,6 +93,15 @@ impl Tool for SessionPush {
 }
 
 pub(crate) fn session_scheduling_claim(ctx: &ToolCtx) -> SchedulingClaims {
+    if let Some(address) = ctx
+        .flow_identity
+        .as_ref()
+        .and_then(|identity| identity.instance.as_ref())
+    {
+        return SchedulingClaims::declared([ResourceAccess::exclusive(ResourceKey::Flow(
+            format!("{}:{}", address.session_id, address.instance_id),
+        ))]);
+    }
     let Some(session_id) = ctx.session_id.as_ref().filter(|id| !id.is_empty()) else {
         return SchedulingClaims::opaque();
     };
@@ -102,6 +111,11 @@ pub(crate) fn session_scheduling_claim(ctx: &ToolCtx) -> SchedulingClaims {
 }
 
 pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(), RuntimeError> {
+    if ctx.instance_publication.is_some() {
+        return Err(RuntimeError::ToolFailed(
+            "persistent context requires asynchronous message commit".into(),
+        ));
+    }
     if matches!(ctx.history_segment, crate::tool::HistorySegment::Root)
         && let Some(session) = ctx.session_runtime.as_ref()
     {
@@ -151,6 +165,41 @@ pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(
     messages.push(msg.clone());
     drop(messages);
     ctx.publish_final_answer(&msg);
+    Ok(())
+}
+
+pub(crate) async fn commit_message_to_context(
+    ctx: &ToolCtx,
+    msg: Message,
+) -> Result<(), RuntimeError> {
+    let Some(binding) = &ctx.instance_publication else {
+        return append_message_to_context(ctx, msg);
+    };
+    if ctx.session_messages_handle.is_none() {
+        return Err(RuntimeError::ToolFailed(
+            "session message context is unavailable".into(),
+        ));
+    }
+    let run = ctx
+        .flow_run_id
+        .clone()
+        .ok_or_else(|| RuntimeError::ToolFailed("message producer is unavailable".into()))?;
+    let context_run =
+        matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned).then(|| run.clone());
+    binding
+        .worker
+        .publish(
+            crate::flow_store::publication::MessagePublication {
+                id: uuid::Uuid::now_v7(),
+                lease: binding.lease.clone(),
+                run,
+                context_run,
+                message: msg,
+            },
+            ctx.clone(),
+        )
+        .await
+        .map_err(|error| RuntimeError::ToolFailed(format!("message commit failed: {error}")))?;
     Ok(())
 }
 

@@ -7,6 +7,7 @@ mod input;
 pub mod outbox;
 pub mod publication;
 pub mod waiter;
+pub mod worker;
 
 use std::fs::File;
 use std::io::{self, Write};
