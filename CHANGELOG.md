@@ -9,6 +9,7 @@ All notable changes to atman are documented in this file.
 ### ✨ Features
 
 - **Embedded instance lifecycle** — `atman-rt` exposes persistent instance identities and a portable state machine with independent execution pauses, explicit interruption recovery, cleanup-aware closure, and turn leases that reject stale callbacks. Hosts supply scheduling and persistence.
+- **Durable fact journals** — The runtime exposes exclusive batch commits with synchronization acknowledgements, integrity-checked replay, and retained incomplete tails. Failed writers require reopening and reconciliation before further commits.
 
 ## [1.17.2] — 2026-10-26
 
