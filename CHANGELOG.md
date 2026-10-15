@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.17.1] — 2026-10-15
+
 ### ✨ Features
 
 - **Hello command** — The initialization template and repository example explicitly deliver their replies through `final.answer` while returning the answer text to callers.

@@ -13,8 +13,8 @@ keywords = ["atman", "tui", "terminal", "ratatui"]
 categories = ["command-line-interface", "development-tools"]
 
 [dependencies]
-atman-rt = { path = "../atman-rt", version = "1.17.0" }
-atman-runtime = { path = "../atman-runtime", version = "1.17.0" }
+atman-rt = { path = "../atman-rt", version = "1.17.1" }
+atman-runtime = { path = "../atman-runtime", version = "1.17.1" }
 anyhow.workspace = true
 chrono.workspace = true
 tokio.workspace = true
