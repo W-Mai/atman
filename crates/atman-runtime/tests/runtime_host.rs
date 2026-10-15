@@ -1261,3 +1261,319 @@ async fn peer_reads_recheck_revocation_inside_the_target_owner() {
         io::ErrorKind::PermissionDenied
     );
 }
+
+async fn wait_inputs(worker: &FlowWorker, count: usize) -> FlowSnapshot {
+    let mut changes = worker.subscribe_commits();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            changes.borrow_and_update();
+            let snapshot = worker.snapshot().await.unwrap();
+            if snapshot.pending.len() == count {
+                return snapshot;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("observation did not deliver expected inputs")
+}
+
+fn answer_watch(
+    source: &FlowWorker,
+) -> atman_runtime::flow_store::subscription::AnswerSubscription {
+    use atman_runtime::flow_store::subscription::{
+        AnswerFilter, AnswerSubscription, SubscriptionPurpose,
+    };
+    AnswerSubscription {
+        id: Uuid::new_v4(),
+        source: source.address().clone(),
+        filter: AnswerFilter::All,
+        once: false,
+        purpose: SubscriptionPurpose::Watcher,
+    }
+}
+
+#[tokio::test]
+async fn owned_observation_survives_turn_end_pause_and_reopen_without_duplicate_input() {
+    use atman_runtime::flow_store::subscription::{SubscriptionPurpose, SubscriptionStatus};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let a = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let b = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&a, FlowTransition::Activated).await;
+    let lease = start(&a).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    // Register against Prepared sources; a creator can safely activate only after acknowledgement.
+    let result = atman_runtime::flow_store::subscription::AnswerSubscription {
+        purpose: SubscriptionPurpose::SpawnResult,
+        ..answer_watch(&b)
+    };
+    let watcher = atman_runtime::flow_store::subscription::AnswerSubscription {
+        once: true,
+        ..answer_watch(&b)
+    };
+    let (registered, duplicate) = tokio::join!(
+        client.watch_answers(result.clone()),
+        client.watch_answers(result.clone())
+    );
+    assert_eq!(registered.unwrap(), duplicate.unwrap());
+    client.watch_answers(watcher.clone()).await.unwrap();
+    let self_watch = answer_watch(&a);
+    client.watch_answers(self_watch.clone()).await.unwrap();
+    change(
+        &a,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    let pause = Uuid::new_v4().into();
+    change(&a, FlowTransition::ExecutionPaused { key: pause }).await;
+    change(&b, FlowTransition::Activated).await;
+    invoke(&b, Executor::new()).await.result.unwrap();
+    let accepted = wait_inputs(&a, 1).await;
+    assert_eq!(accepted.state.pauses(), &[pause]);
+    let InboxPayload::FlowEvent { content, .. } = &accepted.pending[0].request.payload else {
+        panic!("missing source event")
+    };
+    assert_eq!(content["subscriptions"].as_array().unwrap().len(), 2);
+    let original = accepted.pending[0].id;
+    assert!(
+        a.answer_subscriptions()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.subscription.id == watcher.id && r.status == SubscriptionStatus::Matched)
+    );
+
+    // A stopped view/executor does not erase subscription positions; reopening the owner catches up.
+    let address = a.address().clone();
+    drop(client);
+    drop(a.shutdown().await.unwrap());
+    invoke(&b, Executor::new()).await.result.unwrap();
+    let a = host.flow(&address).await.unwrap();
+    let restored = wait_inputs(&a, 2).await;
+    assert_eq!(restored.pending[0].id, original);
+    let InboxPayload::FlowEvent { content, .. } = &restored.pending[1].request.payload else {
+        panic!("missing source event")
+    };
+    assert_eq!(content["subscriptions"].as_array().unwrap().len(), 1);
+    change(&a, FlowTransition::ExecutionResumed { key: pause }).await;
+    let client = host.bind_invocation(start(&a).await).await.unwrap();
+    client.unwatch_answers(result.id).await.unwrap();
+    // Retrying registration must retain cancellation, even when a newer source anchor is available.
+    assert_eq!(
+        client.watch_answers(result).await.unwrap().status,
+        SubscriptionStatus::Cancelled
+    );
+    let lease = match a.state().await.unwrap().state() {
+        InstanceState::Open(InstanceActivity::Active(active)) => active.lease.clone(),
+        _ => unreachable!(),
+    };
+    change(
+        &a,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    invoke(&a, Executor::new()).await.result.unwrap();
+    // Existing inputs are consumed by the invocation; its self-observed final answer is the only new input.
+    wait_inputs(&a, 1).await;
+    let before = a.snapshot().await.unwrap().cursor;
+    a.retry_observations();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(a.snapshot().await.unwrap().cursor, before);
+    invoke(&b, Executor::new()).await.result.unwrap();
+    assert_eq!(a.snapshot().await.unwrap().pending.len(), 1);
+
+    // The host directory and catalog own scanners without retaining each other indefinitely.
+    let mut commits = a.subscribe_commits();
+    drop(client);
+    drop(a);
+    drop(b);
+    drop(session);
+    drop(host);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while commits.changed().await.is_ok() {}
+    })
+    .await
+    .expect("observer leaked the directory or worker");
+}
+
+#[tokio::test]
+async fn cross_session_observation_retains_cursor_on_revocation_and_recovers_after_late_attach() {
+    use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let a_info = session_descriptor();
+    let b_info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(a_info.clone()).unwrap())
+        .unwrap();
+    let remote = host
+        .attach_session(root.create_session(b_info.clone()).unwrap())
+        .unwrap();
+    let a = session
+        .create_flow(flow_descriptor(a_info.id))
+        .await
+        .unwrap();
+    let b = remote
+        .create_flow(flow_descriptor(b_info.id))
+        .await
+        .unwrap();
+    change(&a, FlowTransition::Activated).await;
+    change(&b, FlowTransition::Activated).await;
+    let lease = start(&a).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    let subscription = answer_watch(&b);
+    assert_eq!(
+        client
+            .watch_answers(subscription.clone())
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    let grant = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: a.address().clone(),
+        target: AccessTarget::Flow(b.address().clone()),
+        actions: [FlowAction::Watch].into(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
+        .await
+        .unwrap();
+    client.watch_answers(subscription.clone()).await.unwrap();
+    change(
+        &a,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    session
+        .revoke_access(session.snapshot().await.unwrap().cursor, grant.id)
+        .await
+        .unwrap();
+    let mut issues = a.subscribe_observation_issues();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !issues.borrow_and_update().is_empty() {
+                break;
+            }
+            issues.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    invoke(&b, Executor::new()).await.result.unwrap();
+    assert!(a.snapshot().await.unwrap().pending.is_empty());
+    session
+        .grant_access(
+            session.snapshot().await.unwrap().cursor,
+            FlowGrant {
+                id: Uuid::new_v4(),
+                ..grant
+            },
+        )
+        .await
+        .unwrap();
+    wait_inputs(&a, 1).await;
+    let address = a.address().clone();
+    let mut changes = a.subscribe_commits();
+    drop(issues);
+    drop(client);
+    drop(a);
+    drop(b);
+    drop(session);
+    drop(remote);
+    drop(host);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while changes.changed().await.is_ok() {}
+    })
+    .await
+    .unwrap();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.open_session(a_info.id).unwrap())
+        .unwrap();
+    let a = session.open_flow(address.instance_id).await.unwrap();
+    let mut issues = a.subscribe_observation_issues();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !issues.borrow_and_update().is_empty() {
+                break;
+            }
+            issues.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    // A late source attachment must wake the receiver without a new turn or manual resubscription.
+    let remote_store = root.open_session(b_info.id).unwrap();
+    let mut source_store = remote_store
+        .open_flow(&subscription.source.instance_id)
+        .unwrap();
+    // More than one source page, with no further source commit after attachment.
+    for _ in 0..65 {
+        let lease = source_store
+            .state()
+            .clone()
+            .begin_turn(TurnId::now(), RunId::now())
+            .unwrap();
+        source_store
+            .transition(
+                source_store.state().revision(),
+                FlowTransition::TurnStarted {
+                    turn: lease.turn.clone(),
+                    run: lease.run.clone(),
+                },
+            )
+            .unwrap();
+        let mut message =
+            atman_runtime::message::Message::assistant_text(lease.turn.clone(), "offline answer");
+        message.origin = MessageOrigin::FinalAnswer;
+        source_store
+            .publish_message(atman_runtime::flow_store::publication::MessagePublication {
+                id: Uuid::new_v4(),
+                lease: lease.clone(),
+                run: lease.run.clone(),
+                context_run: None,
+                message,
+            })
+            .unwrap();
+        source_store
+            .transition(
+                source_store.state().revision(),
+                FlowTransition::TurnFinished {
+                    lease,
+                    outcome: TurnOutcome::Completed,
+                },
+            )
+            .unwrap();
+    }
+    drop(source_store);
+    host.attach_session(remote_store).unwrap();
+    wait_inputs(&a, 66).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if issues.borrow_and_update().is_empty() {
+                break;
+            }
+            issues.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}

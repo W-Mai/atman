@@ -6,7 +6,8 @@ use std::{
     sync::{Arc, Mutex, RwLock, Weak},
 };
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
 use super::FlowWorker;
@@ -25,28 +26,50 @@ type FlowDirectory = Arc<Mutex<HashMap<FlowInstanceId, FlowWorker>>>;
 /// The map lock only protects handles. Catalog I/O is serialized by each session owner, and flow input/execution goes directly to the instance worker without passing through that catalog queue.
 #[derive(Clone, Default)]
 pub struct RuntimeHost {
-    sessions: Arc<Mutex<HashMap<Uuid, SessionHandle>>>,
+    directory: Arc<Directory>,
+}
+
+struct Directory {
+    sessions: Mutex<HashMap<Uuid, SessionHandle>>,
+    changes: watch::Sender<()>,
+}
+
+impl Default for Directory {
+    fn default() -> Self {
+        Self {
+            sessions: Default::default(),
+            changes: watch::channel(()).0,
+        }
+    }
 }
 
 /// Workers do not keep their owning directory alive through a reference cycle.
 #[derive(Clone)]
-pub(super) struct WeakRuntimeHost(Weak<Mutex<HashMap<Uuid, SessionHandle>>>);
+pub(super) struct WeakRuntimeHost(Weak<Directory>);
 
 impl WeakRuntimeHost {
     pub fn upgrade(&self) -> io::Result<RuntimeHost> {
         self.0
             .upgrade()
-            .map(|sessions| RuntimeHost { sessions })
+            .map(|directory| RuntimeHost { directory })
             .ok_or_else(|| io::Error::other("instance host is no longer available"))
     }
 }
 
 impl RuntimeHost {
+    pub(super) fn changes(&self) -> watch::Receiver<()> {
+        self.directory.changes.subscribe()
+    }
+
+    fn changed(&self) {
+        self.directory.changes.send_modify(|_| {});
+    }
+
     /// Attach an exclusively owned catalog without opening or starting its recorded flows.
     pub fn attach_session(&self, store: SessionStore) -> io::Result<SessionHandle> {
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let id = store.projection().descriptor.id;
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.directory.sessions.lock().unwrap();
         if sessions.contains_key(&id) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -66,15 +89,17 @@ impl RuntimeHost {
             store,
             flows,
             access,
-            WeakRuntimeHost(Arc::downgrade(&self.sessions)),
+            WeakRuntimeHost(Arc::downgrade(&self.directory)),
             receiver,
         ));
         sessions.insert(id, handle.clone());
+        self.changed();
         Ok(handle)
     }
 
     pub fn session(&self, id: Uuid) -> io::Result<SessionHandle> {
-        self.sessions
+        self.directory
+            .sessions
             .lock()
             .unwrap()
             .get(&id)
@@ -83,7 +108,14 @@ impl RuntimeHost {
     }
 
     pub fn sessions(&self) -> Vec<Uuid> {
-        let mut sessions: Vec<_> = self.sessions.lock().unwrap().keys().copied().collect();
+        let mut sessions: Vec<_> = self
+            .directory
+            .sessions
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
         sessions.sort_unstable();
         sessions
     }
@@ -244,6 +276,8 @@ async fn serve_catalog(
     host: WeakRuntimeHost,
     mut commands: mpsc::Receiver<CatalogCommand>,
 ) {
+    // Catalog lifetime owns observation, independently of execution and frontend handles.
+    let mut observers: HashMap<FlowInstanceId, AbortOnDropHandle<()>> = HashMap::new();
     while let Some(command) = commands.recv().await {
         match command {
             CatalogCommand::Access {
@@ -267,6 +301,11 @@ async fn serve_catalog(
                     return;
                 };
                 store = returned;
+                if result.is_ok() {
+                    if let Ok(host) = host.upgrade() {
+                        host.changed();
+                    }
+                }
                 let _ = reply.send(result);
             }
             CatalogCommand::Snapshot(reply) => {
@@ -334,7 +373,11 @@ async fn serve_catalog(
                 };
                 if let Ok(worker) = &result {
                     // Install before acknowledgement, including when the request's receiver was dropped.
-                    flows.lock().unwrap().insert(id, worker.clone());
+                    flows.lock().unwrap().insert(id.clone(), worker.clone());
+                    observers.insert(id, super::observation::start(worker.clone(), host.clone()));
+                    if let Ok(host) = host.upgrade() {
+                        host.changed();
+                    }
                 }
                 let _ = reply.send(result);
             }

@@ -16,6 +16,7 @@ use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::access::{FlowAction, SessionAccess};
 use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity};
 use crate::flow_store::publication::PublishedMessage;
+use crate::flow_store::subscription::{AnswerSubscription, SubscriptionRecord};
 use crate::flow_store::{FlowRef, FlowTransition, invalid};
 use crate::message::{Message, MessageOrigin};
 
@@ -154,6 +155,66 @@ impl FlowClient {
             .await
     }
 
+    /// Register before returning. The subscription outlives this invocation and keeps its original
+    /// source position on retry; current watch grants are rechecked for every subsequent delivery.
+    pub async fn watch_answers(
+        &self,
+        subscription: AnswerSubscription,
+    ) -> io::Result<SubscriptionRecord> {
+        self.authenticate()?;
+        let recipient = self.host.flow(self.source()).await?;
+        let client = self.clone();
+        let requested = subscription.clone();
+        if let Some(record) = recipient
+            .request(move |store| {
+                client.authenticate()?;
+                existing_subscription(store, &requested)
+            })
+            .await?
+        {
+            return Ok(record);
+        }
+        self.authorize(&subscription.source, FlowAction::Watch)?;
+        let client = self.clone();
+        let anchor = self
+            .host
+            .flow(&subscription.source)
+            .await?
+            .request(move |store| {
+                client.authorize(store.state().address(), FlowAction::Watch)?;
+                Ok(store.publication_anchor())
+            })
+            .await?;
+        let client = self.clone();
+        recipient
+            .request(move |store| {
+                client.authenticate()?;
+                // Concurrent identical registrations can acquire different anchors. Preserve the first.
+                if let Some(record) = existing_subscription(store, &subscription)? {
+                    return Ok(record);
+                }
+                client.authorize(&subscription.source, FlowAction::Watch)?;
+                store.subscribe_answers(subscription.clone(), &anchor)?;
+                existing_subscription(store, &subscription)?
+                    .ok_or_else(|| invalid("subscription was not committed"))
+            })
+            .await
+    }
+
+    /// Cancel owned observation even if access to its source has since been revoked.
+    pub async fn unwatch_answers(&self, id: Uuid) -> io::Result<CommitReceipt> {
+        self.authenticate()?;
+        let client = self.clone();
+        self.host
+            .flow(self.source())
+            .await?
+            .request(move |store| {
+                client.authenticate()?;
+                store.unsubscribe_answers(id)
+            })
+            .await
+    }
+
     pub async fn send(
         &self,
         target: FlowRef,
@@ -220,6 +281,21 @@ impl FlowClient {
                 store.transition(expected_revision, transition)
             })
             .await
+    }
+}
+
+fn existing_subscription(
+    store: &crate::flow_store::FlowStore,
+    requested: &AnswerSubscription,
+) -> io::Result<Option<SubscriptionRecord>> {
+    let existing = store
+        .answer_subscriptions()
+        .find(|record| record.subscription.id == requested.id);
+    match existing {
+        Some(record) if record.subscription != *requested => Err(invalid(
+            "subscription identity conflicts with recorded registration",
+        )),
+        other => Ok(other.cloned()),
     }
 }
 

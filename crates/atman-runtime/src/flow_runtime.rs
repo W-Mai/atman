@@ -4,6 +4,7 @@ pub mod access;
 pub mod execution;
 pub mod host;
 pub mod input;
+pub mod observation;
 pub mod scheduler;
 pub mod send;
 
@@ -50,6 +51,8 @@ pub struct FlowWorker {
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
     commits: watch::Receiver<CommitReceipt>,
     scheduler_owned: Arc<std::sync::atomic::AtomicBool>,
+    observation_issues: watch::Sender<Vec<observation::ObservationIssue>>,
+    observation_retry: watch::Sender<()>,
 }
 
 impl FlowWorker {
@@ -146,6 +149,8 @@ impl FlowWorker {
             state,
             commits,
             scheduler_owned: Default::default(),
+            observation_issues: watch::channel(Vec::new()).0,
+            observation_retry: watch::channel(()).0,
         })
     }
 
