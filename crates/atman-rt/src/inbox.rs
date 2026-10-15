@@ -2,12 +2,16 @@
 //!
 //! Hosts serialize mutations, authenticate message sources, enforce execution gates, and persist input commits. Reservations do not remove messages. The publication callback runs before consumption and must not reenter the owning queue.
 
-use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+use alloc::{
+    collections::VecDeque,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 
 /// FIFO messages with at most one outstanding reservation, including filtered batches.
 pub struct PendingBatch<T> {
     pending: VecDeque<T>,
-    reserved: Option<Arc<()>>,
+    reserved: Option<Weak<()>>,
 }
 
 impl<T> Default for PendingBatch<T> {
@@ -43,11 +47,11 @@ impl<T> PendingBatch<T> {
         self.pending.iter()
     }
     pub fn is_ready(&self) -> bool {
-        self.reserved.is_none() && !self.pending.is_empty()
+        !self.has_reservation() && !self.pending.is_empty()
     }
 
     pub fn is_ready_matching(&self, predicate: impl FnMut(&T) -> bool) -> bool {
-        self.reserved.is_none() && self.pending.iter().any(predicate)
+        !self.has_reservation() && self.pending.iter().any(predicate)
     }
 
     pub fn push_back(&mut self, item: T) {
@@ -61,7 +65,7 @@ impl<T> PendingBatch<T> {
     }
 
     pub fn pop_front(&mut self) -> Option<T> {
-        if self.reserved.is_some() {
+        if self.has_reservation() {
             None
         } else {
             self.pending.pop_front()
@@ -71,7 +75,12 @@ impl<T> PendingBatch<T> {
     pub fn owns(&self, batch: &Batch<T>) -> bool {
         self.reserved
             .as_ref()
-            .is_some_and(|token| Arc::ptr_eq(token, &batch.token))
+            .and_then(Weak::upgrade)
+            .is_some_and(|token| Arc::ptr_eq(&token, &batch.token))
+    }
+
+    fn has_reservation(&self) -> bool {
+        self.reserved.as_ref().and_then(Weak::upgrade).is_some()
     }
 
     pub fn release(&mut self, batch: &Batch<T>) -> bool {
@@ -135,7 +144,7 @@ impl<T: Clone> PendingBatch<T> {
         }
         // A live receipt keeps this allocation alive, preventing cross-queue or reused-token ABA.
         let token = Arc::new(());
-        self.reserved = Some(token.clone());
+        self.reserved = Some(Arc::downgrade(&token));
         Some(Batch {
             token,
             positions,
@@ -147,6 +156,19 @@ impl<T: Clone> PendingBatch<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abandoned_receipts_release_ownership_without_consuming_inputs() {
+        let mut queue = PendingBatch::default();
+        queue.push_back(1);
+        let batch = queue.reserve().unwrap();
+        assert!(!queue.is_ready());
+        drop(batch);
+        assert!(queue.is_ready_matching(|item| *item == 1));
+        let next = queue.reserve().unwrap();
+        assert_eq!(next.items(), &[1]);
+        assert!(queue.owns(&next));
+    }
 
     #[test]
     fn publication_failure_keeps_fifo_and_excludes_other_consumers() {
