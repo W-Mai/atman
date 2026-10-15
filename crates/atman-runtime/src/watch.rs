@@ -1,5 +1,5 @@
-use crate::pending_batch::{Batch, PendingBatch};
 use crate::value::AtmanPayload;
+use atman_rt::inbox::{Batch, PendingBatch};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -287,7 +287,7 @@ impl WatchHub {
     pub fn take_pending_prompt(&self) -> Option<String> {
         let mut state = self.state.lock().unwrap();
         let batch = state.pending_events.reserve()?;
-        let prompt = format_watch_batch(&batch.items);
+        let prompt = format_watch_batch(batch.items());
         state
             .pending_events
             .commit(&batch, || Ok::<_, std::convert::Infallible>(()))
@@ -327,7 +327,7 @@ pub struct WatchReceipt {
 
 impl WatchReceipt {
     pub fn prompt(&self) -> String {
-        format_watch_batch(&self.batch.items)
+        format_watch_batch(self.batch.items())
     }
 
     /// The callback must not reenter this hub and must publish synchronously.

@@ -18,6 +18,7 @@ pub mod expr;
 pub mod fanout;
 pub mod fix;
 pub mod identity;
+pub mod inbox;
 pub mod instance;
 pub mod lifecycle;
 pub mod lint;
