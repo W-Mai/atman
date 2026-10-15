@@ -1384,7 +1384,7 @@ fn resolve_route(line: &str) -> Result<Option<atman_runtime::routing::RouteMatch
     Ok(program.resolve(line))
 }
 
-async fn run_boot_flow(executor: &Executor, reporter: &Reporter) -> Result<()> {
+async fn run_boot_flow(executor: &Executor, session: std::sync::Arc<Session>) -> Result<()> {
     let cfg = match config_dir() {
         Ok(c) => c,
         Err(_) => return Ok(()),
@@ -1407,22 +1407,57 @@ async fn run_boot_flow(executor: &Executor, reporter: &Reporter) -> Result<()> {
     let flow_name = parsed.flows[0].name.name.clone();
     let mut executor = executor.clone();
     executor.source_dir = path.parent().map(|p| p.to_path_buf());
+    let mut input = atman_runtime::message::Message::user_text(
+        atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
+        "Session startup flow.",
+    );
+    input.origin = atman_runtime::message::MessageOrigin::Internal;
+    let turn_id = session.begin_turn(input);
+    let result = run_interactive_flow(
+        &executor,
+        &program,
+        &flow_name,
+        vec![],
+        session.clone(),
+        turn_id,
+        Default::default(),
+    )
+    .await;
+    session.end_turn();
+    result?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_interactive_flow(
+    executor: &Executor,
+    program: &LinkedProgram,
+    flow_name: &str,
+    args: Vec<(String, Value)>,
+    session: std::sync::Arc<Session>,
+    turn_id: atman_rt::TurnId<atman_runtime::event::AtmanUuid>,
+    invocation_env: atman_runtime::InvocationEnv,
+) -> Result<Value> {
+    let managed = program
+        .entry_flow(flow_name)
+        .and_then(|id| program.flow(&id))
+        .is_some_and(atman_runtime::goal::is_managed);
     let value = executor
-        .run_linked_with_invocation(
-            &program,
-            &flow_name,
-            vec![],
-            atman_runtime::RootInvocation::default(),
+        .run_linked_in_turn_with_env(
+            program,
+            flow_name,
+            args,
+            Some(turn_id.clone()),
+            Some(session.clone()),
+            invocation_env,
         )
         .await?;
-    let rendered = render_value(&value);
-    if !rendered.is_empty() {
-        // Route through Reporter so the boot flow's greeting lands as a
-        // TUI system note (inside the alternate screen) instead of a
-        // raw println that would sit above the freshly-cleared frame.
-        reporter.info(rendered);
+    if !managed {
+        session
+            .publish_flow_result(turn_id, render_value(&value))
+            .await;
     }
-    Ok(())
+    Ok(value)
 }
 
 async fn run_slash_command_in_turn(
@@ -1435,17 +1470,16 @@ async fn run_slash_command_in_turn(
     let (program, flow_name, kv, source_dir) = resolve_slash_command(line)?;
     let mut executor = executor.clone();
     executor.source_dir = source_dir;
-    executor
-        .run_linked_in_turn_with_env(
-            &program,
-            &flow_name,
-            kv,
-            Some(turn_id),
-            Some(session),
-            invocation_env,
-        )
-        .await
-        .map_err(Into::into)
+    run_interactive_flow(
+        &executor,
+        &program,
+        &flow_name,
+        kv,
+        session,
+        turn_id,
+        invocation_env,
+    )
+    .await
 }
 
 type SlashCommandParsed = (LinkedProgram, String, Vec<(String, Value)>, Option<PathBuf>);
@@ -2152,12 +2186,9 @@ async fn cmd_repl_once(
         .fire(&executor, atman_rt::ast::LifecycleEvent::SessionStart)
         .await;
 
-    if let Err(e) = run_boot_flow(&executor, &reporter).await {
-        reporter.error(format!("[atman] boot flow error: {e}"));
-    }
-
     let flow_names = discover_flow_names();
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<ReplInput>();
+    let mut plain_output = None;
     let (tui_task, tui_shutdown, ctrl_task, cmd_tx_for_repl) = if use_tui {
         // The control task is the sole TUI-side owner of the REPL input sender.
         // Dropping the TUI closes ctrl_rx, which drops this sink and wakes input_rx.
@@ -3141,9 +3172,12 @@ async fn cmd_repl_once(
         let (printer_tx, printer_rx) = tokio::sync::oneshot::channel::<Option<ExternalPrinter>>();
         spawn_stdin_reader(input_tx, printer_tx);
         let printer = printer_rx.await.unwrap_or(None);
-        spawn_stream_consumer(&session, printer).await;
+        plain_output = Some(spawn_stream_consumer(&session, printer));
         (None, None, None, None)
     };
+    if let Err(e) = run_boot_flow(&executor, session.clone()).await {
+        reporter.error(format!("[atman] boot flow error: {e}"));
+    }
     let sid = session.id().to_string();
     let mut goal_changes = session.goal_control.subscribe();
 
@@ -3387,6 +3421,11 @@ async fn cmd_repl_once(
     lifecycles
         .fire(&executor, atman_rt::ast::LifecycleEvent::SessionEnd)
         .await;
+
+    if let Some((shutdown, consumer)) = plain_output {
+        let _ = shutdown.send(());
+        consumer.await?;
+    }
 
     if let Some(tr) = &executor.tool_ctx.term_registry {
         tr.kill_all();
@@ -4745,15 +4784,37 @@ fn spawn_stdin_reader(
     });
 }
 
-async fn spawn_stream_consumer(session: &atman_runtime::Session, printer: Option<ExternalPrinter>) {
+fn spawn_stream_consumer(
+    session: &atman_runtime::Session,
+    printer: Option<ExternalPrinter>,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
     let mut rx = session.stream_subscribe();
-    tokio::spawn(async move {
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
         let mut printer = printer;
-        let mut pending_line = String::new();
         loop {
-            match rx.recv().await {
+            let received = tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => {
+                    loop {
+                        match rx.try_recv() {
+                            Ok(frame) => render_stream_frame(&mut printer, frame),
+                            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                                render_note(&mut printer, format!("(dropped {n} stream frames)"));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    break;
+                }
+                frame = rx.recv() => frame,
+            };
+            match received {
                 Ok(frame) => {
-                    render_stream_frame(&mut printer, &mut pending_line, frame);
+                    render_stream_frame(&mut printer, frame);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     render_note(&mut printer, format!("(dropped {n} stream frames)"));
@@ -4762,35 +4823,30 @@ async fn spawn_stream_consumer(session: &atman_runtime::Session, printer: Option
             }
         }
     });
+    (shutdown_tx, task)
 }
 
 fn render_stream_frame(
     printer: &mut Option<ExternalPrinter>,
-    pending: &mut String,
     frame: atman_runtime::stream::StreamFrame,
 ) {
     use atman_runtime::stream::StreamFrame;
     match frame {
-        StreamFrame::LlmChunk { text, .. } => {
-            pending.push_str(&text);
-            emit(printer, text);
-        }
-        StreamFrame::LlmDone { .. } => {
-            if !pending.ends_with('\n') {
-                emit(printer, "\n".into());
+        StreamFrame::AssistantMsg { message, .. } => {
+            // Plain terminals cannot replace draft text when a reply is committed.
+            // Present the same committed messages used by TUI and history replay.
+            if message.is_visible_assistant_reply() {
+                let text = message.text_concat();
+                let newline = if text.ends_with('\n') { "" } else { "\n" };
+                emit(printer, format!("{text}{newline}"));
             }
-            pending.clear();
         }
-        StreamFrame::ToolUseStart {
-            tool, args_preview, ..
-        } => {
-            emit(printer, format!("  ⟶ {tool}({args_preview})\n"));
+        StreamFrame::ToolUseStart { tool, .. } => {
+            emit(printer, format!("  ⟶ {tool}\n"));
         }
-        StreamFrame::ToolUseDone {
-            tool, ok, preview, ..
-        } => {
+        StreamFrame::ToolUseDone { tool, ok, .. } => {
             let mark = if ok { '✓' } else { '✗' };
-            emit(printer, format!("  {mark} {tool} → {preview}\n"));
+            emit(printer, format!("  {mark} {tool}\n"));
         }
         StreamFrame::Note(s) => render_note(printer, s),
         StreamFrame::Notification(frame) => render_note(printer, frame.message),
@@ -4803,9 +4859,10 @@ fn render_stream_frame(
         | StreamFrame::FlowDone { .. }
         | StreamFrame::ToolNode { .. }
         | StreamFrame::ThinkingChunk { .. }
+        | StreamFrame::LlmChunk { .. }
+        | StreamFrame::LlmDone { .. }
         | StreamFrame::ToolCallDraft { .. }
         | StreamFrame::LlmCallStats { .. }
-        | StreamFrame::AssistantMsg { .. }
         | StreamFrame::ToolResultMsg { .. }
         | StreamFrame::ToolPendingApproval { .. }
         | StreamFrame::ToolApproved { .. }
@@ -4932,17 +4989,18 @@ async fn run_turn_with_interjection(
 
     let flow_fut = async {
         match kind {
-            TurnKind::Goal(recipe) => executor
-                .run_linked_in_turn_with_env(
+            TurnKind::Goal(recipe) => {
+                run_interactive_flow(
+                    executor,
                     &recipe.program,
                     &recipe.flow_name,
                     recipe.continuation_args(&text),
-                    Some(turn_id),
-                    Some(session.clone()),
+                    session.clone(),
+                    turn_id,
                     invocation_env,
                 )
                 .await
-                .map_err(Into::into),
+            }
             TurnKind::Slash => {
                 run_slash_command_in_turn(&text, executor, session.clone(), turn_id, invocation_env)
                     .await
@@ -4979,17 +5037,9 @@ async fn run_turn_with_interjection(
             }
         }
     };
-    let streamed = session.take_streamed_flag();
     let succeeded = result.is_ok();
     match result {
-        Ok(v) => {
-            if !(reporter.is_tui() && streamed) {
-                let rendered = render_value(&v);
-                if !rendered.is_empty() {
-                    reporter.info(rendered);
-                }
-            }
-        }
+        Ok(_) => {}
         Err(e) => {
             let _ = session.goal_control.pause(
                 atman_runtime::memory::goal::GoalActor::Runtime,
@@ -9103,6 +9153,69 @@ async fn test_provider_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn interactive_entry_publishes_returns_without_duplicating_explicit_delivery() {
+        use atman_runtime::message::MessageOrigin;
+        let cases = [
+            ("return \"reply\"", false, Some(MessageOrigin::FlowResult)),
+            (
+                "return final.answer(message: \"reply\")",
+                false,
+                Some(MessageOrigin::FinalAnswer),
+            ),
+            ("return \"reply\"", true, None),
+            (
+                "return final.answer(message: \"reply\")",
+                true,
+                Some(MessageOrigin::FinalAnswer),
+            ),
+            ("return \"\"", false, None),
+        ];
+        for (body, managed, expected_origin) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("main.at");
+            let contract = if managed {
+                "contract { invocation { goal: true, user_message: prompt } }"
+            } else {
+                ""
+            };
+            std::fs::write(
+                &path,
+                format!("flow main(prompt: string) -> string {{ {contract} {body} }}"),
+            )
+            .unwrap();
+            let program = load_program(&path, &SourceRoots::default()).unwrap();
+            let session = std::sync::Arc::new(Session::open_ephemeral());
+            let turn = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
+            let executor = Executor::with_events(session.sink().clone());
+            run_interactive_flow(
+                &executor,
+                &program,
+                "main",
+                vec![("prompt".into(), Value::Str("request".into()))],
+                session.clone(),
+                turn.clone(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+            let messages = session.messages_full();
+            let replies: Vec<_> = messages
+                .iter()
+                .filter(|message| message.turn_id == turn && message.is_visible_assistant_reply())
+                .collect();
+            assert_eq!(
+                replies.len(),
+                usize::from(expected_origin.is_some()),
+                "{body}"
+            );
+            if let Some(origin) = expected_origin {
+                assert_eq!(replies[0].origin, origin);
+                assert_eq!(replies[0].text_concat(), "reply");
+            }
+        }
+    }
 
     #[tokio::test]
     async fn cancelling_model_test_stops_its_provider_stream() {

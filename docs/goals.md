@@ -43,6 +43,10 @@ Root and child goals use the same controller. An agent pausing its own goal with
 
 The TUI folds preceding work when a final answer is published, including direct `.at` calls after ordinary text streaming. The answer stays outside the fold. A streamed final-answer tool draft can preview the same fold; publication does not require that draft.
 
+`return` passes a value to the caller without displaying it. Interactive command, route, and startup entry points publish a successful ordinary flow's non-empty return value as an assistant message only when that root turn has no published reply. These results remain available in restored history and do not finalize an agent turn. Managed agents must publish through `final.answer`; the host does not convert their return values into replies. Background child messages and replies from other turns do not suppress a root result. `atman run` prints the flow's return value according to its command output contract.
+
+The TUI presents streaming drafts and replaces them with committed replies. The plain-text REPL displays committed assistant messages, including direct `final.answer` calls, without printing their return values again as system notes. Shutdown drains pending output before exiting.
+
 Draft previews, live publication, and history restoration share final-answer presentation, work-range selection, summaries, and per-fold tool/edit statistics. Publication finalizes the preview in place; child streams cannot retract a root preview. Work ranges respect turn boundaries, including Goal resume and background turns without a new user message. Each turn's execution records remain independently expandable, and retries or workflow restarts stay within their own turn; restoring history skips the folding animation.
 
 Message origin and model protocol role are independent. Goal continuation controls carry `internal` origin and remain hidden in the transcript after restoration. Watcher and child-result messages appear as status notes rather than user requests. These messages retain the `user` role when submitted to the model, and hidden controls still establish their turn boundaries during history restoration.

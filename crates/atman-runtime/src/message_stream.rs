@@ -164,6 +164,30 @@ impl MessageStream {
         acc.window_cache.clone()
     }
 
+    pub(crate) fn has_turn_reply(&self, turn_id: &crate::event::TurnId) -> bool {
+        let events = self.events.lock().expect("events poisoned");
+        let mut acc = self.acc.lock().expect("acc poisoned");
+        // Reuse root ownership without rebuilding full-history message caches.
+        for event in &events[acc.replayed..] {
+            acc.ownership.observe(&event.event);
+        }
+        events[acc.replayed..].iter().rev().any(|event| {
+            matches!(
+                &event.event,
+                crate::event::Event::AssistantMsg { message, flow_run_id, .. }
+                    if message.turn_id == *turn_id
+                        && message.is_visible_assistant_reply()
+                        && crate::projection::message_window::message_belongs_to_root(
+                            flow_run_id.as_ref(), &acc.ownership.spawned,
+                        )
+            )
+        }) || acc
+            .full_raw
+            .iter()
+            .rev()
+            .any(|(_, message)| message.turn_id == *turn_id && message.is_visible_assistant_reply())
+    }
+
     fn ensure_fresh_locked(&self, events: &[EventEnvelope], acc: &mut Acc) {
         if acc.replayed >= events.len() {
             return;

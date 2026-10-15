@@ -61,7 +61,6 @@ type WatchKeepalive = (
 pub struct TurnState {
     pub current_turn: Mutex<Option<TurnId>>,
     pub flow_cancel: Mutex<CancellationToken>,
-    pub streamed: std::sync::atomic::AtomicBool,
 }
 
 impl TurnState {
@@ -69,7 +68,6 @@ impl TurnState {
         Self {
             current_turn: Mutex::new(None),
             flow_cancel: Mutex::new(CancellationToken::new()),
-            streamed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -2316,6 +2314,21 @@ impl Session {
         self.message_stream.full_messages()
     }
 
+    /// Publish an ordinary flow's interactive return value when its root turn has no reply. This does not finalize an agent turn or notify a parent of a final answer.
+    pub async fn publish_flow_result(&self, turn_id: TurnId, text: String) -> bool {
+        if text.trim().is_empty() {
+            return false;
+        }
+        let _compact = self.acquire_compact_lock().await;
+        if self.message_stream.has_turn_reply(&turn_id) {
+            return false;
+        }
+        let mut message = Message::assistant_text(turn_id, text);
+        message.origin = crate::message::MessageOrigin::FlowResult;
+        self.append_message(message, None);
+        true
+    }
+
     pub fn messages_handle(&self) -> std::sync::Arc<std::sync::Mutex<Vec<Message>>> {
         self.messages.clone()
     }
@@ -2327,7 +2340,14 @@ impl Session {
     pub fn user_message_count(&self) -> usize {
         self.messages()
             .iter()
-            .filter(|m| matches!(m.role, MessageRole::User))
+            .filter(|m| {
+                m.role == MessageRole::User
+                    && matches!(
+                        m.origin,
+                        crate::message::MessageOrigin::User
+                            | crate::message::MessageOrigin::Interjection
+                    )
+            })
             .count()
     }
 
@@ -2629,22 +2649,7 @@ impl Session {
         .execute(self)
     }
 
-    pub fn mark_streamed(&self) {
-        self.turn
-            .streamed
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub fn take_streamed_flag(&self) -> bool {
-        self.turn
-            .streamed
-            .swap(false, std::sync::atomic::Ordering::Relaxed)
-    }
-
     pub fn end_turn(&self) {
-        self.turn
-            .streamed
-            .store(false, std::sync::atomic::Ordering::Relaxed);
         let turn_id = self.turn.current_turn.lock().unwrap().take();
         if let Some(turn_id) = turn_id {
             let mut submissions = self.submission_queue.lock().unwrap();

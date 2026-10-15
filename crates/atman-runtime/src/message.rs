@@ -83,6 +83,7 @@ pub enum MessageOrigin {
     Watcher,
     ChildResult,
     Interjection,
+    FlowResult,
     FinalAnswer,
     Internal,
 }
@@ -273,6 +274,16 @@ impl Message {
             turn_id,
             origin: MessageOrigin::User,
         }
+    }
+
+    /// Whether this committed message contains a user-visible assistant reply.
+    pub fn is_visible_assistant_reply(&self) -> bool {
+        self.role == MessageRole::Assistant
+            && self.origin != MessageOrigin::Internal
+            && self
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::Text { text } if !text.trim().is_empty()))
     }
 
     pub fn system_text(turn_id: TurnId, text: impl Into<String>) -> Self {

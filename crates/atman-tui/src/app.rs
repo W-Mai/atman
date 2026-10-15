@@ -4184,6 +4184,16 @@ impl AppState {
                 {
                     if message.origin == atman_runtime::message::MessageOrigin::FinalAnswer {
                         self.commit_final_answer_message(message);
+                    } else if message.origin == atman_runtime::message::MessageOrigin::FlowResult {
+                        let mut items = Vec::new();
+                        crate::history::flatten_message(
+                            message,
+                            &mut items,
+                            &std::collections::HashMap::new(),
+                        );
+                        for item in items {
+                            self.push_item(item);
+                        }
                     } else {
                         if atman_runtime::tools::final_answer::attempted(message) {
                             self.discard_completed_final_answer_draft();
@@ -5260,6 +5270,30 @@ mod tests {
             started_at: now,
             ended_at: Some(now),
         }
+    }
+
+    #[test]
+    fn flow_results_share_live_and_restored_message_rendering() {
+        let mut message = Message::assistant_text(
+            atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
+            "# Result\n\nReturned **content**.",
+        );
+        message.origin = atman_runtime::message::MessageOrigin::FlowResult;
+        let mut live = AppState::new("live".into(), None);
+        live.apply_stream_frame(StreamFrame::AssistantMsg {
+            flow_run_id: None,
+            message: message.clone(),
+        });
+        let mut restored = Vec::new();
+        crate::history::flatten_message(&message, &mut restored, &std::collections::HashMap::new());
+        for items in [&live.items[..], restored.as_slice()] {
+            assert!(matches!(
+                items,
+                [OutputItem::AssistantMd { md, streaming: false, .. }]
+                    if md == "# Result\n\nReturned **content**."
+            ));
+        }
+        assert!(live.work_folds.is_empty());
     }
 
     #[test]

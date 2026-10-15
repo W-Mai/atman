@@ -1069,7 +1069,9 @@ pub(crate) fn flatten_message_with_output_store(
                             level: NoteLevel::Info,
                         });
                     }
-                    MessageOrigin::Internal | MessageOrigin::FinalAnswer => {}
+                    MessageOrigin::Internal
+                    | MessageOrigin::FlowResult
+                    | MessageOrigin::FinalAnswer => {}
                 }
             }
         }
@@ -1836,7 +1838,7 @@ mod tests {
                     items.as_slice(),
                     [OutputItem::SystemNote { text, .. }] if text == if origin == MessageOrigin::Watcher { "Watcher notifications" } else { "Child results" }
                 )),
-                MessageOrigin::FinalAnswer => unreachable!(),
+                MessageOrigin::FlowResult | MessageOrigin::FinalAnswer => unreachable!(),
             }
             let request = atman_runtime::provider::LlmRequest {
                 model: "test-model".into(),

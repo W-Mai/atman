@@ -33,7 +33,6 @@ pub(crate) struct StreamingLlmStream<'a> {
     base: LlmStream<'a>,
     stream_tx: Sender<StreamFrame>,
     frame_tx: Option<Sender<StreamFrame>>,
-    session: Option<&'a Session>,
     entry: Option<&'a Arc<FlowEntry>>,
     flow_cancel: Option<CancellationToken>,
     watch_rules: Option<WatchRules>,
@@ -75,7 +74,6 @@ impl<'a> LlmStream<'a> {
             base: self,
             stream_tx: tx,
             frame_tx: None,
-            session: None,
             entry: None,
             flow_cancel: None,
             watch_rules: None,
@@ -153,7 +151,6 @@ impl<'a> LlmStream<'a> {
 impl<'a> StreamingLlmStream<'a> {
     pub(crate) fn with_session(mut self, session: &'a Session) -> Self {
         self.flow_cancel = Some(session.flow_cancel_token());
-        self.session = Some(session);
         self
     }
 
@@ -390,9 +387,6 @@ impl<'a> StreamingLlmStream<'a> {
         text: &str,
         cumulative_tokens: u64,
     ) {
-        if let Some(session) = self.session {
-            session.mark_streamed();
-        }
         self.base.mark_first_token();
         emit_stream_event(
             NodeEvent::LlmChunk {

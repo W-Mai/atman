@@ -452,7 +452,7 @@ fn repl_slash_command_runs_flow_from_config_dir() {
     std::fs::write(
         cmd_dir.join("greet.at"),
         r#"flow greet(who: string) -> string {
-    return "hi " + who
+    return final.answer(message: "hi " + who)
 }
 "#,
     )
@@ -476,7 +476,13 @@ fn repl_slash_command_runs_flow_from_config_dir() {
         .unwrap();
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("hi atman"), "stdout: {stdout}");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(stdout.matches("hi atman").count(), 1, "stdout: {stdout}");
+    assert!(!stdout.contains("[atman] hi atman"), "stdout: {stdout}");
 }
 
 #[test]

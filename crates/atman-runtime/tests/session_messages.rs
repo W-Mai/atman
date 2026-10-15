@@ -2,6 +2,88 @@ type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::session::Session;
 
+#[tokio::test]
+async fn interactive_returns_use_committed_root_turn_messages() {
+    use atman_runtime::event::Event;
+    type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
+    let session = Session::open_ephemeral();
+    let old_turn = TurnId::now();
+    let turn = TurnId::now();
+    let mut startup = Message::user_text(old_turn.clone(), "Session startup flow.");
+    startup.origin = MessageOrigin::Internal;
+    session.begin_turn(startup);
+    assert_eq!(session.user_message_count(), 0);
+    session.end_turn();
+    let mut old = Message::assistant_text(old_turn, "previous reply");
+    old.origin = MessageOrigin::FinalAnswer;
+    session.append_message(old, None);
+
+    let child = FlowRunId::now();
+    session.sink().emit(Event::FlowStart {
+        run_id: child.clone(),
+        flow_name: "child".into(),
+        parent_run_id: None,
+        parent_node_id: None,
+        spawned: true,
+    });
+    let mut child_reply = Message::assistant_text(turn.clone(), "child reply");
+    child_reply.origin = MessageOrigin::FinalAnswer;
+    session.sink().emit(Event::AssistantMsg {
+        turn_id: turn.clone(),
+        flow_run_id: Some(child),
+        message: child_reply,
+    });
+    let mut internal = Message::assistant_text(turn.clone(), "internal text");
+    internal.origin = MessageOrigin::Internal;
+    session.append_message(internal, None);
+
+    let mut stream = session.stream_subscribe();
+    let (first, second) = tokio::join!(
+        session.publish_flow_result(turn.clone(), "root reply".into()),
+        session.publish_flow_result(turn.clone(), "root reply".into()),
+    );
+    assert_ne!(first, second);
+    let atman_runtime::stream::StreamFrame::AssistantMsg { message, .. } =
+        stream.try_recv().unwrap()
+    else {
+        panic!("return value must use the assistant message channel");
+    };
+    assert_eq!(message.text_concat(), "root reply");
+    assert_eq!(message.origin, MessageOrigin::FlowResult);
+    assert!(stream.try_recv().is_err());
+    assert!(session.transcript_since_open().iter().any(|entry| {
+        matches!(entry, atman_runtime::TranscriptEntry::Message { message: restored, .. } if restored == &message)
+    }));
+
+    session
+        .compact_messages(
+            "summary".into(),
+            atman_runtime::compaction::CompactRange {
+                start: 0,
+                end: session.message_count(),
+                tokens_saved_estimate: 100,
+            },
+            10_000,
+        )
+        .unwrap();
+    assert!(!session.publish_flow_result(turn, "root reply".into()).await);
+
+    let final_turn = TurnId::now();
+    let mut final_reply = Message::assistant_text(final_turn.clone(), "final reply");
+    final_reply.origin = MessageOrigin::FinalAnswer;
+    session.append_message(final_reply, None);
+    assert!(
+        !session
+            .publish_flow_result(final_turn, "returned final reply".into())
+            .await
+    );
+    assert!(
+        !session
+            .publish_flow_result(TurnId::now(), " \n".into())
+            .await
+    );
+}
+
 fn user_msg(turn_id: TurnId, text: &str) -> Message {
     Message {
         role: MessageRole::User,

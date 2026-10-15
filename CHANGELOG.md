@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### 🐛 Fixes
+
+- **Interactive flow output** — Published replies are displayed once, including final answers delivered through tool arguments. Ordinary flow return values enter the message history through the interactive entry point; nested calls retain their return values without automatic output. Startup greetings use the same delivery path. Plain-text REPL output consumes committed messages, and the TUI retains streaming previews.
+
 ## [1.17.0] — 2026-10-14
 
 ### ✨ Features
