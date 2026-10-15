@@ -1,5 +1,6 @@
 //! Per-instance serialized storage work without blocking asynchronous executor threads.
 
+pub mod access;
 pub mod execution;
 pub mod host;
 pub mod input;

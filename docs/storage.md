@@ -129,6 +129,10 @@ The host routes both same-session and cross-session delivery by complete `FlowRe
 
 `select_default` changes only the session's view binding. It does not change execution state or permissions. Dropping catalog handles does not cancel instance handles held elsewhere. Host policies prepare eligible input using `flow_runtime::input::context_message` to retain message provenance; projection itself does not authenticate, consume, or authorize input.
 
+`RuntimeHost::bind_invocation` issues an opaque `FlowClient` for an authenticated admitted turn. Its operations derive the sender from that binding and check current grants before target lookup and again inside the target worker. Stale, paused, finishing, or unavailable source invocations cannot initiate peer operations. Catalog grant changes become visible only after their journal commit; already queued reads and controls recheck revocation before acting.
+
+The client exposes execution inspection, public final-answer reads, authorized private context reads, reliable interjections, and revision-checked execution controls. Public output excludes isolated branch publications. Each controller owns a distinct persistent pause key, so its resume cannot remove a user pause or another flow's pause. Cancellation requests cleanup without forging completion. A committed send may finish delivery after its source turn ends, but new receiver admission still checks current grants.
+
 The directory does not yet replace CLI/daemon session ownership. Grant management, outbound retry policy, managed-flow creation, and legacy history migration require the same host integration before those entry points switch storage.
 
 ## Owned send attempts

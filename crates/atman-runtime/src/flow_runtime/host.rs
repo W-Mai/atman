@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     io,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use tokio::sync::{mpsc, oneshot};
@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::FlowWorker;
 use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::access::{FlowGrant, SessionAccess};
 use crate::flow_store::inbox::{Acceptance, DeliveryRequest};
 
 use crate::flow_store::{
@@ -41,12 +42,14 @@ impl RuntimeHost {
         }
         let (commands, receiver) = mpsc::channel(64);
         let flows = FlowDirectory::default();
+        let access = Arc::new(RwLock::new(store.projection().access.clone()));
         let handle = SessionHandle {
             id,
             commands,
             flows: flows.clone(),
+            access: access.clone(),
         };
-        runtime.spawn(serve_catalog(store, flows, receiver));
+        runtime.spawn(serve_catalog(store, flows, access, receiver));
         sessions.insert(id, handle.clone());
         Ok(handle)
     }
@@ -93,6 +96,7 @@ pub struct SessionHandle {
     id: Uuid,
     commands: mpsc::Sender<CatalogCommand>,
     flows: FlowDirectory,
+    pub(super) access: Arc<RwLock<SessionAccess>>,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +106,11 @@ pub struct SessionSnapshot {
 }
 
 enum CatalogCommand {
+    Access {
+        change: AccessChange,
+        expected: CommitReceipt,
+        reply: oneshot::Sender<io::Result<CommitReceipt>>,
+    },
     Flow {
         operation: FlowOperation,
         reply: oneshot::Sender<io::Result<FlowWorker>>,
@@ -113,12 +122,47 @@ enum CatalogCommand {
     Snapshot(oneshot::Sender<io::Result<SessionSnapshot>>),
 }
 
+enum AccessChange {
+    Grant(FlowGrant),
+    Revoke(Uuid),
+}
+
 enum FlowOperation {
     Create(Box<FlowDescriptor>),
     Open(FlowInstanceId),
 }
 
 impl SessionHandle {
+    pub(super) fn is_stopped(&self) -> bool {
+        self.commands.is_closed()
+    }
+
+    /// Trusted host operation; this is not an unverified peer delegation endpoint.
+    pub async fn grant_access(
+        &self,
+        expected: CommitReceipt,
+        grant: FlowGrant,
+    ) -> io::Result<CommitReceipt> {
+        self.request(|reply| CatalogCommand::Access {
+            change: AccessChange::Grant(grant),
+            expected,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn revoke_access(
+        &self,
+        expected: CommitReceipt,
+        id: Uuid,
+    ) -> io::Result<CommitReceipt> {
+        self.request(|reply| CatalogCommand::Access {
+            change: AccessChange::Revoke(id),
+            expected,
+            reply,
+        })
+        .await
+    }
     pub fn id(&self) -> Uuid {
         self.id
     }
@@ -177,10 +221,34 @@ impl SessionHandle {
 async fn serve_catalog(
     mut store: SessionStore,
     flows: FlowDirectory,
+    access: Arc<RwLock<SessionAccess>>,
     mut commands: mpsc::Receiver<CatalogCommand>,
 ) {
     while let Some(command) = commands.recv().await {
         match command {
+            CatalogCommand::Access {
+                change,
+                expected,
+                reply,
+            } => {
+                let published = access.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let result = match change {
+                        AccessChange::Grant(grant) => store.grant_access(&expected, grant),
+                        AccessChange::Revoke(id) => store.revoke_access(&expected, id),
+                    };
+                    if result.is_ok() {
+                        *published.write().unwrap() = store.projection().access.clone();
+                    }
+                    (store, result)
+                })
+                .await;
+                let Ok((returned, result)) = result else {
+                    return;
+                };
+                store = returned;
+                let _ = reply.send(result);
+            }
             CatalogCommand::Snapshot(reply) => {
                 let _ = reply.send(Ok(SessionSnapshot {
                     catalog: store.projection().clone(),

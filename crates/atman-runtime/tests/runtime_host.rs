@@ -713,3 +713,285 @@ async fn abandoned_host_send_preserves_intent_and_cross_session_retry_survives_s
         .is_err()
     );
 }
+
+#[tokio::test]
+async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_ownership() {
+    use atman_runtime::flow_runtime::access::PeerControl;
+    use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let remote_info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let remote_session = host
+        .attach_session(root.create_session(remote_info.clone()).unwrap())
+        .unwrap();
+    let a_info = flow_descriptor(info.id);
+    let b_info = flow_descriptor(info.id);
+    let c_info = flow_descriptor(info.id);
+    let d_info = flow_descriptor(remote_info.id);
+    let a = session.create_flow(a_info.clone()).await.unwrap();
+    let b = session.create_flow(b_info.clone()).await.unwrap();
+    let c = session.create_flow(c_info.clone()).await.unwrap();
+    let d = remote_session.create_flow(d_info.clone()).await.unwrap();
+    for worker in [&a, &b, &c, &d] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    let lease = start(&a).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    let controller = host.bind_invocation(start(&c).await).await.unwrap();
+    host.deliver(
+        DeliveryRequest {
+            request_id: Uuid::new_v4(),
+            sender: SenderIdentity::User(Uuid::new_v4()),
+            recipient: b_info.address.clone(),
+            delivery: DeliveryMode::NextTurn,
+            cause: None,
+            correlation: None,
+            scope: None,
+            payload: InboxPayload::Interjection {
+                text: "private context".into(),
+            },
+        },
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    b.start_turn(
+        Executor::new(),
+        prepare(&b.snapshot().await.unwrap()).unwrap().unwrap(),
+    )
+    .await
+    .unwrap()
+    .wait()
+    .await
+    .unwrap()
+    .result
+    .unwrap();
+    assert_eq!(
+        client
+            .read_context(b_info.address.clone())
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    let output = client.read_output(b_info.address.clone()).await.unwrap();
+    assert_eq!(output.len(), 1);
+    assert_eq!(output[0].publication.message.text_concat(), "delivered");
+    assert!(client.inspect(b_info.address.clone()).await.is_ok());
+    assert!(client.inspect(d_info.address.clone()).await.is_err());
+    assert!(
+        client
+            .control(
+                b_info.address.clone(),
+                b.state().await.unwrap().revision(),
+                PeerControl::Pause
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .send(
+                d_info.address.clone(),
+                Uuid::new_v4(),
+                "unauthorized".into(),
+                DeliveryMode::AtBoundary
+            )
+            .await
+            .is_err()
+    );
+
+    let private = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: a_info.address.clone(),
+        target: AccessTarget::Flow(b_info.address.clone()),
+        actions: [FlowAction::ReadContext, FlowAction::Control].into(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, private.clone())
+        .await
+        .unwrap();
+    assert!(
+        client
+            .read_context(b_info.address.clone())
+            .await
+            .unwrap()
+            .iter()
+            .any(|message| message.text_concat() == "private context")
+    );
+    let other_control = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: c_info.address.clone(),
+        target: AccessTarget::Flow(b_info.address.clone()),
+        actions: [FlowAction::Control].into(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, other_control)
+        .await
+        .unwrap();
+    let user_key = Uuid::new_v4().into();
+    change(&b, FlowTransition::ExecutionPaused { key: user_key }).await;
+    let stale = b.state().await.unwrap().revision();
+    client
+        .control(b_info.address.clone(), stale, PeerControl::Pause)
+        .await
+        .unwrap();
+    assert!(
+        client
+            .control(b_info.address.clone(), stale, PeerControl::Resume)
+            .await
+            .is_err()
+    );
+    controller
+        .control(
+            b_info.address.clone(),
+            b.state().await.unwrap().revision(),
+            PeerControl::Pause,
+        )
+        .await
+        .unwrap();
+    assert_eq!(b.state().await.unwrap().pauses().len(), 3);
+    client
+        .control(
+            b_info.address.clone(),
+            b.state().await.unwrap().revision(),
+            PeerControl::Resume,
+        )
+        .await
+        .unwrap();
+    assert_eq!(b.state().await.unwrap().pauses().len(), 2);
+    controller
+        .control(
+            b_info.address.clone(),
+            b.state().await.unwrap().revision(),
+            PeerControl::Resume,
+        )
+        .await
+        .unwrap();
+    assert_eq!(b.state().await.unwrap().pauses().len(), 1);
+    assert!(b.state().await.unwrap().pauses().contains(&user_key));
+
+    let cross = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: a_info.address.clone(),
+        target: AccessTarget::Session(remote_info.id),
+        actions: [FlowAction::Send].into(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, cross.clone())
+        .await
+        .unwrap();
+    assert!(
+        client
+            .send(
+                d_info.address.clone(),
+                Uuid::new_v4(),
+                "allowed".into(),
+                DeliveryMode::AtBoundary
+            )
+            .await
+            .unwrap()
+            .pending_reason
+            .is_none()
+    );
+    assert_eq!(
+        d.snapshot().await.unwrap().pending[0].request.sender,
+        SenderIdentity::Flow(a_info.address.clone())
+    );
+    assert!(client.inspect(d_info.address.clone()).await.is_err());
+    session
+        .revoke_access(session.snapshot().await.unwrap().cursor, cross.id)
+        .await
+        .unwrap();
+    assert!(
+        client
+            .send(
+                d_info.address,
+                Uuid::new_v4(),
+                "revoked".into(),
+                DeliveryMode::AtBoundary
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(d.snapshot().await.unwrap().pending.len(), 1);
+    session
+        .revoke_access(session.snapshot().await.unwrap().cursor, private.id)
+        .await
+        .unwrap();
+    assert!(client.read_context(b_info.address.clone()).await.is_err());
+
+    change(
+        &a,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    let next = host.bind_invocation(start(&a).await).await.unwrap();
+    assert!(client.inspect(b_info.address.clone()).await.is_err());
+    assert!(next.inspect(b_info.address).await.is_ok());
+}
+
+#[tokio::test]
+async fn peer_reads_recheck_revocation_inside_the_target_owner() {
+    use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let a_info = flow_descriptor(info.id);
+    let b_info = flow_descriptor(info.id);
+    let a = session.create_flow(a_info.clone()).await.unwrap();
+    let b = session.create_flow(b_info.clone()).await.unwrap();
+    for worker in [&a, &b] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    let client = host.bind_invocation(start(&a).await).await.unwrap();
+    let grant = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: a_info.address.clone(),
+        target: AccessTarget::Flow(b_info.address.clone()),
+        actions: [FlowAction::ReadContext].into(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
+        .await
+        .unwrap();
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let target = b.clone();
+    let request = peer_request(&a_info.address, &b_info.address);
+    let blocking = tokio::spawn(async move {
+        target
+            .accept_input(request, move |_| {
+                let _ = entered.send(());
+                held.recv_timeout(Duration::from_secs(10)).unwrap();
+                Ok(())
+            })
+            .await
+    });
+    observed.await.unwrap();
+    let mut read = Box::pin(client.read_context(b_info.address));
+    // The initial authorization passed and the read is queued behind the held target command.
+    assert!(futures::poll!(&mut read).is_pending());
+    session
+        .revoke_access(session.snapshot().await.unwrap().cursor, grant.id)
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    blocking.await.unwrap().unwrap();
+    assert_eq!(
+        read.await.unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+}
