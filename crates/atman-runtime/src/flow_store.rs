@@ -5,6 +5,7 @@
 pub mod inbox;
 mod input;
 pub mod outbox;
+pub mod publication;
 pub mod waiter;
 
 use std::fs::File;
@@ -118,6 +119,7 @@ enum FlowFact {
         correlation: Uuid,
     },
     SendQueued(Box<outbox::SendIntent>),
+    MessagePublished(Box<publication::MessagePublication>),
     DeliveryConfirmed {
         request_id: Uuid,
         delivery: outbox::DeliveryReceipt,
@@ -126,6 +128,18 @@ enum FlowFact {
 
 impl FlowFact {
     fn validate_batch(facts: &[Self]) -> io::Result<()> {
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, Self::MessagePublished(_)))
+        {
+            return if matches!(facts, [Self::MessagePublished(_)]) {
+                Ok(())
+            } else {
+                Err(invalid(
+                    "message publication requires its own journal batch",
+                ))
+            };
+        }
         if !facts
             .iter()
             .any(|fact| matches!(fact, Self::InputCommitted(_)))
@@ -440,6 +454,7 @@ pub struct FlowStore {
     state: FlowInstance<AtmanUuid>,
     inbox: Inbox,
     outbox: outbox::Outbox,
+    publications: publication::Publications,
     cursor: CommitReceipt,
     projection_error: Option<io::Error>,
     pub recovered_tail: Option<RecoveredTail>,
@@ -466,6 +481,7 @@ impl FlowStore {
             state,
             inbox: Inbox::default(),
             outbox: outbox::Outbox::default(),
+            publications: publication::Publications::default(),
             cursor,
             projection_error: None,
             recovered_tail: None,
@@ -475,6 +491,7 @@ impl FlowStore {
     fn open(dir: &Path, owner: Arc<SessionOwner>, address: &FlowRef) -> io::Result<Self> {
         let mut projection: Option<(FlowDescriptor, FlowInstance<AtmanUuid>, Inbox)> = None;
         let mut outbox = outbox::Outbox::default();
+        let mut publications = publication::Publications::default();
         let mut cursor = None;
         let (journal, recovered_tail) = Journal::open(
             &dir.join("events.jsonl"),
@@ -514,6 +531,10 @@ impl FlowStore {
                         }
                         (Some((_, state, inbox)), FlowFact::InputCommitted(input)) => {
                             inbox.replay_input(state, *input, receipt.clone())?;
+                        }
+                        (Some((_, state, _)), FlowFact::MessagePublished(publication)) => {
+                            publications.validate(state, &publication)?;
+                            publications.apply(*publication, receipt.clone());
                         }
                         (Some((_, state, inbox)), FlowFact::SendQueued(intent)) => {
                             outbox.validate(state, &intent)?;
@@ -580,6 +601,7 @@ impl FlowStore {
             state,
             inbox,
             outbox,
+            publications,
             cursor: cursor.ok_or_else(|| invalid("empty flow journal"))?,
             projection_error: None,
             recovered_tail,

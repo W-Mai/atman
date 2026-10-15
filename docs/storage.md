@@ -39,6 +39,10 @@ These storage APIs do not start schedulers, grant permissions, migrate published
 
 ## Durable input acceptance
 
+`FlowStore::publish_message` commits an exact message with its owning turn lease, producing invocation, and stable publication ID. An identical retry returns the original receipt without appending or republishing; conflicting content fails. New publication requires a live matching turn, rejects cancellation and stale epochs, and permits delivery while a paused turn finishes. Message origin and role remain separate. Final-answer recognition stays in the existing message protocol rather than a second storage-specific classifier.
+
+`context_messages` merges committed input and published output in journal order. Reopening restores that context without invoking tools, replaying notifications, or executing the entry. Publications do not end the turn or change Goal state.
+
 `FlowStore::accept_input` persists a typed delivery request before returning `Acceptance`. User submissions retain text, images, invocation configuration, and presentation data. Interjections, flow events, watcher notifications, timers, and internal controls remain distinct payload variants with sender, recipient, correlation, cause, scope, and delivery mode. A protocol message role is not used as a provenance label.
 
 The host authenticates the sender before calling storage. A matching sender/request ID retry returns the original acceptance receipt and current disposition, including after restart, revocation, or closure. Reusing that identity with different content fails. New inputs additionally require an open instance, consistent source/payload categories, and a successful `authorize_new` callback. Host-only delivery types cannot be accepted as user or peer-authored controls.

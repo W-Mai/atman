@@ -68,6 +68,104 @@ fn start(flow: &mut FlowStore) -> TurnLease<AtmanUuid> {
 }
 
 #[test]
+fn publications_preserve_input_order_and_fence_stale_delivery_across_recovery() {
+    use atman_runtime::flow_store::publication::MessagePublication;
+    use atman_runtime::message::MessageOrigin;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let lease = start(&mut flow);
+    let first = MessagePublication {
+        id: Uuid::new_v4(),
+        lease: lease.clone(),
+        run: RunId::now(),
+        message: Message::assistant_text(lease.turn.clone(), "working"),
+    };
+    let first_record = flow.publish_message(first.clone()).unwrap();
+    flow.accept_input(
+        delivery(
+            &description.address,
+            SenderIdentity::User(Uuid::new_v4()),
+            "detail",
+        ),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let reserved = flow
+        .reserve_context_input(&lease, |_| true)
+        .unwrap()
+        .unwrap();
+    let input = Message::user_text(lease.turn.clone(), "detail");
+    flow.commit_input(
+        &reserved,
+        InputContent::Context {
+            messages: vec![input.clone()],
+        },
+    )
+    .unwrap();
+    change(
+        &mut flow,
+        FlowTransition::ExecutionPaused {
+            key: Uuid::now_v7().into(),
+        },
+    );
+    change(
+        &mut flow,
+        FlowTransition::PhaseChanged {
+            lease: lease.clone(),
+            phase: TurnPhase::Finishing,
+        },
+    );
+    let mut answer = first.clone();
+    answer.id = Uuid::new_v4();
+    answer.message = Message::assistant_text(lease.turn.clone(), "done");
+    answer.message.origin = MessageOrigin::FinalAnswer;
+    flow.publish_message(answer.clone()).unwrap();
+    let expected = vec![first.message.clone(), input, answer.message.clone()];
+    assert_eq!(flow.context_messages(), expected);
+    change(
+        &mut flow,
+        FlowTransition::TurnFinished {
+            lease: lease.clone(),
+            outcome: TurnOutcome::Completed,
+        },
+    );
+    let cursor = flow.cursor().clone();
+    assert_eq!(flow.publish_message(first.clone()).unwrap(), first_record);
+    assert_eq!(flow.cursor(), &cursor);
+    let mut stale = first.clone();
+    stale.id = Uuid::new_v4();
+    assert!(flow.publish_message(stale.clone()).is_err());
+    let mut conflict = first.clone();
+    conflict.message.parts.clear();
+    assert!(flow.publish_message(conflict).is_err());
+    drop(flow);
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(flow.context_messages(), expected);
+    assert_eq!(flow.publish_message(first).unwrap(), first_record);
+    let key = *flow.state().pauses().first().unwrap();
+    change(&mut flow, FlowTransition::ExecutionResumed { key });
+    let current = start(&mut flow);
+    assert!(flow.publish_message(stale.clone()).is_err());
+    stale.lease = current.clone();
+    assert!(flow.publish_message(stale.clone()).is_err());
+    stale.message.turn_id = current.turn.clone();
+    change(
+        &mut flow,
+        FlowTransition::PhaseChanged {
+            lease: current,
+            phase: TurnPhase::Cancelling,
+        },
+    );
+    assert!(flow.publish_message(stale).is_err());
+    assert_eq!(flow.context_messages(), expected);
+}
+
+#[test]
 fn separated_journals_restore_peers_and_ignore_corrupt_metadata_without_touching_legacy() {
     let dir = tempfile::tempdir().unwrap();
     let session_info = session_descriptor();

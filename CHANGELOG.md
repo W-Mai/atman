@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- Persist flow messages with idempotent publication receipts and restore input/output context in journal order.
+
 ### ✨ Features
 
 - **Embedded instance lifecycle** — `atman-rt` exposes persistent instance identities and a portable state machine with independent execution pauses, explicit interruption recovery, cleanup-aware closure, and turn leases that reject stale callbacks. Reply admission targets a live waiting turn without bypassing execution pauses. Hosts supply scheduling and persistence.
