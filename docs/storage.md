@@ -11,3 +11,28 @@ The writer serializes the complete batch before touching the file. A write or sy
 Recovery preserves an unterminated final record in an adjacent `.incomplete-<uuid>` file before removing it from the active journal. `RecoveredTail` reports the retained path, original offset, and byte count. Complete malformed records, broken digest chains, sequence gaps, unsupported schemas, or projection failures reject opening without skipping history. Recovery never executes flow code.
 
 Existing published session event files continue to use their existing reader and writer. They are not interpreted as fact journals or rewritten by this API. An embedding host must explicitly choose the new format and bind each journal to its session or flow identity.
+
+## Session and flow storage
+
+`flow_store::RuntimeStore::open(data_dir)` uses the isolated `runtime-v1` namespace. A `SessionStore` owns its container journal and an exclusive execution lease. Each `FlowStore` retains that lease while owning its independent journal. Another session owner cannot open the same container while any of those handles remain alive.
+
+```text
+runtime-v1/sessions/<session-id>/
+  events.jsonl
+  session.json
+  artifacts/
+  flows/<flow-instance-id>/
+    events.jsonl
+    flow.json
+    artifacts/
+```
+
+Container facts record session creation, instance registration, and default-view selection. Flow facts record the immutable creation request, source bundle, provenance, and lifecycle transitions. `created_by` is audit metadata, not control authority. The default flow is a view binding and has no privileged lifecycle.
+
+Creation durably prepares a flow before registering its address in the container. An unregistered prepared directory can be reconciled by retrying the same creation request and descriptor; it cannot be opened through the session catalog. Reusing a request with different creation data fails. Incomplete creation without a committed creation fact fails explicitly and preserves its files for diagnosis.
+
+Flow transitions validate an expected state revision, apply to a private candidate, and publish that candidate only after the journal commit succeeds. Completing an invocation preserves the instance. Reopening an active invocation records `HostLost` without executing its entry; existing pause keys remain. Closing invocations retain cleanup obligations, and interrupted instances require explicit recovery before another turn can start.
+
+`session.json` and `flow.json` are replaceable projections with a committed source cursor. They are rebuilt from journals on opening, even when missing or malformed. `take_projection_error` reports cache-write failures without withdrawing an already committed fact. Source bodies remain in the creation fact; reading history does not require a reachable project checkout.
+
+These storage APIs do not start schedulers, grant permissions, migrate published sessions, or switch the CLI/daemon to a different data format. Hosts authorize commands, validate entry programs, and decide when restored instances may execute.

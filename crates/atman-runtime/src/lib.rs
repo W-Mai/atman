@@ -21,6 +21,7 @@ pub mod executor;
 pub mod flow_authority;
 pub mod flow_meta;
 pub mod flow_registry;
+pub mod flow_store;
 pub mod flow_workspace;
 pub mod form;
 pub mod fs_access;

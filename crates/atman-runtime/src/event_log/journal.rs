@@ -210,7 +210,7 @@ impl Journal {
     }
 }
 
-fn private_file_options() -> OpenOptions {
+pub(crate) fn private_file_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.write(true);
     #[cfg(unix)]
@@ -221,7 +221,7 @@ fn private_file_options() -> OpenOptions {
     options
 }
 
-fn sync_parent(path: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid("journal has no parent directory"))?;
