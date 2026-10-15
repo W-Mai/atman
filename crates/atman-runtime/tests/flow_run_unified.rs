@@ -19,26 +19,26 @@ use atman_runtime::tools::agent_ctrl::{FlowInterject, FlowRegistry};
 use atman_runtime::{Executor, tools};
 type Value = atman_rt::Value<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
-static HOME_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static CONFIG_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-struct HomeGuard(Option<std::ffi::OsString>);
+struct ConfigGuard(Option<std::ffi::OsString>);
 
-impl HomeGuard {
-    fn set(home: &std::path::Path) -> Self {
-        let old = std::env::var_os("HOME");
+impl ConfigGuard {
+    fn set(config: &std::path::Path) -> Self {
+        let old = std::env::var_os("ATMAN_CONFIG_DIR");
         unsafe {
-            std::env::set_var("HOME", home);
+            std::env::set_var("ATMAN_CONFIG_DIR", config);
         }
         Self(old)
     }
 }
 
-impl Drop for HomeGuard {
+impl Drop for ConfigGuard {
     fn drop(&mut self) {
         unsafe {
             match self.0.take() {
-                Some(old) => std::env::set_var("HOME", old),
-                None => std::env::remove_var("HOME"),
+                Some(old) => std::env::set_var("ATMAN_CONFIG_DIR", old),
+                None => std::env::remove_var("ATMAN_CONFIG_DIR"),
             }
         }
     }
@@ -373,7 +373,7 @@ async fn flow_interject_unknown_handle_errors() {
 
 #[tokio::test]
 async fn flow_interject_cancels_running_subagent_llm() {
-    let _home_lock = HOME_TEST_LOCK.lock().await;
+    let _config_lock = CONFIG_TEST_LOCK.lock().await;
     let _registry =
         common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
             "mock", "mock", 100_000, None,
@@ -402,7 +402,7 @@ flow test_flow(goal: string) -> string {
     let mut f = std::fs::File::create(commands_dir.join("test_interject.at")).unwrap();
     f.write_all(flow_src.as_bytes()).unwrap();
 
-    let _home = HomeGuard::set(tmp.path());
+    let _config = ConfigGuard::set(commands_dir.parent().unwrap());
 
     let registry = Arc::new(FlowRegistry::new());
     let providers = atman_runtime::provider::ProviderRegistry::new();
@@ -493,7 +493,7 @@ flow test_flow(goal: string) -> string {
 
 #[tokio::test]
 async fn l1_nudge_text_appears_in_entry_messages() {
-    let _home_lock = HOME_TEST_LOCK.lock().await;
+    let _config_lock = CONFIG_TEST_LOCK.lock().await;
     let _registry =
         common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
             "mock", "mock", 100_000, None,
@@ -518,7 +518,7 @@ flow test_flow(goal: string) -> string {
     let mut f = std::fs::File::create(commands_dir.join("test_l1.at")).unwrap();
     f.write_all(flow_src.as_bytes()).unwrap();
 
-    let _home = HomeGuard::set(tmp.path());
+    let _config = ConfigGuard::set(commands_dir.parent().unwrap());
 
     let registry = Arc::new(FlowRegistry::new());
     let providers = atman_runtime::provider::ProviderRegistry::new();

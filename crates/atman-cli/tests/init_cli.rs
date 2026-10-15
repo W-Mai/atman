@@ -24,7 +24,7 @@ fn init_writes_config_tree_and_prints_next_steps() {
     let cfg = tmp.path().join("atman");
     let (out, err, code) = run_init(&cfg);
     assert_eq!(code, 0, "stderr={err}");
-    assert!(out.contains("wrote 14 template"), "want write count: {out}");
+    assert!(out.contains("wrote 11 template"), "want write count: {out}");
     assert!(out.contains("next steps:"), "want next-steps block: {out}");
     for entry in [
         "config.toml",
@@ -37,9 +37,6 @@ fn init_writes_config_tree_and_prints_next_steps() {
         "prompts/spec.md",
         "prompts/spec-questions.md",
         "prompts/spec-design.md",
-        "prompts/loop-disposition.md",
-        "prompts/loop-continuation.md",
-        "prompts/loop-action.md",
         "prompts/loop-final-answer.md",
     ] {
         assert!(
@@ -121,21 +118,11 @@ fn repl_goal_builtin_set_show_clear() {
         .expect("write");
     let out = child.wait_with_output().expect("wait");
     let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.matches("no goal set").count(), 2, "{stdout}");
+    assert_eq!(stdout.matches("goal updated").count(), 2, "{stdout}");
     assert!(
-        stdout.contains("no session goal set"),
-        "want empty-goal hint: {stdout}"
-    );
-    assert!(
-        stdout.contains("goal set: ship an agent"),
-        "want set confirmation: {stdout}"
-    );
-    assert!(
-        stdout.contains("goal: ship an agent"),
+        stdout.contains("Goal · Active: ship an agent"),
         "want current goal readback: {stdout}"
-    );
-    assert!(
-        stdout.contains("goal cleared"),
-        "want clear confirmation: {stdout}"
     );
 }
 
