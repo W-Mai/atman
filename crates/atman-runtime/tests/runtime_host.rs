@@ -683,8 +683,14 @@ async fn same_and_cross_session_delivery_share_admission_without_parent_lifecycl
     }
     let pause = Uuid::new_v4().into();
     change(&b, FlowTransition::ExecutionPaused { key: pause }).await;
-    let b_scheduler = b.schedule(Executor::new(), prepare).unwrap();
-    let c_scheduler = c.schedule(Executor::new(), prepare).unwrap();
+    a_session
+        .schedule_flow(local.address.instance_id.clone(), Executor::new(), prepare)
+        .await
+        .unwrap();
+    b_session
+        .schedule_flow(remote.address.instance_id.clone(), Executor::new(), prepare)
+        .await
+        .unwrap();
     let mut sent = Vec::new();
     for recipient in [local.address.clone(), remote.address.clone()] {
         let request = DeliveryRequest {
@@ -770,8 +776,14 @@ async fn same_and_cross_session_delivery_share_admission_without_parent_lifecycl
         io::ErrorKind::PermissionDenied
     );
     assert!(c.snapshot().await.unwrap().pending.is_empty());
-    b_scheduler.stop().await.unwrap();
-    c_scheduler.stop().await.unwrap();
+    a_session
+        .stop_scheduling(b.address().instance_id.clone())
+        .await
+        .unwrap();
+    b_session
+        .stop_scheduling(c.address().instance_id.clone())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1576,4 +1588,200 @@ async fn cross_session_observation_retains_cursor_on_revocation_and_recovers_aft
     })
     .await
     .unwrap();
+}
+
+async fn wait_answers(worker: &FlowWorker, count: usize) {
+    let mut commits = worker.subscribe_commits();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            commits.borrow_and_update();
+            let snapshot = worker.snapshot().await.unwrap();
+            if snapshot.state.can_start_turn()
+                && worker
+                    .context()
+                    .messages()
+                    .iter()
+                    .filter(|message| message.origin == MessageOrigin::FinalAnswer)
+                    .count()
+                    == count
+            {
+                break;
+            }
+            commits.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("scheduled answer was not delivered");
+}
+
+#[tokio::test]
+async fn catalog_owned_schedulers_run_subscribed_inputs_after_callers_and_views_detach() {
+    use atman_runtime::flow_runtime::scheduler::SchedulingStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let a = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let b = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&a, FlowTransition::Activated).await;
+    let lease = start(&a).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    client.watch_answers(answer_watch(&b)).await.unwrap();
+    drop(client);
+    change(
+        &a,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    let a_ref = a.address().clone();
+    let b_ref = b.address().clone();
+    // Dropping the result receivers and views must not withdraw execution ownership.
+    session
+        .schedule_flow(a_ref.instance_id.clone(), Executor::new(), prepare)
+        .await
+        .unwrap();
+    session
+        .schedule_flow(b_ref.instance_id.clone(), Executor::new(), prepare)
+        .await
+        .unwrap();
+    assert!(
+        session
+            .schedule_flow(b_ref.instance_id.clone(), Executor::new(), prepare)
+            .await
+            .is_err()
+    );
+    let pause = Uuid::new_v4().into();
+    change(&a, FlowTransition::ExecutionPaused { key: pause }).await;
+    drop(a);
+    drop(b);
+    drop(session);
+    let a = host.flow(&a_ref).await.unwrap();
+    let b = host.flow(&b_ref).await.unwrap();
+    // Installing a controller does not activate the instance or admit arbitrary input.
+    let initial = peer_request(&a_ref, &b_ref);
+    assert!(host.deliver(initial.clone(), |_| Ok(())).await.is_err());
+    assert!(matches!(
+        b.state().await.unwrap().state(),
+        InstanceState::Prepared
+    ));
+    assert!(b.snapshot().await.unwrap().pending.is_empty());
+    change(&b, FlowTransition::Activated).await;
+    host.deliver(initial, |_| Ok(())).await.unwrap();
+    wait_answers(&b, 1).await;
+    wait_inputs(&a, 1).await;
+    assert!(
+        a.context()
+            .messages()
+            .iter()
+            .all(|m| m.origin != MessageOrigin::FinalAnswer)
+    );
+    change(&a, FlowTransition::ExecutionResumed { key: pause }).await;
+    wait_answers(&a, 1).await;
+    assert!(a.snapshot().await.unwrap().pending.is_empty());
+    let session = host.session(info.id).unwrap();
+    assert_eq!(
+        *session
+            .scheduling_status(a_ref.instance_id.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .borrow(),
+        SchedulingStatus::Running
+    );
+    // Only explicit stopping releases admission; input stays durable until a new binding is installed.
+    session
+        .stop_scheduling(a_ref.instance_id.clone())
+        .await
+        .unwrap();
+    host.deliver(peer_request(&b_ref, &a_ref), |_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(a.snapshot().await.unwrap().pending.len(), 1);
+    session
+        .schedule_flow(a_ref.instance_id.clone(), Executor::new(), prepare)
+        .await
+        .unwrap();
+    wait_answers(&a, 2).await;
+    let mut status = session
+        .scheduling_status(a_ref.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(a);
+    drop(b);
+    drop(session);
+    drop(host);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if *status.borrow_and_update() != SchedulingStatus::Running {
+                break;
+            }
+            status.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("host scheduler kept the directory alive");
+    assert_eq!(*status.borrow(), SchedulingStatus::Stopped);
+}
+
+#[tokio::test]
+async fn host_scheduler_failures_remain_observable_and_replacement_keeps_unconsumed_input() {
+    use atman_runtime::flow_runtime::scheduler::SchedulingStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let worker = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&worker, FlowTransition::Activated).await;
+    let mut status = session
+        .schedule_flow(
+            worker.address().instance_id.clone(),
+            Executor::new(),
+            |_| panic!("preparation panic"),
+        )
+        .await
+        .unwrap();
+    host.deliver(peer_request(worker.address(), worker.address()), |_| Ok(()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(*status.borrow_and_update(), SchedulingStatus::Failed(_)) {
+                break;
+            }
+            status.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        *session
+            .scheduling_status(worker.address().instance_id.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .borrow(),
+        SchedulingStatus::Failed(_)
+    ));
+    assert_eq!(worker.snapshot().await.unwrap().pending.len(), 1);
+    assert!(worker.state().await.unwrap().can_start_turn());
+    session
+        .schedule_flow(
+            worker.address().instance_id.clone(),
+            Executor::new(),
+            prepare,
+        )
+        .await
+        .unwrap();
+    wait_answers(&worker, 1).await;
+    assert!(worker.snapshot().await.unwrap().pending.is_empty());
 }

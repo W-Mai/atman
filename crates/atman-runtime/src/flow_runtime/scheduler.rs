@@ -6,6 +6,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use futures::FutureExt;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::{FlowSnapshot, FlowWorker, execution::TurnRequest};
@@ -17,9 +19,25 @@ use crate::{Executor, flow_store::invalid};
 pub struct FlowScheduler {
     stop: CancellationToken,
     task: Option<tokio::task::JoinHandle<io::Result<()>>>,
+    status: watch::Receiver<SchedulingStatus>,
 }
 
+/// Scheduling ownership is separate from the execution state of an admitted turn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SchedulingStatus {
+    Running,
+    Stopped,
+    Failed(String),
+}
+
+pub(crate) type PrepareTurn =
+    Box<dyn FnMut(&FlowSnapshot) -> io::Result<Option<TurnRequest>> + Send>;
+
 impl FlowScheduler {
+    pub fn subscribe_status(&self) -> watch::Receiver<SchedulingStatus> {
+        self.status.clone()
+    }
+
     pub async fn stop(mut self) -> io::Result<()> {
         self.stop.cancel();
         self.task
@@ -70,7 +88,8 @@ impl FlowWorker {
         let worker = self.clone();
         let stop = CancellationToken::new();
         let stopping = stop.clone();
-        let task = runtime.spawn(async move {
+        let (status_tx, status) = watch::channel(SchedulingStatus::Running);
+        let execution = async move {
             let _ownership = ownership;
             let mut commits = worker.subscribe_commits();
             loop {
@@ -115,10 +134,22 @@ impl FlowWorker {
                     }
                 }
             }
+        };
+        let task = runtime.spawn(async move {
+            let result = std::panic::AssertUnwindSafe(execution)
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| Err(io::Error::other("instance scheduler panicked")));
+            status_tx.send_replace(match &result {
+                Ok(()) => SchedulingStatus::Stopped,
+                Err(error) => SchedulingStatus::Failed(error.to_string()),
+            });
+            result
         });
         Ok(FlowScheduler {
             stop,
             task: Some(task),
+            status,
         })
     }
 }

@@ -113,6 +113,8 @@ The worker starts and owns the execution task before returning a `TurnTicket`. D
 
 After a completed turn, the scheduler rechecks pending input and can start another turn on the same instance. Interrupted execution requires explicit recovery. Preparation or storage failures stop the scheduler and remain observable through `FlowScheduler::wait`. `stop` or dropping the scheduler handle prevents further scheduling; already queued admission commands settle, and admitted turns retain their execution and terminal commit obligations. Explicit execution controls pause or cancel a turn. A stopped scheduler releases its ownership so another host controller can attach.
 
+`SessionHandle::schedule_flow` installs this same controller under catalog ownership. Views and requesting invocations receive a status stream; dropping it does not stop admission. `scheduling_status` reports Running, Stopped, or Failed independently of the flow's execution state. Preparation panics become observable scheduling failures and retain unconsumed input. A live controller rejects replacement; `stop_scheduling` relinquishes admission without cancelling an admitted turn. A failed controller can be explicitly replaced, and reopening a stopped storage worker releases its previous controller before binding another writer. Catalog shutdown stops owned controllers. Recovered instances require a fresh trusted executor and preparation policy; reading history does not grant execution authority.
+
 Input policy, instance directory ownership, management authorization, and CLI/daemon integration remain host responsibilities. Automatic admission does not assign root privileges or infer a goal from message text.
 
 ## Host directory

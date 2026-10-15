@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Host-owned scheduling** — Session catalogs retain automatic flow admission after views and callers detach. Controller status distinguishes scheduling failures from execution state, preserves pending input, and permits explicit replacement without cancelling admitted turns.
+
 - **Owned answer observation** — Host catalogs deliver subscribed public answers independently of active turns and execution pauses. Registration retries preserve source positions, live grants gate delivery, and session attachment or restored access resumes catch-up. Blocked sources expose retryable errors without starting empty turns.
 
 - **Durable answer subscriptions** — Receiver journals commit subscription progress with matched inbox input. A final answer matching multiple subscriptions is delivered once with every matching reason; cancellation, pauses, restart, and incomplete writes preserve delivery ownership.

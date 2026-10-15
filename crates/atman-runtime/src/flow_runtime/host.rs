@@ -10,7 +10,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
-use super::FlowWorker;
+use super::{
+    FlowSnapshot, FlowWorker,
+    execution::TurnRequest,
+    scheduler::{FlowScheduler, PrepareTurn, SchedulingStatus},
+};
 use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::access::{FlowGrant, SessionAccess};
 use crate::flow_store::inbox::{Acceptance, DeliveryRequest};
@@ -157,6 +161,20 @@ pub struct SessionSnapshot {
 }
 
 enum CatalogCommand {
+    Schedule {
+        id: FlowInstanceId,
+        executor: Box<crate::Executor>,
+        prepare: PrepareTurn,
+        reply: oneshot::Sender<io::Result<watch::Receiver<SchedulingStatus>>>,
+    },
+    StopScheduling {
+        id: FlowInstanceId,
+        reply: oneshot::Sender<io::Result<()>>,
+    },
+    SchedulingStatus {
+        id: FlowInstanceId,
+        reply: oneshot::Sender<io::Result<Option<watch::Receiver<SchedulingStatus>>>>,
+    },
     Access {
         change: AccessChange,
         expected: CommitReceipt,
@@ -216,6 +234,39 @@ impl SessionHandle {
     }
     pub fn id(&self) -> Uuid {
         self.id
+    }
+
+    /// Install automatic admission under catalog ownership. Dropping the returned status receiver
+    /// or the requesting view does not stop execution. A live controller must be stopped explicitly
+    /// before replacement; recovered journals require a fresh trusted execution binding.
+    pub async fn schedule_flow(
+        &self,
+        id: FlowInstanceId,
+        executor: crate::Executor,
+        prepare: impl FnMut(&FlowSnapshot) -> io::Result<Option<TurnRequest>> + Send + 'static,
+    ) -> io::Result<watch::Receiver<SchedulingStatus>> {
+        self.open_flow(id.clone()).await?;
+        self.request(|reply| CatalogCommand::Schedule {
+            id,
+            executor: Box::new(executor),
+            prepare: Box::new(prepare),
+            reply,
+        })
+        .await
+    }
+
+    /// Stop automatic admission, leaving admitted execution and persistent pause keys unchanged.
+    pub async fn stop_scheduling(&self, id: FlowInstanceId) -> io::Result<()> {
+        self.request(|reply| CatalogCommand::StopScheduling { id, reply })
+            .await
+    }
+
+    pub async fn scheduling_status(
+        &self,
+        id: FlowInstanceId,
+    ) -> io::Result<Option<watch::Receiver<SchedulingStatus>>> {
+        self.request(|reply| CatalogCommand::SchedulingStatus { id, reply })
+            .await
     }
 
     async fn request<T>(
@@ -278,8 +329,53 @@ async fn serve_catalog(
 ) {
     // Catalog lifetime owns observation, independently of execution and frontend handles.
     let mut observers: HashMap<FlowInstanceId, AbortOnDropHandle<()>> = HashMap::new();
+    let mut schedulers: HashMap<FlowInstanceId, FlowScheduler> = HashMap::new();
     while let Some(command) = commands.recv().await {
         match command {
+            CatalogCommand::Schedule {
+                id,
+                executor,
+                prepare,
+                reply,
+            } => {
+                let worker = flows
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .filter(|w| !w.is_stopped())
+                    .cloned();
+                let result = match worker {
+                    None => Err(invalid("instance storage is unavailable")),
+                    Some(worker) => {
+                        if schedulers.get(&id).is_some_and(|controller| {
+                            *controller.subscribe_status().borrow() == SchedulingStatus::Running
+                        }) {
+                            Err(invalid("instance already has a host scheduler"))
+                        } else {
+                            // Await terminal ownership release before installing a replacement.
+                            if let Some(previous) = schedulers.remove(&id) {
+                                let _ = previous.stop().await;
+                            }
+                            worker.schedule(*executor, prepare).map(|controller| {
+                                let status = controller.subscribe_status();
+                                schedulers.insert(id, controller);
+                                status
+                            })
+                        }
+                    }
+                };
+                let _ = reply.send(result);
+            }
+            CatalogCommand::StopScheduling { id, reply } => {
+                let result = match schedulers.remove(&id) {
+                    Some(controller) => controller.stop().await,
+                    None => Ok(()),
+                };
+                let _ = reply.send(result);
+            }
+            CatalogCommand::SchedulingStatus { id, reply } => {
+                let _ = reply.send(Ok(schedulers.get(&id).map(FlowScheduler::subscribe_status)));
+            }
             CatalogCommand::Access {
                 change,
                 expected,
@@ -355,6 +451,9 @@ async fn serve_catalog(
                     continue;
                 }
                 flows.lock().unwrap().remove(&id);
+                if let Some(controller) = schedulers.remove(&id) {
+                    let _ = controller.stop().await;
+                }
                 let result = tokio::task::spawn_blocking(move || {
                     let result = match operation {
                         FlowOperation::Create(descriptor) => store.create_flow(*descriptor),
