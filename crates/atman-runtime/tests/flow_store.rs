@@ -7,6 +7,7 @@ use atman_runtime::event::AtmanUuid;
 use atman_runtime::flow_store::inbox::{
     DeliveryMode, DeliveryRequest, InboxDisposition, InboxPayload, InputContent, SenderIdentity,
 };
+use atman_runtime::flow_store::waiter::{ReplyStatus, ReplyWaiter};
 use atman_runtime::flow_store::{
     EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowStore, FlowTransition,
     RuntimeStore, SessionDescriptor,
@@ -755,4 +756,340 @@ fn torn_input_batch_restores_pending_messages_without_a_ghost_turn() {
     flow.commit_input(&next, invocation_content(next.lease()))
         .unwrap();
     assert_eq!(flow.committed_inputs().len(), 1);
+}
+
+fn waiting_flow() -> (
+    tempfile::TempDir,
+    atman_runtime::flow_store::SessionStore,
+    FlowStore,
+    ReplyWaiter,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut flow = session.create_flow(descriptor(info.id)).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let lease = start(&mut flow);
+    let waiter = ReplyWaiter {
+        correlation: Uuid::new_v4(),
+        lease,
+        sender: SenderIdentity::Flow(FlowRef {
+            session_id: info.id.into(),
+            instance_id: FlowInstanceId::now(),
+        }),
+    };
+    flow.register_reply_waiter(waiter.clone()).unwrap();
+    (dir, session, flow, waiter)
+}
+
+fn reply_request(flow: &FlowStore, waiter: &ReplyWaiter) -> DeliveryRequest {
+    let mut request = delivery(&flow.descriptor().address, waiter.sender.clone(), "reply");
+    request.correlation = Some(waiter.correlation);
+    request
+}
+
+fn wait_phase(flow: &mut FlowStore, waiter: &ReplyWaiter) {
+    change(
+        flow,
+        FlowTransition::PhaseChanged {
+            lease: waiter.lease.clone(),
+            phase: TurnPhase::Waiting(atman_rt::WaitReason::Reply),
+        },
+    );
+}
+
+fn reply_content(waiter: &ReplyWaiter) -> InputContent {
+    InputContent::WaitingContinuation {
+        correlation: waiter.correlation,
+        value: serde_json::json!({ "result": 42 }),
+    }
+}
+
+#[test]
+fn replies_share_inbox_ownership_and_cannot_be_stolen_by_context_or_foreign_senders() {
+    let (_dir, _session, mut flow, waiter) = waiting_flow();
+    let request = reply_request(&flow, &waiter);
+    let mut foreign = request.clone();
+    foreign.sender = SenderIdentity::User(Uuid::new_v4());
+    let unrelated = flow.accept_input(foreign, |_| Ok(())).unwrap();
+    let mut deferred = request.clone();
+    deferred.request_id = Uuid::new_v4();
+    deferred.delivery = DeliveryMode::NextTurn;
+    let deferred = flow.accept_input(deferred, |_| Ok(())).unwrap();
+    let first = flow.accept_input(request.clone(), |_| Ok(())).unwrap();
+    let extra = flow
+        .accept_input(reply_request(&flow, &waiter), |_| Ok(()))
+        .unwrap();
+    let ordinary = flow
+        .reserve_context_input(&waiter.lease, |_| true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ordinary.message_ids(), &[unrelated.message_id]);
+    assert!(
+        flow.reserve_reply_input(&waiter.lease, waiter.correlation)
+            .is_err()
+    );
+    wait_phase(&mut flow, &waiter);
+    assert!(!flow.release_input(&ordinary));
+    let batch = flow
+        .reserve_reply_input(&waiter.lease, waiter.correlation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(batch.message_ids(), &[first.message_id]);
+    assert!(
+        flow.reserve_reply_input(&waiter.lease, waiter.correlation)
+            .unwrap()
+            .is_none()
+    );
+    let before = flow.cursor().clone();
+    let wrong = InputContent::WaitingContinuation {
+        correlation: Uuid::new_v4(),
+        value: serde_json::json!(42),
+    };
+    assert!(flow.commit_input(&batch, wrong).is_err());
+    assert_eq!(flow.cursor(), &before);
+    let receipt = flow.commit_input(&batch, reply_content(&waiter)).unwrap();
+    assert_eq!(
+        flow.reply_waiters()[0].status,
+        ReplyStatus::Delivered {
+            message_id: first.message_id,
+            by: receipt.clone()
+        }
+    );
+    assert_eq!(flow.committed_inputs()[0].input.lease, waiter.lease);
+    assert_eq!(
+        flow.committed_inputs()[0].input.content,
+        reply_content(&waiter)
+    );
+    assert!(
+        flow.reserve_reply_input(&waiter.lease, waiter.correlation)
+            .is_err()
+    );
+    assert_eq!(
+        flow.accept_input(request, |_| panic!("retry"))
+            .unwrap()
+            .disposition,
+        InboxDisposition::InputCommitted { by: receipt }
+    );
+    assert_eq!(
+        flow.pending_inputs()
+            .map(|input| input.id)
+            .collect::<Vec<_>>(),
+        [unrelated.message_id, deferred.message_id, extra.message_id]
+    );
+    change(
+        &mut flow,
+        FlowTransition::PhaseChanged {
+            lease: waiter.lease.clone(),
+            phase: TurnPhase::Running,
+        },
+    );
+    let ordinary = flow
+        .reserve_context_input(&waiter.lease, |_| true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ordinary.message_ids(),
+        &[unrelated.message_id, extra.message_id]
+    );
+}
+
+#[test]
+fn paused_and_cancelled_waiters_retain_replies_and_reject_late_commits() {
+    let (_dir, _session, mut flow, waiter) = waiting_flow();
+    let accepted = flow
+        .accept_input(reply_request(&flow, &waiter), |_| Ok(()))
+        .unwrap();
+    wait_phase(&mut flow, &waiter);
+    let old = flow
+        .reserve_reply_input(&waiter.lease, waiter.correlation)
+        .unwrap()
+        .unwrap();
+    let key = AtmanUuid(Uuid::new_v4());
+    change(&mut flow, FlowTransition::ExecutionPaused { key });
+    assert!(flow.commit_input(&old, reply_content(&waiter)).is_err());
+    assert!(
+        flow.reserve_reply_input(&waiter.lease, waiter.correlation)
+            .is_err()
+    );
+    assert_eq!(flow.reply_waiters()[0].status, ReplyStatus::Pending);
+    change(&mut flow, FlowTransition::ExecutionResumed { key });
+    let current = flow
+        .reserve_reply_input(&waiter.lease, waiter.correlation)
+        .unwrap()
+        .unwrap();
+    let cancelled = flow
+        .cancel_reply_waiter(&waiter.lease, waiter.correlation)
+        .unwrap();
+    assert!(matches!(cancelled.status, ReplyStatus::Cancelled { .. }));
+    assert!(flow.commit_input(&current, reply_content(&waiter)).is_err());
+    assert_eq!(
+        flow.register_reply_waiter(waiter.clone()).unwrap(),
+        cancelled
+    );
+    change(
+        &mut flow,
+        FlowTransition::PhaseChanged {
+            lease: waiter.lease.clone(),
+            phase: TurnPhase::Running,
+        },
+    );
+    let ordinary = flow
+        .reserve_context_input(&waiter.lease, |_| true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ordinary.message_ids(), &[accepted.message_id]);
+    assert!(!flow.release_input(&old));
+    assert!(!flow.release_input(&current));
+    flow.commit_input(&ordinary, context_content(&waiter.lease))
+        .unwrap();
+    let mut reused = waiter.clone();
+    reused.sender = SenderIdentity::User(Uuid::new_v4());
+    assert!(flow.register_reply_waiter(reused).is_err());
+}
+
+#[test]
+fn lost_waiting_turn_releases_uncommitted_replies_but_retains_delivered_input() {
+    for committed in [false, true] {
+        let (_dir, session, mut flow, waiter) = waiting_flow();
+        wait_phase(&mut flow, &waiter);
+        let accepted = flow
+            .accept_input(reply_request(&flow, &waiter), |_| Ok(()))
+            .unwrap();
+        let batch = flow
+            .reserve_reply_input(&waiter.lease, waiter.correlation)
+            .unwrap()
+            .unwrap();
+        if committed {
+            flow.commit_input(&batch, reply_content(&waiter)).unwrap();
+        }
+        let id = flow.descriptor().address.instance_id.clone();
+        drop(flow);
+        let mut flow = session.open_flow(&id).unwrap();
+        assert!(matches!(
+            flow.state().state(),
+            InstanceState::Open(InstanceActivity::Interrupted {
+                reason: Interruption::HostLost,
+                ..
+            })
+        ));
+        assert!(flow.commit_input(&batch, reply_content(&waiter)).is_err());
+        if committed {
+            assert!(matches!(
+                flow.reply_waiters()[0].status,
+                ReplyStatus::Delivered { .. }
+            ));
+            assert!(flow.pending_inputs().next().is_none());
+            assert_eq!(
+                flow.committed_inputs()[0].input.content,
+                reply_content(&waiter)
+            );
+        } else {
+            assert!(matches!(
+                flow.reply_waiters()[0].status,
+                ReplyStatus::Cancelled { .. }
+            ));
+            assert_eq!(
+                flow.pending_inputs().next().unwrap().id,
+                accepted.message_id
+            );
+            change(&mut flow, FlowTransition::InterruptionRecovered);
+            let next = flow
+                .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+                .unwrap()
+                .unwrap();
+            assert_eq!(next.message_ids(), &[accepted.message_id]);
+            flow.commit_input(&next, invocation_content(next.lease()))
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn terminal_turn_transitions_cancel_waits_and_late_registration_cannot_capture_old_replies() {
+    for close in [false, true] {
+        let (_dir, _session, mut flow, waiter) = waiting_flow();
+        wait_phase(&mut flow, &waiter);
+        flow.accept_input(reply_request(&flow, &waiter), |_| Ok(()))
+            .unwrap();
+        let batch = flow
+            .reserve_reply_input(&waiter.lease, waiter.correlation)
+            .unwrap()
+            .unwrap();
+        if close {
+            change(&mut flow, FlowTransition::CloseRequested);
+            assert_eq!(flow.pending_inputs().count(), 0);
+        } else {
+            change(
+                &mut flow,
+                FlowTransition::PhaseChanged {
+                    lease: waiter.lease.clone(),
+                    phase: TurnPhase::Finishing,
+                },
+            );
+            assert_eq!(flow.pending_inputs().count(), 1);
+        }
+        assert!(matches!(
+            flow.reply_waiters()[0].status,
+            ReplyStatus::Cancelled { .. }
+        ));
+        assert!(flow.commit_input(&batch, reply_content(&waiter)).is_err());
+        assert!(
+            flow.reserve_reply_input(&waiter.lease, waiter.correlation)
+                .is_err()
+        );
+    }
+    let (_dir, _session, mut flow, waiter) = waiting_flow();
+    let mut late = waiter.clone();
+    late.correlation = Uuid::new_v4();
+    flow.accept_input(reply_request(&flow, &late), |_| Ok(()))
+        .unwrap();
+    let before = flow.cursor().clone();
+    assert!(flow.register_reply_waiter(late).is_err());
+    assert_eq!(flow.cursor(), &before);
+}
+
+#[test]
+fn independent_waiters_use_one_fifo_without_releasing_each_others_reply() {
+    let (_dir, _session, mut flow, first) = waiting_flow();
+    let mut second = first.clone();
+    second.correlation = Uuid::new_v4();
+    let registered = flow.register_reply_waiter(second.clone()).unwrap();
+    assert_eq!(
+        flow.register_reply_waiter(second.clone()).unwrap(),
+        registered
+    );
+    wait_phase(&mut flow, &first);
+    let second_message = flow
+        .accept_input(reply_request(&flow, &second), |_| Ok(()))
+        .unwrap();
+    let first_message = flow
+        .accept_input(reply_request(&flow, &first), |_| Ok(()))
+        .unwrap();
+    let batch = flow
+        .reserve_reply_input(&first.lease, first.correlation)
+        .unwrap()
+        .unwrap();
+    assert!(
+        flow.reserve_reply_input(&second.lease, second.correlation)
+            .unwrap()
+            .is_none()
+    );
+    drop(batch);
+    let batch = flow
+        .reserve_reply_input(&second.lease, second.correlation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(batch.message_ids(), &[second_message.message_id]);
+    flow.commit_input(&batch, reply_content(&second)).unwrap();
+    assert_eq!(flow.reply_waiters()[0].status, ReplyStatus::Pending);
+    let batch = flow
+        .reserve_reply_input(&first.lease, first.correlation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(batch.message_ids(), &[first_message.message_id]);
+    flow.commit_input(&batch, reply_content(&first)).unwrap();
+    assert!(flow.pending_inputs().next().is_none());
+    assert_eq!(flow.committed_inputs().len(), 2);
 }

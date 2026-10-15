@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::waiter::{ReplyStatus, ReplyWaiter, ReplyWaiters};
 use super::{FlowRef, invalid};
 use crate::event::AtmanUuid;
 use crate::event_log::journal::CommitReceipt;
@@ -135,6 +136,7 @@ pub enum InboxDisposition {
 pub enum InputTarget {
     Context,
     InvocationInput,
+    WaitingContinuation { correlation: Uuid },
 }
 
 /// Exact host-prepared input, persisted before it is exposed to an invocation.
@@ -149,6 +151,10 @@ pub enum InputContent {
         invocation: BTreeMap<String, Value>,
         messages: Vec<Message>,
     },
+    WaitingContinuation {
+        correlation: Uuid,
+        value: Value,
+    },
 }
 
 impl InputContent {
@@ -156,6 +162,9 @@ impl InputContent {
         match self {
             Self::Context { .. } => InputTarget::Context,
             Self::InvocationInput { .. } => InputTarget::InvocationInput,
+            Self::WaitingContinuation { correlation, .. } => InputTarget::WaitingContinuation {
+                correlation: *correlation,
+            },
         }
     }
 
@@ -165,6 +174,7 @@ impl InputContent {
                 return Err(invalid("context input requires actual messages"));
             }
             Self::Context { messages } | Self::InvocationInput { messages, .. } => messages,
+            Self::WaitingContinuation { .. } => return Ok(()),
         };
         if messages.iter().any(|message| message.turn_id != lease.turn) {
             return Err(invalid("input message belongs to another turn"));
@@ -228,6 +238,7 @@ pub(super) struct Inbox {
     messages: HashMap<Uuid, usize>,
     pending: PendingBatch<Uuid>,
     inputs: Vec<InputRecord>,
+    pub(super) waiters: ReplyWaiters,
 }
 
 impl Inbox {
@@ -243,9 +254,82 @@ impl Inbox {
             pending,
             entries,
             messages,
+            waiters,
             ..
         } = self;
-        pending.reserve_matching(|id| eligible(&entries[messages[id]].envelope))
+        pending.reserve_matching(|id| {
+            let envelope = &entries[messages[id]].envelope;
+            !waiters.holds(envelope) && eligible(envelope)
+        })
+    }
+
+    pub fn reserve_reply(&mut self, correlation: Uuid) -> Option<Batch<Uuid>> {
+        let Self {
+            pending,
+            entries,
+            messages,
+            waiters,
+            ..
+        } = self;
+        let mut selected = false;
+        pending.reserve_matching(|id| {
+            if !selected && waiters.matches(correlation, &entries[messages[id]].envelope) {
+                selected = true;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    pub fn validate_waiter(
+        &self,
+        state: &FlowInstance<AtmanUuid>,
+        waiter: &ReplyWaiter,
+    ) -> io::Result<()> {
+        if self.waiters.get(waiter.correlation).is_some() {
+            return Err(invalid("duplicate reply waiter"));
+        }
+        if !(state
+            .can_receive_at_boundary(&waiter.lease)
+            .map_err(invalid)?
+            || state.can_receive_reply(&waiter.lease).map_err(invalid)?)
+        {
+            return Err(invalid("flow cannot register a reply waiter"));
+        }
+        if self.entries.iter().any(|entry| {
+            entry.envelope.request.correlation == Some(waiter.correlation)
+                && entry.envelope.request.sender == waiter.sender
+        }) {
+            return Err(invalid(
+                "reply waiter must be registered before its replies arrive",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_reply(
+        &self,
+        state: &FlowInstance<AtmanUuid>,
+        lease: &TurnLease<AtmanUuid>,
+        correlation: Uuid,
+    ) -> io::Result<()> {
+        let record = self
+            .waiters
+            .get(correlation)
+            .ok_or_else(|| invalid("reply waiter does not exist"))?;
+        if record.status != ReplyStatus::Pending
+            || &record.waiter.lease != lease
+            || !state.can_receive_reply(lease).map_err(invalid)?
+        {
+            return Err(invalid("reply waiter is not eligible for delivery"));
+        }
+        Ok(())
+    }
+
+    pub fn state_changed(&mut self, state: &FlowInstance<AtmanUuid>, receipt: &CommitReceipt) {
+        self.invalidate();
+        self.waiters.state_changed(state, receipt);
     }
 
     pub fn owns(&self, batch: &Batch<Uuid>) -> bool {
@@ -265,11 +349,30 @@ impl Inbox {
         state: &FlowInstance<AtmanUuid>,
         input: &CommittedInput,
     ) -> io::Result<()> {
-        if !state
-            .can_receive_at_boundary(&input.lease)
-            .map_err(invalid)?
-        {
-            return Err(invalid("flow cannot receive input at this boundary"));
+        match input.content.target() {
+            InputTarget::WaitingContinuation { correlation } => {
+                self.validate_reply(state, &input.lease, correlation)?;
+                if input.message_ids.len() != 1 {
+                    return Err(invalid("a reply waiter consumes one reply"));
+                }
+                if self
+                    .pending()
+                    .find(|envelope| self.waiters.matches(correlation, envelope))
+                    .map(|envelope| envelope.id)
+                    != input.message_ids.first().copied()
+                {
+                    return Err(invalid(
+                        "reply input must consume the oldest matching message",
+                    ));
+                }
+            }
+            _ if !state
+                .can_receive_at_boundary(&input.lease)
+                .map_err(invalid)? =>
+            {
+                return Err(invalid("flow cannot receive input at this boundary"));
+            }
+            _ => {}
         }
         input.content.validate(&input.lease)?;
         if input.message_ids.is_empty() {
@@ -279,6 +382,22 @@ impl Inbox {
         for id in &input.message_ids {
             if !pending.any(|candidate| candidate == id) {
                 return Err(invalid("input commit is not an ordered pending subset"));
+            }
+            let envelope = &self.entries[self.messages[id]].envelope;
+            match input.content.target() {
+                InputTarget::WaitingContinuation { correlation }
+                    if !self.waiters.matches(correlation, envelope) =>
+                {
+                    return Err(invalid(
+                        "input does not match the registered reply sender and correlation",
+                    ));
+                }
+                InputTarget::Context | InputTarget::InvocationInput
+                    if self.waiters.holds(envelope) =>
+                {
+                    return Err(invalid("input belongs to a waiting continuation"));
+                }
+                _ => {}
             }
             if input.content.target() == InputTarget::Context
                 && self.entries[self.messages[id]].envelope.request.delivery
@@ -308,6 +427,10 @@ impl Inbox {
             return Err(invalid("input reservation is no longer owned"));
         }
         let receipt = receipt.expect("owned publication supplies a receipt");
+        if let InputTarget::WaitingContinuation { correlation } = input.content.target() {
+            self.waiters
+                .deliver(correlation, input.message_ids[0], receipt.clone());
+        }
         for id in &input.message_ids {
             self.entries[self.messages[id]].acceptance.disposition =
                 InboxDisposition::InputCommitted {

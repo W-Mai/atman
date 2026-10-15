@@ -4,6 +4,7 @@
 
 pub mod inbox;
 mod input;
+pub mod waiter;
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -110,6 +111,11 @@ enum FlowFact {
     Transition(FlowTransition),
     EnvelopeAccepted(Box<AcceptedEnvelope>),
     InputCommitted(Box<CommittedInput>),
+    ReplyWaiterRegistered(Box<waiter::ReplyWaiter>),
+    ReplyWaiterCancelled {
+        lease: TurnLease<AtmanUuid>,
+        correlation: Uuid,
+    },
 }
 
 impl FlowFact {
@@ -122,7 +128,10 @@ impl FlowFact {
         }
         match facts {
             [Self::InputCommitted(input)]
-                if matches!(input.content, InputContent::Context { .. }) =>
+                if matches!(
+                    input.content,
+                    InputContent::Context { .. } | InputContent::WaitingContinuation { .. }
+                ) =>
             {
                 Ok(())
             }
@@ -479,7 +488,7 @@ impl FlowStore {
                             if original != transition || revision == state.revision() {
                                 return Err(invalid("noncanonical flow transition"));
                             }
-                            inbox.invalidate();
+                            inbox.state_changed(state, &receipt);
                             if matches!(
                                 state.state(),
                                 InstanceState::Closing { .. } | InstanceState::Closed
@@ -496,6 +505,27 @@ impl FlowStore {
                         }
                         (Some((_, state, inbox)), FlowFact::InputCommitted(input)) => {
                             inbox.replay_input(state, *input, receipt.clone())?;
+                        }
+                        (Some((_, state, inbox)), FlowFact::ReplyWaiterRegistered(waiter)) => {
+                            inbox.validate_waiter(state, &waiter)?;
+                            inbox.invalidate();
+                            inbox.waiters.register(*waiter, receipt.clone());
+                        }
+                        (
+                            Some((_, _, inbox)),
+                            FlowFact::ReplyWaiterCancelled { lease, correlation },
+                        ) => {
+                            let record = inbox
+                                .waiters
+                                .get(correlation)
+                                .ok_or_else(|| invalid("reply waiter does not exist"))?;
+                            if record.waiter.lease != lease
+                                || record.status != waiter::ReplyStatus::Pending
+                            {
+                                return Err(invalid("reply waiter cancellation is stale"));
+                            }
+                            inbox.invalidate();
+                            inbox.waiters.cancel(correlation, receipt.clone());
                         }
                         _ => {
                             return Err(invalid("missing, duplicate, or mismatched flow creation"));
@@ -595,7 +625,7 @@ impl FlowStore {
         }
         let cursor = self.journal.commit(&[FlowFact::Transition(transition)])?;
         self.state = candidate;
-        self.inbox.invalidate();
+        self.inbox.state_changed(&self.state, &cursor);
         if matches!(
             self.state.state(),
             InstanceState::Closing { .. } | InstanceState::Closed

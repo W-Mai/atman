@@ -3,6 +3,7 @@
 use std::io;
 
 use atman_rt::{RunId, TurnId, TurnLease};
+use uuid::Uuid;
 
 use super::inbox::{
     AcceptedEnvelope, CommittedInput, DeliveryMode, InputContent, InputRecord, InputReservation,
@@ -59,6 +60,24 @@ impl FlowStore {
 
     pub fn release_input(&mut self, reservation: &InputReservation) -> bool {
         self.inbox.release(&reservation.batch)
+    }
+
+    /// Select the oldest matching reply from the same queue used by ordinary input.
+    pub fn reserve_reply_input(
+        &mut self,
+        lease: &TurnLease<AtmanUuid>,
+        correlation: Uuid,
+    ) -> io::Result<Option<InputReservation>> {
+        self.inbox.validate_reply(&self.state, lease, correlation)?;
+        Ok(self
+            .inbox
+            .reserve_reply(correlation)
+            .map(|batch| InputReservation {
+                lease: lease.clone(),
+                revision: self.state.revision(),
+                target: InputTarget::WaitingContinuation { correlation },
+                batch,
+            }))
     }
 
     /// Persist actual input and consumption together; invocation startup belongs to the same commit.
