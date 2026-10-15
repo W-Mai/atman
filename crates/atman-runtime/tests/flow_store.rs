@@ -7,6 +7,7 @@ use atman_runtime::event::AtmanUuid;
 use atman_runtime::flow_store::inbox::{
     DeliveryMode, DeliveryRequest, InboxDisposition, InboxPayload, InputContent, SenderIdentity,
 };
+use atman_runtime::flow_store::outbox::{DeliveryReceipt, SendStatus};
 use atman_runtime::flow_store::waiter::{ReplyStatus, ReplyWaiter};
 use atman_runtime::flow_store::{
     EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowStore, FlowTransition,
@@ -1092,4 +1093,193 @@ fn independent_waiters_use_one_fifo_without_releasing_each_others_reply() {
     flow.commit_input(&batch, reply_content(&first)).unwrap();
     assert!(flow.pending_inputs().next().is_none());
     assert_eq!(flow.committed_inputs().len(), 2);
+}
+
+#[test]
+fn cross_session_delivery_reconciles_lost_ack_after_restart_and_closure() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let a_info = session_descriptor();
+    let b_info = session_descriptor();
+    let mut a_session = root.create_session(a_info.clone()).unwrap();
+    let mut b_session = root.create_session(b_info.clone()).unwrap();
+    let mut a = a_session.create_flow(descriptor(a_info.id)).unwrap();
+    let mut b = b_session.create_flow(descriptor(b_info.id)).unwrap();
+    change(&mut a, FlowTransition::Activated);
+    change(&mut b, FlowTransition::Activated);
+    let lease = start(&mut a);
+    let request = delivery(
+        &b.descriptor().address,
+        SenderIdentity::Flow(a.descriptor().address.clone()),
+        "cross-session task",
+    );
+    let queued = a
+        .queue_send(&lease, request.clone(), None, |_| Ok(()))
+        .unwrap();
+    assert_eq!(queued.status, SendStatus::PendingDelivery);
+    let accepted = b.accept_input(request.clone(), |_| Ok(())).unwrap();
+    let a_id = a.descriptor().address.instance_id.clone();
+    let b_id = b.descriptor().address.instance_id.clone();
+    drop((a, b));
+    let mut a = a_session.open_flow(&a_id).unwrap();
+    let mut b = b_session.open_flow(&b_id).unwrap();
+    assert_eq!(a.pending_sends().next().unwrap(), &queued);
+    assert_eq!(
+        a.queue_send(&lease, request.clone(), None, |_| panic!("send retry"))
+            .unwrap(),
+        queued
+    );
+    change(&mut a, FlowTransition::CloseRequested);
+    change(&mut b, FlowTransition::CloseRequested);
+    let replayed = b
+        .accept_input(request.clone(), |_| {
+            panic!("already accepted before revocation")
+        })
+        .unwrap();
+    assert_eq!(replayed.message_id, accepted.message_id);
+    assert_eq!(replayed.receipt, accepted.receipt);
+    assert!(matches!(
+        replayed.disposition,
+        InboxDisposition::Cancelled { .. }
+    ));
+    let ack = DeliveryReceipt::from(&replayed);
+    let mut foreign = ack.clone();
+    foreign.receipt.journal_id = Uuid::new_v4();
+    let before = a.cursor().clone();
+    assert!(a.confirm_delivery(request.request_id, foreign).is_err());
+    assert_eq!(a.cursor(), &before);
+    let confirmed = a.confirm_delivery(request.request_id, ack.clone()).unwrap();
+    assert!(a.pending_sends().next().is_none());
+    assert_eq!(
+        a.confirm_delivery(request.request_id, ack.clone()).unwrap(),
+        confirmed
+    );
+    let mut conflicting = ack;
+    conflicting.message_id = Uuid::new_v4();
+    assert!(a.confirm_delivery(request.request_id, conflicting).is_err());
+    drop(a);
+    let mut a = a_session.open_flow(&a_id).unwrap();
+    assert_eq!(a.sends(), std::slice::from_ref(&confirmed));
+    assert_eq!(
+        a.queue_send(&lease, request.clone(), None, |_| panic!("closed retry"))
+            .unwrap(),
+        confirmed
+    );
+    let mut changed = request.clone();
+    changed.payload = InboxPayload::Interjection {
+        text: "different task".into(),
+    };
+    assert!(a.queue_send(&lease, changed, None, |_| Ok(())).is_err());
+    let mut new = request;
+    new.request_id = Uuid::new_v4();
+    assert!(a.queue_send(&lease, new, None, |_| Ok(())).is_err());
+    assert_eq!(b.inbox_entries().len(), 1);
+}
+
+#[test]
+fn request_registration_and_send_share_one_commit_and_peers_can_reply_in_the_same_turn() {
+    let (_dir, mut session, mut a, initial) = waiting_flow();
+    let mut b = session
+        .create_flow(descriptor(a.descriptor().address.session_id.0))
+        .unwrap();
+    change(&mut b, FlowTransition::Activated);
+    let waiter = ReplyWaiter {
+        correlation: Uuid::new_v4(),
+        lease: initial.lease.clone(),
+        sender: SenderIdentity::Flow(b.descriptor().address.clone()),
+    };
+    let mut request = delivery(
+        &b.descriptor().address,
+        SenderIdentity::Flow(a.descriptor().address.clone()),
+        "request",
+    );
+    request.correlation = Some(waiter.correlation);
+    let before = a.cursor().clone();
+    assert!(
+        a.queue_send(&waiter.lease, request.clone(), Some(waiter.clone()), |_| {
+            Err(std::io::Error::other("denied"))
+        })
+        .is_err()
+    );
+    assert_eq!(a.cursor(), &before);
+    assert_eq!(a.reply_waiters().len(), 1);
+    assert!(a.sends().is_empty());
+    let queued = a
+        .queue_send(&waiter.lease, request.clone(), Some(waiter.clone()), |_| {
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(queued.queued.sequence, before.sequence + 1);
+    let registered = a
+        .reply_waiters()
+        .iter()
+        .find(|record| record.waiter == waiter)
+        .unwrap();
+    assert_eq!(registered.registered, queued.queued);
+    let accepted = b.accept_input(request.clone(), |_| Ok(())).unwrap();
+    a.confirm_delivery(request.request_id, DeliveryReceipt::from(&accepted))
+        .unwrap();
+    wait_phase(&mut a, &waiter);
+    let b_lease = start(&mut b);
+    let mut reply = delivery(
+        &a.descriptor().address,
+        SenderIdentity::Flow(b.descriptor().address.clone()),
+        "result",
+    );
+    reply.correlation = Some(waiter.correlation);
+    b.queue_send(&b_lease, reply.clone(), None, |_| Ok(()))
+        .unwrap();
+    let accepted_reply = a.accept_input(reply.clone(), |_| Ok(())).unwrap();
+    b.confirm_delivery(reply.request_id, DeliveryReceipt::from(&accepted_reply))
+        .unwrap();
+    let batch = a
+        .reserve_reply_input(&waiter.lease, waiter.correlation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(batch.message_ids(), &[accepted_reply.message_id]);
+    a.commit_input(&batch, reply_content(&waiter)).unwrap();
+    assert_eq!(a.committed_inputs()[0].input.lease, waiter.lease);
+    assert!(a.pending_sends().next().is_none());
+    assert!(b.pending_sends().next().is_none());
+}
+
+#[test]
+fn torn_send_batch_cannot_leave_a_registered_wait_without_its_send_intent() {
+    let (_dir, session, mut flow, first) = waiting_flow();
+    let mut waiter = first.clone();
+    waiter.correlation = Uuid::new_v4();
+    let SenderIdentity::Flow(target) = &waiter.sender else {
+        unreachable!()
+    };
+    let mut request = delivery(
+        target,
+        SenderIdentity::Flow(flow.descriptor().address.clone()),
+        "request",
+    );
+    request.correlation = Some(waiter.correlation);
+    let path = flow.dir().join("events.jsonl");
+    flow.queue_send(&waiter.lease, request, Some(waiter.clone()), |_| Ok(()))
+        .unwrap();
+    let id = flow.descriptor().address.instance_id.clone();
+    drop(flow);
+    let length = std::fs::metadata(&path).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(length - 1)
+        .unwrap();
+    let flow = session.open_flow(&id).unwrap();
+    assert!(flow.recovered_tail.is_some());
+    assert!(flow.sends().is_empty());
+    assert!(
+        !flow
+            .reply_waiters()
+            .iter()
+            .any(|record| record.waiter.correlation == waiter.correlation)
+    );
+    assert!(matches!(
+        flow.state().state(),
+        InstanceState::Open(InstanceActivity::Interrupted { .. })
+    ));
 }

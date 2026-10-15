@@ -4,6 +4,7 @@
 
 pub mod inbox;
 mod input;
+pub mod outbox;
 pub mod waiter;
 
 use std::fs::File;
@@ -115,6 +116,11 @@ enum FlowFact {
     ReplyWaiterCancelled {
         lease: TurnLease<AtmanUuid>,
         correlation: Uuid,
+    },
+    SendQueued(Box<outbox::SendIntent>),
+    DeliveryConfirmed {
+        request_id: Uuid,
+        delivery: outbox::DeliveryReceipt,
     },
 }
 
@@ -433,6 +439,7 @@ pub struct FlowStore {
     descriptor: FlowDescriptor,
     state: FlowInstance<AtmanUuid>,
     inbox: Inbox,
+    outbox: outbox::Outbox,
     cursor: CommitReceipt,
     projection_error: Option<io::Error>,
     pub recovered_tail: Option<RecoveredTail>,
@@ -458,6 +465,7 @@ impl FlowStore {
             descriptor,
             state,
             inbox: Inbox::default(),
+            outbox: outbox::Outbox::default(),
             cursor,
             projection_error: None,
             recovered_tail: None,
@@ -466,6 +474,7 @@ impl FlowStore {
 
     fn open(dir: &Path, owner: Arc<SessionOwner>, address: &FlowRef) -> io::Result<Self> {
         let mut projection: Option<(FlowDescriptor, FlowInstance<AtmanUuid>, Inbox)> = None;
+        let mut outbox = outbox::Outbox::default();
         let mut cursor = None;
         let (journal, recovered_tail) = Journal::open(
             &dir.join("events.jsonl"),
@@ -506,6 +515,31 @@ impl FlowStore {
                         (Some((_, state, inbox)), FlowFact::InputCommitted(input)) => {
                             inbox.replay_input(state, *input, receipt.clone())?;
                         }
+                        (Some((_, state, inbox)), FlowFact::SendQueued(intent)) => {
+                            outbox.validate(state, &intent)?;
+                            if let Some(reply) = &intent.reply {
+                                let record =
+                                    inbox.waiters.get(reply.correlation).ok_or_else(|| {
+                                        invalid("send reply waiter is not registered")
+                                    })?;
+                                if record.waiter != *reply
+                                    || record.status != waiter::ReplyStatus::Pending
+                                {
+                                    return Err(invalid("send reply waiter is no longer pending"));
+                                }
+                            }
+                            outbox.apply(*intent, receipt.clone());
+                        }
+                        (
+                            Some(_),
+                            FlowFact::DeliveryConfirmed {
+                                request_id,
+                                delivery,
+                            },
+                        ) => {
+                            outbox.validate_confirmation(request_id, &delivery)?;
+                            outbox.confirm(request_id, delivery, receipt.clone());
+                        }
                         (Some((_, state, inbox)), FlowFact::ReplyWaiterRegistered(waiter)) => {
                             inbox.validate_waiter(state, &waiter)?;
                             inbox.invalidate();
@@ -545,6 +579,7 @@ impl FlowStore {
             descriptor,
             state,
             inbox,
+            outbox,
             cursor: cursor.ok_or_else(|| invalid("empty flow journal"))?,
             projection_error: None,
             recovered_tail,
