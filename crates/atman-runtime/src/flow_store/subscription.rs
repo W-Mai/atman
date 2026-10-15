@@ -83,6 +83,17 @@ pub struct SubscriptionRecord {
     pub status: SubscriptionStatus,
 }
 
+/// Proof obtained from a live recipient owner. Callers cannot manufacture it from serialized data.
+#[derive(Clone, Debug)]
+pub struct ResultSubscriptionProof(pub(super) ResultRegistration);
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct ResultRegistration {
+    pub recipient: FlowRef,
+    pub record: SubscriptionRecord,
+    pub receipt: CommitReceipt,
+}
+
 /// Source-authenticated page. Records are public final answers only; private context is absent.
 #[derive(Clone, Debug)]
 pub struct PublicationPage {
@@ -273,6 +284,28 @@ impl Subscriptions {
 }
 
 impl FlowStore {
+    pub fn result_subscription_proof(&self, id: Uuid) -> io::Result<ResultSubscriptionProof> {
+        let record = self
+            .subscriptions
+            .records
+            .get(&id)
+            .ok_or_else(|| invalid("result subscription is not registered"))?;
+        if !self.state.accepts_input()
+            || record.status != SubscriptionStatus::Active
+            || record.subscription.purpose != SubscriptionPurpose::SpawnResult
+            || record.subscription.filter != AnswerFilter::All
+            || record.subscription.once
+        {
+            return Err(invalid(
+                "result subscription is not an active continuing answer route",
+            ));
+        }
+        Ok(ResultSubscriptionProof(ResultRegistration {
+            recipient: self.descriptor.address.clone(),
+            record: record.clone(),
+            receipt: self.cursor.clone(),
+        }))
+    }
     pub fn publication_anchor(&self) -> PublicationAnchor {
         PublicationAnchor {
             source: self.descriptor.address.clone(),

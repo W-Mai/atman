@@ -5,6 +5,7 @@
 pub mod access;
 pub mod inbox;
 mod input;
+pub mod launch;
 pub mod outbox;
 pub mod publication;
 pub mod subscription;
@@ -112,6 +113,7 @@ impl FlowTransition {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 enum FlowFact {
     Created(Box<FlowDescriptor>),
+    Activated(Box<launch::Activation>),
     Transition(FlowTransition),
     EnvelopeAccepted(Box<AcceptedEnvelope>),
     InputCommitted(Box<CommittedInput>),
@@ -133,6 +135,15 @@ enum FlowFact {
 
 impl FlowFact {
     fn validate_batch(facts: &[Self]) -> io::Result<()> {
+        if facts.iter().any(|fact| matches!(fact, Self::Activated(_))) {
+            return if matches!(facts, [Self::Activated(_)]) {
+                Ok(())
+            } else {
+                Err(invalid(
+                    "activation and its input require one dedicated fact",
+                ))
+            };
+        }
         if facts.iter().any(|fact| {
             matches!(
                 fact,
@@ -490,6 +501,7 @@ pub struct FlowStore {
     outbox: outbox::Outbox,
     publications: publication::Publications,
     subscriptions: subscription::Subscriptions,
+    activation: Option<launch::Activation>,
     cursor: CommitReceipt,
     projection_error: Option<io::Error>,
     pub recovered_tail: Option<RecoveredTail>,
@@ -518,6 +530,7 @@ impl FlowStore {
             outbox: outbox::Outbox::default(),
             publications: publication::Publications::default(),
             subscriptions: subscription::Subscriptions::default(),
+            activation: None,
             cursor,
             projection_error: None,
             recovered_tail: None,
@@ -529,6 +542,7 @@ impl FlowStore {
         let mut outbox = outbox::Outbox::default();
         let mut publications = publication::Publications::default();
         let mut subscriptions = subscription::Subscriptions::default();
+        let mut activation = None;
         let mut cursor = None;
         let (journal, recovered_tail) = Journal::open(
             &dir.join("events.jsonl"),
@@ -559,6 +573,22 @@ impl FlowStore {
                                 inbox.close(&receipt);
                                 subscriptions.close();
                             }
+                        }
+                        (Some((descriptor, state, inbox)), FlowFact::Activated(record)) => {
+                            if activation.is_some() {
+                                return Err(invalid("duplicate instance activation"));
+                            }
+                            *state = record.validate(
+                                descriptor,
+                                state,
+                                inbox,
+                                cursor
+                                    .as_ref()
+                                    .ok_or_else(|| invalid("activation precedes creation"))?,
+                            )?;
+                            inbox.state_changed(state, &receipt);
+                            record.apply(inbox, &receipt);
+                            activation = Some(*record);
                         }
                         (Some((_, state, inbox)), FlowFact::EnvelopeAccepted(envelope)) => {
                             if !state.accepts_input() || &envelope.request.recipient != address {
@@ -655,6 +685,7 @@ impl FlowStore {
             outbox,
             publications,
             subscriptions,
+            activation,
             cursor: cursor.ok_or_else(|| invalid("empty flow journal"))?,
             projection_error: None,
             recovered_tail,

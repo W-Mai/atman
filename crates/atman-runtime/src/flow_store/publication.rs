@@ -133,9 +133,17 @@ impl FlowStore {
             });
         let mut batches: Vec<_> = inputs.chain(publications).collect();
         batches.sort_by_key(|(sequence, _)| *sequence);
-        batches
+        let inherited = self
+            .activation
+            .as_ref()
             .into_iter()
-            .flat_map(|(_, messages)| messages.iter().cloned())
+            .flat_map(|record| record.input.inherited_context.iter().cloned());
+        inherited
+            .chain(
+                batches
+                    .into_iter()
+                    .flat_map(|(_, messages)| messages.iter().cloned()),
+            )
             .collect()
     }
 }

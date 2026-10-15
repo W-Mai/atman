@@ -44,6 +44,11 @@ pub struct FlowEventRef {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum InboxPayload {
+    /// Explicit entry arguments and invocation configuration; never a mid-turn text injection.
+    Invocation {
+        arguments: BTreeMap<String, Value>,
+        invocation: BTreeMap<String, Value>,
+    },
     UserSubmission {
         text: String,
         images: Vec<ImageSource>,
@@ -89,6 +94,15 @@ pub struct DeliveryRequest {
 
 impl DeliveryRequest {
     pub(crate) fn validate_source(&self) -> io::Result<()> {
+        if matches!(self.payload, InboxPayload::Invocation { .. }) {
+            return if self.delivery == DeliveryMode::NextTurn && self.correlation.is_none() {
+                Ok(())
+            } else {
+                Err(invalid(
+                    "an explicit invocation requires uncorrelated next-turn delivery",
+                ))
+            };
+        }
         let valid = match (&self.sender, &self.payload) {
             (
                 SenderIdentity::User(_),

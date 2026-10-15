@@ -37,6 +37,16 @@ Flow transitions validate an expected state revision, apply to a private candida
 
 These storage APIs do not start schedulers, grant permissions, migrate published sessions, or switch the CLI/daemon to a different data format. Hosts authorize commands, validate entry programs, and decide when restored instances may execute.
 
+## Instance activation
+
+`RuntimeHost::launch_flow` owns creation, result registration, and initial activation across the participating storage owners. The caller supplies a stable creation descriptor and `LaunchInput`, authenticates its sender and inherited context, and supplies authorization for new effects. The host creates or resolves the canonical Prepared instance, obtains a source cursor, commits the requested continuing result subscription at its recipient, and only then activates the source. Current watch grants are checked at registration and activation. The recipient confirmation is an opaque owner-issued proof, not model-provided JSON. No owner lock is held while awaiting another owner.
+
+`FlowStore::activate_with_input` commits activation, the exact initial invocation, inherited context, and result-subscription evidence in one source fact. Before this commit the flow stays Prepared and cannot accept arbitrary input or execute. After it, the common inbox contains the initial invocation and an installed host scheduler can admit it normally. Activation does not itself grant execution authority or install a controller. An incomplete activation restores neither an Open instance nor a pending initial input; complete activation restores both.
+
+The initial request ID equals the immutable creation request ID. Identical retries recover the original acceptance receipt and current consumption disposition, including after restart, pause, or close. Changed launch data is rejected. A failure before activation preserves Prepared state and any already registered result subscription; retrying retains that subscription's original cursor. Concurrent attempts reconcile the authoritative source activation instead of repeating effects. Dropping the waiting caller does not cancel an owned launch attempt.
+
+`InboxPayload::Invocation` carries typed entry arguments and an invocation configuration snapshot. It requires uncorrelated `NextTurn` delivery and cannot enter a running model call as a text interjection. Its context projection retains sender provenance and arguments but excludes invocation settings. Inherited context seeds the new instance once, survives reopening, and does not become newly published output for result subscriptions. Host preparation still selects compatible input and supplies the execution authority; the product `flow.spawn` adapter and CLI/daemon bootstrap must bind those policies explicitly.
+
 ## Durable input acceptance
 
 `FlowStore::publish_message` commits an exact message with its owning turn lease, producing invocation, and stable publication ID. An identical retry returns the original receipt without appending or republishing; conflicting content fails. New publication requires a live matching turn, rejects cancellation and stale epochs, and permits delivery while a paused turn finishes. Message origin and role remain separate. Final-answer recognition stays in the existing message protocol rather than a second storage-specific classifier.

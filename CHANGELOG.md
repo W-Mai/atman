@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Atomic instance activation** — Host creation registers result subscriptions before activating a flow, commits initial invocation data and inherited context together, and reconciles concurrent or recovered launch requests without duplicate execution. Failed activation preserves prepared state and registered reply routes.
+
 - **Host-owned scheduling** — Session catalogs retain automatic flow admission after views and callers detach. Controller status distinguishes scheduling failures from execution state, preserves pending input, and permits explicit replacement without cancelling admitted turns.
 
 - **Owned answer observation** — Host catalogs deliver subscribed public answers independently of active turns and execution pauses. Registration retries preserve source positions, live grants gate delivery, and session attachment or restored access resumes catch-up. Blocked sources expose retryable errors without starting empty turns.
