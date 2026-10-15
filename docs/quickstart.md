@@ -220,8 +220,18 @@ Try the smoke test first:
 
 ```
 atman> /hello
-"hello from atman"
+hello from atman
 ```
+
+The bundled command explicitly delivers its reply and returns the same text:
+
+```at
+flow hello() -> string {
+    return final.answer(message: "hello from atman")
+}
+```
+
+`final.answer` publishes one reply in the calling context. A plain `return` only passes a value to its caller; an interactive entry point can display that value when the flow has not published a reply. Calling a flow from another flow does not automatically display its return value.
 
 Then the code agent:
 

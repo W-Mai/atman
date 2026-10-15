@@ -165,7 +165,7 @@ pub const ON_SESSION_START_AT: &str = r#"flow on_session_start() -> string {
 "#;
 
 pub const HELLO_AT: &str = r#"flow hello() -> string {
-    return "hello from atman"
+    return final.answer(message: "hello from atman")
 }
 "#;
 
@@ -293,11 +293,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hello_template_parses_and_returns_hello() {
+    #[tokio::test]
+    async fn hello_template_delivers_once_and_returns_hello() {
         let file = atman_rt::parse_file(HELLO_AT).expect("hello template must parse");
         assert_eq!(file.flows.len(), 1);
         assert_eq!(file.flows[0].name.name, "hello");
+        let session = std::sync::Arc::new(atman_runtime::Session::open_ephemeral());
+        let executor = atman_runtime::Executor::with_events(session.sink().clone());
+        let turn = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
+        let value = executor
+            .run_in_turn(&file, "hello", vec![], Some(turn), Some(session.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(value, atman_rt::Value::Str(text) if text == "hello from atman"));
+        let messages = session.messages_full();
+        let replies: Vec<_> = messages
+            .iter()
+            .filter(|message| message.is_visible_assistant_reply())
+            .collect();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(
+            replies[0].origin,
+            atman_runtime::message::MessageOrigin::FinalAnswer
+        );
+        assert_eq!(replies[0].text_concat(), "hello from atman");
     }
 
     #[test]
