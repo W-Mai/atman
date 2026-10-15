@@ -4,6 +4,9 @@ use atman_rt::{
     InstanceActivity, InstanceState, Interruption, RunId, TurnId, TurnLease, TurnOutcome,
 };
 use atman_runtime::event::AtmanUuid;
+use atman_runtime::flow_store::inbox::{
+    DeliveryMode, DeliveryRequest, InboxDisposition, InboxPayload, SenderIdentity,
+};
 use atman_runtime::flow_store::{
     EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowStore, FlowTransition,
     RuntimeStore, SessionDescriptor,
@@ -270,4 +273,174 @@ fn stale_or_invalid_controls_do_not_commit_and_projection_failures_do_not_erase_
     assert_eq!(flow.cursor(), &committed);
     assert!(flow.state().can_start_turn());
     assert!(flow.take_projection_error().is_some());
+}
+
+fn delivery(recipient: &FlowRef, sender: SenderIdentity, text: &str) -> DeliveryRequest {
+    DeliveryRequest {
+        request_id: Uuid::new_v4(),
+        sender,
+        recipient: recipient.clone(),
+        delivery: DeliveryMode::AtBoundary,
+        cause: None,
+        correlation: None,
+        scope: None,
+        payload: InboxPayload::Interjection { text: text.into() },
+    }
+}
+
+#[test]
+fn accepted_retries_survive_restart_revocation_and_close_without_duplicate_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let descriptor = descriptor(info.id);
+    let mut flow = session.create_flow(descriptor.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let request = delivery(
+        &descriptor.address,
+        SenderIdentity::User(Uuid::new_v4()),
+        "hello",
+    );
+    let accepted = flow.accept_input(request.clone(), |_| Ok(())).unwrap();
+    assert_eq!(flow.pending_inputs().count(), 1);
+    assert_eq!(
+        flow.accept_input(request.clone(), |_| panic!(
+            "accepted retry must not reauthorize new delivery"
+        ))
+        .unwrap(),
+        accepted
+    );
+    let mut conflict = request.clone();
+    conflict.payload = InboxPayload::Interjection {
+        text: "changed".into(),
+    };
+    assert!(flow.accept_input(conflict, |_| Ok(())).is_err());
+    drop(flow);
+    let mut flow = session.open_flow(&descriptor.address.instance_id).unwrap();
+    assert_eq!(
+        flow.accept_input(request.clone(), |_| panic!("retry after restart"))
+            .unwrap(),
+        accepted
+    );
+    change(&mut flow, FlowTransition::CloseRequested);
+    let close_receipt = flow.cursor().clone();
+    assert_eq!(flow.pending_inputs().count(), 0);
+    let retried = flow
+        .accept_input(request.clone(), |_| panic!("retry after close"))
+        .unwrap();
+    assert_eq!(retried.message_id, accepted.message_id);
+    assert_eq!(retried.receipt, accepted.receipt);
+    assert_eq!(
+        retried.disposition,
+        InboxDisposition::Cancelled { by: close_receipt }
+    );
+    let new = delivery(&descriptor.address, request.sender.clone(), "later");
+    assert!(flow.accept_input(new, |_| Ok(())).is_err());
+    change(&mut flow, FlowTransition::Closed);
+    drop((flow, session));
+    let session = root.open_session(info.id).unwrap();
+    let mut flow = session.open_flow(&descriptor.address.instance_id).unwrap();
+    assert_eq!(
+        flow.accept_input(request, |_| panic!("closed retry"))
+            .unwrap(),
+        retried
+    );
+    assert_eq!(flow.inbox_entries().len(), 1);
+}
+
+#[test]
+fn paused_and_interrupted_flows_keep_ordered_inputs_without_resuming_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let descriptor = descriptor(info.id);
+    let mut flow = session.create_flow(descriptor.clone()).unwrap();
+    let sender = SenderIdentity::User(Uuid::new_v4());
+    assert!(
+        flow.accept_input(
+            delivery(&descriptor.address, sender.clone(), "unprepared"),
+            |_| Ok(())
+        )
+        .is_err()
+    );
+    change(&mut flow, FlowTransition::Activated);
+    let lease = start(&mut flow);
+    let key = AtmanUuid(Uuid::new_v4());
+    change(&mut flow, FlowTransition::ExecutionPaused { key });
+    let first = flow
+        .accept_input(
+            delivery(&descriptor.address, sender.clone(), "first"),
+            |_| Ok(()),
+        )
+        .unwrap();
+    change(
+        &mut flow,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Interrupted(Interruption::Cancelled),
+        },
+    );
+    let second = flow
+        .accept_input(delivery(&descriptor.address, sender, "second"), |_| Ok(()))
+        .unwrap();
+    assert!(!flow.state().can_start_turn());
+    drop(flow);
+    let flow = session.open_flow(&descriptor.address.instance_id).unwrap();
+    assert_eq!(
+        flow.pending_inputs()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        [first.message_id, second.message_id]
+    );
+    assert!(!flow.state().can_start_turn());
+    assert_eq!(flow.state().pauses(), &[key]);
+}
+
+#[test]
+fn delivery_identity_scope_and_authorization_reject_invalid_new_acceptance() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let descriptor = descriptor(info.id);
+    let mut flow = session.create_flow(descriptor.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let sender = SenderIdentity::Flow(FlowRef {
+        session_id: info.id.into(),
+        instance_id: FlowInstanceId::now(),
+    });
+    let request = delivery(&descriptor.address, sender, "peer data");
+    let before = flow.cursor().clone();
+    assert!(
+        flow.accept_input(request.clone(), |_| Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "revoked"
+        )))
+        .is_err()
+    );
+    assert_eq!(flow.cursor(), &before);
+    let mut impersonation = request.clone();
+    impersonation.payload = InboxPayload::UserSubmission {
+        text: "user authority".into(),
+        images: Vec::new(),
+        invocation: BTreeMap::new(),
+        presentation: None,
+    };
+    assert!(
+        flow.accept_input(impersonation, |_| panic!(
+            "invalid source passed validation"
+        ))
+        .is_err()
+    );
+    let mut foreign = request.clone();
+    foreign.recipient.instance_id = FlowInstanceId::now();
+    assert!(flow.accept_input(foreign, |_| Ok(())).is_err());
+    let first = flow.accept_input(request.clone(), |_| Ok(())).unwrap();
+    let mut other_sender = request;
+    other_sender.sender = SenderIdentity::User(Uuid::new_v4());
+    let second = flow.accept_input(other_sender, |_| Ok(())).unwrap();
+    assert_ne!(first.message_id, second.message_id);
+    assert_eq!(flow.pending_inputs().count(), 2);
 }

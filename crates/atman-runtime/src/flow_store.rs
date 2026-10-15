@@ -2,6 +2,8 @@
 //!
 //! Host-only storage: authorization and scheduling happen before commands reach this module. Each flow has one authoritative journal. Metadata files are disposable projections and never override facts. Blocking calls belong on storage workers.
 
+pub mod inbox;
+
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -19,6 +21,7 @@ use crate::event_log::journal::{
     CommitReceipt, Journal, RecoveredTail, private_file_options, sync_parent,
 };
 use crate::source_program::RevisionBundle;
+use inbox::{Acceptance, AcceptedEnvelope, DeliveryRequest, Inbox, InboxEntry};
 
 pub type FlowInstanceId = atman_rt::FlowInstanceId<AtmanUuid>;
 pub type FlowRef = atman_rt::FlowRef<AtmanUuid>;
@@ -102,6 +105,7 @@ impl FlowTransition {
 enum FlowFact {
     Created(Box<FlowDescriptor>),
     Transition(FlowTransition),
+    EnvelopeAccepted(Box<AcceptedEnvelope>),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -385,6 +389,7 @@ pub struct FlowStore {
     journal: Journal,
     descriptor: FlowDescriptor,
     state: FlowInstance<AtmanUuid>,
+    inbox: Inbox,
     cursor: CommitReceipt,
     projection_error: Option<io::Error>,
     pub recovered_tail: Option<RecoveredTail>,
@@ -409,6 +414,7 @@ impl FlowStore {
             journal,
             descriptor,
             state,
+            inbox: Inbox::default(),
             cursor,
             projection_error: None,
             recovered_tail: None,
@@ -416,7 +422,7 @@ impl FlowStore {
     }
 
     fn open(dir: &Path, owner: Arc<SessionOwner>, address: &FlowRef) -> io::Result<Self> {
-        let mut projection: Option<(FlowDescriptor, FlowInstance<AtmanUuid>)> = None;
+        let mut projection: Option<(FlowDescriptor, FlowInstance<AtmanUuid>, Inbox)> = None;
         let mut cursor = None;
         let (journal, recovered_tail) = Journal::open(
             &dir.join("events.jsonl"),
@@ -425,16 +431,32 @@ impl FlowStore {
                 for fact in facts {
                     match (&mut projection, fact) {
                         (None, FlowFact::Created(descriptor)) if &descriptor.address == address => {
-                            projection =
-                                Some((*descriptor, FlowInstance::prepared(address.clone())));
+                            projection = Some((
+                                *descriptor,
+                                FlowInstance::prepared(address.clone()),
+                                Inbox::default(),
+                            ));
                         }
-                        (Some((_, state)), FlowFact::Transition(mut transition)) => {
+                        (Some((_, state, inbox)), FlowFact::Transition(mut transition)) => {
                             let original = transition.clone();
                             let revision = state.revision();
                             transition.apply(state)?;
                             if original != transition || revision == state.revision() {
                                 return Err(invalid("noncanonical flow transition"));
                             }
+                            if matches!(
+                                state.state(),
+                                InstanceState::Closing { .. } | InstanceState::Closed
+                            ) {
+                                inbox.close(&receipt);
+                            }
+                        }
+                        (Some((_, state, inbox)), FlowFact::EnvelopeAccepted(envelope)) => {
+                            if !state.accepts_input() || &envelope.request.recipient != address {
+                                return Err(invalid("acceptance fact targets an unavailable flow"));
+                            }
+                            inbox.validate(&envelope)?;
+                            inbox.apply(*envelope, receipt.clone());
                         }
                         _ => {
                             return Err(invalid("missing, duplicate, or mismatched flow creation"));
@@ -445,7 +467,7 @@ impl FlowStore {
                 Ok(())
             },
         )?;
-        let (descriptor, state) =
+        let (descriptor, state, inbox) =
             projection.ok_or_else(|| invalid("flow creation was not committed"))?;
         let mut store = Self {
             dir: dir.into(),
@@ -453,6 +475,7 @@ impl FlowStore {
             journal,
             descriptor,
             state,
+            inbox,
             cursor: cursor.ok_or_else(|| invalid("empty flow journal"))?,
             projection_error: None,
             recovered_tail,
@@ -477,6 +500,46 @@ impl FlowStore {
         self.projection_error.take()
     }
 
+    pub fn inbox_entries(&self) -> &[InboxEntry] {
+        self.inbox.entries()
+    }
+
+    pub fn pending_inputs(&self) -> impl Iterator<Item = &AcceptedEnvelope> {
+        self.inbox.pending()
+    }
+
+    /// Authenticate the sender before this call; authorize only new delivery after checking accepted retries.
+    pub fn accept_input(
+        &mut self,
+        request: DeliveryRequest,
+        authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()>,
+    ) -> io::Result<Acceptance> {
+        if request.recipient != self.descriptor.address {
+            return Err(invalid("delivery targets another flow"));
+        }
+        if let Some(previous) = self.inbox.previous(&request)? {
+            return Ok(previous);
+        }
+        if !self.state.accepts_input() {
+            return Err(invalid("flow does not accept new input"));
+        }
+        request.validate_source()?;
+        authorize_new(&request)?;
+        let envelope = AcceptedEnvelope {
+            id: Uuid::now_v7(),
+            accepted_at: chrono::Utc::now(),
+            request,
+        };
+        self.inbox.validate(&envelope)?;
+        let receipt = self
+            .journal
+            .commit(&[FlowFact::EnvelopeAccepted(Box::new(envelope.clone()))])?;
+        let acceptance = self.inbox.apply(envelope, receipt.clone());
+        self.cursor = receipt;
+        // Inbox bodies stay in the journal and its in-memory projection, not the metadata cache.
+        Ok(acceptance)
+    }
+
     /// Apply one authorized transition to a private candidate, then publish it only after durable commit.
     pub fn transition(
         &mut self,
@@ -493,6 +556,12 @@ impl FlowStore {
         }
         let cursor = self.journal.commit(&[FlowFact::Transition(transition)])?;
         self.state = candidate;
+        if matches!(
+            self.state.state(),
+            InstanceState::Closing { .. } | InstanceState::Closed
+        ) {
+            self.inbox.close(&cursor);
+        }
         self.cursor = cursor.clone();
         self.refresh_projection();
         Ok(cursor)

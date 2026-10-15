@@ -36,3 +36,11 @@ Flow transitions validate an expected state revision, apply to a private candida
 `session.json` and `flow.json` are replaceable projections with a committed source cursor. They are rebuilt from journals on opening, even when missing or malformed. `take_projection_error` reports cache-write failures without withdrawing an already committed fact. Source bodies remain in the creation fact; reading history does not require a reachable project checkout.
 
 These storage APIs do not start schedulers, grant permissions, migrate published sessions, or switch the CLI/daemon to a different data format. Hosts authorize commands, validate entry programs, and decide when restored instances may execute.
+
+## Durable input acceptance
+
+`FlowStore::accept_input` persists a typed delivery request before returning `Acceptance`. User submissions retain text, images, invocation configuration, and presentation data. Interjections, flow events, watcher notifications, timers, and internal controls remain distinct payload variants with sender, recipient, correlation, cause, scope, and delivery mode. A protocol message role is not used as a provenance label.
+
+The host authenticates the sender before calling storage. A matching sender/request ID retry returns the original acceptance receipt and current disposition, including after restart, revocation, or closure. Reusing that identity with different content fails. New inputs additionally require an open instance, consistent source/payload categories, and a successful `authorize_new` callback. Host-only delivery types cannot be accepted as user or peer-authored controls.
+
+Paused and interrupted flows retain accepted inputs in FIFO order without resuming execution. A durable close transition cancels the pending inputs in the same replayable state change, preserving their bodies and original acceptance receipts. New requests to a closing or closed instance fail; already accepted requests remain accepted facts with a cancelled disposition. Acceptance does not mean an input has reached a model or completed business work.
