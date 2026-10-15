@@ -18,6 +18,7 @@ pub mod expr;
 pub mod fanout;
 pub mod fix;
 pub mod identity;
+pub mod instance;
 pub mod lifecycle;
 pub mod lint;
 pub mod list;
@@ -59,7 +60,11 @@ pub use expr::{
     eval_expr, eval_fanout, is_type_name,
 };
 pub use fanout::join_fanout_all;
-pub use identity::{IdSource, RunId, TurnId};
+pub use identity::{FlowInstanceId, FlowRef, IdSource, RunId, TurnId};
+pub use instance::{
+    ActiveTurn, FlowInstance, InstanceActivity, InstanceError, InstanceState, Interruption,
+    TurnLease, TurnOutcome, TurnPhase, WaitReason,
+};
 pub use lifecycle::{FlowEndFact, FlowLifecycle, FlowStartFact, StartedFlow};
 pub use lint::{LintHit, LintRule, lint_file};
 pub use list::{ListIntrinsic, eval_list_intrinsic};
