@@ -17,6 +17,14 @@ use crate::tool::ToolCtx;
 
 type Acknowledge = Box<dyn FnOnce() + Send>;
 
+/// An atomic scheduling read; pending input alone does not grant permission to execute.
+#[derive(Clone, Debug)]
+pub struct FlowSnapshot {
+    pub state: FlowInstance<AtmanUuid>,
+    pub cursor: CommitReceipt,
+    pub pending: Vec<crate::flow_store::inbox::AcceptedEnvelope>,
+}
+
 enum Command {
     Apply(Box<dyn FnOnce(&mut FlowStore) -> Acknowledge + Send>),
     Stop(oneshot::Sender<FlowStore>),
@@ -35,6 +43,7 @@ pub struct FlowWorker {
     context: Arc<Session>,
     commands: mpsc::Sender<Command>,
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
+    commits: watch::Receiver<CommitReceipt>,
 }
 
 impl FlowWorker {
@@ -50,6 +59,7 @@ impl FlowWorker {
         .map_err(io::Error::other)?;
         let address = store.descriptor().address.clone();
         let (state_tx, state) = watch::channel(store.state().clone());
+        let (commits_tx, commits) = watch::channel(store.cursor().clone());
         let (commands, mut receiver) = mpsc::channel::<Command>(64);
         tokio::spawn(async move {
             let mut store = store;
@@ -81,6 +91,7 @@ impl FlowWorker {
                 };
                 // One journal owner at a time, with no session-wide lock across disk or execution.
                 let state_tx = state_tx.clone();
+                let commits_tx = commits_tx.clone();
                 match tokio::task::spawn_blocking(move || {
                     let acknowledge = command(&mut store);
                     state_tx.send_if_modified(|snapshot| {
@@ -88,6 +99,13 @@ impl FlowWorker {
                             return false;
                         }
                         *snapshot = store.state().clone();
+                        true
+                    });
+                    commits_tx.send_if_modified(|cursor| {
+                        if cursor == store.cursor() {
+                            return false;
+                        }
+                        *cursor = store.cursor().clone();
                         true
                     });
                     acknowledge();
@@ -108,6 +126,7 @@ impl FlowWorker {
             context,
             commands,
             state,
+            commits,
         })
     }
 
@@ -144,6 +163,24 @@ impl FlowWorker {
 
     pub fn subscribe_state(&self) -> watch::Receiver<FlowInstance<AtmanUuid>> {
         self.state.clone()
+    }
+
+    /// Observe durable changes, including inbox arrival without a lifecycle transition.
+    ///
+    /// Subscribe before inspecting. Mark the current revision seen with `borrow_and_update`, inspect, then await `changed` if no work can be admitted. Notifications coalesce; the journal and a fresh snapshot determine actual work. Reads, rejected writes, and matching retries do not generate changes.
+    pub fn subscribe_commits(&self) -> watch::Receiver<CommitReceipt> {
+        self.commits.clone()
+    }
+
+    pub async fn snapshot(&self) -> io::Result<FlowSnapshot> {
+        self.request(|store| {
+            Ok(FlowSnapshot {
+                state: store.state().clone(),
+                cursor: store.cursor().clone(),
+                pending: store.pending_inputs().cloned().collect(),
+            })
+        })
+        .await
     }
 
     /// Drain accepted work and return journal ownership. Other handles become unavailable.

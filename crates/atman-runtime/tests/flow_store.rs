@@ -933,6 +933,113 @@ fn delivery(recipient: &FlowRef, sender: SenderIdentity, text: &str) -> Delivery
     }
 }
 
+#[tokio::test]
+async fn committed_readiness_includes_inbox_arrival_without_spinning_on_reads_or_retries() {
+    use atman_runtime::flow_runtime::FlowWorker;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut store = session.create_flow(description.clone()).unwrap();
+    change(&mut store, FlowTransition::Activated);
+    let worker = FlowWorker::start(store).await.unwrap();
+    let mut observer = worker.subscribe_commits();
+    let mut second_observer = observer.clone();
+    observer.borrow_and_update();
+    second_observer.borrow_and_update();
+    let initial = worker.snapshot().await.unwrap();
+    assert!(initial.pending.is_empty());
+    assert!(initial.state.can_start_turn());
+    assert!(!observer.has_changed().unwrap());
+
+    // Delivery after the empty scan but before waiting must still wake both observers.
+    let request = delivery(
+        &description.address,
+        SenderIdentity::User(Uuid::new_v4()),
+        "arrived",
+    );
+    let receipt = worker
+        .accept_input(request.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    for observer in [&mut observer, &mut second_observer] {
+        tokio::time::timeout(std::time::Duration::from_secs(5), observer.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*observer.borrow_and_update(), receipt.receipt);
+    }
+    let snapshot = worker.snapshot().await.unwrap();
+    assert_eq!(snapshot.state, initial.state);
+    assert_eq!(snapshot.cursor, receipt.receipt);
+    assert_eq!(snapshot.pending[0].id, receipt.message_id);
+    assert_eq!(
+        worker
+            .accept_input(request.clone(), |_| panic!("retry reauthorized"))
+            .await
+            .unwrap(),
+        receipt
+    );
+    let mut conflict = request;
+    conflict.payload = InboxPayload::Interjection {
+        text: "conflict".into(),
+    };
+    assert!(worker.accept_input(conflict, |_| Ok(())).await.is_err());
+    assert!(!observer.has_changed().unwrap());
+    assert!(!second_observer.has_changed().unwrap());
+
+    let key = Uuid::new_v4().into();
+    let paused = worker
+        .transition(
+            snapshot.state.revision(),
+            FlowTransition::ExecutionPaused { key },
+        )
+        .await
+        .unwrap();
+    // Commit notification is published before command acknowledgement, without needing another poll.
+    assert!(observer.has_changed().unwrap());
+    assert_eq!(*observer.borrow_and_update(), paused);
+    let snapshot = worker.snapshot().await.unwrap();
+    assert!(!snapshot.state.can_start_turn());
+    assert_eq!(snapshot.pending.len(), 1);
+    assert_eq!(
+        worker
+            .transition(
+                snapshot.state.revision(),
+                FlowTransition::ExecutionPaused { key }
+            )
+            .await
+            .unwrap(),
+        paused
+    );
+    assert!(!observer.has_changed().unwrap());
+    worker
+        .transition(
+            snapshot.state.revision(),
+            FlowTransition::ExecutionResumed { key },
+        )
+        .await
+        .unwrap();
+    assert!(observer.has_changed().unwrap());
+    observer.borrow_and_update();
+    let resumed = worker.snapshot().await.unwrap();
+    assert!(resumed.state.can_start_turn());
+    assert_eq!(resumed.pending, snapshot.pending);
+    let store = worker.shutdown().await.unwrap();
+    assert!(observer.changed().await.is_err());
+    assert_eq!(store.cursor(), &resumed.cursor);
+    drop(store);
+    let restored = FlowWorker::start(session.open_flow(&description.address.instance_id).unwrap())
+        .await
+        .unwrap();
+    let latest = restored.snapshot().await.unwrap();
+    assert_eq!(latest.pending, resumed.pending);
+    assert_eq!(latest.cursor, resumed.cursor);
+    assert_eq!(*restored.subscribe_commits().borrow(), latest.cursor);
+    restored.shutdown().await.unwrap();
+}
+
 #[test]
 fn accepted_retries_survive_restart_revocation_and_close_without_duplicate_input() {
     let dir = tempfile::tempdir().unwrap();

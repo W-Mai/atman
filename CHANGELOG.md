@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Instance change observation** — Storage workers expose committed journal revisions and atomic lifecycle/inbox snapshots. Inbox arrival wakes subscribers without requiring a lifecycle change; reads and idempotent retries do not trigger another wakeup.
+
 - **Instance inbox pickup** — Shared general model calls atomically consume compatible pending input into durable conversation context. Auxiliary calls and isolated fanout branches cannot consume shared input; next-turn and incompatible submissions remain queued.
 
 - **Owned instance turns** — Storage workers admit recorded input and source into the executor, enforce a single execution claim, and commit terminal state independently of waiting callers. Committed lifecycle snapshots drive execution pause, resume, and cancellation with host-selected cooperative scheduling.
