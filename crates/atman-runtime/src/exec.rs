@@ -133,16 +133,17 @@ pub async fn exec_flow_with_linked_siblings(
     };
     let delegate = crate::vm_delegate::AtmanVmDelegate::from_host(&ctx)?;
     let vm = Vm::from_shared(linked_program.shared_core());
-    let raw_outcome = vm
-        .run_flow(
-            atman_rt::program::FlowId {
-                module,
-                name: flow.name.name.clone(),
-            },
-            args,
-            delegate,
-        )
-        .await;
+    let id = atman_rt::program::FlowId {
+        module,
+        name: flow.name.name.clone(),
+    };
+    let raw_outcome = if let Some(options) = tool_ctx.vm_run_options {
+        vm.run_flow_with_options(id, args, delegate, options)
+            .await
+            .into_output()
+    } else {
+        vm.run_flow(id, args, delegate).await
+    };
     match raw_outcome {
         StmtOutcome::Return(v) => Ok(v),
         StmtOutcome::Err(e) => Err(e),

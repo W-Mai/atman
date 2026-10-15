@@ -19,6 +19,289 @@ use uuid::Uuid;
 
 mod common;
 
+fn turn_request(
+    message: Uuid,
+    argument: i64,
+) -> atman_runtime::flow_runtime::execution::TurnRequest {
+    let turn = TurnId::now();
+    atman_runtime::flow_runtime::execution::TurnRequest {
+        turn: turn.clone(),
+        run: RunId::now(),
+        messages: vec![message],
+        arguments: BTreeMap::from([("input".into(), serde_json::json!(argument))]),
+        invocation: BTreeMap::from([("marker".into(), serde_json::json!("recorded"))]),
+        context: vec![Message::user_text(turn, "run the entry")],
+        authority: atman_runtime::flow_authority::EffectiveAuthority::root(
+            &Default::default(),
+            false,
+            None,
+        ),
+        yield_interval: std::num::NonZeroUsize::new(16).unwrap(),
+    }
+}
+
+struct ExecutionProbe {
+    entered: std::sync::Arc<tokio::sync::Semaphore>,
+    release: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+impl atman_runtime::tool::Tool for ExecutionProbe {
+    fn name(&self) -> &str {
+        "execution_probe"
+    }
+    fn tier(&self) -> atman_runtime::tool::Tier {
+        atman_runtime::tool::Tier::Zero
+    }
+    fn call<'a>(
+        &'a self,
+        _args: atman_runtime::tool::ToolArgs,
+        _ctx: &'a atman_runtime::tool::ToolCtx,
+    ) -> atman_runtime::tool::BoxFut<'a, atman_runtime::tool::ToolResult> {
+        Box::pin(async move {
+            self.entered.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+            Ok(atman_runtime::Value::Unit)
+        })
+    }
+}
+
+#[tokio::test]
+async fn owned_execution_commits_admission_and_completion_even_when_the_observer_leaves() {
+    use atman_runtime::flow_runtime::FlowWorker;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut description = descriptor(info.id);
+    description.entry.bundle.sources.insert(
+        "entry:main.at".into(),
+        r#"flow main(input: int) -> string {
+        when env("marker") != "recorded" { return "invalid environment" }
+        execution_probe()
+        return final.answer(message: to_json_string(input * 2))
+    }"#
+        .into(),
+    );
+    let mut store = session.create_flow(description.clone()).unwrap();
+    change(&mut store, FlowTransition::Activated);
+    let worker = FlowWorker::start(store).await.unwrap();
+    let first = worker
+        .accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::User(Uuid::new_v4()),
+                "first",
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let executor = atman_runtime::Executor::new();
+    let probe = std::sync::Arc::new(ExecutionProbe {
+        entered: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+        release: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    executor.tools.register(probe.clone());
+    let ticket = worker
+        .start_turn(executor.clone(), turn_request(first.message_id, 21))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), probe.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let duplicate = atman_runtime::InstanceInvocation::new(
+        ticket.lease.clone(),
+        atman_runtime::flow_authority::EffectiveAuthority::root(&Default::default(), false, None),
+        Default::default(),
+    )
+    .with_storage(worker.clone())
+    .unwrap();
+    let duplicate_entry = atman_rt::parse_file("flow main() { execution_probe() }").unwrap();
+    assert!(
+        executor
+            .run_with_invocation(
+                &duplicate_entry,
+                "main",
+                vec![],
+                atman_runtime::RootInvocation {
+                    instance: Some(duplicate),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        worker
+            .start_turn(executor.clone(), turn_request(first.message_id, 9))
+            .await
+            .is_err()
+    );
+    let pause_a = Uuid::new_v4().into();
+    let pause_b = Uuid::new_v4().into();
+    let mut state = worker.subscribe_state();
+    for key in [pause_a, pause_b] {
+        worker
+            .transition(
+                worker.state().await.unwrap().revision(),
+                FlowTransition::ExecutionPaused { key },
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(state.borrow().pauses().len(), 2);
+    probe.release.add_permits(1);
+    let second = worker
+        .accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::User(Uuid::new_v4()),
+                "second",
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::ExecutionResumed { key: pause_a },
+        )
+        .await
+        .unwrap();
+    for _ in 0..30 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !worker
+            .context()
+            .messages()
+            .iter()
+            .any(|message| message.origin == atman_runtime::message::MessageOrigin::FinalAnswer)
+    );
+    drop(ticket);
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::ExecutionResumed { key: pause_b },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if state.borrow_and_update().can_start_turn() {
+                break;
+            }
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        worker.context().messages().last().unwrap().text_concat(),
+        "42"
+    );
+    let ticket = worker
+        .start_turn(executor, turn_request(second.message_id, 8))
+        .await
+        .unwrap();
+    probe.release.add_permits(1);
+    let end = tokio::time::timeout(std::time::Duration::from_secs(5), ticket.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(end.outcome, TurnOutcome::Completed);
+    assert!(matches!(end.result, Ok(atman_runtime::Value::Str(text)) if text == "16"));
+    assert!(worker.state().await.unwrap().can_start_turn());
+    let store = worker.shutdown().await.unwrap();
+    assert_eq!(store.committed_inputs().len(), 2);
+    assert!(store.pending_inputs().next().is_none());
+    assert_eq!(store.cursor(), &end.receipt);
+    drop(store);
+    let store = session.open_flow(&description.address.instance_id).unwrap();
+    assert!(store.state().can_start_turn());
+    assert_eq!(store.context_messages().last().unwrap().text_concat(), "16");
+}
+
+#[tokio::test]
+async fn cooperative_instance_execution_can_be_cancelled_while_paused_without_replaying_input() {
+    use atman_runtime::flow_runtime::FlowWorker;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut description = descriptor(info.id);
+    description.entry.bundle.sources.insert(
+        "entry:main.at".into(),
+        "flow main(input: int) { loop { value = input + 1 } }".into(),
+    );
+    let mut store = session.create_flow(description.clone()).unwrap();
+    change(&mut store, FlowTransition::Activated);
+    let worker = FlowWorker::start(store).await.unwrap();
+    let accepted = worker
+        .accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::User(Uuid::new_v4()),
+                "loop",
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let ticket = worker
+        .start_turn(
+            atman_runtime::Executor::new(),
+            turn_request(accepted.message_id, 1),
+        )
+        .await
+        .unwrap();
+    let lease = ticket.lease.clone();
+    let key = Uuid::new_v4().into();
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::ExecutionPaused { key },
+        )
+        .await
+        .unwrap();
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::PhaseChanged {
+                lease: lease.clone(),
+                phase: TurnPhase::Cancelling,
+            },
+        )
+        .await
+        .unwrap();
+    let end = tokio::time::timeout(std::time::Duration::from_secs(5), ticket.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        end.outcome,
+        TurnOutcome::Interrupted(Interruption::Cancelled)
+    );
+    assert!(end.result.is_err());
+    let store = worker.shutdown().await.unwrap();
+    assert_eq!(store.state().pauses(), &[key]);
+    assert_eq!(store.committed_inputs().len(), 1);
+    assert!(store.pending_inputs().next().is_none());
+    drop(store);
+    let store = session.open_flow(&description.address.instance_id).unwrap();
+    assert!(matches!(
+        store.state().state(),
+        InstanceState::Open(InstanceActivity::Interrupted {
+            reason: Interruption::Cancelled,
+            ..
+        })
+    ));
+    assert_eq!(store.state().pauses(), &[key]);
+}
+
 fn descriptor(session: Uuid) -> FlowDescriptor {
     FlowDescriptor {
         address: FlowRef {
@@ -166,6 +449,57 @@ fn publications_preserve_input_order_and_fence_stale_delivery_across_recovery() 
     );
     assert!(flow.publish_message(stale).is_err());
     assert_eq!(flow.context_messages(), expected);
+}
+
+#[tokio::test]
+async fn owned_execution_separates_pre_admission_errors_from_interrupted_turns() {
+    use atman_runtime::flow_runtime::FlowWorker;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    for (source, admitted) in [
+        ("flow main(input: int) { missing_tool() }", true),
+        ("flow main(", false),
+    ] {
+        let mut description = descriptor(info.id);
+        description
+            .entry
+            .bundle
+            .sources
+            .insert("entry:main.at".into(), source.into());
+        let mut store = session.create_flow(description.clone()).unwrap();
+        change(&mut store, FlowTransition::Activated);
+        let worker = FlowWorker::start(store).await.unwrap();
+        let input = worker
+            .accept_input(
+                delivery(
+                    &description.address,
+                    SenderIdentity::User(Uuid::new_v4()),
+                    "run",
+                ),
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        let launched = worker
+            .start_turn(
+                atman_runtime::Executor::new(),
+                turn_request(input.message_id, 1),
+            )
+            .await;
+        if admitted {
+            let end = launched.unwrap().wait().await.unwrap();
+            assert!(end.result.is_err());
+            assert_eq!(end.outcome, TurnOutcome::Interrupted(Interruption::Failed));
+        } else {
+            assert!(launched.is_err());
+        }
+        let store = worker.shutdown().await.unwrap();
+        assert_eq!(store.committed_inputs().len(), usize::from(admitted));
+        assert_eq!(store.pending_inputs().count(), usize::from(!admitted));
+        assert_eq!(store.state().can_start_turn(), !admitted);
+    }
 }
 
 #[test]
@@ -1495,7 +1829,7 @@ async fn recorded_source_and_committed_input_execute_with_the_persistent_instanc
 #[tokio::test]
 async fn instance_worker_persists_real_tool_delivery_and_restores_only_shared_context() {
     let _registry = common::ModelRegistryGuard::mock("mock").await;
-    use atman_runtime::flow_store::worker::FlowWorker;
+    use atman_runtime::flow_runtime::FlowWorker;
     use atman_runtime::message::MessageOrigin;
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();

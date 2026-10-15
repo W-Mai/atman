@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Owned instance turns** — Storage workers admit recorded input and source into the executor, enforce a single execution claim, and commit terminal state independently of waiting callers. Committed lifecycle snapshots drive execution pause, resume, and cancellation with host-selected cooperative scheduling.
+
 - **Persistent messages** — Flow journals retain idempotent publication receipts and restore input/output context in journal order. Instance storage workers commit message delivery before context and live projection, preserve accepted writes across caller cancellation, and isolate fanout publications from shared conversation history.
 
 - **Embedded instance lifecycle** — `atman-rt` exposes persistent instance identities and a portable state machine with independent execution pauses, explicit interruption recovery, cleanup-aware closure, and turn leases that reject stale callbacks. Reply admission targets a live waiting turn without bypassing execution pauses. Hosts supply scheduling and persistence.

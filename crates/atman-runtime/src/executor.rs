@@ -30,7 +30,8 @@ pub struct InstanceInvocation {
     pub lease: atman_rt::TurnLease<crate::event::AtmanUuid>,
     pub authority: crate::flow_authority::EffectiveAuthority,
     pub cancellation: tokio_util::sync::CancellationToken,
-    storage: Option<crate::flow_store::worker::FlowWorker>,
+    storage: Option<crate::flow_runtime::FlowWorker>,
+    options: Option<atman_rt::VmRunOptions>,
     started: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -45,6 +46,7 @@ impl InstanceInvocation {
             authority,
             cancellation,
             storage: None,
+            options: None,
             started: Default::default(),
         }
     }
@@ -52,7 +54,7 @@ impl InstanceInvocation {
     /// Bind execution to the journal's owned context and durable message publication.
     pub fn with_storage(
         mut self,
-        storage: crate::flow_store::worker::FlowWorker,
+        storage: crate::flow_runtime::FlowWorker,
     ) -> Result<Self, RuntimeError> {
         if storage.address() != &self.lease.flow {
             return Err(RuntimeError::ToolFailed(
@@ -75,6 +77,11 @@ impl InstanceInvocation {
             .map_err(|_| {
                 RuntimeError::ToolFailed("instance execution binding was already used".into())
             })
+    }
+
+    pub fn with_vm_options(mut self, options: atman_rt::VmRunOptions) -> Self {
+        self.options = Some(options);
+        self
     }
 }
 
@@ -275,10 +282,6 @@ impl Executor {
                         "instance storage owns a different context".into(),
                     ));
                 }
-                storage
-                    .validate_execution(binding.lease.clone())
-                    .await
-                    .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
                 invocation.session = Some(context);
             }
             if invocation
@@ -301,6 +304,12 @@ impl Executor {
             invocation.turn_id = Some(binding.lease.turn.clone());
             invocation.first_run_id = Some(binding.lease.run.clone());
             binding.claim()?;
+            if let Some(storage) = &binding.storage {
+                storage
+                    .validate_execution(binding.lease.clone())
+                    .await
+                    .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
+            }
         } else if invocation
             .session
             .as_ref()
@@ -325,7 +334,7 @@ impl Executor {
             });
         }
         let mut next_run_id = invocation.first_run_id.clone();
-        match atman_rt::run_redirects(
+        let execution = atman_rt::run_redirects(
             flow_name.to_string(),
             args,
             5,
@@ -362,9 +371,21 @@ impl Executor {
                 RuntimeError::Redirect(target) => Some(target.clone()),
                 _ => None,
             },
-        )
-        .await
+        );
+        let outcome = if let Some(binding) = &invocation.instance
+            && let Some(storage) = &binding.storage
         {
+            crate::flow_runtime::execution::drive(
+                storage,
+                &binding.lease,
+                &binding.cancellation,
+                execution,
+            )
+            .await?
+        } else {
+            execution.await
+        };
+        match outcome {
             atman_rt::RedirectOutcome::Completed(result) => result,
             atman_rt::RedirectOutcome::LimitExceeded => Err(RuntimeError::ToolFailed(
                 "redirect chain exceeded max depth (5)".into(),
@@ -508,10 +529,14 @@ impl Executor {
                     // Root's tool_ctx carries session stream_tx so emit sites use
                     // tool_ctx.stream_tx uniformly.
                     let mut tool_ctx = self.tool_ctx.clone().with_invocation_env(invocation_env);
+                    tool_ctx.vm_run_options = invocation
+                        .instance
+                        .as_ref()
+                        .and_then(|binding| binding.options);
                     tool_ctx.instance_publication =
                         invocation.instance.as_ref().and_then(|binding| {
                             binding.storage.clone().map(|worker| {
-                                crate::flow_store::worker::InstancePublication {
+                                crate::flow_runtime::InstancePublication {
                                     worker,
                                     lease: binding.lease.clone(),
                                 }

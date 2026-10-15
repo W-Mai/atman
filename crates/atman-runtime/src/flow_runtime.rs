@@ -1,20 +1,28 @@
 //! Per-instance serialized storage work without blocking asynchronous executor threads.
 
+pub mod execution;
+
 use std::{io, sync::Arc};
 
 use atman_rt::{FlowInstance, TurnLease};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
-use super::publication::{MessagePublication, PublishedMessage};
-use super::{FlowRef, FlowStore, FlowTransition, invalid};
 use crate::event::AtmanUuid;
 use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::publication::{MessagePublication, PublishedMessage};
+use crate::flow_store::{FlowRef, FlowStore, FlowTransition, invalid};
 use crate::session::Session;
 use crate::tool::ToolCtx;
 
+type Acknowledge = Box<dyn FnOnce() + Send>;
+
 enum Command {
-    Apply(Box<dyn FnOnce(&mut FlowStore) + Send>),
+    Apply(Box<dyn FnOnce(&mut FlowStore) -> Acknowledge + Send>),
     Stop(oneshot::Sender<FlowStore>),
+    ClaimExecution {
+        lease: TurnLease<AtmanUuid>,
+        reply: oneshot::Sender<io::Result<()>>,
+    },
 }
 
 /// Owns a flow journal and its in-memory conversation projection.
@@ -25,6 +33,7 @@ pub struct FlowWorker {
     address: FlowRef,
     context: Arc<Session>,
     commands: mpsc::Sender<Command>,
+    state: watch::Receiver<FlowInstance<AtmanUuid>>,
 }
 
 impl FlowWorker {
@@ -39,23 +48,48 @@ impl FlowWorker {
         .await
         .map_err(io::Error::other)?;
         let address = store.descriptor().address.clone();
+        let (state_tx, state) = watch::channel(store.state().clone());
         let (commands, mut receiver) = mpsc::channel::<Command>(64);
         tokio::spawn(async move {
             let mut store = store;
             let mut stopped = None;
+            let mut claimed = None;
             while let Some(command) = receiver.recv().await {
-                let Command::Apply(command) = command else {
-                    if let Command::Stop(reply) = command {
+                let command = match command {
+                    Command::Apply(command) => command,
+                    Command::Stop(reply) => {
                         receiver.close();
                         if stopped.is_none() {
                             stopped = Some(reply);
                         }
+                        continue;
                     }
-                    continue;
+                    Command::ClaimExecution { lease, reply } => {
+                        let result = if claimed.as_ref() == Some(&lease) {
+                            Err(invalid("instance turn execution was already claimed"))
+                        } else if matches!(store.state().state(), atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) if active.lease == lease && active.phase == atman_rt::TurnPhase::Running)
+                        {
+                            claimed = Some(lease);
+                            Ok(())
+                        } else {
+                            Err(invalid("instance execution is not admitted"))
+                        };
+                        let _ = reply.send(result);
+                        continue;
+                    }
                 };
                 // One journal owner at a time, with no session-wide lock across disk or execution.
+                let state_tx = state_tx.clone();
                 match tokio::task::spawn_blocking(move || {
-                    command(&mut store);
+                    let acknowledge = command(&mut store);
+                    state_tx.send_if_modified(|snapshot| {
+                        if snapshot == store.state() {
+                            return false;
+                        }
+                        *snapshot = store.state().clone();
+                        true
+                    });
+                    acknowledge();
                     store
                 })
                 .await
@@ -72,6 +106,7 @@ impl FlowWorker {
             address,
             context,
             commands,
+            state,
         })
     }
 
@@ -83,14 +118,17 @@ impl FlowWorker {
         self.context.clone()
     }
 
-    async fn request<T: Send + 'static>(
+    pub(super) async fn request<T: Send + 'static>(
         &self,
         command: impl FnOnce(&mut FlowStore) -> io::Result<T> + Send + 'static,
     ) -> io::Result<T> {
         let (reply, received) = oneshot::channel();
         self.commands
             .send(Command::Apply(Box::new(move |store| {
-                let _ = reply.send(command(store));
+                let result = command(store);
+                Box::new(move || {
+                    let _ = reply.send(result);
+                })
             })))
             .await
             .map_err(|_| io::Error::other("flow storage worker stopped"))?;
@@ -103,9 +141,13 @@ impl FlowWorker {
         self.request(|store| Ok(store.state().clone())).await
     }
 
+    pub fn subscribe_state(&self) -> watch::Receiver<FlowInstance<AtmanUuid>> {
+        self.state.clone()
+    }
+
     /// Drain accepted work and return journal ownership. Other handles become unavailable.
     ///
-    /// This stops storage service only; it neither cancels execution nor changes the recorded lifecycle.
+    /// Stop active execution before handing off storage. Loss of storage cancels bound execution, but does not manufacture a terminal lifecycle fact.
     pub async fn shutdown(self) -> io::Result<FlowStore> {
         let (reply, received) = oneshot::channel();
         self.commands
@@ -127,17 +169,14 @@ impl FlowWorker {
     }
 
     pub(crate) async fn validate_execution(&self, lease: TurnLease<AtmanUuid>) -> io::Result<()> {
-        self.request(move |store| {
-            if !store
-                .state()
-                .can_receive_at_boundary(&lease)
-                .map_err(invalid)?
-            {
-                return Err(invalid("instance execution is not admitted"));
-            }
-            Ok(())
-        })
-        .await
+        let (reply, received) = oneshot::channel();
+        self.commands
+            .send(Command::ClaimExecution { lease, reply })
+            .await
+            .map_err(|_| io::Error::other("flow storage worker stopped"))?;
+        received
+            .await
+            .map_err(|_| io::Error::other("flow storage worker stopped before execution claim"))?
     }
 
     pub(crate) async fn publish(

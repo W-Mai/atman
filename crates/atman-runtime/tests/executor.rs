@@ -39,6 +39,30 @@ fn instance_binding() -> atman_runtime::InstanceInvocation {
 }
 
 #[tokio::test]
+async fn explicit_instance_vm_options_do_not_require_storage_binding() {
+    let executor = Executor::new();
+    let file = parse_file("flow main() -> int { return 2 * 3 }").unwrap();
+    let invoke = |instance| atman_runtime::RootInvocation {
+        instance: Some(instance),
+        ..Default::default()
+    };
+    let value = executor
+        .run_with_invocation(&file, "main", vec![], invoke(instance_binding()))
+        .await
+        .unwrap();
+    assert!(matches!(value, Value::Int(6)));
+    let limited = instance_binding().with_vm_options(atman_rt::VmRunOptions::limited(
+        std::num::NonZeroUsize::new(1).unwrap(),
+    ));
+    assert!(
+        executor
+            .run_with_invocation(&file, "main", vec![], invoke(limited))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn instance_execution_uses_explicit_authority_and_inline_calls_keep_instance_identity() {
     let executor = Executor::new();
     let binding = instance_binding();

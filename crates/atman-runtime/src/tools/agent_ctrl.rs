@@ -2497,6 +2497,7 @@ fn emit_child_flow_end(ctx: &ToolCtx, end: &atman_rt::FlowEndFact<FlowRunId, Flo
 fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
     let mut c = parent.clone();
     c.instance_publication = None;
+    c.vm_run_options = None;
     c.session_runtime = None;
     c.context_records_session = None;
     c.history_segment = crate::tool::HistorySegment::Spawned;

@@ -7,7 +7,6 @@ mod input;
 pub mod outbox;
 pub mod publication;
 pub mod waiter;
-pub mod worker;
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -777,6 +776,6 @@ fn ensure_dir(path: &Path) -> io::Result<()> {
     }
 }
 
-fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+pub(crate) fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
