@@ -199,6 +199,14 @@ impl<I: Clone + Eq> FlowInstance<I> {
             && active.phase == TurnPhase::Running)
     }
 
+    /// Admit a reply to an existing continuation without starting another turn.
+    pub fn can_receive_reply(&self, lease: &TurnLease<I>) -> Result<bool, InstanceError> {
+        let active = self.check_lease(lease)?;
+        Ok(self.pauses.is_empty()
+            && matches!(self.state, InstanceState::Open(_))
+            && active.phase == TurnPhase::Waiting(WaitReason::Reply))
+    }
+
     pub fn set_phase(
         &mut self,
         lease: &TurnLease<I>,

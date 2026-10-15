@@ -180,3 +180,33 @@ fn control_of_one_instance_has_no_effect_on_its_peers() {
     assert_eq!(b, peer);
     assert!(b.can_start_turn());
 }
+
+#[test]
+fn reply_admission_requires_a_live_waiting_turn_and_all_pause_owners_released() {
+    let mut flow = instance(10);
+    flow.activate().unwrap();
+    let lease = flow.begin_turn(TurnId::new(20), RunId::new(30)).unwrap();
+    assert!(!flow.can_receive_reply(&lease).unwrap());
+    flow.set_phase(&lease, TurnPhase::Waiting(WaitReason::Reply))
+        .unwrap();
+    assert!(flow.can_receive_reply(&lease).unwrap());
+    assert!(!flow.can_receive_at_boundary(&lease).unwrap());
+    flow.pause(100).unwrap();
+    flow.pause(200).unwrap();
+    flow.resume(&100).unwrap();
+    assert!(!flow.can_receive_reply(&lease).unwrap());
+    flow.resume(&200).unwrap();
+    assert!(flow.can_receive_reply(&lease).unwrap());
+    flow.set_phase(&lease, TurnPhase::Waiting(WaitReason::Effect))
+        .unwrap();
+    assert!(!flow.can_receive_reply(&lease).unwrap());
+    flow.set_phase(&lease, TurnPhase::Finishing).unwrap();
+    assert!(!flow.can_receive_reply(&lease).unwrap());
+    flow.begin_close().unwrap();
+    assert!(!flow.can_receive_reply(&lease).unwrap());
+    flow.finish_turn(&lease, TurnOutcome::Completed).unwrap();
+    assert_eq!(
+        flow.can_receive_reply(&lease),
+        Err(InstanceError::StaleLease)
+    );
+}
