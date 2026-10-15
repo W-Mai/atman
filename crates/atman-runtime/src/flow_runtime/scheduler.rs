@@ -10,7 +10,10 @@ use futures::FutureExt;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::{FlowSnapshot, FlowWorker, execution::TurnRequest};
+use super::{
+    FlowSnapshot, FlowWorker,
+    execution::{TurnCompletion, TurnRequest},
+};
 use crate::{Executor, flow_store::invalid};
 
 /// Owns automatic admission, not the lifetime of an already admitted turn.
@@ -32,6 +35,7 @@ pub enum SchedulingStatus {
 
 pub(crate) type PrepareTurn =
     Box<dyn FnMut(&FlowSnapshot) -> io::Result<Option<TurnRequest>> + Send>;
+pub(crate) type CompletedTurn = Box<dyn FnMut(TurnCompletion) + Send>;
 
 impl FlowScheduler {
     pub fn subscribe_status(&self) -> watch::Receiver<SchedulingStatus> {
@@ -78,7 +82,16 @@ impl FlowWorker {
     pub fn schedule(
         &self,
         executor: Executor,
-        mut prepare: impl FnMut(&FlowSnapshot) -> io::Result<Option<TurnRequest>> + Send + 'static,
+        prepare: impl FnMut(&FlowSnapshot) -> io::Result<Option<TurnRequest>> + Send + 'static,
+    ) -> io::Result<FlowScheduler> {
+        self.schedule_observed(executor, Box::new(prepare), Box::new(|_| {}))
+    }
+
+    pub(crate) fn schedule_observed(
+        &self,
+        executor: Executor,
+        mut prepare: PrepareTurn,
+        mut completed: CompletedTurn,
     ) -> io::Result<FlowScheduler> {
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         self.scheduler_owned
@@ -120,7 +133,7 @@ impl FlowWorker {
                         tokio::select! {
                             biased;
                             _ = stopping.cancelled() => return Ok(()),
-                            completion = ticket.wait() => { completion?; }
+                            completion = ticket.wait() => { completed(completion?); }
                         }
                     }
                     // Admission and completion both recheck the queue; no notification needs to survive this scan.

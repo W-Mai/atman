@@ -92,6 +92,94 @@ fn subscription(
 }
 
 #[test]
+fn synchronous_results_skip_only_the_initial_turn_and_preserve_other_subscribers_after_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let id = Uuid::new_v4();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            id,
+            title: "Synchronous results".into(),
+            project_root: None,
+        })
+        .unwrap();
+    let mut source = session.create_flow(descriptor(id)).unwrap();
+    let recipient_info = descriptor(id);
+    let mut recipient = session.create_flow(recipient_info.clone()).unwrap();
+    transition(&mut source, FlowTransition::Activated);
+    transition(&mut recipient, FlowTransition::Activated);
+    let lease = source
+        .state()
+        .clone()
+        .begin_turn(TurnId::now(), RunId::now())
+        .unwrap();
+    let anchor = source.publication_anchor();
+    let mut result = subscription(&source, SubscriptionPurpose::SpawnResult, false);
+    result.filter = AnswerFilter::ExceptTurn(lease.turn.clone());
+    let watcher = subscription(&source, SubscriptionPurpose::Watcher, false);
+    for sub in [&result, &watcher] {
+        recipient.subscribe_answers(sub.clone(), &anchor).unwrap();
+    }
+    recipient.result_subscription_proof(result.id).unwrap();
+    transition(
+        &mut source,
+        FlowTransition::TurnStarted {
+            turn: lease.turn.clone(),
+            run: lease.run.clone(),
+        },
+    );
+    for text in ["same answer", "another answer"] {
+        let mut message = Message::assistant_text(lease.turn.clone(), text);
+        message.origin = MessageOrigin::FinalAnswer;
+        source
+            .publish_message(MessagePublication {
+                id: Uuid::new_v4(),
+                run: lease.run.clone(),
+                context_run: None,
+                message,
+                lease: lease.clone(),
+            })
+            .unwrap();
+    }
+    transition(
+        &mut source,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    );
+    let page = source
+        .publications_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
+        .unwrap();
+    recipient.observe_answers(&page).unwrap();
+    assert_eq!(recipient.pending_inputs().count(), 2);
+    for message in recipient.pending_inputs() {
+        let InboxPayload::FlowEvent { content, .. } = &message.request.payload else {
+            panic!("missing answer")
+        };
+        assert_eq!(content["subscriptions"].as_array().unwrap().len(), 1);
+        assert_eq!(content["subscriptions"][0]["id"], watcher.id.to_string());
+    }
+    drop(recipient);
+    let mut recipient = session
+        .open_flow(&recipient_info.address.instance_id)
+        .unwrap();
+    recipient.observe_answers(&page).unwrap();
+    assert_eq!(recipient.pending_inputs().count(), 2);
+    answer(&mut source, "same answer", false);
+    let next = source
+        .publications_after(page.through(), NonZeroUsize::new(10).unwrap())
+        .unwrap();
+    recipient.observe_answers(&next).unwrap();
+    let last = recipient.pending_inputs().last().unwrap();
+    let InboxPayload::FlowEvent { content, .. } = &last.request.payload else {
+        panic!("missing answer")
+    };
+    assert_eq!(content["subscriptions"].as_array().unwrap().len(), 2);
+    assert_eq!(recipient.pending_inputs().count(), 3);
+}
+
+#[test]
 fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_once() {
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();

@@ -40,6 +40,7 @@ impl PublicationAnchor {
 pub enum AnswerFilter {
     All,
     Contains(String),
+    ExceptTurn(crate::event::TurnId),
 }
 
 impl AnswerFilter {
@@ -47,6 +48,7 @@ impl AnswerFilter {
         match self {
             Self::All => true,
             Self::Contains(text) => message.text_concat().contains(text),
+            Self::ExceptTurn(turn) => &message.turn_id != turn,
         }
     }
 }
@@ -293,7 +295,10 @@ impl FlowStore {
         if !self.state.accepts_input()
             || record.status != SubscriptionStatus::Active
             || record.subscription.purpose != SubscriptionPurpose::SpawnResult
-            || record.subscription.filter != AnswerFilter::All
+            || !matches!(
+                record.subscription.filter,
+                AnswerFilter::All | AnswerFilter::ExceptTurn(_)
+            )
             || record.subscription.once
         {
             return Err(invalid(

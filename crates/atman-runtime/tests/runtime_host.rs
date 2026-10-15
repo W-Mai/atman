@@ -62,6 +62,14 @@ async fn invoke(
     worker: &FlowWorker,
     executor: Executor,
 ) -> atman_runtime::flow_runtime::execution::TurnCompletion {
+    invoke_with_env(worker, executor, BTreeMap::new()).await
+}
+
+async fn invoke_with_env(
+    worker: &FlowWorker,
+    executor: Executor,
+    invocation: BTreeMap<String, serde_json::Value>,
+) -> atman_runtime::flow_runtime::execution::TurnCompletion {
     worker
         .context()
         .update_trust(
@@ -92,11 +100,243 @@ async fn invoke(
         .unwrap();
     let mut request = prepare(&worker.snapshot().await.unwrap()).unwrap().unwrap();
     request.authority.shell = true;
+    request.invocation = invocation;
     let ticket = worker.start_turn(executor, request).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), ticket.wait())
         .await
         .unwrap()
         .unwrap()
+}
+
+#[tokio::test]
+async fn persistent_spawn_runs_real_entries_and_retains_sync_and_async_instances() {
+    use atman_runtime::ValueJson;
+    let dir = tempfile::tempdir().unwrap();
+    let child_path = dir.path().join("child.at");
+    std::fs::write(
+        &child_path,
+        r#"
+        flow child(message: string, count: int = 2) -> string {
+            contract { invocation { user_message: message } }
+            when count != 2 { return final.answer(message: "wrong default") }
+            when env("effort") != "high" { return final.answer(message: "wrong effort") }
+            return final.answer(message: message)
+        }
+        flow value(n: int) -> int { return n * 2 }
+    "#,
+    )
+    .unwrap();
+    let reference = serde_json::to_string(&format!("{}@child", child_path.display())).unwrap();
+    let raw = serde_json::to_string(&format!("{}@value", child_path.display())).unwrap();
+    let source = format!(
+        r#"
+        flow main() -> any {{
+            contract {{ capabilities {{ shell: true }} }}
+            first = flow.instances()
+            raw = flow.spawn(flow: {raw}, spawn_token: first.spawn_token, arguments: {{n: 21}}, async: false)
+            second = flow.instances()
+            sync = flow.spawn(flow: {reference}, spawn_token: second.spawn_token, arguments: {{message: "sync answer"}}, async: false, inherit_context: true)
+            third = flow.instances()
+            background = flow.spawn(flow: {reference}, spawn_token: third.spawn_token, arguments: {{message: "async answer"}})
+            return [raw, sync, background]
+        }}
+    "#
+    );
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let a = session
+        .create_flow(program_descriptor(info.id, source))
+        .await
+        .unwrap();
+    change(&a, FlowTransition::Activated).await;
+    let result = invoke_with_env(
+        &a,
+        Executor::new(),
+        [("effort".into(), "high".into())].into(),
+    )
+    .await
+    .result
+    .unwrap()
+    .to_json()
+    .unwrap();
+    assert_eq!(result[0], 42);
+    assert_eq!(result[1], "sync answer");
+    let background: FlowRef = serde_json::from_value(result[2]["address"].clone()).unwrap();
+    assert_eq!(background.session_id.0, info.id);
+    wait_inputs(&a, 1).await;
+    let inventory = session.snapshot().await.unwrap();
+    assert_eq!(inventory.catalog.flows.len(), 4);
+    let mut synchronous = None;
+    for entry in inventory.catalog.flows {
+        if entry.id == a.address().instance_id {
+            continue;
+        }
+        let worker = session.open_flow(entry.id).await.unwrap();
+        let record = worker.launch_record().await.unwrap().unwrap();
+        assert_eq!(
+            record.input.request.sender,
+            SenderIdentity::Flow(a.address().clone())
+        );
+        assert!(
+            worker
+                .context()
+                .messages()
+                .iter()
+                .all(|message| !message.text_concat().contains("\"effort\""))
+        );
+        if record
+            .input
+            .inherited_context
+            .iter()
+            .any(|message| message.text_concat() == "execute entry")
+        {
+            synchronous = Some(worker);
+        }
+    }
+    let child = synchronous.expect("inherited context identifies the synchronous child");
+    assert_eq!(
+        child.state().await.unwrap().state(),
+        &InstanceState::Open(InstanceActivity::Idle)
+    );
+    let pause = Uuid::new_v4().into();
+    change(&child, FlowTransition::ExecutionPaused { key: pause }).await;
+    std::fs::remove_file(child_path).unwrap();
+    host.deliver(peer_request(a.address(), child.address()), |_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(child.snapshot().await.unwrap().pending.len(), 1);
+    change(&child, FlowTransition::ExecutionResumed { key: pause }).await;
+    wait_inputs(&a, 2).await;
+    let pending = a.snapshot().await.unwrap().pending;
+    let contents: Vec<_> = pending
+        .iter()
+        .map(|message| serde_json::to_string(&message.request.payload).unwrap())
+        .collect();
+    assert!(contents.iter().any(|text| text.contains("async answer")));
+    assert!(contents.iter().any(|text| text.contains("peer work")));
+    assert_eq!(contents.len(), 2);
+    assert!(
+        contents
+            .iter()
+            .all(|text| !text.contains("\"text\":\"sync answer\""))
+    );
+    assert!(
+        !a.context()
+            .messages()
+            .iter()
+            .any(|message| message.origin == MessageOrigin::FinalAnswer)
+    );
+}
+
+#[tokio::test]
+async fn persistent_spawn_rejects_catalog_changes_after_inspection_before_creating() {
+    use atman_runtime::{
+        Value,
+        tool::{Tier, ToolDefinition},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("child.at");
+    std::fs::write(&path, "flow child() -> int { return 1 }").unwrap();
+    let target = serde_json::to_string(&format!("{}@child", path.display())).unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let a = session
+        .create_flow(program_descriptor(
+            info.id,
+            format!(
+                r#"
+        flow main() -> any {{
+            contract {{ capabilities {{ shell: true }} }}
+            inventory = flow.instances()
+            change_catalog()
+            return flow.spawn(flow: {target}, spawn_token: inventory.spawn_token)
+        }}
+    "#
+            ),
+        ))
+        .await
+        .unwrap();
+    change(&a, FlowTransition::Activated).await;
+    let executor = Executor::new();
+    let changed = session.clone();
+    executor
+        .tools
+        .register_fn(
+            ToolDefinition::new("change_catalog", Tier::Zero),
+            move |_, _| {
+                let changed = changed.clone();
+                async move {
+                    changed.create_flow(flow_descriptor(info.id)).await.unwrap();
+                    Ok(Value::Unit)
+                }
+            },
+        )
+        .unwrap();
+    let completion = invoke(&a, executor).await;
+    assert!(
+        completion
+            .result
+            .unwrap_err()
+            .to_string()
+            .contains("inventory changed")
+    );
+    assert_eq!(session.snapshot().await.unwrap().catalog.flows.len(), 2);
+}
+
+#[tokio::test]
+async fn persistent_spawned_instances_can_spawn_through_the_same_tool_chain() {
+    use atman_runtime::ValueJson;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("delegated.at");
+    let leaf = serde_json::to_string(&format!("{}@leaf", path.display())).unwrap();
+    std::fs::write(&path, format!(r#"
+        flow leaf(n: int) -> int {{ return n + 1 }}
+        flow middle(n: int) -> int {{
+            contract {{ capabilities {{ shell: true }} }}
+            inventory = flow.instances()
+            return flow.spawn(flow: {leaf}, spawn_token: inventory.spawn_token, arguments: {{n: n}}, async: false)
+        }}
+    "#)).unwrap();
+    let target = serde_json::to_string(&format!("{}@middle", path.display())).unwrap();
+    let source = format!(
+        r#"
+        flow main() -> int {{
+            contract {{ capabilities {{ shell: true }} }}
+            inventory = flow.instances()
+            return flow.spawn(flow: {target}, spawn_token: inventory.spawn_token, arguments: {{n: 41}}, async: false)
+        }}
+    "#
+    );
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let a = session
+        .create_flow(program_descriptor(info.id, source))
+        .await
+        .unwrap();
+    change(&a, FlowTransition::Activated).await;
+    assert_eq!(
+        invoke(&a, Executor::new())
+            .await
+            .result
+            .unwrap()
+            .to_json()
+            .unwrap(),
+        42
+    );
+    assert_eq!(session.snapshot().await.unwrap().catalog.flows.len(), 3);
+    assert!(a.snapshot().await.unwrap().pending.is_empty());
 }
 
 #[tokio::test]

@@ -24,6 +24,10 @@ impl InvocationEnv {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    pub fn values(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.0.iter().map(|(key, value)| (key.as_str(), value))
+    }
 }
 
 #[cfg(test)]

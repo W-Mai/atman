@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 const SPAWN_PERMIT_TTL: Duration = Duration::from_secs(300);
 
 pub(super) mod instance;
+mod instance_spawn;
 
 pub struct AgentSpawn;
 
@@ -221,6 +222,7 @@ struct SpawnPermit {
     parent_run_id: FlowRunId,
     revision: u64,
     expires_at: Instant,
+    catalog: Option<crate::event_log::journal::CommitReceipt>,
 }
 
 #[derive(Debug, Clone)]
@@ -276,12 +278,25 @@ impl FlowRegistry {
 
     pub fn issue_spawn_permit(&self, identity: &crate::flow_authority::FlowIdentity) -> String {
         let mut admission = self.spawn_admission.lock().unwrap();
-        Self::issue_spawn_permit_locked(&mut admission, identity)
+        Self::issue_spawn_permit_locked(&mut admission, identity, None)
+    }
+
+    pub(crate) fn issue_instance_spawn_permit(
+        &self,
+        identity: &crate::flow_authority::FlowIdentity,
+        catalog: crate::event_log::journal::CommitReceipt,
+    ) -> String {
+        Self::issue_spawn_permit_locked(
+            &mut self.spawn_admission.lock().unwrap(),
+            identity,
+            Some(catalog),
+        )
     }
 
     fn issue_spawn_permit_locked(
         admission: &mut SpawnAdmission,
         identity: &crate::flow_authority::FlowIdentity,
+        catalog: Option<crate::event_log::journal::CommitReceipt>,
     ) -> String {
         let now = Instant::now();
         admission
@@ -300,6 +315,7 @@ impl FlowRegistry {
                 parent_run_id: identity.run_id.clone(),
                 revision,
                 expires_at: now + SPAWN_PERMIT_TTL,
+                catalog,
             },
         );
         token
@@ -311,7 +327,7 @@ impl FlowRegistry {
     ) -> (Vec<FlowInstanceInfo>, String) {
         let mut admission = self.spawn_admission.lock().unwrap();
         let instances = self.instances_for_session(&identity.session_id);
-        let token = Self::issue_spawn_permit_locked(&mut admission, identity);
+        let token = Self::issue_spawn_permit_locked(&mut admission, identity, None);
         (instances, token)
     }
 
@@ -319,7 +335,7 @@ impl FlowRegistry {
         &self,
         token: &str,
         identity: &crate::flow_authority::FlowIdentity,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Option<crate::event_log::journal::CommitReceipt>, RuntimeError> {
         let mut admission = self.spawn_admission.lock().unwrap();
         let Some(permit) = admission.permits.remove(token) else {
             return Err(RuntimeError::ToolFailed(
@@ -355,7 +371,7 @@ impl FlowRegistry {
         admission
             .permits
             .retain(|_, permit| permit.session_id != identity.session_id);
-        Ok(())
+        Ok(permit.catalog)
     }
 
     pub fn instances_for_session(&self, session_id: &str) -> Vec<FlowInstanceInfo> {
@@ -901,6 +917,8 @@ impl Tool for AgentSpawn {
              Target flow parameters must be passed through `arguments`. \
              A flow may declare `contract { invocation { user_message: param } }` to seed its child message context. \
              Use flow.status/flow.output/flow.kill to manage async sub-agents by handle. \
+             In a persistent instance, both modes create a retained peer; async=false waits for its first turn only. \
+             Later text input requires the declared invocation user_message mapping. Persistent instances require workspace=none. \
              Pass only parameters declared by flow.describe. Missing params use flow-defined defaults.",
         )
     }
@@ -937,7 +955,7 @@ impl Tool for AgentSpawn {
                     "flow.spawn: trusted caller flow identity is unavailable".into(),
                 )
             })?;
-            flow_registry.consume_spawn_permit(&token, identity)?;
+            let catalog = flow_registry.consume_spawn_permit(&token, identity)?;
             let is_async = args
                 .named("async")
                 .and_then(|v| {
@@ -948,6 +966,9 @@ impl Tool for AgentSpawn {
                     }
                 })
                 .unwrap_or(true);
+            if identity.instance.is_some() {
+                return instance_spawn::spawn(args, ctx, is_async, catalog).await;
+            }
             if is_async {
                 run_sub_agent_async(args, ctx, true).await
             } else {
@@ -2253,6 +2274,41 @@ fn invocation_user_message(
     flow: &atman_rt::ast::FlowDecl,
     flow_args: &[(String, Value)],
 ) -> Result<Option<String>, RuntimeError> {
+    let Some(parameter_name) = invocation_message_parameter(flow)? else {
+        return Ok(None);
+    };
+    let parameter = flow
+        .params
+        .iter()
+        .find(|parameter| parameter.name.name == parameter_name)
+        .expect("validated invocation parameter");
+    match flow_args
+        .iter()
+        .find(|(name, _)| name == parameter_name)
+        .map(|(_, value)| value)
+    {
+        Some(Value::Str(value)) => Ok(Some(value.clone())),
+        Some(value) => Err(RuntimeError::TypeMismatch {
+            expected: "string invocation user_message".into(),
+            actual: value.kind_name().into(),
+        }),
+        None => match parameter.default.as_ref() {
+            Some(atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Str(value))) => {
+                Ok(Some(value.clone()))
+            }
+            Some(_) => Err(RuntimeError::ToolFailed(format!(
+                "flow.spawn: invocation user_message parameter `{parameter_name}` requires a literal string default"
+            ))),
+            None => Err(RuntimeError::ToolFailed(format!(
+                "flow.spawn: invocation user_message parameter `{parameter_name}` was not provided"
+            ))),
+        },
+    }
+}
+
+fn invocation_message_parameter(
+    flow: &atman_rt::ast::FlowDecl,
+) -> Result<Option<&str>, RuntimeError> {
     let Some((_, parameter_value)) = flow.contract.as_ref().and_then(|contract| {
         contract
             .blocks
@@ -2290,28 +2346,7 @@ fn invocation_user_message(
             "flow.spawn: invocation user_message parameter `{parameter_name}` must be a string"
         )));
     }
-    match flow_args
-        .iter()
-        .find(|(name, _)| name == parameter_name)
-        .map(|(_, value)| value)
-    {
-        Some(Value::Str(value)) => Ok(Some(value.clone())),
-        Some(value) => Err(RuntimeError::TypeMismatch {
-            expected: "string invocation user_message".into(),
-            actual: value.kind_name().into(),
-        }),
-        None => match parameter.default.as_ref() {
-            Some(atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Str(value))) => {
-                Ok(Some(value.clone()))
-            }
-            Some(_) => Err(RuntimeError::ToolFailed(format!(
-                "flow.spawn: invocation user_message parameter `{parameter_name}` requires a literal string default"
-            ))),
-            None => Err(RuntimeError::ToolFailed(format!(
-                "flow.spawn: invocation user_message parameter `{parameter_name}` was not provided"
-            ))),
-        },
-    }
+    Ok(Some(parameter_name))
 }
 
 fn seed_child_message_context(ctx: &ToolCtx, prompt: String) -> Result<(), RuntimeError> {
@@ -2337,6 +2372,41 @@ fn seed_parent_handoff_context(
         .as_ref()
         .and_then(|identity| identity.parent_run_id.as_ref())
         .map(ToString::to_string);
+    let spec = handoff_spec(
+        flow,
+        parent_run_id,
+        child_run_id,
+        invocation_prompt,
+        inherited_parent_context,
+    );
+    let turn_id = ctx
+        .turn_id
+        .clone()
+        .unwrap_or_else(crate::event::TurnId::now);
+    let record = {
+        let messages = ctx.session_messages_handle.as_ref().ok_or_else(|| {
+            RuntimeError::ToolFailed("flow.spawn: child message context is unavailable".into())
+        })?;
+        let messages = messages.lock().unwrap();
+        crate::context_plan::compile_context_records(&messages, [spec])
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                RuntimeError::ToolFailed(
+                    "flow.spawn: child handoff record was not materialized".into(),
+                )
+            })?
+    };
+    crate::tools::session::append_message_to_context(ctx, Message::context_record(turn_id, record))
+}
+
+fn handoff_spec(
+    flow: &atman_rt::ast::FlowDecl,
+    parent_run_id: Option<String>,
+    child_run_id: &FlowRunId,
+    invocation_prompt: Option<&str>,
+    inherited_parent_context: bool,
+) -> crate::context_plan::ContextRecordSpec {
     let expected_result = flow
         .ret
         .as_ref()
@@ -2359,33 +2429,11 @@ fn seed_parent_handoff_context(
         "task_boundary": "Execute only this delegated flow invocation and return its declared result to the parent.",
         "expected_result": expected_result,
     });
-    let spec = crate::context_plan::ContextRecordSpec::new(
+    crate::context_plan::ContextRecordSpec::new(
         "handoff.parent",
         crate::context_plan::ContextRecordAuthority::Runtime,
         crate::context_plan::ContextRecordRetention::Latest,
         crate::context_plan::ContextRecordBody::text(handoff.to_string()),
-    );
-    let turn_id = ctx
-        .turn_id
-        .clone()
-        .unwrap_or_else(crate::event::TurnId::now);
-    let record = {
-        let messages = ctx.session_messages_handle.as_ref().ok_or_else(|| {
-            RuntimeError::ToolFailed("flow.spawn: child message context is unavailable".into())
-        })?;
-        let messages = messages.lock().unwrap();
-        crate::context_plan::compile_context_records(&messages, [spec])
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                RuntimeError::ToolFailed(
-                    "flow.spawn: child handoff record was not materialized".into(),
-                )
-            })?
-    };
-    crate::tools::session::append_message_to_context(
-        ctx,
-        crate::message::Message::context_record(turn_id, record),
     )
 }
 

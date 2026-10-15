@@ -173,6 +173,11 @@ enum CatalogCommand {
         prepare: PrepareTurn,
         reply: oneshot::Sender<io::Result<watch::Receiver<SchedulingStatus>>>,
     },
+    AdoptScheduling {
+        worker: FlowWorker,
+        controller: FlowScheduler,
+        reply: oneshot::Sender<io::Result<()>>,
+    },
     StopScheduling {
         id: FlowInstanceId,
         reply: oneshot::Sender<io::Result<()>>,
@@ -203,7 +208,7 @@ enum AccessChange {
 }
 
 enum FlowOperation {
-    Create(Box<FlowDescriptor>),
+    Create(Box<FlowDescriptor>, Option<CommitReceipt>),
     Open(FlowInstanceId),
 }
 
@@ -261,6 +266,19 @@ impl SessionHandle {
         .await
     }
 
+    pub(crate) async fn adopt_scheduler(
+        &self,
+        worker: FlowWorker,
+        controller: FlowScheduler,
+    ) -> io::Result<()> {
+        self.request(|reply| CatalogCommand::AdoptScheduling {
+            worker,
+            controller,
+            reply,
+        })
+        .await
+    }
+
     /// Stop automatic admission, leaving admitted execution and persistent pause keys unchanged.
     pub async fn stop_scheduling(&self, id: FlowInstanceId) -> io::Result<()> {
         self.request(|reply| CatalogCommand::StopScheduling { id, reply })
@@ -294,8 +312,16 @@ impl SessionHandle {
     }
 
     pub async fn create_flow(&self, descriptor: FlowDescriptor) -> io::Result<FlowWorker> {
+        self.create_flow_at(descriptor, None).await
+    }
+
+    pub(crate) async fn create_flow_at(
+        &self,
+        descriptor: FlowDescriptor,
+        expected: Option<CommitReceipt>,
+    ) -> io::Result<FlowWorker> {
         self.request(|reply| CatalogCommand::Flow {
-            operation: FlowOperation::Create(Box::new(descriptor)),
+            operation: FlowOperation::Create(Box::new(descriptor), expected),
             reply,
         })
         .await
@@ -422,6 +448,32 @@ async fn serve_catalog(
                 };
                 let _ = reply.send(result);
             }
+            CatalogCommand::AdoptScheduling {
+                worker,
+                controller,
+                reply,
+            } => {
+                let id = &worker.address().instance_id;
+                let current = flows.lock().unwrap().get(id).is_some_and(|current| {
+                    !current.is_stopped() && current.commands.same_channel(&worker.commands)
+                });
+                let result = if !current {
+                    Err(invalid("instance storage changed during launch"))
+                } else if schedulers.get(id).is_some_and(|existing| {
+                    *existing.subscribe_status().borrow() == SchedulingStatus::Running
+                }) {
+                    Err(invalid("instance already has a host scheduler"))
+                } else {
+                    if let Some(previous) = schedulers.remove(id) {
+                        let _ = previous.stop().await;
+                    }
+                    schedulers.insert(id.clone(), controller);
+                    let _ = reply.send(Ok(()));
+                    continue;
+                };
+                let _ = controller.stop().await;
+                let _ = reply.send(result);
+            }
             CatalogCommand::StopScheduling { id, reply } => {
                 let result = match schedulers.remove(&id) {
                     Some(controller) => controller.stop().await,
@@ -480,7 +532,7 @@ async fn serve_catalog(
             }
             CatalogCommand::Flow { operation, reply } => {
                 let id = match &operation {
-                    FlowOperation::Create(descriptor) => descriptor.address.instance_id.clone(),
+                    FlowOperation::Create(descriptor, _) => descriptor.address.instance_id.clone(),
                     FlowOperation::Open(id) => id.clone(),
                 };
                 // Never reopen a live writer: that would either contend on its journal or misclassify execution as host loss.
@@ -493,7 +545,7 @@ async fn serve_catalog(
                 if let Some(worker) = existing {
                     let result = match operation {
                         FlowOperation::Open(_) => Ok(worker.clone()),
-                        FlowOperation::Create(descriptor) => worker
+                        FlowOperation::Create(descriptor, _) => worker
                             .request(move |store| {
                                 if store.descriptor() != descriptor.as_ref() {
                                     return Err(invalid("flow creation payload changed"));
@@ -512,7 +564,9 @@ async fn serve_catalog(
                 }
                 let result = tokio::task::spawn_blocking(move || {
                     let result = match operation {
-                        FlowOperation::Create(descriptor) => store.create_flow(*descriptor),
+                        FlowOperation::Create(descriptor, expected) => {
+                            store.create_flow_at(*descriptor, expected.as_ref())
+                        }
                         FlowOperation::Open(id) => store.open_flow(&id),
                     };
                     (store, result)

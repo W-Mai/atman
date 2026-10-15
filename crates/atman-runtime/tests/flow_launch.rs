@@ -74,6 +74,7 @@ fn initial(info: &FlowDescriptor, recipient: &FlowRef) -> LaunchInput {
         result_route: Some(ResultRoute {
             recipient: recipient.clone(),
             subscription: Uuid::new_v4(),
+            synchronous_turn: None,
         }),
     }
 }

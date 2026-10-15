@@ -284,7 +284,7 @@ impl Tool for FlowInstances {
                     .collect();
                 return Ok(Value::from_json(serde_json::json!({
                     "instances": instances,
-                    "spawn_token": registry.issue_spawn_permit(identity),
+                    "spawn_token": registry.issue_instance_spawn_permit(identity, page.catalog.clone()),
                     "next_cursor": page.next.map(|id| id.to_string()),
                     "total": page.total,
                     "catalog_revision": page.catalog,

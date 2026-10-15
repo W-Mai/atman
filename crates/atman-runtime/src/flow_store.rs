@@ -384,6 +384,14 @@ impl SessionStore {
 
     /// Prepare and register before returning an addressable instance. Repeated creation requires the same immutable descriptor.
     pub fn create_flow(&mut self, descriptor: FlowDescriptor) -> io::Result<FlowStore> {
+        self.create_flow_at(descriptor, None)
+    }
+
+    pub(crate) fn create_flow_at(
+        &mut self,
+        descriptor: FlowDescriptor,
+        expected: Option<&CommitReceipt>,
+    ) -> io::Result<FlowStore> {
         if descriptor.address.session_id.0 != self.projection.descriptor.id {
             return Err(invalid("flow belongs to another session"));
         }
@@ -393,6 +401,11 @@ impl SessionStore {
             .flows
             .iter()
             .find(|flow| flow.id == id || flow.creation_request == descriptor.creation_request);
+        if existing.is_none() && expected.is_some_and(|cursor| cursor != &self.cursor) {
+            return Err(invalid(
+                "flow inventory changed after inspection; call flow.instances again",
+            ));
+        }
         if let Some(existing) = existing {
             if existing.id != id || existing.creation_request != descriptor.creation_request {
                 return Err(invalid(

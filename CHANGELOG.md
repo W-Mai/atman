@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent flow creation** — Bound flow invocations create retained peers through the host scheduler, preserving source snapshots, arguments, invocation settings, and optional inherited context. Synchronous calls wait for the initial result without duplicate result notifications; later input can start another turn. Inventory changes reject stale spawn permits before creation, and failed activation releases scheduling ownership.
+
 - **Persistent instance discovery** — Flow listings use the session catalog, retain unavailable and inactive instances, and support stable cursor pagination. Status and listings share execution and pause fields; summary reads do not retain additional conversation contexts.
 
 - **Atomic instance activation** — Host creation registers result subscriptions before activating a flow, commits initial invocation data and inherited context together, and reconciles concurrent or recovered launch requests without duplicate execution. Failed activation preserves prepared state and registered reply routes.

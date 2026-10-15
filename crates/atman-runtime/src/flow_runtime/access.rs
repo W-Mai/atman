@@ -62,6 +62,35 @@ impl RuntimeHost {
 }
 
 impl FlowClient {
+    /// Product spawn entry: creation stays in the authenticated caller's session. Tool admission supplies the execution ceiling; provenance never grants control over the new instance.
+    pub(crate) async fn spawn(
+        &self,
+        descriptor: crate::flow_store::FlowDescriptor,
+        input: crate::flow_store::launch::LaunchInput,
+        execution: super::launch::LaunchExecution,
+    ) -> io::Result<super::launch::LaunchedFlow> {
+        self.authorize(self.source(), FlowAction::Send)?;
+        if descriptor.address.session_id != self.source().session_id
+            || descriptor.created_by.as_ref() != Some(self.source())
+            || input.request.sender != SenderIdentity::Flow(self.source().clone())
+            || input
+                .result_route
+                .as_ref()
+                .is_some_and(|route| &route.recipient != self.source())
+        {
+            return Err(denied("spawn identity does not match its admitted caller"));
+        }
+        let client = self.clone();
+        self.host
+            .launch_owned(
+                descriptor,
+                input,
+                move |_, _| client.authorize(client.source(), FlowAction::Send),
+                Some(execution),
+            )
+            .await
+    }
+
     pub(super) fn bind(
         host: RuntimeHost,
         source: &super::FlowWorker,

@@ -19,6 +19,16 @@ use crate::{event::AtmanUuid, event_log::journal::CommitReceipt, message::Messag
 pub struct ResultRoute {
     pub recipient: FlowRef,
     pub subscription: Uuid,
+    pub synchronous_turn: Option<crate::event::TurnId>,
+}
+
+impl ResultRoute {
+    pub fn filter(&self) -> AnswerFilter {
+        self.synchronous_turn
+            .clone()
+            .map(AnswerFilter::ExceptTurn)
+            .unwrap_or(AnswerFilter::All)
+    }
 }
 
 /// Trusted host input, separate from the authority to execute it.
@@ -77,7 +87,7 @@ impl Activation {
                 if route.recipient == proof.recipient
                     && route.subscription == proof.record.subscription.id
                     && proof.record.subscription.source == descriptor.address
-                    && proof.record.subscription.filter == AnswerFilter::All
+                    && proof.record.subscription.filter == route.filter()
                     && proof.record.subscription.purpose == SubscriptionPurpose::SpawnResult
                     && !proof.record.subscription.once
                     && proof.record.status == SubscriptionStatus::Active
