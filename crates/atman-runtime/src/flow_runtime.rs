@@ -2,6 +2,7 @@
 
 pub mod execution;
 mod input;
+pub mod scheduler;
 
 use std::{io, sync::Arc};
 
@@ -44,6 +45,7 @@ pub struct FlowWorker {
     commands: mpsc::Sender<Command>,
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
     commits: watch::Receiver<CommitReceipt>,
+    scheduler_owned: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FlowWorker {
@@ -127,6 +129,7 @@ impl FlowWorker {
             commands,
             state,
             commits,
+            scheduler_owned: Default::default(),
         })
     }
 

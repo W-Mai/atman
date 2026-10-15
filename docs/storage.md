@@ -93,7 +93,7 @@ The host compiles the recorded source bundle, commits invocation input, and cons
 
 Inline calls share the instance context. Fanout calls retain isolated invocation contexts: their publications remain in the owning instance journal with `context_run`, and recovery does not merge them into the shared conversation. Message scheduling claims use the instance address rather than serializing every flow in a session.
 
-Worker binding covers message publication, not the complete product scheduler. Persistent notification pickup, context compaction checkpoints, and legacy `flow.spawn` migration still require host integration. The CLI and daemon retain their existing storage and dispatch until that integration is complete.
+Worker binding covers message publication, not the complete product scheduler. Legacy watcher/child notification migration, context compaction checkpoints, and legacy `flow.spawn` migration still require host integration. The CLI and daemon retain their existing storage and dispatch until that integration is complete.
 
 ## Owned instance turns
 
@@ -109,4 +109,8 @@ The worker starts and owns the execution task before returning a `TurnTicket`. D
 
 `subscribe_commits` also observes inbox delivery and other durable changes that leave lifecycle state unchanged. Subscribe first, call `borrow_and_update` before `snapshot`, and await `changed` only after finding no admissible work. This order retains arrivals between an empty scan and the wait. `snapshot` reads lifecycle, journal cursor, and pending input in one serialized command. Commit notifications coalesce and wake all subscribers; readers must recheck eligibility rather than treating a notification as an execution grant. Reads, rejected writes, and idempotent retries do not emit notifications. Reopened workers expose their restored cursor and pending input immediately.
 
-This entry point runs a host-selected batch. Automatic queue selection, notification pickup, management authorization, and CLI/daemon integration remain separate host responsibilities.
+`FlowWorker::schedule` owns one event-driven admission loop per instance. A host preparation callback chooses the ordered input IDs, invocation arguments, context, and authority from a committed snapshot; it can decline input without consuming it. The callback performs local preparation, not external I/O. Admission verifies that the snapshot cursor is still current before compiling and committing the turn. A concurrent input or control change causes a fresh scan. Idle, paused, active, or interrupted instances wait for committed changes instead of polling.
+
+After a completed turn, the scheduler rechecks pending input and can start another turn on the same instance. Interrupted execution requires explicit recovery. Preparation or storage failures stop the scheduler and remain observable through `FlowScheduler::wait`. `stop` or dropping the scheduler handle prevents further scheduling; already queued admission commands settle, and admitted turns retain their execution and terminal commit obligations. Explicit execution controls pause or cancel a turn. A stopped scheduler releases its ownership so another host controller can attach.
+
+Input policy, instance directory ownership, management authorization, and CLI/daemon integration remain host responsibilities. Automatic admission does not assign root privileges or infer a goal from message text.

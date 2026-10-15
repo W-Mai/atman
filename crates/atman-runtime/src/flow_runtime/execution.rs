@@ -72,9 +72,27 @@ impl FlowWorker {
         executor: Executor,
         request: TurnRequest,
     ) -> io::Result<TurnTicket> {
+        self.admit_turn(executor, request, None)
+            .await?
+            .ok_or_else(|| invalid("unconditional admission did not return a ticket"))
+    }
+
+    /// Admit a host-prepared batch only if its scheduling snapshot is still current.
+    pub(super) async fn admit_turn(
+        &self,
+        executor: Executor,
+        request: TurnRequest,
+        expected: Option<CommitReceipt>,
+    ) -> io::Result<Option<TurnTicket>> {
         let worker = self.clone();
         let runtime = tokio::runtime::Handle::current();
         self.request(move |store| {
+            if expected
+                .as_ref()
+                .is_some_and(|cursor| cursor != store.cursor())
+            {
+                return Ok(None);
+            }
             if request.messages.is_empty() {
                 return Err(invalid("a turn requires selected pending input"));
             }
@@ -181,10 +199,10 @@ impl FlowWorker {
                     .await;
                 let _ = completed.send(end);
             });
-            Ok(TurnTicket {
+            Ok(Some(TurnTicket {
                 lease,
                 completed: observed,
-            })
+            }))
         })
         .await
     }

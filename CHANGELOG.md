@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Instance scheduling** — An event-driven controller admits host-selected inbox work, rechecks snapshots before startup, and schedules subsequent turns after completion. Independent pauses and interruptions prevent automatic execution; stopping the controller preserves admitted turns and their terminal commits.
+
 - **Instance change observation** — Storage workers expose committed journal revisions and atomic lifecycle/inbox snapshots. Inbox arrival wakes subscribers without requiring a lifecycle change; reads and idempotent retries do not trigger another wakeup.
 
 - **Instance inbox pickup** — Shared general model calls atomically consume compatible pending input into durable conversation context. Auxiliary calls and isolated fanout branches cannot consume shared input; next-turn and incompatible submissions remain queued.

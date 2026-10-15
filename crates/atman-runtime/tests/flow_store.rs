@@ -1040,6 +1040,288 @@ async fn committed_readiness_includes_inbox_arrival_without_spinning_on_reads_or
     restored.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn instance_scheduler_rechecks_preparation_races_and_runs_pending_turns_without_polling() {
+    use atman_runtime::flow_runtime::FlowWorker;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut description = descriptor(info.id);
+    description.entry.bundle.sources.insert("entry:main.at".into(), r#"flow main(input: int) -> string { return final.answer(message: to_json_string(input)) }"#.into());
+    let mut store = session.create_flow(description.clone()).unwrap();
+    change(&mut store, FlowTransition::Activated);
+    let worker = FlowWorker::start(store).await.unwrap();
+    let prepared = std::sync::Arc::new(AtomicUsize::new(0));
+    let calls = prepared.clone();
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    let mut entered = Some(entered);
+    let (release, held) = std::sync::mpsc::channel();
+    let executor = atman_runtime::Executor::new();
+    let scheduler = worker
+        .schedule(executor.clone(), move |snapshot| {
+            let count = calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(entered) = entered.take() {
+                let _ = entered.send(());
+                held.recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+            }
+            Ok(Some(turn_request(snapshot.pending[0].id, count as i64)))
+        })
+        .unwrap();
+    assert!(worker.schedule(executor.clone(), |_| Ok(None)).is_err());
+    assert_eq!(prepared.load(Ordering::SeqCst), 0);
+    worker
+        .accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::User(Uuid::new_v4()),
+                "one",
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    let key = Uuid::new_v4().into();
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::ExecutionPaused { key },
+        )
+        .await
+        .unwrap();
+    worker
+        .accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::User(Uuid::new_v4()),
+                "two",
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    assert!(worker.context().messages().is_empty());
+    let snapshot = worker.snapshot().await.unwrap();
+    assert_eq!(snapshot.pending.len(), 2);
+    assert!(!snapshot.state.can_start_turn());
+    worker
+        .transition(
+            snapshot.state.revision(),
+            FlowTransition::ExecutionResumed { key },
+        )
+        .await
+        .unwrap();
+    let mut commits = worker.subscribe_commits();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            commits.borrow_and_update();
+            let snapshot = worker.snapshot().await.unwrap();
+            if snapshot.pending.is_empty() && snapshot.state.can_start_turn() {
+                break;
+            }
+            commits.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(prepared.load(Ordering::SeqCst), 3);
+    scheduler.stop().await.unwrap();
+    let never = worker
+        .schedule(executor, |_| panic!("empty inbox was scheduled"))
+        .unwrap();
+    never.stop().await.unwrap();
+    let store = worker.shutdown().await.unwrap();
+    assert_eq!(store.committed_inputs().len(), 2);
+    let answers: Vec<_> = store
+        .context_messages()
+        .iter()
+        .filter(|m| m.origin == atman_runtime::message::MessageOrigin::FinalAnswer)
+        .map(Message::text_concat)
+        .collect();
+    assert_eq!(answers, ["1", "2"]);
+}
+
+#[tokio::test]
+async fn instance_scheduler_stop_releases_admission_ownership_without_cancelling_a_turn() {
+    use atman_runtime::flow_runtime::FlowWorker;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut description = descriptor(info.id);
+    description.entry.bundle.sources.insert("entry:main.at".into(), r#"flow main(input: int) -> string { execution_probe(); return final.answer(message: "settled") }"#.replace(";", "\n"));
+    let mut store = session.create_flow(description.clone()).unwrap();
+    change(&mut store, FlowTransition::Activated);
+    let worker = FlowWorker::start(store).await.unwrap();
+    let executor = atman_runtime::Executor::new();
+    let probe = std::sync::Arc::new(ExecutionProbe {
+        entered: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+        release: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    executor.tools.register(probe.clone());
+    let scheduler = worker
+        .schedule(executor.clone(), |snapshot| {
+            Ok(Some(turn_request(snapshot.pending[0].id, 0)))
+        })
+        .unwrap();
+    worker
+        .accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::User(Uuid::new_v4()),
+                "one",
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), probe.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    scheduler.stop().await.unwrap();
+    assert!(matches!(
+        worker.state().await.unwrap().state(),
+        InstanceState::Open(InstanceActivity::Active(_))
+    ));
+    let replacement = worker
+        .schedule(executor, |_| {
+            panic!("active turn must not be scheduled twice")
+        })
+        .unwrap();
+    probe.release.add_permits(1);
+    let mut commits = worker.subscribe_commits();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            commits.borrow_and_update();
+            if worker.state().await.unwrap().can_start_turn() {
+                break;
+            }
+            commits.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    replacement.stop().await.unwrap();
+    let store = worker.shutdown().await.unwrap();
+    assert_eq!(store.committed_inputs().len(), 1);
+    assert_eq!(
+        store
+            .published_messages()
+            .last()
+            .unwrap()
+            .publication
+            .message
+            .text_concat(),
+        "settled"
+    );
+}
+
+#[tokio::test]
+async fn instance_scheduler_keeps_declined_input_and_never_retries_interrupted_execution() {
+    use atman_runtime::flow_runtime::FlowWorker;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut description = descriptor(info.id);
+    description.entry.bundle.sources.insert(
+        "entry:main.at".into(),
+        "flow main(input: int) { unavailable_tool() }".into(),
+    );
+    let mut store = session.create_flow(description.clone()).unwrap();
+    change(&mut store, FlowTransition::Activated);
+    let worker = FlowWorker::start(store).await.unwrap();
+    let prepared = std::sync::Arc::new(AtomicUsize::new(0));
+    let calls = prepared.clone();
+    let declined = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify = declined.clone();
+    let scheduler = worker
+        .schedule(atman_runtime::Executor::new(), move |snapshot| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                notify.notify_one();
+                return Ok(None);
+            }
+            Ok(Some(turn_request(snapshot.pending[0].id, 0)))
+        })
+        .unwrap();
+    worker
+        .accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::User(Uuid::new_v4()),
+                "one",
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), declined.notified())
+        .await
+        .unwrap();
+    let snapshot = worker.snapshot().await.unwrap();
+    assert_eq!(snapshot.pending.len(), 1);
+    assert!(snapshot.state.can_start_turn());
+    let key = Uuid::new_v4().into();
+    worker
+        .transition(
+            snapshot.state.revision(),
+            FlowTransition::ExecutionPaused { key },
+        )
+        .await
+        .unwrap();
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::ExecutionResumed { key },
+        )
+        .await
+        .unwrap();
+    let mut commits = worker.subscribe_commits();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            commits.borrow_and_update();
+            if matches!(
+                worker.state().await.unwrap().state(),
+                InstanceState::Open(InstanceActivity::Interrupted {
+                    reason: Interruption::Failed,
+                    ..
+                })
+            ) {
+                break;
+            }
+            commits.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    worker
+        .accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::User(Uuid::new_v4()),
+                "two",
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    scheduler.stop().await.unwrap();
+    assert_eq!(prepared.load(Ordering::SeqCst), 2);
+    let store = worker.shutdown().await.unwrap();
+    assert_eq!(store.pending_inputs().count(), 1);
+    assert_eq!(store.committed_inputs().len(), 1);
+}
+
 #[test]
 fn accepted_retries_survive_restart_revocation_and_close_without_duplicate_input() {
     let dir = tempfile::tempdir().unwrap();
