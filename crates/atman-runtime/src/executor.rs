@@ -19,6 +19,47 @@ pub struct RootInvocation {
     pub session: Option<std::sync::Arc<Session>>,
     pub first_run_id: Option<FlowRunId>,
     pub env: InvocationEnv,
+    pub instance: Option<InstanceInvocation>,
+}
+
+/// Host-selected identity, authority ceiling, and cancellation for an admitted persistent turn.
+///
+/// The host verifies and durably admits the lease before execution. This binding does not grant root permissions or recover an interrupted turn.
+#[derive(Clone)]
+pub struct InstanceInvocation {
+    pub lease: atman_rt::TurnLease<crate::event::AtmanUuid>,
+    pub authority: crate::flow_authority::EffectiveAuthority,
+    pub cancellation: tokio_util::sync::CancellationToken,
+    started: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl InstanceInvocation {
+    pub fn new(
+        lease: atman_rt::TurnLease<crate::event::AtmanUuid>,
+        authority: crate::flow_authority::EffectiveAuthority,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        Self {
+            lease,
+            authority,
+            cancellation,
+            started: Default::default(),
+        }
+    }
+
+    fn claim(&self) -> Result<(), RuntimeError> {
+        self.started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| {
+                RuntimeError::ToolFailed("instance execution binding was already used".into())
+            })
+    }
 }
 
 struct FlowSource<'a> {
@@ -204,8 +245,38 @@ impl Executor {
         program: &LinkedProgram,
         flow_name: &str,
         args: Vec<(String, Value)>,
-        invocation: RootInvocation,
+        mut invocation: RootInvocation,
     ) -> Result<Value, RuntimeError> {
+        if let Some(binding) = &invocation.instance {
+            if invocation
+                .turn_id
+                .as_ref()
+                .is_some_and(|id| id != &binding.lease.turn)
+                || invocation
+                    .first_run_id
+                    .as_ref()
+                    .is_some_and(|id| id != &binding.lease.run)
+                || invocation
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.flow_instance() != Some(&binding.lease.flow))
+            {
+                return Err(RuntimeError::ToolFailed(
+                    "invocation context does not match its instance lease".into(),
+                ));
+            }
+            invocation.turn_id = Some(binding.lease.turn.clone());
+            invocation.first_run_id = Some(binding.lease.run.clone());
+            binding.claim()?;
+        } else if invocation
+            .session
+            .as_ref()
+            .is_some_and(|session| session.flow_instance().is_some())
+        {
+            return Err(RuntimeError::ToolFailed(
+                "instance context requires an explicit execution binding".into(),
+            ));
+        }
         let flows = program.flatten_flows();
         if let Some(session) = &invocation.session
             && program
@@ -288,9 +359,11 @@ impl Executor {
             &args,
             session.as_ref().and_then(|session| session.goal()),
         );
-        let flow_cancel = session
+        let flow_cancel = invocation
+            .instance
             .as_ref()
-            .map(|s| s.flow_cancel_token())
+            .map(|binding| binding.cancellation.clone())
+            .or_else(|| session.as_ref().map(|s| s.flow_cancel_token()))
             .unwrap_or_default();
         let flow_registry = session
             .as_ref()
@@ -313,9 +386,11 @@ impl Executor {
             .unwrap_or_else(|| {
                 crate::permission::PermissionBroker::shared(std::sync::Arc::clone(&flow_registry))
             });
-        let session_id = session
+        let session_id = invocation
+            .instance
             .as_ref()
-            .map(|session| session.id().to_string())
+            .map(|binding| binding.lease.flow.session_id.to_string())
+            .or_else(|| session.as_ref().map(|session| session.id().to_string()))
             .or_else(|| self.tool_ctx.session_id.clone())
             .unwrap_or_else(|| format!("standalone-{}", uuid::Uuid::now_v7()));
         let trust = session
@@ -329,15 +404,25 @@ impl Executor {
             .as_ref()
             .map(|binding| binding.path.clone())
             .or_else(|| self.tool_ctx.fs_access.workspace.clone());
-        let identity = flow_registry.register_root(
-            session_id.clone(),
-            run_id.clone(),
-            crate::flow_authority::EffectiveAuthority::root(
-                &trust,
-                crate::flow_authority::contract_allows_shell(flow.contract.as_ref()),
-                workspace_root,
-            ),
-        )?;
+        let identity = if let Some(binding) = &invocation.instance {
+            let mut authority = binding.authority.clone();
+            authority.shell &= crate::flow_authority::contract_allows_shell(flow.contract.as_ref());
+            flow_registry.register_instance(
+                binding.lease.flow.clone(),
+                run_id.clone(),
+                authority,
+            )?
+        } else {
+            flow_registry.register_root(
+                session_id.clone(),
+                run_id.clone(),
+                crate::flow_authority::EffectiveAuthority::root(
+                    &trust,
+                    crate::flow_authority::contract_allows_shell(flow.contract.as_ref()),
+                    workspace_root,
+                ),
+            )?
+        };
         let task_id = self.tool_ctx.task_registry.as_ref().map(|tr| {
             tr.register_flow_with_run_id(
                 task_label,
@@ -413,11 +498,13 @@ impl Executor {
                         }
                         tool_ctx.stream_tx = Some(sess.stream_tx());
                         tool_ctx.session_messages_handle = Some(sess.messages_handle());
-                        // Register root so flow.output/interject("root") work. Root's llm
-                        // context stays on session MessageStream; entry is for output +
-                        // interjection addressing.
+                        // Register the instance address for output and interjection. Legacy session entries retain the root alias; both use the context's MessageStream.
+                        let entry_id = sess
+                            .flow_instance()
+                            .map(|address| address.instance_id.to_string())
+                            .unwrap_or_else(|| "root".to_string());
                         let root_entry = sess.flow_registry.create_entry(
-                            "root".to_string(),
+                            entry_id.clone(),
                             sess.goal().unwrap_or_else(|| flow.name.name.clone()),
                             String::new(),
                             body_run_id.clone(),
@@ -426,7 +513,7 @@ impl Executor {
                             let _ = root_entry.goal_control.set(control.clone());
                         }
                         tool_ctx.agent_entry = Some(std::sync::Arc::clone(&root_entry));
-                        sess.set_current_root("root".to_string());
+                        sess.set_current_root(entry_id);
                     }
                     let _goal_turn = tool_ctx.goal_control.as_ref().map(|g| g.start_turn());
                     if let Some(control) = &tool_ctx.goal_control {

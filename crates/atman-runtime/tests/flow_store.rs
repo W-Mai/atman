@@ -1283,3 +1283,110 @@ fn torn_send_batch_cannot_leave_a_registered_wait_without_its_send_intent() {
         InstanceState::Open(InstanceActivity::Interrupted { .. })
     ));
 }
+
+#[tokio::test]
+async fn recorded_source_and_committed_input_execute_with_the_persistent_instance_binding() {
+    use atman_runtime::ValueJson;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut description = descriptor(info.id);
+    description.entry.bundle.sources.insert("entry:main.at".into(),
+        "flow helper(input: int) -> int { return input * 2 } flow main(input: int) -> int { when env(\"marker\") != \"persisted\" { return 0 } return helper(input).await }".into());
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    flow.accept_input(
+        delivery(
+            &description.address,
+            SenderIdentity::User(Uuid::new_v4()),
+            "execute",
+        ),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let program = atman_runtime::source_program::load_program_from_bundle(
+        &description.entry.bundle,
+        &description.entry.path,
+        &Default::default(),
+    )
+    .unwrap();
+    let reservation = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    let lease = reservation.lease().clone();
+    flow.commit_input(
+        &reservation,
+        InputContent::InvocationInput {
+            arguments: BTreeMap::from([("input".into(), serde_json::json!(21))]),
+            invocation: BTreeMap::from([("marker".into(), serde_json::json!("persisted"))]),
+            messages: Vec::new(),
+        },
+    )
+    .unwrap();
+    let InputContent::InvocationInput {
+        arguments,
+        invocation,
+        ..
+    } = &flow.committed_inputs()[0].input.content
+    else {
+        unreachable!()
+    };
+    let args = arguments
+        .iter()
+        .map(|(key, value)| (key.clone(), atman_runtime::Value::from_json(value.clone())))
+        .collect();
+    let env = atman_runtime::invocation_env::InvocationEnv::from_values(
+        invocation
+            .iter()
+            .map(|(key, value)| (key.clone(), atman_runtime::Value::from_json(value.clone()))),
+    );
+    let mut authority =
+        atman_runtime::flow_authority::EffectiveAuthority::root(&Default::default(), false, None);
+    authority.permission_management = false;
+    let context = std::sync::Arc::new(atman_runtime::Session::open_instance_context(
+        description.address.clone(),
+    ));
+    let executor = atman_runtime::Executor::new();
+    let result = executor
+        .run_linked_with_invocation(
+            &program,
+            &description.entry.name,
+            args,
+            atman_runtime::RootInvocation {
+                session: Some(context.clone()),
+                env,
+                instance: Some(atman_runtime::InstanceInvocation::new(
+                    lease.clone(),
+                    authority,
+                    Default::default(),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, atman_runtime::Value::Int(42)));
+    assert_eq!(
+        context
+            .flow_registry
+            .lookup_run(&lease.run)
+            .unwrap()
+            .instance
+            .as_ref(),
+        Some(&description.address)
+    );
+    change(
+        &mut flow,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    );
+    drop(flow);
+    let flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert!(flow.state().can_start_turn());
+    assert_eq!(flow.committed_inputs().len(), 1);
+    assert!(flow.pending_inputs().next().is_none());
+}

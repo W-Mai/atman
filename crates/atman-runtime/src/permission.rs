@@ -4733,6 +4733,7 @@ mod tests {
             };
             let tested_actor = match case {
                 "unknown" => Arc::new(FlowIdentity {
+                    instance: None,
                     session_id: actor.session_id.clone(),
                     run_id: FlowRunId::now(),
                     parent_run_id: None,
@@ -4742,6 +4743,7 @@ mod tests {
                     execution_state: Mutex::new(FlowExecutionState::Running),
                 }),
                 "forged" => Arc::new(FlowIdentity {
+                    instance: actor.instance.clone(),
                     session_id: actor.session_id.clone(),
                     run_id: actor.run_id.clone(),
                     parent_run_id: actor.parent_run_id.clone(),

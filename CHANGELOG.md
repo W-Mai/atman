@@ -16,6 +16,7 @@ All notable changes to atman are documented in this file.
 - **Atomic input admission** — Flow storage commits actual context or invocation input together with inbox consumption. Turn startup shares the invocation commit, stale reservations are rejected, and recovery retains committed input without duplicate consumption.
 - **Correlated replies** — Flow storage binds reply waiters to a turn and sender, commits continuation input through the shared inbox, and preserves pending or delivered replies across pauses and interruption recovery.
 - **Durable sends** — Flow storage retains outbound delivery intents, atomically registers attached reply waiters, and reconciles receiver acknowledgements after restart without duplicate acceptance across session boundaries.
+- **Instance execution** — The executor accepts host-admitted instance bindings with explicit authority and cancellation, isolates instance contexts, preserves identity through inline calls, and rejects reused or mismatched execution bindings.
 
 ## [1.17.2] — 2026-10-26
 

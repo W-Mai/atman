@@ -409,12 +409,44 @@ impl FlowRegistry {
         run_id: FlowRunId,
         authority: crate::flow_authority::EffectiveAuthority,
     ) -> Result<Arc<crate::flow_authority::FlowIdentity>, RuntimeError> {
+        self.register_entry_locked(session_id, run_id, authority, None)
+    }
+
+    /// Register a host-authorized instance invocation without assigning root privileges.
+    pub fn register_instance(
+        &self,
+        address: crate::flow_store::FlowRef,
+        run_id: FlowRunId,
+        authority: crate::flow_authority::EffectiveAuthority,
+    ) -> Result<Arc<crate::flow_authority::FlowIdentity>, RuntimeError> {
+        self.with_lifecycle_arbitration(|| {
+            self.register_entry_locked(
+                address.session_id.to_string(),
+                run_id,
+                authority,
+                Some(address),
+            )
+        })
+    }
+
+    fn register_entry_locked(
+        &self,
+        session_id: String,
+        run_id: FlowRunId,
+        authority: crate::flow_authority::EffectiveAuthority,
+        instance: Option<crate::flow_store::FlowRef>,
+    ) -> Result<Arc<crate::flow_authority::FlowIdentity>, RuntimeError> {
         let identity = Arc::new(crate::flow_authority::FlowIdentity {
             session_id,
             run_id: run_id.clone(),
             parent_run_id: None,
             root_run_id: run_id.clone(),
-            invocation: crate::flow_authority::InvocationKind::Root,
+            invocation: if instance.is_some() {
+                crate::flow_authority::InvocationKind::Instance
+            } else {
+                crate::flow_authority::InvocationKind::Root
+            },
+            instance,
             effective_authority: authority,
             execution_state: Mutex::new(crate::flow_authority::FlowExecutionState::Running),
         });
@@ -455,7 +487,11 @@ impl FlowRegistry {
         contract_allows_shell: bool,
         workspace: crate::flow_authority::ChildWorkspaceAuthority,
     ) -> Result<Arc<crate::flow_authority::FlowIdentity>, RuntimeError> {
-        if invocation == crate::flow_authority::InvocationKind::Root {
+        if matches!(
+            invocation,
+            crate::flow_authority::InvocationKind::Root
+                | crate::flow_authority::InvocationKind::Instance
+        ) {
             return Err(RuntimeError::ToolFailed(
                 "child flow identity cannot use root invocation".into(),
             ));
@@ -480,6 +516,11 @@ impl FlowRegistry {
             )));
         }
         let identity = Arc::new(crate::flow_authority::FlowIdentity {
+            instance: if invocation == crate::flow_authority::InvocationKind::InlineSubflow {
+                parent.instance.clone()
+            } else {
+                None
+            },
             session_id: parent.session_id.clone(),
             run_id: child_run_id.clone(),
             parent_run_id: Some(parent_run_id.clone()),

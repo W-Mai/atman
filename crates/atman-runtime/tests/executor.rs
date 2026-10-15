@@ -23,6 +23,178 @@ struct ProbeTool {
     calls: Arc<AtomicUsize>,
 }
 
+fn instance_binding() -> atman_runtime::InstanceInvocation {
+    let address = atman_runtime::flow_store::FlowRef {
+        session_id: uuid::Uuid::new_v4().into(),
+        instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+    };
+    let mut state = atman_rt::FlowInstance::prepared(address);
+    state.activate().unwrap();
+    let lease = state
+        .begin_turn(atman_rt::TurnId::now(), FlowRunId::now())
+        .unwrap();
+    let mut authority = EffectiveAuthority::root(&Default::default(), false, None);
+    authority.permission_management = false;
+    atman_runtime::InstanceInvocation::new(lease, authority, Default::default())
+}
+
+#[tokio::test]
+async fn instance_execution_uses_explicit_authority_and_inline_calls_keep_instance_identity() {
+    let executor = Executor::new();
+    let binding = instance_binding();
+    let context = Arc::new(atman_runtime::Session::open_instance_context(
+        binding.lease.flow.clone(),
+    ));
+    let file = parse_file("flow helper(input: int) -> int { return input * 2 } flow main(input: int) -> int { return helper(input).await }").unwrap();
+    let result = executor
+        .run_with_invocation(
+            &file,
+            "main",
+            vec![("input".into(), Value::Int(4))],
+            atman_runtime::RootInvocation {
+                session: Some(context.clone()),
+                instance: Some(binding.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, Value::Int(8)));
+    let identity = context
+        .flow_registry
+        .lookup_run(&binding.lease.run)
+        .unwrap();
+    assert_eq!(identity.instance.as_ref(), Some(&binding.lease.flow));
+    assert_eq!(
+        identity.invocation,
+        atman_runtime::flow_authority::InvocationKind::Instance
+    );
+    assert_eq!(identity.effective_authority, binding.authority);
+    assert!(!identity.effective_authority.permission_management);
+    for event in executor.events.snapshot() {
+        if let Event::FlowStart {
+            run_id,
+            parent_run_id: Some(_),
+            ..
+        } = event
+        {
+            let child = context.flow_registry.lookup_run(&run_id).unwrap();
+            assert_eq!(child.instance.as_ref(), Some(&binding.lease.flow));
+            assert!(!child.effective_authority.permission_management);
+        }
+    }
+    assert_eq!(
+        context.id().to_string(),
+        binding.lease.flow.session_id.to_string()
+    );
+    assert!(
+        context
+            .flow_registry
+            .lookup(&binding.lease.flow.instance_id.to_string())
+            .is_ok()
+    );
+    assert!(context.flow_registry.lookup("root").is_err());
+    assert!(
+        executor
+            .run_with_invocation(
+                &file,
+                "main",
+                vec![("input".into(), Value::Int(4))],
+                atman_runtime::RootInvocation {
+                    session: Some(context),
+                    instance: Some(binding),
+                    ..Default::default()
+                }
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("already used")
+    );
+}
+
+#[tokio::test]
+async fn instance_grants_cancellation_and_context_identity_are_enforced_before_effects() {
+    let executor = Executor::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    executor.tools.register(Arc::new(ProbeTool {
+        name: "probe",
+        tier: Tier::Zero,
+        calls: calls.clone(),
+    }));
+    let file = parse_file("flow main() -> int { return probe() }").unwrap();
+    let binding = instance_binding();
+    let context = Arc::new(atman_runtime::Session::open_instance_context(
+        binding.lease.flow.clone(),
+    ));
+    let mut restricted = binding.clone();
+    restricted.authority.allowed_tiers[0] = false;
+    let result = executor
+        .run_with_invocation(
+            &file,
+            "main",
+            vec![],
+            atman_runtime::RootInvocation {
+                session: Some(context.clone()),
+                instance: Some(restricted),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let cancelled = instance_binding();
+    cancelled.cancellation.cancel();
+    let result = executor
+        .run_with_invocation(
+            &file,
+            "main",
+            vec![],
+            atman_runtime::RootInvocation {
+                instance: Some(cancelled),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(atman_runtime::RuntimeError::Cancelled(_))
+    ));
+    for invocation in [
+        atman_runtime::RootInvocation {
+            session: Some(context.clone()),
+            ..Default::default()
+        },
+        atman_runtime::RootInvocation {
+            session: Some(context.clone()),
+            instance: Some(instance_binding()),
+            ..Default::default()
+        },
+        atman_runtime::RootInvocation {
+            turn_id: Some(atman_rt::TurnId::now()),
+            instance: Some(instance_binding()),
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            executor
+                .run_with_invocation(&file, "main", vec![], invocation)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let other = Arc::new(atman_runtime::Session::open_instance_context(
+        instance_binding().lease.flow,
+    ));
+    assert!(!Arc::ptr_eq(
+        &context.messages_handle(),
+        &other.messages_handle()
+    ));
+    assert!(!Arc::ptr_eq(&context.goal_control, &other.goal_control));
+    assert!(!Arc::ptr_eq(&context.watch_hub, &other.watch_hub));
+}
+
 impl Tool for ProbeTool {
     fn name(&self) -> &str {
         self.name

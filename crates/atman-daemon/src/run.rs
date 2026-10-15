@@ -558,6 +558,7 @@ async fn run_flow_inner(
                     session: Some(session.clone()),
                     first_run_id: next_run_id.take(),
                     env: invocation_env.clone(),
+                    instance: None,
                 },
             )
             .await;

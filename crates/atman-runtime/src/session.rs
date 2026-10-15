@@ -265,6 +265,7 @@ impl InteractionServices {
 }
 
 pub struct Session {
+    flow_instance: Option<crate::flow_store::FlowRef>,
     pub goal_control: std::sync::Arc<crate::goal::GoalController>,
     pub goal_turn: Mutex<Option<crate::goal::GoalTurn>>,
     id: SessionId,
@@ -1131,6 +1132,7 @@ impl Session {
         )?;
         goal_control.bind_events(sink.clone());
         Ok(Self {
+            flow_instance: None,
             watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
@@ -1360,6 +1362,7 @@ impl Session {
         })?;
         goal_control.bind_events(sink.clone());
         Ok(Self {
+            flow_instance: None,
             watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
@@ -1443,6 +1446,7 @@ impl Session {
         let goal_control = crate::goal::GoalController::ephemeral(id.to_string());
         goal_control.bind_events(sink.clone());
         Self {
+            flow_instance: None,
             watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
@@ -1486,6 +1490,22 @@ impl Session {
             fs_access_mode: Mutex::new(None),
             project_index: None,
         }
+    }
+
+    /// Isolated execution context for one persistent instance. Persistence is owned by its FlowStore.
+    pub fn open_instance_context(address: crate::flow_store::FlowRef) -> Self {
+        let mut context = Self::open_ephemeral();
+        context.id = SessionId(address.session_id.0);
+        context.goal_control =
+            crate::goal::GoalController::ephemeral(address.instance_id.to_string());
+        context.goal_control.bind_events(context.sink.clone());
+        context.watch_hub = context.goal_control.watch_hub.clone();
+        context.flow_instance = Some(address);
+        context
+    }
+
+    pub fn flow_instance(&self) -> Option<&crate::flow_store::FlowRef> {
+        self.flow_instance.as_ref()
     }
 
     pub fn project_index(&self) -> Option<std::sync::Arc<crate::index::AnchorIndex>> {

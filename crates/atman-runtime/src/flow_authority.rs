@@ -11,6 +11,7 @@ use crate::trust::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvocationKind {
     Root,
+    Instance,
     InlineSubflow,
     SpawnSync,
     SpawnAsync,
@@ -183,6 +184,7 @@ impl EffectiveAuthority {
 
 #[derive(Debug)]
 pub struct FlowIdentity {
+    pub instance: Option<crate::flow_store::FlowRef>,
     pub session_id: String,
     pub run_id: FlowRunId,
     pub parent_run_id: Option<FlowRunId>,
