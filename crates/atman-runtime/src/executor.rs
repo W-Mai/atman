@@ -529,6 +529,16 @@ impl Executor {
                     // Root's tool_ctx carries session stream_tx so emit sites use
                     // tool_ctx.stream_tx uniformly.
                     let mut tool_ctx = self.tool_ctx.clone().with_invocation_env(invocation_env);
+                    tool_ctx.peer_client = invocation
+                        .instance
+                        .as_ref()
+                        .and_then(|binding| {
+                            binding.storage.as_ref().map(|worker| (binding, worker))
+                        })
+                        .map(|(binding, worker)| worker.peer_client(binding.lease.clone()))
+                        .transpose()
+                        .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?
+                        .flatten();
                     tool_ctx.vm_run_options = invocation
                         .instance
                         .as_ref()

@@ -133,6 +133,10 @@ The host routes both same-session and cross-session delivery by complete `FlowRe
 
 The client exposes execution inspection, public final-answer reads, authorized private context reads, reliable interjections, and revision-checked execution controls. Public output excludes isolated branch publications. Each controller owns a distinct persistent pause key, so its resume cannot remove a user pause or another flow's pause. Cancellation requests cleanup without forging completion. A committed send may finish delivery after its source turn ends, but new receiver admission still checks current grants.
 
+Host-owned workers automatically bind this client into the executor's `ToolCtx`; inline calls and fanout branches retain the originating instance identity. Separate spawned agents cannot inherit that client as their own identity. Workers hold a weak directory reference, avoiding an ownership cycle. A persistent invocation without its host binding fails peer operations instead of consulting the legacy run registry.
+
+The shared `flow.status`, `flow.output`, `flow.interject`, and `flow.kill` tools use the invocation's instance binding. A target handle is an instance UUID within the same session, or `session-uuid/instance-uuid` across sessions. Status returns execution state, revision, and pause state separately. Output retains character-based cursor pagination over committed public answers. Interjection returns a durable delivery status and supports `at_boundary` or `next_turn`; an optional stable UUID `request_id` reconciles identical sends without duplicate input. Cancellation requires `expected_revision` from status and explicit control authority; it requests turn cleanup and preserves the instance. Persistent interjection rejects legacy L2/L3 redirect controls. Legacy session invocations continue using their run handles until their entry points switch storage.
+
 The directory does not yet replace CLI/daemon session ownership. Grant management, outbound retry policy, managed-flow creation, and legacy history migration require the same host integration before those entry points switch storage.
 
 ## Owned send attempts

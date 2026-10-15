@@ -98,6 +98,7 @@ pub struct ResolvedPath {
 pub struct ToolCtx {
     pub(crate) vm_run_options: Option<atman_rt::VmRunOptions>,
     pub(crate) instance_publication: Option<crate::flow_runtime::InstancePublication>,
+    pub(crate) peer_client: Option<crate::flow_runtime::access::FlowClient>,
     pub(crate) child_results: Option<Arc<crate::agent_results::ResultInbox>>,
     pub(crate) result_route: Option<Arc<crate::agent_results::ResultRoute>>,
     pub goal_control: Option<Arc<crate::goal::GoalController>>,
@@ -345,6 +346,11 @@ impl ToolExposureRegistry {
 }
 
 impl ToolCtx {
+    /// Identity-bound peer access supplied by the executing instance's host.
+    pub fn flow_client(&self) -> Option<&crate::flow_runtime::access::FlowClient> {
+        self.peer_client.as_ref()
+    }
+
     pub(crate) fn result_inbox(&self) -> Option<Arc<crate::agent_results::ResultInbox>> {
         self.child_results
             .clone()

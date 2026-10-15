@@ -48,6 +48,258 @@ fn flow_descriptor(session: Uuid) -> FlowDescriptor {
     }
 }
 
+fn program_descriptor(session: Uuid, source: String) -> FlowDescriptor {
+    let mut descriptor = flow_descriptor(session);
+    descriptor
+        .entry
+        .bundle
+        .sources
+        .insert("entry:main.at".into(), source);
+    descriptor
+}
+
+async fn invoke(
+    worker: &FlowWorker,
+    executor: Executor,
+) -> atman_runtime::flow_runtime::execution::TurnCompletion {
+    worker
+        .context()
+        .update_trust(
+            atman_runtime::trust::TrustConfig {
+                mode: atman_runtime::trust::TrustMode::Reckless,
+                ..Default::default()
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+    worker
+        .accept_input(
+            DeliveryRequest {
+                request_id: Uuid::new_v4(),
+                sender: SenderIdentity::User(Uuid::new_v4()),
+                recipient: worker.address().clone(),
+                delivery: DeliveryMode::NextTurn,
+                cause: None,
+                correlation: None,
+                scope: None,
+                payload: InboxPayload::Interjection {
+                    text: "execute entry".into(),
+                },
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let mut request = prepare(&worker.snapshot().await.unwrap()).unwrap().unwrap();
+    request.authority.shell = true;
+    let ticket = worker.start_turn(executor, request).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), ticket.wait())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn executor_routes_shared_flow_tools_through_bound_instance_identity() {
+    use atman_runtime::ValueJson;
+    use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let remote_info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let remote_session = host
+        .attach_session(root.create_session(remote_info.clone()).unwrap())
+        .unwrap();
+    let b = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let d = remote_session
+        .create_flow(flow_descriptor(remote_info.id))
+        .await
+        .unwrap();
+    for worker in [&b, &d] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    invoke(&b, Executor::new()).await.result.unwrap();
+    let request = Uuid::new_v4();
+    let source = format!(
+        r#"
+        flow inspect(target: string) -> string {{
+            return flow.status(handle: target).status
+        }}
+        flow main() -> any {{
+            before = inspect("{}").await
+            concurrent = fanout [inspect("{}"), inspect("{}/{}")]
+            sent = flow.interject(handle: "{}", text: "peer input", request_id: "{}", delivery: "next_turn")
+            retried = flow.interject(handle: "{}/{}", text: "peer input", request_id: "{}", delivery: "next_turn")
+            remote = flow.interject(handle: "{}/{}", text: "remote input")
+            output = flow.output(handle: "{}", cursor: 1, limit: 3)
+            return [before, concurrent, sent, retried, remote, output]
+        }}
+    "#,
+        b.address().instance_id,
+        b.address().instance_id,
+        info.id,
+        b.address().instance_id,
+        b.address().instance_id,
+        request,
+        info.id,
+        b.address().instance_id,
+        request,
+        remote_info.id,
+        d.address().instance_id,
+        b.address().instance_id
+    );
+    let a = session
+        .create_flow(program_descriptor(info.id, source))
+        .await
+        .unwrap();
+    change(&a, FlowTransition::Activated).await;
+    session
+        .grant_access(
+            session.snapshot().await.unwrap().cursor,
+            FlowGrant {
+                id: Uuid::new_v4(),
+                grantee: a.address().clone(),
+                target: AccessTarget::Flow(d.address().clone()),
+                actions: [FlowAction::Send].into(),
+            },
+        )
+        .await
+        .unwrap();
+    let completion = invoke(&a, Executor::new()).await;
+    assert_eq!(completion.outcome, TurnOutcome::Completed);
+    let value = completion.result.unwrap().to_json().unwrap();
+    assert_eq!(value[0], "idle");
+    assert_eq!(value[1], serde_json::json!(["idle", "idle"]));
+    assert_eq!(value[2], value[3]);
+    assert_eq!(value[2]["delivery"]["state"], "accepted");
+    assert_eq!(value[4]["delivery"]["state"], "accepted");
+    assert_eq!(value[5]["chunk"], "eli");
+    assert_eq!(value[5]["next_cursor"], 4);
+    assert_eq!(value[5]["eof"], false);
+    for worker in [&b, &d] {
+        let queued = worker.snapshot().await.unwrap().pending;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(
+            queued[0].request.sender,
+            SenderIdentity::Flow(a.address().clone())
+        );
+    }
+    assert!(a.pending_sends().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn instance_flow_tools_fail_closed_and_controls_do_not_close_the_recipient() {
+    use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let b = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&b, FlowTransition::Activated).await;
+    let lease = start(&b).await;
+    let revision = b.state().await.unwrap().revision();
+    for (source, grant, success) in [
+        (
+            "flow main() -> any { return flow.status(handle: \"root\") }".to_owned(),
+            false,
+            false,
+        ),
+        (
+            format!(
+                "flow main() -> any {{ return flow.interject(handle: \"{}\", text: \"no\", level: \"l2_course_correct\") }}",
+                b.address().instance_id
+            ),
+            false,
+            false,
+        ),
+        (
+            format!(
+                "flow main() -> any {{ return flow.kill(handle: \"{}\", expected_revision: {revision}) }}",
+                b.address().instance_id
+            ),
+            false,
+            false,
+        ),
+        (
+            format!(
+                "flow main() -> any {{ return flow.kill(handle: \"{}\") }}",
+                b.address().instance_id
+            ),
+            true,
+            false,
+        ),
+        (
+            format!(
+                "flow main() -> any {{ return flow.kill(handle: \"{}\", expected_revision: 0) }}",
+                b.address().instance_id
+            ),
+            true,
+            false,
+        ),
+        (
+            format!(
+                "flow main() -> any {{ return flow.kill(handle: \"{}\", expected_revision: {revision}) }}",
+                b.address().instance_id
+            ),
+            true,
+            true,
+        ),
+    ] {
+        let source = source.replacen(
+            "-> any {",
+            "-> any { contract { capabilities { shell: true } }",
+            1,
+        );
+        let a = session
+            .create_flow(program_descriptor(info.id, source))
+            .await
+            .unwrap();
+        change(&a, FlowTransition::Activated).await;
+        if grant {
+            session
+                .grant_access(
+                    session.snapshot().await.unwrap().cursor,
+                    FlowGrant {
+                        id: Uuid::new_v4(),
+                        grantee: a.address().clone(),
+                        target: AccessTarget::Flow(b.address().clone()),
+                        actions: [FlowAction::Control].into(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let result = invoke(&a, Executor::new()).await.result;
+        assert_eq!(result.is_ok(), success, "{result:?}");
+        assert!(b.snapshot().await.unwrap().pending.is_empty());
+        if !success {
+            assert_eq!(b.state().await.unwrap().revision(), revision);
+        }
+    }
+    assert!(
+        matches!(b.state().await.unwrap().state(), InstanceState::Open(InstanceActivity::Active(active)) if active.phase == atman_rt::TurnPhase::Cancelling)
+    );
+    change(
+        &b,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Interrupted(atman_rt::Interruption::Cancelled),
+        },
+    )
+    .await;
+    assert!(matches!(
+        b.state().await.unwrap().state(),
+        InstanceState::Open(InstanceActivity::Interrupted { .. })
+    ));
+}
+
 async fn change(worker: &FlowWorker, change: FlowTransition) {
     worker
         .transition(worker.state().await.unwrap().revision(), change)
@@ -886,11 +1138,12 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
         .grant_access(session.snapshot().await.unwrap().cursor, cross.clone())
         .await
         .unwrap();
+    let delivery_id = Uuid::new_v4();
     assert!(
         client
             .send(
                 d_info.address.clone(),
-                Uuid::new_v4(),
+                delivery_id,
                 "allowed".into(),
                 DeliveryMode::AtBoundary
             )
@@ -908,6 +1161,19 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
         .revoke_access(session.snapshot().await.unwrap().cursor, cross.id)
         .await
         .unwrap();
+    assert!(
+        client
+            .send(
+                d_info.address.clone(),
+                delivery_id,
+                "allowed".into(),
+                DeliveryMode::AtBoundary
+            )
+            .await
+            .unwrap()
+            .pending_reason
+            .is_none()
+    );
     assert!(
         client
             .send(

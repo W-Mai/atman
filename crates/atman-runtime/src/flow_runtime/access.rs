@@ -40,18 +40,32 @@ impl RuntimeHost {
     /// Bind only after authenticating the invocation in the trusted execution adapter.
     pub async fn bind_invocation(&self, lease: TurnLease<AtmanUuid>) -> io::Result<FlowClient> {
         let source = self.flow(&lease.flow).await?;
-        let client = FlowClient {
-            access: self.session(lease.flow.session_id.0)?.access,
-            host: self.clone(),
-            state: source.subscribe_state(),
-            lease,
-        };
-        client.authenticate()?;
-        Ok(client)
+        FlowClient::bind(self.clone(), &source, lease)
     }
 }
 
 impl FlowClient {
+    pub(super) fn bind(
+        host: RuntimeHost,
+        source: &super::FlowWorker,
+        lease: TurnLease<AtmanUuid>,
+    ) -> io::Result<Self> {
+        let state = source.subscribe_state();
+        if source.address() != &lease.flow
+            || state.has_changed().is_err()
+            || !matches!(state.borrow().state(), InstanceState::Open(InstanceActivity::Active(active)) if active.lease == lease)
+        {
+            return Err(denied("peer client requires an admitted instance turn"));
+        }
+        // Binding is identity, not operation admission. Pauses are checked when using the client.
+        Ok(Self {
+            access: host.session(lease.flow.session_id.0)?.access,
+            host,
+            state,
+            lease,
+        })
+    }
+
     pub fn source(&self) -> &FlowRef {
         &self.lease.flow
     }
@@ -147,7 +161,9 @@ impl FlowClient {
         text: String,
         delivery: DeliveryMode,
     ) -> io::Result<SendAttempt> {
-        self.authorize(&target, FlowAction::Send)?;
+        // Authenticate before consulting the durable intent. Matching retries retain their receipt;
+        // only a new intent and a new receiver admission require current send authority.
+        self.authenticate()?;
         let source = self.clone();
         let receiver = self.clone();
         self.host

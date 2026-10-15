@@ -43,6 +43,7 @@ enum Command {
 /// Queued commands finish even if their awaiting caller disappears. Dropping all handles drains accepted commands and releases ownership; idle workers do not occupy a blocking thread.
 #[derive(Clone)]
 pub struct FlowWorker {
+    host: Option<host::WeakRuntimeHost>,
     address: FlowRef,
     context: Arc<Session>,
     commands: mpsc::Sender<Command>,
@@ -57,6 +58,13 @@ impl FlowWorker {
     }
 
     pub async fn start(store: FlowStore) -> io::Result<Self> {
+        Self::start_owned(store, None).await
+    }
+
+    async fn start_owned(
+        store: FlowStore,
+        host: Option<host::WeakRuntimeHost>,
+    ) -> io::Result<Self> {
         let (store, context) = tokio::task::spawn_blocking(move || {
             let context = Arc::new(Session::restore_instance_context(
                 store.descriptor().address.clone(),
@@ -131,6 +139,7 @@ impl FlowWorker {
             }
         });
         Ok(Self {
+            host,
             address,
             context,
             commands,
@@ -142,6 +151,16 @@ impl FlowWorker {
 
     pub fn address(&self) -> &FlowRef {
         &self.address
+    }
+
+    pub(crate) fn peer_client(
+        &self,
+        lease: TurnLease<AtmanUuid>,
+    ) -> io::Result<Option<access::FlowClient>> {
+        self.host
+            .as_ref()
+            .map(|host| access::FlowClient::bind(host.upgrade()?, self, lease))
+            .transpose()
     }
 
     pub fn context(&self) -> Arc<Session> {

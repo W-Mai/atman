@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 const SPAWN_PERMIT_TTL: Duration = Duration::from_secs(300);
 
+mod instance;
+
 pub struct AgentSpawn;
 
 #[derive(Debug, Clone)]
@@ -1615,12 +1617,14 @@ impl Tool for AgentStatus {
         Tier::Zero
     }
     fn description(&self) -> Option<&str> {
-        Some("Check the status of an async sub-agent. Returns handle, status, goal, and timing.")
+        Some(
+            "Check flow execution status. Persistent instances return revision and execution pause state separately from Goal state.",
+        )
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "properties": {"handle": {"type": "string"}},
+            "properties": {"handle": {"type": "string", "description": instance::HANDLE_DESCRIPTION}},
             "required": ["handle"]
         })
     }
@@ -1634,6 +1638,9 @@ impl Tool for AgentStatus {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
+            if let Some(target) = instance::resolve(&handle, ctx)? {
+                return target.status(handle).await;
+            }
             let reg = ctx
                 .flow_registry
                 .clone()
@@ -1688,13 +1695,15 @@ impl Tool for AgentOutput {
         Tier::Zero
     }
     fn description(&self) -> Option<&str> {
-        Some("Read accumulated assistant text from an async sub-agent.")
+        Some(
+            "Read flow output with a character cursor. Persistent instances expose committed public final answers.",
+        )
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "handle": {"type": "string"},
+                "handle": {"type": "string", "description": instance::HANDLE_DESCRIPTION},
                 "cursor": {"type": "integer", "default": 0},
                 "limit": {"type": "integer", "default": 4096}
             },
@@ -1733,12 +1742,14 @@ impl Tool for AgentOutput {
                 })
                 .unwrap_or(4096)
                 .max(1) as usize;
-            let reg = ctx
-                .flow_registry
-                .clone()
-                .ok_or_else(|| RuntimeError::ToolFailed("flow.output: no agent registry".into()))?;
-            let entry = reg.lookup(&handle)?;
-            let output = entry.output();
+            let output = if let Some(target) = instance::resolve(&handle, ctx)? {
+                target.output().await?
+            } else {
+                let reg = ctx.flow_registry.as_ref().ok_or_else(|| {
+                    RuntimeError::ToolFailed("flow.output: no agent registry".into())
+                })?;
+                reg.lookup(&handle)?.output()
+            };
             let chunk = output.chars().skip(cursor).take(limit).collect::<String>();
             let next_cursor = cursor + chunk.chars().count();
             let eof = next_cursor >= output.chars().count();
@@ -1762,12 +1773,17 @@ impl Tool for AgentKill {
         Tier::Four
     }
     fn description(&self) -> Option<&str> {
-        Some("Cancel a running async sub-agent by handle.")
+        Some(
+            "Cancel flow execution by handle. Persistent instances require expected_revision from flow.status and remain addressable after cleanup.",
+        )
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "properties": {"handle": {"type": "string"}},
+            "properties": {
+                "handle": {"type": "string", "description": instance::HANDLE_DESCRIPTION},
+                "expected_revision": {"type": "integer", "minimum": 0}
+            },
             "required": ["handle"]
         })
     }
@@ -1781,6 +1797,9 @@ impl Tool for AgentKill {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
+            if let Some(target) = instance::resolve(&handle, ctx)? {
+                return target.cancel(&args).await;
+            }
             let reg = ctx
                 .flow_registry
                 .clone()
@@ -1810,17 +1829,21 @@ impl Tool for FlowInterject {
              L2 (course_correct): inject text, cancel current LLM call, flow continues with correction. \
              L3 (redirect): cancel current LLM call, redirect to a different flow. \
              L4 (hard_stop): kill the FlowRun immediately. \
-             Use handle \"root\" to interject into the main agent.",
+             Legacy sessions accept handle \"root\" for the main agent. \
+             Persistent instances accept L1 through their durable inbox at a model boundary or the next turn; L4 requires expected_revision. L2/L3 are not supported for persistent instances.",
         )
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "handle": {"type": "string", "description": "Target FlowRun handle (e.g. from flow.spawn return, or \"root\")."},
+                "handle": {"type": "string", "description": instance::HANDLE_DESCRIPTION},
                 "text": {"type": "string", "description": "Interjection text."},
                 "level": {"type": "string", "enum": ["l1_nudge", "l2_course_correct", "l3_redirect", "l4_hard_stop"], "default": "l1_nudge", "description": "Interjection level."},
-                "redirect_target": {"type": "string", "description": "Required for L3 redirect: the flow to redirect to."}
+                "redirect_target": {"type": "string", "description": "Required for L3 redirect: the flow to redirect to."},
+                "delivery": {"type": "string", "enum": ["at_boundary", "next_turn"], "default": "at_boundary"},
+                "request_id": {"type": "string", "description": "Stable UUID for a persistent send; reuse only for an identical retry."},
+                "expected_revision": {"type": "integer", "minimum": 0}
             },
             "required": ["handle", "text"]
         })
@@ -1836,6 +1859,9 @@ impl Tool for FlowInterject {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
             let text = extract_string(&args, "text", 1)?;
+            if let Some(target) = instance::resolve(&handle, ctx)? {
+                return target.interject(&args, text).await;
+            }
             let level_str = args
                 .named("level")
                 .and_then(|v| {
@@ -1896,6 +1922,12 @@ fn flow_handle_scheduling_claim(
     mode: AccessMode,
 ) -> Result<SchedulingClaims, RuntimeError> {
     let handle = extract_string(args, "handle", 0)?;
+    if let Some(target) = instance::resolve(&handle, ctx)? {
+        return Ok(SchedulingClaims::declared([ResourceAccess::new(
+            ResourceKey::Flow(target.resource_key()),
+            mode,
+        )]));
+    }
     let Some(session_id) = ctx.session_id.as_deref().filter(|id| !id.is_empty()) else {
         return Ok(SchedulingClaims::opaque());
     };
@@ -2497,6 +2529,7 @@ fn emit_child_flow_end(ctx: &ToolCtx, end: &atman_rt::FlowEndFact<FlowRunId, Flo
 fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
     let mut c = parent.clone();
     c.instance_publication = None;
+    c.peer_client = None;
     c.vm_run_options = None;
     c.session_runtime = None;
     c.context_records_session = None;

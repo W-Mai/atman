@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     io,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock, Weak},
 };
 
 use tokio::sync::{mpsc, oneshot};
@@ -28,6 +28,19 @@ pub struct RuntimeHost {
     sessions: Arc<Mutex<HashMap<Uuid, SessionHandle>>>,
 }
 
+/// Workers do not keep their owning directory alive through a reference cycle.
+#[derive(Clone)]
+pub(super) struct WeakRuntimeHost(Weak<Mutex<HashMap<Uuid, SessionHandle>>>);
+
+impl WeakRuntimeHost {
+    pub fn upgrade(&self) -> io::Result<RuntimeHost> {
+        self.0
+            .upgrade()
+            .map(|sessions| RuntimeHost { sessions })
+            .ok_or_else(|| io::Error::other("instance host is no longer available"))
+    }
+}
+
 impl RuntimeHost {
     /// Attach an exclusively owned catalog without opening or starting its recorded flows.
     pub fn attach_session(&self, store: SessionStore) -> io::Result<SessionHandle> {
@@ -49,7 +62,13 @@ impl RuntimeHost {
             flows: flows.clone(),
             access: access.clone(),
         };
-        runtime.spawn(serve_catalog(store, flows, access, receiver));
+        runtime.spawn(serve_catalog(
+            store,
+            flows,
+            access,
+            WeakRuntimeHost(Arc::downgrade(&self.sessions)),
+            receiver,
+        ));
         sessions.insert(id, handle.clone());
         Ok(handle)
     }
@@ -222,6 +241,7 @@ async fn serve_catalog(
     mut store: SessionStore,
     flows: FlowDirectory,
     access: Arc<RwLock<SessionAccess>>,
+    host: WeakRuntimeHost,
     mut commands: mpsc::Receiver<CatalogCommand>,
 ) {
     while let Some(command) = commands.recv().await {
@@ -309,7 +329,7 @@ async fn serve_catalog(
                 };
                 store = returned;
                 let result = match result {
-                    Ok(flow) => FlowWorker::start(flow).await,
+                    Ok(flow) => FlowWorker::start_owned(flow, Some(host.clone())).await,
                     Err(error) => Err(error),
                 };
                 if let Ok(worker) = &result {

@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent flow tools** — Host-owned invocations route flow status, output, interjection, and cancellation through their bound instance identity. Same-session and cross-session handles share grant checks and durable delivery; cancellation checks the target revision and preserves the instance after cleanup.
+
 - **Invocation-bound peer access** — Flow clients derive sender identity from the admitted turn, enforce live grants for reads, messages, and execution controls, and reject stale invocations. Independent controller pause keys prevent one flow from resuming another controller's pause.
 
 - **Durable peer grants** — Session journals retain scoped access grants and revocations independently of creator relationships and default-view selection. Catalog revision checks reject stale updates, and revoked grant identities cannot silently regain authority.
