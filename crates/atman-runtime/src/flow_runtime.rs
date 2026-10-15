@@ -1,7 +1,8 @@
 //! Per-instance serialized storage work without blocking asynchronous executor threads.
 
 pub mod execution;
-mod input;
+pub mod host;
+pub mod input;
 pub mod scheduler;
 
 use std::{io, sync::Arc};
@@ -49,6 +50,10 @@ pub struct FlowWorker {
 }
 
 impl FlowWorker {
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.commands.is_closed()
+    }
+
     pub async fn start(store: FlowStore) -> io::Result<Self> {
         let (store, context) = tokio::task::spawn_blocking(move || {
             let context = Arc::new(Session::restore_instance_context(

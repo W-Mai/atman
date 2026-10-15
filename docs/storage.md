@@ -114,3 +114,15 @@ The worker starts and owns the execution task before returning a `TurnTicket`. D
 After a completed turn, the scheduler rechecks pending input and can start another turn on the same instance. Interrupted execution requires explicit recovery. Preparation or storage failures stop the scheduler and remain observable through `FlowScheduler::wait`. `stop` or dropping the scheduler handle prevents further scheduling; already queued admission commands settle, and admitted turns retain their execution and terminal commit obligations. Explicit execution controls pause or cancel a turn. A stopped scheduler releases its ownership so another host controller can attach.
 
 Input policy, instance directory ownership, management authorization, and CLI/daemon integration remain host responsibilities. Automatic admission does not assign root privileges or infer a goal from message text.
+
+## Host directory
+
+`flow_runtime::host::RuntimeHost` attaches exclusively owned session catalogs. Each `SessionHandle` serializes catalog creation and default-view changes on a bounded command queue. Accepted catalog operations finish even if their waiting caller disappears. Disk work runs on the blocking pool; idle catalog owners do not occupy threads.
+
+Repeated `open_flow` and matching `create_flow` calls return the same live `FlowWorker` and conversation context. Opening another view does not reopen its journal or interrupt execution. Creation payload conflicts fail. After explicit worker handoff, reopening still requires exclusive journal ownership and reconciles an unfinished recorded turn as `HostLost`; it does not replay execution.
+
+The host routes both same-session and cross-session delivery by complete `FlowRef`. Known instance handles are looked up without entering the catalog command queue, so unrelated catalog writes do not serialize their input or execution. Callers authenticate senders before routing, including retries, and provide authorization for new deliveries at the receiver's commit boundary. Routing does not grant authority, start a flow, or couple the recipient to its creator's lifecycle. Accepted retries retain their original receipts.
+
+`select_default` changes only the session's view binding. It does not change execution state or permissions. Dropping catalog handles does not cancel instance handles held elsewhere. Host policies prepare eligible input using `flow_runtime::input::context_message` to retain message provenance; projection itself does not authenticate, consume, or authorize input.
+
+The directory does not yet replace CLI/daemon session ownership. Grant management, persistent outbound delivery, managed-flow creation, and legacy history migration require the same host integration before those entry points switch storage.

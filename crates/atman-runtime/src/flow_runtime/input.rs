@@ -96,7 +96,10 @@ fn compatible(
     }
 }
 
-fn context_message(
+/// Prepare the model-facing representation of one accepted envelope without consuming it.
+///
+/// Hosts select the eligible batch separately. This projection preserves provenance and protocol role; it does not authenticate a sender or grant authority.
+pub fn context_message(
     envelope: &AcceptedEnvelope,
     turn: &atman_rt::TurnId<AtmanUuid>,
 ) -> io::Result<Message> {
