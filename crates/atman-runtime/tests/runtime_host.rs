@@ -100,6 +100,177 @@ async fn invoke(
 }
 
 #[tokio::test]
+async fn instance_discovery_uses_durable_membership_and_shared_status_through_executor() {
+    use atman_runtime::ValueJson;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let prepared = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let paused = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&paused, FlowTransition::Activated).await;
+    change(
+        &paused,
+        FlowTransition::ExecutionPaused {
+            key: Uuid::new_v4().into(),
+        },
+    )
+    .await;
+    let closed = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&closed, FlowTransition::CloseRequested).await;
+    change(&closed, FlowTransition::Closed).await;
+    let remote_info = session_descriptor();
+    let remote_session = host
+        .attach_session(root.create_session(remote_info.clone()).unwrap())
+        .unwrap();
+    remote_session
+        .create_flow(flow_descriptor(remote_info.id))
+        .await
+        .unwrap();
+    let source = r#"
+        flow main() -> any {
+            first = flow.instances(limit: 2)
+            second = flow.instances(before: first.next_cursor, limit: 2)
+            status = flow.status(handle: second.instances[0].handle)
+            return [first, second, status]
+        }
+    "#;
+    let a = session
+        .create_flow(program_descriptor(info.id, source.into()))
+        .await
+        .unwrap();
+    change(&a, FlowTransition::Activated).await;
+    let result = invoke(&a, Executor::new())
+        .await
+        .result
+        .unwrap()
+        .to_json()
+        .unwrap();
+    assert_eq!(result[0]["total"], 4);
+    assert_eq!(result[1]["total"], 4);
+    assert_eq!(
+        result[0]["instances"][0]["handle"],
+        a.address().instance_id.to_string()
+    );
+    assert_eq!(result[0]["instances"][0]["status"], "running");
+    assert_eq!(
+        result[0]["instances"][1]["handle"],
+        closed.address().instance_id.to_string()
+    );
+    assert_eq!(result[0]["instances"][1]["status"], "closed");
+    assert_eq!(
+        result[1]["instances"][0]["handle"],
+        paused.address().instance_id.to_string()
+    );
+    assert_eq!(result[1]["instances"][0]["status"], "idle");
+    assert_eq!(result[1]["instances"][0]["paused"], true);
+    assert_eq!(
+        result[1]["instances"][1]["handle"],
+        prepared.address().instance_id.to_string()
+    );
+    assert_eq!(result[1]["instances"][1]["status"], "prepared");
+    assert!(result[1]["next_cursor"].is_null());
+    for field in ["status", "state", "revision", "paused", "address"] {
+        assert_eq!(result[1]["instances"][0][field], result[2][field]);
+    }
+    assert!(
+        result[0]["spawn_token"]
+            .as_str()
+            .unwrap()
+            .starts_with("spawn_")
+    );
+    assert_eq!(
+        prepared.state().await.unwrap().state(),
+        &InstanceState::Prepared
+    );
+    assert_eq!(
+        closed.state().await.unwrap().state(),
+        &InstanceState::Closed
+    );
+}
+
+#[tokio::test]
+async fn instance_discovery_preserves_unavailable_rows_and_stable_pages_without_reviving_flows() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let older = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let unavailable = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let a = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&a, FlowTransition::Activated).await;
+    let lease = start(&a).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    change(&unavailable, FlowTransition::Activated).await;
+    start(&unavailable).await;
+    let store = unavailable.clone().shutdown().await.unwrap();
+    let journal_path = store.dir().join("events.jsonl");
+    let page = client.instances(None, 2).await.unwrap();
+    assert_eq!(page.total, 3);
+    assert_eq!(page.instances[0].address, *a.address());
+    assert_eq!(page.instances[1].address, *unavailable.address());
+    assert!(page.instances[1].state.is_none());
+    assert!(page.instances[1].unavailable.is_some());
+    assert_eq!(page.next.as_ref(), Some(&unavailable.address().instance_id));
+    let inserted = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let next = client.instances(page.next, 2).await.unwrap();
+    assert_eq!(next.total, 4);
+    assert_eq!(next.instances.len(), 1);
+    assert_eq!(next.instances[0].address, *older.address());
+    assert!(next.next.is_none());
+    assert_eq!(
+        inserted.state().await.unwrap().state(),
+        &InstanceState::Prepared
+    );
+    assert!(
+        client
+            .instances(Some(FlowInstanceId::now()), 1)
+            .await
+            .is_err()
+    );
+    assert!(client.instances(None, 0).await.is_err());
+    assert!(client.instances(None, 51).await.is_err());
+    drop(store);
+    let restored = client.instances(None, 4).await.unwrap();
+    let row = restored
+        .instances
+        .iter()
+        .find(|item| item.address == *unavailable.address())
+        .unwrap();
+    assert!(row.unavailable.is_none());
+    assert!(matches!(
+        row.state.as_ref().unwrap().state(),
+        InstanceState::Open(InstanceActivity::Interrupted { .. })
+    ));
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(journal_path)
+        .unwrap();
+    fs2::FileExt::try_lock_exclusive(&file)
+        .expect("discovery must release an inactive journal, not retain a context worker");
+    fs2::FileExt::unlock(&file).unwrap();
+    change(
+        &a,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    assert_eq!(
+        client.instances(None, 4).await.err().unwrap().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+}
+
+#[tokio::test]
 async fn executor_routes_shared_flow_tools_through_bound_instance_identity() {
     use atman_runtime::ValueJson;
     use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};

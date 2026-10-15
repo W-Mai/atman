@@ -17,7 +17,7 @@ use crate::flow_store::access::{FlowAction, SessionAccess};
 use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity};
 use crate::flow_store::publication::PublishedMessage;
 use crate::flow_store::subscription::{AnswerSubscription, SubscriptionRecord};
-use crate::flow_store::{FlowRef, FlowTransition, invalid};
+use crate::flow_store::{FlowInstanceId, FlowRef, FlowTransition, invalid};
 use crate::message::{Message, MessageOrigin};
 
 /// Peer controls cannot remove another controller's pause key or forge lifecycle completion.
@@ -35,6 +35,22 @@ pub struct FlowClient {
     lease: TurnLease<AtmanUuid>,
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
     access: Arc<RwLock<SessionAccess>>,
+}
+
+/// A bounded catalog page. Execution states are sampled independently of catalog membership.
+pub struct InstancePage {
+    pub instances: Vec<InstanceSummary>,
+    pub next: Option<FlowInstanceId>,
+    pub total: usize,
+    pub catalog: CommitReceipt,
+}
+
+pub struct InstanceSummary {
+    pub address: FlowRef,
+    pub entry: Option<String>,
+    pub state: Option<FlowInstance<AtmanUuid>>,
+    /// A registered instance remains discoverable when its journal cannot be opened.
+    pub unavailable: Option<String>,
 }
 
 impl RuntimeHost {
@@ -119,6 +135,57 @@ impl FlowClient {
                 Ok(store.state().clone())
             })
             .await
+    }
+
+    /// Discover the current session, newest registration first. A stable instance cursor avoids repeating earlier entries when another flow is registered between pages. This does not expose private message history, start execution, or grant authority to control the listed instances.
+    pub async fn instances(
+        &self,
+        before: Option<FlowInstanceId>,
+        limit: usize,
+    ) -> io::Result<InstancePage> {
+        self.authorize(self.source(), FlowAction::Discover)?;
+        if !(1..=50).contains(&limit) {
+            return Err(invalid("instance page limit must be between 1 and 50"));
+        }
+        let session = self.host.session(self.source().session_id.0)?;
+        let snapshot = session.snapshot().await?;
+        let registrations = &snapshot.catalog.flows;
+        let end = match before {
+            Some(id) => registrations
+                .iter()
+                .position(|entry| entry.id == id)
+                .ok_or_else(|| invalid("instance page cursor is not in this session"))?,
+            None => registrations.len(),
+        };
+        let start = end.saturating_sub(limit);
+        let mut instances = Vec::with_capacity(end - start);
+        for registration in registrations[start..end].iter().rev() {
+            let address = FlowRef {
+                session_id: self.source().session_id,
+                instance_id: registration.id.clone(),
+            };
+            self.authorize(&address, FlowAction::Discover)?;
+            let summary = session.describe_flow(registration.id.clone()).await;
+            // An expired caller must not turn a failed authorization into an unavailable row.
+            self.authorize(&address, FlowAction::Discover)?;
+            let (entry, state, unavailable) = match summary {
+                Ok((entry, state)) => (Some(entry), Some(state), None),
+                Err(error) => (None, None, Some(error.to_string())),
+            };
+            instances.push(InstanceSummary {
+                address,
+                entry,
+                state,
+                unavailable,
+            });
+        }
+        self.authorize(self.source(), FlowAction::Discover)?;
+        Ok(InstancePage {
+            next: (start > 0).then(|| registrations[start].id.clone()),
+            instances,
+            total: registrations.len(),
+            catalog: snapshot.cursor,
+        })
     }
 
     pub async fn read_output(&self, target: FlowRef) -> io::Result<Vec<PublishedMessage>> {

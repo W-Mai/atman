@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 const SPAWN_PERMIT_TTL: Duration = Duration::from_secs(300);
 
-mod instance;
+pub(super) mod instance;
 
 pub struct AgentSpawn;
 

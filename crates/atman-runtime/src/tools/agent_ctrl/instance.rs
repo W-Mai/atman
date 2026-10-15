@@ -48,28 +48,7 @@ impl Target<'_> {
 
     pub async fn status(self, handle: String) -> ToolResult {
         let snapshot = self.client.inspect(self.address).await.map_err(failed)?;
-        let status = match snapshot.state() {
-            InstanceState::Prepared => "prepared",
-            InstanceState::Open(InstanceActivity::Idle) => "idle",
-            InstanceState::Open(InstanceActivity::Interrupted { .. }) => "interrupted",
-            InstanceState::Open(InstanceActivity::Active(active)) => match active.phase {
-                TurnPhase::Running => "running",
-                TurnPhase::Waiting(_) => "waiting",
-                TurnPhase::Finishing => "finishing",
-                TurnPhase::Cancelling => "cancelling",
-            },
-            InstanceState::Closing { .. } => "closing",
-            InstanceState::Closed => "closed",
-        };
-        // Pause causes are separate from execution phase and Goal automation.
-        Ok(Value::from_json(serde_json::json!({
-            "handle": handle,
-            "address": snapshot.address(),
-            "status": status,
-            "state": snapshot.state(),
-            "revision": snapshot.revision(),
-            "paused": !snapshot.pauses().is_empty(),
-        })))
+        Ok(Value::from_json(status_value(&snapshot, &handle)))
     }
 
     pub async fn output(self) -> Result<String, RuntimeError> {
@@ -139,6 +118,34 @@ impl Target<'_> {
             "pending_reason": attempt.pending_reason.map(|error| error.to_string()),
         })))
     }
+}
+
+pub(in crate::tools) fn status_value(
+    snapshot: &atman_rt::FlowInstance<crate::event::AtmanUuid>,
+    handle: &str,
+) -> serde_json::Value {
+    let status = match snapshot.state() {
+        InstanceState::Prepared => "prepared",
+        InstanceState::Open(InstanceActivity::Idle) => "idle",
+        InstanceState::Open(InstanceActivity::Interrupted { .. }) => "interrupted",
+        InstanceState::Open(InstanceActivity::Active(active)) => match active.phase {
+            TurnPhase::Running => "running",
+            TurnPhase::Waiting(_) => "waiting",
+            TurnPhase::Finishing => "finishing",
+            TurnPhase::Cancelling => "cancelling",
+        },
+        InstanceState::Closing { .. } => "closing",
+        InstanceState::Closed => "closed",
+    };
+    // Pause causes are separate from execution phase and Goal automation.
+    serde_json::json!({
+        "handle": handle,
+        "address": snapshot.address(),
+        "status": status,
+        "state": snapshot.state(),
+        "revision": snapshot.revision(),
+        "paused": !snapshot.pauses().is_empty(),
+    })
 }
 
 fn failed(error: impl std::fmt::Display) -> RuntimeError {

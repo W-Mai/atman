@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, Mutex, RwLock, Weak},
 };
 
+use atman_rt::FlowInstance;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
@@ -15,6 +16,7 @@ use super::{
     execution::TurnRequest,
     scheduler::{FlowScheduler, PrepareTurn, SchedulingStatus},
 };
+use crate::event::AtmanUuid;
 use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::access::{FlowGrant, SessionAccess};
 use crate::flow_store::inbox::{Acceptance, DeliveryRequest};
@@ -161,6 +163,10 @@ pub struct SessionSnapshot {
 }
 
 enum CatalogCommand {
+    Describe {
+        id: FlowInstanceId,
+        reply: oneshot::Sender<io::Result<(String, FlowInstance<AtmanUuid>)>>,
+    },
     Schedule {
         id: FlowInstanceId,
         executor: Box<crate::Executor>,
@@ -313,6 +319,27 @@ impl SessionHandle {
         .await
     }
 
+    /// Read a registered instance without retaining its conversation or installing observers. Live writers provide their current state; inactive journals recover under catalog ownership.
+    pub async fn describe_flow(
+        &self,
+        id: FlowInstanceId,
+    ) -> io::Result<(String, FlowInstance<AtmanUuid>)> {
+        let existing = self
+            .flows
+            .lock()
+            .unwrap()
+            .get(&id)
+            .filter(|worker| !worker.is_stopped())
+            .cloned();
+        if let Some(worker) = existing {
+            return worker
+                .request(|store| Ok((store.descriptor().entry.name.clone(), store.state().clone())))
+                .await;
+        }
+        self.request(|reply| CatalogCommand::Describe { id, reply })
+            .await
+    }
+
     /// Change only the default view binding; this does not start, pause, or privilege a flow.
     pub async fn select_default(&self, id: FlowInstanceId) -> io::Result<CommitReceipt> {
         self.request(|reply| CatalogCommand::Select { id, reply })
@@ -332,6 +359,35 @@ async fn serve_catalog(
     let mut schedulers: HashMap<FlowInstanceId, FlowScheduler> = HashMap::new();
     while let Some(command) = commands.recv().await {
         match command {
+            CatalogCommand::Describe { id, reply } => {
+                let existing = flows
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .filter(|worker| !worker.is_stopped())
+                    .cloned();
+                let result = if let Some(worker) = existing {
+                    worker
+                        .request(|store| {
+                            Ok((store.descriptor().entry.name.clone(), store.state().clone()))
+                        })
+                        .await
+                } else {
+                    let returned = tokio::task::spawn_blocking(move || {
+                        let result = store.open_flow(&id).map(|flow| {
+                            (flow.descriptor().entry.name.clone(), flow.state().clone())
+                        });
+                        (store, result)
+                    })
+                    .await;
+                    let Ok((returned, result)) = returned else {
+                        return;
+                    };
+                    store = returned;
+                    result
+                };
+                let _ = reply.send(result);
+            }
             CatalogCommand::Schedule {
                 id,
                 executor,

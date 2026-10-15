@@ -2,7 +2,7 @@ use crate::error::RuntimeError;
 use crate::source_program::{SourceRoots, load_program};
 use crate::storage;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
-use crate::value::Value;
+use crate::value::{Value, ValueJson};
 use atman_rt::ast::{Expr, FlowDecl, Literal, Stmt, TypeExpr};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -215,17 +215,28 @@ impl Tool for FlowInstances {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "List spawned flow instances visible to the current session and return a single-use spawn_token. \
-             Inspect running work, reuse suitable instances, and kill obsolete flows before passing the token to flow.spawn.",
+            "List flow instances in the current session, newest first, and return a single-use spawn_token. \
+             Persistent sessions include idle, prepared, interrupted, and closed instances. \
+             Use next_cursor as before to read older instances. Inspect existing work before spawning; listing does not grant execution control.",
         )
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false})
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "before": {"type": "string", "description": "The next_cursor returned by the previous page."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50}
+            },
+            "additionalProperties": false
+        })
     }
 
-    fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
+            let failed = |error: &str| RuntimeError::ToolFailed(format!("flow.instances: {error}"));
+            let before = optional_string_arg(&args, "before", "flow.instances")?;
+            let limit = limit_arg(&args, "flow.instances", MAX_SEARCH_LIMIT)?;
             let registry = ctx.flow_registry.as_ref().ok_or_else(|| {
                 RuntimeError::ToolFailed("flow.instances: no flow registry available".into())
             })?;
@@ -234,14 +245,69 @@ impl Tool for FlowInstances {
                     "flow.instances: trusted caller flow identity is unavailable".into(),
                 )
             })?;
-            let (mut instances, token) = registry.inspect_for_spawn(identity);
-            const MAX_INSTANCES: usize = 50;
-            let truncated = instances.len().saturating_sub(MAX_INSTANCES);
-            if truncated > 0 {
-                instances.drain(..truncated);
+            if identity.instance.is_some() {
+                let client = ctx
+                    .flow_client()
+                    .ok_or_else(|| failed("instance has no peer host binding"))?;
+                let cursor = before
+                    .as_deref()
+                    .map(uuid::Uuid::parse_str)
+                    .transpose()
+                    .map_err(|_| failed("invalid instance page cursor"))?
+                    .map(|id| crate::flow_store::FlowInstanceId::new(id.into()));
+                let page = client
+                    .instances(cursor, limit)
+                    .await
+                    .map_err(|error| failed(&error.to_string()))?;
+                let instances: Vec<_> = page
+                    .instances
+                    .into_iter()
+                    .map(|item| {
+                        let handle = item.address.instance_id.to_string();
+                        let mut value = item
+                            .state
+                            .as_ref()
+                            .map(|state| super::agent_ctrl::instance::status_value(state, &handle))
+                            .unwrap_or_else(|| {
+                                serde_json::json!({
+                                    "handle": handle,
+                                    "address": item.address,
+                                    "status": "unavailable",
+                                })
+                            });
+                        value["entry"] = serde_json::json!(item.entry);
+                        if let Some(error) = item.unavailable {
+                            value["error"] = serde_json::json!(error);
+                        }
+                        value
+                    })
+                    .collect();
+                return Ok(Value::from_json(serde_json::json!({
+                    "instances": instances,
+                    "spawn_token": registry.issue_spawn_permit(identity),
+                    "next_cursor": page.next.map(|id| id.to_string()),
+                    "total": page.total,
+                    "catalog_revision": page.catalog,
+                })));
             }
+            let (instances, token) = registry.inspect_for_spawn(identity);
+            let end = match before.as_deref() {
+                Some(handle) => instances
+                    .iter()
+                    .position(|instance| instance.handle == handle)
+                    .ok_or_else(|| {
+                        failed("cursor is no longer in this session; restart from the first page")
+                    })?,
+                None => instances.len(),
+            };
+            let total = instances.len();
+            let start = end.saturating_sub(limit);
+            let next_cursor = (start > 0).then(|| instances[start].handle.clone());
             let items = instances
                 .into_iter()
+                .skip(start)
+                .take(end - start)
+                .rev()
                 .map(|instance| {
                     Value::Struct(vec![
                         ("handle".into(), Value::Str(instance.handle)),
@@ -262,7 +328,12 @@ impl Tool for FlowInstances {
             Ok(Value::Struct(vec![
                 ("instances".into(), Value::List(items)),
                 ("spawn_token".into(), Value::Str(token)),
-                ("truncated".into(), Value::Int(truncated as i64)),
+                ("truncated".into(), Value::Int(start as i64)),
+                ("total".into(), Value::Int(total as i64)),
+                (
+                    "next_cursor".into(),
+                    next_cursor.map(Value::Str).unwrap_or(Value::Unit),
+                ),
             ]))
         })
     }
@@ -301,7 +372,7 @@ impl Tool for FlowSearch {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let query = string_arg(&args, "query", "flow.search")?;
-            let limit = limit_arg(&args, "flow.search")?;
+            let limit = limit_arg(&args, "flow.search", DEFAULT_SEARCH_LIMIT)?;
             let cursor = optional_string_arg(&args, "cursor", "flow.search")?;
             search_catalog(&FlowCatalog::load(ctx)?, query, limit, cursor.as_deref())
         })
@@ -652,9 +723,9 @@ fn optional_string_arg(
     }
 }
 
-fn limit_arg(args: &ToolArgs, tool: &str) -> Result<usize, RuntimeError> {
+fn limit_arg(args: &ToolArgs, tool: &str, default: usize) -> Result<usize, RuntimeError> {
     match args.named("limit") {
-        None | Some(Value::Unit) => Ok(DEFAULT_SEARCH_LIMIT),
+        None | Some(Value::Unit) => Ok(default),
         Some(Value::Int(limit)) if (1..=MAX_SEARCH_LIMIT as i64).contains(limit) => {
             Ok(*limit as usize)
         }

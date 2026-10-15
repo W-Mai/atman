@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent instance discovery** — Flow listings use the session catalog, retain unavailable and inactive instances, and support stable cursor pagination. Status and listings share execution and pause fields; summary reads do not retain additional conversation contexts.
+
 - **Atomic instance activation** — Host creation registers result subscriptions before activating a flow, commits initial invocation data and inherited context together, and reconciles concurrent or recovered launch requests without duplicate execution. Failed activation preserves prepared state and registered reply routes.
 
 - **Host-owned scheduling** — Session catalogs retain automatic flow admission after views and callers detach. Controller status distinguishes scheduling failures from execution state, preserves pending input, and permits explicit replacement without cancelling admitted turns.
