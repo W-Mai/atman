@@ -156,6 +156,10 @@ impl Outbox {
 }
 
 impl FlowStore {
+    pub fn send_record(&self, request_id: Uuid) -> Option<&SendRecord> {
+        self.outbox.get(request_id)
+    }
+
     pub fn sends(&self) -> &[SendRecord] {
         self.outbox.records()
     }

@@ -22,9 +22,9 @@ type FlowDirectory = Arc<Mutex<HashMap<FlowInstanceId, FlowWorker>>>;
 /// A trusted host directory. Registration does not grant peer control or delivery authority.
 ///
 /// The map lock only protects handles. Catalog I/O is serialized by each session owner, and flow input/execution goes directly to the instance worker without passing through that catalog queue.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct RuntimeHost {
-    sessions: Mutex<HashMap<Uuid, SessionHandle>>,
+    sessions: Arc<Mutex<HashMap<Uuid, SessionHandle>>>,
 }
 
 impl RuntimeHost {

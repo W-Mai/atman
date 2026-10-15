@@ -125,4 +125,14 @@ The host routes both same-session and cross-session delivery by complete `FlowRe
 
 `select_default` changes only the session's view binding. It does not change execution state or permissions. Dropping catalog handles does not cancel instance handles held elsewhere. Host policies prepare eligible input using `flow_runtime::input::context_message` to retain message provenance; projection itself does not authenticate, consume, or authorize input.
 
-The directory does not yet replace CLI/daemon session ownership. Grant management, persistent outbound delivery, managed-flow creation, and legacy history migration require the same host integration before those entry points switch storage.
+The directory does not yet replace CLI/daemon session ownership. Grant management, outbound retry policy, managed-flow creation, and legacy history migration require the same host integration before those entry points switch storage.
+
+## Owned send attempts
+
+`RuntimeHost::send` uses the sender's admitted lease to commit an outbox intent, routes its recorded request to the receiver, and commits the authenticated acceptance receipt back to the sender. A reply waiter, when supplied, is registered with the intent before receiver contact. Send admission and new receiver delivery have separate authorization callbacks. The caller authenticates the invoking flow before entering this host API.
+
+The host owns the delivery task once started. Cancelling its waiting caller does not discard the intent or stop that attempt. Same-session, cross-session, reverse, and self-directed sends release each storage owner before contacting the other endpoint. Concurrent retries use the same sender request ID and receiver acceptance identity, so they do not create additional input or confirmation records.
+
+`SendAttempt` returns the authoritative sender record and an optional pending reason. A failed attempt leaves `PendingDelivery`; this may include an accepted receiver message whose sender acknowledgement could not be committed. `retry_send` reads the original intent from the sender journal and reconciles that request. It can confirm prior receiver acceptance after interruption, revocation, or closure without treating the retry as new work. A confirmed send returns its existing record without contacting the receiver again. Accepted means received, not executed or successfully handled.
+
+`FlowWorker::pending_sends` and `send_record` expose durable reconciliation work. Failed attempts do not busy-loop or silently discard intent. Automatic retry policy, terminal rejection/cancellation decisions, and product-facing send tools remain host integration work.

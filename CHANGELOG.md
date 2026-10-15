@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Owned flow delivery** — Host send attempts commit sender intent before receiver contact and record acceptance back to the sender. Caller cancellation does not stop an owned attempt; failed delivery remains pending, and explicit retries reconcile the original request across interruption or closure without duplicate input.
+
 - **Persistent host directory** — Session catalog owners share canonical instance workers across callers, keep default-view selection separate from execution, and route same-session and cross-session delivery through the same receiver admission path. Accepted catalog operations survive caller cancellation.
 
 - **Instance scheduling** — An event-driven controller admits host-selected inbox work, rechecks snapshots before startup, and schedules subsequent turns after completion. Independent pauses and interruptions prevent automatic execution; stopping the controller preserves admitted turns and their terminal commits.

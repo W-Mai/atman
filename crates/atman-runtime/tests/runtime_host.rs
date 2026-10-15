@@ -55,6 +55,39 @@ async fn change(worker: &FlowWorker, change: FlowTransition) {
         .unwrap();
 }
 
+async fn start(worker: &FlowWorker) -> atman_rt::TurnLease<atman_runtime::event::AtmanUuid> {
+    let lease = worker
+        .state()
+        .await
+        .unwrap()
+        .begin_turn(TurnId::now(), RunId::now())
+        .unwrap();
+    change(
+        worker,
+        FlowTransition::TurnStarted {
+            turn: lease.turn.clone(),
+            run: lease.run.clone(),
+        },
+    )
+    .await;
+    lease
+}
+
+fn peer_request(sender: &FlowRef, recipient: &FlowRef) -> DeliveryRequest {
+    DeliveryRequest {
+        request_id: Uuid::new_v4(),
+        sender: SenderIdentity::Flow(sender.clone()),
+        recipient: recipient.clone(),
+        delivery: DeliveryMode::AtBoundary,
+        cause: None,
+        correlation: None,
+        scope: None,
+        payload: InboxPayload::Interjection {
+            text: "peer work".into(),
+        },
+    }
+}
+
 fn prepare(snapshot: &FlowSnapshot) -> io::Result<Option<TurnRequest>> {
     let turn = TurnId::now();
     Ok(Some(TurnRequest {
@@ -348,4 +381,196 @@ async fn same_and_cross_session_delivery_share_admission_without_parent_lifecycl
     assert!(c.snapshot().await.unwrap().pending.is_empty());
     b_scheduler.stop().await.unwrap();
     c_scheduler.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn host_sends_reconcile_concurrent_retries_and_receiver_acknowledgement_after_closure() {
+    use atman_runtime::flow_store::outbox::SendStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let a_info = flow_descriptor(info.id);
+    let b_info = flow_descriptor(info.id);
+    let a = session.create_flow(a_info.clone()).await.unwrap();
+    let b = session.create_flow(b_info.clone()).await.unwrap();
+    for worker in [&a, &b] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    let a_turn = start(&a).await;
+    let b_turn = start(&b).await;
+    let request = peer_request(&a_info.address, &b_info.address);
+    let reverse = peer_request(&b_info.address, &a_info.address);
+    let (one, retry, reverse) = tokio::join!(
+        host.send(
+            a_turn.clone(),
+            request.clone(),
+            None,
+            |_| Ok(()),
+            |_| Ok(())
+        ),
+        host.send(
+            a_turn.clone(),
+            request.clone(),
+            None,
+            |_| Ok(()),
+            |_| Ok(())
+        ),
+        host.send(b_turn.clone(), reverse, None, |_| Ok(()), |_| Ok(())),
+    );
+    let one = one.unwrap();
+    let retry = retry.unwrap();
+    let reverse = reverse.unwrap();
+    assert_eq!(one.record, retry.record);
+    for attempt in [&one, &retry, &reverse] {
+        assert!(attempt.pending_reason.is_none());
+        assert!(matches!(attempt.record.status, SendStatus::Accepted { .. }));
+    }
+    assert_eq!(a.snapshot().await.unwrap().pending.len(), 1);
+    assert_eq!(b.snapshot().await.unwrap().pending.len(), 1);
+    let self_send = host
+        .send(
+            a_turn.clone(),
+            peer_request(&a_info.address, &a_info.address),
+            None,
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    assert!(self_send.pending_reason.is_none());
+
+    // Simulate a lost receiver ACK: the original intent and receiver acceptance exist, but sender confirmation does not.
+    let uncertain = peer_request(&a_info.address, &b_info.address);
+    a.queue_send(a_turn.clone(), uncertain.clone(), None, |_| Ok(()))
+        .await
+        .unwrap();
+    let accepted = host.deliver(uncertain.clone(), |_| Ok(())).await.unwrap();
+    for (worker, lease) in [(&a, a_turn.clone()), (&b, b_turn)] {
+        change(
+            worker,
+            FlowTransition::TurnFinished {
+                lease,
+                outcome: TurnOutcome::Completed,
+            },
+        )
+        .await;
+        change(worker, FlowTransition::CloseRequested).await;
+        change(worker, FlowTransition::Closed).await;
+    }
+    let reconciled = host
+        .retry_send(a_info.address.clone(), uncertain.request_id, |_| {
+            panic!("accepted retry is not new delivery")
+        })
+        .await
+        .unwrap();
+    assert!(reconciled.pending_reason.is_none());
+    let SendStatus::Accepted { delivery, .. } = &reconciled.record.status else {
+        panic!("missing confirmation");
+    };
+    assert_eq!(delivery.message_id, accepted.message_id);
+    assert_eq!(delivery.receipt, accepted.receipt);
+    let repeated = host
+        .send(
+            a_turn,
+            uncertain,
+            None,
+            |_| panic!("existing intent is not a new send"),
+            |_| panic!("confirmed send needs no new delivery"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repeated.record, reconciled.record);
+    assert!(a.pending_sends().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn abandoned_host_send_preserves_intent_and_cross_session_retry_survives_sender_reopen() {
+    use atman_runtime::flow_store::outbox::SendStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let first = session_descriptor();
+    let second = session_descriptor();
+    let a_session = host
+        .attach_session(root.create_session(first.clone()).unwrap())
+        .unwrap();
+    let b_session = host
+        .attach_session(root.create_session(second.clone()).unwrap())
+        .unwrap();
+    let a_info = flow_descriptor(first.id);
+    let b_info = flow_descriptor(second.id);
+    let a = a_session.create_flow(a_info.clone()).await.unwrap();
+    let b = b_session.create_flow(b_info.clone()).await.unwrap();
+    for worker in [&a, &b] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    let lease = start(&a).await;
+    let request = peer_request(&a_info.address, &b_info.address);
+    let (denied, observed) = tokio::sync::oneshot::channel();
+    let mut abandoned = Box::pin(host.send(
+        lease.clone(),
+        request.clone(),
+        None,
+        |_| Ok(()),
+        move |_| {
+            let _ = denied.send(());
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "delivery grant unavailable",
+            ))
+        },
+    ));
+    assert!(futures::poll!(&mut abandoned).is_pending());
+    drop(abandoned);
+    tokio::time::timeout(Duration::from_secs(10), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    let queued = a.send_record(request.request_id).await.unwrap().unwrap();
+    assert_eq!(queued.status, SendStatus::PendingDelivery);
+    assert_eq!(a.pending_sends().await.unwrap().len(), 1);
+    assert!(b.snapshot().await.unwrap().pending.is_empty());
+    drop(a.shutdown().await.unwrap());
+    let retried = host
+        .retry_send(a_info.address.clone(), request.request_id, |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(retried.pending_reason.is_none());
+    assert_eq!(retried.record.queued, queued.queued);
+    assert!(matches!(retried.record.status, SendStatus::Accepted { .. }));
+    let a = host.flow(&a_info.address).await.unwrap();
+    assert!(matches!(
+        a.state().await.unwrap().state(),
+        InstanceState::Open(InstanceActivity::Interrupted {
+            reason: atman_rt::Interruption::HostLost,
+            ..
+        })
+    ));
+    assert!(a.pending_sends().await.unwrap().is_empty());
+    assert_eq!(b.snapshot().await.unwrap().pending.len(), 1);
+    let retried_again = host
+        .retry_send(a_info.address, request.request_id, |_| {
+            panic!("already confirmed")
+        })
+        .await
+        .unwrap();
+    assert_eq!(retried_again.record, retried.record);
+    let mut forged = request;
+    forged.request_id = Uuid::new_v4();
+    forged.sender = SenderIdentity::Flow(b_info.address);
+    assert!(
+        host.send(
+            lease,
+            forged,
+            None,
+            |_| panic!("forged identity must fail first"),
+            |_| panic!("must not deliver")
+        )
+        .await
+        .is_err()
+    );
 }
