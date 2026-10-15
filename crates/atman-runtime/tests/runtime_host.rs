@@ -88,6 +88,145 @@ fn peer_request(sender: &FlowRef, recipient: &FlowRef) -> DeliveryRequest {
     }
 }
 
+#[test]
+fn access_grants_are_scoped_revocable_and_recovered_from_facts_without_default_flow_privileges() {
+    use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut store = root.create_session(info.clone()).unwrap();
+    let first = flow_descriptor(info.id);
+    let mut second = flow_descriptor(info.id);
+    second.created_by = Some(first.address.clone());
+    drop(store.create_flow(first.clone()).unwrap());
+    drop(store.create_flow(second.clone()).unwrap());
+    let remote = flow_descriptor(Uuid::new_v4());
+    for target in [&second.address, &remote.address] {
+        assert!(
+            !store
+                .projection()
+                .access
+                .allows(&first.address, target, FlowAction::ReadContext)
+        );
+        assert!(
+            !store
+                .projection()
+                .access
+                .allows(&first.address, target, FlowAction::Control)
+        );
+    }
+    assert!(
+        store
+            .projection()
+            .access
+            .allows(&first.address, &second.address, FlowAction::Send)
+    );
+    assert!(
+        !store
+            .projection()
+            .access
+            .allows(&first.address, &remote.address, FlowAction::Send)
+    );
+    assert!(!store.projection().access.allows(
+        &first.address,
+        &first.address,
+        FlowAction::Delegate
+    ));
+    store
+        .select_default(second.address.instance_id.clone())
+        .unwrap();
+    assert!(!store.projection().access.allows(
+        &second.address,
+        &first.address,
+        FlowAction::Control
+    ));
+
+    let initial = store.cursor().clone();
+    let grant = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: first.address.clone(),
+        target: AccessTarget::Flow(second.address.clone()),
+        actions: [FlowAction::ReadContext].into(),
+    };
+    let granted = store.grant_access(&initial, grant.clone()).unwrap();
+    assert_eq!(
+        store.grant_access(&initial, grant.clone()).unwrap(),
+        granted
+    );
+    assert!(store.projection().access.allows(
+        &first.address,
+        &second.address,
+        FlowAction::ReadContext
+    ));
+    assert!(!store.projection().access.allows(
+        &second.address,
+        &first.address,
+        FlowAction::ReadContext
+    ));
+    let mut conflict = grant.clone();
+    conflict.actions.insert(FlowAction::Control);
+    assert!(store.grant_access(&granted, conflict).is_err());
+    let mut unknown = grant.clone();
+    unknown.id = Uuid::new_v4();
+    unknown.grantee = flow_descriptor(info.id).address;
+    assert!(store.grant_access(&granted, unknown).is_err());
+    let cross = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: first.address.clone(),
+        target: AccessTarget::AllSessions,
+        actions: [FlowAction::Send].into(),
+    };
+    assert!(store.grant_access(&initial, cross.clone()).is_err());
+    let crossed = store.grant_access(&granted, cross).unwrap();
+    assert!(
+        store
+            .projection()
+            .access
+            .allows(&first.address, &remote.address, FlowAction::Send)
+    );
+    assert!(!store.projection().access.allows(
+        &first.address,
+        &remote.address,
+        FlowAction::Control
+    ));
+    let revoked = store.revoke_access(&crossed, grant.id).unwrap();
+    assert_eq!(store.revoke_access(&crossed, grant.id).unwrap(), revoked);
+    assert!(store.grant_access(&revoked, grant).is_err());
+    assert!(!store.projection().access.allows(
+        &first.address,
+        &second.address,
+        FlowAction::ReadContext
+    ));
+    let records: Vec<_> = store.projection().access.grants().cloned().collect();
+    std::fs::write(
+        store.dir().join("session.json"),
+        "forged disposable access cache",
+    )
+    .unwrap();
+    drop(store);
+    let reopened = root.open_session(info.id).unwrap();
+    assert_eq!(
+        reopened
+            .projection()
+            .access
+            .grants()
+            .cloned()
+            .collect::<Vec<_>>(),
+        records
+    );
+    assert!(!reopened.projection().access.allows(
+        &first.address,
+        &second.address,
+        FlowAction::ReadContext
+    ));
+    assert!(
+        reopened
+            .projection()
+            .access
+            .allows(&first.address, &remote.address, FlowAction::Send)
+    );
+}
+
 fn prepare(snapshot: &FlowSnapshot) -> io::Result<Option<TurnRequest>> {
     let turn = TurnId::now();
     Ok(Some(TurnRequest {

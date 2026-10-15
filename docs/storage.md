@@ -117,6 +117,10 @@ Input policy, instance directory ownership, management authorization, and CLI/da
 
 ## Host directory
 
+Session journals retain explicit peer access grants and revocations. Grants name a registered source flow, a target flow/session or all sessions in the same host, and a set of actions. Same-session discovery, sending, watching public output, and reading public output are default capabilities. Full context reads, peer execution control, Goal management, and delegation require explicit authority; default-view selection and creation provenance do not supply it.
+
+`SessionStore::grant_access` and `revoke_access` require the expected catalog cursor for new changes. Repeating an unchanged grant or revocation does not write another fact. A revoked grant identity cannot be reused to restore permission; renewed authority uses a new grant identity. Recovery rebuilds policy from the journal, ignoring disposable metadata. These storage operations are trusted-host primitives, not direct peer commands; callers still authenticate sources and enforce the resulting policy at operation admission.
+
 `flow_runtime::host::RuntimeHost` attaches exclusively owned session catalogs. Each `SessionHandle` serializes catalog creation and default-view changes on a bounded command queue. Accepted catalog operations finish even if their waiting caller disappears. Disk work runs on the blocking pool; idle catalog owners do not occupy threads.
 
 Repeated `open_flow` and matching `create_flow` calls return the same live `FlowWorker` and conversation context. Opening another view does not reopen its journal or interrupt execution. Creation payload conflicts fail. After explicit worker handoff, reopening still requires exclusive journal ownership and reconciles an unfinished recorded turn as `HostLost`; it does not replay execution.

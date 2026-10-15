@@ -2,6 +2,7 @@
 //!
 //! Host-only storage: authorization and scheduling happen before commands reach this module. Each flow has one authoritative journal. Metadata files are disposable projections and never override facts. Blocking calls belong on storage workers.
 
+pub mod access;
 pub mod inbox;
 mod input;
 pub mod outbox;
@@ -183,6 +184,8 @@ enum SessionFact {
     Created(SessionDescriptor),
     FlowRegistered(FlowRegistration),
     DefaultFlowSelected(FlowInstanceId),
+    AccessGranted(access::FlowGrant),
+    AccessRevoked(Uuid),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -190,6 +193,7 @@ pub struct SessionProjection {
     pub descriptor: SessionDescriptor,
     pub flows: Vec<FlowRegistration>,
     pub default_flow: Option<FlowInstanceId>,
+    pub access: access::SessionAccess,
 }
 
 impl SessionProjection {
@@ -211,6 +215,18 @@ impl SessionProjection {
                 }
                 self.default_flow = Some(id);
             }
+            SessionFact::AccessGranted(grant) => {
+                if grant.grantee.session_id.0 != self.descriptor.id
+                    || !self
+                        .flows
+                        .iter()
+                        .any(|flow| flow.id == grant.grantee.instance_id)
+                {
+                    return Err(invalid("grant recipient is not registered in this session"));
+                }
+                self.access.grant(grant)?;
+            }
+            SessionFact::AccessRevoked(id) => self.access.revoke(id)?,
         }
         Ok(())
     }
@@ -248,6 +264,7 @@ impl RuntimeStore {
                 descriptor,
                 flows: Vec::new(),
                 default_flow: None,
+                access: Default::default(),
             },
             cursor,
             projection_error: None,
@@ -271,6 +288,7 @@ impl RuntimeStore {
                                 descriptor,
                                 flows: Vec::new(),
                                 default_flow: None,
+                                access: Default::default(),
                             });
                         }
                         (Some(state), fact) => state.apply(fact)?,
