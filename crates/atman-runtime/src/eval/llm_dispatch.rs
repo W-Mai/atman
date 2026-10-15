@@ -214,6 +214,25 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         record_spawned_compaction(ctx, &result);
     }
     drop(compact_operation);
+    if uses_managed_context
+        && args.call_purpose == crate::context_plan::ContextCallPurpose::General
+        && let Some(binding) = &ctx.instance_publication
+    {
+        let accepts_images = model_info.capabilities.input_modalities.is_empty()
+            || model_info
+                .capabilities
+                .input_modalities
+                .contains(&crate::provider::InputModality::Image);
+        if let Err(error) = binding
+            .worker
+            .receive_context(binding.lease.clone(), ctx.clone(), accepts_images)
+            .await
+        {
+            return Value::Err(RuntimeError::ToolFailed(format!(
+                "instance inbox pickup failed: {error}"
+            )));
+        }
+    }
     let llm_context = match llm_context::build_llm_context(
         &args,
         context_mode,

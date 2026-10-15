@@ -1,6 +1,7 @@
 //! Per-instance serialized storage work without blocking asynchronous executor threads.
 
 pub mod execution;
+mod input;
 
 use std::{io, sync::Arc};
 

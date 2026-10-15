@@ -45,6 +45,213 @@ struct ExecutionProbe {
     release: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
+struct InboxRecordingProvider {
+    requests: std::sync::Mutex<Vec<atman_runtime::provider::LlmRequest>>,
+    inner: atman_runtime::providers::mock::MockProvider,
+}
+
+impl atman_runtime::provider::Provider for InboxRecordingProvider {
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    fn call<'a>(
+        &'a self,
+        request: atman_runtime::provider::LlmRequest,
+    ) -> atman_runtime::tool::BoxFut<
+        'a,
+        Result<atman_runtime::provider::AssistantMessage, atman_runtime::RuntimeError>,
+    > {
+        self.requests.lock().unwrap().push(request.clone());
+        self.inner.call(request)
+    }
+
+    fn call_streaming(
+        &self,
+        request: atman_runtime::provider::LlmRequest,
+    ) -> atman_runtime::event::Observable<atman_runtime::provider::AssistantMessage> {
+        self.requests.lock().unwrap().push(request.clone());
+        self.inner.call_streaming(request)
+    }
+}
+
+#[tokio::test]
+async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_without_reconsumption()
+ {
+    use atman_runtime::flow_runtime::FlowWorker;
+    use atman_runtime::message::MessageOrigin;
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut description = descriptor(info.id);
+    description.entry.bundle.sources.insert("entry:main.at".into(), r#"
+        flow shared() {
+            llm.call(model: "mock", prompt: "shared", context: "session", record: false)
+        }
+        flow branch() {
+            llm.call(model: "mock", prompt: "branch", context: "session", record: false)
+        }
+        flow main(input: int) -> string {
+            execution_probe()
+            llm.extract(model: "mock", prompt: "extract", context: "session", fields: { value: string -- "value" })
+            fanout [branch()]
+            llm.call(model: "mock", prompt: "isolated", context: "none", record: false)
+            shared().await
+            shared().await
+            return final.answer(message: "finished")
+        }
+    "#.into());
+    let mut store = session.create_flow(description.clone()).unwrap();
+    change(&mut store, FlowTransition::Activated);
+    let worker = FlowWorker::start(store).await.unwrap();
+    let first = worker
+        .accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::User(Uuid::new_v4()),
+                "entry",
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let executor = atman_runtime::Executor::new();
+    let provider = std::sync::Arc::new(InboxRecordingProvider {
+        requests: Default::default(),
+        inner: atman_runtime::providers::mock::MockProvider::new("mock")
+            .with_fallback(atman_runtime::Value::Str(r#"{"value":"ok"}"#.into())),
+    });
+    executor.providers.register(provider.clone());
+    let probe = std::sync::Arc::new(ExecutionProbe {
+        entered: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+        release: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    executor.tools.register(probe.clone());
+    let ticket = worker
+        .start_turn(executor, turn_request(first.message_id, 0))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), probe.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let key = Uuid::new_v4().into();
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::ExecutionPaused { key },
+        )
+        .await
+        .unwrap();
+    let mut accepted = Vec::new();
+    let mut pending = Vec::new();
+    for (text, mode, marker) in [
+        ("boundary-one", DeliveryMode::AtBoundary, None),
+        ("boundary-two", DeliveryMode::AtBoundary, Some("recorded")),
+        ("next-turn-only", DeliveryMode::NextTurn, None),
+        (
+            "different-config",
+            DeliveryMode::AtBoundary,
+            Some("different"),
+        ),
+    ] {
+        let mut request = delivery(
+            &description.address,
+            SenderIdentity::User(Uuid::new_v4()),
+            text,
+        );
+        request.delivery = mode;
+        if let Some(marker) = marker {
+            request.payload = InboxPayload::UserSubmission {
+                text: text.into(),
+                images: vec![],
+                invocation: [("marker".into(), serde_json::json!(marker))].into(),
+                presentation: None,
+            };
+        }
+        let receipt = worker.accept_input(request, |_| Ok(())).await.unwrap();
+        if text.starts_with("boundary") {
+            accepted.push(receipt.message_id);
+        } else {
+            pending.push(receipt.message_id);
+        }
+    }
+    let peer = descriptor(info.id).address;
+    let peer_receipt = worker
+        .accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::Flow(peer),
+                "peer-not-user",
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    accepted.push(peer_receipt.message_id);
+    probe.release.add_permits(1);
+    assert!(provider.requests.lock().unwrap().is_empty());
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::ExecutionResumed { key },
+        )
+        .await
+        .unwrap();
+    let done = tokio::time::timeout(std::time::Duration::from_secs(15), ticket.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(done.result.is_ok(), "{:?}", done.result);
+    let requests = provider.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 5);
+    for (index, request) in requests.iter().enumerate() {
+        for text in ["boundary-one", "boundary-two", "peer-not-user"] {
+            let messages: Vec<_> = request
+                .messages
+                .iter()
+                .filter(|m| m.text_concat().contains(text))
+                .collect();
+            assert_eq!(
+                messages.len(),
+                usize::from(index >= 3),
+                "call {index}: {text}"
+            );
+            if text == "peer-not-user" && index >= 3 {
+                assert_ne!(messages[0].origin, MessageOrigin::User);
+                assert!(messages[0].text_concat().contains("not user authorization"));
+            }
+        }
+        assert!(
+            !request
+                .messages
+                .iter()
+                .any(|m| m.text_concat().contains("next-turn-only")
+                    || m.text_concat().contains("different-config"))
+        );
+    }
+    let messages = worker.context().messages().to_vec();
+    let store = worker.shutdown().await.unwrap();
+    assert_eq!(
+        store.pending_inputs().map(|e| e.id).collect::<Vec<_>>(),
+        pending
+    );
+    let inputs = store.committed_inputs();
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(inputs[1].input.message_ids, accepted);
+    assert_eq!(store.context_messages(), messages);
+    drop(store);
+    let restored = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(restored.context_messages(), messages);
+    assert_eq!(
+        restored.pending_inputs().map(|e| e.id).collect::<Vec<_>>(),
+        pending
+    );
+}
+
 impl atman_runtime::tool::Tool for ExecutionProbe {
     fn name(&self) -> &str {
         "execution_probe"
