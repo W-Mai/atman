@@ -122,6 +122,9 @@ pub fn context_message(
     );
     message.origin = match (&envelope.request.sender, &envelope.request.payload) {
         (_, InboxPayload::Watcher { .. }) => MessageOrigin::Watcher,
+        (_, InboxPayload::FlowEvent { event, .. }) if event == "final_answer" => {
+            MessageOrigin::Watcher
+        }
         (SenderIdentity::User(_), InboxPayload::Interjection { text }) => {
             message.parts = vec![MessagePart::Text { text: text.clone() }];
             MessageOrigin::Interjection

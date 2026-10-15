@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Durable answer subscriptions** — Receiver journals commit subscription progress with matched inbox input. A final answer matching multiple subscriptions is delivered once with every matching reason; cancellation, pauses, restart, and incomplete writes preserve delivery ownership.
+
 - **Persistent flow tools** — Host-owned invocations route flow status, output, interjection, and cancellation through their bound instance identity. Same-session and cross-session handles share grant checks and durable delivery; cancellation checks the target revision and preserves the instance after cleanup.
 
 - **Invocation-bound peer access** — Flow clients derive sender identity from the admitted turn, enforce live grants for reads, messages, and execution controls, and reject stale invocations. Independent controller pause keys prevent one flow from resuming another controller's pause.

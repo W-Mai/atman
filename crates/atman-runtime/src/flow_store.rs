@@ -7,6 +7,7 @@ pub mod inbox;
 mod input;
 pub mod outbox;
 pub mod publication;
+pub mod subscription;
 pub mod waiter;
 
 use std::fs::File;
@@ -121,6 +122,9 @@ enum FlowFact {
     },
     SendQueued(Box<outbox::SendIntent>),
     MessagePublished(Box<publication::MessagePublication>),
+    AnswerSubscribed(Box<subscription::SubscriptionRecord>),
+    AnswerUnsubscribed(Uuid),
+    AnswersObserved(Box<subscription::Observation>),
     DeliveryConfirmed {
         request_id: Uuid,
         delivery: outbox::DeliveryReceipt,
@@ -129,6 +133,18 @@ enum FlowFact {
 
 impl FlowFact {
     fn validate_batch(facts: &[Self]) -> io::Result<()> {
+        if facts.iter().any(|fact| {
+            matches!(
+                fact,
+                Self::AnswerSubscribed(_) | Self::AnswerUnsubscribed(_) | Self::AnswersObserved(_)
+            )
+        }) {
+            return if facts.len() == 1 {
+                Ok(())
+            } else {
+                Err(invalid("subscription changes require their own batch"))
+            };
+        }
         if facts
             .iter()
             .any(|fact| matches!(fact, Self::MessagePublished(_)))
@@ -473,6 +489,7 @@ pub struct FlowStore {
     inbox: Inbox,
     outbox: outbox::Outbox,
     publications: publication::Publications,
+    subscriptions: subscription::Subscriptions,
     cursor: CommitReceipt,
     projection_error: Option<io::Error>,
     pub recovered_tail: Option<RecoveredTail>,
@@ -500,6 +517,7 @@ impl FlowStore {
             inbox: Inbox::default(),
             outbox: outbox::Outbox::default(),
             publications: publication::Publications::default(),
+            subscriptions: subscription::Subscriptions::default(),
             cursor,
             projection_error: None,
             recovered_tail: None,
@@ -510,6 +528,7 @@ impl FlowStore {
         let mut projection: Option<(FlowDescriptor, FlowInstance<AtmanUuid>, Inbox)> = None;
         let mut outbox = outbox::Outbox::default();
         let mut publications = publication::Publications::default();
+        let mut subscriptions = subscription::Subscriptions::default();
         let mut cursor = None;
         let (journal, recovered_tail) = Journal::open(
             &dir.join("events.jsonl"),
@@ -538,6 +557,7 @@ impl FlowStore {
                                 InstanceState::Closing { .. } | InstanceState::Closed
                             ) {
                                 inbox.close(&receipt);
+                                subscriptions.close();
                             }
                         }
                         (Some((_, state, inbox)), FlowFact::EnvelopeAccepted(envelope)) => {
@@ -553,6 +573,20 @@ impl FlowStore {
                         (Some((_, state, _)), FlowFact::MessagePublished(publication)) => {
                             publications.validate(state, &publication)?;
                             publications.apply(*publication, receipt.clone());
+                        }
+                        (Some((_, state, _)), FlowFact::AnswerSubscribed(record)) => {
+                            if !state.accepts_input() {
+                                return Err(invalid("subscription recipient is unavailable"));
+                            }
+                            subscriptions.register(*record)?;
+                        }
+                        (Some(_), FlowFact::AnswerUnsubscribed(id)) => subscriptions.cancel(id)?,
+                        (Some((_, state, inbox)), FlowFact::AnswersObserved(observation)) => {
+                            if !state.accepts_input() {
+                                return Err(invalid("observation recipient is unavailable"));
+                            }
+                            subscriptions.validate(&observation, inbox, address)?;
+                            subscriptions.apply(&observation, inbox, &receipt);
                         }
                         (Some((_, state, inbox)), FlowFact::SendQueued(intent)) => {
                             outbox.validate(state, &intent)?;
@@ -620,6 +654,7 @@ impl FlowStore {
             inbox,
             outbox,
             publications,
+            subscriptions,
             cursor: cursor.ok_or_else(|| invalid("empty flow journal"))?,
             projection_error: None,
             recovered_tail,
@@ -706,6 +741,7 @@ impl FlowStore {
             InstanceState::Closing { .. } | InstanceState::Closed
         ) {
             self.inbox.close(&cursor);
+            self.subscriptions.close();
         }
         self.cursor = cursor.clone();
         self.refresh_projection();

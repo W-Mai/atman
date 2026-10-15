@@ -139,6 +139,14 @@ The shared `flow.status`, `flow.output`, `flow.interject`, and `flow.kill` tools
 
 The directory does not yet replace CLI/daemon session ownership. Grant management, outbound retry policy, managed-flow creation, and legacy history migration require the same host integration before those entry points switch storage.
 
+## Public answer subscriptions
+
+Answer subscriptions belong to the receiving flow's journal. Registration records a source-owner cursor, an all-answers or substring filter, one-shot behavior, and the notification purpose. A source can remain Prepared while a creator records its result subscription; activation is a separate authorized operation. Repeating an identical registration is idempotent, and cancellation never reactivates its identity. Closing a recipient cancels active subscriptions while preserving their history.
+
+`publications_after` reads bounded pages of committed public final answers. Private branch output is excluded. `observe_answers` evaluates all active subscriptions to that source together and commits cursor updates and inbox acceptance in one receiver transaction. A source answer matching both a result subscription and a watcher produces one inbox item with both reasons. A repeated page cannot create another input, including after that item has been consumed or the process has restarted. Cancellation before observation excludes the cancelled subscription; cancellation after acceptance does not remove queued work.
+
+Only observable answer positions advance the cursor. Unrelated commits do not generate cursor-only work, including for self-subscriptions. A page that skips an unobserved source position is rejected. Torn receiver transactions recover neither consumption position nor accepted input; the original source page can be observed again. These storage operations require trusted source handles and host authorization; automatic source scanning and subscription tool routing are separate host responsibilities.
+
 ## Owned send attempts
 
 `RuntimeHost::send` uses the sender's admitted lease to commit an outbox intent, routes its recorded request to the receiver, and commits the authenticated acceptance receipt back to the sender. A reply waiter, when supplied, is registered with the intent before receiver contact. Send admission and new receiver delivery have separate authorization callbacks. The caller authenticates the invoking flow before entering this host API.
