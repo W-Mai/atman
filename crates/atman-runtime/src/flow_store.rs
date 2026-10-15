@@ -3,6 +3,7 @@
 //! Host-only storage: authorization and scheduling happen before commands reach this module. Each flow has one authoritative journal. Metadata files are disposable projections and never override facts. Blocking calls belong on storage workers.
 
 pub mod inbox;
+mod input;
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -21,7 +22,9 @@ use crate::event_log::journal::{
     CommitReceipt, Journal, RecoveredTail, private_file_options, sync_parent,
 };
 use crate::source_program::RevisionBundle;
-use inbox::{Acceptance, AcceptedEnvelope, DeliveryRequest, Inbox, InboxEntry};
+use inbox::{
+    Acceptance, AcceptedEnvelope, CommittedInput, DeliveryRequest, Inbox, InboxEntry, InputContent,
+};
 
 pub type FlowInstanceId = atman_rt::FlowInstanceId<AtmanUuid>;
 pub type FlowRef = atman_rt::FlowRef<AtmanUuid>;
@@ -106,6 +109,37 @@ enum FlowFact {
     Created(Box<FlowDescriptor>),
     Transition(FlowTransition),
     EnvelopeAccepted(Box<AcceptedEnvelope>),
+    InputCommitted(Box<CommittedInput>),
+}
+
+impl FlowFact {
+    fn validate_batch(facts: &[Self]) -> io::Result<()> {
+        if !facts
+            .iter()
+            .any(|fact| matches!(fact, Self::InputCommitted(_)))
+        {
+            return Ok(());
+        }
+        match facts {
+            [Self::InputCommitted(input)]
+                if matches!(input.content, InputContent::Context { .. }) =>
+            {
+                Ok(())
+            }
+            [
+                Self::Transition(FlowTransition::TurnStarted { turn, run }),
+                Self::InputCommitted(input),
+            ] if matches!(input.content, InputContent::InvocationInput { .. })
+                && &input.lease.turn == turn
+                && &input.lease.run == run =>
+            {
+                Ok(())
+            }
+            _ => Err(invalid(
+                "invocation input and turn admission must share one batch",
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -428,6 +462,7 @@ impl FlowStore {
             &dir.join("events.jsonl"),
             address.instance_id.0.0,
             |receipt, facts| {
+                FlowFact::validate_batch(&facts)?;
                 for fact in facts {
                     match (&mut projection, fact) {
                         (None, FlowFact::Created(descriptor)) if &descriptor.address == address => {
@@ -444,6 +479,7 @@ impl FlowStore {
                             if original != transition || revision == state.revision() {
                                 return Err(invalid("noncanonical flow transition"));
                             }
+                            inbox.invalidate();
                             if matches!(
                                 state.state(),
                                 InstanceState::Closing { .. } | InstanceState::Closed
@@ -457,6 +493,9 @@ impl FlowStore {
                             }
                             inbox.validate(&envelope)?;
                             inbox.apply(*envelope, receipt.clone());
+                        }
+                        (Some((_, state, inbox)), FlowFact::InputCommitted(input)) => {
+                            inbox.replay_input(state, *input, receipt.clone())?;
                         }
                         _ => {
                             return Err(invalid("missing, duplicate, or mismatched flow creation"));
@@ -556,6 +595,7 @@ impl FlowStore {
         }
         let cursor = self.journal.commit(&[FlowFact::Transition(transition)])?;
         self.state = candidate;
+        self.inbox.invalidate();
         if matches!(
             self.state.state(),
             InstanceState::Closing { .. } | InstanceState::Closed

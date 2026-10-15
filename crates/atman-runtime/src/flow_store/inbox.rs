@@ -3,15 +3,17 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 
-use atman_rt::inbox::PendingBatch;
+use atman_rt::inbox::{Batch, PendingBatch};
+use atman_rt::{FlowInstance, TurnLease};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
 use super::{FlowRef, invalid};
+use crate::event::AtmanUuid;
 use crate::event_log::journal::CommitReceipt;
-use crate::message::ImageSource;
+use crate::message::{ImageSource, Message};
 use crate::user_input::UserInputPresentation;
 
 /// Authenticated provenance supplied by the host, never an authorization grant by itself.
@@ -124,7 +126,85 @@ pub struct AcceptedEnvelope {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum InboxDisposition {
     Pending,
+    InputCommitted { by: CommitReceipt },
     Cancelled { by: CommitReceipt },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTarget {
+    Context,
+    InvocationInput,
+}
+
+/// Exact host-prepared input, persisted before it is exposed to an invocation.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "target", rename_all = "snake_case")]
+pub enum InputContent {
+    Context {
+        messages: Vec<Message>,
+    },
+    InvocationInput {
+        arguments: BTreeMap<String, Value>,
+        invocation: BTreeMap<String, Value>,
+        messages: Vec<Message>,
+    },
+}
+
+impl InputContent {
+    pub fn target(&self) -> InputTarget {
+        match self {
+            Self::Context { .. } => InputTarget::Context,
+            Self::InvocationInput { .. } => InputTarget::InvocationInput,
+        }
+    }
+
+    fn validate(&self, lease: &TurnLease<AtmanUuid>) -> io::Result<()> {
+        let messages = match self {
+            Self::Context { messages } if messages.is_empty() => {
+                return Err(invalid("context input requires actual messages"));
+            }
+            Self::Context { messages } | Self::InvocationInput { messages, .. } => messages,
+        };
+        if messages.iter().any(|message| message.turn_id != lease.turn) {
+            return Err(invalid("input message belongs to another turn"));
+        }
+        Ok(())
+    }
+}
+
+/// A committed input is not proof of model inclusion or successful business handling.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CommittedInput {
+    pub lease: TurnLease<AtmanUuid>,
+    pub message_ids: Vec<Uuid>,
+    pub content: InputContent,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InputRecord {
+    pub input: CommittedInput,
+    pub receipt: CommitReceipt,
+}
+
+/// Dropping or releasing a reservation retains the original FIFO inputs.
+pub struct InputReservation {
+    pub(super) lease: TurnLease<AtmanUuid>,
+    pub(super) revision: u64,
+    pub(super) target: InputTarget,
+    pub(super) batch: Batch<Uuid>,
+}
+
+impl InputReservation {
+    pub fn lease(&self) -> &TurnLease<AtmanUuid> {
+        &self.lease
+    }
+    pub fn message_ids(&self) -> &[Uuid] {
+        self.batch.items()
+    }
+    pub fn target(&self) -> InputTarget {
+        self.target
+    }
 }
 
 /// Acceptance is distinct from handling; retries retain the original acceptance receipt.
@@ -147,9 +227,116 @@ pub(super) struct Inbox {
     requests: HashMap<(SenderIdentity, Uuid), usize>,
     messages: HashMap<Uuid, usize>,
     pending: PendingBatch<Uuid>,
+    inputs: Vec<InputRecord>,
 }
 
 impl Inbox {
+    pub fn inputs(&self) -> &[InputRecord] {
+        &self.inputs
+    }
+
+    pub fn reserve(
+        &mut self,
+        mut eligible: impl FnMut(&AcceptedEnvelope) -> bool,
+    ) -> Option<Batch<Uuid>> {
+        let Self {
+            pending,
+            entries,
+            messages,
+            ..
+        } = self;
+        pending.reserve_matching(|id| eligible(&entries[messages[id]].envelope))
+    }
+
+    pub fn owns(&self, batch: &Batch<Uuid>) -> bool {
+        self.pending.owns(batch)
+    }
+
+    pub fn release(&mut self, batch: &Batch<Uuid>) -> bool {
+        self.pending.release(batch)
+    }
+
+    pub fn invalidate(&mut self) {
+        self.pending.invalidate_reservation();
+    }
+
+    pub fn validate_input(
+        &self,
+        state: &FlowInstance<AtmanUuid>,
+        input: &CommittedInput,
+    ) -> io::Result<()> {
+        if !state
+            .can_receive_at_boundary(&input.lease)
+            .map_err(invalid)?
+        {
+            return Err(invalid("flow cannot receive input at this boundary"));
+        }
+        input.content.validate(&input.lease)?;
+        if input.message_ids.is_empty() {
+            return Err(invalid("input commit has no accepted messages"));
+        }
+        let mut pending = self.pending.iter();
+        for id in &input.message_ids {
+            if !pending.any(|candidate| candidate == id) {
+                return Err(invalid("input commit is not an ordered pending subset"));
+            }
+            if input.content.target() == InputTarget::Context
+                && self.entries[self.messages[id]].envelope.request.delivery
+                    != DeliveryMode::AtBoundary
+            {
+                return Err(invalid("next-turn input cannot enter an active turn"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Durable publication and FIFO consumption share the same ownership check.
+    pub fn commit_input(
+        &mut self,
+        batch: &Batch<Uuid>,
+        input: CommittedInput,
+        publish: impl FnOnce() -> io::Result<CommitReceipt>,
+    ) -> io::Result<CommitReceipt> {
+        if batch.items() != input.message_ids {
+            return Err(invalid("input commit does not match its reservation"));
+        }
+        let mut receipt = None;
+        if !self.pending.commit(batch, || {
+            receipt = Some(publish()?);
+            Ok::<_, io::Error>(())
+        })? {
+            return Err(invalid("input reservation is no longer owned"));
+        }
+        let receipt = receipt.expect("owned publication supplies a receipt");
+        for id in &input.message_ids {
+            self.entries[self.messages[id]].acceptance.disposition =
+                InboxDisposition::InputCommitted {
+                    by: receipt.clone(),
+                };
+        }
+        self.inputs.push(InputRecord {
+            input,
+            receipt: receipt.clone(),
+        });
+        Ok(receipt)
+    }
+
+    pub fn replay_input(
+        &mut self,
+        state: &FlowInstance<AtmanUuid>,
+        input: CommittedInput,
+        receipt: CommitReceipt,
+    ) -> io::Result<()> {
+        self.validate_input(state, &input)?;
+        let selected: std::collections::HashSet<_> = input.message_ids.iter().copied().collect();
+        let batch = self
+            .pending
+            .reserve_matching(|id| selected.contains(id))
+            .ok_or_else(|| invalid("input replay cannot reserve its pending messages"))?;
+        self.commit_input(&batch, input, || Ok(receipt))?;
+        Ok(())
+    }
+
     pub fn entries(&self) -> &[InboxEntry] {
         &self.entries
     }

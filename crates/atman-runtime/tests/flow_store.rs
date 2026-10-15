@@ -1,16 +1,17 @@
 use std::collections::BTreeMap;
 
 use atman_rt::{
-    InstanceActivity, InstanceState, Interruption, RunId, TurnId, TurnLease, TurnOutcome,
+    InstanceActivity, InstanceState, Interruption, RunId, TurnId, TurnLease, TurnOutcome, TurnPhase,
 };
 use atman_runtime::event::AtmanUuid;
 use atman_runtime::flow_store::inbox::{
-    DeliveryMode, DeliveryRequest, InboxDisposition, InboxPayload, SenderIdentity,
+    DeliveryMode, DeliveryRequest, InboxDisposition, InboxPayload, InputContent, SenderIdentity,
 };
 use atman_runtime::flow_store::{
     EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowStore, FlowTransition,
     RuntimeStore, SessionDescriptor,
 };
+use atman_runtime::message::Message;
 use atman_runtime::source_program::RevisionBundle;
 use uuid::Uuid;
 
@@ -443,4 +444,315 @@ fn delivery_identity_scope_and_authorization_reject_invalid_new_acceptance() {
     let second = flow.accept_input(other_sender, |_| Ok(())).unwrap();
     assert_ne!(first.message_id, second.message_id);
     assert_eq!(flow.pending_inputs().count(), 2);
+}
+
+fn invocation_content(lease: &TurnLease<AtmanUuid>) -> InputContent {
+    InputContent::InvocationInput {
+        arguments: BTreeMap::from([("input".into(), serde_json::json!("accepted input"))]),
+        invocation: BTreeMap::from([("effort".into(), serde_json::json!("high"))]),
+        messages: vec![Message::user_text(
+            lease.turn.clone(),
+            "exact projected input",
+        )],
+    }
+}
+
+fn context_content(lease: &TurnLease<AtmanUuid>) -> InputContent {
+    InputContent::Context {
+        messages: vec![Message::user_text(lease.turn.clone(), "boundary input")],
+    }
+}
+
+#[test]
+fn input_consumption_and_exact_content_survive_restart_without_requeue_or_duplicate_acceptance() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let descriptor = descriptor(info.id);
+    let mut flow = session.create_flow(descriptor.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let request = delivery(
+        &descriptor.address,
+        SenderIdentity::User(Uuid::new_v4()),
+        "first",
+    );
+    let first = flow.accept_input(request.clone(), |_| Ok(())).unwrap();
+    let mut later = request.clone();
+    later.request_id = Uuid::new_v4();
+    later.delivery = DeliveryMode::NextTurn;
+    let second = flow.accept_input(later, |_| Ok(())).unwrap();
+    let before = flow.cursor().sequence;
+    let batch = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |envelope| {
+            envelope.id == first.message_id
+        })
+        .unwrap()
+        .unwrap();
+    assert!(flow.state().can_start_turn());
+    assert_eq!(flow.cursor().sequence, before);
+    let lease = batch.lease().clone();
+    let actual = invocation_content(&lease);
+    let receipt = flow.commit_input(&batch, actual.clone()).unwrap();
+    assert_eq!(receipt.sequence, before + 1);
+    assert!(!flow.state().can_start_turn());
+    assert!(flow.commit_input(&batch, actual.clone()).is_err());
+    assert!(
+        flow.reserve_context_input(&lease, |_| true)
+            .unwrap()
+            .is_none()
+    );
+    let third = flow
+        .accept_input(
+            delivery(&descriptor.address, request.sender.clone(), "third"),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let fourth = flow
+        .accept_input(
+            delivery(&descriptor.address, request.sender.clone(), "fourth"),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let batch = flow
+        .reserve_context_input(&lease, |_| true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(batch.message_ids(), &[third.message_id, fourth.message_id]);
+    flow.commit_input(&batch, context_content(&lease)).unwrap();
+    assert_eq!(
+        flow.pending_inputs()
+            .map(|envelope| envelope.id)
+            .collect::<Vec<_>>(),
+        [second.message_id]
+    );
+    drop(flow);
+    let mut flow = session.open_flow(&descriptor.address.instance_id).unwrap();
+    assert_eq!(flow.committed_inputs().len(), 2);
+    assert_eq!(
+        flow.committed_inputs()[1].input.message_ids,
+        [third.message_id, fourth.message_id]
+    );
+    assert_eq!(flow.committed_inputs()[0].input.content, actual);
+    assert_eq!(flow.committed_inputs()[0].receipt, receipt);
+    assert_eq!(
+        flow.pending_inputs()
+            .map(|envelope| envelope.id)
+            .collect::<Vec<_>>(),
+        [second.message_id]
+    );
+    let retried = flow
+        .accept_input(request, |_| {
+            panic!("accepted retry must not be reauthorized")
+        })
+        .unwrap();
+    assert_eq!(retried.receipt, first.receipt);
+    assert_eq!(
+        retried.disposition,
+        InboxDisposition::InputCommitted { by: receipt }
+    );
+    assert!(matches!(
+        flow.state().state(),
+        InstanceState::Open(InstanceActivity::Interrupted { .. })
+    ));
+    change(&mut flow, FlowTransition::CloseRequested);
+    assert!(matches!(
+        flow.inbox_entries()[0].acceptance.disposition,
+        InboxDisposition::InputCommitted { .. }
+    ));
+    assert!(matches!(
+        flow.inbox_entries()[1].acceptance.disposition,
+        InboxDisposition::Cancelled { .. }
+    ));
+    assert_eq!(flow.committed_inputs().len(), 2);
+}
+
+#[test]
+fn execution_changes_revoke_reservations_without_late_release_or_consumption() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let descriptor = descriptor(info.id);
+    let mut flow = session.create_flow(descriptor.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    flow.accept_input(
+        delivery(
+            &descriptor.address,
+            SenderIdentity::User(Uuid::new_v4()),
+            "input",
+        ),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let lease = start(&mut flow);
+    let old = flow
+        .reserve_context_input(&lease, |_| true)
+        .unwrap()
+        .unwrap();
+    let key = AtmanUuid(Uuid::new_v4());
+    change(&mut flow, FlowTransition::ExecutionPaused { key });
+    assert!(flow.commit_input(&old, context_content(&lease)).is_err());
+    assert!(flow.reserve_context_input(&lease, |_| true).is_err());
+    change(&mut flow, FlowTransition::ExecutionResumed { key });
+    let current = flow
+        .reserve_context_input(&lease, |_| true)
+        .unwrap()
+        .unwrap();
+    assert!(!flow.release_input(&old));
+    assert!(flow.commit_input(&old, context_content(&lease)).is_err());
+    assert!(
+        flow.reserve_context_input(&lease, |_| true)
+            .unwrap()
+            .is_none()
+    );
+    change(
+        &mut flow,
+        FlowTransition::PhaseChanged {
+            lease: lease.clone(),
+            phase: TurnPhase::Finishing,
+        },
+    );
+    assert!(
+        flow.commit_input(&current, context_content(&lease))
+            .is_err()
+    );
+    assert!(flow.reserve_context_input(&lease, |_| true).is_err());
+    change(
+        &mut flow,
+        FlowTransition::TurnFinished {
+            lease: lease.clone(),
+            outcome: TurnOutcome::Completed,
+        },
+    );
+    let next = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    assert_ne!(next.lease().epoch, lease.epoch);
+    assert!(!flow.release_input(&current));
+    flow.commit_input(&next, invocation_content(next.lease()))
+        .unwrap();
+    assert!(flow.pending_inputs().next().is_none());
+}
+
+#[test]
+fn invalid_or_abandoned_input_does_not_start_a_turn_or_consume_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let descriptor = descriptor(info.id);
+    let mut flow = session.create_flow(descriptor.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    flow.accept_input(
+        delivery(
+            &descriptor.address,
+            SenderIdentity::User(Uuid::new_v4()),
+            "input",
+        ),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let cursor = flow.cursor().clone();
+    let batch = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    assert!(
+        flow.commit_input(&batch, context_content(batch.lease()))
+            .is_err()
+    );
+    let mut wrong_turn = batch.lease().clone();
+    wrong_turn.turn = TurnId::now();
+    assert!(
+        flow.commit_input(&batch, invocation_content(&wrong_turn))
+            .is_err()
+    );
+    assert_eq!(flow.cursor(), &cursor);
+    assert!(flow.state().can_start_turn());
+    assert_eq!(flow.pending_inputs().count(), 1);
+    drop(batch);
+    let next = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    let key = AtmanUuid(Uuid::new_v4());
+    change(&mut flow, FlowTransition::ExecutionPaused { key });
+    assert!(
+        flow.commit_input(&next, invocation_content(next.lease()))
+            .is_err()
+    );
+    assert!(
+        flow.reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+            .is_err()
+    );
+    change(&mut flow, FlowTransition::ExecutionResumed { key });
+    let next = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    assert!(flow.release_input(&next));
+    assert!(
+        flow.commit_input(&next, invocation_content(next.lease()))
+            .is_err()
+    );
+    assert!(flow.state().can_start_turn());
+}
+
+#[test]
+fn torn_input_batch_restores_pending_messages_without_a_ghost_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let descriptor = descriptor(info.id);
+    let mut flow = session.create_flow(descriptor.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let accepted = flow
+        .accept_input(
+            delivery(
+                &descriptor.address,
+                SenderIdentity::User(Uuid::new_v4()),
+                "input",
+            ),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let journal = flow.dir().join("events.jsonl");
+    let prefix = std::fs::metadata(&journal).unwrap().len();
+    let batch = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    flow.commit_input(&batch, invocation_content(batch.lease()))
+        .unwrap();
+    drop(flow);
+    let length = std::fs::metadata(&journal).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&journal)
+        .unwrap()
+        .set_len(length - 1)
+        .unwrap();
+    let mut flow = session.open_flow(&descriptor.address.instance_id).unwrap();
+    assert!(flow.recovered_tail.is_some());
+    assert_eq!(std::fs::metadata(&journal).unwrap().len(), prefix);
+    assert!(flow.state().can_start_turn());
+    assert!(flow.committed_inputs().is_empty());
+    assert_eq!(
+        flow.pending_inputs().next().unwrap().id,
+        accepted.message_id
+    );
+    assert!(
+        flow.commit_input(&batch, invocation_content(batch.lease()))
+            .is_err()
+    );
+    let next = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    flow.commit_input(&next, invocation_content(next.lease()))
+        .unwrap();
+    assert_eq!(flow.committed_inputs().len(), 1);
 }
