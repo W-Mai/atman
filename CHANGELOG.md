@@ -110,6 +110,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Form wait ownership** — Direct registry and TUI interactions share runtime registration, timeout, and cancellation cleanup. Dropping a flow removes its waiting forms, and parallel confirmations retain their originating interaction context.
+
 - **Confirmation replies** — `user_confirm` decodes form submissions consistently across TUI and daemon transports instead of treating positive confirmations as cancellations.
 
 - **Executor stack usage** — Invocation execution state is allocated once on the heap, preventing nested entry wrappers from exhausting default test-thread stacks during flow initialization.

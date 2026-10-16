@@ -6,6 +6,45 @@ use atman_runtime::{Session, tool::ToolCtx};
 use atman_tui::prompt_resolver::TuiPromptResolver;
 
 #[tokio::test]
+async fn dropping_a_flow_removes_its_waiting_form_on_each_transport() {
+    for expression in [
+        r#"user_confirm("Proceed?")"#,
+        r#"form.ask(kind: "confirm", prompt: "Proceed?")"#,
+    ] {
+        let file =
+            atman_rt::parse_file(&format!("flow main() -> any {{ return {expression} }}")).unwrap();
+        for via_resolver in [true, false] {
+            let session = Arc::new(Session::open_ephemeral());
+            let forms = session.forms();
+            let mut updates = forms.subscribe();
+            let mut executor = atman_runtime::Executor::new();
+            if via_resolver {
+                executor.tool_ctx.prompt_resolver =
+                    Some(Arc::new(TuiPromptResolver::new(forms.clone())));
+            }
+            let mut execution =
+                Box::pin(executor.run_in_turn(&file, "main", vec![], None, Some(session.clone())));
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::select! {
+                    result = &mut execution => panic!("form must wait: {result:?}"),
+                    () = async {
+                        while forms.list_pending().is_empty() { updates.changed().await.unwrap(); }
+                    } => {}
+                }
+            })
+            .await
+            .unwrap();
+            drop(execution);
+            assert!(
+                forms.list_pending().is_empty(),
+                "{expression}, resolver={via_resolver}"
+            );
+            assert_eq!(session.deferred_form_inbox().pending_count(), 0);
+        }
+    }
+}
+
+#[tokio::test]
 async fn shared_display_preserves_invocation_identity_and_late_answer_destination() {
     let display = Arc::new(Session::open_ephemeral());
     let first = Arc::new(Session::open_ephemeral());
@@ -61,45 +100,53 @@ async fn shared_display_preserves_invocation_identity_and_late_answer_destinatio
 
 #[tokio::test]
 async fn language_confirmation_accepts_the_same_submission_from_both_transports() {
-    let file =
-        atman_rt::parse_file(r#"flow main() -> bool { return user_confirm("Proceed?") }"#).unwrap();
-    for via_resolver in [true, false] {
-        for answer in [Some(true), Some(false), None] {
-            let session = Arc::new(Session::open_ephemeral());
-            let forms = session.forms();
-            let mut updates = forms.subscribe();
-            let mut executor = atman_runtime::Executor::new();
-            if via_resolver {
-                executor.tool_ctx.prompt_resolver =
-                    Some(Arc::new(TuiPromptResolver::new(forms.clone())));
-            }
-            let submission = match answer {
-                Some(value) => FormSubmission::Submitted {
-                    answers: vec![FormAnswer::Confirmed { value }],
-                },
-                None => FormSubmission::Rejected,
-            };
-            let (_, result) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                tokio::join!(
-                    async {
-                        loop {
-                            if let Some(form) = forms.list_pending().first() {
-                                assert!(forms.submit(&form.form_id, submission));
-                                break;
-                            }
-                            updates.changed().await.unwrap();
-                        }
+    for source in [
+        r#"flow main() -> bool { return user_confirm("Proceed?") }"#,
+        r#"flow main() -> bool {
+            answers = fanout [confirm()]
+            return answers[0]
+        }
+        flow confirm() -> bool { return user_confirm("Proceed?") }"#,
+    ] {
+        let file = atman_rt::parse_file(source).unwrap();
+        for via_resolver in [true, false] {
+            for answer in [Some(true), Some(false), None] {
+                let session = Arc::new(Session::open_ephemeral());
+                let forms = session.forms();
+                let mut updates = forms.subscribe();
+                let mut executor = atman_runtime::Executor::new();
+                if via_resolver {
+                    executor.tool_ctx.prompt_resolver =
+                        Some(Arc::new(TuiPromptResolver::new(forms.clone())));
+                }
+                let submission = match answer {
+                    Some(value) => FormSubmission::Submitted {
+                        answers: vec![FormAnswer::Confirmed { value }],
                     },
-                    executor.run_in_turn(&file, "main", vec![], None, Some(session)),
-                )
-            })
-            .await
-            .unwrap();
-            assert!(
-                matches!(result.unwrap(), atman_rt::Value::Bool(value) if value == answer.unwrap_or(false)),
-                "transport={via_resolver}, answer={answer:?}"
-            );
-            assert!(forms.list_pending().is_empty());
+                    None => FormSubmission::Rejected,
+                };
+                let (_, result) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    tokio::join!(
+                        async {
+                            loop {
+                                if let Some(form) = forms.list_pending().first() {
+                                    assert!(forms.submit(&form.form_id, submission));
+                                    break;
+                                }
+                                updates.changed().await.unwrap();
+                            }
+                        },
+                        executor.run_in_turn(&file, "main", vec![], None, Some(session)),
+                    )
+                })
+                .await
+                .unwrap();
+                assert!(
+                    matches!(result.unwrap(), atman_rt::Value::Bool(value) if value == answer.unwrap_or(false)),
+                    "transport={via_resolver}, answer={answer:?}"
+                );
+                assert!(forms.list_pending().is_empty());
+            }
         }
     }
 }

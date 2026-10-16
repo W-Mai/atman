@@ -66,9 +66,19 @@ impl AtmanVmDelegate {
         let program = host.linked_program.cloned().ok_or_else(|| {
             RuntimeError::ToolFailed("high-level VM execution requires a linked program".into())
         })?;
+        let mut tool_ctx = host.tool_ctx.as_ref().clone();
+        if let Some(session) = &host.session_runtime {
+            tool_ctx = tool_ctx
+                .with_session_runtime(session.clone())
+                .with_forms(session.forms());
+        }
+        if let Some(events) = host.events {
+            tool_ctx = tool_ctx.with_events(events.clone());
+        }
+        tool_ctx.flow_run_id = host.flow_run_id.clone();
         let root = RunBinding {
             product_run_id: host.flow_run_id.clone(),
-            tool_ctx: host.tool_ctx.as_ref().clone(),
+            tool_ctx,
             allows_shell: host.allows_shell,
             source_dir: host.source_dir.clone(),
             session: host.session_runtime.clone(),

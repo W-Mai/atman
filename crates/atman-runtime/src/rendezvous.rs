@@ -5,6 +5,9 @@ use uuid::Uuid;
 
 use crate::error::RuntimeError;
 
+mod form;
+pub use form::FormPromptResolver;
+
 // PromptId lives in atman-proto but runtime can't depend on proto (proto has no runtime deps).
 // Represent as Uuid at this trait boundary; adapter in daemon maps to proto::PromptId.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -93,24 +96,37 @@ impl PromptResolver for ContextResolver {
 impl crate::tool::ToolCtx {
     /// Bind the shared host transport to this invocation before registering a prompt.
     pub fn prompt_resolver(&self) -> Option<Arc<dyn PromptResolver>> {
-        self.prompt_resolver.as_ref().map(|resolver| {
-            Arc::new(ContextResolver {
-                resolver: resolver.clone(),
-                context: PromptContext {
-                    events: self.events.clone().unwrap_or_default(),
-                    session: self
-                        .instance_publication
-                        .as_ref()
-                        .map(|binding| binding.worker.context())
-                        .or_else(|| self.session_runtime.clone())
-                        .or_else(|| self.context_records_session.clone()),
-                    run_id: self.flow_run_id.clone(),
-                    tool_use_id: self
-                        .tool_use_id
-                        .clone()
-                        .or_else(|| self.current_node_id.clone()),
-                },
-            }) as Arc<dyn PromptResolver>
+        self.prompt_resolver
+            .clone()
+            .map(|resolver| self.bind_prompt_resolver(resolver))
+    }
+
+    /// Resolve form interactions through the host transport or the attached registry.
+    pub fn form_resolver(&self) -> Option<Arc<dyn PromptResolver>> {
+        self.prompt_resolver().or_else(|| {
+            self.forms.as_ref().map(|forms| {
+                self.bind_prompt_resolver(Arc::new(FormPromptResolver::new(forms.clone())))
+            })
+        })
+    }
+
+    fn bind_prompt_resolver(&self, resolver: Arc<dyn PromptResolver>) -> Arc<dyn PromptResolver> {
+        Arc::new(ContextResolver {
+            resolver,
+            context: PromptContext {
+                events: self.events.clone().unwrap_or_default(),
+                session: self
+                    .instance_publication
+                    .as_ref()
+                    .map(|binding| binding.worker.context())
+                    .or_else(|| self.session_runtime.clone())
+                    .or_else(|| self.context_records_session.clone()),
+                run_id: self.flow_run_id.clone(),
+                tool_use_id: self
+                    .tool_use_id
+                    .clone()
+                    .or_else(|| self.current_node_id.clone()),
+            },
         })
     }
 }
