@@ -8,6 +8,9 @@ use atman_runtime::event::{Event, EventSink};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+/// The operator authenticated by the owner-only socket and token-protected HTTP transport.
+pub const LOCAL_OPERATOR: &str = "local-daemon";
+
 struct PendingPrompt {
     submission: std::sync::Arc<tokio::sync::Mutex<()>>,
     tx: Option<oneshot::Sender<serde_json::Value>>,

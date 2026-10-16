@@ -124,6 +124,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Daemon transport ownership** — Token-authenticated HTTP and the owner-only Unix socket share the local operator identity, allowing persistent flow RPC and session event access through either transport.
+
 - **Host scheduler binding** — Concurrent binding and activation share per-instance ownership. A competing binding cannot replace a live scheduler or change its trust; paused and interrupted instances preserve their execution gates.
 
 - **Retained entry activation** — Source bundles resolve project and user namespaces from their recorded session binding during launch, rebinding, and later turns. Concurrent launches of the same instance share one activation. Host status reads combine execution, Goal, and completion under one committed cursor.

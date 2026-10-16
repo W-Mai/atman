@@ -16,7 +16,7 @@ fn build_state(tmp: &tempfile::TempDir, session_id: Option<Uuid>) -> Arc<HttpSta
     if let Some(session_id) = session_id {
         let session = Arc::new(atman_runtime::Session::open_ephemeral());
         let id = atman_proto::SessionId(session_id);
-        daemon.register_broker(id.clone(), session, "authenticated-daemon-client");
+        daemon.register_broker(id.clone(), session, atman_daemon::state::LOCAL_OPERATOR);
         daemon.register_live(
             id,
             atman_daemon::LiveSession {

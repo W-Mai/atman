@@ -40,7 +40,7 @@ async fn sse_accepts_query_string_token_when_authorization_header_absent() {
     state.daemon.register_broker(
         atman_proto::SessionId(sid),
         session,
-        "authenticated-daemon-client",
+        atman_daemon::state::LOCAL_OPERATOR,
     );
     state.daemon.register_live(
         atman_proto::SessionId(sid),

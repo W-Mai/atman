@@ -107,7 +107,7 @@ A tool's provenance may include these risks:
 
 ## Daemon authentication and session ownership
 
-The daemon HTTP API uses one static bearer token. A valid token authenticates as the fixed principal `authenticated-daemon-client`; it is a single-operator control model, not a multi-user identity provider. Unix-socket requests use the local principal `local-daemon`.
+The daemon HTTP API uses one static bearer token. A valid token and the owner-only Unix socket authenticate the same fixed principal, `local-daemon`. This single-operator control model allows both transports to manage the operator's sessions without granting access to other principals.
 
 Even in this single-principal model, each live session is bound in the daemon's in-memory registry to the principal that created it. The permission RPCs `list_permission_requests`, `create_permission_group`, and `resolve_permission_requests` must match that owner before looking up or mutating the broker. A missing owner or a mismatched principal fails closed. The caller-provided session UUID is only a lookup key and is never treated as an authorization claim.
 
