@@ -14,7 +14,7 @@ A valid `final.answer` is published immediately and ends the current turn. Watch
 
 `memory::goal::GoalEdit` defines objective creation, editing, completion replacement, pause, resume, and clearing independently of execution control. Goal controllers use these shared record operations and revision rules; persistence and execution gates remain host responsibilities.
 
-`memory.goal.get` returns `{goal, execution, paused_by, running_operations}`. `goal` is null when no objective exists. Records include `id`, `revision`, `objective`, `owner`, `parent_goal_id`, `status`, and `pause`.
+In existing managed sessions, `memory.goal.get` returns `{goal, execution, paused_by, running_operations}`. `goal` is null when no objective exists. Records include `id`, `revision`, `objective`, `owner`, `parent_goal_id`, `status`, and `pause`.
 
 `goal.status` controls automatic objective continuation; `execution` describes current activity and execution pauses. A paused goal can have `running` execution during a new user turn, and an active goal can be `idle` between turns. `finishing` identifies an agent acknowledging a user-requested pause while delivering its current final response. A paused goal alone does not imply that the flow has completed.
 
@@ -28,6 +28,14 @@ Goal timestamps remain stored in UTC. Root and child agents receive a runtime cl
 | `memory.goal.resume` | `goal_id`, `expected_revision` | Resume a descendant, or an agent-paused goal after real user input |
 
 Pause reasons accepted from agents are `completed`, `needs_input`, `blocked`, and `user_requested`. All tools accept an optional `target_handle`. A child cannot address its parent or siblings. Stale revisions fail without changing the goal. A new user request can replace an agent-completed goal with a new identity; editing unfinished work preserves its state. User pauses cannot be overridden by agent tools. Managed agents use pause rather than `memory.goal.clear`.
+
+## Persistent instance goals
+
+When invoked through a persistent `FlowWorker`, the same goal tools use the instance journal and the host-authorized peer client. `memory.goal.get` returns `{goal, flow}`: the goal record and the same execution fields exposed by `flow.status`. Changes return `{goal, request_id, receipt}` for the committed operation. An optional `request_id` UUID reconciles identical retries; changing its payload fails. A retry returns its original result without restoring that old record over subsequent edits. Existing records require their current `goal_id` and `expected_revision`; omitting both only permits creation when no goal exists.
+
+Persistent peers have equal goal ownership. `target_handle` can address any peer with an explicit goal-management grant, regardless of who created it. Reading requires context-read or goal-management permission. Agent operations cannot override user pauses. Goal pause, resume, replacement, and clearing never change execution gates or other instances. Flow pause, resume, cancellation, and closure use the separate execution-control API.
+
+Recovery preserves the recorded goal identity, revision, timestamps, status, and summary. The live context and goal subscribers update only after durable commitment. The instance journal is the sole goal record; no legacy `goal.json` is written. These APIs provide durable goal state; automatic objective continuation requires an entry policy and scheduler binding. The existing CLI and daemon retain the managed-session behavior described below until their host binding changes.
 
 ## Execution boundaries
 

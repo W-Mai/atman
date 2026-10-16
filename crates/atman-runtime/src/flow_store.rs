@@ -5,6 +5,7 @@
 pub mod access;
 pub mod completion;
 pub mod context;
+pub mod goal;
 pub mod inbox;
 mod input;
 pub mod launch;
@@ -128,6 +129,7 @@ enum FlowFact {
     SendQueued(Box<outbox::SendIntent>),
     MessagePublished(Box<publication::MessagePublication>),
     ContextCheckpoint(Box<context::ContextCheckpoint>),
+    GoalUpdated(Box<goal::GoalUpdate>),
     FlowSubscribed(Box<subscription::SubscriptionRecord>),
     FlowUnsubscribed(Uuid),
     EventsObserved(Box<subscription::Observation>),
@@ -182,13 +184,15 @@ impl FlowFact {
                 Err(invalid("subscription changes require their own batch"))
             };
         }
-        if facts
-            .iter()
-            .any(|fact| matches!(fact, Self::MessagePublished(_) | Self::ContextCheckpoint(_)))
-        {
+        if facts.iter().any(|fact| {
+            matches!(
+                fact,
+                Self::MessagePublished(_) | Self::ContextCheckpoint(_) | Self::GoalUpdated(_)
+            )
+        }) {
             return if matches!(
                 facts,
-                [Self::MessagePublished(_)] | [Self::ContextCheckpoint(_)]
+                [Self::MessagePublished(_)] | [Self::ContextCheckpoint(_)] | [Self::GoalUpdated(_)]
             ) {
                 Ok(())
             } else {
@@ -546,6 +550,7 @@ pub struct FlowStore {
     activation: Option<launch::Activation>,
     completions: completion::Completions,
     checkpoints: context::Checkpoints,
+    goals: goal::Goals,
     cursor: CommitReceipt,
     projection_error: Option<io::Error>,
     pub recovered_tail: Option<RecoveredTail>,
@@ -577,6 +582,7 @@ impl FlowStore {
             activation: None,
             completions: Default::default(),
             checkpoints: Default::default(),
+            goals: Default::default(),
             cursor,
             projection_error: None,
             recovered_tail: None,
@@ -591,6 +597,7 @@ impl FlowStore {
         let mut activation = None;
         let mut completions = completion::Completions::default();
         let mut checkpoints = context::Checkpoints::default();
+        let mut goals = goal::Goals::default();
         let mut cursor = None;
         let (journal, recovered_tail) = Journal::open(
             &dir.join("events.jsonl"),
@@ -655,6 +662,10 @@ impl FlowStore {
                         (Some((_, state, _)), FlowFact::MessagePublished(publication)) => {
                             publications.validate(state, &publication)?;
                             publications.apply(*publication, receipt.clone());
+                        }
+                        (Some((_, state, _)), FlowFact::GoalUpdated(update)) => {
+                            let record = goals.prepare(state, &update)?;
+                            goals.apply(*update, record, receipt.clone());
                         }
                         (Some((_, state, inbox)), FlowFact::ContextCheckpoint(checkpoint)) => {
                             let window = publication::context_window(
@@ -753,6 +764,7 @@ impl FlowStore {
             activation,
             completions,
             checkpoints,
+            goals,
             cursor: cursor.ok_or_else(|| invalid("empty flow journal"))?,
             projection_error: None,
             recovered_tail,

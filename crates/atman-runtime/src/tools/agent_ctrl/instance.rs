@@ -10,13 +10,13 @@ use crate::flow_store::{FlowInstanceId, FlowRef};
 
 pub(super) const HANDLE_DESCRIPTION: &str = "Flow handle. Persistent instances use an instance UUID in the current session or session UUID/instance UUID across sessions.";
 
-pub(super) struct Target<'a> {
-    client: &'a FlowClient,
-    address: FlowRef,
+pub(in crate::tools) struct Target<'a> {
+    pub(in crate::tools) client: &'a FlowClient,
+    pub(in crate::tools) address: FlowRef,
 }
 
 /// Resolve from invocation identity, never by probing a legacy registry after an instance error.
-pub(super) fn resolve<'a>(
+pub(in crate::tools) fn resolve<'a>(
     handle: &str,
     ctx: &'a ToolCtx,
 ) -> Result<Option<Target<'a>>, RuntimeError> {

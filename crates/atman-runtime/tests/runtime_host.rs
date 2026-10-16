@@ -109,6 +109,227 @@ async fn invoke_with_env(
 }
 
 #[tokio::test]
+async fn goal_tools_persist_for_peers_without_freezing_execution_or_inheriting_control() {
+    use atman_runtime::ValueJson;
+    use atman_runtime::flow_store::{
+        access::{AccessTarget, FlowAction, FlowGrant},
+        goal::{GoalRequest, GoalVersion},
+    };
+    use atman_runtime::memory::goal::{
+        GoalActor, GoalEdit, GoalPauseReason, GoalStatus, GoalStore,
+    };
+    use atman_runtime::tools::memory::{MemoryGoalControl, MemoryGoalGet, MemoryGoalSet};
+    let dir = tempfile::tempdir().unwrap();
+    let child_path = dir.path().join("objective.at");
+    std::fs::write(
+        &child_path,
+        r#"
+        flow child() -> any {
+            contract { invocation { goal: true } }
+            goal = memory.goal.set(text: "child objective")
+            memory.goal.pause(goal_id: goal.goal.id, expected_revision: goal.goal.revision,
+                reason: "user_requested", summary: "hold objective")
+            final.answer(message: "child delivered while goal paused")
+            return memory.goal.get()
+        }
+    "#,
+    )
+    .unwrap();
+    let reference = serde_json::to_string(&format!("{}@child", child_path.display())).unwrap();
+    let source = format!(
+        r#"
+        flow main() -> any {{
+            contract {{ invocation {{ goal: true }} capabilities {{ shell: true }} }}
+            goal = memory.goal.set(text: "parent objective")
+            memory.goal.pause(goal_id: goal.goal.id, expected_revision: goal.goal.revision,
+                reason: "user_requested", summary: "hold objective")
+            inventory = flow.instances()
+            child = flow.spawn(flow: {reference}, spawn_token: inventory.spawn_token, async: false)
+            final.answer(message: "parent delivered while goal paused")
+            return [memory.goal.get(), child]
+        }}
+    "#
+    );
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let parent = session
+        .create_flow(program_descriptor(info.id, source))
+        .await
+        .unwrap();
+    change(&parent, FlowTransition::Activated).await;
+    let fallback = Arc::new(GoalStore::at(dir.path().join("unused-legacy")));
+    let executor = Executor::new();
+    executor.tools.register(Arc::new(MemoryGoalGet {
+        store: fallback.clone(),
+    }));
+    executor.tools.register(Arc::new(MemoryGoalSet {
+        store: fallback.clone(),
+    }));
+    executor
+        .tools
+        .register(Arc::new(MemoryGoalControl { resume: false }));
+    executor
+        .tools
+        .register(Arc::new(MemoryGoalControl { resume: true }));
+    let completed = invoke(&parent, executor).await;
+    let result = completed.result.unwrap().to_json().unwrap();
+    for result in result.as_array().unwrap() {
+        assert_eq!(result["goal"]["status"], "paused");
+        assert_eq!(result["flow"]["paused"], false);
+    }
+    assert_ne!(result[0]["goal"]["owner"], result[1]["goal"]["owner"]);
+    assert!(
+        !fallback.path().exists(),
+        "instance edits must not write legacy goal files"
+    );
+    let catalog = session.snapshot().await.unwrap();
+    let child_id = catalog
+        .catalog
+        .flows
+        .iter()
+        .find(|entry| entry.id != parent.address().instance_id)
+        .unwrap()
+        .id
+        .clone();
+    let child = session.open_flow(child_id).await.unwrap();
+    let saved = child.goal().await.unwrap().goal.unwrap();
+    assert_eq!(saved.status, GoalStatus::Paused);
+    assert_eq!(child.context().goal_control.record(), Some(saved.clone()));
+    assert!(child.context().goal_control.snapshot().paused_by.is_none());
+    assert_eq!(child.context().goal(), Some(saved.objective.clone()));
+    assert!(child.state().await.unwrap().can_start_turn());
+    assert!(
+        child
+            .context()
+            .goal_control
+            .set("uncommitted", None)
+            .is_err()
+    );
+    let address = child.address().clone();
+    drop(child.shutdown().await.unwrap());
+    let child = host.flow(&address).await.unwrap();
+    assert_eq!(child.goal().await.unwrap().goal, Some(saved.clone()));
+    assert_eq!(child.context().goal_control.record(), Some(saved.clone()));
+    assert!(child.context().goal_control.snapshot().paused_by.is_none());
+    assert_eq!(child.context().goal(), Some(saved.objective.clone()));
+    let lease = start(&parent).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    assert!(
+        client.read_goal(address.clone()).await.is_err(),
+        "creation is not a management grant"
+    );
+    let grant = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: parent.address().clone(),
+        target: AccessTarget::Flow(address.clone()),
+        actions: [FlowAction::ManageGoal].into(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        client.read_goal(address.clone()).await.unwrap().goal,
+        Some(saved.clone())
+    );
+    let edit = GoalEdit::Set {
+        text: "edited by authorized peer".into(),
+        replace_completed: false,
+    };
+    let request_id = Uuid::new_v4();
+    let updated = client
+        .edit_goal(
+            address.clone(),
+            request_id,
+            Some(GoalVersion::from(&saved)),
+            edit.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.goal.as_ref().unwrap().status, GoalStatus::Paused);
+    assert_eq!(
+        client
+            .edit_goal(
+                address.clone(),
+                request_id,
+                Some(GoalVersion::from(&saved)),
+                edit
+            )
+            .await
+            .unwrap(),
+        updated
+    );
+    let key = Uuid::new_v4().into();
+    change(&child, FlowTransition::ExecutionPaused { key }).await;
+    let execution = child.state().await.unwrap();
+    client
+        .edit_goal(
+            address.clone(),
+            Uuid::new_v4(),
+            updated.goal.as_ref().map(GoalVersion::from),
+            GoalEdit::Resume {
+                actor: GoalActor::Agent,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(child.state().await.unwrap(), execution);
+    let user_pause = child
+        .edit_goal(
+            GoalRequest {
+                id: Uuid::new_v4(),
+                sender: SenderIdentity::User(Uuid::new_v4()),
+                expected: child
+                    .goal()
+                    .await
+                    .unwrap()
+                    .goal
+                    .as_ref()
+                    .map(GoalVersion::from),
+                edit: GoalEdit::Pause {
+                    actor: GoalActor::User,
+                    reason: GoalPauseReason::UserRequested,
+                    summary: "user pause".into(),
+                },
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    for actor in [GoalActor::Agent, GoalActor::User] {
+        assert!(
+            client
+                .edit_goal(
+                    address.clone(),
+                    Uuid::new_v4(),
+                    user_pause.goal.as_ref().map(GoalVersion::from),
+                    GoalEdit::Resume { actor }
+                )
+                .await
+                .is_err()
+        );
+    }
+    session
+        .revoke_access(session.snapshot().await.unwrap().cursor, grant.id)
+        .await
+        .unwrap();
+    assert!(client.read_goal(address.clone()).await.is_err());
+    change(
+        &parent,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    assert_eq!(child.state().await.unwrap(), execution);
+}
+
+#[tokio::test]
 async fn entry_results_survive_worker_reopen_and_are_read_through_the_shared_tool() {
     use atman_runtime::{
         ValueJson,
@@ -1867,7 +2088,7 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
 }
 
 #[tokio::test]
-async fn peer_reads_recheck_revocation_inside_the_target_owner() {
+async fn peer_reads_and_goal_edits_recheck_revocation_inside_the_target_owner() {
     use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();
@@ -1888,7 +2109,7 @@ async fn peer_reads_recheck_revocation_inside_the_target_owner() {
         id: Uuid::new_v4(),
         grantee: a_info.address.clone(),
         target: AccessTarget::Flow(b_info.address.clone()),
-        actions: [FlowAction::ReadContext].into(),
+        actions: [FlowAction::ReadContext, FlowAction::ManageGoal].into(),
     };
     session
         .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
@@ -1908,9 +2129,20 @@ async fn peer_reads_recheck_revocation_inside_the_target_owner() {
             .await
     });
     observed.await.unwrap();
-    let mut read = Box::pin(client.read_context(b_info.address));
+    let mut read = Box::pin(client.read_context(b_info.address.clone()));
+    let mut goal_read = Box::pin(client.read_goal(b_info.address.clone()));
+    let mut goal_edit = Box::pin(client.edit_goal(
+        b_info.address,
+        Uuid::new_v4(),
+        None,
+        atman_runtime::memory::goal::GoalEdit::Create {
+            text: "revoked change".into(),
+        },
+    ));
     // The initial authorization passed and the read is queued behind the held target command.
     assert!(futures::poll!(&mut read).is_pending());
+    assert!(futures::poll!(&mut goal_read).is_pending());
+    assert!(futures::poll!(&mut goal_edit).is_pending());
     session
         .revoke_access(session.snapshot().await.unwrap().cursor, grant.id)
         .await
@@ -1921,6 +2153,15 @@ async fn peer_reads_recheck_revocation_inside_the_target_owner() {
         read.await.unwrap_err().kind(),
         io::ErrorKind::PermissionDenied
     );
+    assert_eq!(
+        goal_read.await.unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        goal_edit.await.unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(b.goal().await.unwrap().goal.is_none());
 }
 
 async fn wait_inputs(worker: &FlowWorker, count: usize) -> FlowSnapshot {

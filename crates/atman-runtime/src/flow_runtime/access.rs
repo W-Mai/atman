@@ -62,6 +62,58 @@ impl RuntimeHost {
 }
 
 impl FlowClient {
+    pub async fn read_goal(&self, target: FlowRef) -> io::Result<super::goal::GoalView> {
+        self.authorize_goal_read(&target)?;
+        let client = self.clone();
+        self.host
+            .flow(&target)
+            .await?
+            .request(move |store| {
+                client.authorize_goal_read(store.state().address())?;
+                Ok(super::goal::GoalView {
+                    goal: store.goal().cloned(),
+                    execution: store.state().clone(),
+                })
+            })
+            .await
+    }
+
+    fn authorize_goal_read(&self, target: &FlowRef) -> io::Result<()> {
+        self.authorize(target, FlowAction::ReadContext)
+            .or_else(|_| self.authorize(target, FlowAction::ManageGoal))
+    }
+
+    /// Actor identity comes from the authenticated invocation, not tool arguments.
+    pub async fn edit_goal(
+        &self,
+        target: FlowRef,
+        request_id: Uuid,
+        expected: Option<crate::flow_store::goal::GoalVersion>,
+        edit: crate::memory::goal::GoalEdit,
+    ) -> io::Result<crate::flow_store::goal::CommittedGoalUpdate> {
+        use crate::memory::goal::{GoalActor, GoalEdit};
+        self.authorize(&target, FlowAction::ManageGoal)?;
+        if matches!(&edit, GoalEdit::Pause { actor, .. } | GoalEdit::Resume { actor } if *actor != GoalActor::Agent)
+        {
+            return Err(denied("peer goal edits cannot impersonate another actor"));
+        }
+        let client = self.clone();
+        let authorize_target = target.clone();
+        self.host
+            .flow(&target)
+            .await?
+            .edit_goal(
+                crate::flow_store::goal::GoalRequest {
+                    id: request_id,
+                    sender: SenderIdentity::Flow(self.source().clone()),
+                    expected,
+                    edit,
+                },
+                move |_| client.authorize(&authorize_target, FlowAction::ManageGoal),
+            )
+            .await
+    }
+
     /// Prepare continuation ownership before the corresponding subscription or request is published.
     pub async fn prepare_reply(
         &self,

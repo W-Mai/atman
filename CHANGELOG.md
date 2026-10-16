@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent flow goals** — Goal records share each instance journal and survive reopening with exact identities and revisions. Peer edits require explicit grants, retries return committed receipts, and goal changes remain independent of execution pauses and inbox contents.
+
 - **Persistent context compaction** — Flow journals retain compressed model windows separately from full conversation history. Checkpoint commits reject stale replacements, survive caller cancellation, and restore the window and later messages without republishing replies.
 
 - **Durable synchronous replies** — Persistent spawn calls receive entry completions through the shared inbox and record consumption before returning. Caller cancellation preserves child execution and unconsumed results. Concurrent waits resume independently, and matching watchers share the same accepted event.

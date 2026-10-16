@@ -1498,7 +1498,7 @@ impl Session {
 
     /// Isolated execution context for one persistent instance. Persistence is owned by its FlowStore.
     pub fn open_instance_context(address: crate::flow_store::FlowRef) -> Self {
-        Self::restore_instance_context(address, Vec::new(), Vec::new(), None)
+        Self::restore_instance_context(address, Vec::new(), Vec::new(), None, None)
     }
 
     pub(crate) fn restore_instance_context(
@@ -1506,11 +1506,16 @@ impl Session {
         messages: Vec<Message>,
         history: Vec<Message>,
         checkpoint: Option<&[Message]>,
+        goal: Option<crate::memory::goal::GoalRecord>,
     ) -> Self {
         let mut context = Self::open_ephemeral();
         context.id = SessionId(address.session_id.0);
         context.goal_control =
-            crate::goal::GoalController::ephemeral(address.instance_id.to_string());
+            crate::goal::GoalController::for_instance(address.instance_id.to_string(), goal);
+        context
+            .watch
+            .goal
+            .send_replace(context.goal_control.record().map(|goal| goal.objective));
         context.goal_control.bind_events(context.sink.clone());
         context.watch_hub = context.goal_control.watch_hub.clone();
         context.flow_instance = Some(address);
@@ -1547,6 +1552,14 @@ impl Session {
             self.instance_writer.set(writer).is_ok(),
             "instance writer already bound"
         );
+    }
+
+    pub(crate) fn project_instance_goal(&self, record: Option<crate::memory::goal::GoalRecord>) {
+        assert!(self.flow_instance.is_some(), "instance goal projection");
+        self.watch
+            .goal
+            .send_replace(record.as_ref().map(|goal| goal.objective.clone()));
+        self.goal_control.project_record(record);
     }
 
     pub fn flow_instance(&self) -> Option<&crate::flow_store::FlowRef> {
@@ -1713,6 +1726,9 @@ impl Session {
     }
 
     pub fn goal(&self) -> Option<String> {
+        if self.flow_instance.is_some() {
+            return self.goal_control.record().map(|goal| goal.objective);
+        }
         if let Some(cached) = self.watch.goal.borrow().clone() {
             return Some(cached);
         }

@@ -53,9 +53,24 @@ pub struct GoalRecord {
 
 impl GoalRecord {
     pub fn new(objective: String, owner: String, parent_goal_id: Option<String>) -> Self {
-        let now = chrono::Utc::now();
+        Self::at(
+            objective,
+            owner,
+            parent_goal_id,
+            uuid::Uuid::now_v7(),
+            chrono::Utc::now(),
+        )
+    }
+
+    fn at(
+        objective: String,
+        owner: String,
+        parent_goal_id: Option<String>,
+        id: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
         Self {
-            id: uuid::Uuid::now_v7().to_string(),
+            id: id.to_string(),
             revision: 1,
             objective,
             owner,
@@ -83,6 +98,7 @@ impl GoalRecord {
 pub enum GoalEdit {
     Set {
         text: String,
+        replace_completed: bool,
     },
     Create {
         text: String,
@@ -107,14 +123,29 @@ impl GoalEdit {
         record: &mut Option<GoalRecord>,
         owner: &str,
         parent_goal_id: Option<String>,
+        new_id: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> std::io::Result<()> {
         match self {
-            Self::Set { text } | Self::Create { text } | Self::ReplaceCompleted { text } => {
+            Self::Set { text, .. } | Self::Create { text } | Self::ReplaceCompleted { text } => {
                 let text = text.trim();
                 if text.is_empty() {
                     return Err(std::io::Error::other("goal objective must not be empty"));
                 }
-                let parent_goal_id = if matches!(self, Self::ReplaceCompleted { .. }) {
+                let replace_completed = matches!(self, Self::ReplaceCompleted { .. })
+                    || matches!(
+                        self,
+                        Self::Set {
+                            replace_completed: true,
+                            ..
+                        }
+                    ) && record.as_ref().is_some_and(|goal| {
+                        goal.pause.as_ref().is_some_and(|pause| {
+                            pause.actor == GoalActor::Agent
+                                && pause.reason == GoalPauseReason::Completed
+                        })
+                    });
+                let parent_goal_id = if replace_completed {
                     let previous = record
                         .as_ref()
                         .ok_or_else(|| std::io::Error::other("no goal set"))?;
@@ -132,10 +163,17 @@ impl GoalEdit {
                 };
                 if let Some(goal) = record
                     && matches!(self, Self::Set { .. })
+                    && !replace_completed
                 {
                     goal.objective = text.into();
                 } else {
-                    *record = Some(GoalRecord::new(text.into(), owner.into(), parent_goal_id));
+                    *record = Some(GoalRecord::at(
+                        text.into(),
+                        owner.into(),
+                        parent_goal_id,
+                        new_id,
+                        now,
+                    ));
                 }
             }
             Self::Pause {
@@ -180,6 +218,7 @@ impl GoalEdit {
 pub(crate) fn advance_revision(
     previous: &Option<GoalRecord>,
     record: &mut Option<GoalRecord>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> std::io::Result<()> {
     if let Some(goal) = record
         && previous.as_ref() != Some(goal)
@@ -190,7 +229,7 @@ pub(crate) fn advance_revision(
                 .checked_add(1)
                 .ok_or_else(|| std::io::Error::other("goal revision exhausted"))?;
         }
-        goal.updated_at = chrono::Utc::now();
+        goal.updated_at = now;
     }
     Ok(())
 }
@@ -313,7 +352,7 @@ impl GoalStore {
         }
         let previous = record.clone();
         change(&mut record)?;
-        advance_revision(&previous, &mut record)?;
+        advance_revision(&previous, &mut record, chrono::Utc::now())?;
         let temp = parent.join(format!(".goal-{}.tmp", uuid::Uuid::now_v7()));
         let bytes = serde_json::to_vec_pretty(&record).map_err(std::io::Error::other)?;
         let result = (|| {

@@ -743,6 +743,147 @@ fn publications_preserve_input_order_and_fence_stale_delivery_across_recovery() 
 }
 
 #[test]
+fn goal_facts_recover_exact_revisions_without_changing_execution_or_inbox() {
+    use atman_runtime::flow_store::goal::{GoalRequest, GoalVersion};
+    use atman_runtime::memory::goal::{GoalActor, GoalEdit, GoalPauseReason, GoalStatus};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let user = SenderIdentity::User(Uuid::new_v4());
+    let request = |flow: &FlowStore, edit| GoalRequest {
+        id: Uuid::new_v4(),
+        sender: user.clone(),
+        expected: flow.goal().map(GoalVersion::from),
+        edit,
+    };
+    let create = request(
+        &flow,
+        GoalEdit::Create {
+            text: "retained objective".into(),
+        },
+    );
+    let created = flow.edit_goal(create.clone(), |_| Ok(())).unwrap();
+    let initial = created.goal.as_ref().unwrap();
+    let key = Uuid::new_v4().into();
+    change(&mut flow, FlowTransition::ExecutionPaused { key });
+    flow.accept_input(
+        delivery(&description.address, user.clone(), "new work"),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let state = flow.state().clone();
+    let paused = flow
+        .edit_goal(
+            request(
+                &flow,
+                GoalEdit::Pause {
+                    actor: GoalActor::User,
+                    reason: GoalPauseReason::UserRequested,
+                    summary: "hold objective".into(),
+                },
+            ),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(paused.goal.as_ref().unwrap().revision, initial.revision + 1);
+    let agent_resume = request(
+        &flow,
+        GoalEdit::Resume {
+            actor: GoalActor::Agent,
+        },
+    );
+    assert!(flow.edit_goal(agent_resume, |_| Ok(())).is_err());
+    let edit = request(
+        &flow,
+        GoalEdit::Set {
+            text: "edited while paused".into(),
+            replace_completed: false,
+        },
+    );
+    let updated = flow.edit_goal(edit.clone(), |_| Ok(())).unwrap();
+    assert_eq!(updated.goal.as_ref().unwrap().status, GoalStatus::Paused);
+    assert_eq!(flow.state(), &state);
+    assert_eq!(flow.pending_inputs().count(), 1);
+    let resumed = flow
+        .edit_goal(
+            request(
+                &flow,
+                GoalEdit::Resume {
+                    actor: GoalActor::User,
+                },
+            ),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(
+        flow.state(),
+        &state,
+        "goal resume must not remove execution pauses"
+    );
+    assert_eq!(
+        flow.edit_goal(create.clone(), |_| panic!("retry authorization"))
+            .unwrap(),
+        created
+    );
+    assert_eq!(flow.goal(), resumed.goal.as_ref());
+    let mut stale = edit.clone();
+    stale.id = Uuid::new_v4();
+    assert!(flow.edit_goal(stale, |_| Ok(())).is_err());
+    let mut conflict = edit;
+    conflict.edit = GoalEdit::Clear;
+    assert!(flow.edit_goal(conflict, |_| Ok(())).is_err());
+    let journal = flow.dir().join("events.jsonl");
+    let prefix = std::fs::metadata(&journal).unwrap().len();
+    flow.edit_goal(request(&flow, GoalEdit::Clear), |_| Ok(()))
+        .unwrap();
+    drop(flow);
+    let length = std::fs::metadata(&journal).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&journal)
+        .unwrap()
+        .set_len(length - 1)
+        .unwrap();
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert!(flow.recovered_tail.is_some());
+    assert_eq!(std::fs::metadata(&journal).unwrap().len(), prefix);
+    assert_eq!(flow.goal(), resumed.goal.as_ref());
+    assert_eq!(flow.state(), &state);
+    assert_eq!(flow.pending_inputs().count(), 1);
+    let cleared = flow
+        .edit_goal(request(&flow, GoalEdit::Clear), |_| Ok(()))
+        .unwrap();
+    assert!(cleared.goal.is_none());
+    assert_eq!(flow.state(), &state);
+    drop(flow);
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert!(flow.goal().is_none());
+    assert_eq!(flow.goal_updates().len(), 5);
+    change(&mut flow, FlowTransition::CloseRequested);
+    assert_eq!(
+        flow.edit_goal(create, |_| panic!("closed retry authorization"))
+            .unwrap(),
+        created
+    );
+    assert!(
+        flow.edit_goal(
+            request(
+                &flow,
+                GoalEdit::Create {
+                    text: "closed".into()
+                }
+            ),
+            |_| Ok(())
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history() {
     use atman_runtime::flow_store::context::{ContextCheckpoint, context_digest};
     use atman_runtime::flow_store::publication::MessagePublication;

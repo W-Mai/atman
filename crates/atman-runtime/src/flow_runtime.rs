@@ -3,6 +3,7 @@
 pub mod access;
 pub(crate) mod context;
 pub mod execution;
+pub mod goal;
 pub mod host;
 pub mod input;
 pub mod launch;
@@ -80,6 +81,7 @@ impl FlowWorker {
                     .context_checkpoints()
                     .last()
                     .map(|saved| saved.checkpoint.messages.as_slice()),
+                store.goal().cloned(),
             ));
             (store, context)
         })
@@ -496,6 +498,50 @@ mod tests {
             context.context_epoch(),
             Some(crate::flow_store::context::context_digest(&replacement).unwrap(),)
         );
+        let user = crate::flow_store::inbox::SenderIdentity::User(Uuid::new_v4());
+        let goal_request = crate::flow_store::goal::GoalRequest {
+            id: Uuid::new_v4(),
+            sender: user.clone(),
+            expected: None,
+            edit: crate::memory::goal::GoalEdit::Create {
+                text: "durable objective".into(),
+            },
+        };
+        let mut goals = context.subscribe_goal();
+        let goal_writer = worker.clone();
+        let abandoned_goal = goal_request.clone();
+        cancel_queued(&worker, async move {
+            goal_writer.edit_goal(abandoned_goal, |_| Ok(())).await
+        })
+        .await;
+        assert_eq!(context.goal().as_deref(), Some("durable objective"));
+        assert!(goals.has_changed().unwrap());
+        assert_eq!(
+            goals.borrow_and_update().as_deref(),
+            Some("durable objective")
+        );
+        let goal = worker.goal().await.unwrap().goal.unwrap();
+        assert_eq!(context.goal_control.record(), Some(goal.clone()));
+        worker
+            .edit_goal(
+                crate::flow_store::goal::GoalRequest {
+                    id: Uuid::new_v4(),
+                    sender: user,
+                    expected: Some((&goal).into()),
+                    edit: crate::memory::goal::GoalEdit::Clear,
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        let retried = worker
+            .edit_goal(goal_request, |_| unreachable!())
+            .await
+            .unwrap();
+        assert_eq!(retried.goal, Some(goal));
+        assert_eq!(context.goal(), None);
+        assert_eq!(*goals.borrow(), None);
+        assert_eq!(context.goal_control.record(), None);
         let mut cancelled = publication;
         cancelled.id = Uuid::new_v4();
         worker
@@ -520,6 +566,7 @@ mod tests {
         assert!(clone.publish(cancelled, ctx).await.is_err());
         assert_eq!(store.published_messages(), [record]);
         assert_eq!(store.context_checkpoints().len(), 1);
+        assert_eq!(store.goal_updates().len(), 2);
         assert_eq!(store.context_messages(), context.messages().to_vec());
         let weak = Arc::downgrade(&context);
         drop(clone);

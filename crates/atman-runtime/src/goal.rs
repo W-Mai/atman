@@ -200,6 +200,7 @@ pub struct GoalController {
     owner: String,
     parent: Option<Arc<GoalController>>,
     store: Option<GoalStore>,
+    instance_owned: bool,
     state: Mutex<State>,
     changes: Arc<watch::Sender<u64>>,
     transition: Arc<Mutex<()>>,
@@ -233,6 +234,24 @@ impl GoalController {
 
     pub fn ephemeral(owner: String) -> Arc<Self> {
         Self::build(None, owner, None, None)
+    }
+
+    pub(crate) fn for_instance(owner: String, record: Option<GoalRecord>) -> Arc<Self> {
+        let mut controller = Self::build(None, owner, None, record);
+        let inner = Arc::get_mut(&mut controller).expect("new instance goal projection");
+        inner.instance_owned = true;
+        inner.state.get_mut().unwrap().execution_pause = ExecutionPause::Open;
+        controller
+    }
+
+    pub(crate) fn project_record(&self, record: Option<GoalRecord>) {
+        assert!(
+            self.instance_owned,
+            "goal projection requires an instance owner"
+        );
+        self.state.lock().unwrap().record = record;
+        self.emit_state();
+        self.changed();
     }
 
     pub fn child(
@@ -286,6 +305,7 @@ impl GoalController {
             owner,
             parent,
             store,
+            instance_owned: false,
             state: Mutex::new(State {
                 record,
                 execution_pause,
@@ -500,6 +520,7 @@ impl GoalController {
         expected: Option<(&str, u64)>,
         change: impl FnOnce(&mut Option<GoalRecord>) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.ensure_local_mutation()?;
         let mut state = self.state.lock().unwrap();
         if let Some((id, revision)) = expected
             && !state
@@ -519,7 +540,7 @@ impl GoalController {
                 Ok(())
             })?;
         } else {
-            crate::memory::goal::advance_revision(&state.record, &mut record)?;
+            crate::memory::goal::advance_revision(&state.record, &mut record, chrono::Utc::now())?;
         }
         if state.record.is_some()
             && state.record.as_ref().map(|g| &g.id) != record.as_ref().map(|g| &g.id)
@@ -548,8 +569,19 @@ impl GoalController {
                 record,
                 &self.owner,
                 self.parent.as_ref().and_then(|p| p.record().map(|g| g.id)),
+                uuid::Uuid::now_v7(),
+                chrono::Utc::now(),
             )
         })
+    }
+
+    fn ensure_local_mutation(&self) -> io::Result<()> {
+        if self.instance_owned {
+            return Err(io::Error::other(
+                "instance goal edits require the storage owner",
+            ));
+        }
+        Ok(())
     }
 
     /// Create a fresh objective for an owner, replacing only the acknowledged record.
@@ -577,7 +609,13 @@ impl GoalController {
             return Err(io::Error::other("goal objective must not be empty"));
         }
         let creating = self.record().is_none();
-        self.edit(expected, GoalEdit::Set { text: text.into() })?;
+        self.edit(
+            expected,
+            GoalEdit::Set {
+                text: text.into(),
+                replace_completed: false,
+            },
+        )?;
         if creating {
             self.state.lock().unwrap().execution_pause = ExecutionPause::Open;
             self.changed();
@@ -592,6 +630,7 @@ impl GoalController {
         summary: String,
         expected: Option<(&str, u64)>,
     ) -> io::Result<()> {
+        self.ensure_local_mutation()?;
         let _transition = self.transition.lock().unwrap();
         if let Some((id, revision)) = expected
             && !self

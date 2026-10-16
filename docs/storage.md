@@ -69,6 +69,14 @@ Session compaction calculates a replacement using the existing summary and revie
 
 Reopening seeds the model window and full history separately, preserves messages appended after the checkpoint, and restores the cache epoch from the checkpoint itself. An incomplete checkpoint retains the previous committed window and its tail. Compaction does not publish another final answer or create another notification. Persistent spawned peers use the same path as other instances; isolated inline fanout contexts remain invocation-local and are not resumable instances.
 
+## Persistent goals
+
+Each instance journal retains goal creation, text edits, pause, resume, and clearing as `GoalUpdated` facts. Requests carry an authenticated sender, a request UUID, and the expected goal identity and revision; an absent expected version explicitly means that no goal may exist. The shared `memory::goal::GoalEdit` operations validate changes. Committed timestamps and generated identities replay exactly, including clearing the current record, without a separate authoritative goal file.
+
+`FlowWorker::edit_goal` serializes the write, updates the live goal projection and subscribers after commitment, and returns the recorded goal with its commit receipt. Matching request retries return the original result without replacing newer projected state. Conflicting requests, stale revisions, and new edits after close fail. Accepted writes survive caller cancellation. Restoration retains the saved goal status; interrupted execution is represented by the instance lifecycle instead of rewriting the objective.
+
+`FlowClient::read_goal` requires context-read or goal-management access; editing another instance requires an explicit goal-management grant. Checks run again inside the target owner, and peer callers cannot impersonate user or runtime actors. Creation relationships grant no additional authority. Goal changes do not remove execution pauses, invalidate unrelated inbox messages, or control peers. Automatic continuation remains an entry policy admitted by the host scheduler.
+
 ## Input acceptance
 
 `FlowStore::accept_input` persists a typed delivery request before returning `Acceptance`. User submissions retain text, images, invocation configuration, and presentation data. Interjections, flow events, watcher notifications, timers, and internal controls remain distinct payload variants with sender, recipient, correlation, cause, scope, and delivery mode. A protocol message role is not used as a provenance label.

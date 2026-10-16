@@ -11,6 +11,8 @@ use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::ValueJson;
 use crate::value::{AtmanPayload, Value};
 
+mod instance_goal;
+
 pub struct MemoryGoalGet {
     pub store: Arc<GoalStore>,
 }
@@ -26,7 +28,7 @@ impl Tool for MemoryGoalGet {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Read the current agent's goal, state and revision. Use target_handle to inspect a descendant's goal.",
+            "Read this flow's goal, execution state and revision. target_handle reads another permitted flow; persistent peers require a context-read or goal-management grant.",
         )
     }
 
@@ -36,6 +38,9 @@ impl Tool for MemoryGoalGet {
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
+            if let Some(target) = instance_goal::target(&args, ctx)? {
+                return instance_goal::get(target).await;
+            }
             if let Some(control) = goal_target(&args, ctx)? {
                 return goal_value(&control);
             }
@@ -67,7 +72,7 @@ impl Tool for MemoryGoalSet {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Create a goal for an actionable request, or update its objective. Updates require goal_id and expected_revision from goal.get and preserve pause state. target_handle addresses a descendant. Use goal.pause when complete or waiting for input.",
+            "Create a goal for an actionable request, or update its objective. Updates require goal_id and expected_revision from goal.get and preserve pause state. target_handle requires permission to manage that flow's goal. Use goal.pause when complete or waiting for input.",
         )
     }
 
@@ -81,6 +86,9 @@ impl Tool for MemoryGoalSet {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let text = required_string(&args, "text")?;
+            if let Some(target) = instance_goal::target(&args, ctx)? {
+                return instance_goal::set(target, &args, ctx, text).await;
+            }
             if let Some(control) = goal_target(&args, ctx)? {
                 let expected = goal_expected(&args, control.record().is_some())?;
                 if ctx.goal_resume_allowed
@@ -128,7 +136,8 @@ fn goal_schema(required_revision: bool) -> serde_json::Value {
     serde_json::json!({
         "type":"object",
         "properties":{
-            "target_handle":{"type":"string", "description":"Optional descendant agent handle; defaults to this agent."},
+            "target_handle":{"type":"string", "description":"Optional flow handle; defaults to this flow. Persistent peers require explicit goal management or context-read grants."},
+            "request_id":{"type":"string", "description":"Optional UUID for an idempotent persistent goal change."},
             "goal_id":{"type":"string"},
             "expected_revision":{"type":"integer", "minimum":1}
         },
@@ -196,9 +205,9 @@ impl Tool for MemoryGoalControl {
     }
     fn description(&self) -> Option<&str> {
         Some(if self.resume {
-            "Resume a descendant goal, or your own agent-paused goal after new user input. User-paused goals require user controls. Read goal.get first."
+            "Resume a permitted flow's goal, or your own agent-paused goal after new user input. User-paused goals require user controls. Persistent goal changes do not resume flow execution. Read goal.get first."
         } else {
-            "Pause this goal when completed, blocked, or awaiting input. This stops automatic continuation and allows your final response. With target_handle, pause a descendant at its next execution boundary. Read goal.get first."
+            "Pause a goal when completed, blocked, or awaiting input. target_handle requires goal-management permission. Persistent goal pauses stop objective continuation independently of flow execution. Read goal.get first, then deliver your final response separately."
         })
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -213,6 +222,9 @@ impl Tool for MemoryGoalControl {
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
+            if let Some(target) = instance_goal::target(&args, ctx)? {
+                return instance_goal::control(target, &args, ctx, self.resume).await;
+            }
             let control = goal_target(&args, ctx)?.ok_or_else(|| goal_error("no goal context"))?;
             let own = ctx
                 .goal_control
@@ -816,15 +828,18 @@ impl Tool for MemoryGoalClear {
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object"})
+        goal_schema(false)
     }
 
-    fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             if ctx.goal_control.is_some() {
                 return Err(goal_error(
                     "managed goals must be paused; clearing requires user control",
                 ));
+            }
+            if let Some(target) = instance_goal::target(&args, ctx)? {
+                return instance_goal::clear(target, &args).await;
             }
             if let Some(session) = &ctx.session_runtime {
                 session.goal_control.clear().map_err(goal_error)?;
