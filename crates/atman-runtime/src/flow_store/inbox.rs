@@ -41,6 +41,14 @@ pub struct FlowEventRef {
     pub index: u32,
 }
 
+/// Human-authored content; roles and turn identities are assigned after authenticated admission.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct UserContent {
+    pub text: String,
+    pub images: Vec<ImageSource>,
+    pub presentation: Option<UserInputPresentation>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum InboxPayload {
@@ -54,12 +62,11 @@ pub enum InboxPayload {
     Invocation {
         arguments: BTreeMap<String, Value>,
         invocation: BTreeMap<String, Value>,
+        user: Option<UserContent>,
     },
     UserSubmission {
-        text: String,
-        images: Vec<ImageSource>,
+        content: UserContent,
         invocation: BTreeMap<String, Value>,
-        presentation: Option<UserInputPresentation>,
     },
     Interjection {
         text: String,
@@ -104,12 +111,15 @@ pub struct DeliveryRequest {
 
 impl DeliveryRequest {
     pub(crate) fn validate_source(&self) -> io::Result<()> {
-        if matches!(self.payload, InboxPayload::Invocation { .. }) {
-            return if self.delivery == DeliveryMode::NextTurn && self.correlation.is_none() {
+        if let InboxPayload::Invocation { user, .. } = &self.payload {
+            return if self.delivery == DeliveryMode::NextTurn
+                && self.correlation.is_none()
+                && (user.is_none() || matches!(self.sender, SenderIdentity::User(_)))
+            {
                 Ok(())
             } else {
                 Err(invalid(
-                    "an explicit invocation requires uncorrelated next-turn delivery",
+                    "an explicit invocation requires uncorrelated next-turn delivery and authenticated user content",
                 ))
             };
         }

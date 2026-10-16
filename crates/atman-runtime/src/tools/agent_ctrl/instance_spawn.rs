@@ -122,6 +122,7 @@ pub(super) async fn spawn(
             correlation: None,
             scope: None,
             payload: InboxPayload::Invocation {
+                user: None,
                 arguments: arguments.clone(),
                 invocation: invocation.clone(),
             },

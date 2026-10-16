@@ -61,6 +61,7 @@ fn initial(info: &FlowDescriptor, recipient: &FlowRef) -> LaunchInput {
             correlation: None,
             scope: None,
             payload: InboxPayload::Invocation {
+                user: None,
                 arguments: [
                     ("label".into(), "first answer".into()),
                     ("amount".into(), 42.into()),
@@ -86,6 +87,7 @@ fn prepare(snapshot: &FlowSnapshot) -> io::Result<Option<TurnRequest>> {
     let InboxPayload::Invocation {
         arguments,
         invocation,
+        ..
     } = &first.request.payload
     else {
         return Ok(None);
@@ -201,6 +203,25 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
     let authority = EffectiveAuthority::root(&Default::default(), false, None);
     let mut input = initial(&entry, &entry.address);
     input.request.sender = SenderIdentity::User(Uuid::new_v4());
+    let presentation = atman_runtime::user_input::UserInputPresentation {
+        prompt: "human input, separate from entry arguments".into(),
+        quote: Some(atman_runtime::user_input::QuoteSnapshot {
+            text: "quoted text".into(),
+        }),
+    };
+    let content = atman_runtime::flow_store::inbox::UserContent {
+        text: presentation.model_text(),
+        images: vec![
+            atman_runtime::attachment_store::AttachmentStore::at(std::path::Path::new(""))
+                .import_base64("iVBORw0KGgo=", Some("image.png"))
+                .unwrap(),
+        ],
+        presentation: Some(presentation),
+    };
+    let InboxPayload::Invocation { user, .. } = &mut input.request.payload else {
+        unreachable!()
+    };
+    *user = Some(content.clone());
     input.result_route = None;
     input.execution = Some(EntryBinding {
         first_turn: TurnId::now(),
@@ -227,6 +248,14 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
             .is_err()
     );
     assert!(session.snapshot().await.unwrap().catalog.flows.is_empty());
+    let mut forged = input.clone();
+    forged.request.sender = SenderIdentity::Flow(entry.address.clone());
+    assert!(
+        host.launch_entry(entry.clone(), forged, execution(), |_, _| Ok(()))
+            .await
+            .is_err()
+    );
+    assert!(session.snapshot().await.unwrap().catalog.flows.is_empty());
     let (launched, repeated) = tokio::join!(
         host.launch_entry(entry.clone(), input.clone(), execution(), |_, _| Ok(())),
         host.launch_entry(entry.clone(), input.clone(), execution(), |_, _| Ok(()))
@@ -245,6 +274,28 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
     let worker = launched.worker.clone();
     drop(launched);
     delivered(&worker, "first answer").await;
+    let messages = worker.context().messages();
+    let human = messages
+        .iter()
+        .find(|m| m.text_concat() == content.text)
+        .unwrap();
+    assert_eq!(human.origin, MessageOrigin::User);
+    assert_eq!(human.turn_id, input.execution.as_ref().unwrap().first_turn);
+    assert!(
+        matches!(&human.parts[1], atman_runtime::message::MessagePart::Image { source } if source == &content.images[0])
+    );
+    let InboxPayload::Invocation { user, .. } = worker
+        .launch_record()
+        .await
+        .unwrap()
+        .unwrap()
+        .input
+        .request
+        .payload
+    else {
+        unreachable!()
+    };
+    assert_eq!(user.as_ref(), Some(&content));
     assert!(
         session
             .scheduling_status(entry.address.instance_id.clone())

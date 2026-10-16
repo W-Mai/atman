@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Invocation input** — Explicit instance invocations accept optional authenticated user text and images. `InboxPayload::UserSubmission` and `Invocation` share `UserContent`, preserving original content separately from entry arguments.
+
 - **Flow content types** — `FlowDescriptor.content` distinguishes retained executable entries from read-only history. Creation updates expose a typed content summary; entry access returns an error for historical flows.
 
 - **Permission RPC types** — Permission request structs use a flattened `PermissionTarget`; serialized requests retain `session_id` and accept an optional `instance_id`. Permission views include the instance identity when present.

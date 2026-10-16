@@ -114,6 +114,7 @@ impl RuntimeHost {
             {
                 return Err(invalid("launch input does not match creation identity"));
             }
+            input.request.validate_source()?;
             let session = host.session(descriptor.address.session_id.0)?;
             // Existing catalog entries reconcile through their unique worker before new authorization.
             let existing = session
@@ -349,6 +350,7 @@ mod tests {
                 correlation: None,
                 scope: None,
                 payload: InboxPayload::Invocation {
+                    user: None,
                     arguments: Default::default(),
                     invocation: Default::default(),
                 },

@@ -308,11 +308,17 @@ async fn failed_preparation_and_stale_inventory_do_not_register_executable_flows
 fn reopening_requires_explicit_binding_and_preserves_paused_input() {
     let dir = tempfile::tempdir().unwrap();
     let (flow, launch, accepted, first, invocation) = runtime().block_on(async {
-        let (state, flow, launch) = setup(&dir, "flow main(label: string) -> string { return final.answer(message: label) }").await;
+        let (state, flow, mut launch) = setup(&dir, "flow main(label: string) -> string { return final.answer(message: label) }").await;
+        launch["user"] = json!({"text": "first human request", "images": [{"data_base64": "iVBORw0KGgo=", "name": "image.png"}]});
+        let mut invalid = launch.clone();
+        invalid["user"]["images"][0]["data_base64"] = json!("invalid base64");
+        assert!(dispatch(state.clone(), JsonRpcRequest::new(1, methods::FLOW_LAUNCH, invalid)).await.error.is_some());
+        let catalog = rpc(&state, methods::SESSION_FLOWS, json!({"session_id": flow["session_id"]})).await;
+        assert_eq!(catalog["catalog"]["sequence"], launch["expected_catalog_sequence"]);
         let accepted = rpc(&state, methods::FLOW_LAUNCH, launch.clone()).await;
         let first = wait_completion(&state, &flow, None).await;
         rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": first["execution"]["revision"], "action": "pause"})).await;
-        let invocation = json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"label": "second"}});
+        let invocation = json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"label": "second"}, "user": {"text": "second human request", "images": []}});
         rpc(&state, methods::FLOW_INVOKE, invocation.clone()).await;
         std::fs::remove_file(dir.path().join("main.at")).unwrap();
         (flow, launch, accepted, first, invocation)
@@ -346,7 +352,31 @@ fn reopening_requires_explicit_binding_and_preserves_paused_input() {
         let page = rpc(&state, methods::FLOW_OUTPUT, request.clone()).await;
         assert_eq!(page["messages"].as_array().unwrap().len(), 2);
         assert_eq!(answer(&page, 1), "second");
-        rpc(&state, methods::FLOW_INVOKE, invocation).await;
+        rpc(&state, methods::FLOW_INVOKE, invocation.clone()).await;
+        let mut conflict = invocation;
+        conflict["user"]["text"] = json!("changed request");
+        assert!(dispatch(state.clone(), JsonRpcRequest::new(1, methods::FLOW_INVOKE, conflict)).await.error.is_some());
+        let history = rpc(&state, methods::FLOW_EVENTS, json!({"flow": flow, "limit": 128})).await;
+        assert_eq!(history["has_more"], false);
+        let inputs: Vec<_> = history["batches"].as_array().unwrap().iter()
+            .flat_map(|batch| batch["facts"].as_array().unwrap())
+            .filter(|fact| fact["type"] == "input_committed")
+            .map(|fact| &fact["data"]["content"])
+            .collect();
+        assert_eq!(inputs.len(), 2);
+        for (index, expected) in ["first human request", "second human request"].iter().enumerate() {
+            let message: atman_runtime::message::Message = serde_json::from_value(inputs[index]["messages"][0].clone()).unwrap();
+            assert_eq!(message.text_concat(), *expected);
+            assert_eq!(message.origin, atman_runtime::message::MessageOrigin::User);
+            assert_eq!(message.parts.len(), if index == 0 { 2 } else { 1 });
+            if index == 0 {
+                let image = atman_runtime::attachment_store::AttachmentStore::at(std::path::Path::new(""))
+                    .import_base64("iVBORw0KGgo=", Some("image.png")).unwrap();
+                assert!(matches!(&message.parts[1], atman_runtime::message::MessagePart::Image { source } if source == &image));
+            }
+        }
+        assert_eq!(inputs[0]["arguments"]["label"], "first");
+        assert_eq!(inputs[1]["arguments"]["label"], "second");
         assert_eq!(rpc(&state, methods::FLOW_GET, request).await["last_completion"], second["last_completion"]);
     });
 }

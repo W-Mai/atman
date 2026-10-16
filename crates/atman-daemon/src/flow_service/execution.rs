@@ -147,6 +147,7 @@ impl SessionService {
         let session = self.session(flow.session_id.0)?;
         let snapshot = session.snapshot().await?;
         let payload = InboxPayload::Invocation {
+            user: user_content(request.user.as_ref())?,
             arguments: request.arguments.clone(),
             invocation: request.invocation.clone(),
         };
@@ -257,6 +258,7 @@ impl SessionService {
                     correlation: None,
                     scope: None,
                     payload: InboxPayload::Invocation {
+                        user: user_content(request.user.as_ref())?,
                         arguments: request.arguments,
                         invocation: request.invocation,
                     },
@@ -288,6 +290,27 @@ impl SessionService {
             .or(request.after);
         Ok(json!({"messages": page, "next": next, "has_more": end < records.len()}))
     }
+}
+
+fn user_content(
+    input: Option<&atman_proto::flows::FlowUserContent>,
+) -> Result<Option<atman_runtime::flow_store::inbox::UserContent>> {
+    input
+        .map(|input| {
+            // Inline validated bytes live in the committed invocation, independent of client files.
+            let attachments = atman_runtime::attachment_store::AttachmentStore::at(Path::new(""));
+            let images = input
+                .images
+                .iter()
+                .map(|image| attachments.import_base64(&image.data_base64, image.name.as_deref()))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(atman_runtime::flow_store::inbox::UserContent {
+                text: input.text.clone(),
+                images,
+                presentation: None,
+            })
+        })
+        .transpose()
 }
 
 fn config(descriptor: &SessionDescriptor) -> Result<ConfigHub> {

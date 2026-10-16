@@ -2060,6 +2060,7 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
                     correlation: None,
                     scope: None,
                     payload: InboxPayload::Invocation {
+                        user: None,
                         arguments: [("input".into(), "first".into())].into(),
                         invocation: [("effort".into(), "high".into())].into(),
                     },
@@ -2084,10 +2085,12 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
     next.sender = SenderIdentity::User(Uuid::new_v4());
     next.delivery = DeliveryMode::NextTurn;
     next.payload = InboxPayload::UserSubmission {
-        text: "second".into(),
-        images: vec![],
+        content: atman_runtime::flow_store::inbox::UserContent {
+            text: "second".into(),
+            images: vec![],
+            presentation: Default::default(),
+        },
         invocation: [("effort".into(), "low".into())].into(),
-        presentation: Default::default(),
     };
     worker.accept_input(next, |_| Ok(())).await.unwrap();
     let mut commits = worker.subscribe_commits();
@@ -2370,6 +2373,7 @@ async fn entry_authored_continuation_uses_the_same_scheduler_for_direct_and_spaw
                         correlation: None,
                         scope: None,
                         payload: InboxPayload::Invocation {
+                            user: None,
                             arguments: recipe.arguments.clone(),
                             invocation: recipe.invocation.clone(),
                         },
@@ -2388,6 +2392,7 @@ async fn entry_authored_continuation_uses_the_same_scheduler_for_direct_and_spaw
         submission.sender = SenderIdentity::User(Uuid::new_v4());
         submission.delivery = DeliveryMode::NextTurn;
         submission.payload = InboxPayload::Invocation {
+            user: None,
             arguments: [
                 ("input".into(), "start".into()),
                 ("label".into(), "carried".into()),

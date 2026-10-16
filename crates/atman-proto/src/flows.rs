@@ -61,6 +61,13 @@ pub struct ControlFlowRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct FlowUserContent {
+    pub text: String,
+    #[serde(default)]
+    pub images: Vec<crate::InlineImage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct LaunchFlowRequest {
     pub flow: FlowAddress,
     pub request_id: Uuid,
@@ -72,6 +79,7 @@ pub struct LaunchFlowRequest {
     pub arguments: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub invocation: BTreeMap<String, serde_json::Value>,
+    pub user: Option<FlowUserContent>,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -82,6 +90,7 @@ pub struct InvokeFlowRequest {
     pub arguments: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub invocation: BTreeMap<String, serde_json::Value>,
+    pub user: Option<FlowUserContent>,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]

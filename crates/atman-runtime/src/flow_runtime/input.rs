@@ -82,11 +82,11 @@ fn compatible(
     match &envelope.request.payload {
         InboxPayload::Invocation { .. } => false,
         InboxPayload::UserSubmission {
-            images,
+            content,
             invocation: requested,
             ..
         } => {
-            (images.is_empty() || accepts_images)
+            (content.images.is_empty() || accepts_images)
                 && requested.iter().all(|(key, value)| {
                     invocation
                         .get(key)
@@ -121,6 +121,28 @@ pub fn context_message(
         message.origin = MessageOrigin::Internal;
         return Ok(message);
     }
+    let user = match &envelope.request.payload {
+        InboxPayload::UserSubmission { content, .. } => Some(content),
+        InboxPayload::Invocation { user, .. } => user.as_ref(),
+        _ => None,
+    };
+    if let Some(content) = user {
+        // Keep the projection safe even when a host calls it before inbox admission.
+        if !matches!(envelope.request.sender, SenderIdentity::User(_)) {
+            return Err(crate::flow_store::invalid(
+                "user content requires authenticated user provenance",
+            ));
+        }
+        let mut message = Message::user_text(turn.clone(), content.text.clone());
+        message.parts.extend(
+            content
+                .images
+                .iter()
+                .cloned()
+                .map(|source| MessagePart::Image { source }),
+        );
+        return Ok(message);
+    }
     if let InboxPayload::Invocation { arguments, .. } = &envelope.request.payload {
         let mut message = Message::user_text(
             turn.clone(),
@@ -130,16 +152,6 @@ pub fn context_message(
             ),
         );
         message.origin = MessageOrigin::Internal;
-        return Ok(message);
-    }
-    if let InboxPayload::UserSubmission { text, images, .. } = &envelope.request.payload {
-        let mut message = Message::user_text(turn.clone(), text.clone());
-        message.parts.extend(
-            images
-                .iter()
-                .cloned()
-                .map(|source| MessagePart::Image { source }),
-        );
         return Ok(message);
     }
     let mut message = Message::user_text(

@@ -54,6 +54,7 @@ impl EntryRecipe {
         let InboxPayload::Invocation {
             arguments,
             invocation,
+            ..
         } = &input.request.payload
         else {
             return Err(invalid("entry binding requires invocation input"));
@@ -144,6 +145,7 @@ impl EntryRecipe {
             InboxPayload::Invocation {
                 arguments,
                 invocation,
+                ..
             } => {
                 messages.push(first.id);
                 context.push(crate::flow_runtime::input::context_message(first, &turn)?);

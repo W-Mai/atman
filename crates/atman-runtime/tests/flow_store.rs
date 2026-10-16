@@ -444,10 +444,12 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
         request.delivery = mode;
         if let Some(marker) = marker {
             request.payload = InboxPayload::UserSubmission {
-                text: text.into(),
-                images: vec![],
+                content: atman_runtime::flow_store::inbox::UserContent {
+                    text: text.into(),
+                    images: vec![],
+                    presentation: None,
+                },
                 invocation: [("marker".into(), serde_json::json!(marker))].into(),
-                presentation: None,
             };
         }
         let receipt = worker.accept_input(request, |_| Ok(())).await.unwrap();
@@ -2511,10 +2513,12 @@ fn delivery_identity_scope_and_authorization_reject_invalid_new_acceptance() {
     assert_eq!(flow.cursor(), &before);
     let mut impersonation = request.clone();
     impersonation.payload = InboxPayload::UserSubmission {
-        text: "user authority".into(),
-        images: Vec::new(),
+        content: atman_runtime::flow_store::inbox::UserContent {
+            text: "user authority".into(),
+            images: Vec::new(),
+            presentation: None,
+        },
         invocation: BTreeMap::new(),
-        presentation: None,
     };
     assert!(
         flow.accept_input(impersonation, |_| panic!(
@@ -2522,6 +2526,32 @@ fn delivery_identity_scope_and_authorization_reject_invalid_new_acceptance() {
         ))
         .is_err()
     );
+    let mut impersonation = request.clone();
+    impersonation.delivery = DeliveryMode::NextTurn;
+    impersonation.payload = InboxPayload::Invocation {
+        arguments: BTreeMap::new(),
+        invocation: BTreeMap::new(),
+        user: Some(atman_runtime::flow_store::inbox::UserContent {
+            text: "user authority".into(),
+            images: vec![],
+            presentation: None,
+        }),
+    };
+    assert!(
+        flow.accept_input(impersonation.clone(), |_| panic!(
+            "invalid source authorized"
+        ))
+        .is_err()
+    );
+    let envelope = atman_runtime::flow_store::inbox::AcceptedEnvelope {
+        id: Uuid::new_v4(),
+        accepted_at: chrono::Utc::now(),
+        request: impersonation,
+    };
+    assert!(
+        atman_runtime::flow_runtime::input::context_message(&envelope, &TurnId::now()).is_err()
+    );
+    assert_eq!(flow.cursor(), &before);
     let mut foreign = request.clone();
     foreign.recipient.instance_id = FlowInstanceId::now();
     assert!(flow.accept_input(foreign, |_| Ok(())).is_err());

@@ -91,6 +91,8 @@ SSE event stream at GET /events. Every endpoint requires a bearer token."
         atman_proto::flows::ControlFlowRequest,
         atman_proto::flows::FlowControl,
         atman_proto::flows::LaunchFlowRequest,
+        atman_proto::flows::FlowUserContent,
+        atman_proto::InlineImage,
         atman_proto::flows::InvokeFlowRequest,
         atman_proto::flows::ReadFlowOutputRequest,
         atman_proto::flows::ReadFlowEventsRequest,
