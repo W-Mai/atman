@@ -30,6 +30,10 @@ pub(crate) struct LaunchExecution {
 }
 
 impl FlowWorker {
+    pub async fn descriptor(&self) -> io::Result<FlowDescriptor> {
+        self.request(|store| Ok(store.descriptor().clone())).await
+    }
+
     pub async fn launch_record(&self) -> io::Result<Option<LaunchRecord>> {
         self.request(|store| Ok(store.launch_record())).await
     }
@@ -48,6 +52,12 @@ impl RuntimeHost {
     ) -> io::Result<LaunchedFlow> {
         let creation = descriptor.clone();
         let requested = input.clone();
+        let session = self
+            .session(descriptor.address.session_id.0)?
+            .snapshot()
+            .await?
+            .catalog
+            .descriptor;
         self.launch_owned(
             descriptor,
             input,
@@ -55,6 +65,7 @@ impl RuntimeHost {
             Some(execution.catalog),
             move || {
                 let recipe = super::entry::EntryRecipe::from_launch(
+                    &session,
                     &creation,
                     &requested,
                     &execution.authority,
@@ -135,6 +146,8 @@ impl RuntimeHost {
                 Some(worker) => worker,
                 None => session.create_flow_at(descriptor.clone(), catalog).await?,
             };
+            // One activation owns scheduler adoption. Retried launches wait for its durable result instead of racing for scheduling ownership.
+            let _launch = worker.launch_gate.clone().lock_owned().await;
             // Creation can race with another accepted attempt. Reconcile again before new effects.
             if let Some(record) = worker.launch_record().await? {
                 return if record.input == input {

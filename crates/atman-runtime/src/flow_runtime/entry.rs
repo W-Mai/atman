@@ -35,12 +35,14 @@ pub struct EntryRecipe {
 impl EntryRecipe {
     /// Rebind recorded policy under current host ceilings, without releasing execution gates.
     pub fn from_launch(
+        session: &crate::flow_store::SessionDescriptor,
         descriptor: &FlowDescriptor,
         input: &LaunchInput,
         current: &EffectiveAuthority,
         yield_interval: NonZeroUsize,
     ) -> io::Result<Self> {
-        if input.request.recipient != descriptor.address
+        if descriptor.address.session_id.0 != session.id
+            || input.request.recipient != descriptor.address
             || input.request.request_id != descriptor.creation_request
         {
             return Err(invalid("entry input does not match instance creation"));
@@ -59,7 +61,7 @@ impl EntryRecipe {
         let program = crate::source_program::load_program_from_bundle(
             &descriptor.entry.bundle,
             &descriptor.entry.path,
-            &Default::default(),
+            &session.source_roots(),
         )
         .map_err(invalid)?;
         let flow = program
@@ -212,7 +214,13 @@ impl super::FlowWorker {
             let launch = store
                 .launch_record()
                 .ok_or_else(|| invalid("instance has no committed launch input"))?;
-            EntryRecipe::from_launch(store.descriptor(), &launch.input, &current, yield_interval)
+            EntryRecipe::from_launch(
+                store.session_descriptor(),
+                store.descriptor(),
+                &launch.input,
+                &current,
+                yield_interval,
+            )
         })
         .await
     }

@@ -155,7 +155,11 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
 
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();
-    let info = session_info();
+    let mut info = session_info();
+    let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path().join("config"));
+    info.project = Some(
+        atman_runtime::storage::ProjectContext::resolve(&hub, dir.path(), dir.path()).unwrap(),
+    );
     let host = RuntimeHost::default();
     let session = host
         .attach_session(root.create_session(info.clone()).unwrap())
@@ -173,6 +177,18 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
     "#
         .into(),
     );
+    entry.entry.path = dir.path().join("main.at");
+    std::fs::write(
+        &entry.entry.path,
+        &entry.entry.bundle.sources["entry:main.at"],
+    )
+    .unwrap();
+    entry.entry.bundle =
+        atman_runtime::source_program::load_program(&entry.entry.path, &info.source_roots())
+            .unwrap()
+            .revision_bundle();
+    assert!(entry.entry.bundle.entry.starts_with("project:"));
+    std::fs::remove_file(&entry.entry.path).unwrap();
     let authority = EffectiveAuthority::root(&Default::default(), false, None);
     let mut input = initial(&entry, &entry.address);
     input.request.sender = SenderIdentity::User(Uuid::new_v4());
@@ -184,7 +200,11 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
     });
     let catalog = session.snapshot().await.unwrap().cursor;
     let execution = || EntryExecution {
-        executor: Executor::new(),
+        executor: {
+            let mut executor = Executor::new();
+            executor.tool_ctx = atman_runtime::tool::ToolCtx::for_project(info.project.clone());
+            executor
+        },
         authority: authority.clone(),
         trust: atman_runtime::trust::TrustConfig::default(),
         yield_interval: NonZeroUsize::new(16).unwrap(),
@@ -198,10 +218,20 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
             .is_err()
     );
     assert!(session.snapshot().await.unwrap().catalog.flows.is_empty());
-    let launched = host
-        .launch_entry(entry.clone(), input.clone(), execution(), |_, _| Ok(()))
-        .await
-        .unwrap();
+    let (launched, repeated) = tokio::join!(
+        host.launch_entry(entry.clone(), input.clone(), execution(), |_, _| Ok(())),
+        host.launch_entry(entry.clone(), input.clone(), execution(), |_, _| Ok(()))
+    );
+    let launched = launched.unwrap();
+    let repeated = repeated.unwrap();
+    assert_eq!(
+        launched.record.acceptance.receipt,
+        repeated.record.acceptance.receipt
+    );
+    assert_eq!(
+        launched.record.acceptance.message_id,
+        repeated.record.acceptance.message_id
+    );
     let receipt = launched.record.acceptance.clone();
     let worker = launched.worker.clone();
     drop(launched);
@@ -281,7 +311,7 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
     session
         .bind_entry(
             entry.address.instance_id.clone(),
-            Executor::new(),
+            execution().executor,
             authority.clone(),
             NonZeroUsize::new(16).unwrap(),
         )

@@ -39,6 +39,15 @@ pub struct FlowSnapshot {
     pub last_invocation: Option<entry::AdmittedInvocation>,
 }
 
+/// One committed status projection for host views. Scheduler ownership is observed separately by the session catalog.
+#[derive(Clone, Debug)]
+pub struct InstanceStatus {
+    pub execution: FlowInstance<AtmanUuid>,
+    pub goal: Option<crate::memory::goal::GoalRecord>,
+    pub completion: Option<crate::flow_store::completion::CommittedCompletion>,
+    pub cursor: CommitReceipt,
+}
+
 enum Command {
     FlushTrace,
     Apply(Box<dyn FnOnce(&mut FlowStore) -> Acknowledge + Send>),
@@ -63,6 +72,7 @@ pub struct FlowWorker {
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
     commits: watch::Receiver<CommitReceipt>,
     scheduler_owned: Arc<std::sync::atomic::AtomicBool>,
+    launch_gate: Arc<tokio::sync::Mutex<()>>,
     observation_issues: watch::Sender<Vec<observation::ObservationIssue>>,
     observation_retry: watch::Sender<()>,
 }
@@ -250,6 +260,7 @@ impl FlowWorker {
             state,
             commits,
             scheduler_owned: Default::default(),
+            launch_gate: Default::default(),
             observation_issues: watch::channel(Vec::new()).0,
             observation_retry: watch::channel(()).0,
         })
@@ -290,6 +301,18 @@ impl FlowWorker {
 
     pub async fn state(&self) -> io::Result<FlowInstance<AtmanUuid>> {
         self.request(|store| Ok(store.state().clone())).await
+    }
+
+    pub async fn status(&self) -> io::Result<InstanceStatus> {
+        self.request(|store| {
+            Ok(InstanceStatus {
+                execution: store.state().clone(),
+                goal: store.goal().cloned(),
+                completion: store.completion(None).cloned(),
+                cursor: store.cursor().clone(),
+            })
+        })
+        .await
     }
 
     pub fn subscribe_state(&self) -> watch::Receiver<FlowInstance<AtmanUuid>> {

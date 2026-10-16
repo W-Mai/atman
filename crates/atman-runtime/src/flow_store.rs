@@ -63,6 +63,20 @@ pub enum SessionConfiguration {
 }
 
 impl SessionDescriptor {
+    /// Resolve recorded source namespaces without reading configuration or source files.
+    pub fn source_roots(&self) -> crate::source_program::SourceRoots {
+        crate::source_program::SourceRoots {
+            project_root: self
+                .project
+                .as_ref()
+                .map(|project| project.root().to_path_buf()),
+            config_dir: match &self.configuration {
+                SessionConfiguration::Atman(source) => Some(source.config_dir().to_path_buf()),
+                SessionConfiguration::HostProvided => None,
+            },
+        }
+    }
+
     fn validate(&self) -> io::Result<()> {
         if let Some(project) = &self.project {
             project.validate().map_err(invalid)?;

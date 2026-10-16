@@ -111,7 +111,7 @@ impl FlowWorker {
             let program = crate::source_program::load_program_from_bundle(
                 &entry.bundle,
                 &entry.path,
-                &Default::default(),
+                &store.session_descriptor().source_roots(),
             )
             .map_err(invalid)?;
             let flow_name = entry.name.clone();

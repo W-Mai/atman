@@ -118,6 +118,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Retained entry activation** — Source bundles resolve project and user namespaces from their recorded session binding during launch, rebinding, and later turns. Concurrent launches of the same instance share one activation. Host status reads combine execution, Goal, and completion under one committed cursor.
+
 - **Interaction snapshots** — Reopened views show current forms, approvals, and compaction reviews. Concurrent updates cannot publish an older snapshot after a newer one, and changes remain visible while no view is attached.
 
 - **Form wait ownership** — Direct registry and TUI interactions share runtime registration, timeout, and cancellation cleanup. Dropping a flow removes its waiting forms, and parallel confirmations retain their originating interaction context.
