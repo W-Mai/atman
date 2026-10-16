@@ -14,7 +14,7 @@ use crate::value::Value;
 pub struct AtmanRuntimeOptions {
     pub events: EventSink,
     pub mock: bool,
-    pub config_dir: Option<PathBuf>,
+    pub config: ConfigHub,
     pub project_root: PathBuf,
     pub home_dir: Option<PathBuf>,
     pub workspace_generation: String,
@@ -30,10 +30,8 @@ pub struct AtmanRuntime {
 
 impl AtmanRuntime {
     pub async fn build(opts: AtmanRuntimeOptions) -> Result<Self> {
-        let auth_hub = match opts.config_dir.as_deref() {
-            Some(dir) => ConfigHub::from_config_dir(dir),
-            None => ConfigHub::global().context("resolve config hub")?,
-        };
+        let auth_hub = opts.config;
+        let config_dir = Some(auth_hub.config_dir());
         let mut executor = Executor::with_events(opts.events);
         executor.providers =
             crate::provider::ProviderRegistry::with_models(auth_hub.models().clone());
@@ -58,13 +56,8 @@ impl AtmanRuntime {
             tools::register_terminal_with_task_registry(&executor.tools, task_registry.clone());
         executor.tools.register(Arc::new(tools::task_ops::TaskList));
         executor.tools.register(Arc::new(tools::task_ops::TaskKill));
-        let trust_config = load_trust_config(opts.config_dir.as_deref());
-        let tool_output_budget = opts
-            .config_dir
-            .as_deref()
-            .map(ConfigHub::from_config_dir)
-            .and_then(|hub| hub.tool_output_budget().ok())
-            .unwrap_or_default();
+        let trust_config = load_trust_config(config_dir);
+        let tool_output_budget = auth_hub.tool_output_budget().unwrap_or_default();
         executor.tool_ctx = executor
             .tool_ctx
             .clone()
@@ -73,17 +66,14 @@ impl AtmanRuntime {
             .with_task_registry(task_registry)
             .with_trust(trust_config);
         executor.tool_ctx.tool_output_budget = tool_output_budget;
-        tools::register_preview(
-            &executor.tools,
-            load_preview_config(opts.config_dir.as_deref()),
-        );
-        let web_config = load_web_config(opts.config_dir.as_deref());
+        tools::register_preview(&executor.tools, load_preview_config(config_dir));
+        let web_config = load_web_config(config_dir);
         tools::register_web(&executor.tools, web_config.fetch);
         tools::register_web_search(&executor.tools, &web_config.search);
-        let lifecycle = executor.attach_provider_lifecycle(auth_hub)?;
+        let lifecycle = executor.attach_provider_lifecycle(auth_hub.clone())?;
         let provider_catalog_refresh_plan = lifecycle.prepare_auth_runtime().await?;
         if let Some(sandbox) =
-            build_sandbox(&opts.project_root, opts.config_dir.as_deref()).context("sandbox init")?
+            build_sandbox(&opts.project_root, config_dir).context("sandbox init")?
         {
             executor.tool_ctx = executor.tool_ctx.clone().with_sandbox(sandbox);
         }

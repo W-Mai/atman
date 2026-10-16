@@ -91,10 +91,6 @@ impl RuntimeHost {
             let attempt = async {
                 authorize(&descriptor, &input)?;
                 if let Some(execution) = execution {
-                    worker
-                        .context()
-                        .update_trust(execution.trust, |_| Ok(()))
-                        .map_err(io::Error::other)?;
                     // The launch owns scheduling until activation commits. Failed activation
                     // releases it before returning, so a Prepared instance remains retryable.
                     controller = Some(worker.schedule_observed(
@@ -102,6 +98,10 @@ impl RuntimeHost {
                         execution.prepare,
                         execution.completed,
                     )?);
+                    worker
+                        .context()
+                        .update_trust(execution.trust, |_| Ok(()))
+                        .map_err(io::Error::other)?;
                 }
                 let anchor = worker
                     .request(|store| {
@@ -236,6 +236,7 @@ mod tests {
         let session = host
             .attach_session(
                 root.create_session(SessionDescriptor {
+                    configuration: Default::default(),
                     id,
                     title: "Launch".into(),
                     project_root: None,

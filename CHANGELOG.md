@@ -8,9 +8,13 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Runtime configuration input** — `AtmanRuntimeOptions::config` takes a `ConfigHub` instead of an optional configuration directory, preserving explicit authentication sources during construction and restoration.
+
 - **Embedded provider lifecycle construction** — `ProviderLifecycle::new` returns `Result`, and executor attachment returns `ProviderLifecycleError`. Provider connections must use `ProviderRegistry::with_models(hub.models().clone())`; mismatched configuration scopes are rejected.
 
 ### ✨ Features
+
+- **Persistent session configuration** — Session journals retain an explicit configuration source without credentials. Restored flows verify provider bindings before scheduling or consuming input, while history remains readable when project directories or configuration files are unavailable.
 
 - **Configuration-bound model scopes** — Runtime construction binds provider connections and model catalogs to the selected configuration and authentication sources. Shared configuration refreshes validate all active projections before publication, while separate authentication stores retain isolated catalogs and connection lifecycles.
 

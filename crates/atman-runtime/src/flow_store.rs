@@ -46,7 +46,26 @@ const NAMESPACE: &str = "runtime-v1";
 pub struct SessionDescriptor {
     pub id: Uuid,
     pub project_root: Option<PathBuf>,
+    pub configuration: SessionConfiguration,
     pub title: String,
+}
+
+/// Configuration is an explicit session binding, not a fallback inferred from the current process.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", content = "source", rename_all = "snake_case")]
+pub enum SessionConfiguration {
+    #[default]
+    HostProvided,
+    Atman(crate::config_hub::ConfigSource),
+}
+
+impl SessionDescriptor {
+    fn validate(&self) -> io::Result<()> {
+        if let SessionConfiguration::Atman(source) = &self.configuration {
+            source.validate().map_err(invalid)?;
+        }
+        Ok(())
+    }
 }
 
 /// Recorded source closure; reading history never requires the original project directory.
@@ -318,9 +337,13 @@ impl RuntimeStore {
     }
 
     pub fn create_session(&self, descriptor: SessionDescriptor) -> io::Result<SessionStore> {
+        descriptor.validate()?;
         let dir = self.root.join("sessions").join(descriptor.id.to_string());
         create_dir(&dir)?;
-        let owner = Arc::new(SessionOwner::acquire(&dir)?);
+        let owner = Arc::new(SessionOwner {
+            _lock: SessionOwner::lock(&dir)?,
+            descriptor: descriptor.clone(),
+        });
         ensure_dir(&dir.join("flows"))?;
         ensure_dir(&dir.join("artifacts"))?;
         let mut journal = Journal::create(&dir.join("events.jsonl"), descriptor.id)?;
@@ -345,7 +368,7 @@ impl RuntimeStore {
 
     pub fn open_session(&self, id: Uuid) -> io::Result<SessionStore> {
         let dir = self.root.join("sessions").join(id.to_string());
-        let owner = Arc::new(SessionOwner::acquire(&dir)?);
+        let owner_lock = SessionOwner::lock(&dir)?;
         let mut projection: Option<SessionProjection> = None;
         let mut cursor = None;
         let (journal, recovered_tail) =
@@ -353,6 +376,7 @@ impl RuntimeStore {
                 for fact in facts {
                     match (&mut projection, fact) {
                         (None, SessionFact::Created(descriptor)) if descriptor.id == id => {
+                            descriptor.validate()?;
                             projection = Some(SessionProjection {
                                 descriptor,
                                 flows: Vec::new(),
@@ -367,11 +391,16 @@ impl RuntimeStore {
                 cursor = Some(receipt);
                 Ok(())
             })?;
+        let projection = projection.ok_or_else(|| invalid("session creation was not committed"))?;
+        let owner = Arc::new(SessionOwner {
+            _lock: owner_lock,
+            descriptor: projection.descriptor.clone(),
+        });
         let mut store = SessionStore {
             dir,
             owner,
             journal,
-            projection: projection.ok_or_else(|| invalid("session creation was not committed"))?,
+            projection,
             cursor: cursor.ok_or_else(|| invalid("empty session journal"))?,
             projection_error: None,
             recovered_tail,
@@ -383,10 +412,11 @@ impl RuntimeStore {
 
 struct SessionOwner {
     _lock: File,
+    descriptor: SessionDescriptor,
 }
 
 impl SessionOwner {
-    fn acquire(dir: &Path) -> io::Result<Self> {
+    fn lock(dir: &Path) -> io::Result<File> {
         let mut options = private_file_options();
         let file = options
             .create(true)
@@ -395,7 +425,7 @@ impl SessionOwner {
             .write(true)
             .open(dir.join(".owner.lock"))?;
         fs2::FileExt::try_lock_exclusive(&file)?;
-        Ok(Self { _lock: file })
+        Ok(file)
     }
 }
 
@@ -567,6 +597,10 @@ pub struct FlowStore {
 }
 
 impl FlowStore {
+    pub fn session_descriptor(&self) -> &SessionDescriptor {
+        &self._owner.descriptor
+    }
+
     fn create(
         dir: &Path,
         owner: Arc<SessionOwner>,

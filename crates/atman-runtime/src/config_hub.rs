@@ -192,7 +192,60 @@ pub struct ConfigHub {
     models: Arc<crate::model_registry::ModelRegistry>,
 }
 
+/// Durable configuration identity. Credentials remain in their original stores.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ConfigSource {
+    config_dir: PathBuf,
+    auth_path: PathBuf,
+}
+
+impl ConfigSource {
+    pub fn config_dir(&self) -> &Path {
+        &self.config_dir
+    }
+
+    pub fn auth_path(&self) -> &Path {
+        &self.auth_path
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        if !self.config_dir.is_absolute()
+            || !self.auth_path.is_absolute()
+            || self.auth_path.parent() != Some(self.config_dir.as_path())
+            || self
+                .config_dir
+                .components()
+                .chain(self.auth_path.components())
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(ConfigError::Invalid(
+                "invalid configuration source paths".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl ConfigHub {
+    pub fn source(&self) -> ConfigSource {
+        ConfigSource {
+            config_dir: self.config_dir.clone(),
+            auth_path: self.auth_path.clone(),
+        }
+    }
+
+    /// Reopen an explicit source without accepting a changed filesystem alias or using global configuration.
+    pub fn from_source(source: &ConfigSource) -> Result<Self, ConfigError> {
+        source.validate()?;
+        let hub = Self::from_auth_path(&source.auth_path);
+        if hub.source() != *source {
+            return Err(ConfigError::Invalid(
+                "configuration source location has changed".into(),
+            ));
+        }
+        Ok(hub)
+    }
+
     pub fn global() -> Result<Self, ConfigError> {
         let dir = crate::storage::config_dir()
             .map_err(|error| ConfigError::Invalid(format!("config dir: {error}")))?;

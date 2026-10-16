@@ -362,7 +362,7 @@ async fn maybe_auto_compact_locked(
     providers: &crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
 ) {
-    if let Err(error) = session.bind_model_registry(providers.models().clone()) {
+    if let Err(error) = session.bind_provider_registry(providers) {
         session.emit_compact_warning(model, 0, 0, 0, &error.to_string());
         return;
     }

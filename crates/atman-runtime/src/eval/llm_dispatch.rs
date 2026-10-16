@@ -73,7 +73,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         .map(|p| (**p).clone())
         .unwrap_or_default();
     if let Some(session) = &ctx.session_runtime
-        && let Err(error) = session.bind_model_registry(providers_reg.models().clone())
+        && let Err(error) = session.bind_provider_registry(&providers_reg)
     {
         return Value::Err(error);
     }

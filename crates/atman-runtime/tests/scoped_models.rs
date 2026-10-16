@@ -138,7 +138,7 @@ model = "primary"
     let options = |hub: &ConfigHub| AtmanRuntimeOptions {
         events: atman_runtime::event::EventSink::new(),
         mock: false,
-        config_dir: Some(hub.config_dir().to_path_buf()),
+        config: hub.clone(),
         project_root: project.path().to_path_buf(),
         home_dir: None,
         workspace_generation: "scoped-runtime".into(),

@@ -106,6 +106,10 @@ impl FlowWorker {
             if request.messages.is_empty() {
                 return Err(invalid("a turn requires selected pending input"));
             }
+            worker
+                .context()
+                .bind_provider_registry(&executor.providers)
+                .map_err(invalid)?;
             let entry = &store.descriptor().entry;
             let program = crate::source_program::load_program_from_bundle(
                 &entry.bundle,

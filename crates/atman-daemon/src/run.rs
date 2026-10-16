@@ -444,7 +444,7 @@ async fn run_flow_inner(
     let outcome = atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
         events: session.sink().clone(),
         mock: false,
-        config_dir: config_dir.clone(),
+        config: crate::bootstrap::resolve_config_hub(config_dir.as_deref())?,
         project_root: project_root.clone(),
         home_dir,
         workspace_generation,
@@ -882,7 +882,7 @@ mod tests {
                     atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
                         events: atman_runtime::event::EventSink::new(),
                         mock: true,
-                        config_dir: None,
+                        config: atman_runtime::config_hub::ConfigHub::global().unwrap(),
                         project_root: repository.path().to_path_buf(),
                         home_dir: None,
                         workspace_generation: state.daemon_generation().to_owned(),
@@ -971,7 +971,7 @@ mod tests {
                 let options = || atman_runtime::AtmanRuntimeOptions {
                     events: atman_runtime::event::EventSink::new(),
                     mock: false,
-                    config_dir: Some(config.path().to_path_buf()),
+                    config: atman_runtime::config_hub::ConfigHub::from_config_dir(config.path()),
                     project_root: project.path().to_path_buf(),
                     home_dir: Some(home.path().to_path_buf()),
                     workspace_generation: "launcher-root-test".into(),

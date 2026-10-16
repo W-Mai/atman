@@ -97,6 +97,7 @@ fn completion_filters_replay_one_fact_without_fabricating_final_answers() {
     let id = Uuid::new_v4();
     let mut session = root
         .create_session(SessionDescriptor {
+            configuration: Default::default(),
             id,
             title: "Completion subscriptions".into(),
             project_root: None,
@@ -200,6 +201,7 @@ fn synchronous_results_skip_only_the_initial_turn_and_preserve_other_subscribers
     let id = Uuid::new_v4();
     let mut session = root
         .create_session(SessionDescriptor {
+            configuration: Default::default(),
             id,
             title: "Synchronous results".into(),
             project_root: None,
@@ -290,6 +292,7 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
     let session_id = Uuid::new_v4();
     let mut session = root
         .create_session(SessionDescriptor {
+            configuration: Default::default(),
             id: session_id,
             title: "Subscriptions".into(),
             project_root: None,
@@ -444,6 +447,7 @@ fn cancellation_close_and_source_pages_cannot_skip_or_reactivate_subscriptions()
     let id = Uuid::new_v4();
     let mut session = root
         .create_session(SessionDescriptor {
+            configuration: Default::default(),
             id,
             title: "Watch".into(),
             project_root: None,
@@ -513,6 +517,7 @@ fn torn_observation_does_not_advance_cursor_without_its_input() {
     let id = Uuid::new_v4();
     let mut session = root
         .create_session(SessionDescriptor {
+            configuration: Default::default(),
             id,
             title: "Recovery".into(),
             project_root: None,
@@ -566,6 +571,7 @@ fn self_subscription_does_not_turn_its_own_cursor_commits_into_new_work() {
     let id = Uuid::new_v4();
     let mut session = root
         .create_session(SessionDescriptor {
+            configuration: Default::default(),
             id,
             title: "Self watch".into(),
             project_root: None,
@@ -603,6 +609,7 @@ fn reply_registration_and_subscription_cancellation_keep_one_durable_owner() {
     let id = Uuid::new_v4();
     let mut session = root
         .create_session(SessionDescriptor {
+            configuration: Default::default(),
             id,
             title: "Replies".into(),
             project_root: None,

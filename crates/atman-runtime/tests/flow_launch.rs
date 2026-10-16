@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 fn session_info() -> SessionDescriptor {
     SessionDescriptor {
+        configuration: Default::default(),
         id: Uuid::new_v4(),
         title: "Launch".into(),
         project_root: None,

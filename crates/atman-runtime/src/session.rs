@@ -266,6 +266,7 @@ impl InteractionServices {
 
 pub struct Session {
     flow_instance: Option<crate::flow_store::FlowRef>,
+    configuration: crate::flow_store::SessionConfiguration,
     models: std::sync::OnceLock<std::sync::Arc<crate::model_registry::ModelRegistry>>,
     instance_writer: std::sync::OnceLock<crate::flow_runtime::context::ContextWriter>,
     pub goal_control: std::sync::Arc<crate::goal::GoalController>,
@@ -1135,6 +1136,7 @@ impl Session {
         goal_control.bind_events(sink.clone());
         Ok(Self {
             flow_instance: None,
+            configuration: Default::default(),
             instance_writer: Default::default(),
             models: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
@@ -1367,6 +1369,7 @@ impl Session {
         goal_control.bind_events(sink.clone());
         Ok(Self {
             flow_instance: None,
+            configuration: Default::default(),
             instance_writer: Default::default(),
             models: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
@@ -1453,6 +1456,7 @@ impl Session {
         goal_control.bind_events(sink.clone());
         Self {
             flow_instance: None,
+            configuration: Default::default(),
             instance_writer: Default::default(),
             models: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
@@ -1502,11 +1506,19 @@ impl Session {
 
     /// Isolated execution context for one persistent instance. Persistence is owned by its FlowStore.
     pub fn open_instance_context(address: crate::flow_store::FlowRef) -> Self {
-        Self::restore_instance_context(address, Vec::new(), Vec::new(), None, None)
+        Self::restore_instance_context(
+            address,
+            Default::default(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+        )
     }
 
     pub(crate) fn restore_instance_context(
         address: crate::flow_store::FlowRef,
+        configuration: crate::flow_store::SessionConfiguration,
         messages: Vec<Message>,
         history: Vec<Message>,
         checkpoint: Option<&[Message]>,
@@ -1523,6 +1535,7 @@ impl Session {
         context.goal_control.bind_events(context.sink.clone());
         context.watch_hub = context.goal_control.watch_hub.clone();
         context.flow_instance = Some(address);
+        context.configuration = configuration;
         // Seed the same message projection used by live delivery without emitting new events or notifications.
         // These sequence numbers are local projection positions, not authoritative journal cursors.
         let initial: Vec<_> = messages
@@ -2067,6 +2080,31 @@ impl Session {
 
     pub fn last_model(&self) -> String {
         self.watch.context.borrow().model.clone()
+    }
+
+    /// Validate durable configuration before binding this context to live provider connections.
+    pub fn bind_provider_registry(
+        &self,
+        providers: &crate::provider::ProviderRegistry,
+    ) -> Result<(), crate::error::RuntimeError> {
+        if self.flow_instance.is_some() {
+            let current = providers
+                .provider_lifecycle()
+                .map(|lifecycle| lifecycle.config_hub().source());
+            let matches = match (&self.configuration, &current) {
+                (crate::flow_store::SessionConfiguration::HostProvided, None) => true,
+                (crate::flow_store::SessionConfiguration::Atman(expected), Some(actual)) => {
+                    expected == actual
+                }
+                _ => false,
+            };
+            if !matches {
+                return Err(crate::error::RuntimeError::ToolFailed(
+                    "provider configuration does not match the persistent session source".into(),
+                ));
+            }
+        }
+        self.bind_model_registry(providers.models().clone())
     }
 
     /// Bind the context to one model directory without allowing another host scope to replace it.

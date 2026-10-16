@@ -307,7 +307,7 @@ impl Executor {
             ));
         }
         if let Some(session) = &invocation.session {
-            session.bind_model_registry(self.providers.models().clone())?;
+            session.bind_provider_registry(&self.providers)?;
         }
         if let Some(binding) = &invocation.instance {
             binding.claim()?;

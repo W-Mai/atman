@@ -7656,14 +7656,13 @@ fn bootstrap_opts_for(
     static WORKSPACE_GENERATION: OnceLock<String> = OnceLock::new();
 
     let home_dir = std::env::var("HOME").ok().map(std::path::PathBuf::from);
-    let config_dir = config_dir().ok();
     let workspace_generation = WORKSPACE_GENERATION
         .get_or_init(|| uuid::Uuid::now_v7().to_string())
         .clone();
     Ok(atman_runtime::AtmanRuntimeOptions {
         events,
         mock,
-        config_dir,
+        config: atman_runtime::config_hub::ConfigHub::global()?,
         project_root,
         home_dir,
         workspace_generation,

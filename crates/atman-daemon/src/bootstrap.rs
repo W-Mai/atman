@@ -391,7 +391,7 @@ mod tests {
                 let outcome = atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
                     events: EventSink::new(),
                     mock: true,
-                    config_dir: Some(config.path().to_path_buf()),
+                    config: atman_runtime::config_hub::ConfigHub::from_config_dir(config.path()),
                     project_root: project.path().to_path_buf(),
                     home_dir: Some(home.path().to_path_buf()),
                     workspace_generation: "bootstrap-test-generation".into(),
@@ -459,7 +459,9 @@ enabled = true
                     atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
                         events: EventSink::new(),
                         mock: false,
-                        config_dir: Some(config.path().to_path_buf()),
+                        config: atman_runtime::config_hub::ConfigHub::from_config_dir(
+                            config.path(),
+                        ),
                         project_root: project.path().to_path_buf(),
                         home_dir: Some(home.path().to_path_buf()),
                         workspace_generation: "selected-config-provider-test".into(),
@@ -534,7 +536,9 @@ enabled = true
                     atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
                         events: EventSink::new(),
                         mock: false,
-                        config_dir: Some(config.path().to_path_buf()),
+                        config: atman_runtime::config_hub::ConfigHub::from_config_dir(
+                            config.path(),
+                        ),
                         project_root: project.path().to_path_buf(),
                         home_dir: Some(home.path().to_path_buf()),
                         workspace_generation: "oauth-config-test-generation".into(),
@@ -588,7 +592,9 @@ enabled = true
                     atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
                         events: EventSink::new(),
                         mock: false,
-                        config_dir: Some(config.path().to_path_buf()),
+                        config: atman_runtime::config_hub::ConfigHub::from_config_dir(
+                            config.path(),
+                        ),
                         project_root: project.path().to_path_buf(),
                         home_dir: None,
                         workspace_generation: "malformed-auth-test".into(),

@@ -18,7 +18,7 @@ fn atman_runtime_builds_and_runs_without_daemon() {
             let runtime = AtmanRuntime::build(AtmanRuntimeOptions {
                 events: atman_runtime::event::EventSink::new(),
                 mock: true,
-                config_dir: Some(config.path().to_path_buf()),
+                config: atman_runtime::config_hub::ConfigHub::from_config_dir(config.path()),
                 project_root: project.path().to_path_buf(),
                 home_dir: None,
                 workspace_generation: "embedded-runtime-test".into(),

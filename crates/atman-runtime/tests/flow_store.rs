@@ -19,6 +19,83 @@ use uuid::Uuid;
 
 mod common;
 
+#[cfg(unix)]
+#[test]
+fn configuration_reopen_rejects_a_directory_replaced_by_an_alias() {
+    use atman_runtime::config_hub::ConfigHub;
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("config");
+    let replacement = dir.path().join("other");
+    std::fs::create_dir_all(&original).unwrap();
+    std::fs::create_dir_all(&replacement).unwrap();
+    let source = ConfigHub::from_auth_path(original.join("selected.json")).source();
+    let encoded = serde_json::to_string(&source).unwrap();
+    let restored = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(ConfigHub::from_source(&restored).unwrap().source(), source);
+    std::fs::remove_dir(&original).unwrap();
+    std::os::unix::fs::symlink(&replacement, &original).unwrap();
+    assert!(
+        ConfigHub::from_source(&restored)
+            .unwrap_err()
+            .to_string()
+            .contains("location has changed")
+    );
+    assert!(!replacement.join(".config.toml.lock").exists());
+}
+
+#[test]
+fn configuration_source_replays_without_accessing_project_or_credential_files() {
+    use atman_runtime::config_hub::{ConfigHub, ConfigSource};
+    use atman_runtime::flow_store::SessionConfiguration;
+    let data = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let source = ConfigHub::from_auth_path(config.path().join("selected-account.json")).source();
+    std::fs::write(source.auth_path(), "private-credential-test-value").unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let mut info = session_descriptor();
+    info.project_root = Some(project.path().to_path_buf());
+    info.configuration = SessionConfiguration::Atman(source.clone());
+    let mut store = root.create_session(info.clone()).unwrap();
+    let flow = descriptor(info.id);
+    drop(store.create_flow(flow.clone()).unwrap());
+    let journal = std::fs::read_to_string(store.dir().join("events.jsonl")).unwrap();
+    assert!(journal.contains("selected-account.json"));
+    assert!(!journal.contains("private-credential-test-value"));
+    drop(store);
+    config.close().unwrap();
+    project.close().unwrap();
+    let restored = root.open_session(info.id).unwrap();
+    assert_eq!(&restored.projection().descriptor, &info);
+    assert_eq!(
+        restored
+            .open_flow(&flow.address.instance_id)
+            .unwrap()
+            .session_descriptor(),
+        &info
+    );
+    assert!(!source.config_dir().exists());
+
+    let invalid_source: ConfigSource = serde_json::from_value(serde_json::json!({
+        "config_dir": "relative", "auth_path": "relative/auth.json"
+    }))
+    .unwrap();
+    let mut invalid = info.clone();
+    invalid.id = Uuid::new_v4();
+    invalid.configuration = SessionConfiguration::Atman(invalid_source);
+    assert!(root.create_session(invalid.clone()).is_err());
+    assert!(
+        !root
+            .root()
+            .join("sessions")
+            .join(invalid.id.to_string())
+            .exists()
+    );
+    let mut missing = serde_json::to_value(&info).unwrap();
+    missing.as_object_mut().unwrap().remove("configuration");
+    assert!(serde_json::from_value::<SessionDescriptor>(missing).is_err());
+}
+
 #[test]
 fn planning_commits_replay_exactly_and_reconcile_retries_without_rolling_back_state() {
     use atman_runtime::flow_store::planning::{PlanningEdit, PlanningOutcome, PlanningRequest};
@@ -659,6 +736,7 @@ fn descriptor(session: Uuid) -> FlowDescriptor {
 
 fn session_descriptor() -> SessionDescriptor {
     SessionDescriptor {
+        configuration: Default::default(),
         id: Uuid::new_v4(),
         project_root: Some("/missing/project".into()),
         title: "Example".into(),

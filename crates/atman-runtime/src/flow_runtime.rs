@@ -78,6 +78,7 @@ impl FlowWorker {
         let (store, context) = tokio::task::spawn_blocking(move || {
             let context = Arc::new(Session::restore_instance_context(
                 store.descriptor().address.clone(),
+                store.session_descriptor().configuration.clone(),
                 store.context_messages(),
                 store.history_messages(),
                 store
@@ -428,6 +429,7 @@ mod tests {
         let session_id = Uuid::new_v4();
         let mut session = root
             .create_session(SessionDescriptor {
+                configuration: Default::default(),
                 id: session_id,
                 project_root: None,
                 title: "Worker".into(),

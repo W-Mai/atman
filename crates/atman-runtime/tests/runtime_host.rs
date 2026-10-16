@@ -18,10 +18,119 @@ use uuid::Uuid;
 
 fn session_descriptor() -> SessionDescriptor {
     SessionDescriptor {
+        configuration: Default::default(),
         id: Uuid::new_v4(),
         title: "Workspace".into(),
         project_root: None,
     }
+}
+
+#[tokio::test]
+async fn persistent_configuration_is_checked_before_scheduling_or_consuming_input() {
+    use atman_runtime::config_hub::ConfigHub;
+    use atman_runtime::flow_store::SessionConfiguration;
+    use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions};
+    let dir = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let hub = ConfigHub::from_auth_path(config.path().join("account.json"));
+    let mut info = session_descriptor();
+    info.project_root = Some(project.path().to_path_buf());
+    info.configuration = SessionConfiguration::Atman(hub.source());
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let mut store = root.create_session(info.clone()).unwrap();
+    let descriptor = flow_descriptor(info.id);
+    let worker = FlowWorker::start(store.create_flow(descriptor.clone()).unwrap())
+        .await
+        .unwrap();
+    change(&worker, FlowTransition::Activated).await;
+    let options = |config| AtmanRuntimeOptions {
+        events: atman_runtime::event::EventSink::new(),
+        mock: false,
+        config,
+        project_root: project.path().to_path_buf(),
+        home_dir: None,
+        workspace_generation: "persistent-config-test".into(),
+    };
+    let wrong = AtmanRuntime::build(options(ConfigHub::from_config_dir(config.path())))
+        .await
+        .unwrap();
+    let runtime = AtmanRuntime::build(options(hub.clone())).await.unwrap();
+    let mut request = peer_request(worker.address(), worker.address());
+    request.sender = SenderIdentity::User(Uuid::new_v4());
+    worker.accept_input(request, |_| Ok(())).await.unwrap();
+    let before = worker.snapshot().await.unwrap();
+    assert!(worker.schedule(wrong.executor.clone(), prepare).is_err());
+    for executor in [wrong.executor.clone(), Executor::new()] {
+        let request = prepare(&before).unwrap().unwrap();
+        let error = worker.start_turn(executor, request).await.err().unwrap();
+        assert!(error.to_string().contains("session source"), "{error}");
+    }
+    let after = worker.snapshot().await.unwrap();
+    assert_eq!(after.cursor, before.cursor);
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.pending.len(), 1);
+    worker
+        .context()
+        .update_trust(
+            atman_runtime::trust::TrustConfig {
+                mode: atman_runtime::trust::TrustMode::Reckless,
+                ..Default::default()
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+    worker
+        .start_turn(runtime.executor.clone(), prepare(&after).unwrap().unwrap())
+        .await
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert_eq!(
+        worker
+            .context()
+            .messages()
+            .iter()
+            .filter(|message| message.origin == MessageOrigin::FinalAnswer)
+            .count(),
+        1
+    );
+    drop(worker.shutdown().await.unwrap());
+    drop(store);
+    drop(runtime);
+    drop(wrong);
+    drop(hub);
+
+    let store = root.open_session(info.id).unwrap();
+    let SessionConfiguration::Atman(source) = &store.projection().descriptor.configuration else {
+        panic!("missing source")
+    };
+    let restored_hub = ConfigHub::from_source(source).unwrap();
+    assert_eq!(
+        restored_hub.source().auth_path().file_name().unwrap(),
+        "account.json"
+    );
+    let runtime = AtmanRuntime::build(options(restored_hub)).await.unwrap();
+    let worker = FlowWorker::start(store.open_flow(&descriptor.address.instance_id).unwrap())
+        .await
+        .unwrap();
+    assert!(worker.snapshot().await.unwrap().pending.is_empty());
+    assert_eq!(
+        worker
+            .context()
+            .messages()
+            .iter()
+            .filter(|message| message.origin == MessageOrigin::FinalAnswer)
+            .count(),
+        1
+    );
+    // Attaching to an idle restored flow retains history and does not invent a turn.
+    let cursor = worker.snapshot().await.unwrap().cursor;
+    let scheduler = worker.schedule(runtime.executor, |_| Ok(None)).unwrap();
+    scheduler.stop().await.unwrap();
+    assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
+    drop(worker.shutdown().await.unwrap());
 }
 
 fn flow_descriptor(session: Uuid) -> FlowDescriptor {
