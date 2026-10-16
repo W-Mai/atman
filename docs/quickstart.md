@@ -364,6 +364,8 @@ atman mcp call jira update_issue '{"key":"PROJ-1","summary":"Updated"}' --allow-
 
 #### Connection lifetime
 
+`AtmanRuntime::build` owns configured MCP connections for CLI, daemon, and embedded execution. Executor clones and their flows share that service; session views only subscribe to its status. `executor.tool_ctx.mcp_service()` provides status subscriptions, configuration reload, and an async shutdown that waits for connection cleanup. Reload removes old adapters and cancels connections still initializing or refreshing; results from a superseded configuration cannot restore them. Empty or disabled-only configurations do not start a worker thread. A server failure remains visible in `mcp.status`; only calls that explicitly require that server fail.
+
 For embedded hosts, `McpClient::connect_config_in(config, Some(absolute_directory))` fixes a stdio server's working directory, including reconnects. Project-backed CLI startup supplies the runtime's bound project root. `connect_config` captures the process working directory when connecting. `McpClient::shutdown()` closes the connection, cancels pending requests and sampling tasks, and prevents subsequent calls or catalog refreshes from reconnecting. Dropping the final client releases its transport; a failed or abandoned initialization also releases its child process. Stdio stderr is drained without being rendered into the terminal UI.
 
 #### HTTP MCP configuration

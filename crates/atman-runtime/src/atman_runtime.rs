@@ -103,6 +103,12 @@ impl AtmanRuntime {
                 },
             )]);
         }
+        executor.tool_ctx.mcp_service = Some(Arc::new(crate::mcp_service::McpService::start(
+            auth_hub.clone(),
+            project_root.unwrap_or(auth_hub.config_dir()).to_path_buf(),
+            executor.tools.clone(),
+            executor.providers.clone(),
+        )?));
         Ok(Self {
             executor,
             provider_catalog_refresh_plan,

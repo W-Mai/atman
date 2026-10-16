@@ -41,6 +41,7 @@ pub mod known_models;
 pub mod lifecycle;
 pub mod mcp;
 pub mod mcp_config;
+pub mod mcp_service;
 pub mod memory;
 pub mod message;
 pub mod message_stream;

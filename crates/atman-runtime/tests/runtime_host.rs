@@ -26,6 +26,131 @@ fn session_descriptor() -> SessionDescriptor {
 }
 
 #[tokio::test]
+async fn peer_flows_share_runtime_mcp_without_owning_connections() {
+    use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};
+    let dir = tempfile::tempdir().unwrap();
+    let config = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
+    let script = dir.path().join("server.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, os, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if "id" not in req:
+        continue
+    method = req["method"]
+    if method == "initialize":
+        result = {"protocolVersion": "2024-11-05", "capabilities": {}}
+    elif method == "tools/list":
+        result = {"tools": [{"name": "identify", "inputSchema": {"type": "object"}}]}
+    else:
+        result = {"content": [{"type": "text", "text": str(os.getpid())}]}
+    print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": result}), flush=True)
+"#,
+    )
+    .unwrap();
+    config
+        .save_mcp(&[atman_runtime::mcp::McpServerConfig::stdio(
+            "shared",
+            "python3",
+            vec![script.to_string_lossy().into()],
+            atman_runtime::tool::Tier::Zero,
+            5000,
+        )])
+        .unwrap();
+    let runtime = AtmanRuntime::build(AtmanRuntimeOptions {
+        events: atman_runtime::event::EventSink::new(),
+        mock: false,
+        config: config.clone(),
+        project: None,
+        home_dir: None,
+        workspace_generation: "peer-mcp".into(),
+    })
+    .await
+    .unwrap();
+    let child_path = dir.path().join("mcp-child.at");
+    let helper = r#"
+        flow identify() -> any {
+            mcp.await(server: "shared")
+            return mcp.call(server: "shared", tool: "identify", input: {})
+        }
+    "#;
+    std::fs::write(
+        &child_path,
+        format!(
+            r#"
+        flow child() -> any {{ return identify().await }}
+        {helper}
+    "#
+        ),
+    )
+    .unwrap();
+    let reference = serde_json::to_string(&format!("{}@child", child_path.display())).unwrap();
+    let source = format!(
+        r#"
+        flow main() -> any {{
+            contract {{ capabilities {{ shell: true }} }}
+            before = identify().await
+            inventory = flow.instances()
+            child = flow.spawn(flow: {reference}, spawn_token: inventory.spawn_token, async: false)
+            return [before, child, identify().await]
+        }}
+        {helper}
+    "#
+    );
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let mut info = session_descriptor();
+    info.configuration = atman_runtime::flow_store::SessionConfiguration::Atman(config.source());
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let parent = session
+        .create_flow(program_descriptor(info.id, source))
+        .await
+        .unwrap();
+    change(&parent, FlowTransition::Activated).await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        invoke(&parent, runtime.executor.clone()),
+    )
+    .await
+    .unwrap()
+    .result
+    .unwrap()
+    .to_json()
+    .unwrap();
+    assert_eq!(result[0], result[1]);
+    assert_eq!(result[0], result[2]);
+    assert!(parent.context().subscribe_context().borrow().mcp_servers[0].is_ok());
+    let catalog = session.snapshot().await.unwrap();
+    let child_id = catalog
+        .catalog
+        .flows
+        .iter()
+        .find(|entry| entry.id != parent.address().instance_id)
+        .unwrap()
+        .id
+        .clone();
+    let child = session.open_flow(child_id).await.unwrap();
+    assert!(child.context().subscribe_context().borrow().mcp_servers[0].is_ok());
+    runtime
+        .executor
+        .tool_ctx
+        .mcp_service()
+        .unwrap()
+        .shutdown()
+        .await;
+    for context in [parent.context(), child.context()] {
+        assert!(matches!(
+            context.subscribe_context().borrow().mcp_servers[0].state,
+            atman_runtime::mcp::McpServerState::Disconnected { .. }
+        ));
+    }
+}
+
+#[tokio::test]
 async fn runtime_projects_bind_rules_and_spawned_flows_without_borrowing_another_project() {
     use atman_runtime::config_hub::ConfigHub;
     use atman_runtime::flow_store::SessionConfiguration;

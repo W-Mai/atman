@@ -806,11 +806,7 @@ async fn cmd_run_loaded(
         .await;
     }
     executor.source_dir = file.parent().map(|p| p.to_path_buf());
-    let _mcp_shutdown = atman_daemon::bootstrap::spawn_mcp_boot(
-        executor.clone(),
-        session.clone(),
-        config_dir().ok().as_deref(),
-    );
+    session.bind_executor(&executor)?;
     attach_memory_stores(&mut executor, &session, ephemeral)?;
     executor.tool_ctx.prompt_resolver = Some(std::sync::Arc::new(
         atman_runtime::rendezvous::AutoResolveResolver {
@@ -1645,7 +1641,6 @@ struct PrebuiltSession {
     /// Notifications collected during boot, for seamless toast continuity.
     boot_notifications: Vec<atman_runtime::notify::Notification>,
     provider_catalog_refresh_plan: Vec<String>,
-    mcp_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 async fn prebuild_session(
@@ -1775,11 +1770,7 @@ async fn prebuild_session(
     emit(BootStepId::RegisterProviders, false, true);
 
     emit(BootStepId::AttachMcp, true, false);
-    let mcp_shutdown_tx = atman_daemon::bootstrap::spawn_mcp_boot(
-        executor.clone(),
-        session.clone(),
-        config_dir().ok().as_deref(),
-    );
+    session.bind_executor(&executor)?;
     emit(BootStepId::AttachMcp, false, true);
 
     emit(BootStepId::AttachMemory, true, false);
@@ -1803,7 +1794,6 @@ async fn prebuild_session(
         intro,
         boot_notifications: Vec::new(),
         provider_catalog_refresh_plan,
-        mcp_shutdown_tx,
     })
 }
 
@@ -2168,7 +2158,6 @@ async fn cmd_repl_once(
         intro,
         boot_notifications,
         mut provider_catalog_refresh_plan,
-        mcp_shutdown_tx,
     } = prebuilt;
 
     let lifecycles = match config_dir() {
@@ -2271,7 +2260,6 @@ async fn cmd_repl_once(
                 std::sync::Arc::new(store)
             });
         let reporter_for_ctrl = reporter.clone();
-        let mut mcp_shutdown_tx = mcp_shutdown_tx;
         let ctrl_task = tokio::spawn(async move {
             let mut provider_mutations = tokio::task::JoinSet::new();
             let mut organization_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -2872,15 +2860,17 @@ async fn cmd_repl_once(
                         });
                     }
                     atman_tui::TuiControl::McpReload => {
-                        if let Some(tx) = mcp_shutdown_tx.take() {
-                            let _ = tx.send(());
+                        if let Some(service) = executor_for_ctrl.tool_ctx.mcp_service() {
+                            match service.reload() {
+                                Ok(()) => {
+                                    let _ =
+                                        cmd_tx_for_models.send(atman_tui::TuiCommand::McpReloaded);
+                                }
+                                Err(error) => {
+                                    atman_runtime::notify!(error, "MCP reload failed: {error}")
+                                }
+                            }
                         }
-                        mcp_shutdown_tx = atman_daemon::bootstrap::spawn_mcp_boot(
-                            executor_for_ctrl.clone(),
-                            session_for_ctrl.clone(),
-                            crate::config_dir().ok().as_deref(),
-                        );
-                        let _ = cmd_tx_for_models.send(atman_tui::TuiCommand::McpReloaded);
                     }
                     atman_tui::TuiControl::ListKnowledge => {
                         let result = match &knowledge_store_for_ctrl {

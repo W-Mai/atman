@@ -76,6 +76,37 @@ enum ReadinessMode {
     Optional,
 }
 
+enum StatusSource {
+    Service(tokio::sync::watch::Receiver<Vec<McpServerStatus>>),
+    Context(tokio::sync::watch::Receiver<crate::session::ContextSnapshot>),
+}
+
+impl StatusSource {
+    fn from_context(ctx: &ToolCtx) -> Option<Self> {
+        ctx.mcp_service()
+            .map(|service| Self::Service(service.subscribe()))
+            .or_else(|| {
+                ctx.session_runtime
+                    .as_ref()
+                    .map(|session| Self::Context(session.subscribe_context()))
+            })
+    }
+
+    fn snapshot(&self) -> Vec<McpServerStatus> {
+        match self {
+            Self::Service(source) => source.borrow().clone(),
+            Self::Context(source) => source.borrow().mcp_servers.clone(),
+        }
+    }
+
+    async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
+        match self {
+            Self::Service(source) => source.changed().await,
+            Self::Context(source) => source.changed().await,
+        }
+    }
+}
+
 pub async fn await_requested_tools(args: &ToolArgs, ctx: &ToolCtx) -> Result<(), RuntimeError> {
     let Some(Value::List(items)) = args.named("tools") else {
         return Ok(());
@@ -120,24 +151,30 @@ async fn await_selectors(
     if selectors.is_empty() {
         return Ok(());
     }
-    let Some(session) = ctx.session_runtime.as_ref() else {
+    let Some(context) = StatusSource::from_context(ctx) else {
         return Ok(());
     };
-    let mut context = session.subscribe_context();
+    let required = required_servers(selectors, &context.snapshot());
+    await_servers(required, context, ctx, timeout, mode).await
+}
+
+async fn await_servers(
+    required: BTreeSet<String>,
+    mut context: StatusSource,
+    ctx: &ToolCtx,
+    timeout: Duration,
+    mode: ReadinessMode,
+) -> Result<(), RuntimeError> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        let statuses = context.borrow().mcp_servers.clone();
-        let required = required_servers(selectors, &statuses);
-        if required.is_empty() {
-            return Ok(());
-        }
+        let statuses = context.snapshot();
         let mut pending = Vec::new();
-        for server in required {
-            let status = statuses.iter().find(|status| status.name == server);
+        for server in &required {
+            let status = statuses.iter().find(|status| &status.name == server);
             match status.map(|status| &status.state) {
                 Some(McpServerState::Connected { .. }) => {}
                 Some(McpServerState::Pending | McpServerState::Connecting) => {
-                    pending.push(server);
+                    pending.push(server.as_str());
                 }
                 Some(McpServerState::Disabled) => {
                     if mode == ReadinessMode::Required {
@@ -154,6 +191,11 @@ async fn await_selectors(
                             "MCP server `{server}` is unavailable: {message}"
                         )));
                     }
+                }
+                None if mode == ReadinessMode::Required => {
+                    return Err(RuntimeError::ToolFailed(format!(
+                        "MCP server `{server}` is no longer configured"
+                    )));
                 }
                 None => {}
             }
@@ -375,12 +417,11 @@ impl Tool for McpStatus {
                 }
                 None => None,
             };
-            let session = ctx.session_runtime.as_ref().ok_or_else(|| {
-                RuntimeError::ToolFailed("mcp.status: no session available".into())
+            let source = StatusSource::from_context(ctx).ok_or_else(|| {
+                RuntimeError::ToolFailed("mcp.status: no service or session available".into())
             })?;
-            let snapshot = session.subscribe_context().borrow().clone();
+            let snapshot = source.snapshot();
             let statuses = snapshot
-                .mcp_servers
                 .iter()
                 .filter(|status| server.is_none_or(|server| status.name == server))
                 .filter(|status| {
@@ -565,16 +606,10 @@ impl Tool for McpAwait {
                     "MCP server `{server}` was not allowed by the LLM request that produced this call"
                 )));
             }
-            let session = ctx.session_runtime.as_ref().ok_or_else(|| {
-                RuntimeError::ToolFailed("mcp.await: no session available".into())
+            let source = StatusSource::from_context(ctx).ok_or_else(|| {
+                RuntimeError::ToolFailed("mcp.await: no service or session available".into())
             })?;
-            if !session
-                .subscribe_context()
-                .borrow()
-                .mcp_servers
-                .iter()
-                .any(|status| status.name == server)
-            {
+            if !source.snapshot().iter().any(|status| status.name == server) {
                 return Err(RuntimeError::ToolFailed(format!(
                     "MCP server `{server}` is not configured"
                 )));
@@ -589,8 +624,9 @@ impl Tool for McpAwait {
                     });
                 }
             };
-            await_selectors(
-                &[format!("mcp.{server}.*")],
+            await_servers(
+                BTreeSet::from([server]),
+                source,
                 ctx,
                 Duration::from_secs(timeout),
                 ReadinessMode::Required,

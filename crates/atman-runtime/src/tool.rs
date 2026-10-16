@@ -103,6 +103,7 @@ enum ProjectBinding {
 
 #[derive(Clone, Default)]
 pub struct ToolCtx {
+    pub(crate) mcp_service: Option<Arc<crate::mcp_service::McpService>>,
     pub(crate) vm_run_options: Option<atman_rt::VmRunOptions>,
     pub(crate) instance_publication: Option<crate::flow_runtime::InstancePublication>,
     pub(crate) peer_client: Option<crate::flow_runtime::access::FlowClient>,
@@ -354,6 +355,10 @@ impl ToolExposureRegistry {
 }
 
 impl ToolCtx {
+    pub fn mcp_service(&self) -> Option<&Arc<crate::mcp_service::McpService>> {
+        self.mcp_service.as_ref()
+    }
+
     pub fn project(&self) -> Option<&crate::storage::ProjectContext> {
         match &self.project_binding {
             ProjectBinding::Unbound => None,

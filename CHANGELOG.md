@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **MCP bootstrap ownership** — `bootstrap::spawn_mcp_boot` is removed. `AtmanRuntime::build` starts the connection service; embedded callers use `executor.tool_ctx.mcp_service()` to subscribe, reload, or shut it down.
+
 - **Memory tool construction** — Goal, Todo, and Plan tool structs accept `Option<Arc<Store>>` for explicit legacy storage. Their defaults use invocation context without creating file stores; `tools::register_memory` retains its existing signature.
 
 - **Runtime project binding** — `AtmanRuntimeOptions::project` accepts an optional `ProjectContext` instead of a project path. Persistent session descriptors record the same project and storage binding explicitly.
@@ -17,6 +19,8 @@ All notable changes to atman are documented in this file.
 - **Embedded provider lifecycle construction** — `ProviderLifecycle::new` returns `Result`, and executor attachment returns `ProviderLifecycleError`. Provider connections must use `ProviderRegistry::with_models(hub.models().clone())`; mismatched configuration scopes are rejected.
 
 ### ✨ Features
+
+- **Runtime MCP services** — CLI, daemon, and embedded runtimes share connection ownership across their flows. Session views subscribe without retaining connections. Reload cancels superseded initialization and refresh tasks, removes revoked adapters, and rejects stale catalog updates. Status and readiness tools work without a session view; explicit waits fail when their server is removed.
 
 - **Owned MCP connections** — Stdio connections retain their working directory across reconnects. Explicit shutdown cancels pending calls and sampling tasks without reconnecting, and failed or abandoned initialization releases subprocesses. Stderr draining prevents a verbose server from blocking its protocol output.
 

@@ -265,6 +265,7 @@ impl InteractionServices {
 }
 
 pub struct Session {
+    mcp_projection: std::sync::Mutex<Option<std::sync::Arc<crate::mcp_service::McpProjection>>>,
     flow_instance: Option<crate::flow_store::FlowRef>,
     configuration: crate::flow_store::SessionConfiguration,
     project: Option<crate::storage::ProjectContext>,
@@ -1141,6 +1142,7 @@ impl Session {
             project: None,
             instance_writer: Default::default(),
             models: Default::default(),
+            mcp_projection: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
@@ -1375,6 +1377,7 @@ impl Session {
             project: None,
             instance_writer: Default::default(),
             models: Default::default(),
+            mcp_projection: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
@@ -1463,6 +1466,7 @@ impl Session {
             project: None,
             instance_writer: Default::default(),
             models: Default::default(),
+            mcp_projection: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
@@ -2099,7 +2103,30 @@ impl Session {
                 "executor project does not match the persistent session binding".into(),
             ));
         }
-        self.bind_provider_registry(&executor.providers)
+        self.bind_provider_registry(&executor.providers)?;
+        let mut projection = self.mcp_projection.lock().unwrap();
+        if let Some(service) = executor.tool_ctx.mcp_service() {
+            if projection
+                .as_ref()
+                .is_some_and(|current| current.belongs_to(service))
+            {
+                return Ok(());
+            }
+            if projection
+                .as_ref()
+                .is_some_and(|current| !current.is_closed())
+            {
+                return Err(crate::error::RuntimeError::ToolFailed(
+                    "session MCP service is already bound to another runtime".into(),
+                ));
+            }
+            *projection = Some(service.project(self.watch.context.clone()));
+        } else if projection.is_some() {
+            return Err(crate::error::RuntimeError::ToolFailed(
+                "executor is missing the session's MCP service".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Validate durable configuration before binding this context to live provider connections.

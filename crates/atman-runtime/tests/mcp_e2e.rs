@@ -44,15 +44,20 @@ for line in sys.stdin:
 "#;
 
 const OWNED_SERVER: &str = r#"
-import json, os, sys
+import json, os, sys, time
 from pathlib import Path
 
 with open("pids", "a") as f:
     f.write(str(os.getpid()) + "\n")
 sys.stderr.write("x" * (512 * 1024))
 sys.stderr.flush()
+sample_call = None
 for line in sys.stdin:
     req = json.loads(line)
+    if "method" not in req:
+        text = str(req.get("result", req.get("error")))
+        print(json.dumps({"jsonrpc": "2.0", "id": sample_call, "result": {"content": [{"type": "text", "text": text}]}}), flush=True)
+        continue
     method = req["method"]
     if "id" not in req:
         continue
@@ -64,7 +69,11 @@ for line in sys.stdin:
         result = {"protocolVersion": "2024-11-05", "capabilities": {}}
     elif method == "tools/list":
         if os.environ.get("MODE") != "invalid":
-            result = {"tools": [{"name": "probe", "inputSchema": {"type": "object"}}]}
+            if Path("refreshing").exists():
+                Path("refresh-waiting").touch()
+                while not Path("release-refresh").exists():
+                    time.sleep(0.01)
+            result = {"tools": [{"name": os.environ.get("TOOL", "probe"), "inputSchema": {"type": "object"}}]}
     elif method == "tools/call":
         action = req["params"]["arguments"].get("action")
         if action == "reconnect" and not Path("reconnected").exists():
@@ -74,8 +83,12 @@ for line in sys.stdin:
             Path("ready").touch()
             continue
         if action == "sample":
-            print(json.dumps({"jsonrpc": "2.0", "id": "sample", "method": "sampling/createMessage", "params": {"messages": []}}), flush=True)
+            sample_call = req["id"]
+            print(json.dumps({"jsonrpc": "2.0", "id": "sample", "method": "sampling/createMessage", "params": {"messages": [], "model": "mock"}}), flush=True)
             continue
+        if action == "refresh":
+            Path("refreshing").touch()
+            print(json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}), flush=True)
         result = {"content": [{"type": "text", "text": os.getcwd()}]}
     print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": result}), flush=True)
 "#;
@@ -124,6 +137,320 @@ async fn assert_processes_stopped(dir: &std::path::Path) {
         .await
         .unwrap();
     }
+}
+
+async fn service_runtime(
+    config: &atman_runtime::config_hub::ConfigHub,
+    project: &std::path::Path,
+) -> atman_runtime::AtmanRuntime {
+    atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
+        events: atman_runtime::event::EventSink::new(),
+        mock: true,
+        config: config.clone(),
+        project: Some(
+            atman_runtime::storage::ProjectContext::resolve(config, project, project).unwrap(),
+        ),
+        home_dir: None,
+        workspace_generation: "mcp-service".into(),
+    })
+    .await
+    .unwrap()
+}
+
+async fn service_ready(executor: &atman_runtime::Executor) {
+    use atman_runtime::tool::Tool;
+    let args = ToolArgs {
+        named: vec![("server".into(), Value::Str("owned".into()))],
+        ..Default::default()
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        atman_runtime::tools::mcp::McpAwait.call(args, &executor.tool_ctx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
+#[tokio::test]
+async fn runtime_mcp_owners_isolate_connections_and_share_releasable_session_projections() {
+    use atman_runtime::{Session, ValueJson, config_hub::ConfigHub};
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let left_hub = ConfigHub::from_config_dir(left.path());
+    let right_hub = ConfigHub::from_config_dir(right.path());
+    left_hub.save_mcp(&[owned_config(left.path())]).unwrap();
+    right_hub.save_mcp(&[owned_config(right.path())]).unwrap();
+    let left_runtime = service_runtime(&left_hub, left.path()).await;
+    let right_runtime = service_runtime(&right_hub, right.path()).await;
+    let session = Arc::new(Session::open_ephemeral());
+    session.bind_executor(&left_runtime.executor).unwrap();
+    let mut projection = session.subscribe_context();
+    service_ready(&left_runtime.executor).await;
+    service_ready(&right_runtime.executor).await;
+    assert!(projection.borrow().mcp_servers[0].is_ok());
+    let late = Session::open_ephemeral();
+    late.bind_executor(&left_runtime.executor).unwrap();
+    assert!(late.subscribe_context().borrow().mcp_servers[0].is_ok());
+    assert!(session.bind_executor(&right_runtime.executor).is_err());
+    let status = left_runtime.executor.tools.get("mcp.status").unwrap();
+    assert_eq!(
+        status
+            .call(ToolArgs::default(), &left_runtime.executor.tool_ctx)
+            .await
+            .unwrap()
+            .to_json()
+            .unwrap()[0]["state"],
+        "connected"
+    );
+    let left_tool = left_runtime.executor.tools.get("mcp.owned.probe").unwrap();
+    let right_tool = right_runtime.executor.tools.get("mcp.owned.probe").unwrap();
+    for (tool, runtime, path) in [
+        (&left_tool, &left_runtime, left.path()),
+        (&right_tool, &right_runtime, right.path()),
+    ] {
+        let output = tool
+            .call(ToolArgs::default(), &runtime.executor.tool_ctx)
+            .await
+            .unwrap()
+            .to_json()
+            .unwrap();
+        assert_eq!(
+            std::fs::canonicalize(output["text"].as_str().unwrap()).unwrap(),
+            std::fs::canonicalize(path).unwrap()
+        );
+    }
+    let weak = Arc::downgrade(&session);
+    drop(session);
+    assert!(weak.upgrade().is_none());
+    let peer = left_runtime.executor.clone();
+    drop(left_runtime);
+    assert!(
+        left_tool
+            .call(ToolArgs::default(), &peer.tool_ctx)
+            .await
+            .is_ok()
+    );
+    projection.borrow_and_update();
+    left_hub.save_mcp(&[]).unwrap();
+    peer.tool_ctx.mcp_service().unwrap().reload().unwrap();
+    assert!(peer.tools.get("mcp.owned.probe").is_none());
+    assert!(peer.tools.get("mcp.status").is_some());
+    assert!(late.subscribe_context().borrow().mcp_servers.is_empty());
+    assert!(
+        right_tool
+            .call(ToolArgs::default(), &right_runtime.executor.tool_ctx)
+            .await
+            .is_ok()
+    );
+    #[cfg(unix)]
+    assert_processes_stopped(left.path()).await;
+    assert!(
+        left_tool
+            .call(ToolArgs::default(), &peer.tool_ctx)
+            .await
+            .is_err()
+    );
+    let owner = Arc::downgrade(right_runtime.executor.tool_ctx.mcp_service().unwrap());
+    drop(right_runtime);
+    assert!(owner.upgrade().is_none());
+    #[cfg(unix)]
+    assert_processes_stopped(right.path()).await;
+    assert!(
+        right_tool
+            .call(ToolArgs::default(), &ToolCtx::new())
+            .await
+            .is_err()
+    );
+    peer.tool_ctx.mcp_service().unwrap().shutdown().await;
+    assert!(peer.tool_ctx.mcp_service().unwrap().reload().is_err());
+    let replacement = service_runtime(&left_hub, left.path()).await;
+    late.bind_executor(&replacement.executor).unwrap();
+    assert!(late.subscribe_context().borrow().mcp_servers.is_empty());
+}
+
+#[tokio::test]
+async fn runtime_mcp_sampling_uses_its_own_provider_registry() {
+    use atman_runtime::{ValueJson, config_hub::ConfigHub, providers::mock::MockProvider};
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let mut runtimes = Vec::new();
+    for (label, dir) in [
+        ("left-response", left.path()),
+        ("right-response", right.path()),
+    ] {
+        let hub = ConfigHub::from_config_dir(dir);
+        hub.save_mcp(&[owned_config(dir)]).unwrap();
+        let runtime = service_runtime(&hub, dir).await;
+        runtime.executor.providers.register(Arc::new(
+            MockProvider::new("mock").with_fallback(Value::Str(label.into())),
+        ));
+        service_ready(&runtime.executor).await;
+        runtimes.push((label, runtime));
+    }
+    for (label, runtime) in &runtimes {
+        let result = runtime
+            .executor
+            .tools
+            .get("mcp.owned.probe")
+            .unwrap()
+            .call(
+                ToolArgs {
+                    named: vec![("action".into(), Value::Str("sample".into()))],
+                    ..Default::default()
+                },
+                &runtime.executor.tool_ctx,
+            )
+            .await
+            .unwrap()
+            .to_json()
+            .unwrap();
+        assert!(result["text"].as_str().unwrap().contains(label), "{result}");
+        runtime
+            .executor
+            .tool_ctx
+            .mcp_service()
+            .unwrap()
+            .shutdown()
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn runtime_mcp_reload_cancels_connecting_and_refreshing_generations() {
+    use atman_runtime::config_hub::ConfigHub;
+    use atman_runtime::tool::Tool;
+    for mode in ["pending", "connected"] {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = ConfigHub::from_config_dir(dir.path());
+        let mut cfg = owned_config(dir.path());
+        cfg.env.push(("MODE".into(), mode.into()));
+        hub.save_mcp(std::slice::from_ref(&cfg)).unwrap();
+        let runtime = service_runtime(&hub, dir.path()).await;
+        let service = runtime.executor.tool_ctx.mcp_service().unwrap();
+        let mut statuses = service.subscribe();
+        let mut waiting = Box::pin(atman_runtime::tools::mcp::McpAwait.call(
+            ToolArgs {
+                named: vec![("server".into(), Value::Str("owned".into()))],
+                ..Default::default()
+            },
+            &runtime.executor.tool_ctx,
+        ));
+        if mode == "pending" {
+            wait_for_file(&dir.path().join("ready")).await;
+            assert!(futures::poll!(waiting.as_mut()).is_pending());
+        } else {
+            service_ready(&runtime.executor).await;
+            runtime
+                .executor
+                .tools
+                .get("mcp.owned.probe")
+                .unwrap()
+                .call(
+                    ToolArgs {
+                        named: vec![("action".into(), Value::Str("refresh".into()))],
+                        ..Default::default()
+                    },
+                    &runtime.executor.tool_ctx,
+                )
+                .await
+                .unwrap();
+            wait_for_file(&dir.path().join("refresh-waiting")).await;
+        }
+        cfg.disabled = true;
+        hub.save_mcp(if mode == "pending" {
+            &[]
+        } else {
+            std::slice::from_ref(&cfg)
+        })
+        .unwrap();
+        service.reload().unwrap();
+        let expected = statuses.borrow_and_update().clone();
+        if mode == "pending" {
+            assert!(expected.is_empty());
+            let error = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("no longer configured"),
+                "{error}"
+            );
+        } else {
+            assert_eq!(
+                expected[0].state,
+                atman_runtime::mcp::McpServerState::Disabled
+            );
+        }
+        assert!(runtime.executor.tools.get("mcp.owned.probe").is_none());
+        #[cfg(unix)]
+        assert_processes_stopped(dir.path()).await;
+        std::fs::write(dir.path().join("release-refresh"), "").unwrap();
+        assert_eq!(*statuses.borrow(), expected);
+        assert!(runtime.executor.tools.get("mcp.owned.probe").is_none());
+        tokio::time::timeout(std::time::Duration::from_secs(2), service.shutdown())
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn runtime_mcp_can_start_after_empty_boot_and_server_failure_is_independent() {
+    use atman_runtime::{config_hub::ConfigHub, tools::mcp::await_requested_tools};
+    let dir = tempfile::tempdir().unwrap();
+    let hub = ConfigHub::from_config_dir(dir.path());
+    let runtime = service_runtime(&hub, dir.path()).await;
+    let service = runtime.executor.tool_ctx.mcp_service().unwrap();
+    assert!(service.subscribe().borrow().is_empty());
+    let cfg = owned_config(dir.path());
+    let mut invalid = cfg.clone();
+    invalid.name = "unavailable".into();
+    invalid.command = dir
+        .path()
+        .join("missing-executable")
+        .to_string_lossy()
+        .into();
+    hub.save_mcp(&[cfg, invalid]).unwrap();
+    service.reload().unwrap();
+    service_ready(&runtime.executor).await;
+    await_requested_tools(
+        &ToolArgs {
+            named: vec![(
+                "tools".into(),
+                Value::List(vec![Value::Str("mcp.*".into())]),
+            )],
+            ..Default::default()
+        },
+        &runtime.executor.tool_ctx,
+    )
+    .await
+    .unwrap();
+    assert!(
+        await_requested_tools(
+            &ToolArgs {
+                named: vec![(
+                    "tools".into(),
+                    Value::List(vec![Value::Str("mcp.unavailable.*".into())])
+                )],
+                ..Default::default()
+            },
+            &runtime.executor.tool_ctx
+        )
+        .await
+        .is_err()
+    );
+    let mut statuses = service.subscribe();
+    assert!(statuses.borrow().iter().any(|status| matches!(
+        status.state,
+        atman_runtime::mcp::McpServerState::Error { .. }
+    )));
+    service.shutdown().await;
+    assert!(statuses.borrow_and_update().iter().all(|status| matches!(
+        status.state,
+        atman_runtime::mcp::McpServerState::Disconnected { .. }
+    )));
+    #[cfg(unix)]
+    assert_processes_stopped(dir.path()).await;
 }
 
 #[tokio::test]
