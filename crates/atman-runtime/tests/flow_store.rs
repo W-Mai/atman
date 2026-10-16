@@ -1944,7 +1944,8 @@ fn replies_share_inbox_ownership_and_cannot_be_stolen_by_context_or_foreign_send
     assert_eq!(ordinary.message_ids(), &[unrelated.message_id]);
     assert!(
         flow.reserve_reply_input(&waiter.lease, waiter.correlation)
-            .is_err()
+            .unwrap()
+            .is_none()
     );
     wait_phase(&mut flow, &waiter);
     assert!(!flow.release_input(&ordinary));
@@ -2176,7 +2177,7 @@ fn independent_waiters_use_one_fifo_without_releasing_each_others_reply() {
         flow.register_reply_waiter(second.clone()).unwrap(),
         registered
     );
-    wait_phase(&mut flow, &first);
+    // One waiting branch must not require all other branches to stop running.
     let second_message = flow
         .accept_input(reply_request(&flow, &second), |_| Ok(()))
         .unwrap();
@@ -2200,6 +2201,13 @@ fn independent_waiters_use_one_fifo_without_releasing_each_others_reply() {
     assert_eq!(batch.message_ids(), &[second_message.message_id]);
     flow.commit_input(&batch, reply_content(&second)).unwrap();
     assert_eq!(flow.reply_waiters()[0].status, ReplyStatus::Pending);
+    change(
+        &mut flow,
+        FlowTransition::PhaseChanged {
+            lease: first.lease.clone(),
+            phase: TurnPhase::Waiting(atman_rt::WaitReason::Effect),
+        },
+    );
     let batch = flow
         .reserve_reply_input(&first.lease, first.correlation)
         .unwrap()

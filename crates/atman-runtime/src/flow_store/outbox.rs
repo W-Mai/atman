@@ -85,11 +85,7 @@ impl Outbox {
             return Err(invalid("send intent does not belong to this flow"));
         }
         intent.request.validate_source()?;
-        if !(state
-            .can_receive_at_boundary(&intent.lease)
-            .map_err(invalid)?
-            || state.can_receive_reply(&intent.lease).map_err(invalid)?)
-        {
+        if !state.can_receive_reply(&intent.lease).map_err(invalid)? {
             return Err(invalid("flow cannot admit a new send"));
         }
         if let Some(reply) = &intent.reply {

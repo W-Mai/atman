@@ -56,6 +56,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Concurrent reply admission** — Registered continuations can receive replies while other branches run or wait for effects. Independent pauses and terminal phases continue to block delivery, and inbox reservations retain exclusive consumption.
+
 - **Stored floating-point results** — Typed result snapshots encode floating-point bits as eight bytes, preserving their exact representation through tool JSON conversion.
 
 ## [1.17.2] — 2026-10-26

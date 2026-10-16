@@ -304,11 +304,7 @@ impl Inbox {
         if self.waiters.get(waiter.correlation).is_some() {
             return Err(invalid("duplicate reply waiter"));
         }
-        if !(state
-            .can_receive_at_boundary(&waiter.lease)
-            .map_err(invalid)?
-            || state.can_receive_reply(&waiter.lease).map_err(invalid)?)
-        {
+        if !state.can_receive_reply(&waiter.lease).map_err(invalid)? {
             return Err(invalid("flow cannot register a reply waiter"));
         }
         if self.entries.iter().any(|entry| {
