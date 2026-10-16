@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Shared workspace references** — Multiple persistent instances can retain one managed worktree. Releasing its creator preserves other references; only the final release performs cleanup.
+
 - **Workspace ownership** — Managed worktrees support persistent instance references, validated restoration, and explicit owner release. Host restarts and generic cleanup preserve referenced worktrees; dirty and retained data survive release.
 
 - **Persistent session startup** — Hosts explicitly bind startup hooks to the initial entry invocation. CLI batch execution preserves startup effects without replaying them on retry, rebind, or later turns.

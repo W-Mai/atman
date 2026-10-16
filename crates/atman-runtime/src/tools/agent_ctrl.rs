@@ -1111,6 +1111,7 @@ fn finalize_workspace(
         Ok(outcome) => {
             let record = match outcome {
                 WorkspaceFinalizeOutcome::Released(record)
+                | WorkspaceFinalizeOutcome::Referenced(record)
                 | WorkspaceFinalizeOutcome::Dirty(record)
                 | WorkspaceFinalizeOutcome::Retained(record)
                 | WorkspaceFinalizeOutcome::AlreadyReleased(record) => record,

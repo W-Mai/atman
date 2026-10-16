@@ -97,6 +97,7 @@ pub struct WorkspaceInstanceBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceFinalizeOutcome {
     Released(WorkspaceRecord),
+    Referenced(WorkspaceRecord),
     Dirty(WorkspaceRecord),
     Retained(WorkspaceRecord),
     AlreadyReleased(WorkspaceRecord),
@@ -132,8 +133,8 @@ pub struct WorkspaceRecord {
     pub allocation_policy: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease: Option<WorkspaceLease>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instance: Option<WorkspaceInstanceBinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instances: Vec<WorkspaceInstanceBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconciled_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,9 +143,7 @@ pub struct WorkspaceRecord {
 
 impl WorkspaceRecord {
     pub fn is_instance_bound(&self) -> bool {
-        self.instance
-            .as_ref()
-            .is_some_and(|binding| !binding.released)
+        self.instances.iter().any(|binding| !binding.released)
     }
 
     pub fn lifecycle_state(&self) -> WorkspaceState {
@@ -286,7 +285,7 @@ impl WorkspaceManager {
             allocation_base: base.map(str::to_owned),
             allocation_policy: None,
             lease: None,
-            instance: None,
+            instances: Vec::new(),
             reconciled_at: None,
             reconciliation_reason: None,
         };
@@ -369,9 +368,13 @@ impl WorkspaceManager {
                 .as_ref()
                 .is_some_and(|lease| lease.daemon_generation == daemon_generation);
             let same_instance =
-                item.instance.as_ref().map(|binding| &binding.owner) == instance.as_ref();
+                item.instances.first().map(|binding| &binding.owner) == instance.as_ref();
             if same_instance
-                && ((item.lifecycle_state() == WorkspaceState::Bound && item.is_instance_bound())
+                && ((item.lifecycle_state() == WorkspaceState::Bound
+                    && item
+                        .instances
+                        .first()
+                        .is_some_and(|binding| !binding.released))
                     || (item.lifecycle_state() == WorkspaceState::Active && same_generation))
                 && item.retained == retained
                 && item.allocation_base.as_deref() == Some(base_oid)
@@ -403,10 +406,13 @@ impl WorkspaceManager {
                 daemon_generation: daemon_generation.to_owned(),
                 acquired_at: chrono::Utc::now(),
             }),
-            instance: instance.map(|owner| WorkspaceInstanceBinding {
-                owner,
-                released: false,
-            }),
+            instances: instance
+                .into_iter()
+                .map(|owner| WorkspaceInstanceBinding {
+                    owner,
+                    released: false,
+                })
+                .collect(),
             reconciled_at: None,
             reconciliation_reason: None,
         };
@@ -483,8 +489,10 @@ impl WorkspaceManager {
     ) -> Result<WorkspaceRecord, WorkspaceError> {
         let _lock = self.lock_registry()?;
         let record = self.get(&binding.workspace_id)?;
-        if record.instance.as_ref().map(|instance| &instance.owner) != Some(owner)
-            || !record.is_instance_bound()
+        if !record
+            .instances
+            .iter()
+            .any(|instance| &instance.owner == owner && !instance.released)
             || record.lifecycle_state() != WorkspaceState::Bound
             || record.binding() != *binding
         {
@@ -494,6 +502,53 @@ impl WorkspaceManager {
         }
         self.validate_worktree(&record)?;
         Ok(record)
+    }
+
+    /// Share a live workspace reference before activating another instance. The caller authenticates and authorizes both instances.
+    pub fn share_instance(
+        &self,
+        binding: &WorkspaceBinding,
+        sponsor: &crate::flow_store::FlowRef,
+        owner: &crate::flow_store::FlowRef,
+    ) -> Result<WorkspaceRecord, WorkspaceError> {
+        let _lock = self.lock_registry()?;
+        let mut registry = self.load()?;
+        let record = registry
+            .workspaces
+            .iter_mut()
+            .find(|record| record.id == binding.workspace_id)
+            .ok_or_else(|| WorkspaceError::Invalid("workspace not found".into()))?;
+        if record.binding() != *binding {
+            return Err(WorkspaceError::Invalid("workspace binding mismatch".into()));
+        }
+        // A retry is a lookup, including after the sponsor or recipient has released it.
+        if record
+            .instances
+            .iter()
+            .any(|reference| &reference.owner == owner)
+        {
+            return Ok(record.clone());
+        }
+        if owner.session_id.0.is_nil()
+            || owner.instance_id.0.0.is_nil()
+            || record.lifecycle_state() != WorkspaceState::Bound
+            || !record
+                .instances
+                .iter()
+                .any(|reference| &reference.owner == sponsor && !reference.released)
+        {
+            return Err(WorkspaceError::Invalid(
+                "sharing requires a live sponsor and a valid instance".into(),
+            ));
+        }
+        self.validate_worktree(record)?;
+        record.instances.push(WorkspaceInstanceBinding {
+            owner: owner.clone(),
+            released: false,
+        });
+        let result = record.clone();
+        self.save(&registry)?;
+        Ok(result)
     }
 
     fn validate_worktree(&self, record: &WorkspaceRecord) -> Result<(), WorkspaceError> {
@@ -552,36 +607,51 @@ impl WorkspaceManager {
             .iter()
             .position(|item| item.id == id)
             .ok_or_else(|| WorkspaceError::Invalid(format!("workspace {id} not found")))?;
-        validate_ownership(
-            &registry.workspaces[index],
-            Some(owner_session),
-            Some(owner_flow),
-        )?;
-
-        if registry.workspaces[index]
-            .instance
-            .as_ref()
-            .map(|binding| &binding.owner)
-            != instance
-        {
-            return Err(WorkspaceError::Invalid(
-                "workspace lifetime does not match the releasing owner".into(),
-            ));
-        }
-        if registry.workspaces[index]
-            .instance
-            .as_ref()
-            .is_some_and(|binding| binding.released)
-        {
-            let record = registry.workspaces[index].clone();
-            return match record.lifecycle_state() {
-                WorkspaceState::Released => Ok(WorkspaceFinalizeOutcome::AlreadyReleased(record)),
-                WorkspaceState::Dirty => Ok(WorkspaceFinalizeOutcome::Dirty(record)),
-                WorkspaceState::Retained => Ok(WorkspaceFinalizeOutcome::Retained(record)),
-                _ => Err(WorkspaceError::Invalid(
-                    "released instance has incomplete workspace cleanup".into(),
-                )),
-            };
+        let item = &mut registry.workspaces[index];
+        match instance {
+            Some(owner) => {
+                let reference = item
+                    .instances
+                    .iter()
+                    .position(|binding| &binding.owner == owner)
+                    .ok_or_else(|| {
+                        WorkspaceError::Invalid("workspace instance ownership mismatch".into())
+                    })?;
+                if item.instances[reference].released {
+                    let record = item.clone();
+                    return match record.lifecycle_state() {
+                        WorkspaceState::Released => {
+                            Ok(WorkspaceFinalizeOutcome::AlreadyReleased(record))
+                        }
+                        WorkspaceState::Dirty => Ok(WorkspaceFinalizeOutcome::Dirty(record)),
+                        WorkspaceState::Retained => Ok(WorkspaceFinalizeOutcome::Retained(record)),
+                        _ if record.is_instance_bound() => {
+                            Ok(WorkspaceFinalizeOutcome::Referenced(record))
+                        }
+                        _ => Err(WorkspaceError::Invalid(
+                            "released instance has incomplete workspace cleanup".into(),
+                        )),
+                    };
+                }
+                if item
+                    .instances
+                    .iter()
+                    .any(|binding| &binding.owner != owner && !binding.released)
+                {
+                    item.instances[reference].released = true;
+                    let record = item.clone();
+                    self.save(&registry)?;
+                    return Ok(WorkspaceFinalizeOutcome::Referenced(record));
+                }
+            }
+            None => {
+                validate_ownership(item, Some(owner_session), Some(owner_flow))?;
+                if !item.instances.is_empty() {
+                    return Err(WorkspaceError::Invalid(
+                        "workspace lifetime does not match the releasing owner".into(),
+                    ));
+                }
+            }
         }
 
         let state = registry.workspaces[index].lifecycle_state();
@@ -932,29 +1002,27 @@ impl WorkspaceManager {
             )));
         }
         for item in &mut registry.workspaces {
-            if let Some(instance) = &item.instance {
+            if let Some(creator) = item.instances.first() {
                 validate_ownership(
                     item,
-                    Some(&instance.owner.session_id.to_string()),
-                    Some(&instance.owner.instance_id.to_string()),
+                    Some(&creator.owner.session_id.to_string()),
+                    Some(&creator.owner.instance_id.to_string()),
                 )?;
-                if instance.owner.session_id.0.is_nil()
-                    || instance.owner.instance_id.0.0.is_nil()
-                    || (instance.released
-                        && !matches!(
-                            item.lifecycle_state(),
-                            WorkspaceState::Released
-                                | WorkspaceState::Dirty
-                                | WorkspaceState::Retained
-                        ))
-                    || (!instance.released
-                        && matches!(
-                            item.lifecycle_state(),
-                            WorkspaceState::Active
-                                | WorkspaceState::Released
-                                | WorkspaceState::Dirty
-                                | WorkspaceState::Retained
-                        ))
+                let mut owners = std::collections::HashSet::new();
+                let invalid_owners = item.instances.iter().any(|binding| {
+                    binding.owner.session_id.0.is_nil()
+                        || binding.owner.instance_id.0.0.is_nil()
+                        || !owners.insert(&binding.owner)
+                });
+                let terminal = matches!(
+                    item.lifecycle_state(),
+                    WorkspaceState::Released | WorkspaceState::Dirty | WorkspaceState::Retained
+                );
+                if invalid_owners
+                    || (item.is_instance_bound() == terminal)
+                    || item.lifecycle_state() == WorkspaceState::Active
+                    || !matches!(item.allocation_policy.as_deref(), Some("auto" | "retain"))
+                    || item.allocation_base.is_none()
                     || (item.lifecycle_state() == WorkspaceState::Bound && item.lease.is_some())
                 {
                     return Err(WorkspaceError::Invalid(
@@ -1007,7 +1075,7 @@ impl WorkspaceManager {
 }
 
 fn release_instance_reference(record: &mut WorkspaceRecord) {
-    if let Some(instance) = &mut record.instance {
+    for instance in &mut record.instances {
         instance.released = true;
     }
 }
@@ -1175,6 +1243,123 @@ mod tests {
                 .create_instance("peer", &owner, "new", false, &base)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn shared_workspace_outlives_creator_and_releases_only_the_last_reference() {
+        let tmp = repo();
+        let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+        let creator = instance_owner();
+        let child = instance_owner();
+        let peer = instance_owner();
+        let base = GitCli::at(tmp.path()).head_oid().unwrap();
+        let original = manager
+            .create_instance("shared", &creator, "host", false, &base)
+            .unwrap();
+        let binding = original.binding();
+        assert!(manager.share_instance(&binding, &child, &peer).is_err());
+        let shared = manager.share_instance(&binding, &creator, &child).unwrap();
+        assert_eq!(
+            manager.share_instance(&binding, &creator, &child).unwrap(),
+            shared
+        );
+        assert!(matches!(
+            manager.release_instance("shared", &creator).unwrap(),
+            WorkspaceFinalizeOutcome::Referenced(_)
+        ));
+        assert!(binding.path.exists());
+        assert!(manager.validate_instance(&binding, &creator).is_err());
+        assert!(manager.validate_instance(&binding, &child).is_ok());
+        assert!(manager.share_instance(&binding, &creator, &peer).is_err());
+        assert!(
+            manager
+                .create_instance("shared", &creator, "new", false, &base)
+                .is_err()
+        );
+        assert!(manager.reconcile_generation("new").unwrap().is_empty());
+        assert!(manager.prune(false).unwrap().is_empty());
+        let rebound = WorkspaceManager::open_existing(tmp.path(), None)
+            .unwrap()
+            .unwrap();
+        rebound.share_instance(&binding, &child, &peer).unwrap();
+        assert!(matches!(
+            rebound.release_instance("shared", &child).unwrap(),
+            WorkspaceFinalizeOutcome::Referenced(_)
+        ));
+        let repeated = rebound.share_instance(&binding, &creator, &child).unwrap();
+        assert!(
+            repeated
+                .instances
+                .iter()
+                .find(|binding| binding.owner == child)
+                .unwrap()
+                .released
+        );
+        assert!(matches!(
+            rebound.release_instance("shared", &peer).unwrap(),
+            WorkspaceFinalizeOutcome::Released(_)
+        ));
+        assert!(!binding.path.exists());
+        assert!(matches!(
+            rebound.release_instance("shared", &creator).unwrap(),
+            WorkspaceFinalizeOutcome::AlreadyReleased(_)
+        ));
+        assert!(
+            rebound
+                .get("shared")
+                .unwrap()
+                .instances
+                .iter()
+                .all(|reference| reference.released)
+        );
+    }
+
+    #[test]
+    fn sharing_and_last_release_are_serialized() {
+        let tmp = repo();
+        let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+        let creator = instance_owner();
+        let child = instance_owner();
+        let original = manager
+            .create_instance(
+                "race",
+                &creator,
+                "host",
+                false,
+                &GitCli::at(tmp.path()).head_oid().unwrap(),
+            )
+            .unwrap();
+        let root = tmp.path().to_path_buf();
+        let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let sharing = {
+            let (ready, root, binding, creator, child) = (
+                ready.clone(),
+                root.clone(),
+                original.binding(),
+                creator.clone(),
+                child.clone(),
+            );
+            std::thread::spawn(move || {
+                let manager = WorkspaceManager::open_existing(&root, None)
+                    .unwrap()
+                    .unwrap();
+                ready.wait();
+                manager.share_instance(&binding, &creator, &child)
+            })
+        };
+        ready.wait();
+        manager.release_instance("race", &creator).unwrap();
+        let shared = sharing.join().unwrap();
+        if shared.is_ok() {
+            manager
+                .validate_instance(&original.binding(), &child)
+                .unwrap();
+            assert!(original.worktree_path.exists());
+            manager.release_instance("race", &child).unwrap();
+        } else {
+            assert!(!manager.get("race").unwrap().is_instance_bound());
+        }
+        assert!(!original.worktree_path.exists());
     }
 
     #[test]
