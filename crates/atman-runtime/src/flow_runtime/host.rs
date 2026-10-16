@@ -11,6 +11,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
+#[path = "management.rs"]
+mod management;
+pub use management::{ProfileHandle, ProfileView};
+
 use super::{
     FlowSnapshot, FlowWorker,
     execution::TurnRequest,
@@ -44,6 +48,7 @@ pub struct RuntimeHost {
 
 struct Directory {
     sessions: Mutex<HashMap<Uuid, SessionHandle>>,
+    profile: Mutex<Option<ProfileHandle>>,
     changes: watch::Sender<()>,
     services: HostServices,
     stopping: std::sync::atomic::AtomicBool,
@@ -54,6 +59,7 @@ impl Default for Directory {
     fn default() -> Self {
         Self {
             sessions: Default::default(),
+            profile: Default::default(),
             changes: watch::channel(()).0,
             services: HostServices::default(),
             stopping: Default::default(),
@@ -242,7 +248,13 @@ impl RuntimeHost {
                     }))
                     .await;
                     directory.sessions.lock().unwrap().clear();
-                    let errors: Vec<_> = results.into_iter().filter_map(Result::err).collect();
+                    let mut errors: Vec<_> = results.into_iter().filter_map(Result::err).collect();
+                    let profile = directory.profile.lock().unwrap().take();
+                    if let Some(profile) = profile {
+                        if let Err(error) = profile.shutdown().await {
+                            errors.push(format!("profile: {error}"));
+                        }
+                    }
                     if errors.is_empty() {
                         Ok(())
                     } else {

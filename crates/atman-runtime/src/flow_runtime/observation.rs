@@ -46,13 +46,7 @@ impl RuntimeHost {
         source: &FlowRef,
     ) -> io::Result<()> {
         let session = self.session(recipient.session_id.0)?;
-        if session.is_stopped()
-            || !session
-                .access
-                .read()
-                .unwrap()
-                .allows(recipient, source, FlowAction::Watch)
-        {
+        if !self.allows_access(&session, recipient, source, FlowAction::Watch) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "flow observation is outside the current access grants",

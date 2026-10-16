@@ -25,6 +25,226 @@ fn session_descriptor() -> SessionDescriptor {
     }
 }
 
+#[tokio::test]
+async fn management_authority_is_explicit_revocable_and_shared_with_observers() {
+    use atman_runtime::flow_store::{
+        access::{AccessTarget, FlowAction, FlowGrant},
+        profile::{ManagementBinding, ProfileStore, ReplaceManagement},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let mut store = ProfileStore::open(&root).unwrap();
+    let descriptor = store
+        .bootstrap(Default::default())
+        .unwrap()
+        .management
+        .unwrap()
+        .session;
+    let host = RuntimeHost::default();
+    let profile = host.attach_profile(store).unwrap();
+    assert!(profile.snapshot().await.unwrap().unavailable.is_none());
+    let session = host
+        .attach_session(root.open_session(descriptor.id).unwrap())
+        .unwrap();
+    let remote_info = SessionDescriptor {
+        title: "Atman".into(),
+        ..session_descriptor()
+    };
+    let remote = host
+        .attach_session(root.create_session(remote_info.clone()).unwrap())
+        .unwrap();
+    let manager = session
+        .create_flow(flow_descriptor(descriptor.id))
+        .await
+        .unwrap();
+    let sibling = session
+        .create_flow(flow_descriptor(descriptor.id))
+        .await
+        .unwrap();
+    let source = remote
+        .create_flow(flow_descriptor(remote_info.id))
+        .await
+        .unwrap();
+    for worker in [&manager, &sibling, &source] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    let manager_lease = start(&manager).await;
+    let client = host.bind_invocation(manager_lease.clone()).await.unwrap();
+    let sibling_lease = start(&sibling).await;
+    let sibling_client = host.bind_invocation(sibling_lease.clone()).await.unwrap();
+    assert!(client.inspect(source.address().clone()).await.is_err());
+    let grants = vec![FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: manager.address().clone(),
+        target: AccessTarget::AllSessions,
+        actions: [
+            FlowAction::Discover,
+            FlowAction::Watch,
+            FlowAction::Send,
+            FlowAction::ReadOutput,
+        ]
+        .into(),
+    }];
+    let request = ReplaceManagement {
+        request_id: Uuid::new_v4(),
+        expected: profile.snapshot().await.unwrap().profile.cursor,
+        binding: ManagementBinding {
+            session: descriptor.clone(),
+            grants,
+        },
+    };
+    profile.replace(request.clone()).await.unwrap();
+    assert!(client.inspect(source.address().clone()).await.is_ok());
+    assert!(
+        sibling_client
+            .inspect(source.address().clone())
+            .await
+            .is_err()
+    );
+    assert!(client.read_context(source.address().clone()).await.is_err());
+    client.watch_events(answer_watch(&source)).await.unwrap();
+    assert!(invoke(&source, Executor::new()).await.result.is_ok());
+    wait_inputs(&manager, 1).await;
+
+    let remove = ReplaceManagement {
+        request_id: Uuid::new_v4(),
+        expected: profile.snapshot().await.unwrap().profile.cursor,
+        binding: ManagementBinding {
+            session: remote_info,
+            grants: Vec::new(),
+        },
+    };
+    let removed = profile.replace(remove).await.unwrap();
+    assert!(client.inspect(source.address().clone()).await.is_err());
+    assert!(client.watch_events(answer_watch(&source)).await.is_err());
+    assert!(
+        client
+            .send(
+                source.address().clone(),
+                Uuid::new_v4(),
+                "revoked".into(),
+                DeliveryMode::AtBoundary
+            )
+            .await
+            .is_err()
+    );
+    let mut issues = manager.subscribe_observation_issues();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if !issues.borrow_and_update().is_empty() {
+                break;
+            }
+            issues.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(invoke(&source, Executor::new()).await.result.is_ok());
+    assert_eq!(manager.snapshot().await.unwrap().pending.len(), 1);
+    profile.replace(request).await.unwrap();
+    assert_eq!(profile.snapshot().await.unwrap().profile.cursor, removed);
+    assert!(client.inspect(source.address().clone()).await.is_err());
+
+    // Restore the original manager explicitly, then pause it. Remote execution stays independent.
+    let current = profile.snapshot().await.unwrap();
+    profile
+        .replace(ReplaceManagement {
+            request_id: Uuid::new_v4(),
+            expected: current.profile.cursor,
+            binding: ManagementBinding {
+                session: descriptor,
+                grants: vec![FlowGrant {
+                    id: Uuid::new_v4(),
+                    grantee: manager.address().clone(),
+                    target: AccessTarget::AllSessions,
+                    actions: [FlowAction::Discover, FlowAction::Watch].into(),
+                }],
+            },
+        })
+        .await
+        .unwrap();
+    change(
+        &manager,
+        FlowTransition::ExecutionPaused {
+            key: Uuid::new_v4().into(),
+        },
+    )
+    .await;
+    assert!(client.inspect(source.address().clone()).await.is_err());
+    assert!(invoke(&source, Executor::new()).await.result.is_ok());
+    wait_inputs(&manager, 3).await;
+    for (worker, lease) in [(&manager, manager_lease), (&sibling, sibling_lease)] {
+        change(
+            worker,
+            FlowTransition::TurnFinished {
+                lease,
+                outcome: TurnOutcome::Completed,
+            },
+        )
+        .await;
+    }
+    host.shutdown().await.unwrap();
+    assert!(profile.snapshot().await.is_err());
+    let store = ProfileStore::open(&root).unwrap();
+    assert!(host.attach_profile(store).is_err());
+    let reopened = RuntimeHost::default();
+    let profile = reopened
+        .attach_profile(ProfileStore::open(&root).unwrap())
+        .unwrap();
+    assert_eq!(
+        profile
+            .snapshot()
+            .await
+            .unwrap()
+            .profile
+            .management
+            .unwrap()
+            .grants
+            .len(),
+        1
+    );
+    assert!(reopened.sessions().is_empty());
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn unavailable_management_binding_can_be_explicitly_repaired_without_starting_work() {
+    use atman_runtime::flow_store::profile::{ManagementBinding, ProfileStore, ReplaceManagement};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let mut store = ProfileStore::open(&root).unwrap();
+    let original = store
+        .bootstrap(Default::default())
+        .unwrap()
+        .management
+        .unwrap()
+        .session;
+    std::fs::remove_dir_all(root.root().join("sessions").join(original.id.to_string())).unwrap();
+    let host = RuntimeHost::default();
+    let profile = host.attach_profile(store).unwrap();
+    let invalid = profile.snapshot().await.unwrap();
+    assert!(invalid.unavailable.is_some());
+    assert!(profile.bootstrap(Default::default()).await.is_err());
+    let replacement = session_descriptor();
+    root.create_session(replacement.clone()).unwrap();
+    profile
+        .replace(ReplaceManagement {
+            request_id: Uuid::new_v4(),
+            expected: invalid.profile.cursor,
+            binding: ManagementBinding {
+                session: replacement.clone(),
+                grants: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+    let repaired = profile.snapshot().await.unwrap();
+    assert!(repaired.unavailable.is_none());
+    assert_eq!(repaired.profile.management.unwrap().session, replacement);
+    assert!(host.sessions().is_empty());
+    host.shutdown().await.unwrap();
+}
+
 async fn wait_closed(worker: &FlowWorker) {
     let mut state = worker.subscribe_state();
     tokio::time::timeout(Duration::from_secs(10), async {

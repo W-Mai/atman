@@ -473,10 +473,8 @@ impl FlowClient {
             return Err(denied("source access owner is unavailable or replaced"));
         }
         if self
-            .access
-            .read()
-            .unwrap()
-            .allows(&self.lease.flow, target, action)
+            .host
+            .allows_access(&session, &self.lease.flow, target, action)
         {
             Ok(())
         } else {

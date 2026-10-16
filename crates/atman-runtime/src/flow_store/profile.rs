@@ -74,6 +74,7 @@ pub struct ProfileStore {
     journal: Journal,
     projection: Projection,
     recovered_tail: Option<RecoveredTail>,
+    write_failed: bool,
     _owner: File,
 }
 
@@ -219,6 +220,7 @@ impl ProfileStore {
             journal,
             projection: projection.ok_or_else(|| invalid("profile creation was not recorded"))?,
             recovered_tail,
+            write_failed: false,
             _owner: owner,
         })
     }
@@ -231,13 +233,29 @@ impl ProfileStore {
         self.recovered_tail.as_ref()
     }
 
+    pub(crate) fn validate_management(&self) -> io::Result<()> {
+        if self.write_failed {
+            return Err(io::Error::other(
+                "profile write failed; reopen to reconcile the journal",
+            ));
+        }
+        if let Some(binding) = &self.snapshot().management {
+            self.inspect_binding(binding)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn write_failed(&self) -> bool {
+        self.write_failed
+    }
+
     /// Create the projectless container once, without opening flows or installing scheduling. Configuration is used only for its initial descriptor.
     pub fn bootstrap(
         &mut self,
         configuration: SessionConfiguration,
     ) -> io::Result<ProfileSnapshot> {
-        if let Some(binding) = &self.snapshot().management {
-            self.inspect_binding(binding)?;
+        self.validate_management()?;
+        if self.snapshot().management.is_some() {
             return Ok(self.snapshot().clone());
         }
         if self.projection.prepared.is_none() {
@@ -304,7 +322,12 @@ impl ProfileStore {
         let mut candidate = self.projection.clone();
         // Validate before writing. The real receipt is assigned only after synchronization.
         candidate.apply(fact.clone(), self.snapshot().cursor.clone())?;
-        let receipt = self.journal.commit(std::slice::from_ref(&fact))?;
+        let receipt = self
+            .journal
+            .commit(std::slice::from_ref(&fact))
+            .inspect_err(|_| {
+                self.write_failed = true;
+            })?;
         self.projection.apply(fact, receipt.clone())?;
         Ok(receipt)
     }

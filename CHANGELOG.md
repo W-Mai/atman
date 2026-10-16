@@ -44,6 +44,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Management flow authority** — Host-owned profile grants apply to peer operations and event observation, with immediate revocation checks, retained subscription cursors, and independent Session execution.
+
 - **Management profile storage** — Durable profile identity and management Session binding with explicit flow grants, recoverable bootstrap, revision-checked replacement, and stable retry receipts.
 
 - **Persistent flow closure** — `flow.close` and daemon `flow.control` accept explicit closure with execution revision checks. Cleanup stops the active turn and owned processes before recording Closed, preserves history, and resumes unfinished closure after restart. Other instances keep their execution and workspace references.
