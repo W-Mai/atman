@@ -11,6 +11,41 @@ use crate::{
 use std::{collections::BTreeMap, io, num::NonZeroUsize};
 use uuid::Uuid;
 
+/// JSON transports encode paths as strings; restore declared host paths before VM validation.
+pub(super) fn decode_argument(
+    value: serde_json::Value,
+    ty: &atman_rt::ast::TypeExpr,
+) -> crate::Value {
+    use crate::{Value, ValueJson};
+    use atman_rt::ast::TypeExpr;
+    match (value, ty) {
+        (serde_json::Value::String(path), TypeExpr::Named(name))
+            if name.name.eq_ignore_ascii_case("path") =>
+        {
+            Value::Host(crate::AtmanPayload::Path(path.into()))
+        }
+        (serde_json::Value::Array(items), TypeExpr::List(item)) => Value::List(
+            items
+                .into_iter()
+                .map(|value| decode_argument(value, item))
+                .collect(),
+        ),
+        (serde_json::Value::Object(fields), TypeExpr::Struct(types)) => Value::Struct(
+            fields
+                .into_iter()
+                .map(|(name, value)| {
+                    let value = match types.iter().find(|(field, _)| field.name == name) {
+                        Some((_, ty)) => decode_argument(value, ty),
+                        None => Value::from_json(value),
+                    };
+                    (name, value)
+                })
+                .collect(),
+        ),
+        (value, _) => Value::from_json(value),
+    }
+}
+
 /// The last durably admitted entry input, excluding conversation text.
 #[derive(Clone, Debug)]
 pub struct AdmittedInvocation {

@@ -35,6 +35,30 @@ use crate::{
     message::Message,
 };
 
+impl super::SessionInspection {
+    /// Inspect recorded updates without acquiring execution ownership, repairing tails, or recovering a turn. Publish the collected projection only after this read succeeds.
+    pub fn inspect_flow_updates(
+        &self,
+        id: &super::FlowInstanceId,
+        mut apply: impl FnMut(CommitReceipt, Vec<FlowUpdate>) -> io::Result<()>,
+    ) -> io::Result<crate::event_log::journal::JournalInspection> {
+        if !self.projection.flows.iter().any(|flow| &flow.id == id) {
+            return Err(super::invalid("flow is not registered in this session"));
+        }
+        crate::event_log::journal::Journal::inspect(
+            &self
+                .dir
+                .join("flows")
+                .join(id.to_string())
+                .join("events.jsonl"),
+            id.0.0,
+            |receipt, facts: Vec<FlowFact>| {
+                apply(receipt, facts.into_iter().map(FlowUpdate::from).collect())
+            },
+        )
+    }
+}
+
 /// Read-only updates for one instance, in original commit order. Message origins, isolated contexts, and typed completion remain distinct; creation metadata omits the retained source bundle and activation omits execution authority.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]

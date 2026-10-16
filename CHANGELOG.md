@@ -34,6 +34,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent CLI execution** — `run` and `flow run` use retained flow instances and shared peer scheduling, including temporary storage for `--ephemeral`. Session logs, usage summaries, and the monitor read persistent execution alongside existing histories.
+
 - **Batch runtime drain** — `RuntimeHost::wait_quiescent` waits for execution, scheduling, and notification delivery across persistent flows without consuming paused or unbound input.
 
 - **Structured Flow observation** — Select final replies, turn completion, or instance closure with `watch`. Preserve source ordering and exact close receipts across reopening, retire closed-source subscriptions, and release unresolved correlated waits without discarding accepted replies.

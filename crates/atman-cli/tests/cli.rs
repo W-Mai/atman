@@ -24,6 +24,7 @@ fn managed_run_waits_for_child_results_after_its_final_answer() {
     std::fs::write(dir.path().join("child.at"), r#"flow child(prompt: string) -> string {
         contract { invocation { goal: true, user_message: prompt } }
         sleep(ms: 150)
+        memory.goal.set(text: "deliver the delayed result")
         goal = memory.goal.get()
         memory.goal.pause(goal_id: goal.goal.id, expected_revision: goal.goal.revision, reason: "completed", summary: "Delivered")
         return final.answer(message: "delayed child delivery")
@@ -33,10 +34,11 @@ fn managed_run_waits_for_child_results_after_its_final_answer() {
         when prompt == "work" {
             inventory = flow.instances()
             flow.spawn(flow: "child.at", spawn_token: inventory.spawn_token, arguments: {prompt: "leaf"})
+            memory.goal.set(text: "forward child results")
+            goal = memory.goal.get()
+            memory.goal.pause(goal_id: goal.goal.id, expected_revision: goal.goal.revision, reason: "completed", summary: "Turn delivered")
+            return final.answer(message: "branch waiting")
         }
-        goal = memory.goal.get()
-        memory.goal.pause(goal_id: goal.goal.id, expected_revision: goal.goal.revision, reason: "completed", summary: "Turn delivered")
-        when prompt == "work" { return final.answer(message: "branch waiting") }
         return final.answer(message: "branch processed: " + prompt)
     }"#).unwrap();
     std::fs::write(dir.path().join("main.at"), r#"flow main(prompt: string) -> string {
@@ -110,6 +112,41 @@ fn run_executes_pure_flow_and_prints_return_value() {
 }
 
 #[test]
+fn run_preserves_path_arguments_and_explicit_invocation_settings_without_retaining_ephemeral_history()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("typed.at");
+    std::fs::write(&source, "flow main(p: path, paths: [path], meta: {root: path}) -> string { return env(\"effort\") + \":\" + p + \":\" + paths[0] + \":\" + meta.root }\n").unwrap();
+    let data = dir.path().join("data");
+    let output = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", &data)
+        .args(["run", "--ephemeral", "--reasoning", "high"])
+        .arg(&source)
+        .args([
+            "p=src/main.rs",
+            "paths=[\"src/lib.rs\"]",
+            "meta={\"root\":\"src\"}",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "high:src/main.rs:src/lib.rs:src"
+    );
+    assert!(
+        atman_runtime::flow_store::RuntimeStore::session_ids(&data)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!data.join("sessions").exists());
+}
+
+#[test]
 fn run_persists_events_and_logs_tail_reads_them() {
     let data = tempfile::tempdir().unwrap();
     let flow_dir = tempfile::tempdir().unwrap();
@@ -136,7 +173,7 @@ fn run_persists_events_and_logs_tail_reads_them() {
     );
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "hi persist");
 
-    let sessions = data.path().join("sessions");
+    let sessions = data.path().join("runtime-v1/sessions");
     let dirs: Vec<_> = std::fs::read_dir(&sessions)
         .expect("sessions dir")
         .filter_map(|e| e.ok())
@@ -156,20 +193,48 @@ fn run_persists_events_and_logs_tail_reads_them() {
     );
     let stdout = String::from_utf8_lossy(&tail.stdout);
     let lines: Vec<_> = stdout.lines().collect();
-    let types: Vec<&str> = lines
+    let updates: Vec<serde_json::Value> = lines
         .iter()
-        .filter_map(|l| l.split("\"type\":\"").nth(1))
-        .filter_map(|s| s.split('"').next())
+        .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert!(types.contains(&"turn_start"), "types: {types:?}");
-    assert!(types.contains(&"user_msg"), "types: {types:?}");
-    assert!(types.contains(&"flow_start"), "types: {types:?}");
-    assert!(types.contains(&"flow_end"), "types: {types:?}");
-    assert!(types.contains(&"turn_end"), "types: {types:?}");
+    for expected in [
+        "activated",
+        "input_committed",
+        "execution_events",
+        "turn_completed",
+    ] {
+        assert!(
+            updates
+                .iter()
+                .any(|update| update["update"]["type"] == expected),
+            "missing {expected}: {stdout}"
+        );
+    }
+    assert!(
+        !data.path().join("sessions").exists(),
+        "new runs must not create a legacy session writer"
+    );
+    for args in [
+        vec!["logs", "tail"],
+        vec!["cost", &sid],
+        vec!["cost"],
+        vec!["cost", "--all"],
+    ] {
+        let output = Command::new(atman_binary())
+            .env("ATMAN_DATA_DIR", data.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
-fn session_list_prints_rows_sorted_by_mtime() {
+fn session_list_prints_persistent_rows_sorted_by_mtime() {
     let data = tempfile::tempdir().unwrap();
     let flow_dir = tempfile::tempdir().unwrap();
     let flow_path = flow_dir.path().join("s.at");
@@ -194,12 +259,14 @@ fn session_list_prints_rows_sorted_by_mtime() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<_> = stdout.lines().collect();
-    assert_eq!(lines.len(), 3);
-    assert!(lines[0].contains("session_id"));
+    assert_eq!(lines.len(), 4);
+    assert!(lines[0].contains("Persistent sessions"));
+    assert!(lines[1].contains("session_id"));
+    assert!(lines[2].split_whitespace().next() > lines[3].split_whitespace().next());
 }
 
 #[test]
-fn session_show_prints_event_counts() {
+fn session_show_prints_the_persistent_flow_binding() {
     let data = tempfile::tempdir().unwrap();
     let flow_dir = tempfile::tempdir().unwrap();
     let flow_path = flow_dir.path().join("s.at");
@@ -211,7 +278,7 @@ fn session_show_prints_event_counts() {
         .output()
         .unwrap();
 
-    let sid = std::fs::read_dir(data.path().join("sessions"))
+    let sid = std::fs::read_dir(data.path().join("runtime-v1/sessions"))
         .unwrap()
         .next()
         .unwrap()
@@ -226,8 +293,9 @@ fn session_show_prints_event_counts() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("flow_start: 1"));
-    assert!(stdout.contains("flow_end:   1"));
+    assert!(stdout.contains("layout:     persistent"), "{stdout}");
+    assert!(stdout.contains("flows:      1"), "{stdout}");
+    assert!(stdout.contains("default:"), "{stdout}");
 }
 
 #[test]
@@ -658,6 +726,20 @@ fn monitor_serves_sessions_and_events_over_http() {
     std::fs::create_dir_all(&dir).unwrap();
     let ev = "{\"type\":\"flow_start\",\"run_id\":\"r1\",\"flow_name\":\"demo\",\"ts\":\"2026-07-03T00:00:00Z\"}\n{\"type\":\"flow_end\",\"run_id\":\"r1\",\"flow_name\":\"demo\",\"status\":{\"kind\":\"ok\"},\"ts\":\"2026-07-03T00:00:01Z\"}\n";
     std::fs::write(dir.join("events.jsonl"), ev).unwrap();
+    let source = data.path().join("monitor.at");
+    std::fs::write(&source, "flow main() -> string { return \"recorded\" }").unwrap();
+    let run = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .arg("run")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let persistent = atman_runtime::flow_store::RuntimeStore::session_ids(data.path()).unwrap()[0];
 
     let port = 65_000 + (std::process::id() % 500) as u16;
     let mut child = std::process::Command::new(atman_binary())
@@ -692,10 +774,19 @@ fn monitor_serves_sessions_and_events_over_http() {
         .args(["-s", &format!("{base}/")])
         .output()
         .expect("curl index");
+    let persistent_events = Command::new("curl")
+        .args(["-s", &format!("{base}/api/sessions/{persistent}/events")])
+        .output()
+        .unwrap();
     let _ = child.kill();
     let _ = child.wait();
 
     let sessions_body = String::from_utf8_lossy(&sessions_resp.stdout);
+    assert!(
+        sessions_body.contains(&persistent.to_string()),
+        "{sessions_body}"
+    );
+    assert!(String::from_utf8_lossy(&persistent_events.stdout).contains("input_committed"));
     assert!(
         sessions_body.contains(sid),
         "sessions body: {sessions_body}"

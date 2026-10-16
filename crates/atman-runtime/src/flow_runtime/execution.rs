@@ -122,9 +122,10 @@ impl FlowWorker {
             )
             .map_err(invalid)?;
             let flow_name = entry.name.clone();
-            if program.entry_flow(&flow_name).is_none() {
-                return Err(invalid("recorded entry is unavailable"));
-            }
+            let entry = program
+                .entry_flow(&flow_name)
+                .and_then(|id| program.flow(&id))
+                .ok_or_else(|| invalid("recorded entry is unavailable"))?;
             let selected: std::collections::HashSet<_> = request.messages.iter().copied().collect();
             let reserved = store
                 .reserve_invocation_input(request.turn, request.run, |envelope| {
@@ -138,7 +139,19 @@ impl FlowWorker {
             let args = request
                 .arguments
                 .iter()
-                .map(|(key, value)| (key.clone(), Value::from_json(value.clone())))
+                .map(|(key, value)| {
+                    let decoded = match entry
+                        .params
+                        .iter()
+                        .find(|parameter| &parameter.name.name == key)
+                    {
+                        Some(parameter) => {
+                            super::entry::decode_argument(value.clone(), &parameter.ty)
+                        }
+                        None => Value::from_json(value.clone()),
+                    };
+                    (key.clone(), decoded)
+                })
                 .collect();
             let env = crate::InvocationEnv::from_values(
                 request

@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 
 type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
+mod batch_run;
 mod history_migration;
 mod init;
 mod mcp_templates;
@@ -813,225 +814,20 @@ async fn cmd_run_loaded(
     raw_args: Vec<String>,
     snapshot_live: bool,
 ) -> Result<()> {
-    let parsed = program.entry_file();
-
-    let flow_name = match flow_name {
-        Some(n) => n,
-        None => {
-            if parsed.flows.len() != 1 {
-                bail!(
-                    "{} has {} flows; pass --flow=<name> to disambiguate",
-                    file.display(),
-                    parsed.flows.len()
-                );
-            }
-            parsed.flows[0].name.name.clone()
-        }
-    };
-
-    let flow = parsed
-        .flows
-        .iter()
-        .find(|flow| flow.name.name == flow_name)
-        .with_context(|| format!("no flow named `{flow_name}` in {}", file.display()))?;
-    let args = parse_args(&raw_args, flow)?;
-    let invocation_env = match reasoning {
-        Some(value) => {
-            let selection: atman_runtime::provider::ReasoningSelection = value
-                .parse()
-                .map_err(|error: String| anyhow::anyhow!("invalid --reasoning value: {error}"))?;
-            atman_runtime::InvocationEnv::single("effort", Value::Str(selection.to_string()))
-        }
-        None => atman_runtime::InvocationEnv::default(),
-    };
-
-    let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
-    let root = data_dir()?;
-    let config = atman_runtime::config_hub::ConfigHub::global()?;
-    let project = atman_runtime::storage::ProjectContext::resolve(
-        &config,
-        &std::env::current_dir().context("reading current project root")?,
-        &root,
-    )?;
-    let session = std::sync::Arc::new(if ephemeral {
-        Session::open_ephemeral()
-    } else {
-        let project_index = open_project_index(project.storage_root())?;
-        Session::open_with_context_and_trust(
-            &root,
-            redactor.clone(),
-            project_index,
-            load_global_trust_config()?,
-        )
-        .with_context(|| format!("opening session under {}", root.display()))?
-    });
-    if let Some(path) = session.events_path() {
-        atman_runtime::notify!(
-            info,
-            location = Log,
-            "session={} events={}",
-            session.id(),
-            path.display()
-        );
-    }
-
-    load_model_config_from_disk();
-
-    let atman_runtime::AtmanRuntime {
-        mut executor,
-        provider_catalog_refresh_plan,
-        ..
-    } = atman_runtime::AtmanRuntime::build(bootstrap_opts_for(
-        session.sink().clone(),
-        mock,
-        config,
-        project,
-    ))
-    .await?;
-    if !mock && let Some(lifecycle) = executor.provider_lifecycle() {
-        consume_provider_catalog_refresh_plan(provider_catalog_refresh_plan, move |provider_id| {
-            let lifecycle = lifecycle.clone();
-            async move { lifecycle.refresh_models_if_stale(&provider_id).await }
-        })
-        .await;
-    }
-    executor.source_dir = file.parent().map(|p| p.to_path_buf());
-    session.bind_executor(&executor)?;
-    attach_memory_stores(&mut executor, &session, ephemeral)?;
-    executor.tool_ctx.prompt_resolver = Some(std::sync::Arc::new(
-        atman_runtime::rendezvous::AutoResolveResolver {
-            default: serde_json::json!({ "hunks": [] }),
+    batch_run::run(
+        file,
+        program,
+        batch_run::Options {
+            flow_name,
+            mock,
+            ephemeral,
+            reasoning,
+            images,
+            raw_args,
+            snapshot_live,
         },
-    ));
-
-    let target_flow = parsed
-        .flows
-        .iter()
-        .find(|f| f.name.name == flow_name)
-        .ok_or_else(|| anyhow::anyhow!("flow `{flow_name}` not found in {}", file.display()))?;
-    if let Err(errs) = atman_runtime::validate::validate(target_flow, &executor.tools) {
-        for e in &errs {
-            atman_runtime::notify!(warn, "validation: {e}");
-        }
-        bail!("flow validation failed with {} error(s)", errs.len());
-    }
-
-    if snapshot_live && load_auto_snapshot() {
-        auto_snapshot_flows(file, program);
-    }
-
-    let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
-    let user_text = if args.is_empty() {
-        flow_name.clone()
-    } else {
-        args.iter()
-            .map(|(k, v)| format!("{k}={}", render_value(v)))
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let mut parts = Vec::with_capacity(images.len() + 1);
-    for image in images {
-        parts.push(atman_runtime::message::MessagePart::Image {
-            source: session.import_image_path(image)?,
-        });
-    }
-    parts.push(atman_runtime::message::MessagePart::Text {
-        text: user_text.clone(),
-    });
-    let user_msg = atman_runtime::message::Message {
-        role: atman_runtime::message::MessageRole::User,
-        parts,
-        turn_id: turn_id.clone(),
-        origin: atman_runtime::message::MessageOrigin::User,
-    };
-    {
-        let _compact_guard = session.acquire_compact_lock().await;
-        session.begin_turn(user_msg);
-    }
-    let goal_recipe = atman_runtime::goal::GoalTurn {
-        program: program.clone(),
-        flow_name: flow_name.clone(),
-        args: args.clone(),
-        env: invocation_env.clone(),
-    };
-    let mut current_args = args;
-    let mut current_turn = turn_id;
-    let mut goal_changes = session.goal_control.subscribe();
-    let outcome = loop {
-        let outcome = executor
-            .run_linked_in_turn_with_env(
-                program,
-                &flow_name,
-                current_args,
-                Some(current_turn),
-                Some(session.clone()),
-                invocation_env.clone(),
-            )
-            .await;
-        session.end_turn();
-        if let Err(error) = &outcome
-            && session.goal_control.record().is_some()
-        {
-            let _ = session.goal_control.pause(
-                atman_runtime::memory::goal::GoalActor::Runtime,
-                atman_runtime::memory::goal::GoalPauseReason::RunFailed,
-                error.to_string(),
-                None,
-            );
-        }
-        if outcome.is_err() || !atman_runtime::goal::is_managed(target_flow) {
-            break outcome;
-        }
-        let wake = loop {
-            // Descendants can transfer work between inboxes during the liveness scan.
-            // Only a scan with no intervening state changes may conclude that work is over.
-            goal_changes.borrow_and_update();
-            if atman_runtime::goal::has_next_turn(&session.goal_control, &session.watch_hub)
-                && let Some(message) = atman_runtime::goal::begin_background_turn(&session).await
-            {
-                break Some(message);
-            }
-            if !session.goal_control.allows_background_turn() {
-                break None;
-            }
-            if !session.flow_registry.has_background_work()
-                && !session.watch_hub.has_work()
-                && !session.goal_control.child_results.has_pending()
-            {
-                if atman_runtime::goal::has_next_turn(&session.goal_control, &session.watch_hub)
-                    || goal_changes.has_changed().unwrap_or(false)
-                {
-                    continue;
-                }
-                break None;
-            }
-            tokio::select! {
-                _ = goal_changes.changed() => {},
-                _ = session.watch_hub.wait_for_pending_or_idle(), if session.watch_hub.has_work() => {},
-            }
-        };
-        let Some(message) = wake else {
-            break outcome;
-        };
-        current_turn = message.turn_id.clone();
-        current_args = goal_recipe.continuation_args(&message.text_concat());
-    };
-    if outcome.is_ok() && session.record_successful_flow().is_some() {
-        let _ =
-            atman_runtime::session_naming::maybe_generate_session_name(&executor, &session).await;
-    }
-    session.shutdown().await;
-
-    match outcome {
-        Ok(v) => {
-            println!("{}", render_value(&v));
-            Ok(())
-        }
-        Err(e) => {
-            atman_runtime::notify!(error, "flow error: {e}");
-            std::process::exit(1);
-        }
-    }
+    )
+    .await
 }
 
 async fn cmd_session_list(all: bool, project: Option<PathBuf>) -> Result<()> {
@@ -6156,6 +5952,10 @@ async fn cmd_cost(session_id: Option<String>, all: bool) -> Result<()> {
         None => latest_session(&root)?
             .with_context(|| format!("no sessions found under {}", root.display()))?,
     };
+    if let Some(summary) = session_catalog::cost(&root, &sid)? {
+        print_cost_summary(&format!("session {sid}"), &summary);
+        return Ok(());
+    }
     let path = root.join("sessions").join(&sid).join("events.jsonl");
     if !path.exists() {
         bail!("events file not found: {}", path.display());
@@ -6168,16 +5968,16 @@ async fn cmd_cost(session_id: Option<String>, all: bool) -> Result<()> {
 
 async fn cmd_cost_all(root: &Path) -> Result<()> {
     let sessions_dir = root.join("sessions");
-    if !sessions_dir.exists() {
-        bail!("no sessions under {}", sessions_dir.display());
-    }
     let mut per_session: Vec<(String, CostSummary)> = Vec::new();
     let mut combined = CostSummary::default();
     let mut sessions_walked = 0u64;
-    let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&sessions_dir)
-        .with_context(|| format!("read_dir {}", sessions_dir.display()))?
-        .filter_map(|e| e.ok())
-        .collect();
+    let mut entries: Vec<std::fs::DirEntry> = if sessions_dir.exists() {
+        std::fs::read_dir(&sessions_dir)
+            .with_context(|| format!("read_dir {}", sessions_dir.display()))?
+            .collect::<std::io::Result<_>>()?
+    } else {
+        Vec::new()
+    };
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let sid = entry.file_name().to_string_lossy().to_string();
@@ -6196,6 +5996,15 @@ async fn cmd_cost_all(root: &Path) -> Result<()> {
         sessions_walked += 1;
         combined.merge(&summary);
         per_session.push((sid, summary));
+    }
+    for id in atman_runtime::flow_store::RuntimeStore::session_ids(root)? {
+        let summary = session_catalog::cost(root, &id.to_string())?
+            .context("persistent session disappeared")?;
+        if summary.total_calls != 0 {
+            sessions_walked += 1;
+            combined.merge(&summary);
+            per_session.push((id.to_string(), summary));
+        }
     }
     if per_session.is_empty() {
         println!(
@@ -6355,10 +6164,12 @@ const daemonToken = params.get('token') || '';
 const useSse = daemonBase.length > 0;
 document.getElementById('mode').textContent = useSse ? '· sse mode via ' + daemonBase : '· file-tail mode (poll 5s)';
 let activeSse = null;
+let sessionIndex = new Map();
+let selectionVersion = 0;
 
 async function fetchJson(url){const r=await fetch(url);if(!r.ok)throw new Error(r.status);return r.json();}
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
-function eventBlock(e){return `<div class="event ${esc(e.type||'')}"><span class="type">${esc(e.type||'?')}</span> <span class="ts">${esc(e.ts||'')}</span><pre>${esc(JSON.stringify(e,null,2))}</pre></div>`;}
+function eventBlock(e){const type=e.type||e.update?.type||'flow_update';return `<div class="event ${esc(type)}"><span class="type">${esc(type)}</span> <span class="ts">${esc(e.ts||'')}</span><pre>${esc(JSON.stringify(e,null,2))}</pre></div>`;}
 function setSseState(state){
   const pill=document.getElementById('ssePill');
   if(!state){pill.className='pill hidden';pill.textContent='';return;}
@@ -6368,25 +6179,34 @@ function setSseState(state){
 
 async function loadSessions(){
   const list=await fetchJson('/api/sessions');
+  sessionIndex=new Map(list.map(s=>[s.id,s]));
   const el=document.getElementById('sessions');
   if(!list.length){el.innerHTML='<em>no sessions</em>';return;}
   el.innerHTML=list.map(s=>`<div class="sess" data-id="${esc(s.id)}">${esc(s.id)}<br><span class="ts">${s.event_count} events · ${esc(s.first_ts||'?')}</span></div>`).join('');
   el.querySelectorAll('.sess').forEach(node=>node.onclick=()=>loadEvents(node.dataset.id));
 }
 async function loadEvents(sid){
+  const selection=++selectionVersion;
   document.getElementById('hint').textContent=sid;
   document.querySelectorAll('.sess').forEach(n=>n.classList.toggle('active',n.dataset.id===sid));
   const box=document.getElementById('events');
   if(activeSse){activeSse.close();activeSse=null;}
   if(useSse){
-    const url = daemonBase + '/events?session_id=' + encodeURIComponent(sid) + (daemonToken?'&token='+encodeURIComponent(daemonToken):'');
+    const instance=sessionIndex.get(sid)?.instance_id;
+    if(instance){
+      const response=await fetch(daemonBase+'/rpc',{method:'POST',headers:{'Content-Type':'application/json',...(daemonToken?{'Authorization':'Bearer '+daemonToken}:{})},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'session.open',params:{session_id:sid}})});
+      const opened=await response.json();
+      if(selection!==selectionVersion)return;
+      if(!response.ok||opened.error){box.textContent=opened.error?.message||'Cannot open session';return;}
+    }
+    const url = daemonBase + '/events?session_id=' + encodeURIComponent(sid) + (instance?'&instance_id='+encodeURIComponent(instance):'') + (daemonToken?'&token='+encodeURIComponent(daemonToken):'');
     box.innerHTML='<em>connecting sse…</em>';
     setSseState('connecting');
     const es = new EventSource(url);
     activeSse = es;
     let first = true;
     es.onopen = () => { setSseState('connected'); };
-    es.addEventListener('event', ev => {
+    es.addEventListener(instance?'flow_update':'event', ev => {
       try {
         const e = JSON.parse(ev.data);
         if(first){box.innerHTML='';first=false;}
@@ -6398,6 +6218,7 @@ async function loadEvents(sid){
   } else {
     setSseState(null);
     const ev = await fetchJson('/api/sessions/'+encodeURIComponent(sid)+'/events');
+    if(selection!==selectionVersion)return;
     if(!ev.length){box.innerHTML='<em>empty session</em>';return;}
     box.innerHTML=ev.map(eventBlock).join('');
   }
@@ -6415,8 +6236,7 @@ async fn cmd_monitor(port: u16) -> Result<()> {
     use std::net::SocketAddr;
 
     let data = data_dir()?;
-    let sessions_dir = data.join("sessions");
-    let state = Arc::new(sessions_dir);
+    let state = Arc::new(data);
 
     let app = Router::new()
         .route("/", get(|| async { Html(MONITOR_HTML) }))
@@ -6449,12 +6269,13 @@ async fn cmd_monitor(port: u16) -> Result<()> {
     Ok(())
 }
 
-async fn list_sessions_summary(sessions_dir: &std::path::Path) -> Vec<serde_json::Value> {
-    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-        return Vec::new();
-    };
+async fn list_sessions_summary(data: &std::path::Path) -> Vec<serde_json::Value> {
     let mut out: Vec<(String, serde_json::Value)> = Vec::new();
-    for entry in entries.flatten() {
+    for entry in std::fs::read_dir(data.join("sessions"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         let id = entry.file_name().to_string_lossy().to_string();
         let stats = atman_runtime::session_meta::SessionStats::load_or_rebuild(&entry.path())
             .unwrap_or_default();
@@ -6467,12 +6288,43 @@ async fn list_sessions_summary(sessions_dir: &std::path::Path) -> Vec<serde_json
             }),
         ));
     }
+    for id in atman_runtime::flow_store::RuntimeStore::session_ids(data).unwrap_or_default() {
+        match session_catalog::inspect(data, &id.to_string()) {
+            Ok(Some(read)) => {
+                let events = session_catalog::events(data, &id.to_string(), usize::MAX);
+                let (count, error) = match events {
+                    Ok(Some(events)) => (events.len(), None),
+                    Ok(None) => (0, None),
+                    Err(error) => (0, Some(error.to_string())),
+                };
+                out.push((id.to_string(), serde_json::json!({
+                    "id": id, "event_count": count, "first_ts": null, "error": error,
+                    "instance_id": read.projection.default_flow, "title": read.projection.descriptor.title,
+                })));
+            }
+            Err(error) => out.push((
+                id.to_string(),
+                serde_json::json!({"id": id, "event_count": 0, "error": error.to_string()}),
+            )),
+            Ok(None) => {}
+        }
+    }
     out.sort_by(|a, b| b.0.cmp(&a.0));
     out.into_iter().map(|(_, v)| v).collect()
 }
 
-async fn read_session_events(sessions_dir: &std::path::Path, sid: &str) -> Vec<serde_json::Value> {
-    let path = sessions_dir.join(sid).join("events.jsonl");
+async fn read_session_events(data: &std::path::Path, sid: &str) -> Vec<serde_json::Value> {
+    if uuid::Uuid::parse_str(sid).is_err() {
+        return Vec::new();
+    }
+    match session_catalog::events(data, sid, usize::MAX) {
+        Ok(Some(events)) => return events,
+        Err(error) => {
+            return vec![serde_json::json!({"type": "error", "message": error.to_string()})];
+        }
+        Ok(None) => {}
+    }
+    let path = data.join("sessions").join(sid).join("events.jsonl");
     let Ok(contents) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
@@ -8640,6 +8492,14 @@ async fn cmd_logs_stream(
         None => latest_session(&root)?
             .with_context(|| format!("no sessions found under {}", root.display()))?,
     };
+    let instance = match instance {
+        Some(id) => Some(id),
+        None => session_catalog::inspect(&root, &sid)?
+            .and_then(|read| read.projection.default_flow.map(|id| id.0.0)),
+    };
+    if instance.is_some() && since_seq.is_some() {
+        bail!("persistent flow events use --after, not --since-seq");
+    }
     let cfg_path = atman_daemon::config::default_config_path()?;
     let cfg = atman_runtime::config_hub::ConfigHub::from_daemon_config_path(&cfg_path)
         .load_or_init_daemon_config()?;
@@ -8681,6 +8541,15 @@ async fn cmd_logs_tail(session_id: Option<String>, n: usize, follow: bool) -> Re
         None => latest_session(&root)?
             .with_context(|| format!("no sessions found under {}", root.display()))?,
     };
+    if session_catalog::tail(&root, &sid, n)? {
+        if follow {
+            atman_runtime::notify!(
+                warn,
+                "--follow not yet implemented; use logs stream for live events"
+            );
+        }
+        return Ok(());
+    }
     let path = root.join("sessions").join(&sid).join("events.jsonl");
     if !path.exists() {
         bail!("events file not found: {}", path.display());
@@ -8756,12 +8625,20 @@ fn resolve_session_prefix(root: &std::path::Path, sid: &str) -> Result<String> {
 
 fn latest_session(root: &std::path::Path) -> Result<Option<String>> {
     let sessions = root.join("sessions");
-    if !sessions.exists() {
-        return Ok(None);
-    }
     let mut best: Option<(std::time::SystemTime, String)> = None;
-    for entry in std::fs::read_dir(&sessions)? {
-        let entry = entry?;
+    for id in atman_runtime::flow_store::RuntimeStore::session_ids(root)? {
+        let read = atman_runtime::flow_store::RuntimeStore::inspect_session(root, id)?;
+        let modified = std::fs::metadata(read.dir)?.modified()?;
+        if best.as_ref().is_none_or(|(time, _)| *time < modified) {
+            best = Some((modified, id.to_string()));
+        }
+    }
+    let legacy = if sessions.exists() {
+        std::fs::read_dir(&sessions)?.collect::<std::io::Result<Vec<_>>>()?
+    } else {
+        vec![]
+    };
+    for entry in legacy {
         let path = entry.path();
         if !path.is_dir() {
             continue;

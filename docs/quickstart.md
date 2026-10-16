@@ -283,6 +283,8 @@ Use the goal for the objective, `plan.write` / `plan.tick` for the high-level or
 
 ## 7. First flow snapshot / test
 
+`atman run file.at --flow name key=value` records execution in a session containing persistent flow instances. `atman session list`, `atman session show <session-id>`, `atman logs tail <session-id>`, and `atman cost <session-id>` inspect the recorded run. `--ephemeral` discards the temporary session after execution and notification delivery finish. `--reasoning high` supplies an invocation value; a model call uses it only when the flow explicitly passes `effort: env("effort")`.
+
 atman ships two authoring conveniences worth trying early.
 
 **Snapshot your flows in a versioned registry** (opt-in):

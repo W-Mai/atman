@@ -129,7 +129,26 @@ fn catalog_inspection_ignores_cache_and_never_recovers_an_active_flow_or_creates
     assert_eq!(RuntimeStore::session_ids(&data).unwrap(), [id]);
     let read = RuntimeStore::inspect_session(&data, id).unwrap();
     assert_eq!(read.projection.descriptor.title, "Recorded title");
-    assert_eq!(read.projection.default_flow, Some(address.instance_id));
+    assert_eq!(
+        read.projection.default_flow,
+        Some(address.instance_id.clone())
+    );
+    let mut updates = Vec::new();
+    let inspected = read
+        .inspect_flow_updates(&address.instance_id, |_, batch| {
+            updates.extend(batch);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(inspected.cursor.as_ref(), Some(flow.cursor()));
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        atman_runtime::flow_store::view::FlowUpdate::Transition(FlowTransition::TurnStarted { .. })
+    )));
+    assert!(
+        read.inspect_flow_updates(&FlowInstanceId::now(), |_, _| Ok(()))
+            .is_err()
+    );
     assert_eq!(read.journal.cursor.as_ref(), Some(owner.cursor()));
     assert_eq!(read.projection.flows, owner.projection().flows);
     assert_eq!(std::fs::read(&log).unwrap(), bytes);
