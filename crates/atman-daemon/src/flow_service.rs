@@ -266,8 +266,8 @@ impl Request {
     }
 }
 
-async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Value> {
-    let service = state.session_service.get_or_init(|| {
+fn service(state: &DaemonState) -> &SessionService {
+    state.session_service.get_or_init(|| {
         let config_dir = state
             .launcher()
             .and_then(|launcher| launcher.config_dir.clone());
@@ -275,7 +275,20 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
             state.data_dir().to_path_buf(),
             crate::bootstrap::build_redactor(config_dir.as_deref()),
         )
-    });
+    })
+}
+
+pub(crate) async fn shutdown(state: &DaemonState) -> Result<()> {
+    // Initialize even an unused service so an already accepted RPC cannot install a fresh host after shutdown.
+    let service = service(state);
+    let result = service.host.shutdown().await;
+    service.executors.lock().unwrap().clear();
+    result.map_err(Into::into)
+}
+
+async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Value> {
+    anyhow::ensure!(!state.is_stopping(), "daemon is stopping");
+    let service = service(state);
     match request {
         Request::Launch(request) => service.launch(state, request).await,
         Request::Bind(request) => service.bind(state, request).await,

@@ -8,7 +8,6 @@ use atman_daemon::{
     pidfile,
     unix::UnixServer,
 };
-use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -84,7 +83,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("[atman-daemon] http listening on http://{addr}");
 
-    let shutdown = CancellationToken::new();
+    let shutdown = state.shutdown_signal();
     let unix_task = {
         let sh = shutdown.clone();
         let st = state.clone();
@@ -102,11 +101,25 @@ async fn main() -> Result<()> {
         ctrlc_shutdown.cancel();
     });
 
+    let cleanup = {
+        let state = state.clone();
+        let signal = shutdown.clone();
+        tokio::spawn(async move {
+            signal.cancelled().await;
+            state.shutdown().await
+        })
+    };
+
     let serve = axum::serve(listener, router(http_state))
         .with_graceful_shutdown(async move { shutdown.cancelled().await });
-    serve.await?;
-    let _ = unix_task.await;
+    let http_result = serve.await;
+    state.request_shutdown();
+    let cleanup_result = cleanup.await;
+    let unix_result = unix_task.await;
     pidfile::remove_pid(&pid_path);
+    http_result?;
+    cleanup_result??;
+    unix_result??;
     Ok(())
 }
 

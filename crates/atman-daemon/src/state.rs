@@ -30,6 +30,8 @@ pub struct DaemonState {
     prompts: Mutex<HashMap<PromptId, PendingPrompt>>,
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
     provider_lifecycles: Mutex<HashMap<PathBuf, atman_runtime::ProviderLifecycle>>,
+    stopping: CancellationToken,
+    live_changed: tokio::sync::watch::Sender<()>,
 }
 
 #[derive(Clone)]
@@ -65,11 +67,70 @@ impl DaemonState {
             prompts: Mutex::new(HashMap::new()),
             launcher: Mutex::new(None),
             provider_lifecycles: Mutex::new(HashMap::new()),
+            stopping: CancellationToken::new(),
+            live_changed: tokio::sync::watch::channel(()).0,
         }
     }
 
     pub fn daemon_generation(&self) -> &str {
         &self.daemon_generation
+    }
+
+    pub fn shutdown_signal(&self) -> CancellationToken {
+        self.stopping.clone()
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.is_cancelled()
+    }
+
+    /// Stop new requests and wake transports; execution cleanup is completed by `shutdown`.
+    pub fn request_shutdown(&self) {
+        let _live = self.live.lock().unwrap();
+        self.stopping.cancel();
+    }
+
+    /// Drain both retained instances and registered legacy executions before process exit.
+    pub async fn shutdown(self: &std::sync::Arc<Self>) -> Result<()> {
+        self.request_shutdown();
+        let state = self.clone();
+        tokio::spawn(async move {
+            let mut changes = state.live_changed.subscribe();
+            let cancel_legacy = async {
+                loop {
+                    changes.borrow_and_update();
+                    let live: Vec<_> = state
+                        .live
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .filter_map(|entry| {
+                            entry
+                                .live
+                                .as_ref()
+                                .map(|run| (run.cancel.clone(), entry.broker.clone()))
+                        })
+                        .collect();
+                    if live.is_empty() {
+                        break;
+                    }
+                    for (cancel, context) in live {
+                        if let Some(context) = context {
+                            context.cancel_flow();
+                        }
+                        cancel.cancel();
+                    }
+                    if changes.changed().await.is_err() {
+                        break;
+                    }
+                }
+            };
+            let (result, ()) = tokio::join!(crate::flow_service::shutdown(&state), cancel_legacy);
+            state.live.lock().unwrap().clear();
+            state.provider_lifecycles.lock().unwrap().clear();
+            result
+        })
+        .await?
     }
 
     pub fn set_launcher(&self, launcher: std::sync::Arc<crate::run::RunLauncher>) {
@@ -305,8 +366,9 @@ impl DaemonState {
         self.data_dir.join("sessions")
     }
 
-    pub fn register_live(&self, id: SessionId, entry: LiveSession) {
+    pub fn register_live(&self, id: SessionId, entry: LiveSession) -> Result<()> {
         let mut live = self.live.lock().unwrap();
+        anyhow::ensure!(!self.is_stopping(), "daemon is stopping");
         live.entry(id)
             .and_modify(|current| current.live = Some(entry.clone()))
             .or_insert(LiveSessionEntry {
@@ -315,6 +377,9 @@ impl DaemonState {
                 permission_client: None,
                 owner_principal: None,
             });
+        drop(live);
+        self.live_changed.send_modify(|_| {});
+        Ok(())
     }
 
     pub fn register_broker(
@@ -362,6 +427,7 @@ impl DaemonState {
 
     pub fn deregister_live(&self, id: &SessionId) {
         self.live.lock().unwrap().remove(id);
+        self.live_changed.send_modify(|_| {});
     }
 
     pub fn live_session(&self, id: &SessionId) -> Option<std::sync::Arc<atman_runtime::Session>> {

@@ -84,7 +84,11 @@ async fn sse_handler(
     if let Some(instance_id) = q.instance_id {
         let stream =
             flow_events::subscribe(&state.daemon, &principal_id, q, instance_id, &headers).await?;
-        return Ok(event_stream(stream));
+        return Ok(event_stream(
+            stream
+                .take_until(state.daemon.shutdown_signal().cancelled_owned())
+                .boxed(),
+        ));
     }
     if q.after.is_some() {
         return Err((
@@ -104,7 +108,11 @@ async fn sse_handler(
         .join(q.session_id.0.to_string())
         .join("events.jsonl");
     let start = q.since_seq.or_else(|| last_event_id(&headers)).unwrap_or(0);
-    Ok(event_stream(tail_events_stream(events_path, start).boxed()))
+    Ok(event_stream(
+        tail_events_stream(events_path, start)
+            .take_until(state.daemon.shutdown_signal().cancelled_owned())
+            .boxed(),
+    ))
 }
 
 fn event_stream(stream: EventStream) -> Sse<impl Stream<Item = Result<Event, std::io::Error>>> {

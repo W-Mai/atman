@@ -339,7 +339,7 @@ impl RunLauncher {
 
         let cancel = session.flow_cancel_token();
         state.register_broker(sid_proto.clone(), session.clone(), owner_principal);
-        state.register_live(
+        let registered = state.register_live(
             sid_proto.clone(),
             LiveSession {
                 run_id: run_id_proto.clone(),
@@ -348,6 +348,11 @@ impl RunLauncher {
                 started_at: chrono::Utc::now(),
             },
         );
+        if let Err(error) = registered {
+            state.deregister_live(&sid_proto);
+            session.shutdown().await;
+            return Err(error);
+        }
 
         let config_dir = self.config_dir.clone();
         let home_dir = self.home_dir.clone();
@@ -724,15 +729,17 @@ mod tests {
         let session = Arc::new(atman_runtime::Session::open_ephemeral());
         let session_id = ProtoSessionId(session.id().0);
         state.register_broker(session_id.clone(), session, "test-principal");
-        state.register_live(
-            session_id.clone(),
-            LiveSession {
-                run_id: ProtoRunId(uuid::Uuid::now_v7()),
-                flow_name: "panic-test".into(),
-                cancel: tokio_util::sync::CancellationToken::new(),
-                started_at: chrono::Utc::now(),
-            },
-        );
+        state
+            .register_live(
+                session_id.clone(),
+                LiveSession {
+                    run_id: ProtoRunId(uuid::Uuid::now_v7()),
+                    flow_name: "panic-test".into(),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    started_at: chrono::Utc::now(),
+                },
+            )
+            .unwrap();
         assert!(
             state
                 .authorized_live_session(&session_id, "test-principal")

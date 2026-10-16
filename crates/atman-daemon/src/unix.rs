@@ -43,8 +43,14 @@ impl UnixServer {
                 accepted = self.listener.accept() => {
                     let (stream, _addr) = accepted?;
                     let state = state.clone();
+                    let connection_shutdown = shutdown.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_conn(stream, state).await {
+                        let result = tokio::select! {
+                            biased;
+                            _ = connection_shutdown.cancelled() => Ok(()),
+                            result = handle_conn(stream, state) => result,
+                        };
+                        if let Err(e) = result {
                             atman_runtime::notify!(warn, location = Log, stack = merge_count("daemon.unix_conn_error", 60_000), "unix conn error: {e}");
                         }
                     });

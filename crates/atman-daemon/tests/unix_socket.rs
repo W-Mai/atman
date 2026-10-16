@@ -43,9 +43,17 @@ async fn unix_socket_ping_round_trip() {
     let result = resp.result.expect("expect ok");
     assert_eq!(result["pong"], serde_json::json!(true));
 
-    drop(wr);
     shutdown.cancel();
-    let _ = server_task.await;
+    server_task.await.unwrap().unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    assert!(!sock_path.exists());
+    drop(wr);
 }
 
 #[tokio::test]

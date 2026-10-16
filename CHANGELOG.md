@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Daemon execution registration** — `DaemonState::register_live` returns an error after shutdown admission closes.
+
 - **Invocation input** — Explicit instance invocations accept optional authenticated user text and images. `InboxPayload::UserSubmission` and `Invocation` share `UserContent`, preserving original content separately from entry arguments.
 
 - **Flow content types** — `FlowDescriptor.content` distinguishes retained executable entries from read-only history. Creation updates expose a typed content summary; entry access returns an error for historical flows.
@@ -31,6 +33,8 @@ All notable changes to atman are documented in this file.
 - **Embedded provider lifecycle construction** — `ProviderLifecycle::new` returns `Result`, and executor attachment returns `ProviderLifecycleError`. Provider connections must use `ProviderRegistry::with_models(hub.models().clone())`; mismatched configuration scopes are rejected.
 
 ### ✨ Features
+
+- **Daemon shutdown** — SIGINT and SIGTERM stop request admission, disconnect event streams and Unix clients, and drain persistent and registered legacy execution before removing the process marker. Pending instance input and independent pauses remain stored.
 
 - **Explicit runtime shutdown** — Stop attached schedulers, unwind paused or running invocations, commit completion, and release instance journals and process resources. Retain unread input, goals, subscriptions, and independent pause keys for explicit recovery.
 

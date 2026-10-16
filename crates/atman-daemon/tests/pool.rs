@@ -13,15 +13,17 @@ async fn cancel_run_hits_matching_live_session() {
     let sid = SessionId(Uuid::now_v7());
     let run_id = FlowRunId(Uuid::now_v7());
     let cancel = CancellationToken::new();
-    state.register_live(
-        sid,
-        LiveSession {
-            run_id: run_id.clone(),
-            flow_name: "hello".into(),
-            cancel: cancel.clone(),
-            started_at: chrono::Utc::now(),
-        },
-    );
+    state
+        .register_live(
+            sid,
+            LiveSession {
+                run_id: run_id.clone(),
+                flow_name: "hello".into(),
+                cancel: cancel.clone(),
+                started_at: chrono::Utc::now(),
+            },
+        )
+        .unwrap();
 
     let req = JsonRpcRequest::new(
         1,
@@ -45,15 +47,17 @@ fn live_session_requires_both_live_and_broker_registration() {
     assert!(state.live_session(&sid).is_none());
     assert!(state.authorized_live_session(&sid, "alice").is_none());
 
-    state.register_live(
-        sid.clone(),
-        LiveSession {
-            run_id: FlowRunId(Uuid::now_v7()),
-            flow_name: "hello".into(),
-            cancel: CancellationToken::new(),
-            started_at: chrono::Utc::now(),
-        },
-    );
+    state
+        .register_live(
+            sid.clone(),
+            LiveSession {
+                run_id: FlowRunId(Uuid::now_v7()),
+                flow_name: "hello".into(),
+                cancel: CancellationToken::new(),
+                started_at: chrono::Utc::now(),
+            },
+        )
+        .unwrap();
     assert!(Arc::ptr_eq(&state.live_session(&sid).unwrap(), &session));
     assert!(state.authorized_live_session(&sid, "mallory").is_none());
     assert!(Arc::ptr_eq(
@@ -100,15 +104,17 @@ async fn list_sessions_includes_live_only_entry_as_running() {
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
 
     let sid = SessionId(Uuid::now_v7());
-    state.register_live(
-        sid.clone(),
-        LiveSession {
-            run_id: FlowRunId(Uuid::now_v7()),
-            flow_name: "hello".into(),
-            cancel: CancellationToken::new(),
-            started_at: chrono::Utc::now(),
-        },
-    );
+    state
+        .register_live(
+            sid.clone(),
+            LiveSession {
+                run_id: FlowRunId(Uuid::now_v7()),
+                flow_name: "hello".into(),
+                cancel: CancellationToken::new(),
+                started_at: chrono::Utc::now(),
+            },
+        )
+        .unwrap();
 
     let req = JsonRpcRequest::new(1, methods::LIST_SESSIONS, serde_json::json!({}));
     let resp = dispatch(state, req).await;

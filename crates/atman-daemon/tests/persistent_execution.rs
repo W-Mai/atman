@@ -67,6 +67,119 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_shutdown_drains_execution_and_ends_connected_streams_without_losing_queued_input() {
+    use axum::{body::Body, http::Request};
+    use futures::StreamExt;
+    use tower::ServiceExt;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, flow, launch) =
+        setup(&dir, "flow main(label: string) -> any { loop { yield } }").await;
+    rpc(&state, methods::FLOW_LAUNCH, launch.clone()).await;
+    let active = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let view = rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await;
+            if view["execution"]["state"]["open"]["active"].is_object() {
+                break view;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "action": "pause", "expected_revision": active["execution"]["revision"]})).await;
+    let queued = rpc(
+        &state,
+        methods::FLOW_INVOKE,
+        json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"label": "queued"}}),
+    )
+    .await;
+    let app = atman_daemon::http::router(Arc::new(atman_daemon::http::HttpState {
+        daemon: state.clone(),
+        auth_token: "secret".into(),
+    }));
+    let response = app
+        .oneshot(
+            Request::get(format!(
+                "/events?session_id={}&instance_id={}&token=secret",
+                flow["session_id"].as_str().unwrap(),
+                flow["instance_id"].as_str().unwrap()
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let mut stream = response.into_body().into_data_stream();
+    assert!(stream.next().await.unwrap().is_ok());
+
+    let path = dir.path().join("legacy.at");
+    std::fs::write(&path, "flow main() -> any { loop { yield } }").unwrap();
+    let legacy = state
+        .launcher()
+        .unwrap()
+        .spawn(state.clone(), path.to_str().unwrap(), vec![])
+        .await
+        .unwrap();
+    let context = state.live_session(&legacy.session_id).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !context
+            .sink()
+            .snapshot()
+            .iter()
+            .any(|event| matches!(event, atman_runtime::Event::FlowStart { .. }))
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), state.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    state.shutdown().await.unwrap();
+    assert!(state.live_session(&legacy.session_id).is_none());
+    assert!(
+        context
+            .sink()
+            .snapshot()
+            .iter()
+            .any(|event| matches!(event, atman_runtime::Event::FlowEnd { .. }))
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(chunk) = stream.next().await {
+            chunk.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let rejected = dispatch(
+        state.clone(),
+        JsonRpcRequest::new(1, methods::FLOW_LAUNCH, launch),
+    )
+    .await;
+    assert!(rejected.error.unwrap().message.contains("stopping"));
+    let root = atman_runtime::flow_store::RuntimeStore::open(&dir.path().join("data")).unwrap();
+    let session = root
+        .open_session(serde_json::from_value(flow["session_id"].clone()).unwrap())
+        .unwrap();
+    let address: atman_runtime::flow_store::FlowRef = serde_json::from_value(flow).unwrap();
+    let recovered = session.open_flow(&address.instance_id).unwrap();
+    assert_eq!(recovered.state().pauses().len(), 1);
+    assert_eq!(
+        recovered.completion(None).unwrap().completion.outcome,
+        atman_rt::TurnOutcome::Interrupted(atman_rt::Interruption::Cancelled)
+    );
+    assert_eq!(
+        serde_json::to_value(recovered.pending_inputs().next().unwrap().id).unwrap(),
+        queued["acceptance"]["message_id"]
+    );
+    assert!(recovered.published_messages().is_empty());
+}
+
 async fn wait_prompt(state: &Arc<DaemonState>) -> atman_proto::PromptId {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {

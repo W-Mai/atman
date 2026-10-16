@@ -36,15 +36,17 @@ async fn spawn_server(
         session,
         atman_daemon::state::LOCAL_OPERATOR,
     );
-    daemon.register_live(
-        session_id,
-        atman_daemon::LiveSession {
-            run_id: atman_proto::FlowRunId(uuid::Uuid::now_v7()),
-            flow_name: "logs-stream-test".into(),
-            cancel: tokio_util::sync::CancellationToken::new(),
-            started_at: chrono::Utc::now(),
-        },
-    );
+    daemon
+        .register_live(
+            session_id,
+            atman_daemon::LiveSession {
+                run_id: atman_proto::FlowRunId(uuid::Uuid::now_v7()),
+                flow_name: "logs-stream-test".into(),
+                cancel: tokio_util::sync::CancellationToken::new(),
+                started_at: chrono::Utc::now(),
+            },
+        )
+        .unwrap();
     serve(daemon, token).await
 }
 

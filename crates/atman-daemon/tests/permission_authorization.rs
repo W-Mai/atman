@@ -26,15 +26,17 @@ fn register_session(
     let stream = session.stream_tx().subscribe();
     let session_id = SessionId(session.id().0);
     state.register_broker(session_id.clone(), session.clone(), owner);
-    state.register_live(
-        session_id.clone(),
-        LiveSession {
-            run_id: atman_proto::FlowRunId(Uuid::now_v7()),
-            flow_name: "permission-test".into(),
-            cancel: CancellationToken::new(),
-            started_at: Utc::now(),
-        },
-    );
+    state
+        .register_live(
+            session_id.clone(),
+            LiveSession {
+                run_id: atman_proto::FlowRunId(Uuid::now_v7()),
+                flow_name: "permission-test".into(),
+                cancel: CancellationToken::new(),
+                started_at: Utc::now(),
+            },
+        )
+        .unwrap();
     (session_id, session, stream)
 }
 

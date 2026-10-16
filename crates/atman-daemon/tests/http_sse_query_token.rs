@@ -42,15 +42,18 @@ async fn sse_accepts_query_string_token_when_authorization_header_absent() {
         session,
         atman_daemon::state::LOCAL_OPERATOR,
     );
-    state.daemon.register_live(
-        atman_proto::SessionId(sid),
-        LiveSession {
-            run_id: atman_proto::FlowRunId(Uuid::now_v7()),
-            flow_name: "sse-query-token-test".into(),
-            cancel: CancellationToken::new(),
-            started_at: Utc::now(),
-        },
-    );
+    state
+        .daemon
+        .register_live(
+            atman_proto::SessionId(sid),
+            LiveSession {
+                run_id: atman_proto::FlowRunId(Uuid::now_v7()),
+                flow_name: "sse-query-token-test".into(),
+                cancel: CancellationToken::new(),
+                started_at: Utc::now(),
+            },
+        )
+        .unwrap();
     let app = router(state);
     let resp = app
         .oneshot(

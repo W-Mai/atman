@@ -56,15 +56,17 @@ async fn goal_controls_require_owner_and_current_revision() {
     session.goal_control.set("finish work", None).unwrap();
     let sid = atman_proto::SessionId(session.id().0);
     state.register_broker(sid.clone(), session.clone(), "owner");
-    state.register_live(
-        sid.clone(),
-        LiveSession {
-            run_id: atman_proto::FlowRunId(uuid::Uuid::now_v7()),
-            flow_name: "agent".into(),
-            cancel: session.flow_cancel_token(),
-            started_at: chrono::Utc::now(),
-        },
-    );
+    state
+        .register_live(
+            sid.clone(),
+            LiveSession {
+                run_id: atman_proto::FlowRunId(uuid::Uuid::now_v7()),
+                flow_name: "agent".into(),
+                cancel: session.flow_cancel_token(),
+                started_at: chrono::Utc::now(),
+            },
+        )
+        .unwrap();
     let params = serde_json::json!({"session_id":sid});
     let denied = dispatch_as(
         state.clone(),

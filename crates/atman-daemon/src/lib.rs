@@ -93,6 +93,9 @@ pub async fn dispatch_as(
     req: JsonRpcRequest,
     principal_id: &str,
 ) -> JsonRpcResponse {
+    if state.is_stopping() {
+        return JsonRpcResponse::err(req.id, JsonRpcError::application("daemon is stopping"));
+    }
     if req.jsonrpc != atman_proto::JSONRPC_VERSION {
         return JsonRpcResponse::err(
             req.id,
