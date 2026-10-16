@@ -406,6 +406,7 @@ Session listings default to the current project. Use `atman session list --all` 
 - **`atman sync init <url>`** turns `<project>/.atman/` into a git repo so your memory travels across machines.
 - **`atman migrate list --from opencode`** imports opencode / kiro session transcripts into a fresh atman session.
 - **`atman migrate inspect <session>`** prints a read-only JSON map of legacy Atman history, including record byte ranges, ownership, and malformed or unassigned records. It preserves source files and does not start flows.
+- **`atman migrate archive <session> --confirm-stopped`** imports a stopped legacy session into independent read-only flow journals. The JSON response includes the new session ID and source mapping. Retries resume the same destination; `--into <uuid>` explicitly selects another destination. Original files remain unchanged, and missing project directories do not prevent history import.
 - **[docs/context-strategy.md](./context-strategy.md)** covers the goal / todos / sliding-window / recall / compaction layering and when to reach for each.
 - **[docs/how-to-filter.md](./how-to-filter.md)** covers list combinators, fanout, and sequential expressions.
 - **`examples/`** in the atman source tree has larger canonical flows (agent loop, hunk review, LSP-style code review, etc).

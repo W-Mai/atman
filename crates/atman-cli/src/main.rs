@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 
 type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
+mod history_migration;
 mod init;
 mod mcp_templates;
 mod migrate_source;
@@ -114,10 +115,20 @@ enum Cmd {
     },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum MigrateAction {
     /// Inspect legacy Atman history ownership without modifying or activating it.
     Inspect { session_id: String },
+    /// Retain legacy Atman history in independent, read-only flow journals.
+    Archive {
+        session_id: String,
+        /// Confirm the old session executor has stopped before taking the snapshot.
+        #[arg(long, required = true)]
+        confirm_stopped: bool,
+        /// Choose a distinct destination for an intentional branch; retries use a stable ID by default.
+        #[arg(long)]
+        into: Option<uuid::Uuid>,
+    },
     List {
         #[arg(long, default_value = "opencode")]
         from: String,
@@ -387,15 +398,14 @@ fn main() -> Result<()> {
 
 async fn async_main() -> Result<()> {
     let cli = Cli::parse();
-    // Read-only history inspection must not trigger config migration or notifier writes.
-    if let Some(Cmd::Migrate {
-        action: MigrateAction::Inspect { session_id },
-    }) = &cli.cmd
+    // History operations must not trigger unrelated config migration or notifier writes.
+    if let Some(Cmd::Migrate { action }) = &cli.cmd
+        && matches!(
+            action,
+            MigrateAction::Inspect { .. } | MigrateAction::Archive { .. }
+        )
     {
-        return cmd_migrate(MigrateAction::Inspect {
-            session_id: session_id.clone(),
-        })
-        .await;
+        return cmd_migrate(action.clone()).await;
     }
     if let Some(Cmd::Upgrade {
         yes,
@@ -7822,6 +7832,18 @@ fn load_mcp_configs() -> Vec<atman_runtime::mcp::McpServerConfig> {
 
 async fn cmd_migrate(action: MigrateAction) -> Result<()> {
     match action {
+        MigrateAction::Archive {
+            session_id,
+            confirm_stopped,
+            into,
+        } => {
+            let report = tokio::task::spawn_blocking(move || {
+                history_migration::archive(&session_id, into, confirm_stopped)
+            })
+            .await??;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         MigrateAction::Inspect { session_id } => {
             let root = data_dir()?;
             let session_id = resolve_session_prefix(&root, &session_id)?;

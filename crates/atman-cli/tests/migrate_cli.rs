@@ -6,6 +6,110 @@ fn atman_bin() -> &'static str {
 }
 
 #[test]
+fn migrate_archive_requires_confirmation_and_retains_missing_project_history_idempotently() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let id = uuid::Uuid::now_v7().to_string();
+    let source_dir = data.join("sessions").join(&id);
+    std::fs::create_dir_all(&source_dir).unwrap();
+    let bytes = b"{\"type\":\"mermaid_diagram\",\"source\":\"private history\"}\n{torn";
+    std::fs::write(source_dir.join("events.jsonl"), bytes).unwrap();
+    let missing_project = temp.path().join("missing-project");
+    let meta = serde_json::to_vec(
+        &serde_json::json!({"title":"Retained title", "project_root":missing_project}),
+    )
+    .unwrap();
+    std::fs::write(source_dir.join("meta.json"), &meta).unwrap();
+    std::fs::write(data.join("config.toml"), "# untouched legacy config\n").unwrap();
+    let command = |extra: &[&str]| {
+        Command::new(atman_bin())
+            .args(["migrate", "archive", &id[..8]])
+            .args(extra)
+            .current_dir(temp.path())
+            .env("ATMAN_DATA_DIR", &data)
+            .env("ATMAN_CONFIG_DIR", temp.path().join("config"))
+            .output()
+            .unwrap()
+    };
+    let rejected = command(&[]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("--confirm-stopped"));
+    assert!(!data.join("runtime-v1").exists());
+    let output = command(&["--confirm-stopped"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["migrated_from"]["session_id"], id);
+    assert_eq!(report["migrated_from"]["records"], 2);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("private history"));
+    let again = command(&["--confirm-stopped"]);
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&again.stdout).unwrap(),
+        report
+    );
+    let retained = data
+        .join("runtime-v1/sessions")
+        .join(report["session_id"].as_str().unwrap());
+    let projection: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(retained.join("session.json")).unwrap()).unwrap();
+    assert_eq!(projection["value"]["descriptor"]["title"], "Retained title");
+    assert_eq!(
+        projection["value"]["descriptor"]["project"]["root"],
+        temp.path()
+            .canonicalize()
+            .unwrap()
+            .join("missing-project")
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(
+        std::fs::read(retained.join("artifacts/legacy-events.jsonl")).unwrap(),
+        bytes
+    );
+    assert!(!missing_project.exists());
+    assert!(!temp.path().join("config").exists());
+    assert_eq!(
+        std::fs::read(source_dir.join("events.jsonl")).unwrap(),
+        bytes
+    );
+    assert_eq!(std::fs::read(source_dir.join("meta.json")).unwrap(), meta);
+    assert_eq!(
+        std::fs::read_to_string(data.join("config.toml")).unwrap(),
+        "# untouched legacy config\n"
+    );
+
+    std::fs::write(source_dir.join("events.jsonl"), b"late legacy write\n").unwrap();
+    let conflict = command(&["--confirm-stopped"]);
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("source or destination changed"));
+    let branch = uuid::Uuid::now_v7().to_string();
+    let branched = command(&["--confirm-stopped", "--into", &branch]);
+    assert!(
+        branched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&branched.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&branched.stdout).unwrap()["session_id"],
+        branch
+    );
+    assert_eq!(
+        std::fs::read_dir(data.join("runtime-v1/sessions"))
+            .unwrap()
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn migrate_inspect_reports_original_records_without_rewriting_or_starting_a_session() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");

@@ -30,6 +30,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **History archive command** — `migrate archive` imports stopped legacy sessions through the durable migration store. It retains titles and project bindings, supports explicit destination IDs, and returns a JSON receipt without starting execution services.
+
 - **Offline history migration** — Legacy event logs can be imported into independent historical flows with exact source retention, resumable batches, integrity checks, and atomic session publication. Retries retain identity and reject changed sources or conflicting destinations.
 
 - **Historical flow journals** — Read-only flows retain exact legacy records with source identities, ownership, ordering, and integrity validation. Committed history pages remain available after the original source disappears and do not replay execution or notifications.

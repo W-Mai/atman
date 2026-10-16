@@ -22,6 +22,10 @@ Inspection reads the initial file length and verifies the source bytes again bef
 
 ## Offline history migration
 
+Run `atman migrate archive <session-id-or-prefix> --confirm-stopped` after stopping the legacy session executor. The command prints the new session ID and migration receipt as JSON. Repeating the command resumes or verifies the same destination. Use `--into <new-session-uuid>` only when intentionally importing a separate branch. The source remains readable through legacy commands; importing does not change the active session or start execution.
+
+The destination retains the legacy title and recorded project root, with the current Atman configuration source and resolved storage scope. A missing project directory remains a valid historical binding and is not recreated. Missing metadata produces a projectless historical session; malformed metadata is an error. The command bypasses startup configuration migration and does not initialize execution services.
+
 `RuntimeStore::archive_legacy(source, source_session, destination, old_executor_stopped)` imports legacy events into a new session identity. The host authenticates the operator and obtains explicit confirmation that the old executor has stopped. This confirmation does not lock an old binary or prevent it from writing later. Source files remain unchanged. `flow_store::migration::destination_id` provides a stable target for retries; a changed source conflicts with the saved plan instead of silently creating another copy. An operator can explicitly choose another destination for a separate source branch.
 
 The migration retains an exact source copy in the destination session's `artifacts/legacy-events.jsonl`, including whitespace and malformed data. Each owner receives a separate historical flow; uncertain records belong to one unassigned flow. Original lineage stays in the retained events and grants no authority. An explicit default historical flow exists even when the source contains no default-agent records. Historical flows remain closed and cannot start execution or deliver notifications.
