@@ -872,6 +872,160 @@ async fn execution_traces_share_instance_order_and_survive_turns_and_reopen() {
 }
 
 #[tokio::test]
+async fn process_watch_tools_share_instance_delivery_across_pause_turns_and_explicit_wait() {
+    use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};
+    let dir = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let config = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
+    let mut info = session_descriptor();
+    info.configuration = atman_runtime::flow_store::SessionConfiguration::Atman(config.source());
+    info.project = Some(
+        atman_runtime::storage::ProjectContext::resolve(&config, project.path(), dir.path())
+            .unwrap(),
+    );
+    let runtime = AtmanRuntime::build(AtmanRuntimeOptions {
+        events: atman_runtime::event::EventSink::new(),
+        mock: false,
+        config,
+        project: info.project.clone(),
+        home_dir: None,
+        workspace_generation: "process-observation".into(),
+    })
+    .await
+    .unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let source = r#"
+        flow main() -> any {
+            contract { capabilities { shell: true } }
+            when env("action") == "receive" {
+                later = watch(handle: env("background"), pattern: "later")
+                bash.spawn(cmd: env("release"), block: true)
+                received = wait_for_watcher(timeout_ms: 4000)
+                watcher.unwatch(watcher_id: env("persist"))
+                absent = watch(handle: env("terminal"), pattern: "absent", timeout_ms: 100)
+                expired = wait_for_watcher(timeout_ms: 4000)
+                return [received, expired, watcher.list()]
+            }
+            background = bash.spawn(cmd: env("command"), timeout_ms: 0)
+            first = watch(handle: background.handle, pattern: "ready", mode: "persist")
+            second = watch(handle: background.handle, pattern: "ready")
+            terminal = term.spawn(cmd: "printf 'terminal-ready\\n'; exec sleep 60")
+            term_watch = watch(handle: terminal.handle, pattern: "terminal-ready")
+            return [background, terminal, first, second, watcher.list()]
+        }
+    "#;
+    let worker = session
+        .create_flow(program_descriptor(info.id, source.into()))
+        .await
+        .unwrap();
+    change(&worker, FlowTransition::Activated).await;
+    let ready = project.path().join("ready");
+    let later = project.path().join("later");
+    let command = format!(
+        "while [ ! -f '{}' ]; do sleep 0.05; done; printf 'ready\\n'; while [ ! -f '{}' ]; do sleep 0.05; done; printf 'later\\n'; exec sleep 60",
+        ready.display(),
+        later.display()
+    );
+    let setup = invoke_with_env(
+        &worker,
+        runtime.executor.clone(),
+        [("command".into(), command.into())].into(),
+    )
+    .await
+    .result
+    .unwrap()
+    .to_json()
+    .unwrap();
+    let pause = Uuid::now_v7().into();
+    change(&worker, FlowTransition::ExecutionPaused { key: pause }).await;
+    std::fs::write(ready, "go").unwrap();
+    let mut commits = worker.subscribe_commits();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            commits.borrow_and_update();
+            if worker.snapshot().await.unwrap().pending.len() == 2 {
+                break;
+            }
+            commits.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let pending = worker.snapshot().await.unwrap().pending;
+    assert_eq!(pending.len(), 2);
+    assert!(pending.iter().any(|input| matches!(&input.request.payload, InboxPayload::ProcessEvent { content, .. } if content["subscriptions"].as_array().is_some_and(|reasons| reasons.len() == 2))));
+    let cursor = worker.snapshot().await.unwrap().cursor;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        worker.snapshot().await.unwrap().cursor,
+        cursor,
+        "quiet sources must not spin or write duplicate matches"
+    );
+    change(&worker, FlowTransition::ExecutionResumed { key: pause }).await;
+    let result = invoke_with_env(
+        &worker,
+        runtime.executor.clone(),
+        [
+            ("action".into(), "receive".into()),
+            ("background".into(), setup[0]["handle"].clone()),
+            ("terminal".into(), setup[1]["handle"].clone()),
+            ("persist".into(), setup[2]["watcher_id"].clone()),
+            (
+                "release".into(),
+                format!("touch '{}'", later.display()).into(),
+            ),
+        ]
+        .into(),
+    )
+    .await
+    .result
+    .unwrap()
+    .to_json()
+    .unwrap();
+    assert!(
+        result[0].as_str().unwrap().starts_with("1 watcher"),
+        "{result}"
+    );
+    assert!(
+        result[1].as_str().unwrap().starts_with("1 watcher"),
+        "{result}"
+    );
+    assert_eq!(result[2], serde_json::json!([]));
+    assert!(worker.snapshot().await.unwrap().pending.is_empty());
+    let messages = worker.context().messages_full();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.origin == MessageOrigin::Watcher)
+            .count(),
+        4
+    );
+    let address = worker.address().clone();
+    tokio::time::timeout(Duration::from_secs(10), host.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    let stored = root
+        .open_session(info.id)
+        .unwrap()
+        .open_flow(&address.instance_id)
+        .unwrap();
+    assert!(stored.pending_inputs().next().is_none());
+    assert_eq!(
+        stored
+            .context_messages()
+            .iter()
+            .filter(|message| message.origin == MessageOrigin::Watcher)
+            .count(),
+        4
+    );
+}
+
+#[tokio::test]
 async fn process_resources_belong_to_flow_instances_across_turns_and_storage_handoff() {
     use atman_runtime::task_registry::{TaskFilter, TaskKind};
     use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};

@@ -34,6 +34,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Instance process watcher tools** — Bind Bash and Terminal watches to persistent flow resources, receive output changes without polling, and commit explicit waits through the same inbox as model-boundary delivery. Preserve unread notifications across pauses and cancellation, synchronize context updates with compaction, and report lost output history explicitly.
+
 - **Persistent process observations** — Store process-watch identities, absolute deadlines, and matching results in each flow journal. Merge matches at one source position into one inbox input, retain accepted input after unwatch, and report unavailable process incarnations once when resource ownership restarts.
 
 - **CLI persistent session discovery** — `session list` and `session show` inspect recorded persistent catalogs alongside legacy history, including missing project paths. Queries leave execution ownership unchanged, ignore disposable caches, report corrupt catalogs, and leave incomplete journal tails unchanged.

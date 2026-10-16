@@ -114,6 +114,61 @@ impl super::host::SessionHandle {
 }
 
 impl FlowClient {
+    /// Observe an owned process through the instance resource owner. Registration survives the calling turn.
+    pub async fn watch_process(
+        &self,
+        id: Uuid,
+        handle: String,
+        pattern: String,
+        once: bool,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> io::Result<crate::flow_store::process_watch::ProcessWatchRecord> {
+        self.authenticate()?;
+        let client = self.clone();
+        self.host
+            .flow(self.source())
+            .await?
+            .watch_process(
+                id,
+                handle,
+                pattern,
+                once,
+                expires_at,
+                Box::new(move || client.authenticate()),
+            )
+            .await
+    }
+
+    pub async fn process_watches(
+        &self,
+    ) -> io::Result<Vec<crate::flow_store::process_watch::ProcessWatchRecord>> {
+        self.authenticate()?;
+        let client = self.clone();
+        self.host
+            .flow(self.source())
+            .await?
+            .request(move |store| {
+                client.authenticate()?;
+                Ok(store.process_watches().cloned().collect())
+            })
+            .await
+    }
+
+    pub async fn unwatch_process(&self, id: Uuid) -> io::Result<CommitReceipt> {
+        self.authenticate()?;
+        let client = self.clone();
+        let worker = self.host.flow(self.source()).await?;
+        let resources = worker.resources.clone();
+        worker
+            .request(move |store| {
+                client.authenticate()?;
+                let receipt = store.unregister_process_watch(id)?;
+                resources.observers.refresh();
+                Ok(receipt)
+            })
+            .await
+    }
+
     pub async fn read_planning(
         &self,
         target: FlowRef,

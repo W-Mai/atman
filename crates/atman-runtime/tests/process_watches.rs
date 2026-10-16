@@ -94,6 +94,40 @@ fn report(source: &ProcessSource, position: u64, watchers: &[Uuid]) -> ProcessRe
 }
 
 #[test]
+fn output_gap_retires_old_watches_without_replacing_the_live_process() {
+    let (_dir, session, mut flow) = fixture();
+    let source = source();
+    let old = watch(&source, false);
+    flow.register_process_watch(old.clone(), 0).unwrap();
+    let gap = ProcessReport {
+        source: source.clone(),
+        position: 1,
+        observed_at: Utc::now(),
+        signal: ProcessSignal::HistoryGap,
+    };
+    let receipt = flow.observe_process(gap.clone()).unwrap();
+    assert_eq!(flow.observe_process(gap).unwrap(), receipt);
+    assert_eq!(
+        flow.process_watches().next().unwrap().status,
+        ProcessWatchStatus::HistoryGap
+    );
+    let fresh = watch(&source, true);
+    flow.register_process_watch(fresh.clone(), 1).unwrap();
+    flow.observe_process(report(&source, 2, &[old.id, fresh.id]))
+        .unwrap();
+    let inputs: Vec<_> = flow.pending_inputs().cloned().collect();
+    assert_eq!(inputs.len(), 2);
+    let InboxPayload::ProcessEvent { content, .. } = &inputs[1].request.payload else {
+        panic!()
+    };
+    assert_eq!(content["subscriptions"].as_array().unwrap().len(), 1);
+    let address = flow.descriptor().address.clone();
+    drop(flow);
+    let flow = session.open_flow(&address.instance_id).unwrap();
+    assert_eq!(flow.pending_inputs().cloned().collect::<Vec<_>>(), inputs);
+}
+
+#[test]
 fn source_matches_share_one_inbox_input_and_survive_pause_unwatch_and_reopen() {
     let (_dir, session, mut flow) = fixture();
     let source = source();

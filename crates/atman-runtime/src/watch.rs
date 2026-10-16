@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::RuntimeError;
 use crate::message::Message;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
-use crate::value::Value;
+use crate::value::{Value, ValueJson};
 
 pub type WatcherId = String;
 
@@ -380,6 +380,12 @@ pub trait Watchable: Send + Sync {
 pub(crate) struct OutputCursor(usize);
 
 impl OutputCursor {
+    pub(crate) fn at(position: usize) -> Self {
+        Self(position)
+    }
+    pub(crate) fn position(&self) -> usize {
+        self.0
+    }
     pub(crate) fn find(&mut self, bytes: &[u8], base: usize, pattern: &str) -> Option<usize> {
         if pattern.is_empty() {
             return None;
@@ -506,24 +512,28 @@ fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, Run
     }
 }
 
-fn extract_optional_string(args: &ToolArgs, name: &str) -> Option<String> {
-    args.named(name).and_then(|v| {
-        if let Value::Str(s) = v {
-            Some(s.clone())
-        } else {
-            None
-        }
-    })
+fn extract_optional_string(args: &ToolArgs, name: &str) -> Result<Option<String>, RuntimeError> {
+    args.named(name)
+        .map(|value| match value {
+            Value::Str(value) => Ok(value.clone()),
+            other => Err(RuntimeError::TypeMismatch {
+                expected: "string".into(),
+                actual: other.kind_name().into(),
+            }),
+        })
+        .transpose()
 }
 
-fn extract_optional_int(args: &ToolArgs, name: &str) -> Option<i64> {
-    args.named(name).and_then(|v| {
-        if let Value::Int(i) = v {
-            Some(*i)
-        } else {
-            None
-        }
-    })
+fn extract_optional_int(args: &ToolArgs, name: &str) -> Result<Option<i64>, RuntimeError> {
+    args.named(name)
+        .map(|value| match value {
+            Value::Int(value) => Ok(*value),
+            other => Err(RuntimeError::TypeMismatch {
+                expected: "int".into(),
+                actual: other.kind_name().into(),
+            }),
+        })
+        .transpose()
 }
 
 pub struct Watch;
@@ -540,7 +550,7 @@ impl Tool for Watch {
              When pattern appears in the task's output, the agent is woken up.\n\n\
              Non-blocking: returns watcher_id immediately.\n\
              mode: \"once\" (default) or \"persist\".\n\
-             timeout_ms: default 120000 (120s), max 600000 (10min).",
+             timeout_ms: optional lifetime for persistent process watches. Legacy task watches default to 120000 (120s), max 600000 (10min).",
         )
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -550,7 +560,7 @@ impl Tool for Watch {
                 "handle": {"type": "string"},
                 "pattern": {"type": "string", "minLength": 1},
                 "mode": {"type": "string", "enum": ["once", "persist"], "default": "once"},
-                "timeout_ms": {"type": "integer", "default": 120000}
+                "timeout_ms": {"type": "integer", "minimum": 1}
             },
             "required": ["handle", "pattern"]
         })
@@ -564,11 +574,40 @@ impl Tool for Watch {
                     "watch: pattern must not be empty".into(),
                 ));
             }
-            let mode = match extract_optional_string(&args, "mode").as_deref() {
+            if let Some(client) = ctx.instance_client()? {
+                let once = match extract_optional_string(&args, "mode")?.as_deref() {
+                    Some("persist") => false,
+                    None | Some("once") => true,
+                    _ => return Err(RuntimeError::ToolFailed("watch: invalid mode".into())),
+                };
+                let expires_at = extract_optional_int(&args, "timeout_ms")?
+                    .map(|ms| {
+                        if ms <= 0 {
+                            return Err(RuntimeError::ToolFailed(
+                                "watch: timeout_ms must be positive".into(),
+                            ));
+                        }
+                        chrono::Duration::try_milliseconds(ms)
+                            .and_then(|duration| chrono::Utc::now().checked_add_signed(duration))
+                            .ok_or_else(|| {
+                                RuntimeError::ToolFailed("watch: timeout_ms is out of range".into())
+                            })
+                    })
+                    .transpose()?;
+                let record = client
+                    .watch_process(uuid::Uuid::now_v7(), handle, pattern, once, expires_at)
+                    .await
+                    .map_err(|error| RuntimeError::ToolFailed(format!("watch: {error}")))?;
+                return Ok(Value::Struct(vec![(
+                    "watcher_id".into(),
+                    Value::Str(format!("w_{}", record.watch.id.simple())),
+                )]));
+            }
+            let mode = match extract_optional_string(&args, "mode")?.as_deref() {
                 Some("persist") => WatchMode::Persist,
                 _ => WatchMode::Once,
             };
-            let timeout_ms = extract_optional_int(&args, "timeout_ms")
+            let timeout_ms = extract_optional_int(&args, "timeout_ms")?
                 .unwrap_or(120_000)
                 .clamp(1_000, 600_000) as u64;
             let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
@@ -693,6 +732,17 @@ impl Tool for WatcherList {
     }
     fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
+            if let Some(client) = ctx.instance_client()? {
+                let records = client
+                    .process_watches()
+                    .await
+                    .map_err(|error| RuntimeError::ToolFailed(format!("watcher.list: {error}")))?;
+                return Ok(Value::List(records.into_iter().filter(|record| record.status == crate::flow_store::process_watch::ProcessWatchStatus::Active).map(|record| Value::from_json(serde_json::json!({
+                    "watcher_id": format!("w_{}", record.watch.id.simple()), "source": record.watch.source,
+                    "pattern": record.watch.pattern, "mode": if record.watch.once { "once" } else { "persist" },
+                    "age_ms": (chrono::Utc::now() - record.registered_at).num_milliseconds().max(0), "expires_at": record.watch.expires_at,
+                }))).collect()));
+            }
             let hub = ctx.watch_hub.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("watcher.list: watch hub not available".into())
             })?;
@@ -750,6 +800,15 @@ impl Tool for WatcherUnwatch {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let id = extract_string(&args, "watcher_id", 0)?;
+            if let Some(client) = ctx.instance_client()? {
+                let id = uuid::Uuid::parse_str(id.strip_prefix("w_").unwrap_or(&id)).map_err(
+                    |error| RuntimeError::ToolFailed(format!("watcher.unwatch: {error}")),
+                )?;
+                client.unwatch_process(id).await.map_err(|error| {
+                    RuntimeError::ToolFailed(format!("watcher.unwatch: {error}"))
+                })?;
+                return Ok(Value::Unit);
+            }
             let hub = ctx.watch_hub.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("watcher.unwatch: watch hub not available".into())
             })?;
@@ -776,7 +835,7 @@ impl Tool for WaitForWatcher {
         Some(
             "Block until a registered watcher fires, or timeout.\n\
              If no active watchers exist, returns immediately (Unit).\n\
-             Returns Str with event details on match, or Unit on timeout/no watchers.",
+             Persistent instances commit matching notifications into the shared context and return an acknowledgement; legacy task invocations return the event message. Returns Unit on timeout/no watchers.",
         )
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -789,9 +848,38 @@ impl Tool for WaitForWatcher {
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let timeout_ms = extract_optional_int(&args, "timeout_ms")
+            let timeout_ms = extract_optional_int(&args, "timeout_ms")?
                 .unwrap_or(30_000)
                 .clamp(100, 300_000) as u64;
+            if ctx.instance_client()?.is_some() {
+                let binding = ctx.instance_publication.as_ref().ok_or_else(|| {
+                    RuntimeError::ToolFailed(
+                        "wait_for_watcher: missing instance context binding".into(),
+                    )
+                })?;
+                let count = binding
+                    .worker
+                    .wait_for_watchers(
+                        binding.lease.clone(),
+                        ctx.clone(),
+                        Duration::from_millis(timeout_ms),
+                    )
+                    .await
+                    .map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::Interrupted {
+                            RuntimeError::Cancelled(error.to_string())
+                        } else {
+                            RuntimeError::ToolFailed(format!("wait_for_watcher: {error}"))
+                        }
+                    })?;
+                return Ok(if count == 0 {
+                    Value::Unit
+                } else {
+                    Value::Str(format!(
+                        "{count} watcher notification(s) committed to the shared context."
+                    ))
+                });
+            }
             let hub = ctx.watch_hub.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("wait_for_watcher: watch hub not available".into())
             })?;

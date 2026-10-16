@@ -241,7 +241,7 @@ Journal history supports bounded `read_after` pages using a complete `CommitRece
 
 Inline calls share the instance context. Fanout calls retain isolated invocation contexts: their publications remain in the owning instance journal with `context_run`, and recovery does not merge them into the shared conversation. Message scheduling claims use the instance address rather than serializing every flow in a session.
 
-Worker binding covers message publication, model-window checkpoints, persistent spawn execution, and process resources. Legacy watcher/child notification migration and product scheduling still require host integration. The CLI and daemon retain their existing storage and dispatch until that integration is complete.
+Worker binding covers message publication, model-window checkpoints, persistent spawn execution, and process resources. Process watcher tools use the instance inbox; generic flow watcher tool routing and product scheduling still require integration. Existing CLI run and REPL dispatch remain on the legacy path, while instance-addressed daemon operations use the persistent host.
 
 ### Flow process resources
 
@@ -365,7 +365,15 @@ The trusted resource owner establishes the source stream before registration and
 
 `expire_process_watches` commits expiration and timer input together. No timeout is imposed when `expires_at` is absent. The resource owner serializes source reports and expiry commands; an accepted expiry or cancellation excludes a subsequently submitted match. Cancelling a registration preserves already accepted input. Closing the instance cancels outstanding registrations and pending input through the existing lifecycle transition while retaining both in history.
 
-Starting a new `FlowWorker` creates a new process-resource owner. Outstanding registrations for old process incarnations become `SourceLost`, or `Expired` if their recorded deadline has passed, and their notifications enter the same durable inbox. Reopening does not restart a process or generate a second loss notification. Execution pauses retain those inputs without granting permission to run. Storage-only inspection and recovery do not declare source loss; ownership startup does. These host storage APIs do not change the legacy `watch` tool's producer or wait routing.
+Starting a new `FlowWorker` creates a new process-resource owner. Outstanding registrations for old process incarnations become `SourceLost`, or `Expired` if their recorded deadline has passed, and their notifications enter the same durable inbox. Reopening does not restart a process or generate a second loss notification. Execution pauses retain those inputs without granting permission to run. Storage-only inspection and recovery do not declare source loss; ownership startup does.
+
+## Instance process watcher tools
+
+For persistent invocations, `watch`, `watcher.list`, and `watcher.unwatch` address process registrations owned by the invoking instance. Resource identities come from the actual Bash or Terminal task, and registration rechecks the invocation's authority at the journal owner. Each process has one observer holding its source subscription and match cursors across turns. Registration captures the initial source state before acknowledgement. Bash output changes and terminal screen revisions drive matching without polling; all matching registrations at one observed position share one inbox input. An optional `timeout_ms` becomes an absolute deadline without a default limit. A Bash output cursor that falls behind retained history produces `HistoryGap` and retires its registrations; a fresh registration can observe the same live process.
+
+`wait_for_watcher` and the next general model call consume the same durable inbox. Explicit waiting takes the context compaction lock before reservation, commits accepted notifications and their context representation together, and returns a count acknowledgement without duplicating the body in a tool result. Timeout, cancellation before pickup, execution pause, and turn finishing leave unread input pending. Once queued at the owner, context commit and projection retain lock ownership even if the waiting caller disappears. Notification messages preserve watcher provenance and do not grant user authority.
+
+Unwatch refreshes the process observer at the successful storage commit, independently of the caller awaiting its reply. Instance shutdown cancels and joins observers together with process resources. Legacy invocations retain their existing watcher hub. Flow-event subscriptions remain available through `FlowClient::watch_events`; generic `watch` routing and listing for flow sources are not yet connected to that API.
 
 ## Owned send attempts
 

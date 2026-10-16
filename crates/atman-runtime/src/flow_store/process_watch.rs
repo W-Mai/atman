@@ -56,6 +56,7 @@ pub enum ProcessWatchStatus {
     Cancelled,
     Exited,
     SourceLost,
+    HistoryGap,
     Expired,
 }
 
@@ -82,6 +83,7 @@ pub enum ProcessSignal {
     Matches(Vec<ProcessMatch>),
     Exited,
     SourceLost,
+    HistoryGap,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -140,7 +142,12 @@ impl ProcessWatches {
                 .reports
                 .get(&record.watch.source)
                 .and_then(|reports| reports.last())
-                .is_some_and(|(last, _)| !matches!(last.report.signal, ProcessSignal::Matches(_)))
+                .is_some_and(|(last, _)| {
+                    matches!(
+                        last.report.signal,
+                        ProcessSignal::Exited | ProcessSignal::SourceLost
+                    )
+                })
         {
             return Err(invalid("invalid process watch registration"));
         }
@@ -180,7 +187,12 @@ impl ProcessWatches {
                 .reports
                 .get(&report.source)
                 .and_then(|reports| reports.last())
-                .is_some_and(|(last, _)| !matches!(last.report.signal, ProcessSignal::Matches(_)))
+                .is_some_and(|(last, _)| {
+                    matches!(
+                        last.report.signal,
+                        ProcessSignal::Exited | ProcessSignal::SourceLost
+                    )
+                })
         {
             return Err(invalid("stale process observation position"));
         }
@@ -244,6 +256,7 @@ impl ProcessWatches {
                     ProcessSignal::Matches(_) => return None,
                     ProcessSignal::Exited => ProcessWatchStatus::Exited,
                     ProcessSignal::SourceLost => ProcessWatchStatus::SourceLost,
+                    ProcessSignal::HistoryGap => ProcessWatchStatus::HistoryGap,
                 };
                 Some((record.watch.id, status))
             })
@@ -263,7 +276,7 @@ impl ProcessWatches {
                 .collect::<Vec<_>>(),
             _ => Vec::new(),
         };
-        serde_json::json!({"source": report.source, "position": report.position, "observed_at": report.observed_at, "signal": match report.signal { ProcessSignal::Matches(_) => "matched", ProcessSignal::Exited => "exited", ProcessSignal::SourceLost => "source_lost" }, "subscriptions": updates, "matches": matches})
+        serde_json::json!({"source": report.source, "position": report.position, "observed_at": report.observed_at, "signal": match report.signal { ProcessSignal::Matches(_) => "matched", ProcessSignal::Exited => "exited", ProcessSignal::SourceLost => "source_lost", ProcessSignal::HistoryGap => "history_gap" }, "subscriptions": updates, "matches": matches})
     }
 
     pub fn validate(

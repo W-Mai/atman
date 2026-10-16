@@ -10,6 +10,7 @@ pub mod input;
 pub mod launch;
 pub mod observation;
 pub mod planning;
+mod process_watch;
 pub mod reply;
 pub mod resources;
 pub mod scheduler;

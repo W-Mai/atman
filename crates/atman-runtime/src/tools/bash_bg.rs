@@ -124,12 +124,25 @@ impl BgStatus {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BgOutput {
     pub combined: Vec<u8>,
     pub total_bytes: u64,
     pub truncated: bool,
     buffer_start: usize,
+    changes: tokio::sync::watch::Sender<()>,
+}
+
+impl Default for BgOutput {
+    fn default() -> Self {
+        Self {
+            combined: Vec::new(),
+            total_bytes: 0,
+            truncated: false,
+            buffer_start: 0,
+            changes: tokio::sync::watch::channel(()).0,
+        }
+    }
 }
 
 fn framed_output(kind: StreamKind, data: &[u8]) -> Vec<u8> {
@@ -168,6 +181,9 @@ impl BgOutput {
             let drop = self.combined.len() - max_ring;
             self.combined.drain(..drop);
             self.buffer_start += drop;
+        }
+        if !frame.is_empty() {
+            self.changes.send_modify(|_| {});
         }
         frame
     }
@@ -221,16 +237,31 @@ pub struct BgEntry {
     pub task_id: Option<crate::task_registry::TaskId>,
 }
 
+impl BgEntry {
+    pub(crate) fn output_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.output.lock().unwrap().changes.subscribe()
+    }
+
+    pub(crate) fn watch_snapshot(&self) -> (Vec<u8>, usize, bool) {
+        // Completion is published after both readers drain. Read it first so a final snapshot includes all output.
+        let running = matches!(*self.status.lock().unwrap(), BgStatus::Running { .. });
+        let output = self.output.lock().unwrap();
+        (output.combined.clone(), output.buffer_start, running)
+    }
+}
+
 impl crate::watch::Watchable for BgEntry {
     fn watch_output(
         self: Arc<Self>,
         pattern: String,
     ) -> futures::stream::BoxStream<'static, crate::watch::WatchResult> {
         use crate::watch::{OutputCursor, WatchResult};
-        let state = Some((self, OutputCursor::default(), pattern));
+        let changes = self.output_changes();
+        let state = Some((self, OutputCursor::default(), pattern, changes));
         Box::pin(futures::stream::unfold(state, |state| async move {
-            let (entry, mut cursor, pattern) = state?;
+            let (entry, mut cursor, pattern, mut changes) = state?;
             loop {
+                changes.borrow_and_update();
                 let running = matches!(*entry.status.lock().unwrap(), BgStatus::Running { .. });
                 let position = {
                     let out = entry.output.lock().unwrap();
@@ -242,12 +273,14 @@ impl crate::watch::Watchable for BgEntry {
                         col: u16::try_from(position).ok(),
                         text: pattern.clone(),
                     };
-                    return Some((result, Some((entry, cursor, pattern))));
+                    return Some((result, Some((entry, cursor, pattern, changes))));
                 }
                 if !running {
                     return Some((WatchResult::SourceExited, None));
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                if changes.changed().await.is_err() {
+                    return Some((WatchResult::SourceExited, None));
+                }
             }
         }))
     }
@@ -881,6 +914,7 @@ async fn run_bg_process(
         _ => None,
     };
     *status.lock().unwrap() = final_status.clone();
+    output.lock().unwrap().changes.send_modify(|_| {});
 
     if let Some(tx) = &stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::BashExited {
@@ -1467,8 +1501,11 @@ mod tests {
             started_at: 0,
             ended_at: 1,
         };
+        entry.output.lock().unwrap().changes.send_modify(|_| {});
         assert!(matches!(
-            stream.next().await,
+            tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .unwrap(),
             Some(WatchResult::SourceExited)
         ));
         assert!(stream.next().await.is_none());

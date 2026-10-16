@@ -250,6 +250,16 @@ pub struct TermEntry {
 }
 
 impl TermEntry {
+    pub(crate) fn watch_snapshot(&self) -> (TerminalScreen, u64, bool) {
+        let running = self.state.lock().unwrap().is_running();
+        let parser = self.parser.lock().unwrap();
+        (
+            snapshot_screen(&parser),
+            self.output_revision.load(Ordering::Acquire),
+            running,
+        )
+    }
+
     pub fn snapshot(&self) -> TerminalScreen {
         let parser = self.parser.lock().expect("parser poisoned");
         snapshot_screen(&parser)
@@ -1048,7 +1058,7 @@ fn find_pattern_on_screen(screen: &TerminalScreen, pattern: &str) -> Option<(u16
     None
 }
 
-fn find_pattern_columns(screen: &TerminalScreen, row: u16, pattern: &str) -> Vec<u16> {
+pub(crate) fn find_pattern_columns(screen: &TerminalScreen, row: u16, pattern: &str) -> Vec<u16> {
     if pattern.is_empty() {
         return Vec::new();
     }

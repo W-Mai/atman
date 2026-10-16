@@ -190,10 +190,10 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         && ctx.session_messages_handle.is_some();
     let mut compact_guard = if uses_managed_context {
         if let Some(session) = ctx.session_runtime.as_ref() {
-            Some(session.acquire_compact_lock().await)
+            Some(session.acquire_compact_lock_owned().await)
         } else if uses_spawned_context {
             match ctx.compact_lock_handle.as_ref() {
-                Some(lock) => Some(lock.lock().await),
+                Some(lock) => Some(lock.clone().lock_owned().await),
                 None => None,
             }
         } else {
@@ -228,14 +228,22 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 .capabilities
                 .input_modalities
                 .contains(&crate::provider::InputModality::Image);
-        if let Err(error) = binding
+        let Some(guard) = compact_guard.take() else {
+            return Value::Err(RuntimeError::ToolFailed(
+                "instance inbox pickup requires the context lock".into(),
+            ));
+        };
+        match binding
             .worker
-            .receive_context(binding.lease.clone(), ctx.clone(), accepts_images)
+            .receive_context(binding.lease.clone(), ctx.clone(), accepts_images, guard)
             .await
         {
-            return Value::Err(RuntimeError::ToolFailed(format!(
-                "instance inbox pickup failed: {error}"
-            )));
+            Ok(guard) => compact_guard = Some(guard),
+            Err(error) => {
+                return Value::Err(RuntimeError::ToolFailed(format!(
+                    "instance inbox pickup failed: {error}"
+                )));
+            }
         }
     }
     let llm_context = match llm_context::build_llm_context(
@@ -439,9 +447,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 };
                 if held_context {
                     compact_guard = if let Some(session) = ctx.session_runtime.as_ref() {
-                        Some(session.acquire_compact_lock().await)
+                        Some(session.acquire_compact_lock_owned().await)
                     } else if let Some(lock) = ctx.compact_lock_handle.as_ref() {
-                        Some(lock.lock().await)
+                        Some(lock.clone().lock_owned().await)
                     } else {
                         None
                     };
@@ -509,9 +517,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             return Value::Err(error);
                         }
                         compact_guard = if let Some(session) = &ctx.session_runtime {
-                            Some(session.acquire_compact_lock().await)
+                            Some(session.acquire_compact_lock_owned().await)
                         } else if let Some(lock) = &ctx.compact_lock_handle {
-                            Some(lock.lock().await)
+                            Some(lock.clone().lock_owned().await)
                         } else {
                             None
                         };
@@ -852,7 +860,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         };
                         if uses_spawned_context && let Some(lock) = ctx.compact_lock_handle.as_ref()
                         {
-                            compact_guard = Some(lock.lock().await);
+                            compact_guard = Some(lock.clone().lock_owned().await);
                         }
                         if let Some(tx) = stream_tx.as_ref() {
                             let _ = tx.send(crate::stream::StreamFrame::Note(

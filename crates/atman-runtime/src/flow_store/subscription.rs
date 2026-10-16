@@ -170,6 +170,24 @@ struct EventNotification {
     event: ObservedEvent,
 }
 
+pub(crate) fn is_watcher_notification(envelope: &AcceptedEnvelope) -> bool {
+    match &envelope.request.payload {
+        InboxPayload::Watcher { .. } | InboxPayload::ProcessEvent { .. } => true,
+        InboxPayload::Timer { content, .. } => {
+            content.get("kind").and_then(|kind| kind.as_str()) == Some("process_watch_expired")
+        }
+        InboxPayload::FlowEvent { content, .. } => {
+            serde_json::from_value::<EventNotification>(content.clone()).is_ok_and(|notification| {
+                notification
+                    .subscriptions
+                    .iter()
+                    .any(|reason| reason.purpose == SubscriptionPurpose::Watcher)
+            })
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn completion_notification(
     envelope: &AcceptedEnvelope,
 ) -> io::Result<CommittedCompletion> {
