@@ -186,6 +186,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Committed workspace data** — Automatic workspace cleanup retains checkouts whose HEAD differs from their allocation commit, including clean detached worktrees.
+
 - **Daemon transport ownership** — Token-authenticated HTTP and the owner-only Unix socket share the local operator identity, allowing persistent flow RPC and session event access through either transport.
 
 - **Host scheduler binding** — Concurrent binding and activation share per-instance ownership. A competing binding cannot replace a live scheduler or change its trust; paused and interrupted instances preserve their execution gates.

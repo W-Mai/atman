@@ -738,6 +738,19 @@ impl WorkspaceManager {
             return Ok(WorkspaceFinalizeOutcome::Dirty(result));
         }
 
+        let record = &mut registry.workspaces[index];
+        let head = GitCli::at(&record.worktree_path).head_oid()?;
+        if record.allocation_base.as_deref() != Some(head.as_str()) {
+            // A clean index does not prove that a detached checkout has no work to preserve.
+            record.retained = true;
+            record.state = WorkspaceState::Retained.as_str().into();
+            record.lease = None;
+            release_instance_reference(record);
+            let result = record.clone();
+            self.save(&registry)?;
+            return Ok(WorkspaceFinalizeOutcome::Retained(result));
+        }
+
         GitCli::at(&self.repository_root)
             .worktree_remove(&registry.workspaces[index].worktree_path, false)?;
         registry.workspaces[index].state = WorkspaceState::Released.as_str().into();
@@ -1407,6 +1420,53 @@ mod tests {
                     .validate_instance(&record.binding(), &owner)
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn automatic_cleanup_preserves_commits_after_the_allocation_base() {
+        for persistent in [false, true] {
+            let tmp = repo();
+            let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+            let owner = instance_owner();
+            let base = GitCli::at(tmp.path()).head_oid().unwrap();
+            let session = owner.session_id.to_string();
+            let flow = owner.instance_id.to_string();
+            let record = if persistent {
+                manager.create_instance("committed", &owner, "host", false, &base)
+            } else {
+                manager.create_managed("committed", &session, &flow, "host", false, &base)
+            }
+            .unwrap();
+            fs::write(record.worktree_path.join("result.txt"), "preserve result").unwrap();
+            git(&record.worktree_path, &["add", "result.txt"]);
+            git(&record.worktree_path, &["commit", "-q", "-m", "result"]);
+            let result_head = GitCli::at(&record.worktree_path).head_oid().unwrap();
+            assert_ne!(result_head, base);
+            assert!(!crate::git::has_changes(&record.worktree_path).unwrap());
+            let release = || {
+                if persistent {
+                    manager.release_instance("committed", &owner)
+                } else {
+                    manager.finalize_managed("committed", &session, &flow)
+                }
+                .unwrap()
+            };
+            let released = release();
+            assert!(matches!(released, WorkspaceFinalizeOutcome::Retained(_)));
+            assert_eq!(release(), released);
+            let stored = manager.get("committed").unwrap();
+            assert!(stored.retained);
+            assert!(!stored.is_instance_bound());
+            assert_eq!(
+                GitCli::at(&record.worktree_path).head_oid().unwrap(),
+                result_head
+            );
+            assert_eq!(
+                fs::read_to_string(record.worktree_path.join("result.txt")).unwrap(),
+                "preserve result"
+            );
+            assert!(manager.prune(false).unwrap().is_empty());
         }
     }
 
