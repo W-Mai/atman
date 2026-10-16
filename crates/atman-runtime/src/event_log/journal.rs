@@ -3,7 +3,8 @@
 //! This blocking store belongs on the host's storage worker. A successful commit acknowledges the whole batch after synchronization. An I/O failure makes the handle unusable until reopened: a complete but unacknowledged batch may still exist, so callers reconcile stable request IDs after replay. Live display frames do not need this durability boundary.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -39,6 +40,27 @@ pub struct CommitReceipt {
     pub digest: String,
 }
 
+/// One complete committed batch. Individual facts do not have independent acknowledgement positions.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CommittedBatch<T> {
+    pub receipt: CommitReceipt,
+    pub facts: Vec<T>,
+}
+
+/// A bounded window from one journal. An empty page preserves the supplied cursor.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct JournalPage<T> {
+    pub batches: Vec<CommittedBatch<T>>,
+    pub next: Option<CommitReceipt>,
+    pub has_more: bool,
+}
+
+struct BatchPosition {
+    offset: u64,
+    length: usize,
+    digest: String,
+}
+
 /// An incomplete final record retained before truncating the journal to its committed prefix.
 #[derive(Debug)]
 pub struct RecoveredTail {
@@ -54,6 +76,8 @@ pub struct Journal {
     sequence: u64,
     digest: String,
     poisoned: bool,
+    end: u64,
+    batches: Vec<BatchPosition>,
 }
 
 impl Journal {
@@ -77,6 +101,8 @@ impl Journal {
             sequence: 0,
             digest: hex_digest(&bytes),
             poisoned: false,
+            end: bytes.len() as u64,
+            batches: Vec::new(),
         })
     }
 
@@ -103,6 +129,7 @@ impl Journal {
         let mut digest = hex_digest(&line);
         let mut offset = line.len() as u64;
         let mut sequence = 0_u64;
+        let mut batches = Vec::new();
         let tail = loop {
             line.clear();
             let bytes = reader.read_until(b'\n', &mut line)?;
@@ -136,6 +163,11 @@ impl Journal {
             )?;
             sequence = next;
             digest = record.digest;
+            batches.push(BatchPosition {
+                offset,
+                length: bytes,
+                digest: digest.clone(),
+            });
             offset = offset
                 .checked_add(bytes as u64)
                 .ok_or_else(|| invalid("journal offset exhausted"))?;
@@ -160,6 +192,8 @@ impl Journal {
                 sequence,
                 digest,
                 poisoned: false,
+                end: offset,
+                batches,
             },
             recovered,
         ))
@@ -167,6 +201,75 @@ impl Journal {
 
     pub fn sequence(&self) -> u64 {
         self.sequence
+    }
+
+    /// Read committed batches without rescanning preceding history. The cursor must match this journal's recorded identity, sequence, and digest; reads never consume input or advance the writer's commit position.
+    pub fn read_after<T: DeserializeOwned>(
+        &mut self,
+        after: Option<&CommitReceipt>,
+        limit: NonZeroUsize,
+    ) -> io::Result<JournalPage<T>> {
+        if self.poisoned {
+            return Err(io::Error::other(
+                "journal requires reopening after an I/O failure",
+            ));
+        }
+        let start = match after {
+            None => 0,
+            Some(cursor) => {
+                let position = usize::try_from(cursor.sequence).map_err(invalid)?;
+                let known = position
+                    .checked_sub(1)
+                    .and_then(|index| self.batches.get(index));
+                if cursor.journal_id != self.id
+                    || known.is_none_or(|batch| batch.digest != cursor.digest)
+                {
+                    return Err(invalid(
+                        "journal cursor is not a committed position in this history",
+                    ));
+                }
+                position
+            }
+        };
+        let end = start.saturating_add(limit.get()).min(self.batches.len());
+        let mut batches = Vec::with_capacity(end - start);
+        for index in start..end {
+            let position = &self.batches[index];
+            self.poisoned = true;
+            self.file.seek(SeekFrom::Start(position.offset))?;
+            let mut bytes = vec![0; position.length];
+            self.file.read_exact(&mut bytes)?;
+            let record: Record = serde_json::from_slice(&bytes).map_err(invalid)?;
+            let sequence = index as u64 + 1;
+            if !bytes.ends_with(b"\n")
+                || record.sequence != sequence
+                || record.digest != position.digest
+                || record.digest != batch_digest(sequence, &record.previous, &record.payload)
+            {
+                return Err(invalid("journal page integrity check failed"));
+            }
+            self.poisoned = false;
+            let facts: Vec<T> = serde_json::from_str(&record.payload).map_err(invalid)?;
+            if facts.is_empty() {
+                return Err(invalid("empty journal batch"));
+            }
+            batches.push(CommittedBatch {
+                receipt: CommitReceipt {
+                    journal_id: self.id,
+                    sequence,
+                    digest: record.digest,
+                },
+                facts,
+            });
+        }
+        Ok(JournalPage {
+            next: batches
+                .last()
+                .map(|batch| batch.receipt.clone())
+                .or_else(|| after.cloned()),
+            has_more: end < self.batches.len(),
+            batches,
+        })
     }
 
     /// Serialize before touching disk, append one complete batch, and acknowledge only after sync.
@@ -195,12 +298,24 @@ impl Journal {
             digest: digest.clone(),
         };
         let bytes = json_line(&record)?;
+        let end = self
+            .end
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| invalid("journal offset exhausted"))?;
         // Poison before I/O so unwinding cannot leave an apparently usable uncertain writer.
         self.poisoned = true;
+        // Page reads move this same file's offset; append only at the acknowledged boundary.
+        self.file.seek(SeekFrom::Start(self.end))?;
         self.file.write_all(&bytes)?;
         self.file.sync_all()?;
         self.sequence = sequence;
         self.digest = digest.clone();
+        self.batches.push(BatchPosition {
+            offset: self.end,
+            length: bytes.len(),
+            digest: digest.clone(),
+        });
+        self.end = end;
         self.poisoned = false;
         Ok(CommitReceipt {
             journal_id: self.id,
@@ -278,6 +393,106 @@ fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_pages_resume_across_appends_and_reopening_without_moving_the_commit_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let id = Uuid::new_v4();
+        let mut journal = Journal::create(&path, id).unwrap();
+        let empty = journal
+            .read_after::<String>(None, NonZeroUsize::new(2).unwrap())
+            .unwrap();
+        assert!(empty.batches.is_empty() && empty.next.is_none() && !empty.has_more);
+        let first = journal.commit(&["first", "same batch"]).unwrap();
+        let second = journal.commit(&["second"]).unwrap();
+        let third = journal.commit(&["third"]).unwrap();
+        let page = journal
+            .read_after::<String>(None, NonZeroUsize::new(1).unwrap())
+            .unwrap();
+        assert_eq!(page.batches.len(), 1);
+        assert_eq!(page.batches[0].facts, ["first", "same batch"]);
+        assert_eq!(page.next, Some(first.clone()));
+        assert!(page.has_more);
+        let fourth = journal.commit(&["fourth"]).unwrap();
+        let page = journal
+            .read_after::<String>(page.next.as_ref(), NonZeroUsize::new(2).unwrap())
+            .unwrap();
+        assert_eq!(
+            page.batches
+                .iter()
+                .map(|batch| &batch.receipt)
+                .collect::<Vec<_>>(),
+            [&second, &third]
+        );
+        assert!(page.has_more);
+        drop(journal);
+        let (mut journal, _) = Journal::open::<String>(&path, id, |_, _| Ok(())).unwrap();
+        let last = journal
+            .read_after::<String>(page.next.as_ref(), NonZeroUsize::new(2).unwrap())
+            .unwrap();
+        assert_eq!(last.batches[0].facts, ["fourth"]);
+        assert_eq!(last.next, Some(fourth));
+        assert!(!last.has_more);
+        let empty = journal
+            .read_after::<String>(last.next.as_ref(), NonZeroUsize::new(2).unwrap())
+            .unwrap();
+        assert!(empty.batches.is_empty() && !empty.has_more);
+        assert_eq!(empty.next, last.next);
+        let prefix = std::fs::read(&path).unwrap();
+        for invalid in [
+            CommitReceipt {
+                journal_id: Uuid::new_v4(),
+                ..first.clone()
+            },
+            CommitReceipt {
+                sequence: 0,
+                ..first.clone()
+            },
+            CommitReceipt {
+                sequence: u64::MAX,
+                ..first.clone()
+            },
+            CommitReceipt {
+                digest: "different history".into(),
+                ..first
+            },
+        ] {
+            assert!(
+                journal
+                    .read_after::<String>(Some(&invalid), NonZeroUsize::new(2).unwrap())
+                    .is_err()
+            );
+            assert!(!journal.poisoned);
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), prefix);
+        assert_eq!(journal.commit(&["fifth"]).unwrap().sequence, 5);
+        assert!(std::fs::read(&path).unwrap().starts_with(&prefix));
+    }
+
+    #[test]
+    fn page_integrity_checks_only_the_selected_committed_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut journal = Journal::create(&path, Uuid::new_v4()).unwrap();
+        let first = journal.commit(&[1]).unwrap();
+        journal.commit(&[2]).unwrap();
+        let original = std::fs::read_to_string(&path).unwrap();
+        let corrupt = original.replacen("[2]", "[9]", 1);
+        std::fs::write(&path, &corrupt).unwrap();
+        let page = journal
+            .read_after::<u32>(None, NonZeroUsize::new(1).unwrap())
+            .unwrap();
+        assert_eq!(page.batches[0].facts, [1]);
+        assert!(
+            journal
+                .read_after::<u32>(Some(&first), NonZeroUsize::new(1).unwrap())
+                .is_err()
+        );
+        assert!(journal.poisoned);
+        assert!(journal.commit(&[3]).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), corrupt);
+    }
 
     #[test]
     fn durable_batches_replay_atomically_in_sequence_and_bind_to_one_identity() {
