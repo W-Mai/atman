@@ -254,6 +254,7 @@ impl RuntimeHost {
                             Ok(())
                         })?;
                         if new {
+                            context.project_instance_goal(store.goal().cloned());
                             for message in &record.input.inherited_context {
                                 context.append_message(message.clone(), None);
                             }
@@ -341,6 +342,7 @@ mod tests {
             .into(),
         };
         let input = LaunchInput {
+            initial_goal: None,
             execution: None,
             request: DeliveryRequest {
                 request_id: descriptor.creation_request,

@@ -173,6 +173,7 @@ pub(crate) async fn run(file: &Path, program: &LinkedProgram, options: Options) 
                     .into(),
                 },
                 LaunchInput {
+                    initial_goal: None,
                     execution: Some(EntryBinding {
                         first_turn: atman_rt::TurnId(request.into()),
                         first_run: atman_rt::RunId(request.into()),

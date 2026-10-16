@@ -169,7 +169,8 @@ impl SessionService {
             if let Some(record) = worker.launch_record().await? {
                 ensure!(
                     record.input.request.sender == SenderIdentity::User(OPERATOR)
-                        && record.input.request.payload == payload,
+                        && record.input.request.payload == payload
+                        && record.input.initial_goal == request.initial_goal,
                     "launch conflicts with the recorded input"
                 );
                 return Ok(json!({"flow": address(&flow), "acceptance": record.acceptance}));
@@ -208,6 +209,7 @@ impl SessionService {
             .await?;
         // The creation request identifies the initial invocation in each typed identity domain.
         let input = LaunchInput {
+            initial_goal: request.initial_goal,
             execution: Some(EntryBinding {
                 first_turn: atman_rt::TurnId(request.request_id.into()),
                 first_run: atman_rt::RunId(request.request_id.into()),

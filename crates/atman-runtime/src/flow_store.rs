@@ -319,11 +319,17 @@ impl FlowFact {
             };
         }
         if facts.iter().any(|fact| matches!(fact, Self::Activated(_))) {
-            return if matches!(facts, [Self::Activated(_)]) {
+            return if match facts {
+                [Self::Activated(activation)] => activation.goal_update().is_none(),
+                [Self::Activated(activation), Self::GoalUpdated(goal)] => {
+                    activation.goal_update().as_ref() == Some(goal.as_ref())
+                }
+                _ => false,
+            } {
                 Ok(())
             } else {
                 Err(invalid(
-                    "activation and its input require one dedicated fact",
+                    "activation requires its input and exact initial goal in one batch",
                 ))
             };
         }

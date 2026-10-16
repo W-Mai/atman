@@ -51,6 +51,7 @@ fn initial(info: &FlowDescriptor, recipient: &FlowRef) -> LaunchInput {
     let mut previous_answer = Message::assistant_text(TurnId::now(), "inherited answer");
     previous_answer.origin = MessageOrigin::FinalAnswer;
     LaunchInput {
+        initial_goal: None,
         execution: None,
         request: DeliveryRequest {
             request_id: info.creation_request,
@@ -418,7 +419,8 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     recipient.transition(0, FlowTransition::Activated).unwrap();
     let source_info = descriptor(info.id);
     let mut source = session.create_flow(source_info.clone()).unwrap();
-    let input = initial(&source_info, recipient.state().address());
+    let mut input = initial(&source_info, recipient.state().address());
+    input.initial_goal = Some("Finish the requested work".into());
     let mut invalid_mid_turn = input.request.clone();
     invalid_mid_turn.recipient = recipient.state().address().clone();
     invalid_mid_turn.delivery = DeliveryMode::AtBoundary;
@@ -466,6 +468,15 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     assert_eq!(source.state().state(), &InstanceState::Prepared);
     assert!(source.pending_inputs().next().is_none());
     let pause = Uuid::new_v4().into();
+    let mut invalid_goal = input.clone();
+    invalid_goal.initial_goal = Some("  ".into());
+    assert!(
+        source
+            .activate_with_input(invalid_goal, Some(proof.clone()), |_| Ok(()))
+            .is_err()
+    );
+    assert_eq!(source.state().state(), &InstanceState::Prepared);
+    assert!(source.goal().is_none());
     let activation_start = std::fs::metadata(source.dir().join("events.jsonl"))
         .unwrap()
         .len() as usize;
@@ -473,6 +484,13 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
         .activate_with_input(input.clone(), Some(proof.clone()), |_| Ok(()))
         .unwrap();
     assert_eq!(source.cursor(), &committed.acceptance.receipt);
+    let goal = source.goal().cloned().unwrap();
+    assert_eq!(goal.objective, "Finish the requested work");
+    assert_eq!(goal.revision, 1);
+    assert_eq!(
+        source.goal_updates()[0].receipt,
+        committed.acceptance.receipt
+    );
     source
         .transition(
             source.state().revision(),
@@ -486,6 +504,8 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     drop(source);
     let mut source = session.open_flow(&source_info.address.instance_id).unwrap();
     assert_eq!(source.launch_record().unwrap().input, input);
+    assert_eq!(source.goal(), Some(&goal));
+    assert_eq!(source.goal_updates().len(), 1);
     assert_eq!(
         source
             .activate_with_input(input.clone(), None, |_| panic!("retry reauthorized"))
@@ -494,6 +514,14 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
         committed.acceptance
     );
     assert_eq!(source.state().pauses(), &[pause]);
+    let mut changed_goal = input.clone();
+    changed_goal.initial_goal = Some("different objective".into());
+    assert!(
+        source
+            .activate_with_input(changed_goal, None, |_| Ok(()))
+            .is_err()
+    );
+    assert_eq!(source.goal(), Some(&goal));
     let mut changed = input.clone();
     changed.inherited_context.clear();
     assert!(
@@ -530,10 +558,17 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     assert!(recovered.launch_record().is_none());
     assert!(recovered.pending_inputs().next().is_none());
     assert!(recovered.context_messages().is_empty());
+    assert!(recovered.goal().is_none());
+    assert!(recovered.goal_updates().is_empty());
     recovered
         .activate_with_input(input, Some(proof), |_| Ok(()))
         .unwrap();
     assert_eq!(recovered.pending_inputs().count(), 1);
+    assert_eq!(
+        recovered.goal().unwrap().objective,
+        "Finish the requested work"
+    );
+    assert_eq!(recovered.goal_updates().len(), 1);
 }
 
 #[tokio::test]

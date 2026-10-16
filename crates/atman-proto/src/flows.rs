@@ -75,6 +75,8 @@ pub struct LaunchFlowRequest {
     /// Absolute source path. Source contents are retained at creation.
     pub path: String,
     pub entry: String,
+    /// Optional objective installed atomically before entry execution.
+    pub initial_goal: Option<String>,
     #[serde(default)]
     pub arguments: BTreeMap<String, serde_json::Value>,
     #[serde(default)]

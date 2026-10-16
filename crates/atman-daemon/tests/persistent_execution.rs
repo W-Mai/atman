@@ -365,6 +365,62 @@ async fn rpc_entry_waits_for_the_original_daemon_prompt_transport() {
 }
 
 #[tokio::test]
+async fn initial_goal_is_visible_to_the_first_turn_and_retries_do_not_restore_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, flow, mut launch) = setup(&dir, r#"flow main(label: string) -> string {
+        snapshot = memory.goal.get()
+        memory.goal.pause(goal_id: snapshot.goal.id, expected_revision: snapshot.goal.revision, reason: "completed", summary: "finished")
+        return final.answer(message: snapshot.goal.objective)
+    }"#).await;
+    launch["initial_goal"] = json!("Explicit objective");
+    let accepted = rpc(&state, methods::FLOW_LAUNCH, launch.clone()).await;
+    let finished = wait_completion(&state, &flow, None).await;
+    assert_eq!(finished["goal"]["objective"], "Explicit objective");
+    assert_eq!(finished["goal"]["status"], "paused");
+    assert_eq!(finished["goal"]["revision"], 2);
+    assert_eq!(
+        answer(
+            &rpc(&state, methods::FLOW_OUTPUT, json!({"flow": flow})).await,
+            0
+        ),
+        "Explicit objective"
+    );
+    let duplicate = rpc(&state, methods::FLOW_LAUNCH, launch.clone()).await;
+    assert_eq!(
+        duplicate["acceptance"]["receipt"],
+        accepted["acceptance"]["receipt"]
+    );
+    let mut conflict = launch;
+    conflict["initial_goal"] = json!("Replaced objective");
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::FLOW_LAUNCH, conflict)
+        )
+        .await
+        .error
+        .is_some()
+    );
+    assert_eq!(
+        rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await["goal"],
+        finished["goal"]
+    );
+    state.shutdown().await.unwrap();
+    let reopened = Arc::new(DaemonState::new(dir.path().join("data")));
+    rpc(
+        &reopened,
+        methods::SESSION_OPEN,
+        json!({"session_id": flow["session_id"]}),
+    )
+    .await;
+    let restored = rpc(&reopened, methods::FLOW_GET, json!({"flow": flow})).await;
+    assert_eq!(restored["goal"], finished["goal"]);
+    assert_eq!(restored["last_completion"], finished["last_completion"]);
+    assert!(restored["scheduler"].is_null());
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn failed_preparation_and_stale_inventory_do_not_register_executable_flows() {
     let dir = tempfile::tempdir().unwrap();
     let (state, flow, mut launch) =

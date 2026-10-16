@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Instance activation** — `LaunchInput.initial_goal` and RPC `flow.launch` accept an explicit objective committed atomically with the initial invocation. The objective is visible before entry execution; retries do not reset later Goal changes.
+
 - **Daemon session summaries** — `event_count` is nullable when unknown. Session listing methods are asynchronous and include persistent catalog metadata with idle, detached, and unavailable states.
 
 - **Daemon execution registration** — `DaemonState::register_live` returns an error after shutdown admission closes.

@@ -2665,6 +2665,7 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
         .launch_flow(
             descriptor.clone(),
             LaunchInput {
+                initial_goal: None,
                 request: DeliveryRequest {
                     request_id: descriptor.creation_request,
                     sender: SenderIdentity::User(Uuid::new_v4()),

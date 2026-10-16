@@ -56,6 +56,8 @@ impl ResultRoute {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LaunchInput {
     pub request: DeliveryRequest,
+    /// Explicit initial objective, committed with activation before any turn can start.
+    pub initial_goal: Option<String>,
     pub inherited_context: Vec<Message>,
     pub result_route: Option<ResultRoute>,
     pub execution: Option<EntryBinding>,
@@ -84,6 +86,22 @@ pub(super) struct Activation {
 }
 
 impl Activation {
+    pub(super) fn goal_update(&self) -> Option<super::goal::GoalUpdate> {
+        self.input
+            .initial_goal
+            .as_ref()
+            .map(|text| super::goal::GoalUpdate {
+                request: super::goal::GoalRequest {
+                    id: self.input.request.request_id,
+                    sender: self.input.request.sender.clone(),
+                    expected: None,
+                    edit: crate::memory::goal::GoalEdit::Create { text: text.clone() },
+                },
+                new_goal_id: self.id,
+                at: self.accepted_at,
+            })
+    }
+
     pub(super) fn envelope(&self) -> AcceptedEnvelope {
         AcceptedEnvelope {
             id: self.id,
@@ -213,12 +231,25 @@ impl FlowStore {
         let candidate =
             activation.validate(&self.descriptor, &self.state, &self.inbox, &self.cursor)?;
         authorize_new(&activation.input)?;
-        let receipt = self
-            .journal
-            .commit(&[FlowFact::Activated(Box::new(activation.clone()))])?;
+        let goal = activation
+            .goal_update()
+            .map(|update| {
+                self.goals
+                    .prepare(&candidate, &update)
+                    .map(|goal| (update, goal))
+            })
+            .transpose()?;
+        let mut facts = vec![FlowFact::Activated(Box::new(activation.clone()))];
+        if let Some((update, _)) = &goal {
+            facts.push(FlowFact::GoalUpdated(Box::new(update.clone())));
+        }
+        let receipt = self.journal.commit(&facts)?;
         self.state = candidate;
         self.inbox.state_changed(&self.state, &receipt);
         let acceptance = activation.apply(&mut self.inbox, &receipt);
+        if let Some((update, goal)) = goal {
+            self.goals.apply(update, goal, receipt.clone());
+        }
         self.cursor = receipt;
         let input = activation.input.clone();
         self.activation = Some(activation);
