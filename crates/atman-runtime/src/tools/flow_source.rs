@@ -30,6 +30,13 @@ pub fn current_project_root() -> Option<PathBuf> {
 }
 
 pub fn project_root_for_ctx(ctx: &ToolCtx) -> Option<PathBuf> {
+    if let Some(identity) = ctx
+        .flow_identity
+        .as_ref()
+        .filter(|identity| identity.instance.is_some())
+    {
+        return identity.effective_authority.workspace_root.clone();
+    }
     ctx.workspace
         .as_ref()
         .map(|workspace| workspace.path.clone())
@@ -89,7 +96,7 @@ pub fn resolve_installed_command(
 pub fn candidates(flow_ref: &str, ctx: &ToolCtx) -> Vec<PathBuf> {
     let config_dir = crate::storage::config_dir().ok();
     let project_root = project_root_for_ctx(ctx);
-    let cwd = std::env::current_dir().ok();
+    let cwd = ctx.resolve_cwd(None).ok();
     candidates_from(
         flow_ref,
         config_dir.as_deref(),
@@ -106,10 +113,11 @@ pub fn candidates_from(
 ) -> Vec<PathBuf> {
     let path = PathBuf::from(flow_ref);
     if path.is_absolute() || path.components().count() > 1 || flow_ref.starts_with('.') {
-        return vec![match (path.is_absolute(), cwd) {
-            (false, Some(cwd)) => cwd.join(path),
-            _ => path,
-        }];
+        return match (path.is_absolute(), cwd) {
+            (true, _) => vec![path],
+            (false, Some(cwd)) => vec![cwd.join(path)],
+            (false, None) => Vec::new(),
+        };
     }
     let file_name = if flow_ref.ends_with(".at") {
         flow_ref.to_string()
@@ -125,8 +133,6 @@ pub fn candidates_from(
     }
     if let Some(cwd) = cwd {
         candidates.push(cwd.join(file_name));
-    } else {
-        candidates.push(PathBuf::from(file_name));
     }
     candidates
 }

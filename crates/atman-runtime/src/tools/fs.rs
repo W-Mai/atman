@@ -252,8 +252,8 @@ impl Tool for FsWrite {
         Tier::Two
     }
 
-    fn approval_level(&self, args: &ToolArgs, _ctx: &ToolCtx) -> ApprovalLevel {
-        workspace_approval_level(args, ApprovalLevel::from_tier(self.tier()))
+    fn approval_level(&self, args: &ToolArgs, ctx: &ToolCtx) -> ApprovalLevel {
+        workspace_approval_level(args, ctx, ApprovalLevel::from_tier(self.tier()))
     }
 
     fn description(&self) -> Option<&str> {
@@ -376,8 +376,8 @@ impl Tool for FsEdit {
         Tier::Two
     }
 
-    fn approval_level(&self, args: &ToolArgs, _ctx: &ToolCtx) -> ApprovalLevel {
-        workspace_approval_level(args, ApprovalLevel::from_tier(self.tier()))
+    fn approval_level(&self, args: &ToolArgs, ctx: &ToolCtx) -> ApprovalLevel {
+        workspace_approval_level(args, ctx, ApprovalLevel::from_tier(self.tier()))
     }
 
     fn description(&self) -> Option<&str> {
@@ -778,28 +778,17 @@ fn path_scheduling_claim(
     )]))
 }
 
-fn path_in_workspace(path: &std::path::Path) -> bool {
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        match std::env::current_dir() {
-            Ok(cwd) => cwd.join(path),
-            Err(_) => return false,
-        }
-    };
-    let Ok(cwd) = std::env::current_dir() else {
-        return false;
-    };
-    abs.starts_with(&cwd)
-}
-
 fn workspace_approval_level(
     args: &ToolArgs,
+    ctx: &ToolCtx,
     fallback: crate::tool::ApprovalLevel,
 ) -> crate::tool::ApprovalLevel {
-    match extract_path(args, "path", 0) {
-        Ok(p) if path_in_workspace(&p) => crate::tool::ApprovalLevel::Auto,
-        _ => fallback,
+    let inside = extract_path(args, "path", 0)
+        .and_then(|path| Ok(ctx.resolve_path(&path)?.starts_with(ctx.resolve_cwd(None)?)));
+    if matches!(inside, Ok(true)) {
+        crate::tool::ApprovalLevel::Auto
+    } else {
+        fallback
     }
 }
 
@@ -814,8 +803,8 @@ impl Tool for FsGrep {
         Tier::One
     }
 
-    fn approval_level(&self, args: &ToolArgs, _ctx: &ToolCtx) -> ApprovalLevel {
-        workspace_approval_level(args, ApprovalLevel::from_tier(self.tier()))
+    fn approval_level(&self, args: &ToolArgs, ctx: &ToolCtx) -> ApprovalLevel {
+        workspace_approval_level(args, ctx, ApprovalLevel::from_tier(self.tier()))
     }
 
     fn description(&self) -> Option<&str> {

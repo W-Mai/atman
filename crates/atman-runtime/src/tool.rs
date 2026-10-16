@@ -638,7 +638,7 @@ impl ToolCtx {
             Some(path) => self.resolve_path_with_origin(path),
             None => {
                 let mut resolved = self.resolve_path_with_origin(std::path::Path::new("."))?;
-                resolved.origin = if self.workspace.is_some() {
+                resolved.origin = if self.bound_path_root().is_some() {
                     PathOrigin::Omitted
                 } else {
                     PathOrigin::Unbound
@@ -652,11 +652,41 @@ impl ToolCtx {
         Ok(self.resolve_path_with_origin(path)?.path)
     }
 
+    fn bound_path_root(&self) -> Option<&std::path::Path> {
+        if let Some(identity) = self
+            .flow_identity
+            .as_ref()
+            .filter(|identity| identity.instance.is_some())
+        {
+            identity.effective_authority.workspace_root.as_deref()
+        } else {
+            self.workspace
+                .as_ref()
+                .map(|binding| binding.path.as_path())
+        }
+    }
+
     pub fn resolve_path_with_origin(
         &self,
         path: &std::path::Path,
     ) -> Result<ResolvedPath, RuntimeError> {
-        let Some(binding) = &self.workspace else {
+        let Some(base) = self.bound_path_root() else {
+            if self
+                .flow_identity
+                .as_ref()
+                .is_some_and(|identity| identity.instance.is_some())
+            {
+                if !path.is_absolute() {
+                    return Err(RuntimeError::ToolFailed(
+                        "flow has no working directory; use an absolute path or bind a project"
+                            .into(),
+                    ));
+                }
+                return Ok(ResolvedPath {
+                    path: crate::fs_access::canonicalize_stable(path),
+                    origin: PathOrigin::ExplicitExternal,
+                });
+            }
             let base = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let candidate = if path.is_absolute() {
                 path.to_path_buf()
@@ -668,11 +698,11 @@ impl ToolCtx {
                 origin: PathOrigin::Unbound,
             });
         };
-        let root = crate::fs_access::canonicalize_stable(&binding.path);
+        let root = crate::fs_access::canonicalize_stable(base);
         let candidate = if path.is_absolute() {
             path.to_path_buf()
         } else {
-            binding.path.join(path)
+            base.join(path)
         };
         let resolved = crate::fs_access::canonicalize_stable(&candidate);
         if path.is_absolute() {
@@ -689,7 +719,7 @@ impl ToolCtx {
             return Err(RuntimeError::ToolFailed(format!(
                 "managed workspace path {} escapes workspace root {}",
                 path.display(),
-                binding.path.display()
+                base.display()
             )));
         }
         Ok(ResolvedPath {
@@ -1816,6 +1846,107 @@ mod tests {
             .resolve_path(std::path::Path::new("link/file"))
             .unwrap_err();
         assert!(error.to_string().contains("escapes workspace root"));
+    }
+
+    #[test]
+    fn instance_resolver_uses_its_bound_project_and_never_another_hosts_directory() {
+        use crate::{
+            event::FlowRunId,
+            flow_authority::EffectiveAuthority,
+            flow_store::{FlowInstanceId, FlowRef},
+            tools::agent_ctrl::FlowRegistry,
+        };
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let process_cwd = std::env::current_dir().unwrap();
+        let registry = FlowRegistry::default();
+        for project in [Some(a.path()), Some(b.path()), None] {
+            let address = FlowRef {
+                session_id: uuid::Uuid::new_v4().into(),
+                instance_id: FlowInstanceId::now(),
+            };
+            let mut ctx = ToolCtx::new().with_workspace(binding(process_cwd.clone()));
+            ctx.flow_identity = Some(
+                registry
+                    .register_instance(
+                        address,
+                        FlowRunId::now(),
+                        EffectiveAuthority::root(
+                            &Default::default(),
+                            false,
+                            project.map(std::path::Path::to_path_buf),
+                        ),
+                    )
+                    .unwrap(),
+            );
+            if let Some(project) = project {
+                let project = crate::fs_access::canonicalize_stable(project);
+                assert_eq!(
+                    crate::tools::flow_source::project_root_for_ctx(&ctx)
+                        .map(|root| crate::fs_access::canonicalize_stable(&root)),
+                    Some(project.clone())
+                );
+                assert_eq!(
+                    crate::tools::flow_source::candidates("./worker.at", &ctx),
+                    [project.join("./worker.at")]
+                );
+                assert_eq!(
+                    crate::tools::fs::FsWrite.approval_level(
+                        &ToolArgs {
+                            positional: vec![Value::Str("inside.txt".into())],
+                            ..Default::default()
+                        },
+                        &ctx
+                    ),
+                    ApprovalLevel::Auto
+                );
+                assert_eq!(ctx.resolve_cwd(None).unwrap(), project);
+                assert_eq!(
+                    ctx.resolve_path(std::path::Path::new("nested/file"))
+                        .unwrap(),
+                    project.join("nested/file")
+                );
+                assert_eq!(
+                    ctx.resolve_cwd_with_origin(None).unwrap().origin,
+                    PathOrigin::Omitted
+                );
+                assert!(
+                    ctx.resolve_path(std::path::Path::new("../outside"))
+                        .is_err()
+                );
+                assert_eq!(
+                    ctx.resolve_path_with_origin(&project.join("missing"))
+                        .unwrap()
+                        .origin,
+                    PathOrigin::ExplicitInside
+                );
+            } else {
+                assert!(crate::tools::flow_source::project_root_for_ctx(&ctx).is_none());
+                assert!(crate::tools::flow_source::candidates("./worker.at", &ctx).is_empty());
+                assert_eq!(
+                    crate::tools::fs::FsWrite.approval_level(
+                        &ToolArgs {
+                            positional: vec![Value::Str("inside.txt".into())],
+                            ..Default::default()
+                        },
+                        &ctx
+                    ),
+                    ApprovalLevel::Approve
+                );
+                assert!(
+                    ctx.resolve_cwd(None)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("no working directory")
+                );
+                assert!(ctx.resolve_path(std::path::Path::new("relative")).is_err());
+            }
+            assert_eq!(
+                ctx.resolve_path_with_origin(&process_cwd).unwrap().origin,
+                PathOrigin::ExplicitExternal
+            );
+        }
+        assert_eq!(std::env::current_dir().unwrap(), process_cwd);
     }
 
     #[test]

@@ -435,7 +435,14 @@ pub(crate) async fn authorize_tool_invocation(
         if let Some(idx) = session.project_index() {
             c = c.with_project_index(idx);
         }
-        c = c.with_fs_access(session_fs_access_policy(session));
+        if session.flow_instance().is_some() {
+            // The entry binding owns the directory; only explicit session policy changes override its mode.
+            if let Some(mode) = session.fs_access_mode() {
+                c.fs_access.mode = mode;
+            }
+        } else {
+            c = c.with_fs_access(session_fs_access_policy(session));
+        }
         c = c.with_forms(session.forms());
         {
             let s = session.clone();

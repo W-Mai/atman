@@ -68,6 +68,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Instance working directories** — Persistent tool calls resolve paths against their authorized project, including inline calls after reopening. Unrelated host checkout metadata no longer controls their paths, filesystem access modes remain intact, and instances without a project require absolute paths.
+
 - **Concurrent reply admission** — Registered continuations can receive replies while other branches run or wait for effects. Independent pauses and terminal phases continue to block delivery, and inbox reservations retain exclusive consumption.
 
 - **Stored floating-point results** — Typed result snapshots encode floating-point bits as eight bytes, preserving their exact representation through tool JSON conversion.

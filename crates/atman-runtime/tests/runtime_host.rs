@@ -364,6 +364,9 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
         r#"
         flow main(input: string) -> string {
             contract { capabilities { shell: true } invocation { user_message: input } }
+            return deliver(input).await
+        }
+        flow deliver(input: string) -> string {
             return final.answer(message: binding.inspect(input: input, effort: env("effort")))
         }
     "#
@@ -441,7 +444,17 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
             .unwrap()
             .is_none()
     );
-    let executor = Executor::new();
+    let mut executor = Executor::new();
+    executor.tool_ctx =
+        executor
+            .tool_ctx
+            .with_workspace(atman_runtime::git_workspace::WorkspaceBinding {
+                workspace_id: "unrelated-checkout".into(),
+                path: workspace.join("another-project"),
+                repository_root: workspace.join("another-project"),
+                branch: None,
+            });
+    executor.tool_ctx.fs_access.mode = atman_runtime::fs_access::FsAccessMode::ReadOnly;
     executor
         .tools
         .register_fn(
@@ -451,6 +464,10 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
                     "input": args.named("input").unwrap().to_json().unwrap(),
                     "effort": args.named("effort").unwrap().to_json().unwrap(),
                     "authority": ctx.flow_identity.as_ref().unwrap().effective_authority,
+                    "cwd": ctx.resolve_cwd(None).unwrap(),
+                    "fs_root": ctx.fs_access.workspace,
+                    "workspace": ctx.workspace,
+                    "fs_mode": ctx.fs_access.mode,
                 });
                 async move { Ok(Value::Str(value.to_string())) }
             },
@@ -516,6 +533,10 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
         let result: serde_json::Value = serde_json::from_str(&message.text_concat()).unwrap();
         assert_eq!(result["input"], expected_input);
         assert_eq!(result["effort"], expected_effort);
+        assert_eq!(result["cwd"], workspace.to_string_lossy().as_ref());
+        assert_eq!(result["fs_root"], workspace.to_string_lossy().as_ref());
+        assert!(result["workspace"].is_null());
+        assert_eq!(result["fs_mode"], "read-only");
         let actual: EffectiveAuthority =
             serde_json::from_value(result["authority"].clone()).unwrap();
         assert_eq!(actual, binding.authority);

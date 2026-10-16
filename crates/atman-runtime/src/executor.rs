@@ -556,6 +556,19 @@ impl Executor {
                     tool_ctx.flow_registry = Some(std::sync::Arc::clone(&flow_registry));
                     tool_ctx.permission_broker = Some(std::sync::Arc::clone(&permission_broker));
                     tool_ctx.trust = Some(trust);
+                    if identity.instance.is_some() {
+                        let root = identity.effective_authority.workspace_root.as_deref();
+                        tool_ctx.fs_access.workspace = root.map(std::path::Path::to_path_buf);
+                        if tool_ctx.workspace.as_ref().is_some_and(|workspace| {
+                            root.is_none_or(|root| {
+                                crate::fs_access::canonicalize_stable(&workspace.path)
+                                    != crate::fs_access::canonicalize_stable(root)
+                            })
+                        }) {
+                            // A host's checkout metadata must not claim ownership of another instance's directory.
+                            tool_ctx.workspace = None;
+                        }
+                    }
                     tool_ctx.flow_identity = Some(identity);
                     tool_ctx.flow_run_id = Some(body_run_id.clone());
                     tool_ctx.session_id = Some(session_id);
