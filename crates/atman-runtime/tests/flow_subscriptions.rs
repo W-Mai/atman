@@ -84,6 +84,7 @@ fn subscription(source: &FlowStore, purpose: SubscriptionPurpose, once: bool) ->
         filter: FlowEventFilter::FinalAnswers,
         once,
         purpose,
+        reply: None,
     }
 }
 
@@ -221,7 +222,9 @@ fn synchronous_results_skip_only_the_initial_turn_and_preserve_other_subscribers
     for sub in [&result, &watcher] {
         recipient.subscribe_events(sub.clone(), &anchor).unwrap();
     }
-    recipient.result_subscription_proof(result.id).unwrap();
+    recipient
+        .result_subscription_proof(result.id, None)
+        .unwrap();
     transition(
         &mut source,
         FlowTransition::TurnStarted {
@@ -587,4 +590,100 @@ fn self_subscription_does_not_turn_its_own_cursor_commits_into_new_work() {
     assert_eq!(empty.through(), page.through());
     assert_eq!(flow.observe_events(&empty).unwrap(), committed);
     assert_eq!(flow.pending_inputs().count(), 1);
+}
+
+#[test]
+fn reply_registration_and_subscription_cancellation_keep_one_durable_owner() {
+    use atman_runtime::flow_store::{
+        inbox::SenderIdentity,
+        waiter::{ReplyStatus, ReplyWaiter},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let id = Uuid::new_v4();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            id,
+            title: "Replies".into(),
+            project_root: None,
+        })
+        .unwrap();
+    let source = session.create_flow(descriptor(id)).unwrap();
+    let mut recipient = session.create_flow(descriptor(id)).unwrap();
+    transition(&mut recipient, FlowTransition::Activated);
+    let lease = recipient
+        .state()
+        .clone()
+        .begin_turn(TurnId::now(), RunId::now())
+        .unwrap();
+    transition(
+        &mut recipient,
+        FlowTransition::TurnStarted {
+            turn: lease.turn.clone(),
+            run: lease.run.clone(),
+        },
+    );
+    let anchor = source.observation_anchor();
+    let mut first = subscription(&source, SubscriptionPurpose::Watcher, true);
+    first.filter = FlowEventFilter::TurnCompleted {
+        turn: Some(TurnId::now()),
+    };
+    first.reply = Some(ReplyWaiter {
+        correlation: Uuid::new_v4(),
+        lease,
+        sender: SenderIdentity::Flow(source.descriptor().address.clone()),
+    });
+    let receipt = recipient.subscribe_events(first.clone(), &anchor).unwrap();
+    assert_eq!(recipient.reply_waiters()[0].registered, receipt);
+    let mut second = first.clone();
+    second.id = Uuid::new_v4();
+    recipient.subscribe_events(second.clone(), &anchor).unwrap();
+    let mut conflict = first.clone();
+    conflict.id = Uuid::new_v4();
+    conflict.reply.as_mut().unwrap().correlation = Uuid::new_v4();
+    let before = recipient.cursor().clone();
+    assert!(recipient.subscribe_events(conflict, &anchor).is_err());
+    assert_eq!(recipient.cursor(), &before);
+    assert_eq!(recipient.reply_waiters().len(), 1);
+    recipient.unsubscribe_events(first.id).unwrap();
+    assert_eq!(recipient.reply_waiters()[0].status, ReplyStatus::Pending);
+    let cancelled = recipient.unsubscribe_events(second.id).unwrap();
+    assert_eq!(
+        recipient.reply_waiters()[0].status,
+        ReplyStatus::Cancelled {
+            by: cancelled.clone()
+        }
+    );
+    assert_eq!(
+        recipient.subscribe_events(second, &anchor).unwrap(),
+        cancelled
+    );
+    assert!(
+        recipient
+            .flow_subscriptions()
+            .all(|record| record.status == SubscriptionStatus::Cancelled)
+    );
+
+    // A torn compound registration restores neither the subscription nor a ghost waiter.
+    let mut torn = first;
+    torn.id = Uuid::new_v4();
+    torn.reply.as_mut().unwrap().correlation = Uuid::new_v4();
+    let path = recipient.dir().join("events.jsonl");
+    recipient.subscribe_events(torn.clone(), &anchor).unwrap();
+    let complete = std::fs::read(&path).unwrap();
+    let address = recipient.descriptor().address.clone();
+    drop(recipient);
+    std::fs::write(&path, &complete[..complete.len() - 7]).unwrap();
+    let recipient = session.open_flow(&address.instance_id).unwrap();
+    assert!(recipient.recovered_tail.is_some());
+    assert_eq!(recipient.reply_waiters().len(), 1);
+    assert_eq!(
+        recipient.reply_waiters()[0].status,
+        ReplyStatus::Cancelled { by: cancelled }
+    );
+    assert!(
+        recipient
+            .flow_subscriptions()
+            .all(|record| record.subscription.id != torn.id)
+    );
 }

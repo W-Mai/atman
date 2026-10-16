@@ -120,6 +120,7 @@ impl RuntimeHost {
                         filter: route.filter(),
                         once: false,
                         purpose: SubscriptionPurpose::SpawnResult,
+                        reply: None,
                     };
                     let auth = authorize.clone();
                     let creation = descriptor.clone();
@@ -148,7 +149,17 @@ impl RuntimeHost {
                                 } else {
                                     store.subscribe_events(subscription.clone(), &anchor)?;
                                 }
-                                store.result_subscription_proof(subscription.id)
+                                let completion =
+                                    requested.result_route.as_ref().and_then(|route| {
+                                        route.completion_subscription(&creation.address)
+                                    });
+                                if let Some(completion) = &completion {
+                                    store.subscribe_events(completion.clone(), &anchor)?;
+                                }
+                                store.result_subscription_proof(
+                                    subscription.id,
+                                    completion.map(|s| s.id),
+                                )
                             })
                             .await?,
                     )

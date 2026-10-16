@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Durable synchronous replies** — Persistent spawn calls receive entry completions through the shared inbox and record consumption before returning. Caller cancellation preserves child execution and unconsumed results. Concurrent waits resume independently, and matching watchers share the same accepted event.
+
 - **Flow event subscriptions** — Final answers and entry completions use one ordered observation stream and inbox delivery path. Completion filters select all turns or one exact turn, preserve typed results and interruption outcomes, and retain queued events across pause and recovery. Multiple matching subscriptions share one accepted event.
 
 - **Durable entry results** — Flow journals commit typed returns or errors with terminal execution state. Result queries survive reopening and caller detachment, preserve cancellation outcomes, and distinguish unknown returns from successful values. The `flow.result` tool reads saved completions under output-read grants without publishing ordinary returns as final answers.

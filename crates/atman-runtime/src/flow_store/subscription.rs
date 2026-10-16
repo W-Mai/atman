@@ -16,6 +16,7 @@ use super::inbox::{
     AcceptedEnvelope, DeliveryMode, DeliveryRequest, FlowEventRef, Inbox, InboxPayload,
     SenderIdentity,
 };
+use super::waiter::{ReplyStatus, ReplyWaiter};
 use super::{FlowFact, FlowRef, FlowStore, invalid};
 use crate::event_log::journal::CommitReceipt;
 use crate::message::MessageOrigin;
@@ -77,6 +78,8 @@ pub struct FlowSubscription {
     pub filter: FlowEventFilter,
     pub once: bool,
     pub purpose: SubscriptionPurpose,
+    /// An exact one-shot completion can belong to an existing continuation.
+    pub reply: Option<ReplyWaiter>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -103,6 +106,7 @@ pub struct ResultSubscriptionProof(pub(super) ResultRegistration);
 pub(super) struct ResultRegistration {
     pub recipient: FlowRef,
     pub record: SubscriptionRecord,
+    pub completion: Option<SubscriptionRecord>,
     pub receipt: CommitReceipt,
 }
 
@@ -166,6 +170,29 @@ struct EventNotification {
     event: ObservedEvent,
 }
 
+pub(crate) fn completion_notification(
+    envelope: &AcceptedEnvelope,
+) -> io::Result<CommittedCompletion> {
+    let InboxPayload::FlowEvent {
+        source,
+        event,
+        content,
+    } = &envelope.request.payload
+    else {
+        return Err(invalid("reply does not contain a source completion"));
+    };
+    let notification: EventNotification =
+        serde_json::from_value(content.clone()).map_err(invalid)?;
+    notification.event.validate_source(source)?;
+    if event != notification.event.name() {
+        return Err(invalid("reply event type disagrees with its content"));
+    }
+    match notification.event {
+        ObservedEvent::TurnCompleted { completion } => Ok(completion),
+        _ => Err(invalid("reply is not an entry completion")),
+    }
+}
+
 fn event_request_id(source: &FlowEventRef) -> Uuid {
     let mut digest = Sha256::new();
     digest.update(b"atman.flow.observation");
@@ -213,10 +240,59 @@ impl Subscriptions {
         {
             return Err(invalid("invalid or stale flow subscription"));
         }
+        if let Some(reply) = &record.subscription.reply {
+            if !record.subscription.once
+                || !matches!(
+                    record.subscription.filter,
+                    FlowEventFilter::TurnCompleted { turn: Some(_) }
+                )
+                || reply.sender != SenderIdentity::Flow(record.subscription.source.clone())
+                || self.records.values().any(|existing| {
+                    existing.status == SubscriptionStatus::Active
+                        && existing.subscription.source == record.subscription.source
+                        && existing.subscription.filter == record.subscription.filter
+                        && existing
+                            .subscription
+                            .reply
+                            .as_ref()
+                            .is_some_and(|old| old.correlation != reply.correlation)
+                })
+            {
+                return Err(invalid(
+                    "a source completion cannot belong to conflicting reply waiters",
+                ));
+            }
+        }
         Ok(())
     }
 
-    pub fn cancel(&mut self, id: Uuid) -> io::Result<()> {
+    pub fn validate_reply(
+        record: &SubscriptionRecord,
+        inbox: &Inbox,
+        recipient: &FlowRef,
+    ) -> io::Result<()> {
+        if let Some(reply) = &record.subscription.reply
+            && (reply.lease.flow != *recipient
+                || !inbox
+                    .waiters
+                    .get(reply.correlation)
+                    .is_some_and(|registered| {
+                        registered.waiter == *reply && registered.status == ReplyStatus::Pending
+                    }))
+        {
+            return Err(invalid(
+                "completion subscription has no live matching reply registration",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn cancel(
+        &mut self,
+        id: Uuid,
+        inbox: &mut Inbox,
+        receipt: &CommitReceipt,
+    ) -> io::Result<()> {
         let record = self
             .records
             .get_mut(&id)
@@ -225,6 +301,28 @@ impl Subscriptions {
             return Err(invalid("subscription is no longer active"));
         }
         record.status = SubscriptionStatus::Cancelled;
+        let correlation = record
+            .subscription
+            .reply
+            .as_ref()
+            .map(|reply| reply.correlation);
+        if let Some(correlation) = correlation
+            && !self.records.values().any(|record| {
+                record.status == SubscriptionStatus::Active
+                    && record
+                        .subscription
+                        .reply
+                        .as_ref()
+                        .is_some_and(|reply| reply.correlation == correlation)
+            })
+            && inbox
+                .waiters
+                .get(correlation)
+                .is_some_and(|record| record.status == ReplyStatus::Pending)
+        {
+            inbox.invalidate();
+            inbox.waiters.cancel(correlation, receipt.clone());
+        }
         Ok(())
     }
 
@@ -286,7 +384,6 @@ impl Subscriptions {
                 || envelope.request.request_id != event_request_id(source)
                 || envelope.request.cause.as_ref() != Some(source)
                 || envelope.request.delivery != DeliveryMode::AtBoundary
-                || envelope.request.correlation.is_some()
                 || envelope.request.scope.is_some()
             {
                 return Err(invalid("invalid observation envelope"));
@@ -298,6 +395,7 @@ impl Subscriptions {
                 return Err(invalid("observation event type does not match its content"));
             }
             let mut expected = Vec::new();
+            let mut correlation = None;
             for record in &records {
                 if record.cursor < source.sequence
                     && updates[&record.subscription.id] == SubscriptionStatus::Active
@@ -307,12 +405,18 @@ impl Subscriptions {
                         id: record.subscription.id,
                         purpose: record.subscription.purpose,
                     });
+                    if let Some(reply) = &record.subscription.reply {
+                        correlation = Some(reply.correlation);
+                    }
                     if record.subscription.once {
                         updates.insert(record.subscription.id, SubscriptionStatus::Matched);
                     }
                 }
             }
-            if expected.is_empty() || notification.subscriptions != expected {
+            if expected.is_empty()
+                || notification.subscriptions != expected
+                || envelope.request.correlation != correlation
+            {
                 return Err(invalid("observation reasons do not match subscriptions"));
             }
             last_sequence = source.sequence;
@@ -339,7 +443,11 @@ impl Subscriptions {
 }
 
 impl FlowStore {
-    pub fn result_subscription_proof(&self, id: Uuid) -> io::Result<ResultSubscriptionProof> {
+    pub fn result_subscription_proof(
+        &self,
+        id: Uuid,
+        completion_id: Option<Uuid>,
+    ) -> io::Result<ResultSubscriptionProof> {
         let record = self
             .subscriptions
             .records
@@ -353,14 +461,36 @@ impl FlowStore {
                 FlowEventFilter::FinalAnswers | FlowEventFilter::AnswersExceptTurn(_)
             )
             || record.subscription.once
+            || record.subscription.reply.is_some()
         {
             return Err(invalid(
                 "result subscription is not an active continuing answer route",
             ));
         }
+        let completion = completion_id
+            .map(|id| {
+                let completion = self
+                    .subscriptions
+                    .records
+                    .get(&id)
+                    .ok_or_else(|| invalid("completion route is not registered"))?;
+                if completion.status != SubscriptionStatus::Active
+                    || completion.subscription.source != record.subscription.source
+                    || completion.subscription.purpose != SubscriptionPurpose::SpawnResult
+                    || completion.subscription.reply.is_none()
+                {
+                    return Err(invalid(
+                        "completion route is not an active correlated subscription",
+                    ));
+                }
+                Subscriptions::validate_reply(completion, &self.inbox, &self.descriptor.address)?;
+                Ok(completion.clone())
+            })
+            .transpose()?;
         Ok(ResultSubscriptionProof(ResultRegistration {
             recipient: self.descriptor.address.clone(),
             record: record.clone(),
+            completion,
             receipt: self.cursor.clone(),
         }))
     }
@@ -461,9 +591,31 @@ impl FlowStore {
             status: SubscriptionStatus::Active,
         };
         self.subscriptions.validate_registration(&record)?;
-        let receipt = self
-            .journal
-            .commit(&[FlowFact::FlowSubscribed(Box::new(record.clone()))])?;
+        let mut facts = Vec::new();
+        if let Some(reply) = &record.subscription.reply {
+            if reply.lease.flow != self.descriptor.address {
+                return Err(invalid("reply waiter belongs to another flow"));
+            }
+            if let Some(existing) = self.inbox.waiters.get(reply.correlation) {
+                if existing.waiter != *reply || existing.status != ReplyStatus::Pending {
+                    return Err(invalid(
+                        "reply waiter conflicts with completion subscription",
+                    ));
+                }
+            } else {
+                self.inbox.validate_waiter(&self.state, reply)?;
+                facts.push(FlowFact::ReplyWaiterRegistered(Box::new(reply.clone())));
+            }
+        }
+        facts.push(FlowFact::FlowSubscribed(Box::new(record.clone())));
+        FlowFact::validate_batch(&facts)?;
+        let receipt = self.journal.commit(&facts)?;
+        if let FlowFact::ReplyWaiterRegistered(reply) = &facts[0] {
+            self.inbox.invalidate();
+            self.inbox
+                .waiters
+                .register(reply.as_ref().clone(), receipt.clone());
+        }
         self.subscriptions
             .records
             .insert(record.subscription.id, record);
@@ -481,7 +633,7 @@ impl FlowStore {
             return Ok(self.cursor.clone());
         }
         let receipt = self.journal.commit(&[FlowFact::FlowUnsubscribed(id)])?;
-        self.subscriptions.cancel(id)?;
+        self.subscriptions.cancel(id, &mut self.inbox, &receipt)?;
         self.cursor = receipt.clone();
         Ok(receipt)
     }
@@ -526,6 +678,7 @@ impl FlowStore {
         let mut envelopes = Vec::new();
         for (receipt, event) in &page.records {
             let mut matches = Vec::new();
+            let mut correlation = None;
             for record in &records {
                 if record.cursor < receipt.sequence
                     && updates[&record.subscription.id] == SubscriptionStatus::Active
@@ -538,6 +691,9 @@ impl FlowStore {
                         id: record.subscription.id,
                         purpose: record.subscription.purpose,
                     });
+                    if let Some(reply) = &record.subscription.reply {
+                        correlation = Some(reply.correlation);
+                    }
                 }
             }
             if matches.is_empty() {
@@ -558,7 +714,7 @@ impl FlowStore {
                     recipient: self.descriptor.address.clone(),
                     delivery: DeliveryMode::AtBoundary,
                     cause: Some(source.clone()),
-                    correlation: None,
+                    correlation,
                     scope: None,
                     payload: InboxPayload::FlowEvent {
                         source,

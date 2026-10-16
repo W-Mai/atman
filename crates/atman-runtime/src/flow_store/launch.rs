@@ -9,8 +9,8 @@ use uuid::Uuid;
 
 use super::inbox::{Acceptance, AcceptedEnvelope, DeliveryRequest, Inbox, InboxPayload};
 use super::subscription::{
-    FlowEventFilter, ResultRegistration, ResultSubscriptionProof, SubscriptionPurpose,
-    SubscriptionStatus,
+    FlowEventFilter, FlowSubscription, ResultRegistration, ResultSubscriptionProof,
+    SubscriptionPurpose, SubscriptionStatus,
 };
 use super::{FlowDescriptor, FlowFact, FlowRef, FlowStore, invalid};
 use crate::{event::AtmanUuid, event_log::journal::CommitReceipt, message::Message};
@@ -19,15 +19,35 @@ use crate::{event::AtmanUuid, event_log::journal::CommitReceipt, message::Messag
 pub struct ResultRoute {
     pub recipient: FlowRef,
     pub subscription: Uuid,
-    pub synchronous_turn: Option<crate::event::TurnId>,
+    pub synchronous: Option<SynchronousReply>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SynchronousReply {
+    pub turn: crate::event::TurnId,
+    pub subscription: Uuid,
+    pub waiter: super::waiter::ReplyWaiter,
 }
 
 impl ResultRoute {
     pub fn filter(&self) -> FlowEventFilter {
-        self.synchronous_turn
-            .clone()
-            .map(FlowEventFilter::AnswersExceptTurn)
+        self.synchronous
+            .as_ref()
+            .map(|reply| FlowEventFilter::AnswersExceptTurn(reply.turn.clone()))
             .unwrap_or(FlowEventFilter::FinalAnswers)
+    }
+
+    pub fn completion_subscription(&self, source: &FlowRef) -> Option<FlowSubscription> {
+        self.synchronous.as_ref().map(|reply| FlowSubscription {
+            id: reply.subscription,
+            source: source.clone(),
+            filter: FlowEventFilter::TurnCompleted {
+                turn: Some(reply.turn.clone()),
+            },
+            once: true,
+            purpose: SubscriptionPurpose::SpawnResult,
+            reply: Some(reply.waiter.clone()),
+        })
     }
 }
 
@@ -91,6 +111,23 @@ impl Activation {
                     && proof.record.subscription.purpose == SubscriptionPurpose::SpawnResult
                     && !proof.record.subscription.once
                     && proof.record.status == SubscriptionStatus::Active
+                    && proof.record.subscription.reply.is_none()
+                    && match (&route.synchronous, &proof.completion) {
+                        (None, None) => true,
+                        (Some(reply), Some(completion)) => {
+                            reply.waiter.lease.flow == route.recipient
+                                && reply.waiter.sender
+                                    == super::inbox::SenderIdentity::Flow(
+                                        descriptor.address.clone(),
+                                    )
+                                && Some(&completion.subscription)
+                                    == route.completion_subscription(&descriptor.address).as_ref()
+                                && completion.status == SubscriptionStatus::Active
+                                && completion.started_after == proof.record.started_after
+                                && completion.cursor == completion.started_after.sequence
+                        }
+                        _ => false,
+                    }
                     && proof.record.started_after.journal_id
                         == descriptor.address.instance_id.0.0
                     && proof.record.started_after.sequence <= cursor.sequence

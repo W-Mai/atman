@@ -74,7 +74,7 @@ fn initial(info: &FlowDescriptor, recipient: &FlowRef) -> LaunchInput {
         result_route: Some(ResultRoute {
             recipient: recipient.clone(),
             subscription: Uuid::new_v4(),
-            synchronous_turn: None,
+            synchronous: None,
         }),
     }
 }
@@ -161,12 +161,13 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
                 filter: FlowEventFilter::FinalAnswers,
                 once: false,
                 purpose: SubscriptionPurpose::SpawnResult,
+                reply: None,
             },
             &source.observation_anchor(),
         )
         .unwrap();
     let proof = recipient
-        .result_subscription_proof(route.subscription)
+        .result_subscription_proof(route.subscription, None)
         .unwrap();
     let pause = Uuid::new_v4().into();
     let activation_start = std::fs::metadata(source.dir().join("events.jsonl"))

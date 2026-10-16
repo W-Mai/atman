@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::*;
 use crate::flow_runtime::{FlowSnapshot, execution::TurnRequest, launch::LaunchExecution};
 use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity};
-use crate::flow_store::launch::{LaunchInput, ResultRoute};
+use crate::flow_store::launch::{LaunchInput, ResultRoute, SynchronousReply};
 use crate::flow_store::{EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef};
 
 pub(super) async fn spawn(
@@ -97,6 +97,16 @@ pub(super) async fn spawn(
             bundle: prepared.program.revision_bundle(),
         },
     };
+    let reply = if asynchronous {
+        None
+    } else {
+        Some(
+            client
+                .prepare_reply(address.clone(), creation)
+                .await
+                .map_err(failed)?,
+        )
+    };
     let input = LaunchInput {
         request: DeliveryRequest {
             request_id: creation,
@@ -115,7 +125,11 @@ pub(super) async fn spawn(
         result_route: Some(ResultRoute {
             recipient: client.source().clone(),
             subscription: Uuid::now_v7(),
-            synchronous_turn: (!asynchronous).then(|| first_turn.clone()),
+            synchronous: reply.as_ref().map(|reply| SynchronousReply {
+                turn: first_turn.clone(),
+                subscription: Uuid::now_v7(),
+                waiter: reply.waiter().clone(),
+            }),
         }),
     };
     let recipe = Recipe {
@@ -129,8 +143,6 @@ pub(super) async fn spawn(
         yield_interval,
     };
     let executor = executor(ctx)?;
-    let (completed, observed) = tokio::sync::oneshot::channel();
-    let mut completed = Some(completed);
     let launched = client
         .spawn(
             descriptor,
@@ -140,20 +152,7 @@ pub(super) async fn spawn(
                 catalog,
                 trust: ctx.trust.clone().unwrap_or_default(),
                 prepare: Box::new(move |snapshot| recipe.prepare(snapshot)),
-                completed: Box::new(move |completion| {
-                    if completion.lease.turn == first_turn
-                        && let Some(sender) = completed.take()
-                    {
-                        let result = match (completion.outcome, completion.result) {
-                            (atman_rt::TurnOutcome::Completed, result) => result,
-                            (_, Err(error)) => Err(error),
-                            (_, Ok(_)) => Err(RuntimeError::Cancelled(
-                                "instance turn was interrupted".into(),
-                            )),
-                        };
-                        let _ = sender.send(result);
-                    }
-                }),
+                completed: Box::new(|_| {}),
             },
         )
         .await
@@ -164,9 +163,10 @@ pub(super) async fn spawn(
             "request_id": creation, "acceptance": launched.record.acceptance,
         })));
     }
-    observed
+    reply
+        .expect("synchronous reply registered")
+        .completion(first_turn)
         .await
-        .map_err(|_| failed("instance scheduling ended before its initial turn returned"))?
 }
 
 /// Templates and shared services survive; per-invocation state belongs to the new worker.
@@ -236,7 +236,6 @@ impl Recipe {
     fn prepare(&self, snapshot: &FlowSnapshot) -> io::Result<Option<TurnRequest>> {
         let eligible = |message: &&crate::flow_store::inbox::AcceptedEnvelope| {
             message.request.scope.is_none()
-                && message.request.correlation.is_none()
                 && (matches!(message.request.payload, InboxPayload::Invocation { .. })
                     || self.parameter.is_some())
         };

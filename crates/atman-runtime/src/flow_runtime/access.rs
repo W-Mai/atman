@@ -62,6 +62,38 @@ impl RuntimeHost {
 }
 
 impl FlowClient {
+    /// Prepare continuation ownership before the corresponding subscription or request is published.
+    pub async fn prepare_reply(
+        &self,
+        source: FlowRef,
+        correlation: Uuid,
+    ) -> io::Result<super::reply::ReplyWait> {
+        self.authorize(&source, FlowAction::Watch)?;
+        let worker = self.host.flow(self.source()).await?;
+        let waiter = crate::flow_store::waiter::ReplyWaiter {
+            correlation,
+            lease: self.lease.clone(),
+            sender: SenderIdentity::Flow(source),
+        };
+        let waiting_worker = worker.clone();
+        let client = self.clone();
+        worker
+            .request(move |store| {
+                client.authenticate()?;
+                let record = store.register_reply_waiter(waiter)?;
+                if matches!(
+                    record.status,
+                    crate::flow_store::waiter::ReplyStatus::Cancelled { .. }
+                ) {
+                    return Err(invalid("reply wait was already cancelled"));
+                }
+                // The owner creates the guard only after registration succeeds. A rejected request
+                // cannot cancel another waiter; losing the acknowledgement drops this guard safely.
+                Ok(super::reply::ReplyWait::new(waiting_worker, record.waiter))
+            })
+            .await
+    }
+
     /// Product spawn entry: creation stays in the authenticated caller's session. Tool admission supplies the execution ceiling; provenance never grants control over the new instance.
     pub(crate) async fn spawn(
         &self,

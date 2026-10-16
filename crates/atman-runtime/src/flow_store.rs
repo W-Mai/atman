@@ -170,7 +170,11 @@ impl FlowFact {
                 Self::FlowSubscribed(_) | Self::FlowUnsubscribed(_) | Self::EventsObserved(_)
             )
         }) {
-            return if facts.len() == 1 {
+            return if facts.len() == 1
+                || matches!(facts,
+                [Self::ReplyWaiterRegistered(waiter), Self::FlowSubscribed(record)]
+                    if record.subscription.reply.as_ref() == Some(waiter.as_ref()))
+            {
                 Ok(())
             } else {
                 Err(invalid("subscription changes require their own batch"))
@@ -644,13 +648,16 @@ impl FlowStore {
                             publications.validate(state, &publication)?;
                             publications.apply(*publication, receipt.clone());
                         }
-                        (Some((_, state, _)), FlowFact::FlowSubscribed(record)) => {
+                        (Some((_, state, inbox)), FlowFact::FlowSubscribed(record)) => {
                             if !state.accepts_input() {
                                 return Err(invalid("subscription recipient is unavailable"));
                             }
+                            subscription::Subscriptions::validate_reply(&record, inbox, address)?;
                             subscriptions.register(*record)?;
                         }
-                        (Some(_), FlowFact::FlowUnsubscribed(id)) => subscriptions.cancel(id)?,
+                        (Some((_, _, inbox)), FlowFact::FlowUnsubscribed(id)) => {
+                            subscriptions.cancel(id, inbox, &receipt)?
+                        }
                         (Some((_, state, inbox)), FlowFact::EventsObserved(observation)) => {
                             if !state.accepts_input() {
                                 return Err(invalid("observation recipient is unavailable"));

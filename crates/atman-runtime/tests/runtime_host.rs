@@ -374,6 +374,147 @@ async fn persistent_spawn_rejects_catalog_changes_after_inspection_before_creati
 }
 
 #[tokio::test]
+async fn cancelling_a_sync_caller_keeps_child_work_and_delivers_the_reply_after_recovery() {
+    use atman_rt::TurnPhase;
+    use atman_runtime::{
+        Value, ValueJson,
+        flow_store::waiter::ReplyStatus,
+        tool::{Tier, ToolDefinition},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let leaf_path = dir.path().join("leaf.at");
+    std::fs::write(
+        &leaf_path,
+        "flow leaf() -> int { await_release() return 42 }",
+    )
+    .unwrap();
+    let leaf_ref = serde_json::to_string(&format!("{}@leaf", leaf_path.display())).unwrap();
+    let caller_path = dir.path().join("caller.at");
+    std::fs::write(&caller_path, format!(r#"
+        flow caller(message: string) -> any {{
+            contract {{ invocation {{ user_message: message }} capabilities {{ shell: true }} }}
+            when message == "start" {{
+                inventory = flow.instances()
+                return flow.spawn(flow: {leaf_ref}, spawn_token: inventory.spawn_token, async: false)
+            }}
+            return final.answer(message: message)
+        }}
+    "#)).unwrap();
+    let caller_ref = serde_json::to_string(&format!("{}@caller", caller_path.display())).unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let launcher = session.create_flow(program_descriptor(info.id, format!(r#"
+        flow main() -> any {{
+            contract {{ capabilities {{ shell: true }} }}
+            inventory = flow.instances()
+            return flow.spawn(flow: {caller_ref}, spawn_token: inventory.spawn_token, arguments: {{message: "start"}})
+        }}
+    "#))).await.unwrap();
+    change(&launcher, FlowTransition::Activated).await;
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let executor = Executor::new();
+    let (gate_entered, gate_release) = (entered.clone(), release.clone());
+    executor
+        .tools
+        .register_fn(
+            ToolDefinition::new("await_release", Tier::Zero),
+            move |_, _| {
+                let (entered, release) = (gate_entered.clone(), gate_release.clone());
+                async move {
+                    entered.add_permits(1);
+                    release.acquire().await.unwrap().forget();
+                    Ok(Value::Unit)
+                }
+            },
+        )
+        .unwrap();
+    let value = invoke(&launcher, executor)
+        .await
+        .result
+        .unwrap()
+        .to_json()
+        .unwrap();
+    let address: FlowRef = serde_json::from_value(value["address"].clone()).unwrap();
+    let caller = host.flow(&address).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let state = caller.state().await.unwrap();
+    let InstanceState::Open(InstanceActivity::Active(active)) = state.state() else {
+        panic!("caller is waiting")
+    };
+    change(
+        &caller,
+        FlowTransition::PhaseChanged {
+            lease: active.lease.clone(),
+            phase: TurnPhase::Cancelling,
+        },
+    )
+    .await;
+    let mut changes = caller.subscribe_commits();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            changes.borrow_and_update();
+            if caller.completion(None).await.unwrap().is_some() {
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    release.add_permits(1);
+    let pending = wait_inputs(&caller, 1).await;
+    assert!(matches!(
+        pending.state.state(),
+        InstanceState::Open(InstanceActivity::Interrupted { .. })
+    ));
+    let InboxPayload::FlowEvent {
+        source, content, ..
+    } = &pending.pending[0].request.payload
+    else {
+        panic!("completion remains recoverable")
+    };
+    assert_eq!(content["completion"]["result"]["value"]["value"], 42);
+    let leaf = host.flow(&source.flow).await.unwrap();
+    assert_eq!(
+        leaf.state().await.unwrap().state(),
+        &InstanceState::Open(InstanceActivity::Idle)
+    );
+    change(&caller, FlowTransition::InterruptionRecovered).await;
+    settled(&caller).await;
+    wait_inputs(&launcher, 1).await;
+    let message = caller
+        .context()
+        .messages()
+        .iter()
+        .find(|message| message.origin == MessageOrigin::FinalAnswer)
+        .unwrap()
+        .text_concat();
+    assert!(message.contains("turn_completed"));
+    let store = caller.shutdown().await.unwrap();
+    assert_eq!(store.completions().len(), 2);
+    assert_eq!(store.inbox_entries().len(), 2);
+    assert!(store.pending_inputs().next().is_none());
+    assert!(store.inbox_entries().iter().all(|record| matches!(
+        record.acceptance.disposition,
+        InboxDisposition::InputCommitted { .. }
+    )));
+    assert!(matches!(
+        store.reply_waiters()[0].status,
+        ReplyStatus::Cancelled { .. }
+    ));
+    assert_eq!(leaf.shutdown().await.unwrap().completions().len(), 1);
+}
+
+#[tokio::test]
 async fn persistent_spawned_instances_can_spawn_through_the_same_tool_chain() {
     use atman_runtime::ValueJson;
     let dir = tempfile::tempdir().unwrap();
@@ -1808,7 +1949,170 @@ fn answer_watch(source: &FlowWorker) -> atman_runtime::flow_store::subscription:
         filter: FlowEventFilter::FinalAnswers,
         once: false,
         purpose: SubscriptionPurpose::Watcher,
+        reply: None,
     }
+}
+
+#[tokio::test]
+async fn correlated_completions_share_inbox_ownership_and_resume_independent_continuations() {
+    use atman_runtime::{
+        Value,
+        flow_store::{inbox::InputContent, subscription::FlowEventFilter, waiter::ReplyStatus},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let recipient = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&recipient, FlowTransition::Activated).await;
+    let lease = start(&recipient).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    let mut waits = Vec::new();
+    for expression in ["42", "1 / 0"] {
+        let source = session
+            .create_flow(program_descriptor(
+                info.id,
+                format!("flow main() -> int {{ return {expression} }}"),
+            ))
+            .await
+            .unwrap();
+        change(&source, FlowTransition::Activated).await;
+        source
+            .accept_input(peer_request(recipient.address(), source.address()), |_| {
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request = prepare(&source.snapshot().await.unwrap()).unwrap().unwrap();
+        let wait = client
+            .prepare_reply(source.address().clone(), Uuid::new_v4())
+            .await
+            .unwrap();
+        let mut subscription = answer_watch(&source);
+        subscription.filter = FlowEventFilter::TurnCompleted {
+            turn: Some(request.turn.clone()),
+        };
+        subscription.once = true;
+        subscription.reply = Some(wait.waiter().clone());
+        client.watch_events(subscription.clone()).await.unwrap();
+        subscription.id = Uuid::new_v4();
+        subscription.reply = None;
+        client.watch_events(subscription).await.unwrap();
+        waits.push((source, request, wait));
+    }
+    let (second, second_request, second_wait) = waits.pop().unwrap();
+    let (first, first_request, first_wait) = waits.pop().unwrap();
+    let retry = first_wait.waiter().clone();
+    assert!(
+        client
+            .prepare_reply(second.address().clone(), retry.correlation)
+            .await
+            .is_err()
+    );
+    let pause = Uuid::new_v4().into();
+    change(&recipient, FlowTransition::ExecutionPaused { key: pause }).await;
+    let first_turn = first_request.turn.clone();
+    first
+        .start_turn(Executor::new(), first_request)
+        .await
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let error = second
+        .start_turn(Executor::new(), second_request)
+        .await
+        .unwrap()
+        .wait()
+        .await
+        .unwrap()
+        .result
+        .unwrap_err();
+    let pending = wait_inputs(&recipient, 2).await;
+    for input in &pending.pending {
+        let InboxPayload::FlowEvent { content, .. } = &input.request.payload else {
+            panic!("completion")
+        };
+        assert_eq!(content["subscriptions"].as_array().unwrap().len(), 2);
+        assert!(input.request.correlation.is_some());
+    }
+    let second_turn = second
+        .completion(None)
+        .await
+        .unwrap()
+        .unwrap()
+        .completion
+        .lease
+        .turn;
+    let mut first_result = Box::pin(first_wait.completion(first_turn.clone()));
+    assert!(futures::poll!(&mut first_result).is_pending());
+    change(&recipient, FlowTransition::ExecutionResumed { key: pause }).await;
+    let (first_result, second_result) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(first_result, second_wait.completion(second_turn))
+    })
+    .await
+    .unwrap();
+    assert!(matches!(first_result.unwrap(), Value::Int(42)));
+    assert_eq!(second_result.unwrap_err(), error);
+    assert!(recipient.snapshot().await.unwrap().pending.is_empty());
+    let repeated = client
+        .prepare_reply(first.address().clone(), retry.correlation)
+        .await
+        .unwrap();
+    assert!(matches!(
+        repeated.completion(first_turn).await.unwrap(),
+        Value::Int(42)
+    ));
+    let abandoned = client
+        .prepare_reply(first.address().clone(), Uuid::new_v4())
+        .await
+        .unwrap();
+    let mut abandoned_subscription = answer_watch(&first);
+    abandoned_subscription.filter = FlowEventFilter::TurnCompleted {
+        turn: Some(TurnId::now()),
+    };
+    abandoned_subscription.once = true;
+    abandoned_subscription.reply = Some(abandoned.waiter().clone());
+    let mut changes = recipient.subscribe_commits();
+    changes.borrow_and_update();
+    drop(abandoned);
+    tokio::time::timeout(Duration::from_secs(10), changes.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(client.watch_events(abandoned_subscription).await.is_err());
+    change(
+        &recipient,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    let store = recipient.shutdown().await.unwrap();
+    assert_eq!(store.committed_inputs().len(), 2);
+    assert!(store.committed_inputs().iter().all(|record| matches!(
+        record.input.content,
+        InputContent::WaitingContinuation { .. }
+    )));
+    assert_eq!(
+        store
+            .reply_waiters()
+            .iter()
+            .filter(|record| matches!(record.status, ReplyStatus::Delivered { .. }))
+            .count(),
+        2
+    );
+    assert!(matches!(
+        store.reply_waiters()[2].status,
+        ReplyStatus::Cancelled { .. }
+    ));
+    drop(store);
+    let reopened = host.flow(client.source()).await.unwrap();
+    assert!(reopened.snapshot().await.unwrap().pending.is_empty());
 }
 
 #[tokio::test]
@@ -1918,6 +2222,7 @@ async fn owned_observation_survives_turn_end_pause_and_reopen_without_duplicate_
     // Register against Prepared sources; a creator can safely activate only after acknowledgement.
     let result = atman_runtime::flow_store::subscription::FlowSubscription {
         purpose: SubscriptionPurpose::SpawnResult,
+        reply: None,
         ..answer_watch(&b)
     };
     let watcher = atman_runtime::flow_store::subscription::FlowSubscription {
