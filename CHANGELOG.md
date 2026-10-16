@@ -24,6 +24,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent session management** — Daemon RPC supports creating and opening session catalogs, paging their flows, selecting the default view, and inspecting or controlling execution by flow address. Controls preserve independent pause sources, reject stale revisions, and retain state across reopening.
+
 - **Durable late form answers** — Persistent flows retain accepted answers in their own inbox across reopening. Matching retries are deduplicated, conflicting replies are rejected, and paused flows keep answers pending. Daemon and TUI acknowledge acceptance after storage succeeds; failed submissions retain the form and draft.
 
 - **Persistent permission audit** — Instance journals retain permission requests, groups, grants, and decisions alongside invocation diagnostics. Service events preserve their source identities across turns and idle periods, use the owner's redaction policy, and survive reopening without replaying decisions.

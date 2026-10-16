@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+pub mod flows;
+
 pub const JSONRPC_VERSION: &str = "2.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
@@ -167,6 +169,12 @@ impl JsonRpcError {
 }
 
 pub mod methods {
+    pub const SESSION_CREATE: &str = "session.create";
+    pub const SESSION_OPEN: &str = "session.open";
+    pub const SESSION_FLOWS: &str = "session.flows";
+    pub const SESSION_SELECT_FLOW: &str = "session.select_flow";
+    pub const FLOW_GET: &str = "flow.get";
+    pub const FLOW_CONTROL: &str = "flow.control";
     pub const GOAL_RUN: &str = "goal.run";
     pub const GOAL_GET: &str = "goal.get";
     pub const GOAL_SET: &str = "goal.set";

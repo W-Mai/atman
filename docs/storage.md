@@ -35,7 +35,24 @@ Flow transitions validate an expected state revision, apply to a private candida
 
 `session.json` and `flow.json` are replaceable projections with a committed source cursor. They are rebuilt from journals on opening, even when missing or malformed. `take_projection_error` reports cache-write failures without withdrawing an already committed fact. Source bodies remain in the creation fact; reading history does not require a reachable project checkout.
 
-These storage APIs do not start schedulers, grant permissions, migrate published sessions, or switch the CLI/daemon to a different data format. Hosts authorize commands, validate entry programs, and decide when restored instances may execute.
+These storage APIs do not start schedulers, grant permissions, or migrate published sessions. Hosts authorize commands, validate entry programs, and decide when restored instances may execute.
+
+## Persistent session management over RPC
+
+The daemon exposes persistent catalogs through the authenticated `/rpc` endpoint and Unix socket. Both transports represent the local daemon operator; arbitrary external principal names cannot acquire a catalog. Catalog ownership stays with the daemon after an RPC connection closes. These methods address `runtime-v1` storage; `run_flow`, `list_sessions`, and `/events` retain their existing session execution and history format.
+
+| Method | Parameters | Result |
+| --- | --- | --- |
+| `session.create` | `session_id`, nonempty `title`, optional `project_root` | Session summary and catalog receipt |
+| `session.open` | `session_id` | Recorded session summary and catalog receipt |
+| `session.flows` | `session_id`, optional `before` instance UUID, `limit` from 1 to 50 (default 20) | Newest-first membership page, next cursor, total, and catalog receipt |
+| `session.select_flow` | `flow: { session_id, instance_id }` | Summary with the selected default view |
+| `flow.get` | `flow` | Execution revision, state, pause count, readiness, and Goal |
+| `flow.control` | `flow`, `expected_revision`, `action: pause / resume / cancel_turn` | Durable commit receipt |
+
+Create or open a catalog before addressing its flows. Creating the same session identity and descriptor is idempotent; conflicting creation data is rejected. An omitted project explicitly creates a projectless session. Reopening reads its recorded configuration and project binding without requiring either location to exist. Failed instance reads remain visible as unavailable rows in the membership page, preserving pagination and the total count.
+
+View selection changes only the default binding. Opening, listing, selecting, and reading do not install execution schedulers. Pause and resume use a stable operator pause key, so resuming does not clear another controller's pause. Controls check the execution revision inside the instance writer; stale requests fail. Cancelling a turn preserves the instance, and resuming does not recover an interrupted invocation or resume its Goal. The execution readiness field describes the lifecycle gate, not whether a scheduler is installed or a model is running.
 
 ## Instance activation
 

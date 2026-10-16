@@ -61,6 +61,57 @@ impl RuntimeHost {
     }
 }
 
+impl super::host::SessionHandle {
+    /// Enumerate one bounded page without requiring an executing caller. The host authenticates callers; authorization is checked around each independently sampled instance.
+    pub async fn instances(
+        &self,
+        before: Option<FlowInstanceId>,
+        limit: usize,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<InstancePage> {
+        if !(1..=50).contains(&limit) {
+            return Err(invalid("instance page limit must be between 1 and 50"));
+        }
+        let snapshot = self.snapshot().await?;
+        let registrations = &snapshot.catalog.flows;
+        let end = match before {
+            Some(id) => registrations
+                .iter()
+                .position(|entry| entry.id == id)
+                .ok_or_else(|| invalid("instance page cursor is not in this session"))?,
+            None => registrations.len(),
+        };
+        let start = end.saturating_sub(limit);
+        let mut instances = Vec::with_capacity(end - start);
+        for registration in registrations[start..end].iter().rev() {
+            let address = FlowRef {
+                session_id: self.id().into(),
+                instance_id: registration.id.clone(),
+            };
+            authorize(&address)?;
+            let summary = self.describe_flow(registration.id.clone()).await;
+            // An expired caller must not turn a failed authorization into an unavailable row.
+            authorize(&address)?;
+            let (entry, state, unavailable) = match summary {
+                Ok((entry, state)) => (Some(entry), Some(state), None),
+                Err(error) => (None, None, Some(error.to_string())),
+            };
+            instances.push(InstanceSummary {
+                address,
+                entry,
+                state,
+                unavailable,
+            });
+        }
+        Ok(InstancePage {
+            next: (start > 0).then(|| registrations[start].id.clone()),
+            instances,
+            total: registrations.len(),
+            catalog: snapshot.cursor,
+        })
+    }
+}
+
 impl FlowClient {
     pub async fn read_planning(
         &self,
@@ -313,48 +364,15 @@ impl FlowClient {
         limit: usize,
     ) -> io::Result<InstancePage> {
         self.authorize(self.source(), FlowAction::Discover)?;
-        if !(1..=50).contains(&limit) {
-            return Err(invalid("instance page limit must be between 1 and 50"));
-        }
-        let session = self.host.session(self.source().session_id.0)?;
-        let snapshot = session.snapshot().await?;
-        let registrations = &snapshot.catalog.flows;
-        let end = match before {
-            Some(id) => registrations
-                .iter()
-                .position(|entry| entry.id == id)
-                .ok_or_else(|| invalid("instance page cursor is not in this session"))?,
-            None => registrations.len(),
-        };
-        let start = end.saturating_sub(limit);
-        let mut instances = Vec::with_capacity(end - start);
-        for registration in registrations[start..end].iter().rev() {
-            let address = FlowRef {
-                session_id: self.source().session_id,
-                instance_id: registration.id.clone(),
-            };
-            self.authorize(&address, FlowAction::Discover)?;
-            let summary = session.describe_flow(registration.id.clone()).await;
-            // An expired caller must not turn a failed authorization into an unavailable row.
-            self.authorize(&address, FlowAction::Discover)?;
-            let (entry, state, unavailable) = match summary {
-                Ok((entry, state)) => (Some(entry), Some(state), None),
-                Err(error) => (None, None, Some(error.to_string())),
-            };
-            instances.push(InstanceSummary {
-                address,
-                entry,
-                state,
-                unavailable,
-            });
-        }
+        let page = self
+            .host
+            .session(self.source().session_id.0)?
+            .instances(before, limit, |target| {
+                self.authorize(target, FlowAction::Discover)
+            })
+            .await?;
         self.authorize(self.source(), FlowAction::Discover)?;
-        Ok(InstancePage {
-            next: (start > 0).then(|| registrations[start].id.clone()),
-            instances,
-            total: registrations.len(),
-            catalog: snapshot.cursor,
-        })
+        Ok(page)
     }
 
     pub async fn read_output(&self, target: FlowRef) -> io::Result<Vec<PublishedMessage>> {
@@ -515,27 +533,43 @@ impl FlowClient {
         self.host
             .flow(&target)
             .await?
-            .request(move |store| {
-                client.authorize(store.state().address(), FlowAction::Control)?;
-                if store.state().revision() != expected_revision {
-                    return Err(invalid("target execution revision changed"));
-                }
-                let transition = match control {
-                    PeerControl::Pause => FlowTransition::ExecutionPaused { key },
-                    PeerControl::Resume => FlowTransition::ExecutionResumed { key },
-                    PeerControl::CancelTurn => match store.state().state() {
-                        InstanceState::Open(InstanceActivity::Active(active)) => {
-                            FlowTransition::PhaseChanged {
-                                lease: active.lease.clone(),
-                                phase: TurnPhase::Cancelling,
-                            }
-                        }
-                        _ => return Ok(store.cursor().clone()),
-                    },
-                };
-                store.transition(expected_revision, transition)
+            .control(expected_revision, key, control, move |address| {
+                client.authorize(address, FlowAction::Control)
             })
             .await
+    }
+}
+
+impl super::FlowWorker {
+    /// Apply an authenticated host control under the instance writer. The pause key belongs to the controller, not the target or its Goal.
+    pub async fn control(
+        &self,
+        expected_revision: u64,
+        key: AtmanUuid,
+        control: PeerControl,
+        authorize: impl FnOnce(&FlowRef) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<CommitReceipt> {
+        self.request(move |store| {
+            authorize(store.state().address())?;
+            if store.state().revision() != expected_revision {
+                return Err(invalid("target execution revision changed"));
+            }
+            let transition = match control {
+                PeerControl::Pause => FlowTransition::ExecutionPaused { key },
+                PeerControl::Resume => FlowTransition::ExecutionResumed { key },
+                PeerControl::CancelTurn => match store.state().state() {
+                    InstanceState::Open(InstanceActivity::Active(active)) => {
+                        FlowTransition::PhaseChanged {
+                            lease: active.lease.clone(),
+                            phase: TurnPhase::Cancelling,
+                        }
+                    }
+                    _ => return Ok(store.cursor().clone()),
+                },
+            };
+            store.transition(expected_revision, transition)
+        })
+        .await
     }
 }
 

@@ -55,7 +55,7 @@ fn openapi_endpoint() {}
         title = "atman daemon",
         version = env!("CARGO_PKG_VERSION"),
         description = "JSON-RPC 2.0 daemon for the atman flow runtime. \
-Methods dispatched at POST /rpc: ping, list_sessions, run_flow, goal.run, goal.get, goal.set, goal.pause, goal.resume, goal.clear, cancel_run, resolve_prompt, list_permission_requests, create_permission_group, resolve_permission_requests. \
+Methods dispatched at POST /rpc: ping, list_sessions, run_flow, session.create, session.open, session.flows, session.select_flow, flow.get, flow.control, goal.run, goal.get, goal.set, goal.pause, goal.resume, goal.clear, cancel_run, resolve_prompt, list_permission_requests, create_permission_group, resolve_permission_requests. \
 SSE event stream at GET /events. Every endpoint requires a bearer token."
     ),
     paths(rpc_endpoint, sse_endpoint, openapi_endpoint),
@@ -78,6 +78,13 @@ SSE event stream at GET /events. Every endpoint requires a bearer token."
         atman_proto::ResolvePermissionRequestsResponse,
         atman_proto::PermissionResolutionView,
         SessionSummary,
+        atman_proto::flows::FlowAddress,
+        atman_proto::flows::CreateSessionRequest,
+        atman_proto::flows::SessionRequest,
+        atman_proto::flows::ListFlowsRequest,
+        atman_proto::flows::FlowRequest,
+        atman_proto::flows::ControlFlowRequest,
+        atman_proto::flows::FlowControl,
         atman_proto::SessionStatus,
         atman_proto::SessionId,
         atman_proto::FlowRunId,

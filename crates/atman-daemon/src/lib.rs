@@ -71,6 +71,8 @@ pub mod unix;
 
 pub use state::{DaemonState, LiveSession};
 
+mod flow_service;
+
 pub async fn dispatch(state: Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcResponse {
     dispatch_as(state, req, "local-daemon").await
 }
@@ -91,6 +93,19 @@ pub async fn dispatch_as(
     }
 
     let id = req.id.clone();
+    if flow_service::handles(&req.method) {
+        return match flow_service::dispatch(
+            state,
+            req.method,
+            req.params.unwrap_or(json!({})),
+            principal_id,
+        )
+        .await
+        {
+            Ok(result) => JsonRpcResponse::ok(id, result),
+            Err(error) => JsonRpcResponse::err(id, error),
+        };
+    }
     match req.method.as_str() {
         methods::PING => JsonRpcResponse::ok(
             id,

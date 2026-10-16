@@ -49,6 +49,12 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "list_permission_requests",
         "create_permission_group",
         "resolve_permission_requests",
+        "session.create",
+        "session.open",
+        "session.flows",
+        "session.select_flow",
+        "flow.get",
+        "flow.control",
     ] {
         assert!(description.contains(method), "missing RPC method {method}");
     }
@@ -69,6 +75,13 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "GetEventsRequest",
         "SessionSummary",
         "SessionStatus",
+        "FlowAddress",
+        "CreateSessionRequest",
+        "SessionRequest",
+        "ListFlowsRequest",
+        "FlowRequest",
+        "ControlFlowRequest",
+        "FlowControl",
     ] {
         assert!(
             schemas.contains_key(expected),

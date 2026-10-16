@@ -20,6 +20,7 @@ struct PendingPrompt {
 }
 
 pub struct DaemonState {
+    pub(crate) session_service: std::sync::OnceLock<crate::flow_service::SessionService>,
     data_dir: PathBuf,
     daemon_generation: String,
     live: Mutex<HashMap<SessionId, LiveSessionEntry>>,
@@ -54,6 +55,7 @@ impl DaemonState {
             "daemon generation must be non-empty"
         );
         Self {
+            session_service: Default::default(),
             data_dir,
             daemon_generation,
             live: Mutex::new(HashMap::new()),
