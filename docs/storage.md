@@ -47,12 +47,19 @@ The daemon exposes persistent catalogs through the authenticated `/rpc` endpoint
 | `session.open` | `session_id` | Recorded session summary and catalog receipt |
 | `session.flows` | `session_id`, optional `before` instance UUID, `limit` from 1 to 50 (default 20) | Newest-first membership page, next cursor, total, and catalog receipt |
 | `session.select_flow` | `flow: { session_id, instance_id }` | Summary with the selected default view |
-| `flow.get` | `flow` | Execution revision, state, pause count, readiness, and Goal |
+| `flow.get` | `flow` | Atomic execution, Goal, latest completion, and journal cursor; independently observed scheduler status |
 | `flow.control` | `flow`, `expected_revision`, `action: pause / resume / cancel_turn` | Durable commit receipt |
+| `flow.launch` | `flow`, `request_id`, `expected_catalog_sequence`, absolute `path`, `entry`, optional `arguments` and `invocation` maps | Durable initial input acceptance |
+| `flow.invoke` | `flow`, `request_id`, optional `arguments` and `invocation` maps | Durable next-turn input acceptance |
+| `flow.output` | `flow`, optional exclusive `after` publication UUID, `limit` from 1 to 50 (default 20) | Committed final answers, next cursor, and `has_more` |
 
 Create or open a catalog before addressing its flows. Creating the same session identity and descriptor is idempotent; conflicting creation data is rejected. An omitted project explicitly creates a projectless session. Reopening reads its recorded configuration and project binding without requiring either location to exist. Failed instance reads remain visible as unavailable rows in the membership page, preserving pagination and the total count.
 
 View selection changes only the default binding. Opening, listing, selecting, and reading do not install execution schedulers. Pause and resume use a stable operator pause key, so resuming does not clear another controller's pause. Controls check the execution revision inside the instance writer; stale requests fail. Cancelling a turn preserves the instance, and resuming does not recover an interrupted invocation or resume its Goal. The execution readiness field describes the lifecycle gate, not whether a scheduler is installed or a model is running.
+
+`flow.launch` validates and snapshots the named source entry before creating an instance. The daemon retains scheduling independently of the requesting connection and builds execution services from the session's recorded configuration and project binding. Source changes or deletion do not change later invocations. Matching launch retries return the original acceptance with its current consumption disposition, without rereading source files, repeating execution, releasing pauses, or reinstalling scheduling. Conflicting reuse is rejected. `flow.invoke` queues a typed invocation on that same instance; duplicate requests share acceptance and paused input remains pending. Acceptance certifies durable receipt, not successful execution. Invocation settings are explicitly read by the flow and are not added to conversation history.
+
+`flow.output` reads the same final-answer publications exposed to peer flows. Ordinary entry returns are available as typed completion records through `flow.get` and do not become final answers implicitly. Prompt requests use the existing daemon prompt transport with invocation-owned context. `DaemonPromptResolver::new(&state)` retains a weak state reference, preventing cached execution services from keeping their daemon alive. After reopening, execution scheduling still requires an explicit host `SessionHandle::bind_entry`; catalog reads and matching launch retries do not restore it.
 
 ## Instance activation
 

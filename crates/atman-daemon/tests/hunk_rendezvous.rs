@@ -17,9 +17,7 @@ async fn hunk_review_reuses_daemon_rendezvous_when_resolver_present() {
 
     let mut ex = Executor::new();
     tools::register_tier_zero(&ex.tools);
-    ex.tool_ctx.prompt_resolver = Some(Arc::new(DaemonPromptResolver {
-        state: daemon_state.clone(),
-    }));
+    ex.tool_ctx.prompt_resolver = Some(Arc::new(DaemonPromptResolver::new(&daemon_state)));
 
     let src = format!(
         r#"flow t() -> string {{

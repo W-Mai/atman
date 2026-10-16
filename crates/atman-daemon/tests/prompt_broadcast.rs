@@ -118,9 +118,7 @@ async fn persistent_peers_share_transport_without_sharing_prompt_events_or_cance
     let state = Arc::new(DaemonState::new(tmp.path().join("daemon")));
     let mut executor = Executor::new();
     let resolver = Arc::new(RecordingResolver {
-        transport: DaemonPromptResolver {
-            state: state.clone(),
-        },
+        transport: DaemonPromptResolver::new(&state),
         owners: Mutex::new(BTreeMap::new()),
     });
     executor.tool_ctx.prompt_resolver = Some(resolver.clone());
@@ -333,9 +331,7 @@ async fn hunk_review_emits_pending_and_resolved_events_to_shared_sink() {
 
     let mut ex = Executor::with_events(sink.clone());
     tools::register_tier_zero(&ex.tools);
-    ex.tool_ctx.prompt_resolver = Some(Arc::new(DaemonPromptResolver {
-        state: daemon_state.clone(),
-    }));
+    ex.tool_ctx.prompt_resolver = Some(Arc::new(DaemonPromptResolver::new(&daemon_state)));
 
     let src = format!(
         r#"flow t() -> string {{

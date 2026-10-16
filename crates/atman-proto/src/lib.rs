@@ -175,6 +175,9 @@ pub mod methods {
     pub const SESSION_SELECT_FLOW: &str = "session.select_flow";
     pub const FLOW_GET: &str = "flow.get";
     pub const FLOW_CONTROL: &str = "flow.control";
+    pub const FLOW_LAUNCH: &str = "flow.launch";
+    pub const FLOW_INVOKE: &str = "flow.invoke";
+    pub const FLOW_OUTPUT: &str = "flow.output";
     pub const GOAL_RUN: &str = "goal.run";
     pub const GOAL_GET: &str = "goal.get";
     pub const GOAL_SET: &str = "goal.set";

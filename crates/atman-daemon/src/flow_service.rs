@@ -21,12 +21,15 @@ use uuid::Uuid;
 
 use crate::DaemonState;
 
+mod execution;
+
 type CatalogSlot = Arc<OnceCell<SessionHandle>>;
 
 pub(crate) struct SessionService {
     data_dir: PathBuf,
     host: RuntimeHost,
     catalogs: Mutex<HashMap<Uuid, CatalogSlot>>,
+    executors: Mutex<HashMap<Uuid, Arc<OnceCell<atman_runtime::Executor>>>>,
 }
 
 impl SessionService {
@@ -35,6 +38,7 @@ impl SessionService {
             data_dir,
             host: redactor.map(RuntimeHost::with_redactor).unwrap_or_default(),
             catalogs: Default::default(),
+            executors: Default::default(),
         }
     }
 
@@ -95,6 +99,9 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::SESSION_SELECT_FLOW
             | methods::FLOW_GET
             | methods::FLOW_CONTROL
+            | methods::FLOW_LAUNCH
+            | methods::FLOW_INVOKE
+            | methods::FLOW_OUTPUT
     )
 }
 
@@ -125,6 +132,9 @@ enum Request {
     Select(FlowRequest),
     Get(FlowRequest),
     Control(ControlFlowRequest),
+    Launch(LaunchFlowRequest),
+    Invoke(InvokeFlowRequest),
+    Output(ReadFlowOutputRequest),
 }
 
 impl Request {
@@ -136,6 +146,9 @@ impl Request {
             methods::SESSION_SELECT_FLOW => Self::Select(decode(params)?),
             methods::FLOW_GET => Self::Get(decode(params)?),
             methods::FLOW_CONTROL => Self::Control(decode(params)?),
+            methods::FLOW_LAUNCH => Self::Launch(decode(params)?),
+            methods::FLOW_INVOKE => Self::Invoke(decode(params)?),
+            methods::FLOW_OUTPUT => Self::Output(decode(params)?),
             _ => return Err(JsonRpcError::method_not_found(method)),
         };
         let (session, instance) = match &request {
@@ -160,6 +173,33 @@ impl Request {
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::Control(request) => (request.flow.session_id.0, Some(request.flow.instance_id)),
+            Self::Launch(request) => {
+                if request.request_id.is_nil()
+                    || request.entry.trim().is_empty()
+                    || !std::path::Path::new(&request.path).is_absolute()
+                {
+                    return Err(JsonRpcError::invalid_params(
+                        "launch requires a request UUID, an absolute source path, and an entry name",
+                    ));
+                }
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::Invoke(request) => {
+                if request.request_id.is_nil() {
+                    return Err(JsonRpcError::invalid_params(
+                        "request identity must not be nil",
+                    ));
+                }
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::Output(request) => {
+                if !(1..=50).contains(&request.limit) {
+                    return Err(JsonRpcError::invalid_params(
+                        "output page limit must be between 1 and 50",
+                    ));
+                }
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
         };
         if session.is_nil() || instance.is_some_and(|id| id.is_nil()) {
             return Err(JsonRpcError::invalid_params(
@@ -170,7 +210,7 @@ impl Request {
     }
 }
 
-async fn dispatch_owned(state: &DaemonState, request: Request) -> Result<Value> {
+async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Value> {
     let service = state.session_service.get_or_init(|| {
         let config_dir = state
             .launcher()
@@ -181,6 +221,9 @@ async fn dispatch_owned(state: &DaemonState, request: Request) -> Result<Value> 
         )
     });
     match request {
+        Request::Launch(request) => service.launch(state, request).await,
+        Request::Invoke(request) => service.invoke(request).await,
+        Request::Output(request) => service.output(request).await,
         Request::Create(request) => {
             let config_dir = state
                 .launcher()
@@ -233,9 +276,24 @@ async fn dispatch_owned(state: &DaemonState, request: Request) -> Result<Value> 
         Request::Get(request) => {
             let flow = core_address(request.flow);
             let worker = service.host.flow(&flow).await?;
-            let view = worker.goal().await?;
+            let view = worker.status().await?;
+            let scheduler = service
+                .session(flow.session_id.0)?
+                .scheduling_status(flow.instance_id.clone())
+                .await?;
+            let scheduler = scheduler.map(|status| match &*status.borrow() {
+                atman_runtime::flow_runtime::scheduler::SchedulingStatus::Running => {
+                    json!({"status": "running"})
+                }
+                atman_runtime::flow_runtime::scheduler::SchedulingStatus::Stopped => {
+                    json!({"status": "stopped"})
+                }
+                atman_runtime::flow_runtime::scheduler::SchedulingStatus::Failed(error) => {
+                    json!({"status": "failed", "error": error})
+                }
+            });
             Ok(
-                json!({"flow": address(&flow), "execution": execution(&view.execution), "goal": view.goal}),
+                json!({"flow": address(&flow), "execution": execution(&view.execution), "goal": view.goal, "last_completion": view.completion, "cursor": view.cursor, "scheduler": scheduler}),
             )
         }
         Request::Control(request) => {

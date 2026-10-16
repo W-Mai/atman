@@ -381,18 +381,7 @@ impl FlowClient {
         self.host
             .flow(&target)
             .await?
-            .request(move |store| {
-                client.authorize(store.state().address(), FlowAction::ReadOutput)?;
-                Ok(store
-                    .published_messages()
-                    .iter()
-                    .filter(|record| {
-                        record.publication.context_run.is_none()
-                            && record.publication.message.origin == MessageOrigin::FinalAnswer
-                    })
-                    .cloned()
-                    .collect())
-            })
+            .read_output(move |address| client.authorize(address, FlowAction::ReadOutput))
             .await
     }
 
@@ -541,6 +530,26 @@ impl FlowClient {
 }
 
 impl super::FlowWorker {
+    /// Read committed final answers under the writer's authorization boundary.
+    pub async fn read_output(
+        &self,
+        authorize: impl FnOnce(&FlowRef) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<Vec<PublishedMessage>> {
+        self.request(move |store| {
+            authorize(store.state().address())?;
+            Ok(store
+                .published_messages()
+                .iter()
+                .filter(|record| {
+                    record.publication.context_run.is_none()
+                        && record.publication.message.origin == MessageOrigin::FinalAnswer
+                })
+                .cloned()
+                .collect())
+        })
+        .await
+    }
+
     /// Apply an authenticated host control under the instance writer. The pause key belongs to the controller, not the target or its Goal.
     pub async fn control(
         &self,

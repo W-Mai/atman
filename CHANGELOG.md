@@ -10,7 +10,7 @@ All notable changes to atman are documented in this file.
 
 - **Form submission acknowledgement** — `FormRegistry::submit`, `DeferredFormInbox::record`, and daemon prompt resolution are asynchronous and return storage errors. TUI form submissions and results carry a matching request ID.
 
-- **Daemon prompt transport** — `DaemonPromptResolver` accepts shared daemon state without session or sink fields. Prompt ownership is supplied by `ToolCtx::prompt_resolver()` through `PromptResolver::register_in_context` for each invocation.
+- **Daemon prompt transport** — `DaemonPromptResolver::new(&state)` accepts shared daemon state and retains a weak reference without session or sink fields. Prompt ownership is supplied by `ToolCtx::prompt_resolver()` through `PromptResolver::register_in_context` for each invocation.
 
 - **MCP bootstrap ownership** — `bootstrap::spawn_mcp_boot` is removed. `AtmanRuntime::build` starts the connection service; embedded callers use `executor.tool_ctx.mcp_service()` to subscribe, reload, or shut it down.
 
@@ -23,6 +23,8 @@ All notable changes to atman are documented in this file.
 - **Embedded provider lifecycle construction** — `ProviderLifecycle::new` returns `Result`, and executor attachment returns `ProviderLifecycleError`. Provider connections must use `ProviderRegistry::with_models(hub.models().clone())`; mismatched configuration scopes are rejected.
 
 ### ✨ Features
+
+- **Persistent flow execution over RPC** — Daemon clients can launch retained source entries, queue additional typed invocations, and page committed final answers. Matching retries preserve acceptance identities without repeating execution; pauses retain queued input. Status includes the latest typed completion and independently observed scheduler ownership.
 
 - **Persistent session management** — Daemon RPC supports creating and opening session catalogs, paging their flows, selecting the default view, and inspecting or controlling execution by flow address. Controls preserve independent pause sources, reject stale revisions, and retain state across reopening.
 

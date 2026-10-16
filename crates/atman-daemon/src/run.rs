@@ -40,6 +40,16 @@ struct ProviderCatalogRefreshDispatcher {
     lifecycle: atman_runtime::ProviderLifecycle,
 }
 
+pub(crate) fn refresh_provider_catalogs(executor: &atman_runtime::Executor, plan: Vec<String>) {
+    if let Some(lifecycle) = executor.provider_lifecycle() {
+        ProviderCatalogRefreshDispatcher {
+            runtime: tokio::runtime::Handle::current(),
+            lifecycle,
+        }
+        .dispatch(plan);
+    }
+}
+
 impl ProviderCatalogRefreshDispatcher {
     fn dispatch(&self, plan: Vec<String>) {
         for provider_id in plan {
@@ -470,10 +480,9 @@ async fn run_flow_inner(
         session.plans_watch().clone(),
     );
     if let Some(state) = daemon_state {
-        executor.tool_ctx.prompt_resolver =
-            Some(Arc::new(crate::prompt_bridge::DaemonPromptResolver {
-                state,
-            }));
+        executor.tool_ctx.prompt_resolver = Some(Arc::new(
+            crate::prompt_bridge::DaemonPromptResolver::new(&state),
+        ));
     }
     let (lifecycle_tx, mut lifecycle_rx) =
         tokio::sync::mpsc::unbounded_channel::<atman_rt::ast::LifecycleEvent>();

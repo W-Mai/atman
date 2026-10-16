@@ -5,6 +5,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::SessionId;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct FlowAddress {
@@ -56,4 +57,38 @@ pub struct ControlFlowRequest {
     pub flow: FlowAddress,
     pub expected_revision: u64,
     pub action: FlowControl,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct LaunchFlowRequest {
+    pub flow: FlowAddress,
+    pub request_id: Uuid,
+    pub expected_catalog_sequence: u64,
+    /// Absolute source path. Source contents are retained at creation.
+    pub path: String,
+    pub entry: String,
+    #[serde(default)]
+    pub arguments: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub invocation: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct InvokeFlowRequest {
+    pub flow: FlowAddress,
+    pub request_id: Uuid,
+    #[serde(default)]
+    pub arguments: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub invocation: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct ReadFlowOutputRequest {
+    pub flow: FlowAddress,
+    /// Last publication UUID received, exclusive.
+    #[serde(default)]
+    pub after: Option<Uuid>,
+    #[serde(default = "page_size")]
+    pub limit: usize,
 }
