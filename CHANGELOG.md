@@ -110,6 +110,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Executor stack usage** — Invocation execution state is allocated once on the heap, preventing nested entry wrappers from exhausting default test-thread stacks during flow initialization.
+
 - **Instance working directories** — Persistent tool calls resolve paths against their authorized project, including inline calls after reopening. Unrelated host checkout metadata no longer controls their paths, filesystem access modes remain intact, and instances without a project require absolute paths.
 
 - **Concurrent reply admission** — Registered continuations can receive replies while other branches run or wait for effects. Independent pauses and terminal phases continue to block delivery, and inbox reservations retain exclusive consumption.

@@ -345,7 +345,8 @@ impl Executor {
             });
         }
         let mut next_run_id = invocation.first_run_id.clone();
-        let execution = atman_rt::run_redirects(
+        // Keep the execution state machine out of its callers' suspended stack frames.
+        let execution = Box::pin(atman_rt::run_redirects(
             flow_name.to_string(),
             args,
             5,
@@ -383,7 +384,7 @@ impl Executor {
                 RuntimeError::Redirect(target) => Some(target.clone()),
                 _ => None,
             },
-        );
+        ));
         let outcome = if let Some(binding) = &invocation.instance
             && let Some(storage) = &binding.storage
         {
