@@ -40,6 +40,9 @@ impl AtmanRuntime {
         executor.providers =
             crate::provider::ProviderRegistry::with_models(auth_hub.models().clone());
         executor.tool_ctx = crate::tool::ToolCtx::for_project(opts.project.clone());
+        executor.tool_ctx.lifecycle_hooks = Some(Arc::new(
+            crate::lifecycle::LifecycleRunner::from_dir(auth_hub.config_dir()),
+        ));
         if let Some(root) = project_root {
             let workspace_service = crate::flow_workspace::FlowWorkspaceService::new(
                 root,

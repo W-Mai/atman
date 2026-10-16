@@ -26,6 +26,297 @@ fn session_descriptor() -> SessionDescriptor {
 }
 
 #[tokio::test]
+async fn turn_hooks_share_the_admitted_scope_for_peers_and_survive_reopen() {
+    use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, Value};
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(config.join("lib")).unwrap();
+    let todo = |label: &str| {
+        format!(
+            r#"memory.todo.set(where: "{label}", why: "scope", how: "hook", expected_result: "persisted")"#
+        )
+    };
+    std::fs::write(
+        config.join("lib/hooks.at"),
+        format!(
+            r#"pub flow mark() {{ {} }}
+pub flow shell_gate() {{ contract {{ capabilities {{ shell: true }} }} bash(command: "exit 0") }}"#,
+            todo("start")
+        ),
+    )
+    .unwrap();
+    std::fs::write(config.join("a.at"), format!(
+        "use \"user:hooks.at\"::mark\nuse \"user:hooks.at\"::shell_gate\non turn.start {{ mark().await\n shell_gate().await\n {} }}\non session.start {{ {} }}\non session.end {{ {} }}",
+        todo("unexpected authority"), todo("unexpected start"), todo("unexpected end")
+    )).unwrap();
+    std::fs::write(
+        config.join("b.at"),
+        format!(
+            "on turn.start {{ {} }}\non turn.end {{ {}\n missing_tool() }}",
+            todo("after-error"),
+            todo("end")
+        ),
+    )
+    .unwrap();
+    let compact = r#"replace_messages_range(messages: [], start: 0, end: 0, summary: "summary")"#;
+    std::fs::write(
+        config.join("c.at"),
+        format!(
+            "on session.context_compact {{ {}\n {compact} }}",
+            todo("compacted")
+        ),
+    )
+    .unwrap();
+    let child_path = dir.path().join("child.at");
+    std::fs::write(
+        &child_path,
+        format!(
+            "flow child() -> string {{ {}\n {compact}\n return final.answer(message: \"child\") }}",
+            todo("body")
+        ),
+    )
+    .unwrap();
+    let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(&config);
+    let runtime = AtmanRuntime::build(AtmanRuntimeOptions {
+        events: Default::default(),
+        mock: false,
+        config: hub.clone(),
+        project: None,
+        home_dir: None,
+        workspace_generation: "turn-hooks".into(),
+    })
+    .await
+    .unwrap();
+    // Binding retains the hook graph; an invocation must not reload a changed helper.
+    std::fs::remove_file(config.join("lib/hooks.at")).unwrap();
+    let mut info = session_descriptor();
+    info.configuration = atman_runtime::flow_store::SessionConfiguration::Atman(hub.source());
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let source = format!(
+        r#"flow main() -> string {{
+        when env("fail") == "yes" {{ missing_entry_tool() }}
+        inventory = flow.instances()
+        flow.spawn(flow: {}, spawn_token: inventory.spawn_token, async: false)
+        {}
+        {compact}
+        return final.answer(message: "parent")
+    }}"#,
+        serde_json::to_string(&format!("{}@child", child_path.display())).unwrap(),
+        todo("body")
+    );
+    let worker = session
+        .create_flow(program_descriptor(info.id, source))
+        .await
+        .unwrap();
+    change(&worker, FlowTransition::Activated).await;
+    let mut leases = Vec::new();
+    for _ in 0..2 {
+        let complete = invoke(&worker, runtime.executor.clone()).await;
+        assert!(
+            matches!(complete.result, Ok(Value::Str(ref text)) if text == "parent"),
+            "{:?}",
+            complete.result
+        );
+        assert_eq!(complete.outcome, TurnOutcome::Completed);
+        let entry = worker
+            .context()
+            .flow_registry
+            .lookup(&worker.address().instance_id.to_string())
+            .unwrap();
+        assert_eq!(entry.child_run_id, complete.lease.run);
+        assert_eq!(entry.goal, "main");
+        leases.push(complete.lease);
+    }
+    let expected = ["start", "after-error", "body", "compacted", "end"];
+    let planning = worker.planning().await.unwrap();
+    assert_eq!(
+        planning
+            .todos
+            .iter()
+            .map(|todo| todo.where_.as_str())
+            .collect::<Vec<_>>(),
+        expected.repeat(2)
+    );
+    let trace = worker.execution_events().await.unwrap();
+    for lease in &leases {
+        let runs: Vec<_> = trace
+            .iter()
+            .flat_map(|batch| &batch.events)
+            .filter(|event| {
+                event.scope
+                    == atman_runtime::flow_store::trace::ExecutionScope::Invocation(lease.clone())
+            })
+            .filter_map(|event| match &event.event {
+                atman_runtime::Event::FlowStart {
+                    run_id, flow_name, ..
+                } => Some((run_id, flow_name)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            runs.iter()
+                .any(|(id, name)| *id == &lease.run && name.as_str() == "main")
+        );
+        assert_eq!(
+            runs.iter()
+                .map(|(id, _)| *id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            runs.len()
+        );
+        assert_eq!(
+            runs.iter()
+                .filter(|(_, name)| name.starts_with("__lifecycle_turn"))
+                .count(),
+            3
+        );
+        assert_eq!(
+            runs.iter()
+                .filter(|(_, name)| name.starts_with("__lifecycle_session.context_compact"))
+                .count(),
+            1
+        );
+    }
+    let mut children = 0;
+    for row in session.snapshot().await.unwrap().catalog.flows {
+        if row.id == worker.address().instance_id {
+            continue;
+        }
+        let child = session.open_flow(row.id).await.unwrap();
+        assert_eq!(
+            child
+                .planning()
+                .await
+                .unwrap()
+                .todos
+                .iter()
+                .map(|todo| todo.where_.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(
+            child
+                .execution_events()
+                .await
+                .unwrap()
+                .iter()
+                .flat_map(|batch| &batch.events)
+                .all(|event| event.scope.flow() == child.address())
+        );
+        children += 1;
+    }
+    assert_eq!(children, 2);
+    let failed = invoke_with_env(
+        &worker,
+        runtime.executor.clone(),
+        [("fail".into(), serde_json::json!("yes"))].into(),
+    )
+    .await;
+    assert!(
+        failed
+            .result
+            .unwrap_err()
+            .to_string()
+            .contains("missing_entry_tool")
+    );
+    let planning = worker.planning().await.unwrap();
+    assert_eq!(planning.todos.len(), 13);
+    assert_eq!(planning.todos.last().unwrap().where_, "end");
+    let address = worker.address().clone();
+    host.shutdown().await.unwrap();
+    let stored = root.open_session(info.id).unwrap();
+    let reopened = FlowWorker::start(stored.open_flow(&address.instance_id).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(reopened.planning().await.unwrap(), planning);
+    assert_eq!(
+        reopened
+            .completion(None)
+            .await
+            .unwrap()
+            .unwrap()
+            .completion
+            .lease,
+        failed.lease
+    );
+    drop(reopened.shutdown().await.unwrap());
+}
+
+#[tokio::test]
+async fn turn_hook_pause_and_cancel_share_the_entry_lease() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let worker = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&worker, FlowTransition::Activated).await;
+    let mut hooks = atman_runtime::lifecycle::LifecycleRunner::new();
+    hooks.absorb(
+        &atman_rt::parse_file("on turn.start { loop { yield } }\non turn.end { missing_tool() }")
+            .unwrap(),
+    );
+    let mut executor = Executor::new();
+    executor.tool_ctx.lifecycle_hooks = Some(Arc::new(hooks));
+    worker
+        .accept_input(peer_request(worker.address(), worker.address()), |_| Ok(()))
+        .await
+        .unwrap();
+    let ticket = worker
+        .start_turn(
+            executor,
+            prepare(&worker.snapshot().await.unwrap()).unwrap().unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut commits = worker.subscribe_commits();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            commits.borrow_and_update();
+            if worker.execution_events().await.unwrap().iter().flat_map(|batch| &batch.events).any(|event| matches!(&event.event,
+                atman_runtime::Event::FlowStart { flow_name, .. } if flow_name.contains("turn.start"))) {
+                break;
+            }
+            commits.changed().await.unwrap();
+        }
+    }).await.unwrap();
+    let key = Uuid::now_v7().into();
+    change(&worker, FlowTransition::ExecutionPaused { key }).await;
+    assert!(worker.completion(None).await.unwrap().is_none());
+    worker
+        .cancel_run(ticket.lease.run.clone(), |_| Ok(()))
+        .await
+        .unwrap()
+        .unwrap();
+    let complete = tokio::time::timeout(Duration::from_secs(5), ticket.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        complete.outcome,
+        TurnOutcome::Interrupted(atman_rt::Interruption::Cancelled)
+    );
+    assert!(worker.read_output(|_| Ok(())).await.unwrap().is_empty());
+    assert!(
+        !worker
+            .execution_events()
+            .await
+            .unwrap()
+            .iter()
+            .flat_map(|batch| &batch.events)
+            .any(|event| matches!(&event.event,
+        atman_runtime::Event::FlowStart { flow_name, .. } if flow_name.contains("turn.end")))
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn host_shutdown_unwinds_paused_execution_without_closing_instances_or_losing_input() {
     use atman_runtime::flow_store::goal::GoalRequest;
     use atman_runtime::memory::goal::GoalEdit;

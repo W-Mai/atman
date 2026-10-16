@@ -148,6 +148,8 @@ pub struct ToolCtx {
     pub fs_access: crate::fs_access::FsAccessPolicy,
     pub workspace: Option<crate::git_workspace::WorkspaceBinding>,
     pub flow_workspace_service: Option<std::sync::Arc<crate::flow_workspace::FlowWorkspaceService>>,
+    /// Host configuration hooks, shared as immutable code by persistent peers.
+    pub lifecycle_hooks: Option<Arc<crate::lifecycle::LifecycleRunner>>,
     pub lifecycle_fire_tx:
         Option<tokio::sync::mpsc::UnboundedSender<atman_rt::ast::LifecycleEvent>>,
     pub bg_registry: Option<std::sync::Arc<crate::tools::bash_bg::BgRegistry>>,

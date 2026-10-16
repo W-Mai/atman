@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent turn hooks** — Configured turn and context-compaction hooks execute in the admitted instance scope, retaining peer isolation, cancellation, trace identity, and entry results.
+
 - **Persistent CLI execution** — `run` and `flow run` use retained flow instances and shared peer scheduling, including temporary storage for `--ephemeral`. Session logs, usage summaries, and the monitor read persistent execution alongside existing histories.
 
 - **Batch runtime drain** — `RuntimeHost::wait_quiescent` waits for execution, scheduling, and notification delivery across persistent flows without consuming paused or unbound input.

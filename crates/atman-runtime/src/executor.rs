@@ -329,8 +329,34 @@ impl Executor {
                 executor.tool_ctx.task_registry = None;
             }
         }
+        let persistent = invocation
+            .instance
+            .as_ref()
+            .is_some_and(|binding| binding.storage.is_some());
+        let (lifecycle_tx, mut lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
+        if persistent {
+            executor.tool_ctx.lifecycle_fire_tx = Some(lifecycle_tx);
+            // All runs in this turn share one visible entry, including host hooks.
+            let binding = invocation.instance.as_ref().expect("persistent invocation");
+            let session = invocation.session.as_ref().expect("persistent context");
+            let entry_id = binding.lease.flow.instance_id.to_string();
+            let entry = session.flow_registry.create_entry(
+                entry_id.clone(),
+                session.goal().unwrap_or_else(|| flow_name.to_owned()),
+                String::new(),
+                binding.lease.run.clone(),
+            );
+            if program
+                .entry_flow(flow_name)
+                .and_then(|id| program.flow(&id))
+                .is_some_and(crate::goal::is_managed)
+            {
+                let _ = entry.goal_control.set(session.goal_control.clone());
+            }
+            executor.tool_ctx.agent_entry = Some(entry);
+            session.set_current_root(entry_id);
+        }
         let executor = &executor;
-        let flows = program.flatten_flows();
         if let Some(session) = &invocation.session
             && program
                 .entry_flow(flow_name)
@@ -344,48 +370,35 @@ impl Executor {
                 env: invocation.env.clone(),
             });
         }
-        let mut next_run_id = invocation.first_run_id.clone();
         // Keep the execution state machine out of its callers' suspended stack frames.
-        let execution = Box::pin(atman_rt::run_redirects(
-            flow_name.to_string(),
-            args,
-            5,
-            |current, current_args| {
-                let run_id = next_run_id.take();
-                let flows = &flows;
-                let invocation = &invocation;
-                async move {
-                    let id = program
-                        .entry_flow(&current)
-                        .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{current}`")))?;
-                    let flow = program
-                        .flow(&id)
-                        .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{current}`")))?;
-                    executor
-                        .run_flow(
-                            flow,
-                            current_args,
-                            flows,
-                            invocation,
-                            run_id,
-                            FlowSource {
-                                linked_program: Some(program),
-                                module: Some(id.module),
-                                dir: program
-                                    .source_dir(&id)
-                                    .map(std::path::Path::to_path_buf)
-                                    .or_else(|| self.source_dir.clone()),
-                            },
-                        )
-                        .await
+        let execution = Box::pin(async {
+            if persistent {
+                executor
+                    .fire_turn_hook(&invocation, atman_rt::ast::LifecycleEvent::TurnStart)
+                    .await;
+            }
+            let result = executor
+                .run_linked_body(
+                    program,
+                    flow_name,
+                    args,
+                    &invocation,
+                    invocation.first_run_id.clone(),
+                )
+                .await;
+            if persistent {
+                while let Ok(event) = lifecycle_rx.try_recv() {
+                    if event == atman_rt::ast::LifecycleEvent::ContextCompact {
+                        executor.fire_turn_hook(&invocation, event).await;
+                    }
                 }
-            },
-            |error| match error {
-                RuntimeError::Redirect(target) => Some(target.clone()),
-                _ => None,
-            },
-        ));
-        let outcome = if let Some(binding) = &invocation.instance
+                executor
+                    .fire_turn_hook(&invocation, atman_rt::ast::LifecycleEvent::TurnEnd)
+                    .await;
+            }
+            result
+        });
+        if let Some(binding) = &invocation.instance
             && let Some(storage) = &binding.storage
         {
             crate::flow_runtime::execution::drive(
@@ -397,7 +410,87 @@ impl Executor {
             .await?
         } else {
             execution.await
+        }
+    }
+
+    async fn fire_turn_hook(
+        &self,
+        invocation: &RootInvocation,
+        event: atman_rt::ast::LifecycleEvent,
+    ) {
+        let Some(hooks) = &self.tool_ctx.lifecycle_hooks else {
+            return;
         };
+        // Host hooks are non-reentrant; compacting inside a hook cannot enqueue more hooks.
+        let mut executor = self.clone();
+        executor.tool_ctx.lifecycle_fire_tx = None;
+        let executor = &executor;
+        hooks
+            .fire_with(event, |program, name| async move {
+                executor
+                    .run_linked_body(&program, &name, Vec::new(), invocation, None)
+                    .await
+            })
+            .await;
+    }
+
+    /// Execute under an already claimed invocation. Only the outer entry drives its lease.
+    async fn run_linked_body(
+        &self,
+        program: &LinkedProgram,
+        flow_name: &str,
+        args: Vec<(String, Value)>,
+        invocation: &RootInvocation,
+        mut next_run_id: Option<FlowRunId>,
+    ) -> Result<Value, RuntimeError> {
+        if invocation
+            .instance
+            .as_ref()
+            .is_some_and(|binding| binding.cancellation.is_cancelled())
+        {
+            return Err(RuntimeError::Cancelled(
+                "instance turn was cancelled".into(),
+            ));
+        }
+        let flows = program.flatten_flows();
+        let outcome = atman_rt::run_redirects(
+            flow_name.to_string(),
+            args,
+            5,
+            |current, current_args| {
+                let run_id = next_run_id.take();
+                let flows = &flows;
+                async move {
+                    let id = program
+                        .entry_flow(&current)
+                        .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{current}`")))?;
+                    let flow = program
+                        .flow(&id)
+                        .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{current}`")))?;
+                    self.run_flow(
+                        flow,
+                        current_args,
+                        flows,
+                        invocation,
+                        run_id,
+                        FlowSource {
+                            linked_program: Some(program),
+                            module: Some(id.module),
+                            dir: program
+                                .source_dir(&id)
+                                .map(std::path::Path::to_path_buf)
+                                .or_else(|| self.source_dir.clone()),
+                        },
+                    )
+                    .await
+                }
+            },
+            |error| match error {
+                RuntimeError::Redirect(target) => Some(target.clone()),
+                _ => None,
+            },
+        )
+        .await;
         match outcome {
             atman_rt::RedirectOutcome::Completed(result) => result,
             atman_rt::RedirectOutcome::LimitExceeded => Err(RuntimeError::ToolFailed(
@@ -598,22 +691,27 @@ impl Executor {
                         }
                         tool_ctx.stream_tx = Some(sess.stream_tx());
                         tool_ctx.session_messages_handle = Some(sess.messages_handle());
-                        // Register the instance address for output and interjection. Legacy session entries retain the root alias; both use the context's MessageStream.
-                        let entry_id = sess
-                            .flow_instance()
-                            .map(|address| address.instance_id.to_string())
-                            .unwrap_or_else(|| "root".to_string());
-                        let root_entry = sess.flow_registry.create_entry(
-                            entry_id.clone(),
-                            sess.goal().unwrap_or_else(|| flow.name.name.clone()),
-                            String::new(),
-                            body_run_id.clone(),
-                        );
-                        if let Some(control) = &tool_ctx.goal_control {
-                            let _ = root_entry.goal_control.set(control.clone());
+                        if invocation
+                            .instance
+                            .as_ref()
+                            .is_none_or(|binding| binding.storage.is_none())
+                        {
+                            let entry_id = sess
+                                .flow_instance()
+                                .map(|address| address.instance_id.to_string())
+                                .unwrap_or_else(|| "root".to_string());
+                            let root_entry = sess.flow_registry.create_entry(
+                                entry_id.clone(),
+                                sess.goal().unwrap_or_else(|| flow.name.name.clone()),
+                                String::new(),
+                                body_run_id.clone(),
+                            );
+                            if let Some(control) = &tool_ctx.goal_control {
+                                let _ = root_entry.goal_control.set(control.clone());
+                            }
+                            tool_ctx.agent_entry = Some(root_entry);
+                            sess.set_current_root(entry_id);
                         }
-                        tool_ctx.agent_entry = Some(std::sync::Arc::clone(&root_entry));
-                        sess.set_current_root(entry_id);
                     }
                     let _goal_turn = tool_ctx.goal_control.as_ref().map(|g| g.start_turn());
                     if let Some(control) = &tool_ctx.goal_control {

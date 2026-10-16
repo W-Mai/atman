@@ -27,8 +27,9 @@ impl LifecycleRunner {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return runner;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let mut paths: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+        paths.sort();
+        for path in paths {
             if path.extension().and_then(|s| s.to_str()) != Some("at") {
                 continue;
             }
@@ -75,6 +76,19 @@ impl LifecycleRunner {
     }
 
     pub async fn fire(&self, executor: &Executor, event: LifecycleEvent) {
+        self.fire_with(event, |program, name| async move {
+            executor
+                .run_linked_with_invocation(&program, &name, Vec::new(), RootInvocation::default())
+                .await
+        })
+        .await;
+    }
+
+    pub(crate) async fn fire_with<F, Fut>(&self, event: LifecycleEvent, mut run: F)
+    where
+        F: FnMut(LinkedProgram, String) -> Fut,
+        Fut: std::future::Future<Output = Result<Value, crate::RuntimeError>>,
+    {
         for (idx, hook) in self.decls.iter().enumerate() {
             let decl = &hook.decl;
             if decl.event != event {
@@ -82,28 +96,20 @@ impl LifecycleRunner {
             }
             let flow = lifecycle_flow(decl, idx);
             let flow_name = flow.name.name.clone();
-            let result = if let Some(program) = hook.program.as_ref() {
-                match program.with_entry_flow(flow) {
-                    Ok(program) => {
-                        executor
-                            .run_linked_with_invocation(
-                                &program,
-                                &flow_name,
-                                Vec::new(),
-                                RootInvocation::default(),
-                            )
-                            .await
-                    }
-                    Err(error) => Err(crate::error::RuntimeError::ToolFailed(error.to_string())),
-                }
+            let program = if let Some(program) = hook.program.as_ref() {
+                program.with_entry_flow(flow)
             } else {
-                let file = atman_rt::ast::File {
+                crate::source_program::link_inline(atman_rt::ast::File {
                     flows: vec![flow],
                     ..atman_rt::ast::File::default()
-                };
-                executor.run(&file, &flow_name, Vec::new()).await
+                })
+            };
+            let result = match program {
+                Ok(program) => run(program, flow_name).await,
+                Err(error) => Err(crate::RuntimeError::ToolFailed(error.to_string())),
             };
             match result {
+                Err(crate::RuntimeError::Cancelled(_)) => break,
                 Ok(Value::Err(e)) => {
                     let key = format!("lifecycle.{}.returned_error", lifecycle_event_slug(event));
                     crate::notify!(
