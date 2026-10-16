@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use crate::config_hub::{ConfigHub, SandboxConfig};
+use crate::config_hub::{ConfigHub, RedactConfig, SandboxConfig};
 use crate::event::EventSink;
 use crate::executor::Executor;
 use crate::providers::mock::MockProvider;
@@ -54,6 +54,14 @@ impl AtmanRuntime {
         let rule_fetch = build_rule_fetch(project_root, opts.home_dir.as_deref()).await;
         tools::register_tier_zero_with_rules(&executor.tools, rule_fetch);
         tools::register_flow_memory(&executor.tools);
+        if let Some(project) = &opts.project {
+            tools::register_project_memory(
+                &executor.tools,
+                project.storage_root(),
+                build_redactor(config_dir),
+                None,
+            );
+        }
         tools::register_git_ops(&executor.tools);
         tools::register_watch(&executor.tools);
         let task_registry = crate::TaskRegistry::new();
@@ -100,6 +108,33 @@ impl AtmanRuntime {
             provider_catalog_refresh_plan,
         })
     }
+}
+
+pub fn load_redact_config(config_dir: Option<&Path>) -> RedactConfig {
+    let Some(dir) = config_dir else {
+        return RedactConfig::default();
+    };
+    crate::config_hub::ConfigHub::from_config_dir(dir)
+        .redact_config()
+        .unwrap_or_default()
+}
+
+pub fn build_redactor(config_dir: Option<&Path>) -> Option<Arc<crate::redact::Redactor>> {
+    let cfg = load_redact_config(config_dir);
+    if !cfg.enabled {
+        return None;
+    }
+    let mut pairs: Vec<(&str, &str)> = crate::redact::BUILTIN_PATTERNS.to_vec();
+    for (k, r) in &cfg.custom_patterns {
+        pairs.push((k.as_str(), r.as_str()));
+    }
+    let mode = if cfg.partial {
+        crate::redact::RedactMode::Partial
+    } else {
+        crate::redact::RedactMode::Full
+    };
+    let redactor = crate::redact::Redactor::from_pairs(&pairs, mode).with_allowlist(cfg.allowlist);
+    Some(Arc::new(redactor))
 }
 
 fn build_sandbox(

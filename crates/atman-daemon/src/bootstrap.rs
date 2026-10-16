@@ -7,35 +7,7 @@ use atman_runtime::{Executor, tools};
 
 type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
-use atman_runtime::config_hub::RedactConfig;
-
-pub fn load_redact_config(config_dir: Option<&Path>) -> RedactConfig {
-    let Some(dir) = config_dir else {
-        return RedactConfig::default();
-    };
-    atman_runtime::config_hub::ConfigHub::from_config_dir(dir)
-        .redact_config()
-        .unwrap_or_default()
-}
-
-pub fn build_redactor(config_dir: Option<&Path>) -> Option<Arc<atman_runtime::redact::Redactor>> {
-    let cfg = load_redact_config(config_dir);
-    if !cfg.enabled {
-        return None;
-    }
-    let mut pairs: Vec<(&str, &str)> = atman_runtime::redact::BUILTIN_PATTERNS.to_vec();
-    for (k, r) in &cfg.custom_patterns {
-        pairs.push((k.as_str(), r.as_str()));
-    }
-    let mode = if cfg.partial {
-        atman_runtime::redact::RedactMode::Partial
-    } else {
-        atman_runtime::redact::RedactMode::Full
-    };
-    let redactor =
-        atman_runtime::redact::Redactor::from_pairs(&pairs, mode).with_allowlist(cfg.allowlist);
-    Some(Arc::new(redactor))
-}
+pub use atman_runtime::atman_runtime::{build_redactor, load_redact_config};
 
 pub(crate) fn resolve_config_hub(
     config_dir: Option<&Path>,
@@ -320,36 +292,14 @@ pub fn attach_memory_stores_with_redactor(
     todos_watch: tokio::sync::watch::Sender<Vec<atman_runtime::memory::todo::Todo>>,
     plans_watch: tokio::sync::watch::Sender<Vec<atman_runtime::memory::plan::Plan>>,
 ) {
-    let confession_root = project_scope_root.join("confessions");
-    let spec_root = project_scope_root.join("specs");
-    let _ = std::fs::create_dir_all(&confession_root);
-    let _ = std::fs::create_dir_all(&spec_root);
     let todo_store =
         Arc::new(atman_runtime::memory::todo::TodoStore::at(session_dir).with_notify(todos_watch));
     let goal_store =
         Arc::new(atman_runtime::memory::goal::GoalStore::at(session_dir).with_notify(goal_watch));
     let plan_store =
         Arc::new(atman_runtime::memory::plan::PlanStore::at(session_dir).with_notify(plans_watch));
-    let mut confession_store =
-        atman_runtime::memory::confession::ConfessionStore::at(&confession_root);
-    let mut spec_store = atman_runtime::memory::spec::SpecStore::new(spec_root);
-    if let Some(idx) = &project_index {
-        confession_store = confession_store.with_index(idx.clone());
-        spec_store = spec_store.with_index(idx.clone());
-    }
-    if let Some(r) = &redactor {
-        confession_store = confession_store.with_redactor(r.clone());
-    }
-    let confession_store = Arc::new(confession_store);
-    let spec_store = Arc::new(spec_store);
-    tools::register_memory(
-        &executor.tools,
-        todo_store,
-        confession_store,
-        goal_store,
-        plan_store,
-    );
-    tools::register_spec_memory(&executor.tools, spec_store);
+    tools::register_file_memory(&executor.tools, todo_store, goal_store, plan_store);
+    tools::register_project_memory(&executor.tools, project_scope_root, redactor, project_index);
 }
 
 pub fn default_config_dir() -> Result<PathBuf> {
@@ -366,7 +316,7 @@ mod tests {
     use atman_runtime::atman_runtime::{
         load_preview_config, load_sandbox_config, load_trust_config, load_web_config,
     };
-    use atman_runtime::config_hub::SandboxConfig;
+    use atman_runtime::config_hub::{RedactConfig, SandboxConfig};
     use atman_runtime::event::EventSink;
 
     #[test]

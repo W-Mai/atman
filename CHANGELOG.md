@@ -18,6 +18,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Project knowledge resources** — Runtime construction binds Confession and Spec tools to the selected project's storage root. Sessions and peer flows in that project share saved knowledge, while other projects remain isolated. CLI and daemon setup use the same registration path, including configured confession redaction and optional indexes; registration does not create directories.
+
 - **Runtime memory tools** — Runtime construction registers Goal, Plan, Todo, and history tools without requiring legacy session stores. Persistent calls resolve the current instance, and missing host bindings fail before accessing legacy state. Inline calls retain the current owner; spawned flows keep independent records across reopening.
 
 - **Project-bound flow execution** — Persistent flows verify project resources before scheduling or consuming input. CLI and daemon memory setup reuse the selected storage binding. Projectless runtimes load only explicit global rules, reject implicit working directories, and keep sandbox profiles tied to each operation's working directory.

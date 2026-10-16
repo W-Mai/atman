@@ -148,6 +148,144 @@ async fn runtime_projects_bind_rules_and_spawned_flows_without_borrowing_another
 }
 
 #[tokio::test]
+async fn runtime_project_knowledge_is_shared_by_peers_and_isolated_across_projects() {
+    use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};
+    use atman_runtime::{config_hub::ConfigHub, flow_store::SessionConfiguration};
+    let dir = tempfile::tempdir().unwrap();
+    let hub = ConfigHub::from_config_dir(dir.path());
+    std::fs::write(
+        dir.path().join("config.toml"),
+        "[redact]\nenabled = true\ncustom_patterns = [{ kind = 'sample', regex = 'TOKEN-[0-9]+' }]\n",
+    )
+    .unwrap();
+    let options = |project| AtmanRuntimeOptions {
+        events: atman_runtime::event::EventSink::new(),
+        mock: false,
+        config: hub.clone(),
+        project,
+        home_dir: None,
+        workspace_generation: "project-knowledge".into(),
+    };
+    let projectless = AtmanRuntime::build(options(None)).await.unwrap();
+    for name in [
+        "memory.confess",
+        "memory.fetch_confessions",
+        "memory.spec.read",
+    ] {
+        assert!(projectless.executor.tools.get(name).is_none());
+    }
+    let reader = r#"
+        flow read() -> any {
+            return [memory.fetch_confessions(), memory.spec.read(feature: "shared")]
+        }
+    "#;
+    let helper = format!(
+        r#"
+        flow write(label: string) -> any {{
+            memory.confess(trigger: label, rule_violated: "rule", what_i_did: "TOKEN-42",
+                why: "test", mitigation: "review")
+            memory.spec.update(feature: "shared", phase: "research", content: label)
+            return read().await
+        }}
+        {reader}
+    "#
+    );
+    let child_path = dir.path().join("knowledge.at");
+    std::fs::write(
+        &child_path,
+        format!("flow child() -> any {{ return write(\"child\").await }}\n{helper}"),
+    )
+    .unwrap();
+    let reference = serde_json::to_string(&format!("{}@child", child_path.display())).unwrap();
+    let root = RuntimeStore::open(&dir.path().join("runtime")).unwrap();
+    let host = RuntimeHost::default();
+    for label in ["alpha", "beta"] {
+        let project = tempfile::tempdir().unwrap();
+        let binding = atman_runtime::storage::ProjectContext::resolve(
+            &hub,
+            project.path(),
+            &dir.path().join("data"),
+        )
+        .unwrap();
+        let runtime = AtmanRuntime::build(options(Some(binding.clone())))
+            .await
+            .unwrap();
+        assert!(
+            !binding.storage_root().exists(),
+            "registration must not create knowledge directories"
+        );
+        let mut info = session_descriptor();
+        info.project = Some(binding.clone());
+        info.configuration = SessionConfiguration::Atman(hub.source());
+        let session = host
+            .attach_session(root.create_session(info.clone()).unwrap())
+            .unwrap();
+        let source = format!(
+            r#"
+            flow main() -> any {{
+                contract {{ capabilities {{ shell: true }} }}
+                write("{label}").await
+                inventory = flow.instances()
+                child = flow.spawn(flow: {reference}, spawn_token: inventory.spawn_token, async: false)
+                return [child, read().await]
+            }}
+            {helper}
+        "#
+        );
+        let worker = session
+            .create_flow(program_descriptor(info.id, source))
+            .await
+            .unwrap();
+        change(&worker, FlowTransition::Activated).await;
+        let result = invoke(&worker, runtime.executor.clone())
+            .await
+            .result
+            .unwrap()
+            .to_json()
+            .unwrap();
+        assert_eq!(result[0], result[1], "peers share the project's knowledge");
+        let confessions = result[0][0].as_array().unwrap();
+        assert_eq!(confessions.len(), 2);
+        assert_eq!(confessions[0]["trigger"], label);
+        assert_eq!(confessions[1]["trigger"], "child");
+        assert!(
+            confessions
+                .iter()
+                .all(|item| item["what_i_did"] == "<REDACTED:sample>")
+        );
+        let entries = result[0][1]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["content"], label);
+        assert_eq!(entries[1]["content"], "child");
+        drop(runtime);
+        let restored = AtmanRuntime::build(options(Some(binding))).await.unwrap();
+        let mut other_info = info.clone();
+        other_info.id = Uuid::new_v4();
+        let other_session = host
+            .attach_session(root.create_session(other_info.clone()).unwrap())
+            .unwrap();
+        let other = other_session
+            .create_flow(program_descriptor(
+                other_info.id,
+                format!("flow main() -> any {{ return read().await }}\n{reader}"),
+            ))
+            .await
+            .unwrap();
+        change(&other, FlowTransition::Activated).await;
+        let recovered = invoke(&other, restored.executor)
+            .await
+            .result
+            .unwrap()
+            .to_json()
+            .unwrap();
+        assert_eq!(
+            recovered, result[0],
+            "another session uses the same saved project knowledge"
+        );
+    }
+}
+
+#[tokio::test]
 async fn persistent_configuration_is_checked_before_scheduling_or_consuming_input() {
     use atman_runtime::config_hub::ConfigHub;
     use atman_runtime::flow_store::SessionConfiguration;

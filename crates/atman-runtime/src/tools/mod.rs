@@ -230,7 +230,24 @@ pub fn register_memory(
     goal_store: Arc<crate::memory::goal::GoalStore>,
     plan_store: Arc<crate::memory::plan::PlanStore>,
 ) {
+    register_file_memory(reg, todo_store, goal_store, plan_store);
+    register_confession_memory(reg, confession_store);
+}
+
+/// Register file-backed goals and planning for a non-instance session.
+pub fn register_file_memory(
+    reg: &ToolRegistry,
+    todo_store: Arc<crate::memory::todo::TodoStore>,
+    goal_store: Arc<crate::memory::goal::GoalStore>,
+    plan_store: Arc<crate::memory::plan::PlanStore>,
+) {
     register_flow_memory_with_stores(reg, Some(todo_store), Some(goal_store), Some(plan_store));
+}
+
+fn register_confession_memory(
+    reg: &ToolRegistry,
+    confession_store: Arc<crate::memory::confession::ConfessionStore>,
+) {
     reg.register(Arc::new(memory::MemoryConfess {
         store: confession_store.clone(),
     }));
@@ -292,6 +309,27 @@ fn legacy_memory_store<T>(store: &Option<Arc<T>>) -> Result<&T, crate::RuntimeEr
             "memory requires an admitted flow invocation or an explicit legacy store".into(),
         )
     })
+}
+
+/// Register project knowledge from an explicit storage root without creating directories.
+pub fn register_project_memory(
+    reg: &ToolRegistry,
+    storage_root: &std::path::Path,
+    redactor: Option<Arc<crate::redact::Redactor>>,
+    index: Option<Arc<crate::index::AnchorIndex>>,
+) {
+    let mut confessions =
+        crate::memory::confession::ConfessionStore::at(storage_root.join("confessions"));
+    let mut specs = crate::memory::spec::SpecStore::new(storage_root.join("specs"));
+    if let Some(index) = index {
+        confessions = confessions.with_index(index.clone());
+        specs = specs.with_index(index);
+    }
+    if let Some(redactor) = redactor {
+        confessions = confessions.with_redactor(redactor);
+    }
+    register_confession_memory(reg, Arc::new(confessions));
+    register_spec_memory(reg, Arc::new(specs));
 }
 
 pub fn register_spec_memory(reg: &ToolRegistry, spec_store: Arc<crate::memory::spec::SpecStore>) {
