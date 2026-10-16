@@ -1,4 +1,8 @@
-use std::{num::NonZeroUsize, path::Path, sync::Arc};
+use std::{
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, ensure};
 use atman_proto::flows::{
@@ -29,6 +33,7 @@ impl SessionService {
         &self,
         state: &Arc<DaemonState>,
         descriptor: &SessionDescriptor,
+        home_dir: Option<PathBuf>,
     ) -> Result<Executor> {
         let slot = self
             .executors
@@ -50,9 +55,7 @@ impl SessionService {
                     mock: false,
                     config,
                     project: descriptor.project.clone(),
-                    home_dir: state
-                        .launcher()
-                        .and_then(|launcher| launcher.home_dir.clone()),
+                    home_dir,
                     workspace_generation: state.daemon_generation().to_owned(),
                 })
                 .await?;
@@ -74,6 +77,7 @@ impl SessionService {
         state: &Arc<DaemonState>,
         session: &SessionDescriptor,
         descriptor: &FlowDescriptor,
+        home_dir: Option<PathBuf>,
     ) -> Result<(
         Executor,
         EffectiveAuthority,
@@ -96,7 +100,7 @@ impl SessionService {
                 .as_ref()
                 .map(|project| project.root().to_path_buf()),
         );
-        let executor = self.executor(state, session).await?;
+        let executor = self.executor(state, session, home_dir).await?;
         if let Err(errors) = atman_runtime::validate::validate(entry, &executor.tools) {
             anyhow::bail!(
                 "entry validation failed: {}",
@@ -121,7 +125,12 @@ impl SessionService {
         let worker = self.host.flow(&flow).await?;
         let descriptor = worker.descriptor().await?;
         let (executor, authority, trust) = self
-            .prepare_entry(state, &snapshot.catalog.descriptor, &descriptor)
+            .prepare_entry(
+                state,
+                &snapshot.catalog.descriptor,
+                &descriptor,
+                launcher_home(state),
+            )
             .await?;
         let status = session
             .bind_entry(
@@ -201,23 +210,52 @@ impl SessionService {
                 content: loaded.into(),
             }
         };
-        let (executor, authority, trust) = self
-            .prepare_entry(state, &snapshot.catalog.descriptor, &descriptor)
+        let launched = self
+            .activate_entry(
+                state,
+                snapshot,
+                PreparedEntry {
+                    descriptor,
+                    payload,
+                    initial_goal: request.initial_goal,
+                    session_start: false,
+                },
+                launcher_home(state),
+            )
             .await?;
-        // The creation request identifies the initial invocation in each typed identity domain.
+        Ok(json!({"flow": address(&flow), "acceptance": launched.record.acceptance}))
+    }
+
+    async fn activate_entry(
+        &self,
+        state: &Arc<DaemonState>,
+        snapshot: atman_runtime::flow_runtime::host::SessionSnapshot,
+        entry: PreparedEntry,
+        home_dir: Option<PathBuf>,
+    ) -> Result<atman_runtime::flow_runtime::launch::LaunchedFlow> {
+        let PreparedEntry {
+            descriptor,
+            payload,
+            initial_goal,
+            session_start,
+        } = entry;
+        let (executor, authority, trust) = self
+            .prepare_entry(state, &snapshot.catalog.descriptor, &descriptor, home_dir)
+            .await?;
+        let request_id = descriptor.creation_request;
         let input = LaunchInput {
             workspace: None,
-            initial_goal: request.initial_goal,
+            initial_goal,
             execution: Some(EntryBinding {
-                session_start: false,
-                first_turn: atman_rt::TurnId(request.request_id.into()),
-                first_run: atman_rt::RunId(request.request_id.into()),
+                session_start,
+                first_turn: atman_rt::TurnId(request_id.into()),
+                first_run: atman_rt::RunId(request_id.into()),
                 authority: authority.clone(),
             }),
             request: DeliveryRequest {
-                request_id: request.request_id,
+                request_id,
                 sender: SenderIdentity::User(OPERATOR),
-                recipient: flow.clone(),
+                recipient: descriptor.address.clone(),
                 delivery: DeliveryMode::NextTurn,
                 cause: None,
                 correlation: None,
@@ -227,7 +265,7 @@ impl SessionService {
             inherited_context: vec![],
             result_route: None,
         };
-        let launched = self
+        Ok(self
             .host
             .launch_entry(
                 descriptor,
@@ -241,8 +279,7 @@ impl SessionService {
                 },
                 |_, _| Ok(()),
             )
-            .await?;
-        Ok(json!({"flow": address(&flow), "acceptance": launched.record.acceptance}))
+            .await?)
     }
 
     pub(super) async fn invoke(&self, request: InvokeFlowRequest) -> Result<Value> {
@@ -319,4 +356,152 @@ fn config(descriptor: &SessionDescriptor) -> Result<ConfigHub> {
         anyhow::bail!("session requires an explicit Atman configuration source to execute");
     };
     Ok(ConfigHub::from_source(source)?)
+}
+
+struct PreparedEntry {
+    descriptor: FlowDescriptor,
+    payload: InboxPayload,
+    initial_goal: Option<String>,
+    session_start: bool,
+}
+
+fn launcher_home(state: &DaemonState) -> Option<PathBuf> {
+    state
+        .launcher()
+        .and_then(|launcher| launcher.home_dir.clone())
+}
+
+pub(crate) async fn launch_run(
+    state: Arc<DaemonState>,
+    launcher: crate::run::RunLauncher,
+    path: PathBuf,
+    args: Vec<(String, atman_runtime::Value)>,
+    options: crate::run::RunOptions,
+) -> Result<crate::run::SpawnedRun> {
+    use atman_runtime::{
+        ValueJson,
+        flow_store::{FlowInstanceId, FlowRef},
+    };
+    use uuid::Uuid;
+    ensure!(!state.is_stopping(), "daemon is stopping");
+    let hub = crate::bootstrap::resolve_config_hub(launcher.config_dir.as_deref())?;
+    let project = atman_runtime::storage::ProjectContext::resolve(
+        &hub,
+        &launcher.project_root,
+        state.data_dir(),
+    )?;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        project.root().join(path)
+    };
+    if crate::run::path_is_managed_agent_at(&path, Some(hub.config_dir())) {
+        atman_runtime::templates::ensure_managed_agent_at(hub.config_dir())?;
+    }
+    let mut session = SessionDescriptor {
+        id: Uuid::now_v7(),
+        title: String::new(),
+        project: Some(project),
+        configuration: SessionConfiguration::Atman(hub.source()),
+    };
+    let roots = session.source_roots();
+    let source_path = path.clone();
+    let program = tokio::task::spawn_blocking(move || load_program(&source_path, &roots)).await??;
+    let flow = program
+        .entry_file()
+        .flows
+        .first()
+        .context("source contains no flows")?;
+    let initial_goal = if options.goal {
+        ensure!(
+            atman_runtime::goal::is_managed(flow),
+            "goal.run requires a managed agent invocation contract"
+        );
+        let parameter = atman_runtime::validate::invocation_message_parameter(flow)?
+            .context("goal.run requires an invocation user_message parameter")?;
+        Some(
+            args.iter()
+                .find_map(|(name, value)| match value {
+                    atman_runtime::Value::Str(text)
+                        if name == parameter && !text.trim().is_empty() =>
+                    {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+                .with_context(|| format!("goal.run requires a non-empty {parameter} argument"))?,
+        )
+    } else {
+        None
+    };
+    session.title = flow.name.name.clone();
+    let text = if args.is_empty() {
+        session.title.clone()
+    } else {
+        args.iter()
+            .map(|(name, value)| format!("{name}={}", crate::run::render_value(value)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut arguments = std::collections::BTreeMap::new();
+    for (name, value) in args {
+        ensure!(
+            arguments.insert(name.clone(), value.to_json()?).is_none(),
+            "duplicate argument: {name}"
+        );
+    }
+    let env = crate::run::invocation_env_from_reasoning(options.reasoning)?;
+    let invocation = env
+        .values()
+        .map(|(name, value)| Ok((name.to_owned(), value.to_json()?)))
+        .collect::<Result<_, atman_runtime::RuntimeError>>()?;
+    let user = user_content(Some(&atman_proto::flows::FlowUserContent {
+        text,
+        images: options.images,
+    }))?;
+    let descriptor = FlowDescriptor {
+        address: FlowRef {
+            session_id: session.id.into(),
+            instance_id: FlowInstanceId::now(),
+        },
+        creation_request: Uuid::now_v7(),
+        created_by: None,
+        content: EntrySnapshot {
+            name: session.title.clone(),
+            path,
+            bundle: program.revision_bundle(),
+        }
+        .into(),
+    };
+    let session_id = atman_proto::SessionId(session.id);
+    let instance_id = descriptor.address.instance_id.0.0;
+    let run_id = atman_proto::FlowRunId(descriptor.creation_request);
+    let service = super::service_with_config(&state, Some(hub.config_dir()));
+    let handle = service.attach(session.id, Some(session)).await?;
+    let launched = service
+        .activate_entry(
+            &state,
+            handle.snapshot().await?,
+            PreparedEntry {
+                descriptor,
+                payload: InboxPayload::Invocation {
+                    user,
+                    arguments,
+                    invocation,
+                },
+                initial_goal,
+                session_start: true,
+            },
+            launcher.home_dir,
+        )
+        .await?;
+    let goal_id = options
+        .goal
+        .then(|| launched.record.acceptance.message_id.to_string());
+    Ok(crate::run::SpawnedRun {
+        session_id,
+        instance_id,
+        run_id,
+        goal_id,
+    })
 }

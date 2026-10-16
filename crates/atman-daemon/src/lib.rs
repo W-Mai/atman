@@ -471,6 +471,7 @@ pub async fn dispatch_as(
                         Ok(spawned) => {
                             let resp = RunFlowResponse {
                                 session_id: spawned.session_id,
+                                instance_id: spawned.instance_id,
                                 run_id: spawned.run_id,
                             };
                             match serde_json::to_value(&resp) {

@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Daemon run storage** — `run_flow` and `goal.run` create persistent flow instances through the shared scheduler. Run responses include `instance_id`; completed turns leave instances idle and addressable. Entry flows explicitly schedule Goal continuation.
+
 - **Daemon execution targeting** — Goal reads, approvals, and event streams resolve the default persistent flow. Run cancellation verifies the active invocation identity and caller; `DaemonState::cancel_run` is asynchronous and returns errors explicitly.
 
 - **Persistent Goal control** — Daemon Goal methods address explicit flow instances with request identities and revision checks. User resume commits the objective change and one next-turn input atomically, preserving execution pauses and retry receipts.

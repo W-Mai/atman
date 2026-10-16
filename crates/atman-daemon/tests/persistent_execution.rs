@@ -114,22 +114,21 @@ async fn daemon_shutdown_drains_execution_and_ends_connected_streams_without_los
     let mut stream = response.into_body().into_data_stream();
     assert!(stream.next().await.unwrap().is_ok());
 
-    let path = dir.path().join("legacy.at");
+    let path = dir.path().join("direct.at");
     std::fs::write(&path, "flow main() -> any { loop { yield } }").unwrap();
-    let legacy = state
+    let direct = state
         .launcher()
         .unwrap()
         .spawn(state.clone(), path.to_str().unwrap(), vec![])
         .await
         .unwrap();
-    let context = state.live_session(&legacy.session_id).unwrap();
+    let direct_flow = json!({"session_id": direct.session_id, "instance_id": direct.instance_id});
     tokio::time::timeout(Duration::from_secs(10), async {
-        while !context
-            .sink()
-            .snapshot()
-            .iter()
-            .any(|event| matches!(event, atman_runtime::Event::FlowStart { .. }))
-        {
+        loop {
+            let view = rpc(&state, methods::FLOW_GET, json!({"flow": direct_flow})).await;
+            if view["execution"]["state"]["open"]["active"].is_object() {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -141,14 +140,6 @@ async fn daemon_shutdown_drains_execution_and_ends_connected_streams_without_los
         .unwrap()
         .unwrap();
     state.shutdown().await.unwrap();
-    assert!(state.live_session(&legacy.session_id).is_none());
-    assert!(
-        context
-            .sink()
-            .snapshot()
-            .iter()
-            .any(|event| matches!(event, atman_runtime::Event::FlowEnd { .. }))
-    );
     tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(chunk) = stream.next().await {
             chunk.unwrap();
@@ -163,6 +154,14 @@ async fn daemon_shutdown_drains_execution_and_ends_connected_streams_without_los
     .await;
     assert!(rejected.error.unwrap().message.contains("stopping"));
     let root = atman_runtime::flow_store::RuntimeStore::open(&dir.path().join("data")).unwrap();
+    let direct_session = root.open_session(direct.session_id.0).unwrap();
+    let direct_worker = direct_session
+        .open_flow(&atman_rt::FlowInstanceId(direct.instance_id.into()))
+        .unwrap();
+    assert_eq!(
+        direct_worker.completion(None).unwrap().completion.outcome,
+        atman_rt::TurnOutcome::Interrupted(atman_rt::Interruption::Cancelled)
+    );
     let session = root
         .open_session(serde_json::from_value(flow["session_id"].clone()).unwrap())
         .unwrap();

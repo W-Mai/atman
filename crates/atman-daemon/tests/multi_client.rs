@@ -112,6 +112,7 @@ async fn multi_client_run_and_sse_stream_share_session() {
     );
 
     drop(stream);
+    daemon.shutdown().await.unwrap();
     shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
 }

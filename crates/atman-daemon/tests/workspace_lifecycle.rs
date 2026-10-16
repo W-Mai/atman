@@ -1,11 +1,12 @@
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use atman_daemon::{DaemonState, run::RunLauncher};
-use atman_proto::SessionStatus;
+use atman_daemon::{DaemonState, dispatch, run::RunLauncher};
+use atman_proto::{JsonRpcRequest, SessionStatus, methods};
 use atman_runtime::git_workspace::{WorkspaceManager, WorkspaceState};
+use serde_json::{Value, json};
 
 const DAEMON_GENERATION: &str = "daemon-s7-generation";
 
@@ -49,7 +50,7 @@ async fn launcher_runs_child_flow_in_dirty_managed_workspace() {
     .unwrap();
 
     let state = Arc::new(DaemonState::new_with_generation(
-        data_dir,
+        data_dir.clone(),
         DAEMON_GENERATION.into(),
     ));
     let launcher = RunLauncher::new(project_root.clone(), Some(config_dir), None).unwrap();
@@ -58,7 +59,21 @@ async fn launcher_runs_child_flow_in_dirty_managed_workspace() {
         .await
         .unwrap();
 
-    wait_for_finished_session(&state, &spawned.session_id).await;
+    let flow = json!({"session_id": spawned.session_id, "instance_id": spawned.instance_id});
+    let completed = wait_completion(&state, &flow, None).await;
+    assert_eq!(
+        completed["last_completion"]["result"]["value"]["value"],
+        "done"
+    );
+    let listed = state.list_sessions().await.unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .find(|s| s.id == spawned.session_id)
+            .unwrap()
+            .status,
+        SessionStatus::Idle
+    );
 
     assert!(
         !project_root.join("child.txt").exists(),
@@ -74,13 +89,15 @@ async fn launcher_runs_child_flow_in_dirty_managed_workspace() {
         record.owner_session.as_deref(),
         Some(spawned.session_id.to_string().as_str())
     );
-    let child_run_id = record.owner_flow.as_deref().expect("workspace owner flow");
-    uuid::Uuid::parse_str(child_run_id).expect("owner flow is a runtime-generated FlowRunId");
-    assert_ne!(child_run_id, spawned.run_id.to_string());
-    assert_eq!(record.lifecycle_state(), WorkspaceState::Dirty);
+    let child_instance_id = record.owner_flow.as_deref().expect("workspace owner flow");
+    uuid::Uuid::parse_str(child_instance_id)
+        .expect("owner flow is a runtime-generated FlowInstanceId");
+    assert_ne!(child_instance_id, spawned.instance_id.to_string());
+    assert_eq!(record.lifecycle_state(), WorkspaceState::Bound);
+    assert!(record.is_instance_bound());
     assert!(
         record.lease.is_none(),
-        "terminal workspace kept an active lease"
+        "persistent workspace must not depend on a process lease"
     );
     assert!(record.worktree_path.exists(), "dirty worktree was removed");
     assert_eq!(
@@ -88,61 +105,96 @@ async fn launcher_runs_child_flow_in_dirty_managed_workspace() {
         "written in managed workspace\n"
     );
 
-    let events_path = state
-        .sessions_root()
-        .join(spawned.session_id.to_string())
-        .join("events.jsonl");
-    let events = read_events(&events_path);
-    assert!(events.iter().any(|event| {
-        event["type"] == "flow_end"
-            && event["run_id"] == spawned.run_id.to_string()
-            && event["status"]["kind"] == "ok"
-    }));
-    assert!(events.iter().any(|event| {
-        event["type"] == "flow_start"
-            && event["run_id"] == child_run_id
-            && event["parent_run_id"] == spawned.run_id.to_string()
-            && event["spawned"] == true
-    }));
-    assert!(events.iter().any(|event| {
-        event["type"] == "flow_end"
-            && event["run_id"] == child_run_id
-            && event["status"]["kind"] == "ok"
-    }));
-    assert!(events.iter().any(|event| {
-        event["type"] == "workspace_lifecycle"
-            && event["run_id"] == child_run_id
-            && event["workspace_id"] == record.id
-            && event["path"] == record.worktree_path.display().to_string()
-            && event["state"] == "dirty"
-            && event.get("cleanup_error").is_none()
-    }));
-}
-
-async fn wait_for_finished_session(state: &Arc<DaemonState>, session_id: &atman_proto::SessionId) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let finished = state
-            .list_sessions()
-            .await
+    let child = json!({"session_id": spawned.session_id, "instance_id": child_instance_id});
+    let child_before = wait_completion(&state, &child, None).await;
+    assert_eq!(
+        child_before["last_completion"]["result"]["value"]["value"],
+        "done"
+    );
+    assert!(
+        !state
+            .sessions_root()
+            .join(spawned.session_id.to_string())
+            .join("events.jsonl")
+            .exists()
+    );
+    let original = rpc(
+        &state,
+        methods::FLOW_EVENTS,
+        json!({"flow": child, "limit": 100}),
+    )
+    .await;
+    state.shutdown().await.unwrap();
+    assert!(record.worktree_path.exists());
+    std::fs::remove_file(&child_path).unwrap();
+    std::fs::remove_file(&root_path).unwrap();
+    let reopened = Arc::new(DaemonState::new(data_dir));
+    rpc(
+        &reopened,
+        methods::SESSION_OPEN,
+        json!({"session_id": spawned.session_id}),
+    )
+    .await;
+    assert_eq!(
+        rpc(
+            &reopened,
+            methods::FLOW_EVENTS,
+            json!({"flow": child, "limit": 100})
+        )
+        .await,
+        original
+    );
+    rpc(&reopened, methods::FLOW_BIND, json!({"flow": child})).await;
+    rpc(&reopened, methods::FLOW_INVOKE, json!({"flow": child, "request_id": uuid::Uuid::now_v7(), "arguments": {}, "invocation": {}})).await;
+    let second = wait_completion(
+        &reopened,
+        &child,
+        Some(&child_before["last_completion"]["lease"]["turn"]),
+    )
+    .await;
+    assert_eq!(
+        second["last_completion"]["result"]["value"]["value"],
+        "done"
+    );
+    assert_ne!(
+        second["last_completion"]["lease"]["run"],
+        child_before["last_completion"]["lease"]["run"]
+    );
+    assert_eq!(
+        WorkspaceManager::at(&project_root, None)
             .unwrap()
-            .into_iter()
-            .find(|session| &session.id == session_id)
-            .is_some_and(|session| session.status == SessionStatus::Finished);
-        if finished {
-            return;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for launcher");
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+            .get(&record.id)
+            .unwrap(),
+        *record
+    );
+    assert!(!project_root.join("child.txt").exists());
+    reopened.shutdown().await.unwrap();
 }
 
-fn read_events(path: &Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(path)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect()
+async fn rpc(state: &Arc<DaemonState>, method: &str, params: Value) -> Value {
+    let response = dispatch(state.clone(), JsonRpcRequest::new(1, method, params)).await;
+    assert!(response.error.is_none(), "{method}: {:?}", response.error);
+    response.result.unwrap()
+}
+
+async fn wait_completion(
+    state: &Arc<DaemonState>,
+    flow: &Value,
+    previous: Option<&Value>,
+) -> Value {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let view = rpc(state, methods::FLOW_GET, json!({"flow": flow})).await;
+            let completion = &view["last_completion"];
+            if !completion.is_null() && previous != Some(&completion["lease"]["turn"]) {
+                assert_eq!(completion["result"]["kind"], "returned", "{view}");
+                return view;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("persistent entry should complete")
 }
 
 fn init_repo(path: &Path) {

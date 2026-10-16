@@ -239,6 +239,7 @@ pub struct InlineImage {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RunFlowResponse {
     pub session_id: SessionId,
+    pub instance_id: Uuid,
     pub run_id: FlowRunId,
 }
 

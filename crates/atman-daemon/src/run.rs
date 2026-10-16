@@ -1,17 +1,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use atman_proto::{FlowRunId as ProtoRunId, SessionId as ProtoSessionId};
 use atman_rt::Value as CoreValue;
 
-type RuntimeRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
-
-use crate::state::{DaemonState, LiveSession};
+use crate::state::DaemonState;
 
 type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
-fn render_value(v: &Value) -> String {
+pub(crate) fn render_value(v: &Value) -> String {
     match v {
         Value::Str(s) => s.clone(),
         Value::Int(n) => n.to_string(),
@@ -22,6 +20,7 @@ fn render_value(v: &Value) -> String {
     }
 }
 
+#[derive(Clone)]
 pub struct RunLauncher {
     pub project_root: PathBuf,
     pub config_dir: Option<PathBuf>,
@@ -30,6 +29,7 @@ pub struct RunLauncher {
 
 pub struct SpawnedRun {
     pub session_id: ProtoSessionId,
+    pub instance_id: uuid::Uuid,
     pub run_id: ProtoRunId,
     pub goal_id: Option<String>,
 }
@@ -99,7 +99,7 @@ pub struct RunOptions {
     pub images: Vec<atman_proto::InlineImage>,
 }
 
-fn invocation_env_from_reasoning(
+pub(crate) fn invocation_env_from_reasoning(
     reasoning: Option<String>,
 ) -> Result<atman_runtime::InvocationEnv> {
     match reasoning {
@@ -113,40 +113,6 @@ fn invocation_env_from_reasoning(
             ))
         }
         None => Ok(atman_runtime::InvocationEnv::default()),
-    }
-}
-
-fn queue_run_images(
-    session: &atman_runtime::Session,
-    images: Vec<atman_proto::InlineImage>,
-) -> Result<()> {
-    for image in images {
-        session.queue_image_base64(&image.data_base64, image.name.as_deref())?;
-    }
-    Ok(())
-}
-
-struct RegistryCleanup {
-    state: Arc<DaemonState>,
-    session_id: ProtoSessionId,
-}
-
-fn spawn_with_provider_lifecycle(
-    builder: std::thread::Builder,
-    provider_lifecycle: atman_runtime::ProviderLifecycle,
-    body: impl FnOnce() + Send + 'static,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    builder.spawn(move || {
-        let provider_lifecycle_owner = provider_lifecycle;
-        body();
-        drop(provider_lifecycle_owner);
-    })
-}
-
-impl Drop for RegistryCleanup {
-    fn drop(&mut self) {
-        self.state.deregister_broker(&self.session_id);
-        self.state.deregister_live(&self.session_id);
     }
 }
 
@@ -231,419 +197,16 @@ impl RunLauncher {
         owner_principal: &str,
         options: RunOptions,
     ) -> Result<SpawnedRun> {
+        crate::flow_service::authorize_operator(owner_principal)
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let launcher = self.clone();
         let path = PathBuf::from(flow_path);
-        std::fs::metadata(&path).with_context(|| format!("stat flow {}", path.display()))?;
-        let RunOptions {
-            reasoning,
-            images,
-            goal,
-        } = options;
-        let objective = if goal {
-            if path_is_managed_agent_at(&path, self.config_dir.as_deref())
-                && let Some(dir) = &self.config_dir
-            {
-                atman_runtime::templates::ensure_managed_agent_at(dir)?;
-            }
-            let program = atman_runtime::source_program::load_program(
-                &path,
-                &atman_runtime::source_program::SourceRoots {
-                    project_root: Some(self.project_root.clone()),
-                    config_dir: self.config_dir.clone(),
-                },
-            )?;
-            if !program
-                .entry_file()
-                .flows
-                .first()
-                .is_some_and(atman_runtime::goal::is_managed)
-            {
-                anyhow::bail!("goal.run requires a managed agent invocation contract");
-            }
-            let parameter = program.entry_file().flows[0]
-                .contract
-                .as_ref()
-                .and_then(|c| c.blocks.iter().find(|b| b.name.name == "invocation"))
-                .and_then(|b| b.kwargs.iter().find(|(n, _)| n.name == "user_message"))
-                .and_then(|(_, v)| match v {
-                    atman_rt::ast::Expr::Ident(name) => Some(name.name.as_str()),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    anyhow::anyhow!("goal.run requires an invocation user_message parameter")
-                })?;
-            Some(
-                args.iter()
-                    .find_map(|(name, value)| match value {
-                        Value::Str(text) if name == parameter && !text.trim().is_empty() => {
-                            Some(text.clone())
-                        }
-                        _ => None,
-                    })
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("goal.run requires a non-empty {parameter} argument")
-                    })?,
-            )
-        } else {
-            None
-        };
-        let invocation_env = invocation_env_from_reasoning(reasoning)?;
-
-        reload_model_config(self.config_dir.as_deref());
-        let provider_lifecycle = state.provider_lifecycle_for(self.config_dir.as_deref())?;
-        let provider_catalog_refresh = ProviderCatalogRefreshDispatcher {
-            runtime: tokio::runtime::Handle::current(),
-            lifecycle: provider_lifecycle.clone(),
-        };
-
-        let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
-        let hub = match &self.config_dir {
-            Some(dir) => atman_runtime::config_hub::ConfigHub::from_config_dir(dir),
-            None => atman_runtime::config_hub::ConfigHub::global()
-                .map_err(|error| anyhow::anyhow!("resolve config hub: {error}"))?,
-        };
-        let project = atman_runtime::storage::ProjectContext::resolve(
-            &hub,
-            &self.project_root,
-            state.data_dir(),
-        )?;
-        let scope_root = project.storage_root();
-        let project_index = match atman_runtime::index::AnchorIndex::open_project(scope_root) {
-            Ok(idx) => Some(std::sync::Arc::new(idx)),
-            Err(e) => {
-                atman_runtime::notify!(
-                    warn,
-                    "project index unavailable at {}: {e}",
-                    scope_root.display()
-                );
-                None
-            }
-        };
-        let trust = hub.trust_config().context("load global trust config")?;
-        let session = std::sync::Arc::new(
-            atman_runtime::Session::open_with_context_and_trust(
-                state.data_dir(),
-                redactor,
-                project_index,
-                trust,
-            )
-            .with_context(|| format!("opening session under {}", state.data_dir().display()))?,
-        );
-        queue_run_images(&session, images)?;
-        if let Some(objective) = objective {
-            session.goal_control.set(&objective, None)?;
-        }
-        let goal_id = session.goal_control.record().map(|g| g.id);
-        let sid_proto = ProtoSessionId(session.id().0);
-        let run_id_runtime = RuntimeRunId::now();
-        let run_id_proto: ProtoRunId = run_id_runtime.clone().into();
-
-        let cancel = session.flow_cancel_token();
-        state.register_broker(sid_proto.clone(), session.clone(), owner_principal);
-        let registered = state.register_live(
-            sid_proto.clone(),
-            LiveSession {
-                run_id: run_id_proto.clone(),
-                flow_name: String::new(),
-                cancel,
-                started_at: chrono::Utc::now(),
-            },
-        );
-        if let Err(error) = registered {
-            state.deregister_live(&sid_proto);
-            session.shutdown().await;
-            return Err(error);
-        }
-
-        let config_dir = self.config_dir.clone();
-        let home_dir = self.home_dir.clone();
-        let state_for_task = state.clone();
-        let sid_for_task = sid_proto.clone();
-
-        let spawn_result = spawn_with_provider_lifecycle(
-            std::thread::Builder::new().name(format!("atman-run-{}", sid_proto)),
-            provider_lifecycle,
-            move || {
-                let _cleanup = RegistryCleanup {
-                    state: state_for_task.clone(),
-                    session_id: sid_for_task.clone(),
-                };
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(error) => {
-                        atman_runtime::notify!(error, "build flow runtime failed: {error:#}");
-                        state_for_task.deregister_broker(&sid_for_task);
-                        state_for_task.deregister_live(&sid_for_task);
-                        return;
-                    }
-                };
-                let state_for_run = state_for_task.clone();
-                rt.block_on(async move {
-                    if let Err(e) = run_flow_inner(
-                        session.clone(),
-                        &path,
-                        args,
-                        run_id_runtime,
-                        project,
-                        config_dir,
-                        home_dir,
-                        Some(state_for_run),
-                        provider_catalog_refresh,
-                        invocation_env,
-                        goal,
-                    )
-                    .await
-                    {
-                        atman_runtime::notify!(error, "flow run failed: {e:#}");
-                    }
-                    state_for_task.deregister_broker(&sid_for_task);
-                    session.shutdown().await;
-                    state_for_task.deregister_live(&sid_for_task);
-                });
-            },
-        );
-        if let Err(error) = spawn_result {
-            state.deregister_broker(&sid_proto);
-            state.deregister_live(&sid_proto);
-            return Err(error).context("spawn run thread");
-        }
-
-        Ok(SpawnedRun {
-            goal_id,
-            session_id: sid_proto,
-            run_id: run_id_proto,
-        })
+        // The daemon retains accepted creation work if its RPC waiter disconnects.
+        tokio::spawn(crate::flow_service::launch_run(
+            state, launcher, path, args, options,
+        ))
+        .await?
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_flow_inner(
-    session: std::sync::Arc<atman_runtime::Session>,
-    path: &std::path::Path,
-    args: Vec<(String, Value)>,
-    run_id: RuntimeRunId,
-    project: atman_runtime::storage::ProjectContext,
-    config_dir: Option<PathBuf>,
-    home_dir: Option<PathBuf>,
-    daemon_state: Option<Arc<crate::DaemonState>>,
-    provider_catalog_refresh: ProviderCatalogRefreshDispatcher,
-    invocation_env: atman_runtime::InvocationEnv,
-    drive_goal: bool,
-) -> Result<()> {
-    let owner_cancel = session.flow_cancel_token();
-    let project_root = project.root().to_path_buf();
-    if path_is_managed_agent_at(path, config_dir.as_deref()) {
-        if let Some(dir) = &config_dir {
-            atman_runtime::templates::ensure_managed_agent_at(dir)?;
-        }
-    }
-    let program = atman_runtime::source_program::load_program(
-        path,
-        &atman_runtime::source_program::SourceRoots {
-            project_root: Some(project_root.clone()),
-            config_dir: config_dir.clone(),
-        },
-    )?;
-    let parsed = program.entry_file();
-    if parsed.flows.is_empty() {
-        anyhow::bail!("{} contains no flows", path.display());
-    }
-    let flow_name = parsed.flows[0].name.name.clone();
-
-    let workspace_generation = daemon_state
-        .as_ref()
-        .map(|state| state.daemon_generation().to_owned())
-        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-    let outcome = atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
-        events: session.sink().clone(),
-        mock: false,
-        config: crate::bootstrap::resolve_config_hub(config_dir.as_deref())?,
-        project: Some(project.clone()),
-        home_dir,
-        workspace_generation,
-    })
-    .await?;
-    provider_catalog_refresh.dispatch(outcome.provider_catalog_refresh_plan);
-    let mut executor = outcome.executor;
-    executor.source_dir = path.parent().map(|p| p.to_path_buf());
-
-    let lifecycles = match &config_dir {
-        Some(c) => atman_runtime::lifecycle::LifecycleRunner::from_dir(c),
-        None => atman_runtime::lifecycle::LifecycleRunner::new(),
-    };
-
-    let redactor = crate::bootstrap::build_redactor(config_dir.as_deref());
-    crate::bootstrap::attach_memory_stores_with_redactor(
-        &mut executor,
-        session.dir(),
-        project.storage_root(),
-        redactor,
-        session.project_index(),
-        session.goal_watch().clone(),
-        session.todos_watch().clone(),
-        session.plans_watch().clone(),
-    );
-    if let Some(state) = daemon_state {
-        executor.tool_ctx.prompt_resolver = Some(Arc::new(
-            crate::prompt_bridge::DaemonPromptResolver::new(&state),
-        ));
-    }
-    let (lifecycle_tx, mut lifecycle_rx) =
-        tokio::sync::mpsc::unbounded_channel::<atman_rt::ast::LifecycleEvent>();
-    executor.tool_ctx.lifecycle_fire_tx = Some(lifecycle_tx);
-
-    let target_flow = parsed
-        .flows
-        .iter()
-        .find(|f| f.name.name == flow_name)
-        .ok_or_else(|| anyhow::anyhow!("flow `{flow_name}` not found in {}", path.display()))?;
-    if let Err(errs) = atman_runtime::validate::validate(target_flow, &executor.tools) {
-        anyhow::bail!(
-            "flow validation failed: {}",
-            errs.iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
-    }
-
-    lifecycles
-        .fire(&executor, atman_rt::ast::LifecycleEvent::SessionStart)
-        .await;
-
-    let mut turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
-    let recipe = atman_runtime::goal::GoalTurn {
-        program: program.clone(),
-        flow_name: flow_name.clone(),
-        args: args.clone(),
-        env: invocation_env.clone(),
-    };
-    let mut turn_args = args;
-    let mut next_run_id = Some(run_id);
-    let mut goal_changes = session.goal_control.subscribe();
-    let mut failure = None;
-    let user_text = if turn_args.is_empty() {
-        flow_name.clone()
-    } else {
-        turn_args
-            .iter()
-            .map(|(k, v)| format!("{k}={}", render_value(v)))
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let mut parts: Vec<atman_runtime::message::MessagePart> = session
-        .take_pending_images()
-        .into_iter()
-        .map(|source| atman_runtime::message::MessagePart::Image { source })
-        .collect();
-    parts.push(atman_runtime::message::MessagePart::Text {
-        text: user_text.clone(),
-    });
-    let user_msg = atman_runtime::message::Message {
-        role: atman_runtime::message::MessageRole::User,
-        parts,
-        turn_id: turn_id.clone(),
-        origin: atman_runtime::message::MessageOrigin::User,
-    };
-    {
-        let _compact_guard = session.acquire_compact_lock().await;
-        session.begin_turn(user_msg);
-    }
-    loop {
-        if owner_cancel.is_cancelled() {
-            session.cancel_flow();
-            session.end_turn();
-            break;
-        }
-        lifecycles
-            .fire(&executor, atman_rt::ast::LifecycleEvent::TurnStart)
-            .await;
-        let result = executor
-            .run_linked_with_invocation(
-                &program,
-                &flow_name,
-                turn_args,
-                atman_runtime::RootInvocation {
-                    turn_id: Some(turn_id.clone()),
-                    session: Some(session.clone()),
-                    first_run_id: next_run_id.take(),
-                    env: invocation_env.clone(),
-                    instance: None,
-                },
-            )
-            .await;
-        while let Ok(ev) = lifecycle_rx.try_recv() {
-            lifecycles.fire(&executor, ev).await;
-        }
-        lifecycles
-            .fire(&executor, atman_rt::ast::LifecycleEvent::TurnEnd)
-            .await;
-        session.end_turn();
-        if let Err(error) = &result
-            && session.goal_control.record().is_some()
-        {
-            let _ = session.goal_control.pause(
-                atman_runtime::memory::goal::GoalActor::Runtime,
-                atman_runtime::memory::goal::GoalPauseReason::RunFailed,
-                error.to_string(),
-                None,
-            );
-        }
-        if result.is_ok() && session.record_successful_flow().is_some() {
-            let _ = atman_runtime::session_naming::maybe_generate_session_name(&executor, &session)
-                .await;
-        }
-        if !drive_goal {
-            failure = result.err();
-            break;
-        }
-        let wake = loop {
-            if owner_cancel.is_cancelled() || session.goal_control.record().is_none() {
-                break None;
-            }
-            if atman_runtime::goal::has_next_turn(&session.goal_control, &session.watch_hub) {
-                let message = tokio::select! {
-                    biased;
-                    _ = owner_cancel.cancelled() => break None,
-                    message = atman_runtime::goal::begin_background_turn(&session) => message,
-                };
-                if let Some(message) = message {
-                    break Some(message);
-                }
-            }
-            tokio::select! {
-                biased;
-                _ = owner_cancel.cancelled() => {},
-                _ = goal_changes.changed() => {},
-                _ = session.watch_hub.wait_for_pending(),
-                    if session.goal_control.allows_background_turn() => {},
-            }
-        };
-        let Some(message) = wake else {
-            break;
-        };
-        turn_id = message.turn_id.clone();
-        // Child-result delivery already emits its own transcript marker.
-        if message.origin != atman_runtime::message::MessageOrigin::ChildResult {
-            session.push_system_note(
-                if message.origin == atman_runtime::message::MessageOrigin::Watcher {
-                    "Watcher notifications".into()
-                } else {
-                    "Goal continued".into()
-                },
-            );
-        }
-        turn_args = recipe.continuation_args(&message.text_concat());
-    }
-    lifecycles
-        .fire(&executor, atman_rt::ast::LifecycleEvent::SessionEnd)
-        .await;
-    if let Some(error) = failure {
-        return Err(error.into());
-    }
-    Ok(())
 }
 
 fn reload_model_config(config_dir: Option<&Path>) {
@@ -660,7 +223,7 @@ fn reload_model_config(config_dir: Option<&Path>) {
     }
 }
 
-fn path_is_managed_agent_at(path: &Path, config_dir: Option<&Path>) -> bool {
+pub(crate) fn path_is_managed_agent_at(path: &Path, config_dir: Option<&Path>) -> bool {
     let Some(dir) = config_dir else {
         return false;
     };
@@ -722,48 +285,6 @@ mod tests {
     }
 
     #[test]
-    fn registry_cleanup_guard_removes_entries_during_unwind() {
-        let state = Arc::new(DaemonState::new(
-            tempfile::tempdir().unwrap().path().to_path_buf(),
-        ));
-        let session = Arc::new(atman_runtime::Session::open_ephemeral());
-        let session_id = ProtoSessionId(session.id().0);
-        state.register_broker(session_id.clone(), session, "test-principal");
-        state
-            .register_live(
-                session_id.clone(),
-                LiveSession {
-                    run_id: ProtoRunId(uuid::Uuid::now_v7()),
-                    flow_name: "panic-test".into(),
-                    cancel: tokio_util::sync::CancellationToken::new(),
-                    started_at: chrono::Utc::now(),
-                },
-            )
-            .unwrap();
-        assert!(
-            state
-                .authorized_live_session(&session_id, "test-principal")
-                .is_some()
-        );
-
-        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
-            let state = Arc::clone(&state);
-            let session_id = session_id.clone();
-            move || {
-                let _cleanup = RegistryCleanup { state, session_id };
-                panic!("simulate flow-thread panic");
-            }
-        }));
-        assert!(unwind.is_err());
-        assert!(state.live_session(&session_id).is_none());
-        assert!(
-            state
-                .authorized_live_session(&session_id, "test-principal")
-                .is_none()
-        );
-    }
-
-    #[test]
     fn reconciliation_is_noop_without_git_or_registry_and_reports_bad_registry() {
         let plain = tempfile::tempdir().unwrap();
         assert!(
@@ -790,91 +311,6 @@ mod tests {
         .unwrap();
         assert!(reconcile_workspaces(repository.path(), "generation").is_err());
         assert!(manager.managed_root().exists());
-    }
-
-    #[test]
-    fn spawned_thread_owns_provider_lifecycle_until_body_finishes() {
-        const PROVIDER_ID: &str = "spawn-owner-oauth";
-
-        struct CatalogCleanup;
-
-        impl Drop for CatalogCleanup {
-            fn drop(&mut self) {
-                atman_runtime::model_registry::remove_provider_catalog(PROVIDER_ID);
-            }
-        }
-
-        let _registry_lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        atman_runtime::model_registry::remove_provider_catalog(PROVIDER_ID);
-        let _catalog_cleanup = CatalogCleanup;
-        let config = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let provider = Arc::new(atman_runtime::providers::mock::MockProvider::new(
-            PROVIDER_ID,
-        ));
-        let weak_provider = Arc::downgrade(&provider);
-        let state = Arc::new(DaemonState::new(project.path().join("data")));
-        let launcher = RunLauncher::new(
-            project.path().to_path_buf(),
-            Some(config.path().to_path_buf()),
-            None,
-        )
-        .unwrap();
-        let provider_lifecycle = state.provider_lifecycle_for(Some(config.path())).unwrap();
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                provider_lifecycle
-                    .install_pre_discovered_provider(
-                        atman_runtime::auth_store::StoredProvider {
-                            id: PROVIDER_ID.into(),
-                            name: "Spawn Owner".into(),
-                            kind: atman_runtime::auth_store::ProviderKind::Codex,
-                            access_token: "access".into(),
-                            refresh_token: None,
-                            expires_at: i64::MAX,
-                            account: None,
-                            enabled: true,
-                            model_cache: None,
-                        },
-                        provider.clone(),
-                        vec![atman_runtime::provider::DiscoveredModelDetails {
-                            slug: "spawn-owner-model".into(),
-                            context_budget: Some(128_000),
-                            capability_knowledge:
-                                atman_runtime::provider::CapabilityKnowledge::Legacy {
-                                    thinking: true,
-                                },
-                        }],
-                    )
-                    .await
-                    .unwrap();
-            });
-        drop(provider);
-
-        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
-        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
-        let handle = spawn_with_provider_lifecycle(
-            std::thread::Builder::new().name("provider-owner-test".into()),
-            provider_lifecycle,
-            move || {
-                entered_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-            },
-        )
-        .unwrap();
-        drop(launcher);
-        drop(state);
-        entered_rx.recv().unwrap();
-
-        assert!(weak_provider.upgrade().is_some());
-        release_tx.send(()).unwrap();
-        handle.join().unwrap();
-        assert!(weak_provider.upgrade().is_none());
     }
 
     #[test]
@@ -1066,23 +502,12 @@ mod tests {
     }
 
     #[test]
-    fn run_options_isolate_reasoning_and_queue_image_inputs() {
-        let session = atman_runtime::Session::open_ephemeral();
+    fn run_options_isolate_reasoning() {
         let invocation_env = invocation_env_from_reasoning(Some("high@pro".into())).unwrap();
-        queue_run_images(
-            &session,
-            vec![atman_proto::InlineImage {
-                data_base64: "iVBORw0KGgo=".into(),
-                name: Some("input.png".into()),
-            }],
-        )
-        .unwrap();
-
         assert!(matches!(
             invocation_env.get("effort"),
             Some(Value::Str(value)) if value == "high@pro"
         ));
-        assert_eq!(session.pending_image_count(), 1);
 
         let next_invocation_env = invocation_env_from_reasoning(None).unwrap();
         assert!(next_invocation_env.get("effort").is_none());

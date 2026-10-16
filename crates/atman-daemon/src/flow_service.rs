@@ -25,6 +25,7 @@ use crate::DaemonState;
 pub(crate) mod catalog;
 pub(crate) mod events;
 mod execution;
+pub(crate) use execution::launch_run;
 pub(crate) mod goal;
 
 // Transport authentication identifies this operator; callers cannot supply sender provenance.
@@ -135,7 +136,7 @@ pub(crate) async fn dispatch(
         .map_err(|error| JsonRpcError::application(error.to_string()))
 }
 
-fn authorize_operator(principal: &str) -> Result<(), JsonRpcError> {
+pub(crate) fn authorize_operator(principal: &str) -> Result<(), JsonRpcError> {
     // Both authenticated transports represent this one local operator. Unknown principals must not acquire storage ownership.
     if principal != crate::state::LOCAL_OPERATOR {
         return Err(JsonRpcError::application(
@@ -356,13 +357,20 @@ impl Request {
 }
 
 fn service(state: &DaemonState) -> &SessionService {
+    let config_dir = state
+        .launcher()
+        .and_then(|launcher| launcher.config_dir.clone());
+    service_with_config(state, config_dir.as_deref())
+}
+
+fn service_with_config<'a>(
+    state: &'a DaemonState,
+    config_dir: Option<&std::path::Path>,
+) -> &'a SessionService {
     state.session_service.get_or_init(|| {
-        let config_dir = state
-            .launcher()
-            .and_then(|launcher| launcher.config_dir.clone());
         SessionService::new(
             state.data_dir().to_path_buf(),
-            crate::bootstrap::build_redactor(config_dir.as_deref()),
+            crate::bootstrap::build_redactor(config_dir),
         )
     })
 }
