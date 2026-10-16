@@ -405,6 +405,7 @@ Session listings default to the current project. Use `atman session list --all` 
 - **`atman logs stream <session>`** tails a running daemon's SSE feed in the terminal. Add `--instance <flow-uuid>` to read committed persistent-flow batches, and `--after '<journal-uuid>:<sequence>:<digest>'` to resume after a saved batch receipt. Instance reads require an explicit session UUID and cannot use the legacy `--since-seq` option.
 - **`atman sync init <url>`** turns `<project>/.atman/` into a git repo so your memory travels across machines.
 - **`atman migrate list --from opencode`** imports opencode / kiro session transcripts into a fresh atman session.
+- **`atman migrate inspect <session>`** prints a read-only JSON map of legacy Atman history, including record byte ranges, ownership, and malformed or unassigned records. It preserves source files and does not start flows.
 - **[docs/context-strategy.md](./context-strategy.md)** covers the goal / todos / sliding-window / recall / compaction layering and when to reach for each.
 - **[docs/how-to-filter.md](./how-to-filter.md)** covers list combinators, fanout, and sequential expressions.
 - **`examples/`** in the atman source tree has larger canonical flows (agent loop, hunk review, LSP-style code review, etc).

@@ -5,6 +5,62 @@ fn atman_bin() -> &'static str {
     env!("CARGO_BIN_EXE_atman")
 }
 
+#[test]
+fn migrate_inspect_reports_original_records_without_rewriting_or_starting_a_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let id = uuid::Uuid::now_v7().to_string();
+    let session = data.join("sessions").join(&id);
+    std::fs::create_dir_all(&session).unwrap();
+    std::fs::write(
+        data.join("config.toml"),
+        "# retained legacy configuration\n",
+    )
+    .unwrap();
+    let path = session.join("events.jsonl");
+    let bytes = b"{\"type\":\"mermaid_diagram\",\"source\":\"private diagram\"}\n{\"type\":\"future_event\"}\n{torn";
+    std::fs::write(&path, bytes).unwrap();
+    let output = Command::new(atman_bin())
+        .args(["migrate", "inspect", &id[..8]])
+        .current_dir(temp.path())
+        .env("ATMAN_DATA_DIR", &data)
+        .env("ATMAN_CONFIG_DIR", temp.path().join("config"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["session_id"], id);
+    assert_eq!(report["records"].as_array().unwrap().len(), 3);
+    assert_eq!(report["records"][0]["owner"]["kind"], "unassigned");
+    assert_eq!(report["records"][2]["issues"][0], "unterminated_line");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("private diagram"));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(std::fs::read_dir(&session).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(data.join("sessions")).unwrap().count(), 1);
+    assert!(!data.join("runtime-v1").exists());
+    assert_eq!(
+        std::fs::read_to_string(data.join("config.toml")).unwrap(),
+        "# retained legacy configuration\n"
+    );
+    assert!(!temp.path().join("config").exists());
+    assert_eq!(std::fs::read_dir(&data).unwrap().count(), 2);
+
+    let missing = Command::new(atman_bin())
+        .args(["migrate", "inspect", &uuid::Uuid::now_v7().to_string()])
+        .current_dir(temp.path())
+        .env("ATMAN_DATA_DIR", &data)
+        .env("ATMAN_CONFIG_DIR", temp.path().join("config"))
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    assert!(missing.stdout.is_empty());
+    assert_eq!(std::fs::read_dir(data.join("sessions")).unwrap().count(), 1);
+}
+
 fn seed_fixture(root: &Path) {
     let sess = root.join("session/proj_hash");
     std::fs::create_dir_all(&sess).unwrap();

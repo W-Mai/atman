@@ -12,6 +12,14 @@ Recovery preserves an unterminated final record in an adjacent `.incomplete-<uui
 
 Existing published session event files continue to use their existing reader and writer. They are not interpreted as fact journals or rewritten by this API. An embedding host must explicitly choose the new format and bind each journal to its session or flow identity.
 
+## Legacy history inspection
+
+`atman migrate inspect <session-id-or-prefix>` prints a JSON ownership report for the original `sessions/<session>/events.jsonl`. `event_log::legacy::inspect` provides the same read-only operation to Rust hosts. Each nonempty physical line retains its byte range, SHA-256 digest, original sequence and timestamp when valid, and any parsing issues. Invalid JSON, unsupported events, and unterminated final lines remain indexed. Missing metadata stays absent; ordering follows byte positions. Whitespace remains covered by the complete source digest. Reports contain metadata and ownership mappings rather than message bodies.
+
+Explicit agent owners join runs across turns. Inline calls inherit their recorded parent's identity; spawned runs without an agent owner retain independent mapping keys. Missing parents, cycles, and conflicting identities remain unassigned. Unscoped legacy session messages retain their default-agent meaning, while diagnostics without a reliable owner remain unassigned. Mapping keys do not grant execution or create new instance addresses.
+
+Inspection reads the initial file length and verifies the source bytes again before returning; it does not keep tailing an active writer. `LegacySource::verify` detects appends, truncations, and same-length replacements before a caller reuses a report. This is a content check, not proof that an old executor has stopped. Inspection does not migrate files, activate flows, or switch catalogs; a migration writer must establish exclusive execution ownership and revalidate its source before committing.
+
 ## Session and flow storage
 
 `flow_store::RuntimeStore::open(data_dir)` uses the isolated `runtime-v1` namespace. A `SessionStore` owns its container journal and an exclusive execution lease. Each `FlowStore` retains that lease while owning its independent journal. Another session owner cannot open the same container while any of those handles remain alive.

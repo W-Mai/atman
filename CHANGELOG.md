@@ -28,6 +28,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Legacy history inspection** — `migrate inspect` maps recorded agent ownership across turns while retaining byte ranges and integrity checks for every nonempty record. Malformed, conflicting, and unscoped records remain visible without rewriting history or starting execution.
+
 - **Flow event streaming in the CLI** — `logs stream --instance` reads complete committed batches through the daemon, with `--after` cursor resumption and explicit server errors.
 
 - **Persistent flow event transport** — `flow.events` and instance-addressed SSE expose the same committed update batches. Full cursors support validated pagination and automatic reconnection without resetting to the initial history range; view connections do not control execution.

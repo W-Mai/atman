@@ -116,6 +116,8 @@ enum Cmd {
 
 #[derive(Subcommand, Debug)]
 enum MigrateAction {
+    /// Inspect legacy Atman history ownership without modifying or activating it.
+    Inspect { session_id: String },
     List {
         #[arg(long, default_value = "opencode")]
         from: String,
@@ -385,6 +387,16 @@ fn main() -> Result<()> {
 
 async fn async_main() -> Result<()> {
     let cli = Cli::parse();
+    // Read-only history inspection must not trigger config migration or notifier writes.
+    if let Some(Cmd::Migrate {
+        action: MigrateAction::Inspect { session_id },
+    }) = &cli.cmd
+    {
+        return cmd_migrate(MigrateAction::Inspect {
+            session_id: session_id.clone(),
+        })
+        .await;
+    }
     if let Some(Cmd::Upgrade {
         yes,
         verbose,
@@ -7810,6 +7822,20 @@ fn load_mcp_configs() -> Vec<atman_runtime::mcp::McpServerConfig> {
 
 async fn cmd_migrate(action: MigrateAction) -> Result<()> {
     match action {
+        MigrateAction::Inspect { session_id } => {
+            let root = data_dir()?;
+            let session_id = resolve_session_prefix(&root, &session_id)?;
+            let id =
+                uuid::Uuid::parse_str(&session_id).context("legacy session ID must be a UUID")?;
+            let path = root.join("sessions").join(&session_id).join("events.jsonl");
+            let report = tokio::task::spawn_blocking(move || {
+                atman_runtime::event_log::legacy::inspect(&path, id)
+            })
+            .await?
+            .with_context(|| format!("inspect legacy session {session_id}"))?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         MigrateAction::List { from, storage } => {
             let source = build_migration_source(&from, storage)?;
             let sessions = source.discover_sessions()?;
