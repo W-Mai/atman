@@ -3,6 +3,7 @@
 //! Host-only storage: authorization and scheduling happen before commands reach this module. Each flow has one authoritative journal. Metadata files are disposable projections and never override facts. Blocking calls belong on storage workers.
 
 pub mod access;
+pub mod completion;
 pub mod inbox;
 mod input;
 pub mod launch;
@@ -115,6 +116,7 @@ enum FlowFact {
     Created(Box<FlowDescriptor>),
     Activated(Box<launch::Activation>),
     Transition(FlowTransition),
+    TurnCompleted(Box<completion::Completion>),
     EnvelopeAccepted(Box<AcceptedEnvelope>),
     InputCommitted(Box<CommittedInput>),
     ReplyWaiterRegistered(Box<waiter::ReplyWaiter>),
@@ -135,6 +137,24 @@ enum FlowFact {
 
 impl FlowFact {
     fn validate_batch(facts: &[Self]) -> io::Result<()> {
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, Self::Transition(FlowTransition::TurnFinished { .. })))
+        {
+            return Err(invalid("turn completion requires a result record"));
+        }
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, Self::TurnCompleted(_)))
+        {
+            return if matches!(facts, [Self::TurnCompleted(_)]) {
+                Ok(())
+            } else {
+                Err(invalid(
+                    "turn result and terminal state require one dedicated fact",
+                ))
+            };
+        }
         if facts.iter().any(|fact| matches!(fact, Self::Activated(_))) {
             return if matches!(facts, [Self::Activated(_)]) {
                 Ok(())
@@ -515,6 +535,7 @@ pub struct FlowStore {
     publications: publication::Publications,
     subscriptions: subscription::Subscriptions,
     activation: Option<launch::Activation>,
+    completions: completion::Completions,
     cursor: CommitReceipt,
     projection_error: Option<io::Error>,
     pub recovered_tail: Option<RecoveredTail>,
@@ -544,6 +565,7 @@ impl FlowStore {
             publications: publication::Publications::default(),
             subscriptions: subscription::Subscriptions::default(),
             activation: None,
+            completions: Default::default(),
             cursor,
             projection_error: None,
             recovered_tail: None,
@@ -556,6 +578,7 @@ impl FlowStore {
         let mut publications = publication::Publications::default();
         let mut subscriptions = subscription::Subscriptions::default();
         let mut activation = None;
+        let mut completions = completion::Completions::default();
         let mut cursor = None;
         let (journal, recovered_tail) = Journal::open(
             &dir.join("events.jsonl"),
@@ -602,6 +625,10 @@ impl FlowStore {
                             inbox.state_changed(state, &receipt);
                             record.apply(inbox, &receipt);
                             activation = Some(*record);
+                        }
+                        (Some((_, state, inbox)), FlowFact::TurnCompleted(completion)) => {
+                            completions.replay(state, *completion, receipt.clone())?;
+                            inbox.state_changed(state, &receipt);
                         }
                         (Some((_, state, inbox)), FlowFact::EnvelopeAccepted(envelope)) => {
                             if !state.accepts_input() || &envelope.request.recipient != address {
@@ -699,6 +726,7 @@ impl FlowStore {
             publications,
             subscriptions,
             activation,
+            completions,
             cursor: cursor.ok_or_else(|| invalid("empty flow journal"))?,
             projection_error: None,
             recovered_tail,
@@ -771,6 +799,11 @@ impl FlowStore {
     ) -> io::Result<CommitReceipt> {
         if expected_revision != self.state.revision() {
             return Err(invalid("stale flow state revision"));
+        }
+        if let FlowTransition::TurnFinished { lease, outcome } = transition {
+            return self
+                .finish_turn(lease, completion::InvocationResult::Unobserved(outcome))
+                .map(|record| record.receipt);
         }
         let mut candidate = self.state.clone();
         transition.apply(&mut candidate)?;

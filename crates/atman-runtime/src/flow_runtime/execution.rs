@@ -2,9 +2,7 @@
 
 use std::{collections::BTreeMap, future::Future, io, num::NonZeroUsize};
 
-use atman_rt::{
-    InstanceActivity, InstanceState, Interruption, RunId, TurnId, TurnLease, TurnOutcome, TurnPhase,
-};
+use atman_rt::{InstanceActivity, InstanceState, RunId, TurnId, TurnLease, TurnOutcome, TurnPhase};
 use futures::FutureExt;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -16,7 +14,10 @@ use crate::event::AtmanUuid;
 use crate::event_log::journal::CommitReceipt;
 use crate::flow_authority::EffectiveAuthority;
 use crate::flow_store::inbox::{Acceptance, DeliveryRequest, InputContent};
-use crate::flow_store::{FlowTransition, invalid};
+use crate::flow_store::{
+    completion::{CommittedCompletion, InvocationResult},
+    invalid,
+};
 use crate::message::Message;
 use crate::{Executor, InstanceInvocation, RootInvocation, Value, ValueJson};
 
@@ -56,6 +57,15 @@ impl TurnTicket {
 }
 
 impl FlowWorker {
+    /// Read a recorded entry result without rerunning the entry or publishing an answer.
+    pub async fn completion(
+        &self,
+        turn: Option<crate::event::TurnId>,
+    ) -> io::Result<Option<CommittedCompletion>> {
+        self.request(move |store| Ok(store.completion(turn.as_ref()).cloned()))
+            .await
+    }
+
     /// Authenticate the sender before admission; the callback authorizes only new delivery.
     pub async fn accept_input(
         &self,
@@ -169,31 +179,15 @@ impl FlowWorker {
                         "instance execution panicked".into(),
                     ))
                 });
-                let outcome = match &result {
-                    Ok(_) => TurnOutcome::Completed,
-                    Err(RuntimeError::Cancelled(_)) => {
-                        TurnOutcome::Interrupted(Interruption::Cancelled)
-                    }
-                    Err(_) => TurnOutcome::Interrupted(Interruption::Failed),
-                };
                 let end = worker
                     .request(move |store| {
-                        let mut candidate = store.state().clone();
-                        let outcome = candidate
-                            .finish_turn(&owned_lease, outcome)
-                            .map_err(invalid)?;
-                        let receipt = store.transition(
-                            store.state().revision(),
-                            FlowTransition::TurnFinished {
-                                lease: owned_lease.clone(),
-                                outcome,
-                            },
-                        )?;
+                        let record = store
+                            .finish_turn(owned_lease.clone(), InvocationResult::capture(&result))?;
                         Ok(TurnCompletion {
                             lease: owned_lease,
-                            outcome,
+                            outcome: record.completion.outcome,
                             result,
-                            receipt,
+                            receipt: record.receipt,
                         })
                     })
                     .await;

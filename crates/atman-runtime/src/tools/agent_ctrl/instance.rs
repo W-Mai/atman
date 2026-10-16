@@ -63,6 +63,17 @@ impl Target<'_> {
             .join("\n"))
     }
 
+    pub async fn result(self, turn: Option<crate::event::TurnId>) -> ToolResult {
+        let record = self
+            .client
+            .read_result(self.address, turn)
+            .await
+            .map_err(failed)?;
+        Ok(Value::from_json(
+            serde_json::json!({ "completion": record }),
+        ))
+    }
+
     pub async fn cancel(self, args: &ToolArgs) -> ToolResult {
         let revision = match args.named("expected_revision") {
             Some(Value::Int(n)) if *n >= 0 => *n as u64,

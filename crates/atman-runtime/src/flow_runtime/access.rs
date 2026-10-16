@@ -238,6 +238,25 @@ impl FlowClient {
             .await
     }
 
+    /// Read one committed entry result under the same authority as public output.
+    /// An absent record is not evidence that an invocation succeeded or failed.
+    pub async fn read_result(
+        &self,
+        target: FlowRef,
+        turn: Option<crate::event::TurnId>,
+    ) -> io::Result<Option<crate::flow_store::completion::CommittedCompletion>> {
+        self.authorize(&target, FlowAction::ReadOutput)?;
+        let client = self.clone();
+        self.host
+            .flow(&target)
+            .await?
+            .request(move |store| {
+                client.authorize(store.state().address(), FlowAction::ReadOutput)?;
+                Ok(store.completion(turn.as_ref()).cloned())
+            })
+            .await
+    }
+
     pub async fn read_context(&self, target: FlowRef) -> io::Result<Vec<Message>> {
         self.authorize(&target, FlowAction::ReadContext)?;
         let client = self.clone();

@@ -388,6 +388,7 @@ async fn owned_execution_commits_admission_and_completion_even_when_the_observer
             .iter()
             .any(|message| message.origin == atman_runtime::message::MessageOrigin::FinalAnswer)
     );
+    let abandoned_turn = ticket.lease.turn.clone();
     drop(ticket);
     worker
         .transition(
@@ -430,6 +431,17 @@ async fn owned_execution_commits_admission_and_completion_even_when_the_observer
     let store = session.open_flow(&description.address.instance_id).unwrap();
     assert!(store.state().can_start_turn());
     assert_eq!(store.context_messages().last().unwrap().text_concat(), "16");
+    assert_eq!(store.completions().len(), 2);
+    assert_eq!(
+        store
+            .completion(Some(&abandoned_turn))
+            .unwrap()
+            .completion
+            .result,
+        atman_runtime::flow_store::completion::InvocationResult::Returned(
+            atman_runtime::flow_store::completion::StoredValue::String("42".into())
+        )
+    );
 }
 
 #[tokio::test]
@@ -557,6 +569,78 @@ fn start(flow: &mut FlowStore) -> TurnLease<AtmanUuid> {
         panic!("turn was not started");
     };
     active.lease.clone()
+}
+
+#[test]
+fn completion_and_terminal_state_commit_together_and_recover_without_fabricating_results() {
+    use atman_runtime::flow_store::completion::{InvocationResult, StoredValue};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let lease = start(&mut flow);
+    let result = InvocationResult::Returned(StoredValue::Struct(vec![(
+        "answer".into(),
+        StoredValue::Int(42),
+    )]));
+    let completed = flow.finish_turn(lease.clone(), result.clone()).unwrap();
+    assert_eq!(completed.completion.outcome, TurnOutcome::Completed);
+    assert_eq!(flow.completion(Some(&lease.turn)), Some(&completed));
+    assert_eq!(flow.cursor(), &completed.receipt);
+    assert!(flow.state().can_start_turn());
+    assert!(flow.published_messages().is_empty());
+    assert!(flow.context_messages().is_empty());
+    drop(flow);
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(
+        flow.finish_turn(lease.clone(), result.clone()).unwrap(),
+        completed
+    );
+    assert!(
+        flow.finish_turn(lease, InvocationResult::Returned(StoredValue::Int(7)))
+            .is_err()
+    );
+
+    let cancelled = start(&mut flow);
+    change(
+        &mut flow,
+        FlowTransition::PhaseChanged {
+            lease: cancelled.clone(),
+            phase: TurnPhase::Cancelling,
+        },
+    );
+    let record = flow.finish_turn(cancelled.clone(), result.clone()).unwrap();
+    assert_eq!(
+        record.completion.outcome,
+        TurnOutcome::Interrupted(Interruption::Cancelled)
+    );
+    assert_eq!(record.completion.result, result);
+    assert_eq!(flow.finish_turn(cancelled, result.clone()).unwrap(), record);
+    change(&mut flow, FlowTransition::InterruptionRecovered);
+
+    let torn = start(&mut flow);
+    let file = flow.dir().join("events.jsonl");
+    let prefix = std::fs::metadata(&file).unwrap().len() as usize;
+    flow.finish_turn(torn.clone(), result).unwrap();
+    drop(flow);
+    let bytes = std::fs::read(&file).unwrap();
+    std::fs::write(&file, &bytes[..prefix + (bytes.len() - prefix) / 2]).unwrap();
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert!(flow.recovered_tail.is_some());
+    let recovered = flow.completion(Some(&torn.turn)).unwrap();
+    assert_eq!(
+        recovered.completion.outcome,
+        TurnOutcome::Interrupted(Interruption::HostLost)
+    );
+    assert_eq!(
+        recovered.completion.result,
+        InvocationResult::Unobserved(TurnOutcome::Interrupted(Interruption::HostLost))
+    );
+    assert_eq!(flow.completions().len(), 3);
+    assert!(flow.interrupt_lost_turn().unwrap().is_none());
 }
 
 #[test]

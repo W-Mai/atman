@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Durable entry results** — Flow journals commit typed returns or errors with terminal execution state. Result queries survive reopening and caller detachment, preserve cancellation outcomes, and distinguish unknown returns from successful values. The `flow.result` tool reads saved completions under output-read grants without publishing ordinary returns as final answers.
+
 - **Persistent flow creation** — Bound flow invocations create retained peers through the host scheduler, preserving source snapshots, arguments, invocation settings, and optional inherited context. Synchronous calls wait for the initial result without duplicate result notifications; later input can start another turn. Inventory changes reject stale spawn permits before creation, and failed activation releases scheduling ownership.
 
 - **Persistent instance discovery** — Flow listings use the session catalog, retain unavailable and inactive instances, and support stable cursor pagination. Status and listings share execution and pause fields; summary reads do not retain additional conversation contexts.

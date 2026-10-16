@@ -109,6 +109,88 @@ async fn invoke_with_env(
 }
 
 #[tokio::test]
+async fn entry_results_survive_worker_reopen_and_are_read_through_the_shared_tool() {
+    use atman_runtime::{
+        ValueJson,
+        flow_store::completion::{InvocationResult, StoredValue},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let worker = session
+        .create_flow(program_descriptor(
+            info.id,
+            "flow main() -> any { return { answer: 42, values: [true, 2.5] } }".into(),
+        ))
+        .await
+        .unwrap();
+    change(&worker, FlowTransition::Activated).await;
+    let completed = invoke(&worker, Executor::new()).await;
+    let record = worker
+        .completion(Some(completed.lease.turn.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.receipt, completed.receipt);
+    assert_eq!(
+        record.completion.result,
+        InvocationResult::Returned(StoredValue::capture(completed.result.as_ref().unwrap()))
+    );
+    assert!(
+        worker
+            .context()
+            .messages()
+            .iter()
+            .all(|m| m.origin != MessageOrigin::FinalAnswer)
+    );
+    let address = worker.address().clone();
+    drop(worker.shutdown().await.unwrap());
+    let reopened = host.flow(&address).await.unwrap();
+    assert_eq!(reopened.completion(None).await.unwrap().unwrap(), record);
+    let caller = session
+        .create_flow(program_descriptor(
+            info.id,
+            format!(
+                r#"
+        flow main() -> any {{
+            exact = flow.result(handle: "{}", turn: "{}")
+            latest = flow.result(handle: "{}")
+            missing = flow.result(handle: "{}", turn: "{}")
+            output = flow.output(handle: "{}")
+            return [exact, latest, missing, output]
+        }}
+    "#,
+                address.instance_id,
+                completed.lease.turn,
+                address.instance_id,
+                address.instance_id,
+                Uuid::new_v4(),
+                address.instance_id
+            ),
+        ))
+        .await
+        .unwrap();
+    change(&caller, FlowTransition::Activated).await;
+    let queried = invoke(&caller, Executor::new())
+        .await
+        .result
+        .unwrap()
+        .to_json()
+        .unwrap();
+    assert_eq!(
+        queried[0]["completion"],
+        serde_json::to_value(&record).unwrap()
+    );
+    assert_eq!(queried[0], queried[1]);
+    assert!(queried[2]["completion"].is_null());
+    assert_eq!(queried[3]["chunk"], "");
+}
+
+#[tokio::test]
 async fn persistent_spawn_runs_real_entries_and_retains_sync_and_async_instances() {
     use atman_runtime::ValueJson;
     let dir = tempfile::tempdir().unwrap();
@@ -1457,6 +1539,21 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
     let output = client.read_output(b_info.address.clone()).await.unwrap();
     assert_eq!(output.len(), 1);
     assert_eq!(output[0].publication.message.text_concat(), "delivered");
+    assert!(
+        client
+            .read_result(b_info.address.clone(), None)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        client
+            .read_result(d_info.address.clone(), None)
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
     assert!(client.inspect(b_info.address.clone()).await.is_ok());
     assert!(client.inspect(d_info.address.clone()).await.is_err());
     assert!(

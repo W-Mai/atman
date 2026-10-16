@@ -1707,6 +1707,60 @@ impl Tool for AgentStatus {
     }
 }
 
+pub struct FlowResult;
+impl Tool for FlowResult {
+    fn name(&self) -> &str {
+        "flow.result"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Read a durable entry result from a persistent flow instance. Omit turn for the latest completed entry; otherwise pass its turn UUID. Returns a completion with outcome, typed result, and receipt, or null if no matching completion exists. Ordinary returns do not become final answers. Process-local values are explicitly unavailable for restoration.",
+        )
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object", "properties": {
+                "handle": {"type": "string", "description": instance::HANDLE_DESCRIPTION},
+                "turn": {"type": "string", "description": "Exact turn UUID. Omit to read the most recent completion."}
+            }, "required": ["handle"], "additionalProperties": false
+        })
+    }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        flow_handle_scheduling_claim(args, ctx, AccessMode::Read)
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let handle = extract_string(&args, "handle", 0)?;
+            let turn = match args.named("turn") {
+                None => None,
+                Some(Value::Str(id)) => Some(TurnId::new(
+                    uuid::Uuid::parse_str(id)
+                        .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?
+                        .into(),
+                )),
+                _ => {
+                    return Err(RuntimeError::ToolFailed(
+                        "flow.result: turn must be a UUID string".into(),
+                    ));
+                }
+            };
+            let target = instance::resolve(&handle, ctx)?.ok_or_else(|| {
+                RuntimeError::ToolFailed(
+                    "flow.result requires a persistent instance binding".into(),
+                )
+            })?;
+            target.result(turn).await
+        })
+    }
+}
+
 pub struct AgentOutput;
 impl Tool for AgentOutput {
     fn name(&self) -> &str {

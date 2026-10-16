@@ -103,6 +103,7 @@ pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stub
     reg.register(Arc::new(agent_ctrl::AgentSpawn));
     reg.register(Arc::new(agent_ctrl::AgentStatus));
     reg.register(Arc::new(agent_ctrl::AgentOutput));
+    reg.register(Arc::new(agent_ctrl::FlowResult));
     reg.register(Arc::new(agent_ctrl::AgentKill));
     reg.register(Arc::new(agent_ctrl::FlowInterject));
     reg.register(Arc::new(form::FormAsk));

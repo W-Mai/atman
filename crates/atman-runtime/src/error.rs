@@ -1,6 +1,7 @@
 use thiserror::Error;
 
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Error)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum RuntimeError {
     #[error("undefined variable: {0}")]
     UndefinedVar(String),
