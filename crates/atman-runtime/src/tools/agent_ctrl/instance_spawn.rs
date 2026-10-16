@@ -110,6 +110,7 @@ pub(super) async fn spawn(
     let input = LaunchInput {
         initial_goal: None,
         execution: Some(EntryBinding {
+            session_start: false,
             first_turn: first_turn.clone(),
             first_run,
             authority: authority.clone(),

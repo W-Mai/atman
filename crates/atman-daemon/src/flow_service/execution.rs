@@ -208,6 +208,7 @@ impl SessionService {
         let input = LaunchInput {
             initial_goal: request.initial_goal,
             execution: Some(EntryBinding {
+                session_start: false,
                 first_turn: atman_rt::TurnId(request.request_id.into()),
                 first_run: atman_rt::RunId(request.request_id.into()),
                 authority: authority.clone(),

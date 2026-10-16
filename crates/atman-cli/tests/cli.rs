@@ -88,6 +88,13 @@ fn managed_run_waits_for_child_results_after_its_final_answer() {
 #[test]
 fn run_executes_pure_flow_and_prints_return_value() {
     let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let data = dir.path().join("data");
+    std::fs::create_dir(&config).unwrap();
+    std::fs::write(config.join("hooks.at"), r#"
+        on session.start { memory.todo.set(where: "startup", why: "container", how: "hook", expected_result: "once") }
+        on session.end { memory.todo.set(where: "unexpected shutdown", why: "container", how: "hook", expected_result: "never") }
+    "#).unwrap();
     let flow_path = dir.path().join("hello.at");
     std::fs::write(
         &flow_path,
@@ -98,6 +105,8 @@ fn run_executes_pure_flow_and_prints_return_value() {
     )
     .unwrap();
     let out = Command::new(atman_binary())
+        .env("ATMAN_CONFIG_DIR", &config)
+        .env("ATMAN_DATA_DIR", &data)
         .arg("run")
         .arg(&flow_path)
         .arg("who=atman")
@@ -109,6 +118,13 @@ fn run_executes_pure_flow_and_prints_return_value() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi atman");
+    let root = atman_runtime::flow_store::RuntimeStore::open(&data).unwrap();
+    let id = atman_runtime::flow_store::RuntimeStore::session_ids(&data).unwrap()[0];
+    let session = root.open_session(id).unwrap();
+    let instance = session.projection().default_flow.clone().unwrap();
+    let flow = session.open_flow(&instance).unwrap();
+    assert_eq!(flow.planning().todos.len(), 1);
+    assert_eq!(flow.planning().todos[0].where_, "startup");
 }
 
 #[test]

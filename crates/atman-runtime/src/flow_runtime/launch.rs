@@ -52,12 +52,11 @@ impl RuntimeHost {
     ) -> io::Result<LaunchedFlow> {
         let creation = descriptor.clone();
         let requested = input.clone();
-        let session = self
+        let snapshot = self
             .session(descriptor.address.session_id.0)?
             .snapshot()
-            .await?
-            .catalog
-            .descriptor;
+            .await?;
+        let session = snapshot.catalog.descriptor;
         self.launch_owned(
             descriptor,
             input,
@@ -116,10 +115,37 @@ impl RuntimeHost {
             }
             input.request.validate_source()?;
             let session = host.session(descriptor.address.session_id.0)?;
+            let snapshot = session.snapshot().await?;
+            let startup = input
+                .execution
+                .as_ref()
+                .is_some_and(|binding| binding.session_start);
+            if input
+                .execution
+                .as_ref()
+                .is_some_and(|binding| binding.session_start)
+                && (descriptor.created_by.is_some()
+                    || matches!(
+                        input.request.sender,
+                        crate::flow_store::inbox::SenderIdentity::Flow(_)
+                    )
+                    || snapshot
+                        .catalog
+                        .flows
+                        .first()
+                        .is_some_and(|flow| flow.id != descriptor.address.instance_id))
+            {
+                return Err(invalid(
+                    "session startup requires the container's initial host entry",
+                ));
+            }
+            let catalog = if startup {
+                Some(catalog.unwrap_or_else(|| snapshot.cursor.clone()))
+            } else {
+                catalog
+            };
             // Existing catalog entries reconcile through their unique worker before new authorization.
-            let existing = session
-                .snapshot()
-                .await?
+            let existing = snapshot
                 .catalog
                 .flows
                 .iter()

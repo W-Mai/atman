@@ -161,6 +161,19 @@ impl FlowWorker {
             );
             let binding =
                 InstanceInvocation::new(lease.clone(), request.authority, CancellationToken::new())
+                    .with_session_start(
+                        store.last_invocation_input().is_none()
+                            && store.launch_record().is_some_and(|record| {
+                                record
+                                    .input
+                                    .execution
+                                    .as_ref()
+                                    .is_some_and(|binding| binding.session_start)
+                                    && reserved
+                                        .message_ids()
+                                        .contains(&record.acceptance.message_id)
+                            }),
+                    )
                     .with_vm_options(
                         atman_rt::VmRunOptions::measure()
                             .with_yield_interval(request.yield_interval),

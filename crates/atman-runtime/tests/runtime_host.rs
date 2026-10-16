@@ -2976,6 +2976,7 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
                 inherited_context: Vec::new(),
                 result_route: None,
                 execution: Some(EntryBinding {
+                    session_start: false,
                     first_turn: initial_turn.clone(),
                     first_run: initial_run.clone(),
                     authority: ceiling.clone(),

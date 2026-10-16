@@ -160,6 +160,7 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
     let root = RuntimeStore::open(dir.path()).unwrap();
     let mut info = session_info();
     let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path().join("config"));
+    info.configuration = atman_runtime::flow_store::SessionConfiguration::Atman(hub.source());
     info.project = Some(
         atman_runtime::storage::ProjectContext::resolve(&hub, dir.path(), dir.path()).unwrap(),
     );
@@ -225,15 +226,32 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
     *user = Some(content.clone());
     input.result_route = None;
     input.execution = Some(EntryBinding {
+        session_start: true,
         first_turn: TurnId::now(),
         first_run: RunId::now(),
         authority: authority.clone(),
     });
     let catalog = session.snapshot().await.unwrap().cursor;
+    let runtime = atman_runtime::AtmanRuntime::build(atman_runtime::AtmanRuntimeOptions {
+        events: Default::default(),
+        mock: false,
+        config: hub,
+        project: info.project.clone(),
+        home_dir: None,
+        workspace_generation: "startup-hooks".into(),
+    })
+    .await
+    .unwrap();
     let execution = || EntryExecution {
         executor: {
-            let mut executor = Executor::new();
+            let mut executor = runtime.executor.clone();
             executor.tool_ctx = atman_runtime::tool::ToolCtx::for_project(info.project.clone());
+            let mut hooks = atman_runtime::lifecycle::LifecycleRunner::new();
+            hooks.absorb(&atman_rt::parse_file(r#"
+                on session.start { memory.todo.set(where: "startup", why: "container", how: "hook", expected_result: "once") }
+                on session.end { memory.todo.set(where: "unexpected shutdown", why: "container", how: "hook", expected_result: "never") }
+            "#).unwrap());
+            executor.tool_ctx.lifecycle_hooks = Some(Arc::new(hooks));
             executor
         },
         authority: authority.clone(),
@@ -380,8 +398,10 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
         .await
         .unwrap();
     delivered(&worker, "after explicit bind").await;
+    assert_eq!(worker.planning().await.unwrap().todos.len(), 1);
+    assert_eq!(worker.planning().await.unwrap().todos[0].where_, "startup");
     session
-        .stop_scheduling(entry.address.instance_id)
+        .stop_scheduling(entry.address.instance_id.clone())
         .await
         .unwrap();
     worker.shutdown().await.unwrap();
@@ -391,10 +411,19 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
     let mut input = initial(&other, &other.address);
     input.result_route = None;
     input.execution = Some(EntryBinding {
+        session_start: false,
         first_turn: TurnId::now(),
         first_run: RunId::now(),
         authority: EffectiveAuthority::root(&Default::default(), false, Some(dir.path().into())),
     });
+    let mut invalid_start = input.clone();
+    invalid_start.request.sender = SenderIdentity::User(Uuid::new_v4());
+    invalid_start.execution.as_mut().unwrap().session_start = true;
+    assert!(
+        host.launch_entry(other.clone(), invalid_start, execution(), |_, _| Ok(()))
+            .await
+            .is_err()
+    );
     let accepted = host
         .launch_flow(other.clone(), input.clone(), |_, _| Ok(()))
         .await
@@ -407,6 +436,29 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
         .unwrap();
     assert_eq!(retried.record.acceptance, accepted.record.acceptance);
     accepted.worker.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+    let reopened = RuntimeHost::default();
+    let session = reopened
+        .attach_session(root.open_session(info.id).unwrap())
+        .unwrap();
+    let worker = reopened.flow(&entry.address).await.unwrap();
+    session
+        .bind_entry(
+            entry.address.instance_id.clone(),
+            execution().executor,
+            authority.clone(),
+            Default::default(),
+            NonZeroUsize::new(16).unwrap(),
+        )
+        .await
+        .unwrap();
+    reopened
+        .deliver(next_input("after reopen"), |_| Ok(()))
+        .await
+        .unwrap();
+    delivered(&worker, "after reopen").await;
+    assert_eq!(worker.planning().await.unwrap().todos.len(), 1);
+    reopened.shutdown().await.unwrap();
 }
 
 #[test]
@@ -456,6 +508,7 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
         .unwrap();
     let mut invalid_binding = input.clone();
     invalid_binding.execution = Some(atman_runtime::flow_store::launch::EntryBinding {
+        session_start: false,
         first_turn: TurnId(Uuid::nil().into()),
         first_run: RunId::now(),
         authority: EffectiveAuthority::root(&Default::default(), false, None),
@@ -468,6 +521,18 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     assert_eq!(source.state().state(), &InstanceState::Prepared);
     assert!(source.pending_inputs().next().is_none());
     let pause = Uuid::new_v4().into();
+    let mut peer_start = input.clone();
+    peer_start.execution = Some(atman_runtime::flow_store::launch::EntryBinding {
+        session_start: true,
+        first_turn: TurnId::now(),
+        first_run: RunId::now(),
+        authority: EffectiveAuthority::root(&Default::default(), false, None),
+    });
+    assert!(
+        source
+            .activate_with_input(peer_start, Some(proof.clone()), |_| Ok(()))
+            .is_err()
+    );
     let mut invalid_goal = input.clone();
     invalid_goal.initial_goal = Some("  ".into());
     assert!(

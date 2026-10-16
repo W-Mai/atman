@@ -32,6 +32,7 @@ pub struct InstanceInvocation {
     pub cancellation: tokio_util::sync::CancellationToken,
     storage: Option<crate::flow_runtime::FlowWorker>,
     options: Option<atman_rt::VmRunOptions>,
+    session_start: bool,
     started: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -47,6 +48,7 @@ impl InstanceInvocation {
             cancellation,
             storage: None,
             options: None,
+            session_start: false,
             started: Default::default(),
         }
     }
@@ -81,6 +83,11 @@ impl InstanceInvocation {
 
     pub fn with_vm_options(mut self, options: atman_rt::VmRunOptions) -> Self {
         self.options = Some(options);
+        self
+    }
+
+    pub(crate) fn with_session_start(mut self, enabled: bool) -> Self {
+        self.session_start = enabled;
         self
     }
 }
@@ -373,8 +380,20 @@ impl Executor {
         // Keep the execution state machine out of its callers' suspended stack frames.
         let execution = Box::pin(async {
             if persistent {
+                if invocation
+                    .instance
+                    .as_ref()
+                    .is_some_and(|binding| binding.session_start)
+                {
+                    executor
+                        .fire_invocation_hook(
+                            &invocation,
+                            atman_rt::ast::LifecycleEvent::SessionStart,
+                        )
+                        .await;
+                }
                 executor
-                    .fire_turn_hook(&invocation, atman_rt::ast::LifecycleEvent::TurnStart)
+                    .fire_invocation_hook(&invocation, atman_rt::ast::LifecycleEvent::TurnStart)
                     .await;
             }
             let result = executor
@@ -389,11 +408,11 @@ impl Executor {
             if persistent {
                 while let Ok(event) = lifecycle_rx.try_recv() {
                     if event == atman_rt::ast::LifecycleEvent::ContextCompact {
-                        executor.fire_turn_hook(&invocation, event).await;
+                        executor.fire_invocation_hook(&invocation, event).await;
                     }
                 }
                 executor
-                    .fire_turn_hook(&invocation, atman_rt::ast::LifecycleEvent::TurnEnd)
+                    .fire_invocation_hook(&invocation, atman_rt::ast::LifecycleEvent::TurnEnd)
                     .await;
             }
             result
@@ -413,7 +432,7 @@ impl Executor {
         }
     }
 
-    async fn fire_turn_hook(
+    async fn fire_invocation_hook(
         &self,
         invocation: &RootInvocation,
         event: atman_rt::ast::LifecycleEvent,

@@ -66,6 +66,8 @@ pub struct LaunchInput {
 /// Recorded identity and structural ceilings; restoring them does not authorize execution.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct EntryBinding {
+    /// Execute container startup hooks in the first admitted invocation of its initial entry.
+    pub session_start: bool,
     pub first_turn: crate::event::TurnId,
     pub first_run: crate::event::FlowRunId,
     pub authority: crate::flow_authority::EffectiveAuthority,
@@ -134,6 +136,12 @@ impl Activation {
         if let Some(binding) = &self.input.execution
             && (binding.first_turn.0.0.is_nil()
                 || binding.first_run.0.0.is_nil()
+                || (binding.session_start
+                    && (descriptor.created_by.is_some()
+                        || matches!(
+                            self.input.request.sender,
+                            super::inbox::SenderIdentity::Flow(_)
+                        )))
                 || self
                     .input
                     .result_route
