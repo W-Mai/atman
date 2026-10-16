@@ -38,6 +38,7 @@ pub struct RuntimeHost {
 struct Directory {
     sessions: Mutex<HashMap<Uuid, SessionHandle>>,
     changes: watch::Sender<()>,
+    redactor: Option<Arc<crate::redact::Redactor>>,
 }
 
 impl Default for Directory {
@@ -45,6 +46,7 @@ impl Default for Directory {
         Self {
             sessions: Default::default(),
             changes: watch::channel(()).0,
+            redactor: None,
         }
     }
 }
@@ -63,6 +65,16 @@ impl WeakRuntimeHost {
 }
 
 impl RuntimeHost {
+    /// Bind service diagnostic redaction before opening instances. Per-invocation sinks can supply their own execution diagnostic policy.
+    pub fn with_redactor(redactor: Arc<crate::redact::Redactor>) -> Self {
+        Self {
+            directory: Arc::new(Directory {
+                redactor: Some(redactor),
+                ..Directory::default()
+            }),
+        }
+    }
+
     pub(super) fn changes(&self) -> watch::Receiver<()> {
         self.directory.changes.subscribe()
     }
@@ -96,6 +108,7 @@ impl RuntimeHost {
             flows,
             access,
             WeakRuntimeHost(Arc::downgrade(&self.directory)),
+            self.directory.redactor.clone(),
             receiver,
         ));
         sessions.insert(id, handle.clone());
@@ -378,6 +391,7 @@ async fn serve_catalog(
     flows: FlowDirectory,
     access: Arc<RwLock<SessionAccess>>,
     host: WeakRuntimeHost,
+    redactor: Option<Arc<crate::redact::Redactor>>,
     mut commands: mpsc::Receiver<CatalogCommand>,
 ) {
     // Catalog lifetime owns observation, independently of execution and frontend handles.
@@ -577,7 +591,9 @@ async fn serve_catalog(
                 };
                 store = returned;
                 let result = match result {
-                    Ok(flow) => FlowWorker::start_owned(flow, Some(host.clone())).await,
+                    Ok(flow) => {
+                        FlowWorker::start_owned(flow, Some(host.clone()), redactor.clone()).await
+                    }
                     Err(error) => Err(error),
                 };
                 if let Ok(worker) = &result {

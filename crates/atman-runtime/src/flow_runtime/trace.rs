@@ -1,4 +1,4 @@
-//! Invocation-scoped event capture drained by the existing flow storage owner.
+//! Scoped event capture drained by the existing flow storage owner.
 
 use std::{
     io,
@@ -17,7 +17,7 @@ use super::FlowWorker;
 use crate::event::{AtmanUuid, Event, EventSink};
 use crate::flow_store::{
     FlowStore,
-    trace::{ExecutionEvent, ExecutionEventBatch, is_execution_event},
+    trace::{ExecutionEvent, ExecutionEventBatch, ExecutionScope},
 };
 
 #[derive(Default)]
@@ -57,18 +57,11 @@ impl TraceBuffer {
         }
     }
 
-    pub fn bind(
-        self: &Arc<Self>,
-        mut sink: EventSink,
-        lease: TurnLease<AtmanUuid>,
-        redactor: Option<Arc<crate::redact::Redactor>>,
-    ) -> EventSink {
+    pub fn bind(self: &Arc<Self>, sink: EventSink, scope: ExecutionScope) -> EventSink {
         let buffer = self.clone();
-        if let Some(redactor) = &redactor {
-            sink = sink.with_redactor(redactor.clone());
-        }
+        let redactor = sink.redactor();
         sink.with_observer(Arc::new(move |envelope| {
-            if buffer.closed.load(Ordering::Acquire) || !is_execution_event(&envelope.event) {
+            if buffer.closed.load(Ordering::Acquire) || !scope.accepts(&envelope.event) {
                 return;
             }
             let mut pending = buffer.pending.lock().unwrap();
@@ -77,7 +70,7 @@ impl TraceBuffer {
             }
             pending.push(PendingEvent {
                 event: ExecutionEvent {
-                    lease: lease.clone(),
+                    scope: scope.clone(),
                     sequence: envelope.seq,
                     timestamp: envelope.ts,
                     event: envelope.event.clone(),
@@ -129,8 +122,11 @@ impl FlowWorker {
         lease: TurnLease<AtmanUuid>,
         source: &EventSink,
     ) -> EventSink {
-        self.trace
-            .bind(self.context().sink().clone(), lease, source.redactor())
+        let mut sink = self.context().sink().clone();
+        if let Some(redactor) = source.redactor() {
+            sink = sink.with_redactor(redactor);
+        }
+        self.trace.bind(sink, ExecutionScope::Invocation(lease))
     }
 
     /// Read committed execution diagnostics; observation does not start or resume an instance.

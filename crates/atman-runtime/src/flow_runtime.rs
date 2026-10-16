@@ -73,15 +73,34 @@ impl FlowWorker {
     }
 
     pub async fn start(store: FlowStore) -> io::Result<Self> {
-        Self::start_owned(store, None).await
+        Self::start_with_redactor(store, None).await
+    }
+
+    /// Bind service diagnostic redaction for this writer's lifetime, including idle periods and late audit decisions.
+    pub async fn start_with_redactor(
+        store: FlowStore,
+        redactor: Option<Arc<crate::redact::Redactor>>,
+    ) -> io::Result<Self> {
+        Self::start_owned(store, None, redactor).await
     }
 
     async fn start_owned(
         store: FlowStore,
         host: Option<host::WeakRuntimeHost>,
+        redactor: Option<Arc<crate::redact::Redactor>>,
     ) -> io::Result<Self> {
+        let trace = Arc::new(trace::TraceBuffer::default());
+        let mut sink = crate::event::EventSink::new();
+        if let Some(redactor) = redactor {
+            sink = sink.with_redactor(redactor);
+        }
+        let sink = trace.bind(
+            sink,
+            crate::flow_store::trace::ExecutionScope::Instance(store.descriptor().address.clone()),
+        );
         let (store, context) = tokio::task::spawn_blocking(move || {
             let mut context = Session::restore_instance_context(
+                sink,
                 store.descriptor().address.clone(),
                 store.session_descriptor().configuration.clone(),
                 store.session_descriptor().project.clone(),
@@ -125,7 +144,6 @@ impl FlowWorker {
             Arc::downgrade(&context),
         ));
         let resource_owner = resources::ResourceOwner(resources.clone());
-        let trace = Arc::new(trace::TraceBuffer::default());
         let trace_owner = trace::TraceOwner(trace.clone());
         tokio::spawn(async move {
             let mut store = store;

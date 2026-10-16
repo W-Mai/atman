@@ -26,6 +26,164 @@ fn session_descriptor() -> SessionDescriptor {
 }
 
 #[tokio::test]
+async fn permission_audit_uses_instance_scope_and_retains_source_runs_across_turns() {
+    use atman_runtime::{
+        Value,
+        event::Event,
+        flow_store::trace::ExecutionScope,
+        permission::{PermissionIntent, SubmissionOutcome},
+        redact::{RedactMode, Redactor},
+        tool::{Tier, ToolDefinition},
+        trust::{TrustConfig, TrustMode},
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let host = RuntimeHost::with_redactor(Arc::new(Redactor::from_pairs(
+        &[("secret", "private-label")],
+        RedactMode::Full,
+    )));
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let worker = session
+        .create_flow(program_descriptor(
+            info.id,
+            "flow main() -> string { return permission_probe() }".into(),
+        ))
+        .await
+        .unwrap();
+    let other = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&worker, FlowTransition::Activated).await;
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let executor = Executor::new();
+    executor
+        .tools
+        .register_fn(
+            ToolDefinition::new("permission_probe", Tier::Zero),
+            move |_, ctx| {
+                let owner = ctx.flow_identity.as_ref().unwrap();
+                let broker = ctx.permission_broker.as_ref().unwrap();
+                let SubmissionOutcome::Pending(pending) = broker
+                    .submit(
+                        Some(&owner.session_id),
+                        Some(&owner.run_id),
+                        PermissionIntent::minimal("pending", "permission_probe", Tier::Two),
+                        false,
+                        &TrustConfig {
+                            mode: TrustMode::Steady,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap()
+                else {
+                    panic!("expected pending permission")
+                };
+                let request = pending.request;
+                let group = broker
+                    .user_create_group(
+                        &owner.session_id,
+                        [request.request_id.clone()].into(),
+                        "private-label".into(),
+                        &[(request.request_id.clone(), request.revision)].into(),
+                    )
+                    .unwrap();
+                captured.lock().unwrap().push((request, group));
+                async { Ok(Value::Str("done".into())) }
+            },
+        )
+        .unwrap();
+
+    let first = invoke(&worker, executor.clone()).await;
+    assert!(first.result.is_ok(), "{:?}", first.result);
+    let second = invoke(&worker, executor).await;
+    assert!(second.result.is_ok(), "{:?}", second.result);
+    let records = requests.lock().unwrap().clone();
+    assert_eq!(records.len(), 2);
+    // A late service emission retains its own group after a later turn has finished.
+    let group = &records[0].1;
+    let late_service = worker.context().sink().clone();
+    let late_event = Event::PermissionGroupUpdated {
+        payload: atman_runtime::permission_audit::PermissionGroupAudit::from_group(
+            group,
+            &info.id.to_string(),
+            chrono::Utc::now(),
+        ),
+    };
+    late_service.emit(late_event.clone());
+    let trace = worker.execution_events().await.unwrap();
+    let events: Vec<_> = trace.iter().flat_map(|batch| &batch.events).collect();
+    for ((request, group), completion) in records.iter().zip([&first, &second]) {
+        let created = events.iter().filter(|event| matches!(&event.event,
+            Event::PermissionRequestCreated { payload } if payload.request_id.as_ref() == Some(&request.request_id)
+                && payload.requesting_run_id == completion.lease.run));
+        assert_eq!(created.count(), 1);
+        let cancelled: Vec<_> = events.iter().filter(|event| matches!(&event.event,
+            Event::PermissionRequestCancelled { payload } if payload.request_id.as_ref() == Some(&request.request_id)
+                && payload.requesting_run_id == completion.lease.run)).collect();
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(
+            cancelled[0].scope,
+            ExecutionScope::Instance(worker.address().clone())
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(&event.event,
+                    Event::PermissionGroupResolved { payload } if payload.group_id == group.group_id
+                ))
+                .count(),
+            1
+        );
+    }
+    let grouped = events
+        .iter()
+        .find(|event| {
+            matches!(&event.event,
+        Event::PermissionGroupUpdated { payload } if payload.group_id == group.group_id)
+        })
+        .unwrap();
+    assert_eq!(
+        grouped.scope,
+        ExecutionScope::Instance(worker.address().clone())
+    );
+    assert!(
+        !serde_json::to_string(&trace)
+            .unwrap()
+            .contains("private-label")
+    );
+    assert!(other.execution_events().await.unwrap().is_empty());
+    let address = worker.address().clone();
+    let mut store = worker.shutdown().await.unwrap();
+    let cursor = store.cursor().clone();
+    let mut invalid = (*grouped).clone();
+    invalid.sequence = events.last().unwrap().sequence + 1;
+    invalid.scope = ExecutionScope::Instance(other.address().clone());
+    assert!(
+        store
+            .append_execution_events(vec![invalid.clone()])
+            .is_err()
+    );
+    invalid.scope = ExecutionScope::Instance(address.clone());
+    invalid.event = Event::MermaidDiagram {
+        source: "requires an invocation".into(),
+    };
+    assert!(store.append_execution_events(vec![invalid]).is_err());
+    assert_eq!(store.cursor(), &cursor);
+    drop(store);
+    let reopened = session.open_flow(address.instance_id).await.unwrap();
+    late_service.emit(late_event);
+    assert_eq!(
+        serde_json::to_value(reopened.execution_events().await.unwrap()).unwrap(),
+        serde_json::to_value(trace).unwrap()
+    );
+    reopened.shutdown().await.unwrap();
+    other.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn execution_traces_share_instance_order_and_survive_turns_and_reopen() {
     use atman_runtime::{
         Value,
@@ -126,7 +284,12 @@ async fn execution_traces_share_instance_order_and_survive_turns_and_reopen() {
             node_positions(live.iter().map(|event| (event.seq, &event.event)).collect()),
             "batching must retain every live execution node exactly once"
         );
-        assert!(events.iter().all(|event| event.lease == completion.lease));
+        assert!(events.iter().all(|event| {
+            event
+                .scope
+                .lease()
+                .is_none_or(|lease| lease == &completion.lease)
+        }));
         assert!(
             events
                 .windows(2)
@@ -170,7 +333,12 @@ async fn execution_traces_share_instance_order_and_survive_turns_and_reopen() {
     assert!(store.append_execution_events(vec![old.clone()]).is_err());
     let mut wrong_owner = old.clone();
     wrong_owner.sequence = previous_sequence + 1;
-    wrong_owner.lease.flow = second.address().clone();
+    let atman_runtime::flow_store::trace::ExecutionScope::Invocation(lease) =
+        &mut wrong_owner.scope
+    else {
+        panic!("expected invocation event")
+    };
+    lease.flow = second.address().clone();
     assert!(store.append_execution_events(vec![wrong_owner]).is_err());
     let mut message = old;
     message.sequence = previous_sequence + 1;
@@ -192,7 +360,7 @@ async fn execution_traces_share_instance_order_and_survive_turns_and_reopen() {
     let new_events: Vec<_> = updated
         .iter()
         .flat_map(|batch| &batch.events)
-        .filter(|event| event.lease != a.lease)
+        .filter(|event| event.scope.lease().is_some_and(|lease| lease != &a.lease))
         .collect();
     assert!(!new_events.is_empty());
     assert!(
@@ -1306,13 +1474,13 @@ async fn planning_tools_follow_the_invocation_across_inline_spawn_and_reopen() {
         parent_trace
             .iter()
             .flat_map(|batch| &batch.events)
-            .all(|event| event.lease.flow == *parent.address())
+            .all(|event| event.scope.flow() == parent.address())
     );
     assert!(
         child_trace
             .iter()
             .flat_map(|batch| &batch.events)
-            .all(|event| event.lease.flow == *child.address())
+            .all(|event| event.scope.flow() == child.address())
     );
     assert!(
         child_trace

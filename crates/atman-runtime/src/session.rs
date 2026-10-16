@@ -1448,6 +1448,10 @@ impl Session {
     }
 
     pub fn open_ephemeral() -> Self {
+        Self::ephemeral_with_sink(EventSink::new())
+    }
+
+    fn ephemeral_with_sink(sink: EventSink) -> Self {
         let (injection_tx, _) = broadcast::channel(32);
         let (stream_tx, _) = broadcast::channel(2048);
         let (context_watch, context_rx) = watch::channel(ContextSnapshot::default());
@@ -1455,7 +1459,6 @@ impl Session {
         let (attach_watch, attach_rx) = watch::channel(0);
         let (todos_watch, todos_rx) = watch::channel(Vec::new());
         let (plans_watch, plans_rx) = watch::channel(Vec::new());
-        let sink = EventSink::new();
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::default());
         let (flow_registry, permission_broker) = new_permission_pipeline(&sink, &stream_tx);
@@ -1519,6 +1522,7 @@ impl Session {
     /// Isolated execution context for one persistent instance. Persistence is owned by its FlowStore.
     pub fn open_instance_context(address: crate::flow_store::FlowRef) -> Self {
         Self::restore_instance_context(
+            EventSink::new(),
             address,
             Default::default(),
             None,
@@ -1529,7 +1533,9 @@ impl Session {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn restore_instance_context(
+        sink: EventSink,
         address: crate::flow_store::FlowRef,
         configuration: crate::flow_store::SessionConfiguration,
         project: Option<crate::storage::ProjectContext>,
@@ -1538,7 +1544,7 @@ impl Session {
         checkpoint: Option<&[Message]>,
         goal: Option<crate::memory::goal::GoalRecord>,
     ) -> Self {
-        let mut context = Self::open_ephemeral();
+        let mut context = Self::ephemeral_with_sink(sink);
         context.id = SessionId(address.session_id.0);
         context.goal_control =
             crate::goal::GoalController::for_instance(address.instance_id.to_string(), goal);

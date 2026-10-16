@@ -22,6 +22,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent permission audit** — Instance journals retain permission requests, groups, grants, and decisions alongside invocation diagnostics. Service events preserve their source identities across turns and idle periods, use the owner's redaction policy, and survive reopening without replaying decisions.
+
 - **Invocation-owned prompts** — Shared daemon and TUI transports preserve each flow's prompt events, run identity, and late-answer destination across inline and parallel calls. Dropping an execution future removes its pending prompts; expired forms retain their original reply route.
 
 - **Persistent execution diagnostics** — Flow instances retain independently attributed workflow, tool, model, and resource events in their journals. Concurrent emission preserves one order, and turn completion waits for preceding diagnostics to commit. Reopening preserves recorded traces without rerunning work.

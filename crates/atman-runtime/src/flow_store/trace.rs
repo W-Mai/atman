@@ -5,16 +5,47 @@ use std::io;
 use atman_rt::{FlowInstance, InstanceActivity, InstanceState, TurnLease};
 use serde::{Deserialize, Serialize};
 
-use super::{FlowFact, FlowStore, completion::Completions, invalid};
+use super::{FlowFact, FlowRef, FlowStore, completion::Completions, invalid};
 use crate::event::{AtmanUuid, Event};
 use crate::event_log::journal::CommitReceipt;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExecutionEvent {
-    pub lease: TurnLease<AtmanUuid>,
+    pub scope: ExecutionScope,
     pub sequence: u64,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub event: Event,
+}
+
+/// Service diagnostics belong to the instance, even when no turn is active. Invocation diagnostics retain their original lease after completion.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", content = "owner", rename_all = "snake_case")]
+pub enum ExecutionScope {
+    Invocation(TurnLease<AtmanUuid>),
+    Instance(FlowRef),
+}
+
+impl ExecutionScope {
+    pub fn flow(&self) -> &FlowRef {
+        match self {
+            Self::Invocation(lease) => &lease.flow,
+            Self::Instance(address) => address,
+        }
+    }
+
+    pub fn lease(&self) -> Option<&TurnLease<AtmanUuid>> {
+        match self {
+            Self::Invocation(lease) => Some(lease),
+            Self::Instance(_) => None,
+        }
+    }
+
+    pub(crate) fn accepts(&self, event: &Event) -> bool {
+        match self {
+            Self::Invocation(_) => is_execution_event(event),
+            Self::Instance(_) => is_service_event(event),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -48,14 +79,16 @@ impl ExecutionTrace {
                 } => Some(&active.lease),
                 _ => None,
             };
-            let known = active == Some(&event.lease)
-                || completions
-                    .get(&event.lease)
-                    .is_some_and(|record| record.completion.lease == event.lease);
-            if &event.lease.flow != state.address()
+            let known = event.scope.lease().is_none_or(|lease| {
+                active == Some(lease)
+                    || completions
+                        .get(lease)
+                        .is_some_and(|record| &record.completion.lease == lease)
+            });
+            if event.scope.flow() != state.address()
                 || !known
                 || event.sequence <= sequence
-                || !is_execution_event(&event.event)
+                || !event.scope.accepts(&event.event)
             {
                 return Err(invalid(
                     "execution event has an invalid owner, sequence, or kind",
@@ -73,6 +106,24 @@ impl ExecutionTrace {
             .sequence;
         self.batches.push(ExecutionEventBatch { events, receipt });
     }
+}
+
+fn is_service_event(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::PermissionRequestCreated { .. }
+            | Event::PermissionRequestTargeted { .. }
+            | Event::PermissionRequestDeferred { .. }
+            | Event::PermissionRequestApproved { .. }
+            | Event::PermissionRequestDenied { .. }
+            | Event::PermissionRequestCancelled { .. }
+            | Event::PermissionGroupCreated { .. }
+            | Event::PermissionGroupUpdated { .. }
+            | Event::PermissionGroupResolved { .. }
+            | Event::PermissionGrantCreated { .. }
+            | Event::PermissionGrantExpired { .. }
+            | Event::UnrestrictedExecution { .. }
+    )
 }
 
 impl FlowStore {
