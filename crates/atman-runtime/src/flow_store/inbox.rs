@@ -85,6 +85,10 @@ pub enum InboxPayload {
         source: FlowEventRef,
         content: Value,
     },
+    ProcessEvent {
+        source: super::process_watch::ProcessSource,
+        content: Value,
+    },
     Timer {
         timer: Uuid,
         due_at: DateTime<Utc>,
@@ -155,6 +159,7 @@ impl DeliveryRequest {
             (
                 SenderIdentity::Host(_),
                 InboxPayload::Watcher { .. }
+                | InboxPayload::ProcessEvent { .. }
                 | InboxPayload::Timer { .. }
                 | InboxPayload::Internal { .. },
             ) => true,

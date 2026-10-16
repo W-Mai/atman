@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::{
     FlowContent, FlowFact, FlowRef, FlowStore, FlowTransition, completion, context, goal, history,
-    inbox, outbox, planning, publication, subscription, trace, waiter,
+    inbox, outbox, planning, process_watch, publication, subscription, trace, waiter,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -71,6 +71,10 @@ pub enum FlowUpdate {
     FlowSubscribed(Box<subscription::SubscriptionRecord>),
     FlowUnsubscribed(Uuid),
     EventsObserved(Box<subscription::Observation>),
+    ProcessWatchRegistered(Box<process_watch::ProcessWatchRecord>),
+    ProcessWatchCancelled(Uuid),
+    ProcessObserved(Box<process_watch::ProcessObservation>),
+    ProcessWatchesExpired(Box<process_watch::ProcessWatchExpiry>),
 }
 
 impl From<FlowFact> for FlowUpdate {
@@ -110,6 +114,10 @@ impl From<FlowFact> for FlowUpdate {
             FlowFact::FlowSubscribed(value) => Self::FlowSubscribed(value),
             FlowFact::FlowUnsubscribed(value) => Self::FlowUnsubscribed(value),
             FlowFact::EventsObserved(value) => Self::EventsObserved(value),
+            FlowFact::ProcessWatchRegistered(value) => Self::ProcessWatchRegistered(value),
+            FlowFact::ProcessWatchCancelled(value) => Self::ProcessWatchCancelled(value),
+            FlowFact::ProcessObserved(value) => Self::ProcessObserved(value),
+            FlowFact::ProcessWatchesExpired(value) => Self::ProcessWatchesExpired(value),
         }
     }
 }

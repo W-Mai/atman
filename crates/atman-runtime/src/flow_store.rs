@@ -14,6 +14,7 @@ pub mod launch;
 pub mod migration;
 pub mod outbox;
 pub mod planning;
+pub mod process_watch;
 pub mod publication;
 pub mod subscription;
 pub mod trace;
@@ -228,6 +229,10 @@ enum FlowFact {
     FlowSubscribed(Box<subscription::SubscriptionRecord>),
     FlowUnsubscribed(Uuid),
     EventsObserved(Box<subscription::Observation>),
+    ProcessWatchRegistered(Box<process_watch::ProcessWatchRecord>),
+    ProcessWatchCancelled(Uuid),
+    ProcessObserved(Box<process_watch::ProcessObservation>),
+    ProcessWatchesExpired(Box<process_watch::ProcessWatchExpiry>),
     DeliveryConfirmed {
         request_id: Uuid,
         delivery: outbox::DeliveryReceipt,
@@ -324,7 +329,13 @@ impl FlowFact {
         if facts.iter().any(|fact| {
             matches!(
                 fact,
-                Self::FlowSubscribed(_) | Self::FlowUnsubscribed(_) | Self::EventsObserved(_)
+                Self::FlowSubscribed(_)
+                    | Self::FlowUnsubscribed(_)
+                    | Self::EventsObserved(_)
+                    | Self::ProcessWatchRegistered(_)
+                    | Self::ProcessWatchCancelled(_)
+                    | Self::ProcessObserved(_)
+                    | Self::ProcessWatchesExpired(_)
             )
         }) {
             return if facts.len() == 1
@@ -806,6 +817,7 @@ pub struct FlowStore {
     outbox: outbox::Outbox,
     publications: publication::Publications,
     subscriptions: subscription::Subscriptions,
+    process_watches: process_watch::ProcessWatches,
     activation: Option<launch::Activation>,
     completions: completion::Completions,
     checkpoints: context::Checkpoints,
@@ -851,6 +863,7 @@ impl FlowStore {
             outbox: outbox::Outbox::default(),
             publications: publication::Publications::default(),
             subscriptions: subscription::Subscriptions::default(),
+            process_watches: process_watch::ProcessWatches::default(),
             activation: None,
             completions: Default::default(),
             checkpoints: Default::default(),
@@ -869,6 +882,7 @@ impl FlowStore {
         let mut outbox = outbox::Outbox::default();
         let mut publications = publication::Publications::default();
         let mut subscriptions = subscription::Subscriptions::default();
+        let mut process_watches = process_watch::ProcessWatches::default();
         let mut activation = None;
         let mut completions = completion::Completions::default();
         let mut checkpoints = context::Checkpoints::default();
@@ -914,6 +928,7 @@ impl FlowStore {
                             ) {
                                 inbox.close(&receipt);
                                 subscriptions.close();
+                                process_watches.close();
                             }
                         }
                         (Some((descriptor, state, inbox)), FlowFact::Activated(record)) => {
@@ -996,6 +1011,31 @@ impl FlowStore {
                             subscriptions.validate(&observation, inbox, address)?;
                             subscriptions.apply(&observation, inbox, &receipt);
                         }
+                        (Some((_, state, _)), FlowFact::ProcessWatchRegistered(record)) => {
+                            if !state.accepts_input() {
+                                return Err(invalid("process watch recipient is unavailable"));
+                            }
+                            process_watches.register(*record)?;
+                        }
+                        (Some(_), FlowFact::ProcessWatchCancelled(id)) => {
+                            process_watches.cancel(id)?
+                        }
+                        (Some((_, state, inbox)), FlowFact::ProcessObserved(observation)) => {
+                            if !state.accepts_input() {
+                                return Err(invalid(
+                                    "process observation recipient is unavailable",
+                                ));
+                            }
+                            process_watches.validate(&observation, inbox, address)?;
+                            process_watches.apply(*observation, inbox, &receipt);
+                        }
+                        (Some((_, state, inbox)), FlowFact::ProcessWatchesExpired(expiry)) => {
+                            if !state.accepts_input() {
+                                return Err(invalid("process expiry recipient is unavailable"));
+                            }
+                            process_watches.validate_expiry(&expiry, inbox, address)?;
+                            process_watches.apply_expiry(*expiry, inbox, &receipt);
+                        }
                         (Some((_, state, inbox)), FlowFact::SendQueued(intent)) => {
                             outbox.validate(state, &intent)?;
                             if let Some(reply) = &intent.reply {
@@ -1067,6 +1107,7 @@ impl FlowStore {
             outbox,
             publications,
             subscriptions,
+            process_watches,
             activation,
             completions,
             checkpoints,
@@ -1167,6 +1208,7 @@ impl FlowStore {
         ) {
             self.inbox.close(&cursor);
             self.subscriptions.close();
+            self.process_watches.close();
         }
         self.cursor = cursor.clone();
         self.refresh_projection();

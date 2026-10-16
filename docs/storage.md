@@ -357,6 +357,16 @@ The observer establishes change receivers before scanning source events and adva
 
 `FlowWorker::subscribe_observation_issues` exposes blocked sources and their reasons. Storage failures retain progress and can be retried with `retry_observations`; no empty turn is started to retry delivery. Reopening a worker restores its subscriptions, while a catalog attachment alone does not eagerly open every recorded flow. Product bootstrap and generic watcher tool routing still require integration with these host APIs.
 
+## Process watch storage
+
+`FlowStore::register_process_watch` records a process incarnation, handle, pattern, source position, one-shot behavior, and optional absolute expiry. Bash and terminal sources have distinct types. Reusing a handle for a different process requires a new incarnation. Identical registration retries preserve the original position and terminal status; they do not restart observation or extend the deadline.
+
+The trusted resource owner establishes the source stream before registration and submits one `ProcessReport` containing all matches at a source position. `observe_process` rechecks active registrations and commits their status changes with a single `ProcessEvent` inbox envelope. An identical report returns its original receipt, including after consumption or closure; a conflicting report at that position is rejected. Source positions are monotonic within an incarnation. Matching belongs to the resource adapter, while acceptance, cancellation, expiry, and consumption belong to the receiving journal.
+
+`expire_process_watches` commits expiration and timer input together. No timeout is imposed when `expires_at` is absent. The resource owner serializes source reports and expiry commands; an accepted expiry or cancellation excludes a subsequently submitted match. Cancelling a registration preserves already accepted input. Closing the instance cancels outstanding registrations and pending input through the existing lifecycle transition while retaining both in history.
+
+Starting a new `FlowWorker` creates a new process-resource owner. Outstanding registrations for old process incarnations become `SourceLost`, or `Expired` if their recorded deadline has passed, and their notifications enter the same durable inbox. Reopening does not restart a process or generate a second loss notification. Execution pauses retain those inputs without granting permission to run. Storage-only inspection and recovery do not declare source loss; ownership startup does. These host storage APIs do not change the legacy `watch` tool's producer or wait routing.
+
 ## Owned send attempts
 
 `RuntimeHost::send` uses the sender's admitted lease to commit an outbox intent, routes its recorded request to the receiver, and commits the authenticated acceptance receipt back to the sender. A reply waiter, when supplied, is registered with the intent before receiver contact. Send admission and new receiver delivery have separate authorization callbacks. The caller authenticates the invoking flow before entering this host API.

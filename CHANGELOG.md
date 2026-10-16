@@ -34,6 +34,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent process observations** — Store process-watch identities, absolute deadlines, and matching results in each flow journal. Merge matches at one source position into one inbox input, retain accepted input after unwatch, and report unavailable process incarnations once when resource ownership restarts.
+
 - **CLI persistent session discovery** — `session list` and `session show` inspect recorded persistent catalogs alongside legacy history, including missing project paths. Queries leave execution ownership unchanged, ignore disposable caches, report corrupt catalogs, and leave incomplete journal tails unchanged.
 
 - **Daemon shutdown** — SIGINT and SIGTERM stop request admission, disconnect event streams and Unix clients, and drain persistent and registered legacy execution before removing the process marker. Pending instance input and independent pauses remain stored.

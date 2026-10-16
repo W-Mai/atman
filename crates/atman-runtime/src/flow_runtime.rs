@@ -119,6 +119,8 @@ impl FlowWorker {
             crate::flow_store::trace::ExecutionScope::Instance(store.descriptor().address.clone()),
         );
         let (store, context) = tokio::task::spawn_blocking(move || {
+            let mut store = store;
+            store.lose_process_sources()?;
             let mut context = Session::restore_instance_context(
                 sink,
                 store.descriptor().address.clone(),
@@ -144,10 +146,10 @@ impl FlowWorker {
             context
                 .sink()
                 .restore_seq(sequence.max(next.saturating_sub(1)));
-            (store, context)
+            Ok::<_, io::Error>((store, context))
         })
         .await
-        .map_err(io::Error::other)?;
+        .map_err(io::Error::other)??;
         let address = store.descriptor().address.clone();
         let resources = Arc::new(resources::InstanceResources::default());
         if matches!(

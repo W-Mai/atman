@@ -162,7 +162,9 @@ pub fn context_message(
         ),
     );
     message.origin = match (&envelope.request.sender, &envelope.request.payload) {
-        (_, InboxPayload::Watcher { .. }) => MessageOrigin::Watcher,
+        (_, InboxPayload::Watcher { .. } | InboxPayload::ProcessEvent { .. }) => {
+            MessageOrigin::Watcher
+        }
         (_, InboxPayload::FlowEvent { event, .. }) if event == "final_answer" => {
             MessageOrigin::Watcher
         }
