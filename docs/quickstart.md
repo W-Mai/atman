@@ -362,6 +362,10 @@ atman mcp call jira search '{"query":"open"}'
 atman mcp call jira update_issue '{"key":"PROJ-1","summary":"Updated"}' --allow-write
 ```
 
+#### Connection lifetime
+
+For embedded hosts, `McpClient::connect_config_in(config, Some(absolute_directory))` fixes a stdio server's working directory, including reconnects. Project-backed CLI startup supplies the runtime's bound project root. `connect_config` captures the process working directory when connecting. `McpClient::shutdown()` closes the connection, cancels pending requests and sampling tasks, and prevents subsequent calls or catalog refreshes from reconnecting. Dropping the final client releases its transport; a failed or abandoned initialization also releases its child process. Stdio stderr is drained without being rendered into the terminal UI.
+
 #### HTTP MCP configuration
 
 Configure an HTTP endpoint in `~/.config/atman/mcp_servers.json`:

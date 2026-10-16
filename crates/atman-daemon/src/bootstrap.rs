@@ -117,7 +117,10 @@ pub fn spawn_mcp_boot(
                         transport,
                         state: atman_runtime::mcp::McpServerState::Connecting,
                     });
-                    let outcome = atman_runtime::mcp::McpClient::connect_config(&cfg).await;
+                    let outcome = atman_runtime::mcp::McpClient::connect_config_in(
+                        &cfg,
+                        executor.tool_ctx.project().map(|project| project.root()),
+                    ).await;
                     match outcome {
                         Ok(client) => {
                             let providers = executor.providers.clone();

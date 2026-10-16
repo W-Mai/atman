@@ -18,6 +18,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Owned MCP connections** — Stdio connections retain their working directory across reconnects. Explicit shutdown cancels pending calls and sampling tasks without reconnecting, and failed or abandoned initialization releases subprocesses. Stderr draining prevents a verbose server from blocking its protocol output.
+
 - **Project knowledge resources** — Runtime construction binds Confession and Spec tools to the selected project's storage root. Sessions and peer flows in that project share saved knowledge, while other projects remain isolated. CLI and daemon setup use the same registration path, including configured confession redaction and optional indexes; registration does not create directories.
 
 - **Runtime memory tools** — Runtime construction registers Goal, Plan, Todo, and history tools without requiring legacy session stores. Persistent calls resolve the current instance, and missing host bindings fail before accessing legacy state. Inline calls retain the current owner; spawned flows keep independent records across reopening.

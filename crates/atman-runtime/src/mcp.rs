@@ -1,5 +1,6 @@
 use crate::value::ValueJson;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,7 +18,19 @@ use tokio::task::JoinHandle;
 use crate::error::RuntimeError;
 use crate::tool::BoxFut;
 
-type PendingCalls = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, McpError>>>>>;
+type PendingCalls =
+    Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, McpError>>>>>;
+
+struct PendingCall<'a> {
+    calls: &'a PendingCalls,
+    id: u64,
+}
+
+impl Drop for PendingCall<'_> {
+    fn drop(&mut self) {
+        self.calls.lock().unwrap().remove(&self.id);
+    }
+}
 
 pub trait McpTransport: Send + Sync {
     fn call<'a>(
@@ -34,6 +47,9 @@ pub trait McpTransport: Send + Sync {
     ) -> BoxFut<'a, Result<(), McpError>>;
 
     fn kind(&self) -> &'static str;
+
+    /// Release owned resources when supported by the transport.
+    fn shutdown(&self) {}
 
     fn initial_protocol_version(&self) -> &'static str {
         "2024-11-05"
@@ -243,10 +259,10 @@ pub struct McpStdioTransport {
     stdin: Arc<Mutex<ChildStdin>>,
     pending: PendingCalls,
     next_id: Arc<Mutex<u64>>,
-    #[allow(dead_code)]
-    child: Arc<Mutex<Child>>,
-    #[allow(dead_code)]
-    reader_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    child: std::sync::Mutex<Option<Child>>,
+    reader_task: JoinHandle<()>,
+    stderr_task: JoinHandle<()>,
+    closed: tokio_util::sync::CancellationToken,
     timeout_ms: u64,
     #[allow(dead_code)]
     sampling_handler: SharedSamplingHandler,
@@ -258,7 +274,13 @@ impl McpTransport for McpStdioTransport {
         method: &'a str,
         params: serde_json::Value,
     ) -> BoxFut<'a, Result<serde_json::Value, McpError>> {
-        Box::pin(self.call_stdio(method, params))
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+                _ = self.closed.cancelled() => Err(McpError::Disconnected),
+                result = self.call_stdio(method, params) => result,
+            }
+        })
     }
 
     fn notify<'a>(
@@ -266,11 +288,33 @@ impl McpTransport for McpStdioTransport {
         method: &'a str,
         params: serde_json::Value,
     ) -> BoxFut<'a, Result<(), McpError>> {
-        Box::pin(self.notify_stdio(method, params))
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+                _ = self.closed.cancelled() => Err(McpError::Disconnected),
+                result = self.notify_stdio(method, params) => result,
+            }
+        })
     }
 
     fn kind(&self) -> &'static str {
         "stdio"
+    }
+
+    fn shutdown(&self) {
+        self.closed.cancel();
+        self.pending.lock().unwrap().clear();
+        self.reader_task.abort();
+        self.stderr_task.abort();
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+impl Drop for McpStdioTransport {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -283,9 +327,33 @@ impl McpStdioTransport {
         notification_tx: tokio::sync::broadcast::Sender<McpNotification>,
         sampling_handler: SharedSamplingHandler,
     ) -> Result<Self, McpError> {
+        let cwd = std::env::current_dir().map_err(|error| McpError::Io(error.to_string()))?;
+        Self::spawn_in(
+            cmd,
+            args,
+            env,
+            timeout_ms,
+            notification_tx,
+            sampling_handler,
+            &cwd,
+        )
+        .await
+    }
+
+    async fn spawn_in(
+        cmd: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout_ms: u64,
+        notification_tx: tokio::sync::broadcast::Sender<McpNotification>,
+        sampling_handler: SharedSamplingHandler,
+        cwd: &Path,
+    ) -> Result<Self, McpError> {
         let mut command = Command::new(cmd);
         command
             .args(args)
+            .current_dir(cwd)
+            .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -303,10 +371,17 @@ impl McpStdioTransport {
             .stdout
             .take()
             .ok_or_else(|| McpError::Io("no stdout".into()))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| McpError::Io("no stderr".into()))?;
+        let stderr_task = tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+        });
 
         let stdin_arc = Arc::new(tokio::sync::Mutex::new(stdin));
         let stdin_for_reader = stdin_arc.clone();
-        let pending: PendingCalls = Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingCalls = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let pending_for_reader = pending.clone();
         let notif_for_reader = notification_tx.clone();
         let sampling_for_reader = sampling_handler.clone();
@@ -325,8 +400,10 @@ impl McpStdioTransport {
             stdin: stdin_arc,
             pending,
             next_id: Arc::new(Mutex::new(1)),
-            child: Arc::new(Mutex::new(child)),
-            reader_task: Arc::new(Mutex::new(Some(reader_task))),
+            child: std::sync::Mutex::new(Some(child)),
+            reader_task,
+            stderr_task,
+            closed: tokio_util::sync::CancellationToken::new(),
             timeout_ms,
             sampling_handler,
         })
@@ -344,7 +421,11 @@ impl McpStdioTransport {
             v
         };
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
+        self.pending.lock().unwrap().insert(id, tx);
+        let _pending_call = PendingCall {
+            calls: &self.pending,
+            id,
+        };
 
         let req = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -372,17 +453,11 @@ impl McpStdioTransport {
 
         match tokio::time::timeout(Duration::from_millis(self.timeout_ms), rx).await {
             Ok(Ok(inner)) => inner,
-            Ok(Err(_)) => {
-                self.pending.lock().await.remove(&id);
-                Err(McpError::Disconnected)
-            }
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                Err(McpError::Timeout {
-                    timeout_ms: self.timeout_ms,
-                    method: method.into(),
-                })
-            }
+            Ok(Err(_)) => Err(McpError::Disconnected),
+            Err(_) => Err(McpError::Timeout {
+                timeout_ms: self.timeout_ms,
+                method: method.into(),
+            }),
         }
     }
 
@@ -420,7 +495,9 @@ async fn reader_loop(
 ) {
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
+    let mut sampling_tasks = tokio::task::JoinSet::new();
     loop {
+        while sampling_tasks.try_join_next().is_some() {}
         match lines.next_line().await {
             Ok(Some(line)) => {
                 if line.trim().is_empty() {
@@ -441,7 +518,7 @@ async fn reader_loop(
                                 .unwrap_or(serde_json::Value::Null);
                             let handler_arc = sampling_handler.clone();
                             let stdin_arc = stdin.clone();
-                            tokio::spawn(async move {
+                            sampling_tasks.spawn(async move {
                                 let handler = handler_arc.lock().unwrap().clone();
                                 let result = if let Some(h) = handler {
                                     match serde_json::from_value::<SamplingRequest>(params.clone())
@@ -495,7 +572,7 @@ async fn reader_loop(
                 let Some(id) = parsed.get("id").and_then(|v| v.as_u64()) else {
                     continue;
                 };
-                let sender = pending.lock().await.remove(&id);
+                let sender = pending.lock().unwrap().remove(&id);
                 if let Some(sender) = sender {
                     let outcome = if let Some(err) = parsed.get("error") {
                         Err(McpError::ServerError {
@@ -519,7 +596,7 @@ async fn reader_loop(
             Err(_) => break,
         }
     }
-    let mut pending = pending.lock().await;
+    let mut pending = pending.lock().unwrap();
     for (_, tx) in pending.drain() {
         let _ = tx.send(Err(McpError::Disconnected));
     }
@@ -979,6 +1056,7 @@ pub struct McpClient {
     retained_notification_rx:
         std::sync::Mutex<Option<tokio::sync::broadcast::Receiver<McpNotification>>>,
     sampling_handler: SharedSamplingHandler,
+    closed: tokio_util::sync::CancellationToken,
 }
 
 #[derive(Debug, Clone)]
@@ -1010,6 +1088,7 @@ pub enum McpNotification {
 enum ReconnectConfig {
     Stdio {
         cmd: String,
+        cwd: PathBuf,
         args: Vec<String>,
         env: Vec<(String, String)>,
         timeout_ms: u64,
@@ -1024,14 +1103,23 @@ enum ReconnectConfig {
 
 impl McpClient {
     pub async fn connect_config(config: &McpServerConfig) -> Result<Self, McpError> {
+        Self::connect_config_in(config, None).await
+    }
+
+    /// Bind a stdio server's working directory for both connection and reconnection.
+    pub async fn connect_config_in(
+        config: &McpServerConfig,
+        cwd: Option<&Path>,
+    ) -> Result<Self, McpError> {
         match config.transport {
             TransportKind::Stdio => {
-                Self::connect_stdio(
+                Self::connect_stdio_in(
                     &config.name,
                     &config.command,
                     &config.args,
                     &config.env,
                     config.timeout_ms,
+                    cwd,
                 )
                 .await
             }
@@ -1058,16 +1146,37 @@ impl McpClient {
         env: &[(String, String)],
         timeout_ms: u64,
     ) -> Result<Self, McpError> {
+        Self::connect_stdio_in(name, cmd, args, env, timeout_ms, None).await
+    }
+
+    async fn connect_stdio_in(
+        name: impl Into<String>,
+        cmd: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout_ms: u64,
+        cwd: Option<&Path>,
+    ) -> Result<Self, McpError> {
+        let cwd = match cwd {
+            Some(cwd) if cwd.is_absolute() => cwd.to_path_buf(),
+            Some(_) => {
+                return Err(McpError::Protocol(
+                    "MCP working directory must be absolute".into(),
+                ));
+            }
+            None => std::env::current_dir().map_err(|error| McpError::Io(error.to_string()))?,
+        };
         let (notification_tx, notification_rx) = tokio::sync::broadcast::channel(256);
         let sampling_handler: SharedSamplingHandler = Arc::new(std::sync::Mutex::new(None));
         let transport: Arc<dyn McpTransport> = Arc::new(
-            McpStdioTransport::spawn(
+            McpStdioTransport::spawn_in(
                 cmd,
                 args,
                 env,
                 timeout_ms,
                 notification_tx.clone(),
                 sampling_handler.clone(),
+                &cwd,
             )
             .await?,
         );
@@ -1082,6 +1191,7 @@ impl McpClient {
         .await?;
         client.reconnect = Some(ReconnectConfig::Stdio {
             cmd: cmd.to_string(),
+            cwd,
             args: args.to_vec(),
             env: env.to_vec(),
             timeout_ms,
@@ -1169,7 +1279,26 @@ impl McpClient {
             notification_tx,
             retained_notification_rx: std::sync::Mutex::new(Some(notification_rx)),
             sampling_handler,
+            closed: tokio_util::sync::CancellationToken::new(),
         })
+    }
+
+    /// Close the connection and cancel pending calls without allowing reconnection.
+    pub fn shutdown(&self) {
+        self.closed.cancel();
+        let transport = self.transport.lock().unwrap().clone();
+        transport.shutdown();
+    }
+
+    async fn while_open<T>(
+        &self,
+        operation: impl std::future::Future<Output = Result<T, McpError>>,
+    ) -> Result<T, McpError> {
+        tokio::select! {
+            biased;
+            _ = self.closed.cancelled() => Err(McpError::Disconnected),
+            result = operation => result,
+        }
     }
 
     pub fn set_sampling_handler(&self, handler: SamplingHandler) {
@@ -1194,6 +1323,10 @@ impl McpClient {
     }
 
     pub async fn refresh_tool_snapshot(&self) -> Result<Option<Arc<McpToolSnapshot>>, McpError> {
+        self.while_open(self.refresh_tools()).await
+    }
+
+    async fn refresh_tools(&self) -> Result<Option<Arc<McpToolSnapshot>>, McpError> {
         let _refresh = self.tool_refresh.lock().await;
         let transport = { self.transport.lock().unwrap().clone() };
         let candidate = match fetch_tool_snapshot(transport.as_ref()).await {
@@ -1223,17 +1356,19 @@ impl McpClient {
         let new_transport: Arc<dyn McpTransport> = match cfg {
             ReconnectConfig::Stdio {
                 cmd,
+                cwd,
                 args,
                 env,
                 timeout_ms,
             } => Arc::new(
-                McpStdioTransport::spawn(
+                McpStdioTransport::spawn_in(
                     cmd,
                     args,
                     env,
                     *timeout_ms,
                     self.notification_tx.clone(),
                     self.sampling_handler.clone(),
+                    cwd,
                 )
                 .await?,
             ),
@@ -1253,11 +1388,24 @@ impl McpClient {
             ),
         };
         initialize_transport(new_transport.as_ref()).await?;
-        *self.transport.lock().unwrap() = new_transport;
+        let mut current = self.transport.lock().unwrap();
+        if self.closed.is_cancelled() {
+            new_transport.shutdown();
+            return Err(McpError::Disconnected);
+        }
+        *current = new_transport;
         Ok(())
     }
 
     async fn call_rpc(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, McpError> {
+        self.while_open(self.call_rpc_open(method, params)).await
+    }
+
+    async fn call_rpc_open(
         &self,
         method: &str,
         params: serde_json::Value,
@@ -1339,6 +1487,12 @@ impl McpClient {
         let v = self.call_rpc("prompts/get", params).await?;
         serde_json::from_value(v)
             .map_err(|e| McpError::Protocol(format!("prompts/get parse error: {e}")))
+    }
+}
+
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -2404,6 +2558,21 @@ for line in sys.stdin:
             .await
             .unwrap_err();
         assert!(matches!(err, McpError::Timeout { .. }));
+        assert!(transport.pending.lock().unwrap().is_empty());
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                transport.call("abandoned", serde_json::json!({}))
+            )
+            .await
+            .is_err()
+        );
+        assert!(transport.pending.lock().unwrap().is_empty());
+        transport.shutdown();
+        assert!(matches!(
+            transport.call("closed", serde_json::json!({})).await,
+            Err(McpError::Disconnected)
+        ));
     }
 
     #[test]
