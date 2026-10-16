@@ -217,14 +217,16 @@ impl Journal {
         let start = match after {
             None => 0,
             Some(cursor) => {
-                let position = usize::try_from(cursor.sequence).map_err(invalid)?;
+                let position = usize::try_from(cursor.sequence)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
                 let known = position
                     .checked_sub(1)
                     .and_then(|index| self.batches.get(index));
                 if cursor.journal_id != self.id
                     || known.is_none_or(|batch| batch.digest != cursor.digest)
                 {
-                    return Err(invalid(
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
                         "journal cursor is not a committed position in this history",
                     ));
                 }
@@ -458,10 +460,12 @@ mod tests {
                 ..first
             },
         ] {
-            assert!(
+            assert_eq!(
                 journal
                     .read_after::<String>(Some(&invalid), NonZeroUsize::new(2).unwrap())
-                    .is_err()
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput,
             );
             assert!(!journal.poisoned);
         }

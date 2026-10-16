@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use atman_proto::{JsonRpcError, flows::*, methods};
 use atman_rt::FlowInstanceId;
 use atman_runtime::flow_runtime::{
+    FlowWorker,
     access::PeerControl,
     host::{HostServices, RuntimeHost, SessionHandle},
 };
@@ -21,6 +22,7 @@ use uuid::Uuid;
 
 use crate::DaemonState;
 
+pub(crate) mod events;
 mod execution;
 
 type CatalogSlot = Arc<OnceCell<SessionHandle>>;
@@ -109,6 +111,7 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::FLOW_BIND
             | methods::FLOW_INVOKE
             | methods::FLOW_OUTPUT
+            | methods::FLOW_EVENTS
     )
 }
 
@@ -142,6 +145,14 @@ pub(crate) async fn context(
     flow: FlowAddress,
     principal: &str,
 ) -> Result<Arc<atman_runtime::Session>, JsonRpcError> {
+    Ok(worker(state, flow, principal).await?.context())
+}
+
+pub(crate) async fn worker(
+    state: &DaemonState,
+    flow: FlowAddress,
+    principal: &str,
+) -> Result<FlowWorker, JsonRpcError> {
     authorize_operator(principal)?;
     if flow.session_id.0.is_nil() || flow.instance_id.is_nil() {
         return Err(JsonRpcError::invalid_params(
@@ -151,12 +162,11 @@ pub(crate) async fn context(
     let service = state.session_service.get().ok_or_else(|| {
         JsonRpcError::application("open the persistent session before accessing its flows")
     })?;
-    let worker = service
+    service
         .host
         .flow(&core_address(flow))
         .await
-        .map_err(|error| JsonRpcError::application(error.to_string()))?;
-    Ok(worker.context())
+        .map_err(|error| JsonRpcError::application(error.to_string()))
 }
 
 enum Request {
@@ -170,6 +180,7 @@ enum Request {
     Bind(FlowRequest),
     Invoke(InvokeFlowRequest),
     Output(ReadFlowOutputRequest),
+    Events(ReadFlowEventsRequest),
 }
 
 impl Request {
@@ -185,6 +196,7 @@ impl Request {
             methods::FLOW_BIND => Self::Bind(decode(params)?),
             methods::FLOW_INVOKE => Self::Invoke(decode(params)?),
             methods::FLOW_OUTPUT => Self::Output(decode(params)?),
+            methods::FLOW_EVENTS => Self::Events(decode(params)?),
             _ => return Err(JsonRpcError::method_not_found(method)),
         };
         let (session, instance) = match &request {
@@ -236,6 +248,14 @@ impl Request {
                 }
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
+            Self::Events(request) => {
+                if !(1..=128).contains(&request.limit) {
+                    return Err(JsonRpcError::invalid_params(
+                        "event page limit must be between 1 and 128",
+                    ));
+                }
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
         };
         if session.is_nil() || instance.is_some_and(|id| id.is_nil()) {
             return Err(JsonRpcError::invalid_params(
@@ -261,6 +281,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::Bind(request) => service.bind(state, request).await,
         Request::Invoke(request) => service.invoke(request).await,
         Request::Output(request) => service.output(request).await,
+        Request::Events(request) => service.events(request).await,
         Request::Create(request) => {
             let config_dir = state
                 .launcher()

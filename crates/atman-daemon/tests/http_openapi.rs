@@ -59,6 +59,7 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "flow.bind",
         "flow.invoke",
         "flow.output",
+        "flow.events",
     ] {
         assert!(description.contains(method), "missing RPC method {method}");
     }
@@ -90,6 +91,8 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "LaunchFlowRequest",
         "InvokeFlowRequest",
         "ReadFlowOutputRequest",
+        "ReadFlowEventsRequest",
+        "FlowCursor",
     ] {
         assert!(
             schemas.contains_key(expected),

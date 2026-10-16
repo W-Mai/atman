@@ -93,3 +93,51 @@ pub struct ReadFlowOutputRequest {
     #[serde(default = "page_size")]
     pub limit: usize,
 }
+
+/// Exclusive position of a complete flow commit. The server validates its journal identity and digest against retained history.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct FlowCursor {
+    pub journal_id: Uuid,
+    pub sequence: u64,
+    pub digest: String,
+}
+
+impl std::fmt::Display for FlowCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}:{}", self.journal_id, self.sequence, self.digest)
+    }
+}
+
+impl std::str::FromStr for FlowCursor {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let invalid = "expected flow cursor journal UUID:sequence:SHA-256 digest";
+        let mut fields = value.split(':');
+        let journal_id: Uuid = fields.next().ok_or(invalid)?.parse().map_err(|_| invalid)?;
+        let sequence = fields.next().ok_or(invalid)?.parse().map_err(|_| invalid)?;
+        let digest = fields.next().ok_or(invalid)?;
+        if journal_id.is_nil()
+            || sequence == 0
+            || digest.len() != 64
+            || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || fields.next().is_some()
+        {
+            return Err(invalid);
+        }
+        Ok(Self {
+            journal_id,
+            sequence,
+            digest: digest.into(),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct ReadFlowEventsRequest {
+    pub flow: FlowAddress,
+    #[serde(default)]
+    pub after: Option<FlowCursor>,
+    #[serde(default = "page_size")]
+    pub limit: usize,
+}

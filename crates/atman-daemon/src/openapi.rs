@@ -25,11 +25,15 @@ fn rpc_endpoint() {}
     path = "/events",
     params(
         ("session_id" = String, Query, description = "Session UUID"),
-        ("since_seq" = Option<u64>, Query, description = "Resume from this seq (exclusive)"),
+        ("instance_id" = Option<String>, Query, description = "Persistent flow instance UUID; emits committed flow_update batches"),
+        ("after" = Option<String>, Query, description = "Initial instance cursor journal UUID:sequence:digest, exclusive"),
+        ("Last-Event-ID" = Option<String>, Header, description = "Reconnect cursor from the last applied event; instance streams require the complete cursor and prefer it over the initial after query"),
+        ("since_seq" = Option<u64>, Query, description = "Legacy session event sequence, exclusive; not accepted with instance_id"),
         ("token" = Option<String>, Query, description = "Bearer token fallback for EventSource (query only, GET only)"),
     ),
     responses(
-        (status = 200, description = "SSE stream (text/event-stream). Payload is a JSON-serialized atman_runtime::event::Event per line."),
+        (status = 200, description = "SSE stream. Instance streams emit committed batches of typed FlowUpdate with a receipt; legacy session streams emit event::Event."),
+        (status = 400, description = "Invalid address, cursor, or cursor namespace"),
         (status = 401, description = "Missing or invalid bearer token"),
         (status = 403, description = "Authenticated principal is not authorized for the session"),
     ),
@@ -55,7 +59,7 @@ fn openapi_endpoint() {}
         title = "atman daemon",
         version = env!("CARGO_PKG_VERSION"),
         description = "JSON-RPC 2.0 daemon for the atman flow runtime. \
-Methods dispatched at POST /rpc: ping, list_sessions, run_flow, session.create, session.open, session.flows, session.select_flow, flow.get, flow.control, flow.launch, flow.bind, flow.invoke, flow.output, goal.run, goal.get, goal.set, goal.pause, goal.resume, goal.clear, cancel_run, resolve_prompt, list_permission_requests, create_permission_group, resolve_permission_requests. \
+Methods dispatched at POST /rpc: ping, list_sessions, run_flow, session.create, session.open, session.flows, session.select_flow, flow.get, flow.control, flow.launch, flow.bind, flow.invoke, flow.output, flow.events, goal.run, goal.get, goal.set, goal.pause, goal.resume, goal.clear, cancel_run, resolve_prompt, list_permission_requests, create_permission_group, resolve_permission_requests. \
 SSE event stream at GET /events. Every endpoint requires a bearer token."
     ),
     paths(rpc_endpoint, sse_endpoint, openapi_endpoint),
@@ -89,6 +93,8 @@ SSE event stream at GET /events. Every endpoint requires a bearer token."
         atman_proto::flows::LaunchFlowRequest,
         atman_proto::flows::InvokeFlowRequest,
         atman_proto::flows::ReadFlowOutputRequest,
+        atman_proto::flows::ReadFlowEventsRequest,
+        atman_proto::flows::FlowCursor,
         atman_proto::SessionStatus,
         atman_proto::SessionId,
         atman_proto::FlowRunId,

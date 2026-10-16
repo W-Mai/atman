@@ -179,6 +179,7 @@ pub mod methods {
     pub const FLOW_BIND: &str = "flow.bind";
     pub const FLOW_INVOKE: &str = "flow.invoke";
     pub const FLOW_OUTPUT: &str = "flow.output";
+    pub const FLOW_EVENTS: &str = "flow.events";
     pub const GOAL_RUN: &str = "goal.run";
     pub const GOAL_GET: &str = "goal.get";
     pub const GOAL_SET: &str = "goal.set";

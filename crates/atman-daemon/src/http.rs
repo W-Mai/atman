@@ -20,6 +20,10 @@ use atman_proto::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, SessionId};
 
 use crate::DaemonState;
 
+mod flow_events;
+
+type EventStream = futures::stream::BoxStream<'static, Result<Event, std::io::Error>>;
+
 pub struct HttpState {
     pub daemon: Arc<DaemonState>,
     pub auth_token: String,
@@ -64,6 +68,10 @@ async fn rpc_handler(
 pub struct SseQuery {
     pub session_id: SessionId,
     #[serde(default)]
+    pub instance_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub after: Option<String>,
+    #[serde(default)]
     pub since_seq: Option<u64>,
 }
 
@@ -73,6 +81,17 @@ async fn sse_handler(
     Query(q): Query<SseQuery>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::io::Error>>>, (StatusCode, String)> {
+    if let Some(instance_id) = q.instance_id {
+        let stream =
+            flow_events::subscribe(&state.daemon, &principal_id, q, instance_id, &headers).await?;
+        return Ok(event_stream(stream));
+    }
+    if q.after.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "after requires an instance_id".into(),
+        ));
+    }
     if !state.daemon.owns_live_session(&q.session_id, &principal_id) {
         return Err((
             StatusCode::FORBIDDEN,
@@ -85,10 +104,14 @@ async fn sse_handler(
         .join(q.session_id.0.to_string())
         .join("events.jsonl");
     let start = q.since_seq.or_else(|| last_event_id(&headers)).unwrap_or(0);
+    Ok(event_stream(tail_events_stream(events_path, start).boxed()))
+}
+
+fn event_stream(stream: EventStream) -> Sse<impl Stream<Item = Result<Event, std::io::Error>>> {
     let prelude =
         futures::stream::once(async { Ok(Event::default().retry(Duration::from_millis(3000))) });
-    let stream = prelude.chain(tail_events_stream(events_path, start));
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+    Sse::new(prelude.chain(stream).boxed())
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
 fn last_event_id(headers: &HeaderMap) -> Option<u64> {

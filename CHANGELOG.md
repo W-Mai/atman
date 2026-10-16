@@ -28,6 +28,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent flow event transport** — `flow.events` and instance-addressed SSE expose the same committed update batches. Full cursors support validated pagination and automatic reconnection without resetting to the initial history range; view connections do not control execution.
+
 - **Committed flow views** — History pages and live subscriptions share typed updates and validated commit cursors. Atomic batches retain input provenance, final replies, completion, and execution diagnostics across turns and reopening; disconnected views leave execution running.
 
 - **Journal history pages** — Bounded reads preserve atomic batches and validate journal-scoped commit receipts. Recovery rebuilds file positions, and resumed reads avoid rescanning preceding history or moving the append boundary.
