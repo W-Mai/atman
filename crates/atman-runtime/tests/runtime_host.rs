@@ -26,6 +26,119 @@ fn session_descriptor() -> SessionDescriptor {
 }
 
 #[tokio::test]
+async fn host_shutdown_unwinds_paused_execution_without_closing_instances_or_losing_input() {
+    use atman_runtime::flow_store::goal::GoalRequest;
+    use atman_runtime::memory::goal::GoalEdit;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let mut saved = Vec::new();
+    for _ in 0..2 {
+        let info = session_descriptor();
+        let session = host
+            .attach_session(root.create_session(info.clone()).unwrap())
+            .unwrap();
+        let worker = session
+            .create_flow(program_descriptor(
+                info.id,
+                "flow main() -> any { loop { yield } }".into(),
+            ))
+            .await
+            .unwrap();
+        change(&worker, FlowTransition::Activated).await;
+        let request = peer_request(worker.address(), worker.address());
+        worker.accept_input(request, |_| Ok(())).await.unwrap();
+        let turn = prepare(&worker.snapshot().await.unwrap()).unwrap().unwrap();
+        let ticket = worker.start_turn(Executor::new(), turn).await.unwrap();
+        let key = Uuid::now_v7().into();
+        change(&worker, FlowTransition::ExecutionPaused { key }).await;
+        let goal = worker
+            .edit_goal(
+                GoalRequest {
+                    id: Uuid::now_v7(),
+                    sender: SenderIdentity::User(Uuid::now_v7()),
+                    expected: None,
+                    edit: GoalEdit::Set {
+                        text: "retained objective".into(),
+                        replace_completed: false,
+                    },
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap()
+            .goal;
+        let queued = worker
+            .accept_input(peer_request(worker.address(), worker.address()), |_| Ok(()))
+            .await
+            .unwrap();
+        let idle = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+        change(&idle, FlowTransition::Activated).await;
+        change(&idle, FlowTransition::ExecutionPaused { key }).await;
+        idle.accept_input(peer_request(worker.address(), idle.address()), |_| Ok(()))
+            .await
+            .unwrap();
+        session
+            .schedule_flow(idle.address().instance_id.clone(), Executor::new(), prepare)
+            .await
+            .unwrap();
+        saved.push((info, worker, idle, ticket, key, goal, queued));
+    }
+    let owned = host.clone();
+    let waiter = tokio::spawn(async move { owned.shutdown().await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.session(saved[0].0.id).is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    waiter.abort();
+    let _ = waiter.await;
+    tokio::time::timeout(Duration::from_secs(10), host.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    host.shutdown().await.unwrap();
+    assert!(host.sessions().is_empty());
+    let extra = root.create_session(session_descriptor()).unwrap();
+    assert!(host.attach_session(extra).is_err());
+    for (info, worker, idle, ticket, key, goal, queued) in saved {
+        let complete = ticket.wait().await.unwrap();
+        assert_eq!(
+            complete.outcome,
+            TurnOutcome::Interrupted(atman_rt::Interruption::Cancelled)
+        );
+        assert!(worker.snapshot().await.is_err());
+        let session = root.open_session(info.id).unwrap();
+        let flow = session.open_flow(&worker.address().instance_id).unwrap();
+        assert_eq!(
+            flow.completion(None).unwrap().completion.lease,
+            complete.lease
+        );
+        assert!(matches!(
+            flow.state().state(),
+            InstanceState::Open(InstanceActivity::Interrupted { .. })
+        ));
+        assert_eq!(flow.state().pauses(), &[key]);
+        assert_eq!(flow.goal(), goal.as_ref());
+        assert_eq!(
+            flow.pending_inputs()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![queued.message_id]
+        );
+        let idle = session.open_flow(&idle.address().instance_id).unwrap();
+        assert_eq!(
+            idle.state().state(),
+            &InstanceState::Open(InstanceActivity::Idle)
+        );
+        assert!(idle.completion(None).is_none());
+        assert_eq!(idle.pending_inputs().count(), 1);
+    }
+}
+
+#[tokio::test]
 async fn late_form_replies_use_the_instance_inbox_and_commit_before_transport_acknowledgement() {
     use atman_runtime::form::{
         CompositeForm, DeferredFormAnswer, FormAnswer, FormKind, FormQuestion, FormSubmission,

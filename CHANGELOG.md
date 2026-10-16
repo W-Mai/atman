@@ -32,6 +32,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Explicit runtime shutdown** — Stop attached schedulers, unwind paused or running invocations, commit completion, and release instance journals and process resources. Retain unread input, goals, subscriptions, and independent pause keys for explicit recovery.
+
 - **History archive command** — `migrate archive` imports stopped legacy sessions through the durable migration store. It retains titles and project bindings, supports explicit destination IDs, and returns a JSON receipt without starting execution services.
 
 - **Offline history migration** — Legacy event logs can be imported into independent historical flows with exact source retention, resumable batches, integrity checks, and atomic session publication. Retries retain identity and reject changed sources or conflicting destinations.

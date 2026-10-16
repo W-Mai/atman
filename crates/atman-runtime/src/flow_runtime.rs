@@ -73,12 +73,21 @@ pub struct FlowWorker {
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
     commits: watch::Receiver<CommitReceipt>,
     scheduler_owned: Arc<std::sync::atomic::AtomicBool>,
+    stopping: Arc<std::sync::atomic::AtomicBool>,
     launch_gate: Arc<tokio::sync::Mutex<()>>,
     observation_issues: watch::Sender<Vec<observation::ObservationIssue>>,
     observation_retry: watch::Sender<()>,
 }
 
 impl FlowWorker {
+    pub(super) fn is_stopping(&self) -> bool {
+        self.stopping.load(std::sync::atomic::Ordering::Acquire)
+            || self
+                .host
+                .as_ref()
+                .is_some_and(|host| host.upgrade().is_err())
+    }
+
     pub(crate) fn is_stopped(&self) -> bool {
         self.commands.is_closed()
     }
@@ -261,6 +270,7 @@ impl FlowWorker {
             state,
             commits,
             scheduler_owned: Default::default(),
+            stopping: Default::default(),
             launch_gate: Default::default(),
             observation_issues: watch::channel(Vec::new()).0,
             observation_retry: watch::channel(()).0,

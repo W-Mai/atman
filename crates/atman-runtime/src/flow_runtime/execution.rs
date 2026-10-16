@@ -97,6 +97,13 @@ impl FlowWorker {
         let worker = self.clone();
         let runtime = tokio::runtime::Handle::current();
         self.request(move |store| {
+            if worker.is_stopping() {
+                return if expected.is_some() {
+                    Ok(None)
+                } else {
+                    Err(invalid("instance host is stopping"))
+                };
+            }
             if expected
                 .as_ref()
                 .is_some_and(|cursor| cursor != store.cursor())
@@ -200,6 +207,45 @@ impl FlowWorker {
             }))
         })
         .await
+    }
+}
+
+impl FlowWorker {
+    /// Stop admission under the writer, unwind active execution, then relinquish storage.
+    pub(super) async fn stop_execution(self) -> io::Result<()> {
+        let mut state = self.subscribe_state();
+        let stopping = self.stopping.clone();
+        self.request(move |store| {
+            stopping.store(true, std::sync::atomic::Ordering::Release);
+            if let InstanceState::Open(InstanceActivity::Active(active)) = store.state().state()
+                && active.phase != TurnPhase::Cancelling
+            {
+                store.transition(
+                    store.state().revision(),
+                    crate::flow_store::FlowTransition::PhaseChanged {
+                        lease: active.lease.clone(),
+                        phase: TurnPhase::Cancelling,
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .await?;
+        loop {
+            let active = matches!(
+                state.borrow_and_update().state(),
+                InstanceState::Open(InstanceActivity::Active(_))
+                    | InstanceState::Closing { active: Some(_) }
+            );
+            if !active {
+                break;
+            }
+            state
+                .changed()
+                .await
+                .map_err(|_| io::Error::other("instance stopped before execution completed"))?;
+        }
+        self.shutdown().await.map(drop)
     }
 }
 

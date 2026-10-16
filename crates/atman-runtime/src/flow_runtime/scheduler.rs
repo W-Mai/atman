@@ -107,7 +107,7 @@ impl FlowWorker {
             let _ownership = ownership;
             let mut commits = worker.subscribe_commits();
             loop {
-                if stopping.is_cancelled() {
+                if stopping.is_cancelled() || worker.is_stopping() {
                     return Ok(());
                 }
                 commits.borrow_and_update();

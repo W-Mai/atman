@@ -739,14 +739,14 @@ mod tests {
                 .is_some()
         );
 
-        let unwind = std::panic::catch_unwind({
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
             let state = Arc::clone(&state);
             let session_id = session_id.clone();
             move || {
                 let _cleanup = RegistryCleanup { state, session_id };
                 panic!("simulate flow-thread panic");
             }
-        });
+        }));
         assert!(unwind.is_err());
         assert!(state.live_session(&session_id).is_none());
         assert!(

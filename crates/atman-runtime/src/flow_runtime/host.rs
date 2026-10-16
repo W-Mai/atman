@@ -46,6 +46,8 @@ struct Directory {
     sessions: Mutex<HashMap<Uuid, SessionHandle>>,
     changes: watch::Sender<()>,
     services: HostServices,
+    stopping: std::sync::atomic::AtomicBool,
+    shutdown: tokio::sync::OnceCell<Result<(), String>>,
 }
 
 impl Default for Directory {
@@ -54,6 +56,8 @@ impl Default for Directory {
             sessions: Default::default(),
             changes: watch::channel(()).0,
             services: HostServices::default(),
+            stopping: Default::default(),
+            shutdown: Default::default(),
         }
     }
 }
@@ -66,6 +70,11 @@ impl WeakRuntimeHost {
     pub fn upgrade(&self) -> io::Result<RuntimeHost> {
         self.0
             .upgrade()
+            .filter(|directory| {
+                !directory
+                    .stopping
+                    .load(std::sync::atomic::Ordering::Acquire)
+            })
             .map(|directory| RuntimeHost { directory })
             .ok_or_else(|| io::Error::other("instance host is no longer available"))
     }
@@ -102,6 +111,13 @@ impl RuntimeHost {
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let id = store.projection().descriptor.id;
         let mut sessions = self.directory.sessions.lock().unwrap();
+        if self
+            .directory
+            .stopping
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(invalid("instance host is stopping"));
+        }
         if sessions.contains_key(&id) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -131,6 +147,13 @@ impl RuntimeHost {
     }
 
     pub fn session(&self, id: Uuid) -> io::Result<SessionHandle> {
+        if self
+            .directory
+            .stopping
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(invalid("instance host is stopping"));
+        }
         self.directory
             .sessions
             .lock()
@@ -170,6 +193,46 @@ impl RuntimeHost {
             .accept_input(request, authorize_new)
             .await
     }
+
+    /// Stop all attached execution owners and release their journals and process resources.
+    ///
+    /// Accepted shutdown continues if the waiting caller disappears. Repeated calls observe the same result. Unread input, goals, pause keys and subscriptions remain recorded; instances are not closed or automatically resumed. Disconnecting a frontend must not call this operation.
+    pub async fn shutdown(&self) -> io::Result<()> {
+        let directory = self.directory.clone();
+        tokio::spawn(async move {
+            directory
+                .shutdown
+                .get_or_init(|| async {
+                    let sessions: Vec<_> = {
+                        let sessions = directory.sessions.lock().unwrap();
+                        directory
+                            .stopping
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        sessions.values().cloned().collect()
+                    };
+                    directory.changes.send_modify(|_| {});
+                    let results = futures::future::join_all(sessions.iter().map(|session| async {
+                        session
+                            .request(CatalogCommand::Shutdown)
+                            .await
+                            .map_err(|error| format!("session {}: {error}", session.id))
+                    }))
+                    .await;
+                    directory.sessions.lock().unwrap().clear();
+                    let errors: Vec<_> = results.into_iter().filter_map(Result::err).collect();
+                    if errors.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(errors.join("; "))
+                    }
+                })
+                .await
+                .clone()
+                .map_err(io::Error::other)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
 }
 
 /// A session catalog owner shared by all views and callers.
@@ -190,6 +253,7 @@ pub struct SessionSnapshot {
 }
 
 enum CatalogCommand {
+    Shutdown(oneshot::Sender<io::Result<()>>),
     Describe {
         id: FlowInstanceId,
         reply: oneshot::Sender<io::Result<(String, FlowInstance<AtmanUuid>)>>,
@@ -430,6 +494,49 @@ async fn serve_catalog(
     let mut schedulers: HashMap<FlowInstanceId, FlowScheduler> = HashMap::new();
     while let Some(command) = commands.recv().await {
         match command {
+            CatalogCommand::Shutdown(reply) => {
+                // Reject queued catalog work before waiting for executions which may themselves be awaiting a catalog reply.
+                commands.close();
+                drop(commands);
+                let mut errors = Vec::new();
+                for (id, controller) in schedulers.drain() {
+                    if let Err(error) = controller.stop().await {
+                        errors.push(format!("flow {id} scheduler: {error}"));
+                    }
+                }
+                for (_, observer) in observers.drain() {
+                    observer.abort();
+                    let _ = observer.await;
+                }
+                let workers: Vec<_> = flows
+                    .lock()
+                    .unwrap()
+                    .drain()
+                    .map(|(_, worker)| worker)
+                    .collect();
+                let results = futures::future::join_all(
+                    workers
+                        .into_iter()
+                        .filter(|worker| !worker.is_stopped())
+                        .map(|worker| async move {
+                            let address = worker.address().clone();
+                            worker
+                                .stop_execution()
+                                .await
+                                .map_err(|error| format!("flow {}: {error}", address.instance_id))
+                        }),
+                )
+                .await;
+                errors.extend(results.into_iter().filter_map(Result::err));
+                // Release the catalog owner before acknowledging that another host can open it.
+                drop(store);
+                let _ = reply.send(if errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(io::Error::other(errors.join("; ")))
+                });
+                return;
+            }
             CatalogCommand::Describe { id, reply } => {
                 let existing = flows
                     .lock()
