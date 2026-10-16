@@ -8,7 +8,9 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
-use crate::memory::goal::{GoalActor, GoalPauseReason, GoalRecord, GoalStatus, GoalStore};
+use crate::memory::goal::{
+    GoalActor, GoalEdit, GoalPauseReason, GoalRecord, GoalStatus, GoalStore,
+};
 
 /// Product contract for managed agents; ordinary language flows remain single runs.
 pub fn is_managed(flow: &atman_rt::ast::FlowDecl) -> bool {
@@ -333,24 +335,7 @@ impl GoalController {
         if text.trim().is_empty() {
             return Err(io::Error::other("goal objective must not be empty"));
         }
-        self.mutate(expected, |record| {
-            let previous = record
-                .as_ref()
-                .ok_or_else(|| io::Error::other("no goal set"))?;
-            if !previous.pause.as_ref().is_some_and(|p| {
-                p.actor == GoalActor::Agent && p.reason == GoalPauseReason::Completed
-            }) {
-                return Err(io::Error::other(
-                    "only an agent-completed goal can be replaced by new input",
-                ));
-            }
-            *record = Some(GoalRecord::new(
-                text.trim().into(),
-                self.owner.clone(),
-                previous.parent_goal_id.clone(),
-            ));
-            Ok(())
-        })?;
+        self.edit(expected, GoalEdit::ReplaceCompleted { text: text.into() })?;
         self.state.lock().unwrap().execution_pause = ExecutionPause::Open;
         self.changed();
         Ok(())
@@ -533,16 +518,8 @@ impl GoalController {
                 *saved = record.clone();
                 Ok(())
             })?;
-        } else if let Some(goal) = &mut record
-            && state.record.as_ref() != Some(goal)
-        {
-            if let Some(old) = state.record.as_ref().filter(|old| old.id == goal.id) {
-                goal.revision = old
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| io::Error::other("goal revision exhausted"))?;
-            }
-            goal.updated_at = chrono::Utc::now();
+        } else {
+            crate::memory::goal::advance_revision(&state.record, &mut record)?;
         }
         if state.record.is_some()
             && state.record.as_ref().map(|g| &g.id) != record.as_ref().map(|g| &g.id)
@@ -565,6 +542,16 @@ impl GoalController {
         Ok(())
     }
 
+    fn edit(&self, expected: Option<(&str, u64)>, edit: GoalEdit) -> io::Result<()> {
+        self.mutate(expected, |record| {
+            edit.apply(
+                record,
+                &self.owner,
+                self.parent.as_ref().and_then(|p| p.record().map(|g| g.id)),
+            )
+        })
+    }
+
     /// Create a fresh objective for an owner, replacing only the acknowledged record.
     pub fn create(&self, text: &str, expected: Option<(&str, u64)>) -> io::Result<()> {
         let _transition = self.transition.lock().unwrap();
@@ -572,19 +559,12 @@ impl GoalController {
         if text.is_empty() {
             return Err(io::Error::other("goal objective must not be empty"));
         }
-        self.mutate(expected, |record| {
-            if record.is_some() && expected.is_none() {
-                return Err(io::Error::other(
-                    "a goal already exists; read it before replacing",
-                ));
-            }
-            *record = Some(GoalRecord::new(
-                text.into(),
-                self.owner.clone(),
-                self.parent.as_ref().and_then(|p| p.record().map(|g| g.id)),
+        if self.record().is_some() && expected.is_none() {
+            return Err(io::Error::other(
+                "a goal already exists; read it before replacing",
             ));
-            Ok(())
-        })?;
+        }
+        self.edit(expected, GoalEdit::Create { text: text.into() })?;
         self.state.lock().unwrap().execution_pause = ExecutionPause::Open;
         self.changed();
         Ok(())
@@ -597,18 +577,7 @@ impl GoalController {
             return Err(io::Error::other("goal objective must not be empty"));
         }
         let creating = self.record().is_none();
-        self.mutate(expected, |record| {
-            if let Some(goal) = record {
-                goal.objective = text.into();
-            } else {
-                *record = Some(GoalRecord::new(
-                    text.into(),
-                    self.owner.clone(),
-                    self.parent.as_ref().and_then(|p| p.record().map(|g| g.id)),
-                ));
-            }
-            Ok(())
-        })?;
+        self.edit(expected, GoalEdit::Set { text: text.into() })?;
         if creating {
             self.state.lock().unwrap().execution_pause = ExecutionPause::Open;
             self.changed();
@@ -638,21 +607,14 @@ impl GoalController {
             self.state.lock().unwrap().execution_pause = ExecutionPause::Paused;
             self.changed();
         }
-        self.mutate(expected, |record| {
-            let goal = record
-                .as_mut()
-                .ok_or_else(|| io::Error::other("no goal set"))?;
-            if actor != GoalActor::User
-                && goal
-                    .pause
-                    .as_ref()
-                    .is_some_and(|p| p.actor == GoalActor::User)
-            {
-                return Err(io::Error::other("goal is paused by the user"));
-            }
-            goal.pause(actor, reason, summary);
-            Ok(())
-        })?;
+        self.edit(
+            expected,
+            GoalEdit::Pause {
+                actor,
+                reason,
+                summary,
+            },
+        )?;
         if ExecutionPause::for_pause(actor, reason) == ExecutionPause::Finishing {
             let mut state = self.state.lock().unwrap();
             if state.execution_pause == ExecutionPause::Open {
@@ -666,22 +628,7 @@ impl GoalController {
 
     pub fn resume(&self, actor: GoalActor, expected: Option<(&str, u64)>) -> io::Result<()> {
         let _transition = self.transition.lock().unwrap();
-        self.mutate(expected, |record| {
-            let goal = record
-                .as_mut()
-                .ok_or_else(|| io::Error::other("no goal set"))?;
-            if actor != GoalActor::User
-                && goal
-                    .pause
-                    .as_ref()
-                    .is_some_and(|p| p.actor == GoalActor::User)
-            {
-                return Err(io::Error::other("only the user can resume this goal"));
-            }
-            goal.status = GoalStatus::Active;
-            goal.pause = None;
-            Ok(())
-        })?;
+        self.edit(expected, GoalEdit::Resume { actor })?;
         self.state.lock().unwrap().execution_pause = ExecutionPause::Open;
         self.changed();
         Ok(())
@@ -690,10 +637,7 @@ impl GoalController {
     pub fn clear(&self) -> io::Result<()> {
         let _transition = self.transition.lock().unwrap();
         // Removing an objective must not release an existing execution pause.
-        self.mutate(None, |record| {
-            *record = None;
-            Ok(())
-        })?;
+        self.edit(None, GoalEdit::Clear)?;
         self.child_results.invalidate();
         Ok(())
     }

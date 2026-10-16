@@ -77,6 +77,124 @@ impl GoalRecord {
     }
 }
 
+/// Objective changes, independent of execution pauses and scheduling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum GoalEdit {
+    Set {
+        text: String,
+    },
+    Create {
+        text: String,
+    },
+    ReplaceCompleted {
+        text: String,
+    },
+    Pause {
+        actor: GoalActor,
+        reason: GoalPauseReason,
+        summary: String,
+    },
+    Resume {
+        actor: GoalActor,
+    },
+    Clear,
+}
+
+impl GoalEdit {
+    pub(crate) fn apply(
+        &self,
+        record: &mut Option<GoalRecord>,
+        owner: &str,
+        parent_goal_id: Option<String>,
+    ) -> std::io::Result<()> {
+        match self {
+            Self::Set { text } | Self::Create { text } | Self::ReplaceCompleted { text } => {
+                let text = text.trim();
+                if text.is_empty() {
+                    return Err(std::io::Error::other("goal objective must not be empty"));
+                }
+                let parent_goal_id = if matches!(self, Self::ReplaceCompleted { .. }) {
+                    let previous = record
+                        .as_ref()
+                        .ok_or_else(|| std::io::Error::other("no goal set"))?;
+                    if !previous.pause.as_ref().is_some_and(|pause| {
+                        pause.actor == GoalActor::Agent
+                            && pause.reason == GoalPauseReason::Completed
+                    }) {
+                        return Err(std::io::Error::other(
+                            "only an agent-completed goal can be replaced by new input",
+                        ));
+                    }
+                    previous.parent_goal_id.clone()
+                } else {
+                    parent_goal_id
+                };
+                if let Some(goal) = record
+                    && matches!(self, Self::Set { .. })
+                {
+                    goal.objective = text.into();
+                } else {
+                    *record = Some(GoalRecord::new(text.into(), owner.into(), parent_goal_id));
+                }
+            }
+            Self::Pause {
+                actor,
+                reason,
+                summary,
+            } => {
+                let goal = record
+                    .as_mut()
+                    .ok_or_else(|| std::io::Error::other("no goal set"))?;
+                if *actor != GoalActor::User
+                    && goal
+                        .pause
+                        .as_ref()
+                        .is_some_and(|p| p.actor == GoalActor::User)
+                {
+                    return Err(std::io::Error::other("goal is paused by the user"));
+                }
+                goal.pause(*actor, *reason, summary.clone());
+            }
+            Self::Resume { actor } => {
+                let goal = record
+                    .as_mut()
+                    .ok_or_else(|| std::io::Error::other("no goal set"))?;
+                if *actor != GoalActor::User
+                    && goal
+                        .pause
+                        .as_ref()
+                        .is_some_and(|p| p.actor == GoalActor::User)
+                {
+                    return Err(std::io::Error::other("only the user can resume this goal"));
+                }
+                goal.status = GoalStatus::Active;
+                goal.pause = None;
+            }
+            Self::Clear => *record = None,
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn advance_revision(
+    previous: &Option<GoalRecord>,
+    record: &mut Option<GoalRecord>,
+) -> std::io::Result<()> {
+    if let Some(goal) = record
+        && previous.as_ref() != Some(goal)
+    {
+        if let Some(old) = previous.as_ref().filter(|old| old.id == goal.id) {
+            goal.revision = old
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("goal revision exhausted"))?;
+        }
+        goal.updated_at = chrono::Utc::now();
+    }
+    Ok(())
+}
+
 pub struct GoalStore {
     path: PathBuf,
     legacy_path: Option<PathBuf>,
@@ -195,17 +313,7 @@ impl GoalStore {
         }
         let previous = record.clone();
         change(&mut record)?;
-        if let Some(goal) = &mut record
-            && previous.as_ref() != Some(goal)
-        {
-            if let Some(old) = previous.as_ref().filter(|old| old.id == goal.id) {
-                goal.revision = old
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| std::io::Error::other("goal revision exhausted"))?;
-            }
-            goal.updated_at = chrono::Utc::now();
-        }
+        advance_revision(&previous, &mut record)?;
         let temp = parent.join(format!(".goal-{}.tmp", uuid::Uuid::now_v7()));
         let bytes = serde_json::to_vec_pretty(&record).map_err(std::io::Error::other)?;
         let result = (|| {

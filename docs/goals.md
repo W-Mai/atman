@@ -12,6 +12,8 @@ A valid `final.answer` is published immediately and ends the current turn. Watch
 
 ## Goal tools
 
+`memory::goal::GoalEdit` defines objective creation, editing, completion replacement, pause, resume, and clearing independently of execution control. Goal controllers use these shared record operations and revision rules; persistence and execution gates remain host responsibilities.
+
 `memory.goal.get` returns `{goal, execution, paused_by, running_operations}`. `goal` is null when no objective exists. Records include `id`, `revision`, `objective`, `owner`, `parent_goal_id`, `status`, and `pause`.
 
 `goal.status` controls automatic objective continuation; `execution` describes current activity and execution pauses. A paused goal can have `running` execution during a new user turn, and an active goal can be `idle` between turns. `finishing` identifies an agent acknowledging a user-requested pause while delivering its current final response. A paused goal alone does not imply that the flow has completed.
