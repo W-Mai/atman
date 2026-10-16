@@ -110,6 +110,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Interaction snapshots** — Reopened views show current forms, approvals, and compaction reviews. Concurrent updates cannot publish an older snapshot after a newer one, and changes remain visible while no view is attached.
+
 - **Form wait ownership** — Direct registry and TUI interactions share runtime registration, timeout, and cancellation cleanup. Dropping a flow removes its waiting forms, and parallel confirmations retain their originating interaction context.
 
 - **Confirmation replies** — `user_confirm` decodes form submissions consistently across TUI and daemon transports instead of treating positive confirmations as cancellations.

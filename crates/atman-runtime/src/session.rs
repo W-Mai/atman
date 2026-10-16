@@ -387,7 +387,7 @@ impl CompactReviewRegistry {
                 responder: tx,
             });
         }
-        let _ = self.watch_tx.send(Some(pending));
+        self.broadcast_snapshot();
         rx
     }
 
@@ -402,11 +402,16 @@ impl CompactReviewRegistry {
         match entry {
             Some(e) => {
                 let _ = e.responder.send(decision);
-                let _ = self.watch_tx.send(None);
+                self.broadcast_snapshot();
                 true
             }
             None => false,
         }
+    }
+
+    fn broadcast_snapshot(&self) {
+        self.watch_tx
+            .send_modify(|snapshot| *snapshot = self.list_pending());
     }
 }
 
@@ -670,14 +675,8 @@ impl FormRegistry {
     }
 
     fn broadcast_snapshot(&self) {
-        let snap = self
-            .entries
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|e| e.pending.clone())
-            .collect();
-        let _ = self.watch_tx.send(snap);
+        self.watch_tx
+            .send_modify(|snapshot| *snapshot = self.list_pending());
     }
 }
 
@@ -808,14 +807,8 @@ impl ApprovalRegistry {
     }
 
     fn broadcast_snapshot(&self) {
-        let snapshot = self
-            .entries
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|e| e.pending.clone())
-            .collect();
-        let _ = self.watch_tx.send(snapshot);
+        self.watch_tx
+            .send_modify(|snapshot| *snapshot = self.list_pending());
     }
 }
 type ImagePart = (usize, String);
@@ -4389,10 +4382,18 @@ mod tests {
         let mut rx = reg.request(pending);
         assert_eq!(reg.list_pending().len(), 1);
         assert!(rx.try_recv().is_err(), "should still be queued");
+        let view = reg.subscribe();
+        assert_eq!(
+            view.borrow().len(),
+            1,
+            "late subscribers must see pending approvals"
+        );
+        drop(view);
         assert!(reg.decide("tu42", ApprovalDecision::Approve));
         let got = rx.blocking_recv().unwrap();
         assert!(matches!(got, ApprovalDecision::Approve));
         assert!(reg.list_pending().is_empty());
+        assert!(reg.subscribe().borrow().is_empty());
     }
 
     #[test]
@@ -4645,6 +4646,34 @@ mod tests {
         let got = rx.blocking_recv().unwrap();
         assert_eq!(got, crate::form::FormSubmission::Rejected);
         assert!(reg.list_pending().is_empty());
+    }
+
+    #[test]
+    fn interaction_registry_snapshots_remain_current_while_views_are_detached() {
+        let forms = FormRegistry::new();
+        let view = forms.subscribe();
+        let _answer = forms.request(mk_form("f1", "Proceed?"));
+        assert_eq!(view.borrow().len(), 1);
+        drop(view);
+        assert!(forms.cancel("f1"));
+        assert!(forms.subscribe().borrow().is_empty());
+
+        let reviews = CompactReviewRegistry::new();
+        let view = reviews.subscribe();
+        let _answer = reviews.request(PendingCompactReview {
+            review_id: "r1".into(),
+            summary: "summary".into(),
+            slice_preview: String::new(),
+            slice_count: 0,
+            range_start: 0,
+            range_end: 0,
+            tokens_before: 0,
+            emitted_at: chrono::Utc::now(),
+        });
+        assert!(view.borrow().is_some());
+        drop(view);
+        assert!(reviews.decide("r1", CompactReviewDecision::Reject));
+        assert!(reviews.subscribe().borrow().is_none());
     }
 
     #[test]
