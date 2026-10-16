@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Workspace ownership** — Managed worktrees support persistent instance references, validated restoration, and explicit owner release. Host restarts and generic cleanup preserve referenced worktrees; dirty and retained data survive release.
+
 - **Persistent session startup** — Hosts explicitly bind startup hooks to the initial entry invocation. CLI batch execution preserves startup effects without replaying them on retry, rebind, or later turns.
 
 - **Persistent turn hooks** — Configured turn and context-compaction hooks execute in the admitted instance scope, retaining peer isolation, cancellation, trace identity, and entry results.

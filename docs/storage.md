@@ -265,6 +265,10 @@ Worker binding covers message publication, model-window checkpoints, persistent 
 
 ### Flow process resources
 
+`WorkspaceManager::create_instance` records a typed `FlowRef` before allocating a managed Git worktree. The resulting `bound` record has no process lease; host generation changes do not orphan it. Generic release, finalization, and pruning cannot remove a live instance reference. `validate_instance` checks recorded ownership, paths, and Git registration without recreating missing checkouts. Registry queries remain available when a checkout is missing.
+
+The owning host calls `release_instance` after stopping execution and process resources. Clean automatic worktrees are removed; dirty and retained worktrees keep their data after releasing the reference. Cleanup retries preserve the recorded result. Incomplete allocation can be released only by its exact owner, with existing Git state verified before removal. Registry updates synchronize file contents and directory entries before returning. These registry APIs do not themselves attach workspace resources to persistent entry execution or close instances.
+
 Each persistent `FlowWorker` owns an `InstanceResources` group containing its `BgRegistry`, `TermRegistry`, and `TaskRegistry`. Bound executor invocations use that group across turns; inline calls share it, and persistent peers use their own worker's group. Handles and task operations cannot access a sibling's registry, even within the same session. Instance invocations without storage do not inherit a runtime's process registries implicitly.
 
 Background processes use the resource owner's cancellation lifetime. Completing or cancelling a turn and pausing execution do not close that group. Explicit process/task termination still stops the selected process. `CloseRequested` commits before closing process admission and requesting cleanup; the worker publishes the state and acknowledgement only after admission is closed. A terminal created concurrently with closure is terminated before it can be registered. `Closed` rejects unfinished process cleanup.

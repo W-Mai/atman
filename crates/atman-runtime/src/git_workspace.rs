@@ -34,6 +34,7 @@ impl std::str::FromStr for WorkspacePolicy {
 pub enum WorkspaceState {
     Allocating,
     Active,
+    Bound,
     TerminalPending,
     Retained,
     Dirty,
@@ -47,6 +48,7 @@ impl WorkspaceState {
         match value {
             "allocating" => Self::Allocating,
             "active" => Self::Active,
+            "bound" => Self::Bound,
             "terminal_pending" => Self::TerminalPending,
             "retained" => Self::Retained,
             "dirty" => Self::Dirty,
@@ -60,6 +62,7 @@ impl WorkspaceState {
         match self {
             Self::Allocating => "allocating",
             Self::Active => "active",
+            Self::Bound => "bound",
             Self::TerminalPending => "terminal_pending",
             Self::Retained => "retained",
             Self::Dirty => "dirty",
@@ -82,6 +85,13 @@ pub struct WorkspaceBinding {
 pub struct WorkspaceLease {
     pub daemon_generation: String,
     pub acquired_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A durable instance reference, independent of a host process or invocation lease.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceInstanceBinding {
+    pub owner: crate::flow_store::FlowRef,
+    pub released: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,12 +133,20 @@ pub struct WorkspaceRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease: Option<WorkspaceLease>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<WorkspaceInstanceBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconciled_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconciliation_reason: Option<String>,
 }
 
 impl WorkspaceRecord {
+    pub fn is_instance_bound(&self) -> bool {
+        self.instance
+            .as_ref()
+            .is_some_and(|binding| !binding.released)
+    }
+
     pub fn lifecycle_state(&self) -> WorkspaceState {
         WorkspaceState::parse(&self.state)
     }
@@ -268,6 +286,7 @@ impl WorkspaceManager {
             allocation_base: base.map(str::to_owned),
             allocation_policy: None,
             lease: None,
+            instance: None,
             reconciled_at: None,
             reconciliation_reason: None,
         };
@@ -292,6 +311,33 @@ impl WorkspaceManager {
             daemon_generation,
             retained,
             base_oid,
+            None,
+            |_| Ok(()),
+        )
+    }
+
+    /// Allocate a workspace reference before creating Git state. The instance owner must authorize creation and retain the returned binding in its durable journal.
+    pub fn create_instance(
+        &self,
+        id: &str,
+        owner: &crate::flow_store::FlowRef,
+        daemon_generation: &str,
+        retained: bool,
+        base_oid: &str,
+    ) -> Result<WorkspaceRecord, WorkspaceError> {
+        if owner.session_id.0.is_nil() || owner.instance_id.0.0.is_nil() {
+            return Err(WorkspaceError::Invalid(
+                "instance identity must not be nil".into(),
+            ));
+        }
+        self.create_managed_with_hook(
+            id,
+            &owner.session_id.to_string(),
+            &owner.instance_id.to_string(),
+            daemon_generation,
+            retained,
+            base_oid,
+            Some(owner.clone()),
             |_| Ok(()),
         )
     }
@@ -305,6 +351,7 @@ impl WorkspaceManager {
         daemon_generation: &str,
         retained: bool,
         base_oid: &str,
+        instance: Option<crate::flow_store::FlowRef>,
         mut hook: impl FnMut(AllocationStage) -> Result<(), WorkspaceError>,
     ) -> Result<WorkspaceRecord, WorkspaceError> {
         if owner_session.is_empty() || owner_flow.is_empty() || daemon_generation.is_empty() {
@@ -321,10 +368,17 @@ impl WorkspaceManager {
                 .lease
                 .as_ref()
                 .is_some_and(|lease| lease.daemon_generation == daemon_generation);
-            if item.lifecycle_state() == WorkspaceState::Active
+            let same_instance =
+                item.instance.as_ref().map(|binding| &binding.owner) == instance.as_ref();
+            if same_instance
+                && ((item.lifecycle_state() == WorkspaceState::Bound && item.is_instance_bound())
+                    || (item.lifecycle_state() == WorkspaceState::Active && same_generation))
                 && item.retained == retained
-                && same_generation
+                && item.allocation_base.as_deref() == Some(base_oid)
             {
+                if item.is_instance_bound() {
+                    self.validate_worktree(item)?;
+                }
                 return Ok(item.clone());
             }
             return Err(WorkspaceError::Invalid(format!(
@@ -348,6 +402,10 @@ impl WorkspaceManager {
             lease: Some(WorkspaceLease {
                 daemon_generation: daemon_generation.to_owned(),
                 acquired_at: chrono::Utc::now(),
+            }),
+            instance: instance.map(|owner| WorkspaceInstanceBinding {
+                owner,
+                released: false,
             }),
             reconciled_at: None,
             reconciliation_reason: None,
@@ -379,6 +437,7 @@ impl WorkspaceManager {
                 if !path.exists() && !registered {
                     record.state = WorkspaceState::Released.as_str().into();
                     record.lease = None;
+                    release_instance_reference(record);
                     record.reconciliation_reason = Some(format!(
                         "allocation failed before creating worktree: {error}"
                     ));
@@ -398,6 +457,10 @@ impl WorkspaceManager {
         registry.workspaces[index].worktree_path = canonicalize(&worktree.path);
         registry.workspaces[index].branch = worktree.branch;
         registry.workspaces[index].state = WorkspaceState::Active.as_str().into();
+        if registry.workspaces[index].is_instance_bound() {
+            registry.workspaces[index].state = WorkspaceState::Bound.as_str().into();
+            registry.workspaces[index].lease = None;
+        }
         hook(AllocationStage::BeforeFinalSave)?;
         self.save(&registry)?;
         Ok(registry.workspaces[index].clone())
@@ -408,6 +471,79 @@ impl WorkspaceManager {
         id: &str,
         owner_session: &str,
         owner_flow: &str,
+    ) -> Result<WorkspaceFinalizeOutcome, WorkspaceError> {
+        self.finalize_owned(id, owner_session, owner_flow, None)
+    }
+
+    /// Validate a recorded instance binding without recreating a missing worktree.
+    pub fn validate_instance(
+        &self,
+        binding: &WorkspaceBinding,
+        owner: &crate::flow_store::FlowRef,
+    ) -> Result<WorkspaceRecord, WorkspaceError> {
+        let _lock = self.lock_registry()?;
+        let record = self.get(&binding.workspace_id)?;
+        if record.instance.as_ref().map(|instance| &instance.owner) != Some(owner)
+            || !record.is_instance_bound()
+            || record.lifecycle_state() != WorkspaceState::Bound
+            || record.binding() != *binding
+        {
+            return Err(WorkspaceError::Invalid(
+                "workspace instance binding mismatch".into(),
+            ));
+        }
+        self.validate_worktree(&record)?;
+        Ok(record)
+    }
+
+    fn validate_worktree(&self, record: &WorkspaceRecord) -> Result<(), WorkspaceError> {
+        let path = &record.worktree_path;
+        if record.repository_root != self.repository_root
+            || path.canonicalize()? != *path
+            || !GitCli::at(&self.repository_root)
+                .worktree_list()?
+                .iter()
+                .any(|worktree| canonicalize(&worktree.path) == *path)
+            || canonicalize_from(
+                path,
+                Path::new(git_output(path, &["rev-parse", "--git-common-dir"])?.trim()),
+            ) != canonicalize_from(
+                &self.repository_root,
+                Path::new(
+                    git_output(&self.repository_root, &["rev-parse", "--git-common-dir"])?.trim(),
+                ),
+            )
+            || canonicalize(Path::new(
+                git_output(path, &["rev-parse", "--show-toplevel"])?.trim(),
+            )) != *path
+        {
+            return Err(WorkspaceError::Invalid(
+                "workspace Git registration mismatch".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Release the exact instance reference after its execution and process resources have stopped. Failed cleanup remains retryable; dirty and explicitly retained worktrees survive.
+    pub fn release_instance(
+        &self,
+        id: &str,
+        owner: &crate::flow_store::FlowRef,
+    ) -> Result<WorkspaceFinalizeOutcome, WorkspaceError> {
+        self.finalize_owned(
+            id,
+            &owner.session_id.to_string(),
+            &owner.instance_id.to_string(),
+            Some(owner),
+        )
+    }
+
+    fn finalize_owned(
+        &self,
+        id: &str,
+        owner_session: &str,
+        owner_flow: &str,
+        instance: Option<&crate::flow_store::FlowRef>,
     ) -> Result<WorkspaceFinalizeOutcome, WorkspaceError> {
         let _lock = self.lock_registry()?;
         let mut registry = self.load()?;
@@ -422,24 +558,78 @@ impl WorkspaceManager {
             Some(owner_flow),
         )?;
 
+        if registry.workspaces[index]
+            .instance
+            .as_ref()
+            .map(|binding| &binding.owner)
+            != instance
+        {
+            return Err(WorkspaceError::Invalid(
+                "workspace lifetime does not match the releasing owner".into(),
+            ));
+        }
+        if registry.workspaces[index]
+            .instance
+            .as_ref()
+            .is_some_and(|binding| binding.released)
+        {
+            let record = registry.workspaces[index].clone();
+            return match record.lifecycle_state() {
+                WorkspaceState::Released => Ok(WorkspaceFinalizeOutcome::AlreadyReleased(record)),
+                WorkspaceState::Dirty => Ok(WorkspaceFinalizeOutcome::Dirty(record)),
+                WorkspaceState::Retained => Ok(WorkspaceFinalizeOutcome::Retained(record)),
+                _ => Err(WorkspaceError::Invalid(
+                    "released instance has incomplete workspace cleanup".into(),
+                )),
+            };
+        }
+
         let state = registry.workspaces[index].lifecycle_state();
         if state == WorkspaceState::Released {
             return Ok(WorkspaceFinalizeOutcome::AlreadyReleased(
                 registry.workspaces[index].clone(),
             ));
         }
+        if instance.is_some() {
+            if matches!(state, WorkspaceState::Unknown(_)) {
+                return Err(WorkspaceError::Invalid(
+                    "unknown instance workspace state".into(),
+                ));
+            }
+            let record = &registry.workspaces[index];
+            let registered = GitCli::at(&self.repository_root)
+                .worktree_list()?
+                .iter()
+                .any(|worktree| {
+                    canonicalize(&worktree.path) == canonicalize(&record.worktree_path)
+                });
+            if !record.worktree_path.exists() && !registered {
+                let record = &mut registry.workspaces[index];
+                record.state = WorkspaceState::Released.as_str().into();
+                record.lease = None;
+                release_instance_reference(record);
+                let result = record.clone();
+                self.save(&registry)?;
+                return Ok(WorkspaceFinalizeOutcome::Released(result));
+            }
+            // Recovery may discard only the registered worktree owned by this instance.
+            self.validate_worktree(record)?;
+        }
         if registry.workspaces[index].retained || state == WorkspaceState::Retained {
             registry.workspaces[index].retained = true;
             registry.workspaces[index].state = WorkspaceState::Retained.as_str().into();
             registry.workspaces[index].lease = None;
+            release_instance_reference(&mut registry.workspaces[index]);
             let result = registry.workspaces[index].clone();
             self.save(&registry)?;
             return Ok(WorkspaceFinalizeOutcome::Retained(result));
         }
-        if matches!(
-            state,
-            WorkspaceState::Allocating | WorkspaceState::Orphaned | WorkspaceState::Unknown(_)
-        ) {
+        if instance.is_none()
+            && matches!(
+                state,
+                WorkspaceState::Allocating | WorkspaceState::Orphaned | WorkspaceState::Unknown(_)
+            )
+        {
             return Err(WorkspaceError::Invalid(format!(
                 "workspace {id} in state {} requires explicit recovery",
                 state.as_str()
@@ -455,6 +645,7 @@ impl WorkspaceManager {
             if !path.exists() && !registered {
                 registry.workspaces[index].state = WorkspaceState::Released.as_str().into();
                 registry.workspaces[index].lease = None;
+                release_instance_reference(&mut registry.workspaces[index]);
                 let result = registry.workspaces[index].clone();
                 self.save(&registry)?;
                 return Ok(WorkspaceFinalizeOutcome::Released(result));
@@ -467,6 +658,7 @@ impl WorkspaceManager {
         if crate::git::has_changes(&registry.workspaces[index].worktree_path)? {
             registry.workspaces[index].state = WorkspaceState::Dirty.as_str().into();
             registry.workspaces[index].lease = None;
+            release_instance_reference(&mut registry.workspaces[index]);
             let result = registry.workspaces[index].clone();
             self.save(&registry)?;
             return Ok(WorkspaceFinalizeOutcome::Dirty(result));
@@ -476,6 +668,7 @@ impl WorkspaceManager {
             .worktree_remove(&registry.workspaces[index].worktree_path, false)?;
         registry.workspaces[index].state = WorkspaceState::Released.as_str().into();
         registry.workspaces[index].lease = None;
+        release_instance_reference(&mut registry.workspaces[index]);
         let result = registry.workspaces[index].clone();
         self.save(&registry)?;
         Ok(WorkspaceFinalizeOutcome::Released(result))
@@ -513,6 +706,7 @@ impl WorkspaceManager {
                     if !path_exists && !registered {
                         item.state = WorkspaceState::Released.as_str().into();
                         item.lease = None;
+                        release_instance_reference(item);
                         item.reconciliation_reason = Some(format!(
                             "allocation from older daemon generation {} left no path or Git registration",
                             previous_generation
@@ -570,6 +764,12 @@ impl WorkspaceManager {
             .find(|w| w.id == id)
             .ok_or_else(|| WorkspaceError::Invalid(format!("workspace {id} not found")))?;
         validate_ownership(item, owner_session, owner_flow)?;
+        if item.is_instance_bound() && item.lifecycle_state() == WorkspaceState::Bound {
+            item.retained = retained;
+            let result = item.clone();
+            self.save(&registry)?;
+            return Ok(result);
+        }
         match (item.lifecycle_state(), retained) {
             (WorkspaceState::Active, true) => {
                 item.retained = true;
@@ -610,6 +810,11 @@ impl WorkspaceManager {
             .ok_or_else(|| WorkspaceError::Invalid(format!("workspace {id} not found")))?;
         let item = &registry.workspaces[index];
         validate_ownership(item, owner_session, owner_flow)?;
+        if item.is_instance_bound() {
+            return Err(WorkspaceError::Invalid(
+                "workspace is still referenced by a flow instance".into(),
+            ));
+        }
         let state = item.lifecycle_state();
         if !matches!(state, WorkspaceState::Active | WorkspaceState::Retained) {
             return Err(WorkspaceError::Invalid(format!(
@@ -640,7 +845,10 @@ impl WorkspaceManager {
         let worktrees = GitCli::at(&self.repository_root).worktree_list()?;
         let mut candidates = Vec::new();
         for item in &registry.workspaces {
-            if !item.retained && item.lifecycle_state() == WorkspaceState::Orphaned {
+            if !item.retained
+                && !item.is_instance_bound()
+                && item.lifecycle_state() == WorkspaceState::Orphaned
+            {
                 candidates.push(item.clone());
             }
         }
@@ -724,6 +932,40 @@ impl WorkspaceManager {
             )));
         }
         for item in &mut registry.workspaces {
+            if let Some(instance) = &item.instance {
+                validate_ownership(
+                    item,
+                    Some(&instance.owner.session_id.to_string()),
+                    Some(&instance.owner.instance_id.to_string()),
+                )?;
+                if instance.owner.session_id.0.is_nil()
+                    || instance.owner.instance_id.0.0.is_nil()
+                    || (instance.released
+                        && !matches!(
+                            item.lifecycle_state(),
+                            WorkspaceState::Released
+                                | WorkspaceState::Dirty
+                                | WorkspaceState::Retained
+                        ))
+                    || (!instance.released
+                        && matches!(
+                            item.lifecycle_state(),
+                            WorkspaceState::Active
+                                | WorkspaceState::Released
+                                | WorkspaceState::Dirty
+                                | WorkspaceState::Retained
+                        ))
+                    || (item.lifecycle_state() == WorkspaceState::Bound && item.lease.is_some())
+                {
+                    return Err(WorkspaceError::Invalid(
+                        "inconsistent instance workspace ownership".into(),
+                    ));
+                }
+            } else if item.lifecycle_state() == WorkspaceState::Bound {
+                return Err(WorkspaceError::Invalid(
+                    "bound workspace has no instance owner".into(),
+                ));
+            }
             if item.retained && item.allocation_policy.is_none() {
                 item.state = WorkspaceState::Retained.as_str().into();
             } else if item.lifecycle_state() == WorkspaceState::Retained {
@@ -745,14 +987,28 @@ impl WorkspaceManager {
             uuid::Uuid::new_v4()
         ));
         let result = (|| {
-            fs::write(&tmp, serde_json::to_vec_pretty(registry)?)?;
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
+            file.write_all(&serde_json::to_vec_pretty(registry)?)?;
+            file.sync_all()?;
             fs::rename(&tmp, &self.registry_path)?;
+            #[cfg(unix)]
+            fs::File::open(parent)?.sync_all()?;
             Ok(())
         })();
         if result.is_err() {
             let _ = fs::remove_file(&tmp);
         }
         result
+    }
+}
+
+fn release_instance_reference(record: &mut WorkspaceRecord) {
+    if let Some(instance) = &mut record.instance {
+        instance.released = true;
     }
 }
 
@@ -854,6 +1110,229 @@ mod tests {
         git(tmp.path(), &["add", "README.md"]);
         git(tmp.path(), &["commit", "-q", "-m", "initial"]);
         tmp
+    }
+
+    fn instance_owner() -> crate::flow_store::FlowRef {
+        crate::flow_store::FlowRef {
+            session_id: uuid::Uuid::new_v4().into(),
+            instance_id: crate::flow_store::FlowInstanceId::now(),
+        }
+    }
+
+    #[test]
+    fn instance_reference_survives_hosts_and_blocks_generic_cleanup() {
+        let tmp = repo();
+        let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+        let owner = instance_owner();
+        let base = GitCli::at(tmp.path()).head_oid().unwrap();
+        let record = manager
+            .create_instance("peer", &owner, "old", false, &base)
+            .unwrap();
+        assert_eq!(record.lifecycle_state(), WorkspaceState::Bound);
+        assert!(record.lease.is_none());
+        assert!(manager.reconcile_generation("new").unwrap().is_empty());
+        assert_eq!(
+            manager
+                .create_instance("peer", &owner, "new", false, &base)
+                .unwrap(),
+            record
+        );
+        assert_eq!(
+            manager
+                .validate_instance(&record.binding(), &owner)
+                .unwrap(),
+            record
+        );
+        let (session, flow) = (owner.session_id.to_string(), owner.instance_id.to_string());
+        assert!(manager.finalize_managed("peer", &session, &flow).is_err());
+        assert!(
+            manager
+                .release("peer", Some(&session), Some(&flow), true)
+                .is_err()
+        );
+        assert!(manager.prune(false).unwrap().is_empty());
+        assert!(manager.release_instance("peer", &instance_owner()).is_err());
+        let mut forged = record.binding();
+        forged.path = tmp.path().into();
+        assert!(manager.validate_instance(&forged, &owner).is_err());
+        assert_eq!(manager.get("peer").unwrap(), record);
+
+        let reopened = WorkspaceManager::open_existing(tmp.path(), None)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            reopened.release_instance("peer", &owner).unwrap(),
+            WorkspaceFinalizeOutcome::Released(_)
+        ));
+        assert!(!record.worktree_path.exists());
+        assert!(!reopened.get("peer").unwrap().is_instance_bound());
+        assert!(matches!(
+            reopened.release_instance("peer", &owner).unwrap(),
+            WorkspaceFinalizeOutcome::AlreadyReleased(_)
+        ));
+        assert!(
+            reopened
+                .create_instance("peer", &owner, "new", false, &base)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn instance_release_preserves_dirty_and_retained_worktrees() {
+        let tmp = repo();
+        let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+        let base = GitCli::at(tmp.path()).head_oid().unwrap();
+        for retained in [false, true] {
+            let owner = instance_owner();
+            let id = if retained { "retain" } else { "dirty" };
+            let record = manager
+                .create_instance(id, &owner, "host", false, &base)
+                .unwrap();
+            let content = record.worktree_path.join("uncommitted.txt");
+            fs::write(&content, "preserve this").unwrap();
+            let toggled = manager
+                .retain(
+                    id,
+                    retained,
+                    Some(&owner.session_id.to_string()),
+                    Some(&owner.instance_id.to_string()),
+                )
+                .unwrap();
+            assert!(toggled.is_instance_bound());
+            assert_eq!(toggled.lifecycle_state(), WorkspaceState::Bound);
+            let released = manager.release_instance(id, &owner).unwrap();
+            assert_eq!(manager.release_instance(id, &owner).unwrap(), released);
+            assert_eq!(fs::read_to_string(content).unwrap(), "preserve this");
+            let stored = manager.get(id).unwrap();
+            assert!(!stored.is_instance_bound());
+            assert_eq!(
+                stored.lifecycle_state(),
+                if retained {
+                    WorkspaceState::Retained
+                } else {
+                    WorkspaceState::Dirty
+                }
+            );
+            assert!(
+                manager
+                    .validate_instance(&record.binding(), &owner)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn instance_allocation_and_release_crashes_preserve_reference_ownership() {
+        for (stage, residual) in [
+            (AllocationStage::BeforeWorktreeAdd, false),
+            (AllocationStage::AfterWorktreeAdd, true),
+            (AllocationStage::BeforeFinalSave, true),
+        ] {
+            let tmp = repo();
+            let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+            let owner = instance_owner();
+            assert!(
+                manager
+                    .create_managed_with_hook(
+                        "crash",
+                        &owner.session_id.to_string(),
+                        &owner.instance_id.to_string(),
+                        "old",
+                        false,
+                        &GitCli::at(tmp.path()).head_oid().unwrap(),
+                        Some(owner.clone()),
+                        |current| {
+                            if current == stage {
+                                Err(WorkspaceError::Invalid("injected crash".into()))
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    )
+                    .is_err()
+            );
+            let allocating = manager.get("crash").unwrap();
+            assert!(allocating.is_instance_bound());
+            manager.reconcile_generation("new").unwrap();
+            let recovered = manager.get("crash").unwrap();
+            assert_eq!(recovered.is_instance_bound(), residual);
+            assert!(manager.prune(false).unwrap().is_empty());
+            if residual {
+                assert!(recovered.worktree_path.exists());
+                assert!(
+                    manager
+                        .retain(
+                            "crash",
+                            true,
+                            Some(&owner.session_id.to_string()),
+                            Some(&owner.instance_id.to_string())
+                        )
+                        .is_err()
+                );
+            }
+            manager.release_instance("crash", &owner).unwrap();
+            assert!(!manager.get("crash").unwrap().is_instance_bound());
+            assert!(!recovered.worktree_path.exists());
+        }
+
+        let tmp = repo();
+        let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+        let owner = instance_owner();
+        let record = manager
+            .create_instance(
+                "closing",
+                &owner,
+                "host",
+                false,
+                &GitCli::at(tmp.path()).head_oid().unwrap(),
+            )
+            .unwrap();
+        let mut registry = manager.load().unwrap();
+        registry.workspaces[0].state = WorkspaceState::TerminalPending.as_str().into();
+        manager.save(&registry).unwrap();
+        GitCli::at(tmp.path())
+            .worktree_remove(&record.worktree_path, false)
+            .unwrap();
+        assert!(matches!(
+            manager.release_instance("closing", &owner).unwrap(),
+            WorkspaceFinalizeOutcome::Released(_)
+        ));
+        assert!(!manager.get("closing").unwrap().is_instance_bound());
+    }
+
+    #[test]
+    fn missing_or_replaced_instance_workspace_remains_readable_without_recreation() {
+        let tmp = repo();
+        let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+        let owner = instance_owner();
+        let base = GitCli::at(tmp.path()).head_oid().unwrap();
+        let record = manager
+            .create_instance("missing", &owner, "host", false, &base)
+            .unwrap();
+        fs::remove_dir_all(&record.worktree_path).unwrap();
+        assert!(
+            manager
+                .validate_instance(&record.binding(), &owner)
+                .is_err()
+        );
+        assert!(
+            manager
+                .create_instance("missing", &owner, "next", false, &base)
+                .is_err()
+        );
+        assert_eq!(manager.list().unwrap(), vec![record.clone()]);
+        assert!(!record.worktree_path.exists());
+        assert!(manager.release_instance("missing", &owner).is_err());
+        fs::create_dir_all(&record.worktree_path).unwrap();
+        git(&record.worktree_path, &["init", "-q"]);
+        assert!(
+            manager
+                .validate_instance(&record.binding(), &owner)
+                .is_err()
+        );
+        assert!(manager.release_instance("missing", &owner).is_err());
+        assert_eq!(manager.get("missing").unwrap(), record);
+        assert!(record.worktree_path.join(".git").exists());
     }
 
     #[test]
@@ -1097,6 +1576,7 @@ mod tests {
                 "old-generation",
                 false,
                 &GitCli::at(tmp.path()).head_oid().unwrap(),
+                None,
                 |current| {
                     if current == stage {
                         Err(WorkspaceError::Invalid("injected crash".into()))
