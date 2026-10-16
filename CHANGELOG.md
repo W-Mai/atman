@@ -30,6 +30,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Offline history migration** — Legacy event logs can be imported into independent historical flows with exact source retention, resumable batches, integrity checks, and atomic session publication. Retries retain identity and reject changed sources or conflicting destinations.
+
 - **Historical flow journals** — Read-only flows retain exact legacy records with source identities, ownership, ordering, and integrity validation. Committed history pages remain available after the original source disappears and do not replay execution or notifications.
 
 - **Legacy history inspection** — `migrate inspect` maps recorded agent ownership across turns while retaining byte ranges and integrity checks for every nonempty record. Malformed, conflicting, and unscoped records remain visible without rewriting history or starting execution.

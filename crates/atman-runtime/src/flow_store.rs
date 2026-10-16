@@ -11,6 +11,7 @@ pub mod history;
 pub mod inbox;
 mod input;
 pub mod launch;
+pub mod migration;
 pub mod outbox;
 pub mod planning;
 pub mod publication;
@@ -404,6 +405,7 @@ enum SessionFact {
     DefaultFlowSelected(FlowInstanceId),
     AccessGranted(access::FlowGrant),
     AccessRevoked(Uuid),
+    LegacyImported(migration::LegacyMigration),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -412,6 +414,7 @@ pub struct SessionProjection {
     pub flows: Vec<FlowRegistration>,
     pub default_flow: Option<FlowInstanceId>,
     pub access: access::SessionAccess,
+    pub migrated_from: Option<migration::LegacyMigration>,
 }
 
 impl SessionProjection {
@@ -445,6 +448,10 @@ impl SessionProjection {
                 self.access.grant(grant)?;
             }
             SessionFact::AccessRevoked(id) => self.access.revoke(id)?,
+            SessionFact::LegacyImported(migration) => {
+                migration.validate(self)?;
+                self.migrated_from = Some(migration);
+            }
         }
         Ok(())
     }
@@ -468,10 +475,32 @@ impl RuntimeStore {
 
     pub fn create_session(&self, descriptor: SessionDescriptor) -> io::Result<SessionStore> {
         descriptor.validate()?;
+        let _catalog = self.lock_catalog()?;
         let dir = self.root.join("sessions").join(descriptor.id.to_string());
-        create_dir(&dir)?;
+        initialize_dir(&dir, |dir| {
+            self.create_session_at(dir, descriptor.clone()).map(drop)
+        })?;
+        self.open_session(descriptor.id)
+    }
+
+    fn lock_catalog(&self) -> io::Result<File> {
+        let file = private_file_options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.root.join(".catalog.lock"))?;
+        fs2::FileExt::lock_exclusive(&file)?;
+        Ok(file)
+    }
+
+    fn create_session_at(
+        &self,
+        dir: &Path,
+        descriptor: SessionDescriptor,
+    ) -> io::Result<SessionStore> {
         let owner = Arc::new(SessionOwner {
-            _lock: SessionOwner::lock(&dir)?,
+            _lock: SessionOwner::lock(dir)?,
             descriptor: descriptor.clone(),
         });
         ensure_dir(&dir.join("flows"))?;
@@ -479,7 +508,7 @@ impl RuntimeStore {
         let mut journal = Journal::create(&dir.join("events.jsonl"), descriptor.id)?;
         let cursor = journal.commit(&[SessionFact::Created(descriptor.clone())])?;
         let mut store = SessionStore {
-            dir,
+            dir: dir.to_path_buf(),
             owner,
             journal,
             projection: SessionProjection {
@@ -487,6 +516,7 @@ impl RuntimeStore {
                 flows: Vec::new(),
                 default_flow: None,
                 access: Default::default(),
+                migrated_from: None,
             },
             cursor,
             projection_error: None,
@@ -512,6 +542,7 @@ impl RuntimeStore {
                                 flows: Vec::new(),
                                 default_flow: None,
                                 access: Default::default(),
+                                migrated_from: None,
                             });
                         }
                         (Some(state), fact) => state.apply(fact)?,
@@ -625,8 +656,10 @@ impl SessionStore {
             return Ok(store);
         }
         let dir = self.dir.join("flows").join(id.to_string());
-        let mut flow = match create_dir(&dir) {
-            Ok(()) => FlowStore::create(&dir, self.owner.clone(), descriptor.clone())?,
+        let mut flow = match initialize_dir(&dir, |dir| {
+            FlowStore::create(dir, self.owner.clone(), descriptor.clone()).map(drop)
+        }) {
+            Ok(()) => FlowStore::open(&dir, self.owner.clone(), &descriptor.address)?,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 // A crash between flow creation and container registration leaves a prepared orphan.
                 let store = FlowStore::open(&dir, self.owner.clone(), &descriptor.address)?;
@@ -1119,12 +1152,18 @@ fn write_projection(path: &Path, cursor: &CommitReceipt, value: &impl Serialize)
         cursor: &'a CommitReceipt,
         value: &'a T,
     }
-    let bytes = serde_json::to_vec(&Projection {
-        schema: 1,
-        cursor,
-        value,
-    })
-    .map_err(invalid)?;
+    write_json(
+        path,
+        &Projection {
+            schema: 1,
+            cursor,
+            value,
+        },
+    )
+}
+
+fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
+    let bytes = serde_json::to_vec(value).map_err(invalid)?;
     let tmp = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
     let result = (|| {
         let mut file = private_file_options()
@@ -1138,6 +1177,27 @@ fn write_projection(path: &Path, cursor: &CommitReceipt, value: &impl Serialize)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(tmp);
+    }
+    result
+}
+
+/// Initialize privately before publishing a directory. The caller owns its namespace lock.
+fn initialize_dir(path: &Path, initialize: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+    if path.try_exists()? {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "storage directory already exists",
+        ));
+    }
+    let temporary = path.with_file_name(format!(".prepare-{}", Uuid::now_v7()));
+    create_dir(&temporary)?;
+    let result = (|| {
+        initialize(&temporary)?;
+        std::fs::rename(&temporary, path)?;
+        sync_parent(path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(temporary);
     }
     result
 }

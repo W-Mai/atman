@@ -20,6 +20,14 @@ Explicit agent owners join runs across turns. Inline calls inherit their recorde
 
 Inspection reads the initial file length and verifies the source bytes again before returning; it does not keep tailing an active writer. `LegacySource::verify` detects appends, truncations, and same-length replacements before a caller reuses a report. This is a content check, not proof that an old executor has stopped. Inspection does not migrate files, activate flows, or switch catalogs; a migration writer must establish exclusive execution ownership and revalidate its source before committing.
 
+## Offline history migration
+
+`RuntimeStore::archive_legacy(source, source_session, destination, old_executor_stopped)` imports legacy events into a new session identity. The host authenticates the operator and obtains explicit confirmation that the old executor has stopped. This confirmation does not lock an old binary or prevent it from writing later. Source files remain unchanged. `flow_store::migration::destination_id` provides a stable target for retries; a changed source conflicts with the saved plan instead of silently creating another copy. An operator can explicitly choose another destination for a separate source branch.
+
+The migration retains an exact source copy in the destination session's `artifacts/legacy-events.jsonl`, including whitespace and malformed data. Each owner receives a separate historical flow; uncertain records belong to one unassigned flow. Original lineage stays in the retained events and grants no authority. An explicit default historical flow exists even when the source contains no default-agent records. Historical flows remain closed and cannot start execution or deliver notifications.
+
+Migration work stays under `runtime-v1/.migrations/<destination>/work` until every flow is complete and verified against the source map. Retries resume after committed record batches. Source changes, invalid retained data, and occupied destinations stop publication without overwriting history. A `LegacyImported` session fact records source identity, owner mappings, record counts, and final flow cursors. The source is verified again before the complete directory is atomically published into `runtime-v1/sessions`. Journal handles are closed before the rename. Reading the imported history no longer requires the original source or project directory.
+
 ## Session and flow storage
 
 `flow_store::RuntimeStore::open(data_dir)` uses the isolated `runtime-v1` namespace. A `SessionStore` owns its container journal and an exclusive execution lease. Each `FlowStore` retains that lease while owning its independent journal. Another session owner cannot open the same container while any of those handles remain alive.
@@ -37,13 +45,13 @@ runtime-v1/sessions/<session-id>/
 
 Container facts record session creation, instance registration, and default-view selection. Flow facts record the immutable creation request, source bundle, provenance, and lifecycle transitions. `created_by` is audit metadata, not control authority. The default flow is a view binding and has no privileged lifecycle.
 
-Creation durably prepares a flow before registering its address in the container. An unregistered prepared directory can be reconciled by retrying the same creation request and descriptor; it cannot be opened through the session catalog. Reusing a request with different creation data fails. Incomplete creation without a committed creation fact fails explicitly and preserves its files for diagnosis.
+Session and flow creation initialize journals in private directories before publishing their final paths. A shared catalog lock serializes session creation with migration publication. Incomplete initialization directories remain outside the registered inventory. A complete but unregistered flow can be reconciled by retrying the same creation request and descriptor; it cannot be opened through the session catalog. Reusing a request with different creation data fails.
 
 Flow transitions validate an expected state revision, apply to a private candidate, and publish that candidate only after the journal commit succeeds. Completing an invocation preserves the instance. Reopening an active invocation records `HostLost` without executing its entry; existing pause keys remain. Closing invocations retain cleanup obligations, and interrupted instances require explicit recovery before another turn can start.
 
 `session.json` and `flow.json` are replaceable projections with a committed source cursor. They are rebuilt from journals on opening, even when missing or malformed. `take_projection_error` reports cache-write failures without withdrawing an already committed fact. Source bodies remain in the creation fact; reading history does not require a reachable project checkout.
 
-These storage APIs do not start schedulers, grant permissions, or migrate published sessions. Hosts authorize commands, validate entry programs, and decide when restored instances may execute.
+Creating or opening storage does not start schedulers or grant permissions. Hosts authorize commands, validate entry programs, and decide when restored instances may execute. Legacy migration requires an explicit `archive_legacy` call.
 
 ### Read-only historical flows
 
