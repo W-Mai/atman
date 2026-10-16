@@ -48,13 +48,24 @@ fn permission_error(error: impl std::fmt::Display) -> JsonRpcError {
     JsonRpcError::application(error.to_string())
 }
 
-fn authorized_permission_session(
+async fn authorized_permission_session(
     state: &DaemonState,
-    session_id: &atman_proto::SessionId,
+    target: &atman_proto::PermissionTarget,
     principal_id: &str,
 ) -> Result<Arc<atman_runtime::Session>, JsonRpcError> {
+    if let Some(instance_id) = target.instance_id {
+        return flow_service::context(
+            state,
+            atman_proto::flows::FlowAddress {
+                session_id: target.session_id.clone(),
+                instance_id,
+            },
+            principal_id,
+        )
+        .await;
+    }
     state
-        .authorized_live_session(session_id, principal_id)
+        .authorized_live_session(&target.session_id, principal_id)
         .ok_or_else(|| JsonRpcError::application("permission denied for session"))
 }
 
@@ -74,7 +85,7 @@ pub use state::{DaemonState, LiveSession};
 mod flow_service;
 
 pub async fn dispatch(state: Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcResponse {
-    dispatch_as(state, req, "local-daemon").await
+    dispatch_as(state, req, crate::state::LOCAL_OPERATOR).await
 }
 
 pub async fn dispatch_as(
@@ -185,17 +196,21 @@ pub async fn dispatch_as(
             let parsed: Result<ListPermissionRequestsRequest, _> =
                 serde_json::from_value(req.params.unwrap_or(json!({})));
             match parsed {
-                Ok(p) => match authorized_permission_session(&state, &p.session_id, principal_id) {
+                Ok(p) => match authorized_permission_session(&state, &p.target, principal_id).await
+                {
                     Ok(session) => {
                         let (requests, groups) = session
                             .permission_broker()
-                            .user_list(&p.session_id.0.to_string());
+                            .user_list(&session.id().to_string());
                         let response = atman_proto::ListPermissionRequestsResponse {
                             requests: requests
                                 .into_iter()
                                 .map(|request| atman_proto::PermissionRequestView {
                                     request_id: request.request_id.0,
                                     session_id: request.session_id,
+                                    instance_id: session
+                                        .flow_instance()
+                                        .map(|address| address.instance_id.0.0),
                                     requesting_run_id: request.requesting_run_id.into(),
                                     tool: request.intent.tool_name,
                                     tier: format!("{:?}", request.intent.tier),
@@ -233,7 +248,8 @@ pub async fn dispatch_as(
             let parsed: Result<CreatePermissionGroupRequest, _> =
                 serde_json::from_value(req.params.unwrap_or(json!({})));
             match parsed {
-                Ok(p) => match authorized_permission_session(&state, &p.session_id, principal_id) {
+                Ok(p) => match authorized_permission_session(&state, &p.target, principal_id).await
+                {
                     Ok(session) => {
                         let ids: BTreeSet<_> = p
                             .request_ids
@@ -249,7 +265,7 @@ pub async fn dispatch_as(
                             })
                             .collect();
                         match session.permission_broker().user_create_group(
-                            &p.session_id.0.to_string(),
+                            &session.id().to_string(),
                             ids,
                             p.label,
                             &revisions,
@@ -270,7 +286,8 @@ pub async fn dispatch_as(
             let parsed: Result<ResolvePermissionRequestsRequest, _> =
                 serde_json::from_value(req.params.unwrap_or(json!({})));
             match parsed {
-                Ok(p) => match authorized_permission_session(&state, &p.session_id, principal_id) {
+                Ok(p) => match authorized_permission_session(&state, &p.target, principal_id).await
+                {
                     Ok(session) => {
                         let (request_ids, revisions, group) = match p.selector {
                             PermissionRpcSelector::Requests {
@@ -305,7 +322,7 @@ pub async fn dispatch_as(
                             ),
                         };
                         match session.permission_broker().user_resolve(
-                            &p.session_id.0.to_string(),
+                            &session.id().to_string(),
                             Some(principal_id.to_owned()),
                             request_ids,
                             &revisions,

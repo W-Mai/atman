@@ -79,6 +79,7 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "GetEventsRequest",
         "SessionSummary",
         "SessionStatus",
+        "PermissionTarget",
         "FlowAddress",
         "CreateSessionRequest",
         "SessionRequest",

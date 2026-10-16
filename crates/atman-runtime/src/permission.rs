@@ -692,6 +692,28 @@ pub struct PermissionClientGuard {
     broker: std::sync::Weak<PermissionBroker>,
 }
 
+/// Approval endpoint ownership for persistent instances. Retain this collection only while the host can receive user decisions; dropping it disconnects each registered client without retaining flow contexts.
+#[derive(Default)]
+pub struct PermissionClients {
+    clients: Mutex<HashMap<crate::flow_store::FlowRef, PermissionClientGuard>>,
+}
+
+impl PermissionClients {
+    pub(crate) fn register(
+        &self,
+        flow: crate::flow_store::FlowRef,
+        broker: &Arc<PermissionBroker>,
+    ) {
+        let previous = self
+            .clients
+            .lock()
+            .unwrap()
+            .insert(flow, broker.register_client());
+        // Cancellation and audit emission must not run under the endpoint map lock.
+        drop(previous);
+    }
+}
+
 impl Drop for PermissionClientGuard {
     fn drop(&mut self) {
         if let Some(broker) = self.broker.upgrade()

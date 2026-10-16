@@ -111,6 +111,29 @@ The daemon HTTP API uses one static bearer token. A valid token and the owner-on
 
 Even in this single-principal model, each live session is bound in the daemon's in-memory registry to the principal that created it. The permission RPCs `list_permission_requests`, `create_permission_group`, and `resolve_permission_requests` must match that owner before looking up or mutating the broker. A missing owner or a mismatched principal fails closed. The caller-provided session UUID is only a lookup key and is never treated as an authorization claim.
 
+For persistent flows, all three RPCs accept `session_id` and `instance_id` at the top level. These identify the instance's own broker; changing the default flow does not redirect decisions. Returned requests include `instance_id`. An unknown or nil instance is rejected without falling back to a legacy session. Omitting `instance_id` retains the legacy live-session route and its ownership checks. Groups, request revisions, and scoped grants use the same broker validation on both routes.
+
+The daemon retains an approval endpoint while its persistent session service is available. Every opened or spawned instance registers with that endpoint before execution can start. Closing one RPC connection does not remove the endpoint. Dropping the service disconnects its clients; when no approval client remains, pending user approvals are cancelled rather than left waiting. Retained flow handles cannot keep the endpoint alive.
+
+Embedded hosts can provide the same ownership boundary with `RuntimeHost::with_services`:
+
+```rust
+use std::sync::Arc;
+use atman_runtime::{
+    flow_runtime::host::{HostServices, RuntimeHost},
+    permission::PermissionClients,
+};
+
+let approvals = Arc::new(PermissionClients::default());
+let host = RuntimeHost::with_services(HostServices {
+    permission_clients: Arc::downgrade(&approvals),
+    ..Default::default()
+});
+// Retain approvals while the transport can receive user decisions.
+```
+
+Endpoint registration establishes a decision transport; it does not approve any request or increase a flow's authority. Hosts without an approval endpoint continue to reject calls that require an unavailable user decision.
+
 ## Session state and global defaults
 
 Permission state has three distinct roles:

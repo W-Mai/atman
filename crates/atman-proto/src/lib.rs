@@ -290,13 +290,23 @@ pub struct ResolvePromptRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ListPermissionRequestsRequest {
+pub struct PermissionTarget {
     pub session_id: SessionId,
+    /// Explicit persistent flow identity. Omission addresses a legacy live session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ListPermissionRequestsRequest {
+    #[serde(flatten)]
+    pub target: PermissionTarget,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CreatePermissionGroupRequest {
-    pub session_id: SessionId,
+    #[serde(flatten)]
+    pub target: PermissionTarget,
     pub request_ids: Vec<Uuid>,
     pub expected_request_revisions: std::collections::BTreeMap<Uuid, u64>,
     pub label: String,
@@ -340,7 +350,8 @@ pub enum PermissionRpcSelector {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResolvePermissionRequestsRequest {
-    pub session_id: SessionId,
+    #[serde(flatten)]
+    pub target: PermissionTarget,
     pub selector: PermissionRpcSelector,
     pub action: PermissionRpcAction,
     #[serde(default)]
@@ -353,6 +364,8 @@ pub struct ResolvePermissionRequestsRequest {
 pub struct PermissionRequestView {
     pub request_id: Uuid,
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<Uuid>,
     pub requesting_run_id: FlowRunId,
     pub tool: String,
     pub tier: String,

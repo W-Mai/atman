@@ -70,6 +70,7 @@ SSE event stream at GET /events. Every endpoint requires a bearer token."
         ResolvePromptRequest,
         GetEventsRequest,
         ListPermissionRequestsRequest,
+        atman_proto::PermissionTarget,
         CreatePermissionGroupRequest,
         ResolvePermissionRequestsRequest,
         atman_proto::ListPermissionRequestsResponse,

@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use atman_daemon::{DaemonState, dispatch, run::RunLauncher};
+use atman_daemon::{DaemonState, dispatch, dispatch_as, run::RunLauncher};
 use atman_proto::{JsonRpcRequest, methods};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -78,6 +78,21 @@ async fn wait_prompt(state: &Arc<DaemonState>) -> atman_proto::PromptId {
     })
     .await
     .unwrap()
+}
+
+async fn wait_permissions(state: &Arc<DaemonState>, flow: &Value, count: usize) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let listed = rpc(state, methods::LIST_PERMISSION_REQUESTS, flow.clone()).await;
+        if listed["requests"].as_array().unwrap().len() == count {
+            return listed;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let status = rpc(state, methods::FLOW_GET, json!({"flow": flow})).await;
+            panic!("expected {count} permissions, got {listed}; flow: {status}");
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 #[tokio::test]
@@ -334,6 +349,187 @@ fn reopening_requires_explicit_binding_and_preserves_paused_input() {
         rpc(&state, methods::FLOW_INVOKE, invocation).await;
         assert_eq!(rpc(&state, methods::FLOW_GET, request).await["last_completion"], second["last_completion"]);
     });
+}
+
+#[tokio::test]
+async fn permission_rpc_targets_instances_through_real_tool_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let outputs = tempfile::tempdir_in(dir.path()).unwrap();
+    let (state, first, mut launch) = setup(
+        &dir,
+        r#"flow main(label: string) -> string {
+        writes = fanout [
+            fs.write(path: label + "-a", content: "approved"),
+            fs.write(path: label + "-b", content: "approved")
+        ]
+        return final.answer(message: label)
+    }"#,
+    )
+    .await;
+    std::fs::write(
+        dir.path().join("config/config.toml"),
+        "[trust]\nmode = \"calm\"\n",
+    )
+    .unwrap();
+    launch["arguments"]["label"] = json!(outputs.path().join("first"));
+    rpc(&state, methods::FLOW_LAUNCH, launch.clone()).await;
+    let first_requests = wait_permissions(&state, &first, 2).await;
+
+    let catalog = rpc(
+        &state,
+        methods::SESSION_FLOWS,
+        json!({"session_id": first["session_id"]}),
+    )
+    .await;
+    let second = json!({"session_id": first["session_id"], "instance_id": Uuid::now_v7()});
+    launch["flow"] = second.clone();
+    launch["request_id"] = json!(Uuid::now_v7());
+    launch["expected_catalog_sequence"] = catalog["catalog"]["sequence"].clone();
+    launch["arguments"]["label"] = json!(outputs.path().join("second"));
+    rpc(&state, methods::FLOW_LAUNCH, launch).await;
+    let second_requests = wait_permissions(&state, &second, 2).await;
+    rpc(
+        &state,
+        methods::SESSION_SELECT_FLOW,
+        json!({"flow": second}),
+    )
+    .await;
+    for (flow, requests) in [(&first, &first_requests), (&second, &second_requests)] {
+        assert!(
+            requests["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|request| request["instance_id"] == flow["instance_id"])
+        );
+        assert_eq!(
+            rpc(&state, methods::LIST_PERMISSION_REQUESTS, flow.clone()).await,
+            *requests
+        );
+    }
+    for params in [
+        json!({"session_id": first["session_id"]}),
+        json!({"session_id": first["session_id"], "instance_id": Uuid::now_v7()}),
+        json!({"session_id": first["session_id"], "instance_id": Uuid::nil()}),
+    ] {
+        assert!(
+            dispatch(
+                state.clone(),
+                JsonRpcRequest::new(1, methods::LIST_PERMISSION_REQUESTS, params)
+            )
+            .await
+            .error
+            .is_some()
+        );
+    }
+    assert!(
+        dispatch_as(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::LIST_PERMISSION_REQUESTS, first.clone()),
+            "another-principal"
+        )
+        .await
+        .error
+        .is_some()
+    );
+
+    let ids_and_revisions = |requests: &Value| {
+        let requests = requests["requests"].as_array().unwrap();
+        let ids: Vec<_> = requests
+            .iter()
+            .map(|request| request["request_id"].clone())
+            .collect();
+        let revisions: serde_json::Map<_, _> = requests
+            .iter()
+            .map(|request| {
+                (
+                    request["request_id"].as_str().unwrap().to_owned(),
+                    request["revision"].clone(),
+                )
+            })
+            .collect();
+        (ids, revisions)
+    };
+    let (first_ids, first_revisions) = ids_and_revisions(&first_requests);
+    let (second_ids, second_revisions) = ids_and_revisions(&second_requests);
+    let mut group = first.clone();
+    group["request_ids"] = json!(second_ids);
+    group["expected_request_revisions"] = json!(second_revisions);
+    group["label"] = json!("file writes");
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::CREATE_PERMISSION_GROUP, group.clone())
+        )
+        .await
+        .error
+        .is_some()
+    );
+    group["request_ids"] = json!(first_ids);
+    group["expected_request_revisions"] = json!(first_revisions);
+    let grouped = rpc(&state, methods::CREATE_PERMISSION_GROUP, group).await;
+    let mut resolution = first.clone();
+    resolution["selector"] =
+        json!({"group_id": grouped["group_id"], "expected_group_revision": grouped["revision"]});
+    resolution["action"] = json!("approve");
+    resolution["scope"] = json!({"child_run_same_tool": {"run_id": second_requests["requests"][0]["requesting_run_id"], "tool_name": "fs.write"}});
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::RESOLVE_PERMISSION_REQUESTS, resolution.clone())
+        )
+        .await
+        .error
+        .is_some()
+    );
+    assert!(!outputs.path().join("first-a").exists());
+    resolution["scope"] = json!("current_call");
+    let resolved = rpc(
+        &state,
+        methods::RESOLVE_PERMISSION_REQUESTS,
+        resolution.clone(),
+    )
+    .await;
+    assert_eq!(resolved["resolutions"].as_array().unwrap().len(), 2);
+    wait_completion(&state, &first, None).await;
+    for suffix in ["a", "b"] {
+        assert_eq!(
+            std::fs::read_to_string(outputs.path().join(format!("first-{suffix}"))).unwrap(),
+            "approved"
+        );
+        assert!(!outputs.path().join(format!("second-{suffix}")).exists());
+    }
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::RESOLVE_PERMISSION_REQUESTS, resolution)
+        )
+        .await
+        .error
+        .is_some()
+    );
+    assert_eq!(
+        rpc(&state, methods::LIST_PERMISSION_REQUESTS, second.clone()).await,
+        second_requests
+    );
+    let status = rpc(&state, methods::FLOW_GET, json!({"flow": second})).await;
+    rpc(&state, methods::FLOW_CONTROL, json!({"flow": second, "expected_revision": status["execution"]["revision"], "action": "cancel_turn"})).await;
+    wait_permissions(&state, &second, 0).await;
+    let mut late = second;
+    late["selector"] =
+        json!({"request_ids": second_ids, "expected_request_revisions": second_revisions});
+    late["action"] = json!("approve");
+    assert!(
+        dispatch(
+            state,
+            JsonRpcRequest::new(1, methods::RESOLVE_PERMISSION_REQUESTS, late)
+        )
+        .await
+        .error
+        .is_some()
+    );
+    assert!(!outputs.path().join("second-a").exists());
+    assert!(!outputs.path().join("second-b").exists());
 }
 
 #[test]

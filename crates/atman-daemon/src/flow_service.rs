@@ -11,7 +11,7 @@ use atman_proto::{JsonRpcError, flows::*, methods};
 use atman_rt::FlowInstanceId;
 use atman_runtime::flow_runtime::{
     access::PeerControl,
-    host::{RuntimeHost, SessionHandle},
+    host::{HostServices, RuntimeHost, SessionHandle},
 };
 use atman_runtime::flow_store::{FlowRef, RuntimeStore, SessionDescriptor};
 use serde::de::DeserializeOwned;
@@ -28,15 +28,21 @@ type CatalogSlot = Arc<OnceCell<SessionHandle>>;
 pub(crate) struct SessionService {
     data_dir: PathBuf,
     host: RuntimeHost,
+    _permission_clients: Arc<atman_runtime::permission::PermissionClients>,
     catalogs: Mutex<HashMap<Uuid, CatalogSlot>>,
     executors: Mutex<HashMap<Uuid, Arc<OnceCell<atman_runtime::Executor>>>>,
 }
 
 impl SessionService {
     fn new(data_dir: PathBuf, redactor: Option<Arc<atman_runtime::redact::Redactor>>) -> Self {
+        let permission_clients = Arc::new(atman_runtime::permission::PermissionClients::default());
         Self {
             data_dir,
-            host: redactor.map(RuntimeHost::with_redactor).unwrap_or_default(),
+            host: RuntimeHost::with_services(HostServices {
+                redactor,
+                permission_clients: Arc::downgrade(&permission_clients),
+            }),
+            _permission_clients: permission_clients,
             catalogs: Default::default(),
             executors: Default::default(),
         }
@@ -112,18 +118,45 @@ pub(crate) async fn dispatch(
     params: Value,
     principal: &str,
 ) -> Result<Value, JsonRpcError> {
-    // Both authenticated transports represent this one local operator. Unknown principals must not acquire storage ownership.
-    if principal != "local-daemon" {
-        return Err(JsonRpcError::application(
-            "permission denied for persistent session management",
-        ));
-    }
+    authorize_operator(principal)?;
     let request = Request::parse(&method, params)?;
     // Accepted management work survives a disconnected RPC waiter.
     tokio::spawn(async move { dispatch_owned(&state, request).await })
         .await
         .map_err(|error| JsonRpcError::internal(error.to_string()))?
         .map_err(|error| JsonRpcError::application(error.to_string()))
+}
+
+fn authorize_operator(principal: &str) -> Result<(), JsonRpcError> {
+    // Both authenticated transports represent this one local operator. Unknown principals must not acquire storage ownership.
+    if principal != crate::state::LOCAL_OPERATOR {
+        return Err(JsonRpcError::application(
+            "permission denied for persistent session management",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn context(
+    state: &DaemonState,
+    flow: FlowAddress,
+    principal: &str,
+) -> Result<Arc<atman_runtime::Session>, JsonRpcError> {
+    authorize_operator(principal)?;
+    if flow.session_id.0.is_nil() || flow.instance_id.is_nil() {
+        return Err(JsonRpcError::invalid_params(
+            "session and flow identities must not be nil",
+        ));
+    }
+    let service = state.session_service.get().ok_or_else(|| {
+        JsonRpcError::application("open the persistent session before accessing its flows")
+    })?;
+    let worker = service
+        .host
+        .flow(&core_address(flow))
+        .await
+        .map_err(|error| JsonRpcError::application(error.to_string()))?;
+    Ok(worker.context())
 }
 
 enum Request {

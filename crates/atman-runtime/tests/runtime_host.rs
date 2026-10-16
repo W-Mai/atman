@@ -213,6 +213,73 @@ async fn late_form_replies_use_the_instance_inbox_and_commit_before_transport_ac
 }
 
 #[tokio::test]
+async fn permission_endpoint_lifetime_is_independent_of_retained_instance_handles() {
+    use atman_runtime::{
+        flow_runtime::host::HostServices,
+        permission::{
+            ApprovalAuthority, PermissionClients, PermissionIntent, PermissionResolution,
+            SubmissionOutcome,
+        },
+        tool::Tier,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let clients = Arc::new(PermissionClients::default());
+    let host = RuntimeHost::with_services(HostServices {
+        permission_clients: Arc::downgrade(&clients),
+        ..Default::default()
+    });
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let worker = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let context = worker.context();
+    let broker = context.permission_broker();
+    assert!(
+        broker.has_clients(),
+        "registration must precede the creation acknowledgement"
+    );
+    let owner = context
+        .flow_registry
+        .register_root(
+            context.id().to_string(),
+            RunId::now(),
+            EffectiveAuthority::root(&context.trust_config(), true, None),
+        )
+        .unwrap();
+    let SubmissionOutcome::Pending(pending) = broker
+        .submit_to(
+            Some(&owner.session_id),
+            Some(&owner.run_id),
+            PermissionIntent::minimal("pending", "fs.write", Tier::Two),
+            false,
+            ApprovalAuthority::User(broker.user_authority(&owner.session_id, None)),
+            &context.trust_config(),
+        )
+        .unwrap()
+    else {
+        panic!("expected pending permission")
+    };
+    drop(clients);
+    assert!(!broker.has_clients());
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), pending.resolution).await.unwrap().unwrap(),
+        PermissionResolution::Cancelled { reason } if reason == "permission client disconnected"
+    ));
+    assert!(
+        worker.snapshot().await.is_ok(),
+        "execution handles do not retain the endpoint"
+    );
+    let other = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    assert!(
+        !other.context().permission_broker().has_clients(),
+        "new instances must not revive a disconnected endpoint"
+    );
+}
+
+#[tokio::test]
 async fn permission_audit_uses_instance_scope_and_retains_source_runs_across_turns() {
     use atman_runtime::{
         Value,
@@ -2777,6 +2844,7 @@ async fn cancelling_a_sync_caller_keeps_child_work_and_delivers_the_reply_after_
 #[tokio::test]
 async fn persistent_spawned_instances_can_spawn_through_the_same_tool_chain() {
     use atman_runtime::ValueJson;
+    use atman_runtime::{flow_runtime::host::HostServices, permission::PermissionClients};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("delegated.at");
     let leaf = serde_json::to_string(&format!("{}@leaf", path.display())).unwrap();
@@ -2799,7 +2867,11 @@ async fn persistent_spawned_instances_can_spawn_through_the_same_tool_chain() {
     "#
     );
     let root = RuntimeStore::open(dir.path()).unwrap();
-    let host = RuntimeHost::default();
+    let clients = Arc::new(PermissionClients::default());
+    let host = RuntimeHost::with_services(HostServices {
+        permission_clients: Arc::downgrade(&clients),
+        ..Default::default()
+    });
     let info = session_descriptor();
     let session = host
         .attach_session(root.create_session(info.clone()).unwrap())
@@ -2820,6 +2892,22 @@ async fn persistent_spawned_instances_can_spawn_through_the_same_tool_chain() {
     );
     assert_eq!(session.snapshot().await.unwrap().catalog.flows.len(), 3);
     assert!(a.snapshot().await.unwrap().pending.is_empty());
+    let mut brokers = Vec::new();
+    for instance in session.snapshot().await.unwrap().catalog.flows {
+        let broker = session
+            .open_flow(instance.id)
+            .await
+            .unwrap()
+            .context()
+            .permission_broker();
+        assert!(
+            broker.has_clients(),
+            "spawned peers must share endpoint registration"
+        );
+        brokers.push(broker);
+    }
+    drop(clients);
+    assert!(brokers.iter().all(|broker| !broker.has_clients()));
 }
 
 #[tokio::test]

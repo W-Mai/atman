@@ -27,6 +27,13 @@ use crate::flow_store::{
 
 type FlowDirectory = Arc<Mutex<HashMap<FlowInstanceId, FlowWorker>>>;
 
+/// Services installed before any instance opens. Approval endpoint ownership remains with the frontend or transport, independently of retained execution handles.
+#[derive(Clone, Default)]
+pub struct HostServices {
+    pub redactor: Option<Arc<crate::redact::Redactor>>,
+    pub permission_clients: Weak<crate::permission::PermissionClients>,
+}
+
 /// A trusted host directory. Registration does not grant peer control or delivery authority.
 ///
 /// The map lock only protects handles. Catalog I/O is serialized by each session owner, and flow input/execution goes directly to the instance worker without passing through that catalog queue.
@@ -38,7 +45,7 @@ pub struct RuntimeHost {
 struct Directory {
     sessions: Mutex<HashMap<Uuid, SessionHandle>>,
     changes: watch::Sender<()>,
-    redactor: Option<Arc<crate::redact::Redactor>>,
+    services: HostServices,
 }
 
 impl Default for Directory {
@@ -46,7 +53,7 @@ impl Default for Directory {
         Self {
             sessions: Default::default(),
             changes: watch::channel(()).0,
-            redactor: None,
+            services: HostServices::default(),
         }
     }
 }
@@ -67,9 +74,16 @@ impl WeakRuntimeHost {
 impl RuntimeHost {
     /// Bind service diagnostic redaction before opening instances. Per-invocation sinks can supply their own execution diagnostic policy.
     pub fn with_redactor(redactor: Arc<crate::redact::Redactor>) -> Self {
+        Self::with_services(HostServices {
+            redactor: Some(redactor),
+            ..HostServices::default()
+        })
+    }
+
+    pub fn with_services(services: HostServices) -> Self {
         Self {
             directory: Arc::new(Directory {
-                redactor: Some(redactor),
+                services,
                 ..Directory::default()
             }),
         }
@@ -108,7 +122,7 @@ impl RuntimeHost {
             flows,
             access,
             WeakRuntimeHost(Arc::downgrade(&self.directory)),
-            self.directory.redactor.clone(),
+            self.directory.services.clone(),
             receiver,
         ));
         sessions.insert(id, handle.clone());
@@ -403,7 +417,7 @@ async fn serve_catalog(
     flows: FlowDirectory,
     access: Arc<RwLock<SessionAccess>>,
     host: WeakRuntimeHost,
-    redactor: Option<Arc<crate::redact::Redactor>>,
+    services: HostServices,
     mut commands: mpsc::Receiver<CatalogCommand>,
 ) {
     // Catalog lifetime owns observation, independently of execution and frontend handles.
@@ -604,12 +618,19 @@ async fn serve_catalog(
                 store = returned;
                 let result = match result {
                     Ok(flow) => {
-                        FlowWorker::start_owned(flow, Some(host.clone()), redactor.clone()).await
+                        FlowWorker::start_owned(flow, Some(host.clone()), services.redactor.clone())
+                            .await
                     }
                     Err(error) => Err(error),
                 };
                 if let Ok(worker) = &result {
                     // Install before acknowledgement, including when the request's receiver was dropped.
+                    if let Some(clients) = services.permission_clients.upgrade() {
+                        clients.register(
+                            worker.address().clone(),
+                            &worker.context().permission_broker(),
+                        );
+                    }
                     flows.lock().unwrap().insert(id.clone(), worker.clone());
                     observers.insert(id, super::observation::start(worker.clone(), host.clone()));
                     if let Ok(host) = host.upgrade() {
