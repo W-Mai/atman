@@ -884,6 +884,244 @@ fn goal_facts_recover_exact_revisions_without_changing_execution_or_inbox() {
 }
 
 #[test]
+fn goal_continuations_share_inbox_receipts_and_recover_without_restarting_interrupted_work() {
+    use atman_runtime::flow_store::{
+        completion::{InvocationResult, StoredValue},
+        goal::{GoalRequest, GoalVersion},
+    };
+    use atman_runtime::memory::goal::{GoalActor, GoalEdit, GoalPauseReason};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    for scenario in [
+        "deliver",
+        "new_input",
+        "edit",
+        "pause",
+        "replace",
+        "clear",
+        "cancel",
+        "failure",
+        "host_lost",
+    ] {
+        let description = descriptor(info.id);
+        let mut flow = session.create_flow(description.clone()).unwrap();
+        change(&mut flow, FlowTransition::Activated);
+        let turn = TurnId::now();
+        let run = RunId::now();
+        let lease = flow
+            .state()
+            .clone()
+            .begin_turn(turn.clone(), run.clone())
+            .unwrap();
+        change(&mut flow, FlowTransition::TurnStarted { turn, run });
+        let goal = flow
+            .edit_goal(
+                GoalRequest {
+                    id: Uuid::new_v4(),
+                    sender: SenderIdentity::User(Uuid::new_v4()),
+                    expected: None,
+                    edit: GoalEdit::Create {
+                        text: "objective".into(),
+                    },
+                },
+                |_| Ok(()),
+            )
+            .unwrap()
+            .goal
+            .unwrap();
+        let version = GoalVersion::from(&goal);
+        let mut stale = version.clone();
+        stale.revision += 1;
+        assert!(
+            flow.schedule_goal(lease.clone(), stale, "stale proposal".into(), |_| Ok(()))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(flow.pending_inputs().count(), 0);
+        let first = flow
+            .schedule_goal(
+                lease.clone(),
+                version.clone(),
+                "continue objective".into(),
+                |_| Ok(()),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            flow.schedule_goal(
+                lease.clone(),
+                version.clone(),
+                "continue objective".into(),
+                |_| unreachable!()
+            )
+            .unwrap(),
+            Some(first.clone())
+        );
+        assert!(
+            flow.schedule_goal(
+                lease.clone(),
+                version.clone(),
+                "different request".into(),
+                |_| Ok(())
+            )
+            .is_err()
+        );
+        let request = flow.pending_inputs().next().unwrap().request.clone();
+        let mut forged = request.clone();
+        forged.request_id = Uuid::new_v4();
+        assert!(flow.accept_input(forged.clone(), |_| Ok(())).is_err());
+        forged.sender = SenderIdentity::User(Uuid::new_v4());
+        assert!(flow.accept_input(forged, |_| Ok(())).is_err());
+        assert!(
+            flow.reserve_context_input(&lease, |_| true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            flow.reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+                .is_err()
+        );
+        let user = delivery(
+            &description.address,
+            SenderIdentity::User(Uuid::new_v4()),
+            "new request",
+        );
+        let user_receipt = flow.accept_input(user.clone(), |_| Ok(())).unwrap();
+
+        match scenario {
+            "edit" | "pause" | "replace" | "clear" => {
+                let edit = match scenario {
+                    "edit" => GoalEdit::Set {
+                        text: "updated objective".into(),
+                        replace_completed: false,
+                    },
+                    "pause" => GoalEdit::Pause {
+                        actor: GoalActor::User,
+                        reason: GoalPauseReason::UserRequested,
+                        summary: "hold objective".into(),
+                    },
+                    "replace" => GoalEdit::Create {
+                        text: "new objective".into(),
+                    },
+                    _ => GoalEdit::Clear,
+                };
+                flow.edit_goal(
+                    GoalRequest {
+                        id: Uuid::new_v4(),
+                        sender: SenderIdentity::User(Uuid::new_v4()),
+                        expected: Some(version.clone()),
+                        edit,
+                    },
+                    |_| Ok(()),
+                )
+                .unwrap();
+            }
+            "cancel" => change(
+                &mut flow,
+                FlowTransition::PhaseChanged {
+                    lease: lease.clone(),
+                    phase: TurnPhase::Cancelling,
+                },
+            ),
+            _ => {}
+        }
+        if scenario != "host_lost" {
+            let result = if scenario == "failure" {
+                InvocationResult::Failed(atman_runtime::RuntimeError::ToolFailed(
+                    "entry failed".into(),
+                ))
+            } else {
+                InvocationResult::Returned(StoredValue::Unit)
+            };
+            flow.finish_turn(lease.clone(), result).unwrap();
+        }
+        let key = Uuid::new_v4().into();
+        change(&mut flow, FlowTransition::ExecutionPaused { key });
+        drop(flow);
+        let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+        match scenario {
+            "clear" => assert!(flow.goal().is_none()),
+            "replace" => assert_ne!(flow.goal().unwrap().id, goal.id),
+            _ => assert_eq!(flow.goal().unwrap().id, goal.id),
+        }
+        let acceptance = flow
+            .accept_input(request.clone(), |_| unreachable!())
+            .unwrap();
+        let retained = matches!(scenario, "deliver" | "new_input");
+        assert_eq!(
+            matches!(acceptance.disposition, InboxDisposition::Pending),
+            retained,
+            "{scenario}"
+        );
+        assert_eq!(acceptance.receipt, first.receipt);
+        assert_eq!(
+            flow.accept_input(user, |_| unreachable!())
+                .unwrap()
+                .disposition,
+            InboxDisposition::Pending
+        );
+        if retained {
+            assert!(
+                flow.reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+                    .is_err()
+            );
+            change(&mut flow, FlowTransition::ExecutionResumed { key });
+            let chosen = if scenario == "deliver" {
+                first.message_id
+            } else {
+                user_receipt.message_id
+            };
+            let reservation = flow
+                .reserve_invocation_input(TurnId::now(), RunId::now(), |envelope| {
+                    envelope.id == chosen
+                })
+                .unwrap()
+                .unwrap();
+            let receipt = flow
+                .commit_input(
+                    &reservation,
+                    InputContent::InvocationInput {
+                        arguments: Default::default(),
+                        invocation: Default::default(),
+                        messages: vec![],
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                flow.accept_input(request.clone(), |_| unreachable!())
+                    .unwrap()
+                    .disposition,
+                if scenario == "deliver" {
+                    InboxDisposition::InputCommitted { by: receipt }
+                } else {
+                    InboxDisposition::Cancelled { by: receipt }
+                }
+            );
+            assert!(!flow.pending_inputs().any(|envelope| matches!(
+                envelope.request.payload,
+                InboxPayload::GoalContinuation { .. }
+            )));
+        } else {
+            assert!(matches!(
+                acceptance.disposition,
+                InboxDisposition::Cancelled { .. }
+            ));
+            assert_eq!(flow.pending_inputs().count(), 1);
+        }
+        drop(flow);
+        let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+        assert!(!matches!(
+            flow.accept_input(request, |_| unreachable!())
+                .unwrap()
+                .disposition,
+            InboxDisposition::Pending
+        ));
+    }
+}
+
+#[test]
 fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history() {
     use atman_runtime::flow_store::context::{ContextCheckpoint, context_digest};
     use atman_runtime::flow_store::publication::MessagePublication;

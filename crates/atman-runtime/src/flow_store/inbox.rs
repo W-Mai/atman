@@ -44,6 +44,12 @@ pub struct FlowEventRef {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum InboxPayload {
+    /// An entry-authored next turn, conditional on its successful completion and goal version.
+    GoalContinuation {
+        source: TurnLease<AtmanUuid>,
+        goal: super::goal::GoalVersion,
+        text: String,
+    },
     /// Explicit entry arguments and invocation configuration; never a mid-turn text injection.
     Invocation {
         arguments: BTreeMap<String, Value>,
@@ -104,6 +110,14 @@ impl DeliveryRequest {
             };
         }
         let valid = match (&self.sender, &self.payload) {
+            (SenderIdentity::Flow(sender), InboxPayload::GoalContinuation { source, .. }) => {
+                sender == &source.flow
+                    && sender == &self.recipient
+                    && self.delivery == DeliveryMode::NextTurn
+                    && self.correlation.is_none()
+                    && self.scope.is_none()
+                    && self.cause.is_none()
+            }
             (
                 SenderIdentity::User(_),
                 InboxPayload::UserSubmission { .. } | InboxPayload::Interjection { .. },
@@ -340,6 +354,18 @@ impl Inbox {
     pub fn state_changed(&mut self, state: &FlowInstance<AtmanUuid>, receipt: &CommitReceipt) {
         self.invalidate();
         self.waiters.state_changed(state, receipt);
+        if matches!(
+            state.state(),
+            atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Interrupted { .. })
+        ) || matches!(state.state(), atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) if active.phase == atman_rt::TurnPhase::Cancelling)
+        {
+            self.cancel_matching(receipt, |envelope| {
+                matches!(
+                    envelope.request.payload,
+                    InboxPayload::GoalContinuation { .. }
+                )
+            });
+        }
     }
 
     pub fn owns(&self, batch: &Batch<Uuid>) -> bool {
@@ -447,6 +473,15 @@ impl Inbox {
                     by: receipt.clone(),
                 };
         }
+        if input.content.target() == InputTarget::InvocationInput {
+            // Admitted work supersedes unselected suggestions from the previous turn.
+            self.cancel_matching(&receipt, |envelope| {
+                matches!(
+                    envelope.request.payload,
+                    InboxPayload::GoalContinuation { .. }
+                )
+            });
+        }
         self.inputs.push(InputRecord {
             input,
             receipt: receipt.clone(),
@@ -532,5 +567,35 @@ impl Inbox {
             };
         }
         self.pending.clear();
+    }
+
+    /// Reconcile cancellation from an already committed owner fact, preserving original bodies.
+    pub(super) fn cancel_matching(
+        &mut self,
+        receipt: &CommitReceipt,
+        mut matches: impl FnMut(&AcceptedEnvelope) -> bool,
+    ) {
+        let selected: std::collections::HashSet<_> = self
+            .pending()
+            .filter(|envelope| matches(envelope))
+            .map(|envelope| envelope.id)
+            .collect();
+        if selected.is_empty() {
+            return;
+        }
+        self.invalidate();
+        let Some(batch) = self.pending.reserve_matching(|id| selected.contains(id)) else {
+            return;
+        };
+        for id in batch.items() {
+            self.entries[self.messages[id]].acceptance.disposition = InboxDisposition::Cancelled {
+                by: receipt.clone(),
+            };
+        }
+        assert!(
+            self.pending
+                .commit(&batch, || Ok::<_, std::convert::Infallible>(()))
+                .unwrap()
+        );
     }
 }

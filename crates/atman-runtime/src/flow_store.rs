@@ -5,6 +5,7 @@
 pub mod access;
 pub mod completion;
 pub mod context;
+pub mod continuation;
 pub mod goal;
 pub mod inbox;
 mod input;
@@ -646,6 +647,7 @@ impl FlowStore {
                             activation = Some(*record);
                         }
                         (Some((_, state, inbox)), FlowFact::TurnCompleted(completion)) => {
+                            inbox.turn_completed(&completion, &receipt);
                             completions.replay(state, *completion, receipt.clone())?;
                             inbox.state_changed(state, &receipt);
                         }
@@ -654,6 +656,11 @@ impl FlowStore {
                                 return Err(invalid("acceptance fact targets an unavailable flow"));
                             }
                             inbox.validate(&envelope)?;
+                            continuation::validate_request(
+                                &envelope.request,
+                                state,
+                                goals.current(),
+                            )?;
                             inbox.apply(*envelope, receipt.clone());
                         }
                         (Some((_, state, inbox)), FlowFact::InputCommitted(input)) => {
@@ -663,8 +670,9 @@ impl FlowStore {
                             publications.validate(state, &publication)?;
                             publications.apply(*publication, receipt.clone());
                         }
-                        (Some((_, state, _)), FlowFact::GoalUpdated(update)) => {
+                        (Some((_, state, inbox)), FlowFact::GoalUpdated(update)) => {
                             let record = goals.prepare(state, &update)?;
+                            inbox.goal_changed(record.as_ref(), &receipt);
                             goals.apply(*update, record, receipt.clone());
                         }
                         (Some((_, state, inbox)), FlowFact::ContextCheckpoint(checkpoint)) => {
@@ -813,6 +821,7 @@ impl FlowStore {
             return Err(invalid("flow does not accept new input"));
         }
         request.validate_source()?;
+        continuation::validate_request(&request, &self.state, self.goals.current())?;
         authorize_new(&request)?;
         let envelope = AcceptedEnvelope {
             id: Uuid::now_v7(),

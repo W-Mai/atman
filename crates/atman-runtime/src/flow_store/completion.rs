@@ -234,6 +234,7 @@ impl FlowStore {
             .journal
             .commit(&[FlowFact::TurnCompleted(Box::new(completion.clone()))])?;
         self.completions.apply(completion.clone(), receipt.clone());
+        self.inbox.turn_completed(&completion, &receipt);
         self.state = state;
         self.inbox.state_changed(&self.state, &receipt);
         self.cursor = receipt.clone();

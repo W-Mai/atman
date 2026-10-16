@@ -60,6 +60,9 @@ pub(super) struct Goals {
 }
 
 impl Goals {
+    pub(super) fn current(&self) -> Option<&GoalRecord> {
+        self.current.as_ref()
+    }
     fn previous(&self, request: &GoalRequest) -> io::Result<Option<&CommittedGoalUpdate>> {
         let record = self
             .indices
@@ -148,6 +151,7 @@ impl FlowStore {
         let receipt = self
             .journal
             .commit(&[FlowFact::GoalUpdated(Box::new(update.clone()))])?;
+        self.inbox.goal_changed(goal.as_ref(), &receipt);
         let record = self.goals.apply(update, goal, receipt.clone());
         self.cursor = receipt;
         Ok(record)
