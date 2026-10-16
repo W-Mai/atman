@@ -177,6 +177,8 @@ Pending and resolved daemon events use the same captured sink, including cancell
 
 The TUI can display forms from multiple flows through one registry. Each record retains its originating run, tool call, and deferred-answer inbox independently of the current view. `FormRegistry::request_with_inbox` makes that destination explicit; ordinary `request` uses the registry's default inbox. Late submissions are accepted once into the original context. Deferred-form inbox persistence and permission-audit integration with the instance journal remain separate host integration work.
 
+Registered transports return `FormSubmission` for both `form.ask` and language-level `user_confirm`. The latter shares its decision check with the in-process registry: one positive confirmation returns `true`; rejection, malformed submissions, and transport failure return `false`.
+
 ## Execution diagnostics
 
 Persistent instance execution sends node, tool, model-usage, and resource diagnostics to the owning flow's event sink. Inline calls and fanout retain that instance binding; peer instances use separate sinks. Concurrent producers allocate sequence positions, forward, and update the live projection in one order.

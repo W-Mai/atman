@@ -58,3 +58,48 @@ async fn shared_display_preserves_invocation_identity_and_late_answer_destinatio
     assert_eq!(display.deferred_form_inbox().pending_count(), 0);
     assert!(forms.list_pending().is_empty());
 }
+
+#[tokio::test]
+async fn language_confirmation_accepts_the_same_submission_from_both_transports() {
+    let file =
+        atman_rt::parse_file(r#"flow main() -> bool { return user_confirm("Proceed?") }"#).unwrap();
+    for via_resolver in [true, false] {
+        for answer in [Some(true), Some(false), None] {
+            let session = Arc::new(Session::open_ephemeral());
+            let forms = session.forms();
+            let mut updates = forms.subscribe();
+            let mut executor = atman_runtime::Executor::new();
+            if via_resolver {
+                executor.tool_ctx.prompt_resolver =
+                    Some(Arc::new(TuiPromptResolver::new(forms.clone())));
+            }
+            let submission = match answer {
+                Some(value) => FormSubmission::Submitted {
+                    answers: vec![FormAnswer::Confirmed { value }],
+                },
+                None => FormSubmission::Rejected,
+            };
+            let (_, result) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(
+                    async {
+                        loop {
+                            if let Some(form) = forms.list_pending().first() {
+                                assert!(forms.submit(&form.form_id, submission));
+                                break;
+                            }
+                            updates.changed().await.unwrap();
+                        }
+                    },
+                    executor.run_in_turn(&file, "main", vec![], None, Some(session)),
+                )
+            })
+            .await
+            .unwrap();
+            assert!(
+                matches!(result.unwrap(), atman_rt::Value::Bool(value) if value == answer.unwrap_or(false)),
+                "transport={via_resolver}, answer={answer:?}"
+            );
+            assert!(forms.list_pending().is_empty());
+        }
+    }
+}

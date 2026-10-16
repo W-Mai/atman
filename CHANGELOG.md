@@ -110,6 +110,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Confirmation replies** — `user_confirm` decodes form submissions consistently across TUI and daemon transports instead of treating positive confirmations as cancellations.
+
 - **Executor stack usage** — Invocation execution state is allocated once on the heap, preventing nested entry wrappers from exhausting default test-thread stacks during flow initialization.
 
 - **Instance working directories** — Persistent tool calls resolve paths against their authorized project, including inline calls after reopening. Unrelated host checkout metadata no longer controls their paths, filesystem access modes remain intact, and instances without a project require absolute paths.

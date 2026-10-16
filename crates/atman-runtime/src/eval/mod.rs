@@ -1047,7 +1047,7 @@ async fn eval_confirm(v: Value, ctx: &AtmanHost<'_>) -> Value {
     // over RPC; in-process TUI subscribes to FormRegistry. Boot /
     // headless / unit tests without either wired keep the historical
     // auto-approve so they don't deadlock.
-    if let Some(resolver) = ctx.tool_ctx.prompt_resolver() {
+    let submission = if let Some(resolver) = ctx.tool_ctx.prompt_resolver() {
         let id = crate::rendezvous::PromptId::now();
         let payload = serde_json::to_value(&confirm_kind).unwrap_or(serde_json::Value::Null);
         let timeout = std::time::Duration::from_secs(300);
@@ -1060,44 +1060,43 @@ async fn eval_confirm(v: Value, ctx: &AtmanHost<'_>) -> Value {
             &ctx.tool_ctx.cancel,
         )
         .await;
-        let answer: crate::form::FormAnswer = match result {
-            Ok(v) => serde_json::from_value(v).unwrap_or(crate::form::FormAnswer::Cancelled),
-            Err(_) => crate::form::FormAnswer::Cancelled,
+        result
+            .ok()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or(crate::form::FormSubmission::Rejected)
+    } else {
+        let Some(session) = ctx.session_runtime.as_ref() else {
+            return Value::Bool(true);
         };
-        return Value::Bool(matches!(
-            answer,
-            crate::form::FormAnswer::Confirmed { value: true }
-        ));
-    }
-    let Some(session) = ctx.session_runtime.as_ref() else {
-        return Value::Bool(true);
+        let forms = session.forms();
+        if forms.subscriber_count() == 0 {
+            return Value::Bool(true);
+        }
+        let Some(run_id) = ctx.flow_run_id.clone() else {
+            return Value::Bool(true);
+        };
+        let pending = crate::form::PendingForm {
+            form_id: uuid::Uuid::now_v7().to_string(),
+            run_id,
+            tool_use_id: ctx.current_node_id.clone().unwrap_or_default(),
+            form: crate::form::CompositeForm {
+                questions: vec![crate::form::FormQuestion {
+                    id: "question".into(),
+                    kind: confirm_kind.clone(),
+                }],
+            },
+            kind: confirm_kind,
+            emitted_at: chrono::Utc::now(),
+        };
+        forms
+            .request(pending)
+            .await
+            .unwrap_or(crate::form::FormSubmission::Rejected)
     };
-    let forms = session.forms();
-    if forms.subscriber_count() == 0 {
-        return Value::Bool(true);
-    }
-    let Some(run_id) = ctx.flow_run_id.clone() else {
-        return Value::Bool(true);
-    };
-    let pending = crate::form::PendingForm {
-        form_id: uuid::Uuid::now_v7().to_string(),
-        run_id,
-        tool_use_id: ctx.current_node_id.clone().unwrap_or_default(),
-        form: crate::form::CompositeForm {
-            questions: vec![crate::form::FormQuestion {
-                id: "question".into(),
-                kind: confirm_kind.clone(),
-            }],
-        },
-        kind: confirm_kind,
-        emitted_at: chrono::Utc::now(),
-    };
-    let rx = forms.request(pending);
-    let submission = rx.await.unwrap_or(crate::form::FormSubmission::Rejected);
     Value::Bool(matches!(
         submission,
         crate::form::FormSubmission::Submitted { answers }
-            if matches!(answers.first(), Some(crate::form::FormAnswer::Confirmed { value: true }))
+            if matches!(answers.as_slice(), [crate::form::FormAnswer::Confirmed { value: true }])
     ))
 }
 
