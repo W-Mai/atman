@@ -26,6 +26,185 @@ fn session_descriptor() -> SessionDescriptor {
 }
 
 #[tokio::test]
+async fn execution_traces_share_instance_order_and_survive_turns_and_reopen() {
+    use atman_runtime::{
+        Value,
+        event::{Event, EventSink},
+        redact::{RedactMode, Redactor},
+        tool::{Tier, ToolDefinition},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let source = r#"
+        flow main() -> string {
+            index = 0
+            loop {
+                index = index + 1
+                when index == 128 { break }
+            }
+            value = helper().await
+            results = fanout [helper(), helper()]
+            return final.answer(message: value)
+        }
+        flow helper() -> string { return trace_probe() }
+    "#;
+    let first = FlowWorker::start(
+        session
+            .create_flow(program_descriptor(info.id, source.into()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let second = FlowWorker::start(
+        session
+            .create_flow(program_descriptor(info.id, source.into()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    change(&first, FlowTransition::Activated).await;
+    change(&second, FlowTransition::Activated).await;
+    let executor = Executor::with_events(EventSink::new().with_redactor(Arc::new(
+        Redactor::from_pairs(&[("secret", "trace-secret")], RedactMode::Full),
+    )));
+    let captured = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+    let probes = captured.clone();
+    executor
+        .tools
+        .register_fn(
+            ToolDefinition::new("trace_probe", Tier::Zero),
+            move |_, ctx| {
+                probes.lock().unwrap().insert(
+                    ctx.flow_identity
+                        .as_ref()
+                        .unwrap()
+                        .instance
+                        .as_ref()
+                        .unwrap()
+                        .instance_id
+                        .to_string(),
+                    ctx.events.clone().unwrap(),
+                );
+                async { Ok(Value::Str("trace-secret".into())) }
+            },
+        )
+        .unwrap();
+    let (a, b) = tokio::join!(
+        invoke(&first, executor.clone()),
+        invoke(&second, executor.clone())
+    );
+    assert!(a.result.is_ok(), "{:?}", a.result);
+    assert!(b.result.is_ok(), "{:?}", b.result);
+    assert!(executor.events.snapshot().is_empty());
+    for (worker, completion) in [(&first, &a), (&second, &b)] {
+        let trace = worker.execution_events().await.unwrap();
+        assert!(!trace.is_empty());
+        assert!(trace.last().unwrap().receipt.sequence < completion.receipt.sequence);
+        let events: Vec<_> = trace.iter().flat_map(|batch| &batch.events).collect();
+        let live = worker.context().sink().snapshot_envelopes();
+        let node_positions = |events: Vec<(u64, &Event)>| {
+            events
+                .into_iter()
+                .filter_map(|(seq, event)| {
+                    matches!(
+                        event,
+                        Event::FlowNodeStart { .. } | Event::FlowNodeEnd { .. }
+                    )
+                    .then_some(seq)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            node_positions(
+                events
+                    .iter()
+                    .map(|event| (event.sequence, &event.event))
+                    .collect()
+            ),
+            node_positions(live.iter().map(|event| (event.seq, &event.event)).collect()),
+            "batching must retain every live execution node exactly once"
+        );
+        assert!(events.iter().all(|event| event.lease == completion.lease));
+        assert!(
+            events
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+        assert!(events.iter().any(|event| matches!(&event.event, Event::FlowStart { flow_name, .. } if flow_name == "helper")));
+        assert!(events.iter().any(|event| matches!(&event.event, Event::FlowEnd { run_id, .. } if run_id == &completion.lease.run)));
+        assert!(!events.iter().any(|event| matches!(
+            event.event,
+            Event::AssistantMsg { .. } | Event::UserMsg { .. }
+        )));
+        assert!(
+            !serde_json::to_string(&trace)
+                .unwrap()
+                .contains("trace-secret")
+        );
+    }
+    let late_sink = captured
+        .lock()
+        .unwrap()
+        .get(&first.address().instance_id.to_string())
+        .unwrap()
+        .clone();
+    late_sink.emit(Event::MermaidDiagram {
+        source: "late resource diagnostic".into(),
+    });
+    let saved = first.execution_events().await.unwrap();
+    assert!(matches!(
+        saved.last().unwrap().events.last().unwrap().event,
+        Event::MermaidDiagram { .. }
+    ));
+    let previous_sequence = saved.last().unwrap().events.last().unwrap().sequence;
+    let address = first.address().clone();
+    let mut store = first.shutdown().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(store.execution_events()).unwrap(),
+        serde_json::to_value(&saved).unwrap()
+    );
+    let cursor = store.cursor().clone();
+    let old = saved[0].events[0].clone();
+    assert!(store.append_execution_events(vec![old.clone()]).is_err());
+    let mut wrong_owner = old.clone();
+    wrong_owner.sequence = previous_sequence + 1;
+    wrong_owner.lease.flow = second.address().clone();
+    assert!(store.append_execution_events(vec![wrong_owner]).is_err());
+    let mut message = old;
+    message.sequence = previous_sequence + 1;
+    message.event = Event::TurnEnd {
+        turn_id: a.lease.turn.clone(),
+    };
+    assert!(store.append_execution_events(vec![message]).is_err());
+    assert_eq!(store.cursor(), &cursor);
+    drop(store);
+    let restored = FlowWorker::start(session.open_flow(&address.instance_id).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(restored.execution_events().await.unwrap()).unwrap(),
+        serde_json::to_value(saved).unwrap()
+    );
+    assert!(invoke(&restored, executor).await.result.is_ok());
+    let updated = restored.execution_events().await.unwrap();
+    let new_events: Vec<_> = updated
+        .iter()
+        .flat_map(|batch| &batch.events)
+        .filter(|event| event.lease != a.lease)
+        .collect();
+    assert!(!new_events.is_empty());
+    assert!(
+        new_events
+            .iter()
+            .all(|event| event.sequence > previous_sequence)
+    );
+    restored.shutdown().await.unwrap();
+    second.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn process_resources_belong_to_flow_instances_across_turns_and_storage_handoff() {
     use atman_runtime::task_registry::{TaskFilter, TaskKind};
     use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};
@@ -180,6 +359,9 @@ async fn process_resources_belong_to_flow_instances_across_turns_and_storage_han
             .contains("process-ready")
     );
     assert_eq!(context.dir(), store.dir());
+    assert!(store.execution_events().iter().flat_map(|batch| &batch.events).any(|event| {
+        matches!(&event.event, atman_runtime::event::Event::TerminalFinalState { handle, .. } if handle == terminal)
+    }));
     let restored = FlowWorker::start(store).await.unwrap();
     change(&restored, FlowTransition::Closed).await;
     assert!(
@@ -1118,6 +1300,34 @@ async fn planning_tools_follow_the_invocation_across_inline_spawn_and_reopen() {
         .id
         .clone();
     let child = session.open_flow(child_id).await.unwrap();
+    let parent_trace = parent.execution_events().await.unwrap();
+    let child_trace = child.execution_events().await.unwrap();
+    assert!(
+        parent_trace
+            .iter()
+            .flat_map(|batch| &batch.events)
+            .all(|event| event.lease.flow == *parent.address())
+    );
+    assert!(
+        child_trace
+            .iter()
+            .flat_map(|batch| &batch.events)
+            .all(|event| event.lease.flow == *child.address())
+    );
+    assert!(
+        child_trace
+            .iter()
+            .flat_map(|batch| &batch.events)
+            .any(|event| matches!(&event.event,
+        atman_runtime::event::Event::FlowStart { flow_name, .. } if flow_name == "child"))
+    );
+    assert!(
+        !parent_trace
+            .iter()
+            .flat_map(|batch| &batch.events)
+            .any(|event| matches!(&event.event,
+        atman_runtime::event::Event::FlowStart { flow_name, .. } if flow_name == "child"))
+    );
     let snapshot = child.planning().await.unwrap();
     let child_goal = child.goal().await.unwrap().goal.unwrap();
     assert_eq!(child_goal.objective, "child");
@@ -1141,6 +1351,10 @@ async fn planning_tools_follow_the_invocation_across_inline_spawn_and_reopen() {
     let address = child.address().clone();
     drop(child.shutdown().await.unwrap());
     let reopened = host.flow(&address).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(reopened.execution_events().await.unwrap()).unwrap(),
+        serde_json::to_value(child_trace).unwrap()
+    );
     assert_eq!(reopened.planning().await.unwrap(), snapshot);
     assert_eq!(reopened.goal().await.unwrap().goal, Some(child_goal));
     assert_eq!(

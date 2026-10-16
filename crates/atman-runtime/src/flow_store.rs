@@ -14,6 +14,7 @@ pub mod outbox;
 pub mod planning;
 pub mod publication;
 pub mod subscription;
+pub mod trace;
 pub mod waiter;
 
 use std::fs::File;
@@ -141,6 +142,7 @@ impl FlowTransition {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 enum FlowFact {
+    ExecutionEvents(Vec<trace::ExecutionEvent>),
     Created(Box<FlowDescriptor>),
     Activated(Box<launch::Activation>),
     Transition(FlowTransition),
@@ -168,6 +170,16 @@ enum FlowFact {
 
 impl FlowFact {
     fn validate_batch(facts: &[Self]) -> io::Result<()> {
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, Self::ExecutionEvents(_)))
+        {
+            return if matches!(facts, [Self::ExecutionEvents(_)]) {
+                Ok(())
+            } else {
+                Err(invalid("execution diagnostics require their own batch"))
+            };
+        }
         if facts
             .iter()
             .any(|fact| matches!(fact, Self::Transition(FlowTransition::TurnFinished { .. })))
@@ -596,6 +608,7 @@ pub struct FlowStore {
     checkpoints: context::Checkpoints,
     goals: goal::Goals,
     planning: planning::Planning,
+    trace: trace::ExecutionTrace,
     cursor: CommitReceipt,
     projection_error: Option<io::Error>,
     pub recovered_tail: Option<RecoveredTail>,
@@ -633,6 +646,7 @@ impl FlowStore {
             checkpoints: Default::default(),
             goals: Default::default(),
             planning: Default::default(),
+            trace: Default::default(),
             cursor,
             projection_error: None,
             recovered_tail: None,
@@ -649,6 +663,7 @@ impl FlowStore {
         let mut checkpoints = context::Checkpoints::default();
         let mut goals = goal::Goals::default();
         let mut planning = planning::Planning::default();
+        let mut trace = trace::ExecutionTrace::default();
         let mut cursor = None;
         let (journal, recovered_tail) = Journal::open(
             &dir.join("events.jsonl"),
@@ -719,6 +734,10 @@ impl FlowStore {
                         (Some((_, state, _)), FlowFact::MessagePublished(publication)) => {
                             publications.validate(state, &publication)?;
                             publications.apply(*publication, receipt.clone());
+                        }
+                        (Some((_, state, _)), FlowFact::ExecutionEvents(events)) => {
+                            trace.validate(&events, state, &completions)?;
+                            trace.apply(events, receipt.clone());
                         }
                         (Some((_, state, inbox)), FlowFact::GoalUpdated(update)) => {
                             let record = goals.prepare(state, &update)?;
@@ -828,6 +847,7 @@ impl FlowStore {
             checkpoints,
             goals,
             planning,
+            trace,
             cursor: cursor.ok_or_else(|| invalid("empty flow journal"))?,
             projection_error: None,
             recovered_tail,

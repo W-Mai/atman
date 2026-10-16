@@ -169,6 +169,16 @@ Background processes use the resource owner's cancellation lifetime. Completing 
 
 Process logs, attachments, and large tool output use the owning `FlowStore` directory under `sessions/<session>/flows/<flow>`. Legacy Plan/Todo refresh entry points leave journal-backed projections intact. Legacy invocations retain their existing turn cancellation behavior and process registration APIs.
 
+## Execution diagnostics
+
+Persistent instance execution sends node, tool, model-usage, and resource diagnostics to the owning flow's event sink. Inline calls and fanout retain that instance binding; peer instances use separate sinks. Concurrent producers allocate sequence positions, forward, and update the live projection in one order.
+
+`ExecutionEvent` records the producing turn lease, instance-local sequence, timestamp, and typed event. `FlowStore::execution_events` and `FlowWorker::execution_events` return batches with journal receipts. Conversation messages, Goal changes, lifecycle transitions, and model-window checkpoints remain in their existing facts; execution batches cannot substitute for those records. Sequence positions identify local event order, while journal receipts identify durable commit order.
+
+The existing flow writer drains captured diagnostics before applying commands, including message publication and turn completion. Redaction and disk writes run on the storage worker. Diagnostics from a completed turn's retained resources keep their original lease and can arrive during a later turn. Storage handoff drains resources and remaining diagnostics before returning ownership. Reopening restores the committed batches and advances new event positions beyond their recorded high-water mark without reexecuting work. A failed journal write stops that writer and prevents acknowledgement of later commands.
+
+Diagnostic backlog applies backpressure at invocation suspension boundaries. The executor waits for the writer when a transport batch is pending, while pause and cancellation remain observable. This preserves diagnostics without allowing a CPU loop to continually grow pending writes; it does not set an operation budget or drop events. A cooperative quantum and independently running resource callbacks can still emit events before reaching that boundary.
+
 ## Owned instance turns
 
 General model calls using shared session context claim compatible `AtBoundary` inbox messages before reading that context. The storage worker reserves, commits consumption and exact messages, and updates the conversation projection as one owned command. Auxiliary extraction, explicit message overrides, context-free calls, and isolated fanout branches do not claim shared input. Inline calls use the same instance inbox.

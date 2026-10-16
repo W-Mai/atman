@@ -14,6 +14,7 @@ pub mod reply;
 pub mod resources;
 pub mod scheduler;
 pub mod send;
+mod trace;
 
 use std::{io, sync::Arc};
 
@@ -39,6 +40,7 @@ pub struct FlowSnapshot {
 }
 
 enum Command {
+    FlushTrace,
     Apply(Box<dyn FnOnce(&mut FlowStore) -> Acknowledge + Send>),
     Stop(oneshot::Sender<FlowStore>),
     ClaimExecution {
@@ -56,6 +58,7 @@ pub struct FlowWorker {
     address: FlowRef,
     context: Arc<Session>,
     resources: Arc<resources::InstanceResources>,
+    trace: Arc<trace::TraceBuffer>,
     commands: mpsc::Sender<Command>,
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
     commits: watch::Receiver<CommitReceipt>,
@@ -93,6 +96,15 @@ impl FlowWorker {
             context.bind_instance_directory(store.dir());
             let context = Arc::new(context);
             context.project_instance_planning(store.planning());
+            let sequence = store
+                .execution_events()
+                .last()
+                .and_then(|batch| batch.events.last())
+                .map_or(0, |event| event.sequence);
+            let next = context.sink().next_seq_peek();
+            context
+                .sink()
+                .restore_seq(sequence.max(next.saturating_sub(1)));
             (store, context)
         })
         .await
@@ -113,12 +125,25 @@ impl FlowWorker {
             Arc::downgrade(&context),
         ));
         let resource_owner = resources::ResourceOwner(resources.clone());
+        let trace = Arc::new(trace::TraceBuffer::default());
+        let trace_owner = trace::TraceOwner(trace.clone());
         tokio::spawn(async move {
             let mut store = store;
             let mut stopped = None;
             let mut claimed = None;
-            while let Some(command) = receiver.recv().await {
+            loop {
+                let command = tokio::select! {
+                    command = receiver.recv() => match command {
+                        Some(command) => command,
+                        None => break,
+                    },
+                    _ = trace_owner.0.wake.notified() => Command::FlushTrace,
+                };
                 let command = match command {
+                    Command::FlushTrace => {
+                        Box::new(|_: &mut FlowStore| Box::new(|| {}) as Acknowledge)
+                            as Box<dyn FnOnce(&mut FlowStore) -> Acknowledge + Send>
+                    }
                     Command::Apply(command) => command,
                     Command::Stop(reply) => {
                         receiver.close();
@@ -145,7 +170,9 @@ impl FlowWorker {
                 let state_tx = state_tx.clone();
                 let commits_tx = commits_tx.clone();
                 let resources = resource_owner.0.clone();
+                let trace = trace_owner.0.clone();
                 match tokio::task::spawn_blocking(move || {
+                    trace.flush(&mut store)?;
                     let acknowledge = command(&mut store);
                     if matches!(
                         store.state().state(),
@@ -168,15 +195,29 @@ impl FlowWorker {
                         true
                     });
                     acknowledge();
-                    store
+                    Ok::<_, io::Error>(store)
                 })
                 .await
                 {
-                    Ok(returned) => store = returned,
+                    Ok(Ok(returned)) => store = returned,
+                    Ok(Err(error)) => {
+                        crate::notify!(error, "flow execution journal failed: {error}");
+                        return;
+                    }
                     Err(_) => return,
                 }
             }
             resource_owner.0.shutdown().await;
+            trace_owner.0.close();
+            let trace = trace_owner.0.clone();
+            let Ok(Ok(store)) = tokio::task::spawn_blocking(move || {
+                trace.flush(&mut store)?;
+                Ok::<_, io::Error>(store)
+            })
+            .await
+            else {
+                return;
+            };
             if let Some(reply) = stopped {
                 let _ = reply.send(store);
             }
@@ -186,6 +227,7 @@ impl FlowWorker {
             address,
             context,
             resources,
+            trace,
             commands,
             state,
             commits,

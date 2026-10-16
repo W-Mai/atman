@@ -322,6 +322,7 @@ impl Executor {
         if let Some(binding) = &invocation.instance {
             if let Some(storage) = &binding.storage {
                 storage.bind_resources(&mut executor.tool_ctx);
+                executor.events = storage.execution_sink(binding.lease.clone(), &self.events);
             } else {
                 executor.tool_ctx.bg_registry = None;
                 executor.tool_ctx.term_registry = None;

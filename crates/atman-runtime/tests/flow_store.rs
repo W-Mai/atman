@@ -756,6 +756,13 @@ async fn cooperative_instance_execution_can_be_cancelled_while_paused_without_re
         .await
         .unwrap();
     let lease = ticket.lease.clone();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while worker.context().sink().next_seq_peek() < 1024 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("continuous diagnostics must yield to the writer and control tasks");
     let key = Uuid::new_v4().into();
     worker
         .transition(

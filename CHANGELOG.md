@@ -20,6 +20,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent execution diagnostics** — Flow instances retain independently attributed workflow, tool, model, and resource events in their journals. Concurrent emission preserves one order, and turn completion waits for preceding diagnostics to commit. Reopening preserves recorded traces without rerunning work.
+
 - **Retained host entry launches** — Direct host launches and peer spawning share entry preparation, activation, and catalog-owned scheduling. Matching retries preserve acceptance receipts without resuming paused work or reinstalling stopped controllers.
 
 - **Flow process ownership** — Persistent flows keep independent bash, terminal, and task registries across turns. Process logs and large output use each flow's directory. Closing an owner rejects late spawns and drains processes before storage handoff; sibling flows and retained history stay available.

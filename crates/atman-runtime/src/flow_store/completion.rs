@@ -155,7 +155,7 @@ pub(super) struct Completions {
 }
 
 impl Completions {
-    fn get(&self, lease: &TurnLease<AtmanUuid>) -> Option<&CommittedCompletion> {
+    pub(super) fn get(&self, lease: &TurnLease<AtmanUuid>) -> Option<&CommittedCompletion> {
         self.epochs
             .get(&lease.epoch)
             .map(|&index| &self.records[index])

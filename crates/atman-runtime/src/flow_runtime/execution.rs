@@ -252,7 +252,12 @@ pub(crate) async fn drive<T>(
                 }
             }
             _ = cancellation.cancelled() => return Ok(execution.await),
-            output = &mut execution, if !paused => return Ok(output),
+            output = std::future::poll_fn(|cx| {
+                if worker.trace.poll_capacity(cx).is_pending() {
+                    return std::task::Poll::Pending;
+                }
+                execution.as_mut().poll(cx)
+            }), if !paused => return Ok(output),
         }
     }
 }

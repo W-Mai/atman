@@ -58,6 +58,27 @@ fn cloned_sink_shares_counter_state() {
 }
 
 #[test]
+fn concurrent_producers_forward_and_project_in_the_same_sequence_order() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let sink = EventSink::new().with_forwarder(tx);
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            let sink = sink.clone();
+            scope.spawn(move || {
+                for _ in 0..200 {
+                    sink.emit(make_flow_start());
+                }
+            });
+        }
+    });
+    for (index, envelope) in sink.snapshot_envelopes().iter().enumerate() {
+        assert_eq!(envelope.seq, (index + 1) as u64);
+        assert_eq!(rx.try_recv().unwrap().seq, envelope.seq);
+    }
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
 fn next_seq_peek_does_not_advance_counter() {
     let sink = EventSink::new();
     let a = sink.next_seq_peek();

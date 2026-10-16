@@ -540,7 +540,10 @@ pub struct EventSink {
     seq_counter: Arc<std::sync::atomic::AtomicU64>,
     redactor: Option<Arc<crate::redact::Redactor>>,
     last_compact_at: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
+    observer: Option<EventObserver>,
 }
+
+type EventObserver = Arc<dyn Fn(&EventEnvelope) + Send + Sync>;
 
 impl EventSink {
     pub fn new() -> Self {
@@ -554,6 +557,11 @@ impl EventSink {
 
     pub fn with_redactor(mut self, redactor: Arc<crate::redact::Redactor>) -> Self {
         self.redactor = Some(redactor);
+        self
+    }
+
+    pub(crate) fn with_observer(mut self, observer: EventObserver) -> Self {
+        self.observer = Some(observer);
         self
     }
 
@@ -579,6 +587,8 @@ impl EventSink {
     }
 
     pub fn emit_returning_seq(&self, event: Event) -> u64 {
+        // Sequence allocation, forwarding, and projection use one order across concurrent producers.
+        let mut events = self.events.lock().expect("event sink poisoned");
         let next = self
             .seq_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -587,26 +597,15 @@ impl EventSink {
         if let Some(tx) = &self.forwarder {
             let _ = tx.send(envelope.clone());
         }
-        self.events
-            .lock()
-            .expect("event sink poisoned")
-            .push(envelope);
+        if let Some(observer) = &self.observer {
+            observer(&envelope);
+        }
+        events.push(envelope);
         next
     }
 
     pub fn emit(&self, event: Event) {
-        let next = self
-            .seq_counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        let envelope = EventEnvelope::new(next, event);
-        if let Some(tx) = &self.forwarder {
-            let _ = tx.send(envelope.clone());
-        }
-        self.events
-            .lock()
-            .expect("event sink poisoned")
-            .push(envelope);
+        self.emit_returning_seq(event);
     }
 
     pub fn events_handle(&self) -> Arc<Mutex<Vec<EventEnvelope>>> {
