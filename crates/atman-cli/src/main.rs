@@ -17,6 +17,7 @@ mod mcp_templates;
 mod migrate_source;
 mod oauth_login;
 mod repl_completer;
+mod session_catalog;
 mod suggest;
 mod sync;
 mod upgrade;
@@ -399,6 +400,19 @@ fn main() -> Result<()> {
 async fn async_main() -> Result<()> {
     let cli = Cli::parse();
     // History operations must not trigger unrelated config migration or notifier writes.
+    match &cli.cmd {
+        Some(Cmd::Session {
+            action: SessionAction::List { all, project },
+        }) => {
+            return cmd_session_list(*all, project.clone()).await;
+        }
+        Some(Cmd::Session {
+            action: SessionAction::Show { session_id },
+        }) => {
+            return cmd_session_show(session_id.clone()).await;
+        }
+        _ => {}
+    }
     if let Some(Cmd::Migrate { action }) = &cli.cmd
         && matches!(
             action,
@@ -1023,13 +1037,17 @@ async fn cmd_run_loaded(
 async fn cmd_session_list(all: bool, project: Option<PathBuf>) -> Result<()> {
     let root = data_dir()?;
     let sessions = root.join("sessions");
-    if !sessions.exists() {
-        return Ok(());
-    }
     let filter = resolve_session_list_filter(all, project.as_deref())?;
+    let persistent = session_catalog::list(
+        &root,
+        match &filter {
+            SessionListFilter::All => None,
+            SessionListFilter::Project { canonical_root, .. } => Some(canonical_root),
+        },
+    )?;
     let query = match &filter {
         SessionListFilter::All => {
-            atman_runtime::session_meta::SessionDiscoveryQuery::all_projects()
+            atman_runtime::session_meta::SessionDiscoveryQuery::all_projects().with_legacy(true)
         }
         SessionListFilter::Project { canonical_root, .. } => {
             atman_runtime::session_meta::SessionDiscoveryQuery::current_project(canonical_root)
@@ -1037,7 +1055,12 @@ async fn cmd_session_list(all: bool, project: Option<PathBuf>) -> Result<()> {
         }
     };
     let mut rows: Vec<(std::time::SystemTime, String, u64, usize, String)> = Vec::new();
-    for entry in std::fs::read_dir(&sessions)? {
+    let legacy = match std::fs::read_dir(&sessions) {
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    for entry in legacy.into_iter().flatten() {
         let entry = entry?;
         if !entry.path().is_dir() {
             continue;
@@ -1068,11 +1091,17 @@ async fn cmd_session_list(all: bool, project: Option<PathBuf>) -> Result<()> {
     rows.sort_by_key(|r| std::cmp::Reverse(r.0));
     match &filter {
         SessionListFilter::All => {}
-        SessionListFilter::Project { .. } if rows.is_empty() => {
+        SessionListFilter::Project { .. } if rows.is_empty() && persistent == 0 => {
             println!("no sessions match this project. Use --all to list every session.");
             return Ok(());
         }
         SessionListFilter::Project { .. } => {}
+    }
+    if rows.is_empty() {
+        return Ok(());
+    }
+    if persistent != 0 {
+        println!("\nLegacy sessions");
     }
     let header_sid = "session_id";
     let header_events = "events";
@@ -1098,12 +1127,10 @@ fn resolve_session_list_filter(all: bool, project: Option<&Path>) -> Result<Sess
         return Ok(SessionListFilter::All);
     }
     if let Some(path) = project {
-        if !path.exists() {
-            bail!("--project path does not exist: {}", path.display());
-        }
+        let path = atman_runtime::fs_access::canonicalize_stable(&std::path::absolute(path)?);
         return Ok(SessionListFilter::Project {
-            fingerprint: atman_runtime::session_meta::fingerprint_from_root(path),
-            canonical_root: atman_runtime::session_meta::canonical_root(path),
+            fingerprint: atman_runtime::session_meta::fingerprint_from_root(&path),
+            canonical_root: path,
         });
     }
     let cwd = std::env::current_dir().context("reading cwd")?;
@@ -1126,9 +1153,16 @@ fn short_project_path(path: &Path) -> String {
 
 async fn cmd_session_show(sid: String) -> Result<()> {
     let root = data_dir()?;
+    let persistent = session_catalog::show(&root, &sid)?;
     let dir = root.join("sessions").join(&sid);
     if !dir.is_dir() {
+        if persistent {
+            return Ok(());
+        }
         bail!("session not found: {}", dir.display());
+    }
+    if persistent {
+        println!("\nLegacy session with the same ID");
     }
     let events_path = dir.join("events.jsonl");
     let mut flow_start = 0usize;

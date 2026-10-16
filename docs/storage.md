@@ -69,6 +69,10 @@ The journal's content boundary rejects execution facts in historical flows and l
 
 The daemon exposes persistent catalogs through the authenticated `/rpc` endpoint and Unix socket. Both transports represent the local daemon operator; arbitrary external principal names cannot acquire a catalog. Catalog ownership stays with the daemon after an RPC connection closes. These methods address `runtime-v1` storage; `run_flow`, `list_sessions`, and `/events` without an instance address retain their existing session execution and history format.
 
+CLI `session list` and `session show` also inspect persistent catalogs directly, including while their executor holds the writer lease. `RuntimeStore::session_ids` discovers published directories, and `inspect_session` rebuilds the catalog through the same journal validation and projection reducer used by recovery. Neither operation creates storage, repairs incomplete tails, rewrites caches, opens flows, or restores execution. Inspection reads a fixed-length file prefix and reports trailing bytes separately. Complete corruption is an error; a damaged catalog in a listing is reported without hiding healthy sessions. These are recorded catalog views, not acknowledgements of an active writer's latest commit or live execution status.
+
+Persistent listings include titles, flow counts, and recorded project paths; `show` includes the default flow and registered flow IDs. Missing project directories remain queryable with `--project`. Published flat session history remains visible, and identical IDs in both layouts are shown separately. Read-only CLI catalog commands bypass configuration migration, notifier setup, and execution services.
+
 | Method | Parameters | Result |
 | --- | --- | --- |
 | `session.create` | `session_id`, nonempty `title`, optional `project_root` | Session summary and catalog receipt |

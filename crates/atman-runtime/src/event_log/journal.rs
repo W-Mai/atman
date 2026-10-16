@@ -61,6 +61,99 @@ struct BatchPosition {
     digest: String,
 }
 
+/// Integrity-checked on-disk prefix. Trailing bytes are left untouched, and the cursor does not certify a concurrently active writer's acknowledgement.
+#[derive(Clone, Debug)]
+pub struct JournalInspection {
+    pub cursor: Option<CommitReceipt>,
+    pub valid_bytes: u64,
+    pub trailing_bytes: u64,
+}
+
+struct ScannedJournal {
+    sequence: u64,
+    digest: String,
+    offset: u64,
+    batches: Vec<BatchPosition>,
+    tail: Option<Vec<u8>>,
+}
+
+fn scan<T: DeserializeOwned>(
+    file: &mut File,
+    expected_id: Uuid,
+    apply: &mut impl FnMut(CommitReceipt, Vec<T>) -> io::Result<()>,
+) -> io::Result<ScannedJournal> {
+    let length = file.metadata()?.len();
+    let mut reader = BufReader::new(file.take(length));
+    let mut line = Vec::new();
+    reader.read_until(b'\n', &mut line)?;
+    if !line.ends_with(b"\n") {
+        return Err(invalid("incomplete journal header"));
+    }
+    let header: Header = serde_json::from_slice(&line).map_err(invalid)?;
+    if header.format != FORMAT || header.version != VERSION || header.id != expected_id {
+        return Err(invalid("journal format, version, or identity mismatch"));
+    }
+    let mut digest = hex_digest(&line);
+    let mut offset = line.len() as u64;
+    let mut sequence = 0_u64;
+    let mut batches = Vec::new();
+    let tail = loop {
+        line.clear();
+        let bytes = reader.read_until(b'\n', &mut line)?;
+        if bytes == 0 {
+            break None;
+        }
+        if !line.ends_with(b"\n") {
+            break Some(line);
+        }
+        let record: Record = serde_json::from_slice(&line).map_err(invalid)?;
+        let next = sequence
+            .checked_add(1)
+            .ok_or_else(|| invalid("journal sequence exhausted"))?;
+        if record.sequence != next
+            || record.previous != digest
+            || record.digest != batch_digest(next, &digest, &record.payload)
+        {
+            return Err(invalid("journal batch integrity check failed"));
+        }
+        let events: Vec<T> = serde_json::from_str(&record.payload).map_err(invalid)?;
+        if events.is_empty() {
+            return Err(invalid("empty journal batch"));
+        }
+        apply(
+            CommitReceipt {
+                journal_id: expected_id,
+                sequence: next,
+                digest: record.digest.clone(),
+            },
+            events,
+        )?;
+        sequence = next;
+        digest = record.digest;
+        batches.push(BatchPosition {
+            offset,
+            length: bytes,
+            digest: digest.clone(),
+        });
+        offset = offset
+            .checked_add(bytes as u64)
+            .ok_or_else(|| invalid("journal offset exhausted"))?;
+    };
+    if reader.get_ref().limit() != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "journal shrank during inspection",
+        ));
+    }
+    Ok(ScannedJournal {
+        sequence,
+        digest,
+        offset,
+        batches,
+        tail,
+    })
+}
+
 /// An incomplete final record retained before truncating the journal to its committed prefix.
 #[derive(Debug)]
 pub struct RecoveredTail {
@@ -116,63 +209,13 @@ impl Journal {
     ) -> io::Result<(Self, Option<RecoveredTail>)> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         fs2::FileExt::try_lock_exclusive(&file)?;
-        let mut reader = BufReader::new(&mut file);
-        let mut line = Vec::new();
-        reader.read_until(b'\n', &mut line)?;
-        if !line.ends_with(b"\n") {
-            return Err(invalid("incomplete journal header"));
-        }
-        let header: Header = serde_json::from_slice(&line).map_err(invalid)?;
-        if header.format != FORMAT || header.version != VERSION || header.id != expected_id {
-            return Err(invalid("journal format, version, or identity mismatch"));
-        }
-        let mut digest = hex_digest(&line);
-        let mut offset = line.len() as u64;
-        let mut sequence = 0_u64;
-        let mut batches = Vec::new();
-        let tail = loop {
-            line.clear();
-            let bytes = reader.read_until(b'\n', &mut line)?;
-            if bytes == 0 {
-                break None;
-            }
-            if !line.ends_with(b"\n") {
-                break Some(line);
-            }
-            let record: Record = serde_json::from_slice(&line).map_err(invalid)?;
-            let next = sequence
-                .checked_add(1)
-                .ok_or_else(|| invalid("journal sequence exhausted"))?;
-            if record.sequence != next
-                || record.previous != digest
-                || record.digest != batch_digest(next, &digest, &record.payload)
-            {
-                return Err(invalid("journal batch integrity check failed"));
-            }
-            let events: Vec<T> = serde_json::from_str(&record.payload).map_err(invalid)?;
-            if events.is_empty() {
-                return Err(invalid("empty journal batch"));
-            }
-            apply(
-                CommitReceipt {
-                    journal_id: expected_id,
-                    sequence: next,
-                    digest: record.digest.clone(),
-                },
-                events,
-            )?;
-            sequence = next;
-            digest = record.digest;
-            batches.push(BatchPosition {
-                offset,
-                length: bytes,
-                digest: digest.clone(),
-            });
-            offset = offset
-                .checked_add(bytes as u64)
-                .ok_or_else(|| invalid("journal offset exhausted"))?;
-        };
-        drop(reader);
+        let ScannedJournal {
+            sequence,
+            digest,
+            offset,
+            batches,
+            tail,
+        } = scan(&mut file, expected_id, &mut apply)?;
         let recovered = if let Some(tail) = tail {
             let retained = retain_tail(path, offset, &tail)?;
             file.set_len(offset)?;
@@ -197,6 +240,25 @@ impl Journal {
             },
             recovered,
         ))
+    }
+
+    /// Inspect a fixed-length file snapshot without locking, repairing, or starting execution. Publish the callback's projection only after success. A complete record may still be awaiting its writer's sync; inspection is historical evidence, not an acceptance or delivery acknowledgement. Use the owning host for authoritative live state.
+    pub fn inspect<T: DeserializeOwned>(
+        path: &Path,
+        expected_id: Uuid,
+        mut apply: impl FnMut(CommitReceipt, Vec<T>) -> io::Result<()>,
+    ) -> io::Result<JournalInspection> {
+        let mut file = File::open(path)?;
+        let scanned = scan(&mut file, expected_id, &mut apply)?;
+        Ok(JournalInspection {
+            cursor: (scanned.sequence != 0).then_some(CommitReceipt {
+                journal_id: expected_id,
+                sequence: scanned.sequence,
+                digest: scanned.digest,
+            }),
+            valid_bytes: scanned.offset,
+            trailing_bytes: scanned.tail.map_or(0, |tail| tail.len() as u64),
+        })
     }
 
     pub fn sequence(&self) -> u64 {

@@ -34,6 +34,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **CLI persistent session discovery** — `session list` and `session show` inspect recorded persistent catalogs alongside legacy history, including missing project paths. Queries leave execution ownership unchanged, ignore disposable caches, report corrupt catalogs, and leave incomplete journal tails unchanged.
+
 - **Daemon shutdown** — SIGINT and SIGTERM stop request admission, disconnect event streams and Unix clients, and drain persistent and registered legacy execution before removing the process marker. Pending instance input and independent pauses remain stored.
 
 - **Explicit runtime shutdown** — Stop attached schedulers, unwind paused or running invocations, commit completion, and release instance journals and process resources. Retain unread input, goals, subscriptions, and independent pause keys for explicit recovery.

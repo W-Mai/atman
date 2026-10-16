@@ -163,12 +163,8 @@ pub(crate) fn is_temp_path(path: &Path) -> bool {
     false
 }
 
-// canonicalize() only works for existing paths, but we're often asked
-// about paths that will be created. Walk up to the nearest existing
-// ancestor, canonicalize it (this resolves macOS /var → /private/var
-// symlinks), then re-attach the missing tail. That way "workspace" and
-// "target" get the same symlink-resolved prefix and starts_with works.
-pub(crate) fn canonicalize_stable(p: &Path) -> PathBuf {
+/// Resolve the nearest existing ancestor and retain the missing path suffix. Relative paths are resolved against the current directory when available; this function does not create directories or grant filesystem access.
+pub fn canonicalize_stable(p: &Path) -> PathBuf {
     let absolute = if p.is_absolute() {
         p.to_path_buf()
     } else {

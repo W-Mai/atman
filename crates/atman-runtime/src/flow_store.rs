@@ -418,6 +418,26 @@ pub struct SessionProjection {
 }
 
 impl SessionProjection {
+    fn replay(projection: &mut Option<Self>, id: Uuid, facts: Vec<SessionFact>) -> io::Result<()> {
+        for fact in facts {
+            match (projection.as_mut(), fact) {
+                (None, SessionFact::Created(descriptor)) if descriptor.id == id => {
+                    descriptor.validate()?;
+                    *projection = Some(SessionProjection {
+                        descriptor,
+                        flows: Vec::new(),
+                        default_flow: None,
+                        access: Default::default(),
+                        migrated_from: None,
+                    });
+                }
+                (Some(state), fact) => state.apply(fact)?,
+                _ => return Err(invalid("missing or mismatched session creation")),
+            }
+        }
+        Ok(())
+    }
+
     fn apply(&mut self, fact: SessionFact) -> io::Result<()> {
         match fact {
             SessionFact::Created(_) => return Err(invalid("duplicate session creation")),
@@ -457,12 +477,62 @@ impl SessionProjection {
     }
 }
 
+/// Recorded catalog state inspected without acquiring execution ownership or consulting disposable metadata.
+#[derive(Debug)]
+pub struct SessionInspection {
+    pub dir: PathBuf,
+    pub projection: SessionProjection,
+    pub journal: crate::event_log::journal::JournalInspection,
+}
+
 /// The namespace never overlaps published flat session logs.
 pub struct RuntimeStore {
     root: PathBuf,
 }
 
 impl RuntimeStore {
+    /// Discover published session directories without creating a namespace or opening an owner lease. Temporary directories and symlinks are excluded.
+    pub fn session_ids(data_dir: &Path) -> io::Result<Vec<Uuid>> {
+        let entries = match std::fs::read_dir(data_dir.join(NAMESPACE).join("sessions")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(error) => return Err(error),
+        };
+        let mut ids = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            if let Some(name) = name.to_str()
+                && let Ok(id) = Uuid::parse_str(name)
+                && id.to_string() == name
+            {
+                ids.push(id);
+            }
+        }
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// Read recorded catalog facts without repairing logs, rewriting metadata, or recovering execution. The source project and configuration need not exist. Use the owning host to observe acknowledged live state.
+    pub fn inspect_session(data_dir: &Path, id: Uuid) -> io::Result<SessionInspection> {
+        let dir = std::path::absolute(data_dir)?
+            .join(NAMESPACE)
+            .join("sessions")
+            .join(id.to_string());
+        let mut projection = None;
+        let journal = Journal::inspect(&dir.join("events.jsonl"), id, |_, facts| {
+            SessionProjection::replay(&mut projection, id, facts)
+        })?;
+        Ok(SessionInspection {
+            dir,
+            projection: projection.ok_or_else(|| invalid("session creation was not recorded"))?,
+            journal,
+        })
+    }
+
     pub fn open(data_dir: &Path) -> io::Result<Self> {
         let root = std::path::absolute(data_dir)?.join(NAMESPACE);
         ensure_dir(&root.join("sessions"))?;
@@ -533,22 +603,7 @@ impl RuntimeStore {
         let mut cursor = None;
         let (journal, recovered_tail) =
             Journal::open(&dir.join("events.jsonl"), id, |receipt, facts| {
-                for fact in facts {
-                    match (&mut projection, fact) {
-                        (None, SessionFact::Created(descriptor)) if descriptor.id == id => {
-                            descriptor.validate()?;
-                            projection = Some(SessionProjection {
-                                descriptor,
-                                flows: Vec::new(),
-                                default_flow: None,
-                                access: Default::default(),
-                                migrated_from: None,
-                            });
-                        }
-                        (Some(state), fact) => state.apply(fact)?,
-                        _ => return Err(invalid("missing or mismatched session creation")),
-                    }
-                }
+                SessionProjection::replay(&mut projection, id, facts)?;
                 cursor = Some(receipt);
                 Ok(())
             })?;
