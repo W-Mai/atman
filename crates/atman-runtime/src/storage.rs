@@ -154,7 +154,7 @@ pub fn resolve_project_scope_with(
     project_root: &Path,
     data_dir: &Path,
 ) -> Result<PathBuf> {
-    let cfg = hub.storage_config(Some(project_root));
+    let cfg = hub.try_storage_config(Some(project_root))?;
     resolve_project_storage_root(project_root, &cfg, data_dir)
 }
 
@@ -171,7 +171,7 @@ pub fn resolve_current_project_scope() -> Result<PathBuf> {
     resolve_project_scope_for(&project_root)
 }
 
-/// Controls where session data is stored.
+/// Controls the location of project knowledge and specification data.
 #[derive(
     Debug,
     Clone,
@@ -184,12 +184,12 @@ pub fn resolve_current_project_scope() -> Result<PathBuf> {
     documented::DocumentedFields,
 )]
 pub struct StorageConfig {
-    /// Storage scope: `global` (shared across projects) or `local` (per-project).
+    /// Storage scope: `global` (host data directory) or `local` (project directory).
     #[serde(default)]
     pub scope: Option<StorageScope>,
 }
 
-/// Whether data is shared globally or scoped to the local project.
+/// Location of project-scoped data.
 #[derive(
     Debug,
     Clone,
@@ -204,7 +204,7 @@ pub struct StorageConfig {
 #[serde(rename_all = "lowercase")]
 pub enum StorageScope {
     #[default]
-    /// Shared across all projects.
+    /// Stored by project identity under the host data directory.
     Global,
     /// Scoped to the current project directory.
     Local,
@@ -212,8 +212,12 @@ pub enum StorageScope {
 
 impl StorageConfig {
     pub fn load_from(path: &Path) -> Result<Self> {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return Ok(Self::default());
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
         };
         #[derive(Deserialize, Default)]
         struct Wrapper {
@@ -237,16 +241,88 @@ pub fn resolve_project_storage_root(
     cfg: &StorageConfig,
     data_dir: &Path,
 ) -> Result<PathBuf> {
-    let scope = cfg.scope.unwrap_or_default();
-    let out = match scope {
+    let out = project_storage_path(project_root, cfg.scope.unwrap_or_default(), data_dir);
+    std::fs::create_dir_all(&out).with_context(|| format!("mkdir {}", out.display()))?;
+    Ok(out)
+}
+
+fn project_storage_path(project_root: &Path, scope: StorageScope, data_dir: &Path) -> PathBuf {
+    match scope {
         StorageScope::Local => project_root.join(".atman"),
         StorageScope::Global => {
             let fp = fingerprint_from_root(project_root);
             data_dir.join("projects").join(fp)
         }
-    };
-    std::fs::create_dir_all(&out).with_context(|| format!("mkdir {}", out.display()))?;
-    Ok(out)
+    }
+}
+
+/// Recorded project resources. This binding does not grant filesystem execution authority.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectContext {
+    root: PathBuf,
+    scope: StorageScope,
+    storage_root: PathBuf,
+}
+
+impl ProjectContext {
+    /// Resolve once at the host boundary without creating project or storage directories.
+    pub fn resolve(
+        hub: &crate::config_hub::ConfigHub,
+        project_root: &Path,
+        data_dir: &Path,
+    ) -> Result<Self> {
+        let root = crate::fs_access::canonicalize_stable(project_root);
+        let scope = hub
+            .try_storage_config(Some(&root))?
+            .scope
+            .unwrap_or_default();
+        let storage_root =
+            crate::fs_access::canonicalize_stable(&project_storage_path(&root, scope, data_dir));
+        let binding = Self {
+            root,
+            scope,
+            storage_root,
+        };
+        binding.validate()?;
+        Ok(binding)
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn scope(&self) -> StorageScope {
+        self.scope
+    }
+
+    pub fn storage_root(&self) -> &Path {
+        &self.storage_root
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            [&self.root, &self.storage_root].into_iter().all(|path| {
+                path.is_absolute()
+                    && !path
+                        .components()
+                        .any(|component| matches!(component, std::path::Component::ParentDir))
+            }),
+            "invalid project binding paths"
+        );
+        Ok(())
+    }
+
+    /// Check execution locations without changing the recorded scope or reading current preferences.
+    pub fn validate_locations(&self) -> Result<()> {
+        self.validate()?;
+        anyhow::ensure!(
+            [&self.root, &self.storage_root]
+                .into_iter()
+                .all(|path| { crate::fs_access::canonicalize_stable(path) == *path }),
+            "project binding location has changed"
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]

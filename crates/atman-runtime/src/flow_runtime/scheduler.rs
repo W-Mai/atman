@@ -94,9 +94,7 @@ impl FlowWorker {
         mut completed: CompletedTurn,
     ) -> io::Result<FlowScheduler> {
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
-        self.context()
-            .bind_provider_registry(&executor.providers)
-            .map_err(invalid)?;
+        self.context().bind_executor(&executor).map_err(invalid)?;
         self.scheduler_owned
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| invalid("instance already has a scheduler"))?;

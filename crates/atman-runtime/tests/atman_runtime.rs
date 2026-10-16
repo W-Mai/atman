@@ -19,7 +19,14 @@ fn atman_runtime_builds_and_runs_without_daemon() {
                 events: atman_runtime::event::EventSink::new(),
                 mock: true,
                 config: atman_runtime::config_hub::ConfigHub::from_config_dir(config.path()),
-                project_root: project.path().to_path_buf(),
+                project: Some(
+                    atman_runtime::storage::ProjectContext::resolve(
+                        &atman_runtime::config_hub::ConfigHub::from_config_dir(config.path()),
+                        project.path(),
+                        &config.path().join("data"),
+                    )
+                    .unwrap(),
+                ),
                 home_dir: None,
                 workspace_generation: "embedded-runtime-test".into(),
             })

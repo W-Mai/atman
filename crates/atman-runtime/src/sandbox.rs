@@ -160,7 +160,7 @@ pub trait Sandbox: Send + Sync {
 }
 
 pub struct SandboxExec {
-    project_root: PathBuf,
+    project_root: Option<PathBuf>,
     extra_read: Vec<PathBuf>,
     extra_write: Vec<PathBuf>,
     profile_template: String,
@@ -170,7 +170,15 @@ pub struct SandboxExec {
 impl SandboxExec {
     pub fn new(project_root: impl Into<PathBuf>) -> Self {
         Self {
-            project_root: project_root.into(),
+            project_root: Some(project_root.into()),
+            ..Self::without_project()
+        }
+    }
+
+    /// Restrict project placeholders to each operation's explicitly supplied working directory.
+    pub fn without_project() -> Self {
+        Self {
+            project_root: None,
             extra_read: Vec::new(),
             extra_write: Vec::new(),
             profile_template: DEFAULT_PROFILE.to_string(),
@@ -201,7 +209,7 @@ impl SandboxExec {
     pub fn render_profile(&self, cwd: &Path) -> String {
         render_template(
             &self.profile_template,
-            &self.project_root,
+            self.project_root.as_deref().unwrap_or(cwd),
             cwd,
             &self.extra_read,
             &self.extra_write,

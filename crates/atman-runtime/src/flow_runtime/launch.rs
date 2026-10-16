@@ -239,7 +239,7 @@ mod tests {
                     configuration: Default::default(),
                     id,
                     title: "Launch".into(),
-                    project_root: None,
+                    project: None,
                 })
                 .unwrap(),
             )

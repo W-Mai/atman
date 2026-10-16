@@ -290,12 +290,13 @@ impl RunLauncher {
             None => atman_runtime::config_hub::ConfigHub::global()
                 .map_err(|error| anyhow::anyhow!("resolve config hub: {error}"))?,
         };
-        let scope_root = atman_runtime::storage::resolve_project_scope_with(
+        let project = atman_runtime::storage::ProjectContext::resolve(
             &hub,
             &self.project_root,
             state.data_dir(),
         )?;
-        let project_index = match atman_runtime::index::AnchorIndex::open_project(&scope_root) {
+        let scope_root = project.storage_root();
+        let project_index = match atman_runtime::index::AnchorIndex::open_project(scope_root) {
             Ok(idx) => Some(std::sync::Arc::new(idx)),
             Err(e) => {
                 atman_runtime::notify!(
@@ -337,7 +338,6 @@ impl RunLauncher {
             },
         );
 
-        let project_root = self.project_root.clone();
         let config_dir = self.config_dir.clone();
         let home_dir = self.home_dir.clone();
         let state_for_task = state.clone();
@@ -370,8 +370,7 @@ impl RunLauncher {
                         &path,
                         args,
                         run_id_runtime,
-                        project_root,
-                        scope_root,
+                        project,
                         config_dir,
                         home_dir,
                         Some(state_for_run),
@@ -409,8 +408,7 @@ async fn run_flow_inner(
     path: &std::path::Path,
     args: Vec<(String, Value)>,
     run_id: RuntimeRunId,
-    project_root: PathBuf,
-    scope_root: PathBuf,
+    project: atman_runtime::storage::ProjectContext,
     config_dir: Option<PathBuf>,
     home_dir: Option<PathBuf>,
     daemon_state: Option<Arc<crate::DaemonState>>,
@@ -419,6 +417,7 @@ async fn run_flow_inner(
     drive_goal: bool,
 ) -> Result<()> {
     let owner_cancel = session.flow_cancel_token();
+    let project_root = project.root().to_path_buf();
     if path_is_managed_agent_at(path, config_dir.as_deref()) {
         if let Some(dir) = &config_dir {
             atman_runtime::templates::ensure_managed_agent_at(dir)?;
@@ -445,7 +444,7 @@ async fn run_flow_inner(
         events: session.sink().clone(),
         mock: false,
         config: crate::bootstrap::resolve_config_hub(config_dir.as_deref())?,
-        project_root: project_root.clone(),
+        project: Some(project.clone()),
         home_dir,
         workspace_generation,
     })
@@ -463,7 +462,7 @@ async fn run_flow_inner(
     crate::bootstrap::attach_memory_stores_with_redactor(
         &mut executor,
         session.dir(),
-        &scope_root,
+        project.storage_root(),
         redactor,
         session.project_index(),
         session.goal_watch().clone(),
@@ -883,7 +882,14 @@ mod tests {
                         events: atman_runtime::event::EventSink::new(),
                         mock: true,
                         config: atman_runtime::config_hub::ConfigHub::global().unwrap(),
-                        project_root: repository.path().to_path_buf(),
+                        project: Some(
+                            atman_runtime::storage::ProjectContext::resolve(
+                                &atman_runtime::config_hub::ConfigHub::global().unwrap(),
+                                repository.path(),
+                                state.data_dir(),
+                            )
+                            .unwrap(),
+                        ),
                         home_dir: None,
                         workspace_generation: state.daemon_generation().to_owned(),
                     })
@@ -972,7 +978,14 @@ mod tests {
                     events: atman_runtime::event::EventSink::new(),
                     mock: false,
                     config: atman_runtime::config_hub::ConfigHub::from_config_dir(config.path()),
-                    project_root: project.path().to_path_buf(),
+                    project: Some(
+                        atman_runtime::storage::ProjectContext::resolve(
+                            &atman_runtime::config_hub::ConfigHub::from_config_dir(config.path()),
+                            project.path(),
+                            &config.path().join("data"),
+                        )
+                        .unwrap(),
+                    ),
                     home_dir: Some(home.path().to_path_buf()),
                     workspace_generation: "launcher-root-test".into(),
                 };

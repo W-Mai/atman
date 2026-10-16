@@ -95,6 +95,13 @@ pub struct ResolvedPath {
 }
 
 #[derive(Clone, Default)]
+enum ProjectBinding {
+    #[default]
+    Unbound,
+    Bound(Option<crate::storage::ProjectContext>),
+}
+
+#[derive(Clone, Default)]
 pub struct ToolCtx {
     pub(crate) vm_run_options: Option<atman_rt::VmRunOptions>,
     pub(crate) instance_publication: Option<crate::flow_runtime::InstancePublication>,
@@ -136,6 +143,7 @@ pub struct ToolCtx {
     pub output_store: Option<std::sync::Arc<crate::tools::tool_output::OutputStore>>,
     pub data_root: Option<std::path::PathBuf>,
     pub project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
+    project_binding: ProjectBinding,
     pub fs_access: crate::fs_access::FsAccessPolicy,
     pub workspace: Option<crate::git_workspace::WorkspaceBinding>,
     pub flow_workspace_service: Option<std::sync::Arc<crate::flow_workspace::FlowWorkspaceService>>,
@@ -346,6 +354,25 @@ impl ToolExposureRegistry {
 }
 
 impl ToolCtx {
+    pub fn project(&self) -> Option<&crate::storage::ProjectContext> {
+        match &self.project_binding {
+            ProjectBinding::Unbound => None,
+            ProjectBinding::Bound(project) => project.as_ref(),
+        }
+    }
+
+    /// Create an explicit resource context without retaining services from another project.
+    pub fn for_project(project: Option<crate::storage::ProjectContext>) -> Self {
+        Self {
+            fs_access: crate::fs_access::FsAccessPolicy {
+                workspace: project.as_ref().map(|project| project.root().to_path_buf()),
+                ..Default::default()
+            },
+            project_binding: ProjectBinding::Bound(project),
+            ..Default::default()
+        }
+    }
+
     /// Identity-bound peer access supplied by the executing instance's host.
     pub fn flow_client(&self) -> Option<&crate::flow_runtime::access::FlowClient> {
         self.peer_client.as_ref()
@@ -663,6 +690,7 @@ impl ToolCtx {
             self.workspace
                 .as_ref()
                 .map(|binding| binding.path.as_path())
+                .or_else(|| self.project().map(|project| project.root()))
         }
     }
 
@@ -675,6 +703,7 @@ impl ToolCtx {
                 .flow_identity
                 .as_ref()
                 .is_some_and(|identity| identity.instance.is_some())
+                || matches!(self.project_binding, ProjectBinding::Bound(_))
             {
                 if !path.is_absolute() {
                     return Err(RuntimeError::ToolFailed(

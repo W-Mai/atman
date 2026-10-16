@@ -21,7 +21,129 @@ fn session_descriptor() -> SessionDescriptor {
         configuration: Default::default(),
         id: Uuid::new_v4(),
         title: "Workspace".into(),
-        project_root: None,
+        project: None,
+    }
+}
+
+#[tokio::test]
+async fn runtime_projects_bind_rules_and_spawned_flows_without_borrowing_another_project() {
+    use atman_runtime::config_hub::ConfigHub;
+    use atman_runtime::flow_store::SessionConfiguration;
+    use atman_runtime::storage::ProjectContext;
+    use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};
+    let data = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(
+        home.path().join(".claude/CLAUDE.md"),
+        "# global-rule\nshared rule",
+    )
+    .unwrap();
+    for (project, content) in [(first.path(), "alpha"), (second.path(), "beta")] {
+        std::fs::write(
+            project.join("AGENTS.md"),
+            format!("# project-rule\n{content}"),
+        )
+        .unwrap();
+    }
+    let hub = ConfigHub::from_config_dir(config.path());
+    let bindings = [
+        Some(ProjectContext::resolve(&hub, first.path(), data.path()).unwrap()),
+        Some(ProjectContext::resolve(&hub, second.path(), data.path()).unwrap()),
+        None,
+    ];
+    let options = |project| AtmanRuntimeOptions {
+        events: atman_runtime::event::EventSink::new(),
+        mock: false,
+        config: hub.clone(),
+        project,
+        home_dir: Some(home.path().to_path_buf()),
+        workspace_generation: "bound-projects".into(),
+    };
+    let alpha = AtmanRuntime::build(options(bindings[0].clone()))
+        .await
+        .unwrap();
+    let beta = AtmanRuntime::build(options(bindings[1].clone()))
+        .await
+        .unwrap();
+    let global = AtmanRuntime::build(options(None)).await.unwrap();
+    assert!(global.executor.tool_ctx.flow_workspace_service.is_none());
+    assert!(global.executor.tool_ctx.resolve_cwd(None).is_err());
+    assert_eq!(
+        alpha.executor.tool_ctx.resolve_cwd(None).unwrap(),
+        bindings[0].as_ref().unwrap().root()
+    );
+    let runtimes = [&alpha, &beta, &global];
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let host = RuntimeHost::default();
+    let child = data.path().join("child.at");
+    std::fs::write(
+        &child,
+        r#"flow child() -> string { return rule.fetch(name: "project-rule") }"#,
+    )
+    .unwrap();
+    let reference = serde_json::to_string(&format!("{}@child", child.display())).unwrap();
+    let source = format!(
+        r#"
+        flow main() -> any {{
+            contract {{ capabilities {{ shell: true }} }}
+            inventory = flow.instances()
+            child = flow.spawn(flow: {reference}, spawn_token: inventory.spawn_token, async: false)
+            return [rule.fetch(name: "project-rule"), child, rule.fetch(name: "global-rule")]
+        }}
+    "#
+    );
+    for (index, binding) in bindings.iter().enumerate() {
+        let mut info = session_descriptor();
+        info.project = binding.clone();
+        info.configuration = SessionConfiguration::Atman(hub.source());
+        let session = host
+            .attach_session(root.create_session(info.clone()).unwrap())
+            .unwrap();
+        let worker = session
+            .create_flow(program_descriptor(info.id, source.clone()))
+            .await
+            .unwrap();
+        change(&worker, FlowTransition::Activated).await;
+        let mut input = peer_request(worker.address(), worker.address());
+        input.sender = SenderIdentity::User(Uuid::new_v4());
+        worker.accept_input(input, |_| Ok(())).await.unwrap();
+        let before = worker.snapshot().await.unwrap();
+        let wrong = &runtimes[(index + 1) % runtimes.len()].executor;
+        assert!(worker.schedule(wrong.clone(), prepare).is_err());
+        let error = worker
+            .start_turn(wrong.clone(), prepare(&before).unwrap().unwrap())
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("project"), "{error}");
+        assert_eq!(worker.snapshot().await.unwrap().cursor, before.cursor);
+        let completed = tokio::time::timeout(
+            Duration::from_secs(10),
+            invoke(&worker, runtimes[index].executor.clone()),
+        )
+        .await
+        .unwrap();
+        let result = completed.result.unwrap().to_json().unwrap();
+        let expected = match index {
+            0 => "# project-rule\nalpha",
+            1 => "# project-rule\nbeta",
+            _ => "",
+        };
+        assert_eq!(
+            result,
+            serde_json::json!([expected, expected, "# global-rule\nshared rule"])
+        );
+        assert_eq!(session.snapshot().await.unwrap().catalog.flows.len(), 2);
+        if let Some(binding) = binding {
+            assert!(
+                !binding.storage_root().exists(),
+                "reading rules must not initialize knowledge stores"
+            );
+        }
     }
 }
 
@@ -35,7 +157,9 @@ async fn persistent_configuration_is_checked_before_scheduling_or_consuming_inpu
     let project = tempfile::tempdir().unwrap();
     let hub = ConfigHub::from_auth_path(config.path().join("account.json"));
     let mut info = session_descriptor();
-    info.project_root = Some(project.path().to_path_buf());
+    info.project = Some(
+        atman_runtime::storage::ProjectContext::resolve(&hub, project.path(), dir.path()).unwrap(),
+    );
     info.configuration = SessionConfiguration::Atman(hub.source());
     let root = RuntimeStore::open(dir.path()).unwrap();
     let mut store = root.create_session(info.clone()).unwrap();
@@ -48,7 +172,7 @@ async fn persistent_configuration_is_checked_before_scheduling_or_consuming_inpu
         events: atman_runtime::event::EventSink::new(),
         mock: false,
         config,
-        project_root: project.path().to_path_buf(),
+        project: info.project.clone(),
         home_dir: None,
         workspace_generation: "persistent-config-test".into(),
     };
@@ -61,7 +185,9 @@ async fn persistent_configuration_is_checked_before_scheduling_or_consuming_inpu
     worker.accept_input(request, |_| Ok(())).await.unwrap();
     let before = worker.snapshot().await.unwrap();
     assert!(worker.schedule(wrong.executor.clone(), prepare).is_err());
-    for executor in [wrong.executor.clone(), Executor::new()] {
+    let mut unconfigured = Executor::new();
+    unconfigured.tool_ctx = atman_runtime::tool::ToolCtx::for_project(info.project.clone());
+    for executor in [wrong.executor.clone(), unconfigured] {
         let request = prepare(&before).unwrap().unwrap();
         let error = worker.start_turn(executor, request).await.err().unwrap();
         assert!(error.to_string().contains("session source"), "{error}");

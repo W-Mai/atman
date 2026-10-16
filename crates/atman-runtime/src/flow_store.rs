@@ -45,7 +45,9 @@ const NAMESPACE: &str = "runtime-v1";
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SessionDescriptor {
     pub id: Uuid,
-    pub project_root: Option<PathBuf>,
+    // A projectless session is explicit; a missing binding is not an implicit default.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub project: Option<crate::storage::ProjectContext>,
     pub configuration: SessionConfiguration,
     pub title: String,
 }
@@ -61,6 +63,9 @@ pub enum SessionConfiguration {
 
 impl SessionDescriptor {
     fn validate(&self) -> io::Result<()> {
+        if let Some(project) = &self.project {
+            project.validate().map_err(invalid)?;
+        }
         if let SessionConfiguration::Atman(source) = &self.configuration {
             source.validate().map_err(invalid)?;
         }

@@ -267,6 +267,7 @@ impl InteractionServices {
 pub struct Session {
     flow_instance: Option<crate::flow_store::FlowRef>,
     configuration: crate::flow_store::SessionConfiguration,
+    project: Option<crate::storage::ProjectContext>,
     models: std::sync::OnceLock<std::sync::Arc<crate::model_registry::ModelRegistry>>,
     instance_writer: std::sync::OnceLock<crate::flow_runtime::context::ContextWriter>,
     pub goal_control: std::sync::Arc<crate::goal::GoalController>,
@@ -1137,6 +1138,7 @@ impl Session {
         Ok(Self {
             flow_instance: None,
             configuration: Default::default(),
+            project: None,
             instance_writer: Default::default(),
             models: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
@@ -1370,6 +1372,7 @@ impl Session {
         Ok(Self {
             flow_instance: None,
             configuration: Default::default(),
+            project: None,
             instance_writer: Default::default(),
             models: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
@@ -1457,6 +1460,7 @@ impl Session {
         Self {
             flow_instance: None,
             configuration: Default::default(),
+            project: None,
             instance_writer: Default::default(),
             models: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
@@ -1509,6 +1513,7 @@ impl Session {
         Self::restore_instance_context(
             address,
             Default::default(),
+            None,
             Vec::new(),
             Vec::new(),
             None,
@@ -1519,6 +1524,7 @@ impl Session {
     pub(crate) fn restore_instance_context(
         address: crate::flow_store::FlowRef,
         configuration: crate::flow_store::SessionConfiguration,
+        project: Option<crate::storage::ProjectContext>,
         messages: Vec<Message>,
         history: Vec<Message>,
         checkpoint: Option<&[Message]>,
@@ -1536,6 +1542,7 @@ impl Session {
         context.watch_hub = context.goal_control.watch_hub.clone();
         context.flow_instance = Some(address);
         context.configuration = configuration;
+        context.project = project;
         // Seed the same message projection used by live delivery without emitting new events or notifications.
         // These sequence numbers are local projection positions, not authoritative journal cursors.
         let initial: Vec<_> = messages
@@ -2080,6 +2087,19 @@ impl Session {
 
     pub fn last_model(&self) -> String {
         self.watch.context.borrow().model.clone()
+    }
+
+    /// Check recorded resource bindings before claiming execution or consuming input.
+    pub fn bind_executor(
+        &self,
+        executor: &crate::Executor,
+    ) -> Result<(), crate::error::RuntimeError> {
+        if self.flow_instance.is_some() && self.project.as_ref() != executor.tool_ctx.project() {
+            return Err(crate::error::RuntimeError::ToolFailed(
+                "executor project does not match the persistent session binding".into(),
+            ));
+        }
+        self.bind_provider_registry(&executor.providers)
     }
 
     /// Validate durable configuration before binding this context to live provider connections.

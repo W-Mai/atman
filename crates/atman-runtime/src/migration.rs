@@ -31,39 +31,47 @@ impl RuleScope {
 const MAX_RULE_BYTES: usize = 100_000;
 
 pub fn scan_migrated_rules(project_root: &Path, home: &Path) -> Vec<MigratedRule> {
+    scan_rule_sources(Some(project_root), Some(home))
+}
+
+/// Scan only explicit sources; an absent project or home never resolves from process state.
+pub fn scan_rule_sources(project_root: Option<&Path>, home: Option<&Path>) -> Vec<MigratedRule> {
     let mut out = Vec::new();
 
-    for (rel, tool) in &[
-        ("CLAUDE.md", "claude"),
-        ("AGENTS.md", "opencode"),
-        (".cursorrules", "cursor"),
-        ("CONVENTIONS.md", "aider"),
-    ] {
-        let path = project_root.join(rel);
-        if let Some(rule) = load_file(&path, tool, RuleScope::Project) {
-            out.push(rule);
+    if let Some(project_root) = project_root {
+        for (rel, tool) in &[
+            ("CLAUDE.md", "claude"),
+            ("AGENTS.md", "opencode"),
+            (".cursorrules", "cursor"),
+            ("CONVENTIONS.md", "aider"),
+        ] {
+            let path = project_root.join(rel);
+            if let Some(rule) = load_file(&path, tool, RuleScope::Project) {
+                out.push(rule);
+            }
         }
+
+        push_dir(
+            &mut out,
+            &project_root.join(".cursor/rules"),
+            "cursor",
+            "md",
+        );
+        push_dir(&mut out, &project_root.join(".kiro/steering"), "kiro", "md");
+        scan_aider_yaml(project_root, &mut out);
     }
 
-    push_dir(
-        &mut out,
-        &project_root.join(".cursor/rules"),
-        "cursor",
-        "md",
-    );
-    push_dir(&mut out, &project_root.join(".kiro/steering"), "kiro", "md");
-
-    for (rel, tool) in &[
-        (".claude/CLAUDE.md", "claude"),
-        (".config/opencode/AGENTS.md", "opencode"),
-    ] {
-        let path = home.join(rel);
-        if let Some(rule) = load_file(&path, tool, RuleScope::Global) {
-            out.push(rule);
+    if let Some(home) = home {
+        for (rel, tool) in &[
+            (".claude/CLAUDE.md", "claude"),
+            (".config/opencode/AGENTS.md", "opencode"),
+        ] {
+            let path = home.join(rel);
+            if let Some(rule) = load_file(&path, tool, RuleScope::Global) {
+                out.push(rule);
+            }
         }
     }
-
-    scan_aider_yaml(project_root, &mut out);
     scan_skill_references(project_root, home, &mut out);
 
     out
@@ -134,25 +142,33 @@ fn strip_yaml_comment(line: &str) -> &str {
     }
 }
 
-fn scan_skill_references(project_root: &Path, home: &Path, out: &mut Vec<MigratedRule>) {
+fn scan_skill_references(
+    project_root: Option<&Path>,
+    home: Option<&Path>,
+    out: &mut Vec<MigratedRule>,
+) {
     let mut seen = std::collections::HashSet::new();
-    for rel in [
-        ".agents/skills",
-        ".codex/skills",
-        ".claude/skills",
-        ".github/skills",
-        ".cursor/skills",
-        ".kiro/skills",
-        ".vscode/skills",
-    ] {
-        scan_skill_root(&project_root.join(rel), RuleScope::Project, out, &mut seen);
+    if let Some(project_root) = project_root {
+        for rel in [
+            ".agents/skills",
+            ".codex/skills",
+            ".claude/skills",
+            ".github/skills",
+            ".cursor/skills",
+            ".kiro/skills",
+            ".vscode/skills",
+        ] {
+            scan_skill_root(&project_root.join(rel), RuleScope::Project, out, &mut seen);
+        }
     }
-    scan_skill_root(
-        &home.join(".claude/skills"),
-        RuleScope::Global,
-        out,
-        &mut seen,
-    );
+    if let Some(home) = home {
+        scan_skill_root(
+            &home.join(".claude/skills"),
+            RuleScope::Global,
+            out,
+            &mut seen,
+        );
+    }
 }
 
 fn scan_skill_root(

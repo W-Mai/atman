@@ -19,6 +19,87 @@ use uuid::Uuid;
 
 mod common;
 
+#[test]
+fn project_binding_retains_scope_without_recreating_missing_paths_or_accepting_invalid_config() {
+    use atman_runtime::config_hub::ConfigHub;
+    use atman_runtime::flow_store::SessionConfiguration;
+    use atman_runtime::storage::{ProjectContext, StorageScope};
+    let data = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let hub = ConfigHub::from_config_dir(config.path());
+    let config_path = config.path().join("config.toml");
+    std::fs::write(&config_path, "[storage]\nscope = 'local'\n").unwrap();
+    let local = ProjectContext::resolve(&hub, project.path(), data.path()).unwrap();
+    assert_eq!(local.scope(), StorageScope::Local);
+    assert_eq!(local.storage_root(), local.root().join(".atman"));
+    assert!(!local.storage_root().exists());
+    let mut info = session_descriptor();
+    info.project = Some(local.clone());
+    info.configuration = SessionConfiguration::Atman(hub.source());
+    let root = RuntimeStore::open(data.path()).unwrap();
+    drop(root.create_session(info.clone()).unwrap());
+    std::fs::write(&config_path, "[storage]\nscope = 'global'\n").unwrap();
+    let global = ProjectContext::resolve(&hub, project.path(), data.path()).unwrap();
+    assert_eq!(global.scope(), StorageScope::Global);
+    assert_ne!(local.storage_root(), global.storage_root());
+    assert!(!global.storage_root().exists());
+    project.close().unwrap();
+    let store = root.open_session(info.id).unwrap();
+    assert_eq!(store.projection().descriptor.project.as_ref(), Some(&local));
+    assert!(!local.root().exists());
+    assert!(!local.storage_root().exists());
+
+    let mut invalid = serde_json::to_value(&info).unwrap();
+    let mut missing = invalid.clone();
+    missing.as_object_mut().unwrap().remove("project");
+    assert!(serde_json::from_value::<SessionDescriptor>(missing).is_err());
+    invalid["id"] = serde_json::json!(Uuid::new_v4());
+    invalid["project"]["storage_root"] = "relative".into();
+    let invalid: SessionDescriptor = serde_json::from_value(invalid).unwrap();
+    assert!(root.create_session(invalid.clone()).is_err());
+    assert!(
+        !root
+            .root()
+            .join("sessions")
+            .join(invalid.id.to_string())
+            .exists()
+    );
+    std::fs::write(&config_path, "[storage]\nscope = 'invalid'\n").unwrap();
+    assert!(ProjectContext::resolve(&hub, local.root(), data.path()).is_err());
+    // An unreadable configuration path is not an absent configuration file.
+    std::fs::remove_file(&config_path).unwrap();
+    std::fs::create_dir(&config_path).unwrap();
+    assert!(ProjectContext::resolve(&hub, local.root(), data.path()).is_err());
+    let profile = atman_runtime::sandbox::SandboxExec::without_project()
+        .with_template("{PROJECT_ROOT}|{CWD}")
+        .render_profile(std::path::Path::new("/explicit/operation"));
+    assert_eq!(profile, "/explicit/operation|/explicit/operation");
+}
+
+#[cfg(unix)]
+#[test]
+fn recorded_project_locations_reject_replaced_directory_aliases() {
+    use atman_runtime::config_hub::ConfigHub;
+    use atman_runtime::storage::ProjectContext;
+    let data = tempfile::tempdir().unwrap();
+    let project = data.path().join("project");
+    let replacement = data.path().join("replacement");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::create_dir(&replacement).unwrap();
+    let binding = ProjectContext::resolve(
+        &ConfigHub::from_config_dir(data.path()),
+        &project,
+        data.path(),
+    )
+    .unwrap();
+    binding.validate_locations().unwrap();
+    std::fs::remove_dir(&project).unwrap();
+    std::os::unix::fs::symlink(&replacement, &project).unwrap();
+    assert!(binding.validate_locations().is_err());
+    assert!(!binding.storage_root().exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn configuration_reopen_rejects_a_directory_replaced_by_an_alias() {
@@ -54,7 +135,14 @@ fn configuration_source_replays_without_accessing_project_or_credential_files() 
     std::fs::write(source.auth_path(), "private-credential-test-value").unwrap();
     let root = RuntimeStore::open(data.path()).unwrap();
     let mut info = session_descriptor();
-    info.project_root = Some(project.path().to_path_buf());
+    info.project = Some(
+        atman_runtime::storage::ProjectContext::resolve(
+            &ConfigHub::from_source(&source).unwrap(),
+            project.path(),
+            data.path(),
+        )
+        .unwrap(),
+    );
     info.configuration = SessionConfiguration::Atman(source.clone());
     let mut store = root.create_session(info.clone()).unwrap();
     let flow = descriptor(info.id);
@@ -738,7 +826,7 @@ fn session_descriptor() -> SessionDescriptor {
     SessionDescriptor {
         configuration: Default::default(),
         id: Uuid::new_v4(),
-        project_root: Some("/missing/project".into()),
+        project: None,
         title: "Example".into(),
     }
 }

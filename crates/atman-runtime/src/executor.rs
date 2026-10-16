@@ -307,7 +307,7 @@ impl Executor {
             ));
         }
         if let Some(session) = &invocation.session {
-            session.bind_provider_registry(&self.providers)?;
+            session.bind_executor(self)?;
         }
         if let Some(binding) = &invocation.instance {
             binding.claim()?;

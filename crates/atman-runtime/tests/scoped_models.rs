@@ -139,7 +139,14 @@ model = "primary"
         events: atman_runtime::event::EventSink::new(),
         mock: false,
         config: hub.clone(),
-        project_root: project.path().to_path_buf(),
+        project: Some(
+            atman_runtime::storage::ProjectContext::resolve(
+                hub,
+                project.path(),
+                &project.path().join("data"),
+            )
+            .unwrap(),
+        ),
         home_dir: None,
         workspace_generation: "scoped-runtime".into(),
     };

@@ -756,11 +756,17 @@ async fn cmd_run_loaded(
     };
 
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
+    let root = data_dir()?;
+    let config = atman_runtime::config_hub::ConfigHub::global()?;
+    let project = atman_runtime::storage::ProjectContext::resolve(
+        &config,
+        &std::env::current_dir().context("reading current project root")?,
+        &root,
+    )?;
     let session = std::sync::Arc::new(if ephemeral {
         Session::open_ephemeral()
     } else {
-        let root = data_dir()?;
-        let project_index = open_current_project_index()?;
+        let project_index = open_project_index(project.storage_root())?;
         Session::open_with_context_and_trust(
             &root,
             redactor.clone(),
@@ -785,7 +791,13 @@ async fn cmd_run_loaded(
         mut executor,
         provider_catalog_refresh_plan,
         ..
-    } = atman_runtime::AtmanRuntime::build(bootstrap_opts(session.sink().clone(), mock)?).await?;
+    } = atman_runtime::AtmanRuntime::build(bootstrap_opts_for(
+        session.sink().clone(),
+        mock,
+        config,
+        project,
+    ))
+    .await?;
     if !mock && let Some(lifecycle) = executor.provider_lifecycle() {
         consume_provider_catalog_refresh_plan(provider_catalog_refresh_plan, move |provider_id| {
             let lifecycle = lifecycle.clone();
@@ -1667,11 +1679,14 @@ async fn prebuild_session(
     let session_meta = resolved_sid.as_ref().and_then(|sid| {
         atman_runtime::session_meta::SessionMeta::load(&root.join("sessions").join(sid))
     });
-    let project_root = session_meta
+    let project_root = match session_meta
         .as_ref()
         .and_then(|meta| meta.project_root.clone())
         .or(requested_project_root.clone())
-        .unwrap_or(std::env::current_dir().context("reading current project root")?);
+    {
+        Some(root) => root,
+        None => std::env::current_dir().context("reading current project root")?,
+    };
     let project_root = atman_runtime::session_meta::canonical_root(&project_root);
     if let Some(requested) = requested_project_root {
         let requested = atman_runtime::session_meta::canonical_root(&requested);
@@ -1690,9 +1705,10 @@ async fn prebuild_session(
             }
         }
     }
-    let project_scope = atman_runtime::storage::resolve_project_scope_for(&project_root)
+    let config = atman_runtime::config_hub::ConfigHub::global()?;
+    let project = atman_runtime::storage::ProjectContext::resolve(&config, &project_root, &root)
         .with_context(|| format!("resolve project storage for {}", project_root.display()))?;
-    let project_index = open_project_index(&project_scope)?;
+    let project_index = open_project_index(project.storage_root())?;
     let global_trust = load_global_trust_config()?;
     let mut initial_transcript = Vec::new();
     let session = std::sync::Arc::new(match resume_sid {
@@ -1749,8 +1765,9 @@ async fn prebuild_session(
     } = atman_runtime::AtmanRuntime::build(bootstrap_opts_for(
         session.sink().clone(),
         false,
-        project_root,
-    )?)
+        config,
+        project,
+    ))
     .await?;
     emit(BootStepId::BuildExecutor, false, true);
 
@@ -7640,33 +7657,26 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
     Ok(())
 }
 
-fn bootstrap_opts(
-    events: atman_runtime::event::EventSink,
-    mock: bool,
-) -> Result<atman_runtime::AtmanRuntimeOptions> {
-    let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    bootstrap_opts_for(events, mock, project_root)
-}
-
 fn bootstrap_opts_for(
     events: atman_runtime::event::EventSink,
     mock: bool,
-    project_root: PathBuf,
-) -> Result<atman_runtime::AtmanRuntimeOptions> {
+    config: atman_runtime::config_hub::ConfigHub,
+    project: atman_runtime::storage::ProjectContext,
+) -> atman_runtime::AtmanRuntimeOptions {
     static WORKSPACE_GENERATION: OnceLock<String> = OnceLock::new();
 
     let home_dir = std::env::var("HOME").ok().map(std::path::PathBuf::from);
     let workspace_generation = WORKSPACE_GENERATION
         .get_or_init(|| uuid::Uuid::now_v7().to_string())
         .clone();
-    Ok(atman_runtime::AtmanRuntimeOptions {
+    atman_runtime::AtmanRuntimeOptions {
         events,
         mock,
-        config: atman_runtime::config_hub::ConfigHub::global()?,
-        project_root,
+        config,
+        project: Some(project),
         home_dir,
         workspace_generation,
-    })
+    }
 }
 
 fn open_project_index(
@@ -7685,13 +7695,6 @@ fn open_project_index(
     }
 }
 
-fn open_current_project_index() -> Result<Option<std::sync::Arc<atman_runtime::index::AnchorIndex>>>
-{
-    let scope = atman_runtime::storage::resolve_current_project_scope()
-        .context("resolve project storage scope")?;
-    open_project_index(&scope)
-}
-
 fn attach_memory_stores(
     executor: &mut atman_runtime::Executor,
     session: &atman_runtime::Session,
@@ -7703,10 +7706,12 @@ fn attach_memory_stores(
         std::fs::create_dir_all(&scratch).ok();
         (scratch.clone(), scratch, None)
     } else {
-        let scope = match session.meta().and_then(|meta| meta.project_root) {
-            Some(project_root) => atman_runtime::storage::resolve_project_scope_for(&project_root)?,
-            None => atman_runtime::storage::resolve_current_project_scope()?,
-        };
+        let scope = executor
+            .tool_ctx
+            .project()
+            .context("project memory requires an explicit runtime project")?
+            .storage_root()
+            .to_path_buf();
         (
             session_dir.to_path_buf(),
             scope.clone(),

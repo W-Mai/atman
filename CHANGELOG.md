@@ -8,11 +8,15 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Runtime project binding** — `AtmanRuntimeOptions::project` accepts an optional `ProjectContext` instead of a project path. Persistent session descriptors record the same project and storage binding explicitly.
+
 - **Runtime configuration input** — `AtmanRuntimeOptions::config` takes a `ConfigHub` instead of an optional configuration directory, preserving explicit authentication sources during construction and restoration.
 
 - **Embedded provider lifecycle construction** — `ProviderLifecycle::new` returns `Result`, and executor attachment returns `ProviderLifecycleError`. Provider connections must use `ProviderRegistry::with_models(hub.models().clone())`; mismatched configuration scopes are rejected.
 
 ### ✨ Features
+
+- **Project-bound flow execution** — Persistent flows verify project resources before scheduling or consuming input. CLI and daemon memory setup reuse the selected storage binding. Projectless runtimes load only explicit global rules, reject implicit working directories, and keep sandbox profiles tied to each operation's working directory.
 
 - **Persistent session configuration** — Session journals retain an explicit configuration source without credentials. Restored flows verify provider bindings before scheduling or consuming input, while history remains readable when project directories or configuration files are unavailable.
 

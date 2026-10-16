@@ -326,6 +326,22 @@ impl ConfigHub {
         crate::storage::StorageConfig::merge(global, project)
     }
 
+    pub fn try_storage_config(
+        &self,
+        project_root: Option<&Path>,
+    ) -> Result<crate::storage::StorageConfig, ConfigError> {
+        let load = |path: &Path| {
+            crate::storage::StorageConfig::load_from(path)
+                .map_err(|error| ConfigError::Invalid(error.to_string()))
+        };
+        let global = load(&self.config_toml_path())?;
+        let project = project_root
+            .map(|root| load(&root.join(".atman/config.toml")))
+            .transpose()?
+            .unwrap_or_default();
+        Ok(crate::storage::StorageConfig::merge(global, project))
+    }
+
     pub fn set_project_storage_scope(
         &self,
         project_root: &Path,

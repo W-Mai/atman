@@ -1576,21 +1576,17 @@ mod tests {
         let detached = ContextCallIdentity::from_tool_context(&crate::tool::ToolCtx::default());
         assert_eq!(detached.scope, ContextCallScope::Detached);
 
-        let root = ContextCallIdentity::from_tool_context(&crate::tool::ToolCtx {
-            session_id: Some("session-1".into()),
-            flow_run_id: Some(crate::event::FlowRunId::now()),
-            ..Default::default()
-        });
+        let context = crate::tool::ToolCtx::new()
+            .with_session_id("session-1")
+            .with_anchors(None, Some(crate::event::FlowRunId::now()), None);
+        let root = ContextCallIdentity::from_tool_context(&context);
         assert_eq!(root.scope, ContextCallScope::Root);
         assert_eq!(root.session_id.as_deref(), Some("session-1"));
         assert!(root.flow_run_id.is_none());
 
-        let child = ContextCallIdentity::from_tool_context(&crate::tool::ToolCtx {
-            session_id: Some("session-1".into()),
-            flow_run_id: Some(crate::event::FlowRunId::now()),
-            history_segment: crate::tool::HistorySegment::Spawned,
-            ..Default::default()
-        });
+        let child = ContextCallIdentity::from_tool_context(
+            &context.with_history_segment(crate::tool::HistorySegment::Spawned),
+        );
         assert_eq!(child.scope, ContextCallScope::Child);
         assert!(child.flow_run_id.is_some());
     }

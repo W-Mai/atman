@@ -79,6 +79,7 @@ impl FlowWorker {
             let context = Arc::new(Session::restore_instance_context(
                 store.descriptor().address.clone(),
                 store.session_descriptor().configuration.clone(),
+                store.session_descriptor().project.clone(),
                 store.context_messages(),
                 store.history_messages(),
                 store
@@ -431,7 +432,7 @@ mod tests {
             .create_session(SessionDescriptor {
                 configuration: Default::default(),
                 id: session_id,
-                project_root: None,
+                project: None,
                 title: "Worker".into(),
             })
             .unwrap();

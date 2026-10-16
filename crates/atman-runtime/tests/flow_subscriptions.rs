@@ -100,7 +100,7 @@ fn completion_filters_replay_one_fact_without_fabricating_final_answers() {
             configuration: Default::default(),
             id,
             title: "Completion subscriptions".into(),
-            project_root: None,
+            project: None,
         })
         .unwrap();
     let mut source = session.create_flow(descriptor(id)).unwrap();
@@ -204,7 +204,7 @@ fn synchronous_results_skip_only_the_initial_turn_and_preserve_other_subscribers
             configuration: Default::default(),
             id,
             title: "Synchronous results".into(),
-            project_root: None,
+            project: None,
         })
         .unwrap();
     let mut source = session.create_flow(descriptor(id)).unwrap();
@@ -295,7 +295,7 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
             configuration: Default::default(),
             id: session_id,
             title: "Subscriptions".into(),
-            project_root: None,
+            project: None,
         })
         .unwrap();
     let mut source = session.create_flow(descriptor(session_id)).unwrap();
@@ -450,7 +450,7 @@ fn cancellation_close_and_source_pages_cannot_skip_or_reactivate_subscriptions()
             configuration: Default::default(),
             id,
             title: "Watch".into(),
-            project_root: None,
+            project: None,
         })
         .unwrap();
     let mut source = session.create_flow(descriptor(id)).unwrap();
@@ -520,7 +520,7 @@ fn torn_observation_does_not_advance_cursor_without_its_input() {
             configuration: Default::default(),
             id,
             title: "Recovery".into(),
-            project_root: None,
+            project: None,
         })
         .unwrap();
     let mut source = session.create_flow(descriptor(id)).unwrap();
@@ -574,7 +574,7 @@ fn self_subscription_does_not_turn_its_own_cursor_commits_into_new_work() {
             configuration: Default::default(),
             id,
             title: "Self watch".into(),
-            project_root: None,
+            project: None,
         })
         .unwrap();
     let mut flow = session.create_flow(descriptor(id)).unwrap();
@@ -612,7 +612,7 @@ fn reply_registration_and_subscription_cancellation_keep_one_durable_owner() {
             configuration: Default::default(),
             id,
             title: "Replies".into(),
-            project_root: None,
+            project: None,
         })
         .unwrap();
     let source = session.create_flow(descriptor(id)).unwrap();

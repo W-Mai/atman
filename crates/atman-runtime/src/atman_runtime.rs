@@ -15,7 +15,7 @@ pub struct AtmanRuntimeOptions {
     pub events: EventSink,
     pub mock: bool,
     pub config: ConfigHub,
-    pub project_root: PathBuf,
+    pub project: Option<crate::storage::ProjectContext>,
     pub home_dir: Option<PathBuf>,
     pub workspace_generation: String,
 }
@@ -32,20 +32,26 @@ impl AtmanRuntime {
     pub async fn build(opts: AtmanRuntimeOptions) -> Result<Self> {
         let auth_hub = opts.config;
         let config_dir = Some(auth_hub.config_dir());
+        if let Some(project) = &opts.project {
+            project.validate_locations()?;
+        }
+        let project_root = opts.project.as_ref().map(|project| project.root());
         let mut executor = Executor::with_events(opts.events);
         executor.providers =
             crate::provider::ProviderRegistry::with_models(auth_hub.models().clone());
-        let workspace_service = crate::flow_workspace::FlowWorkspaceService::new(
-            &opts.project_root,
-            None,
-            &opts.workspace_generation,
-        )?;
-        executor.tool_ctx = executor
-            .tool_ctx
-            .clone()
-            .with_flow_workspace_service(Arc::new(workspace_service));
-
-        let rule_fetch = build_rule_fetch(&opts.project_root, opts.home_dir.as_deref()).await;
+        executor.tool_ctx = crate::tool::ToolCtx::for_project(opts.project.clone());
+        if let Some(root) = project_root {
+            let workspace_service = crate::flow_workspace::FlowWorkspaceService::new(
+                root,
+                None,
+                &opts.workspace_generation,
+            )?;
+            executor.tool_ctx = executor
+                .tool_ctx
+                .clone()
+                .with_flow_workspace_service(Arc::new(workspace_service));
+        }
+        let rule_fetch = build_rule_fetch(project_root, opts.home_dir.as_deref()).await;
         tools::register_tier_zero_with_rules(&executor.tools, rule_fetch);
         tools::register_git_ops(&executor.tools);
         tools::register_watch(&executor.tools);
@@ -72,9 +78,7 @@ impl AtmanRuntime {
         tools::register_web_search(&executor.tools, &web_config.search);
         let lifecycle = executor.attach_provider_lifecycle(auth_hub.clone())?;
         let provider_catalog_refresh_plan = lifecycle.prepare_auth_runtime().await?;
-        if let Some(sandbox) =
-            build_sandbox(&opts.project_root, config_dir).context("sandbox init")?
-        {
+        if let Some(sandbox) = build_sandbox(project_root, config_dir).context("sandbox init")? {
             executor.tool_ctx = executor.tool_ctx.clone().with_sandbox(sandbox);
         }
         if opts.mock {
@@ -98,7 +102,7 @@ impl AtmanRuntime {
 }
 
 fn build_sandbox(
-    project_root: &Path,
+    project_root: Option<&Path>,
     config_dir: Option<&Path>,
 ) -> Result<Option<Arc<dyn Sandbox>>> {
     let cfg = load_sandbox_config(config_dir);
@@ -110,7 +114,8 @@ fn build_sandbox(
             .with_context(|| format!("read sandbox template {}", path.display()))?,
         None => crate::sandbox::DEFAULT_PROFILE.to_string(),
     };
-    let sandbox = SandboxExec::new(project_root)
+    let sandbox = project_root
+        .map_or_else(SandboxExec::without_project, SandboxExec::new)
         .with_extra_read(cfg.extra_read.clone())
         .with_extra_write(cfg.extra_write.clone())
         .with_allow_network(cfg.allow_network)
@@ -129,17 +134,14 @@ fn build_sandbox(
 }
 
 async fn build_rule_fetch(
-    project_root: &Path,
+    project_root: Option<&Path>,
     home: Option<&Path>,
 ) -> tools::memory_stubs::RuleFetch {
     let rule_fetch = tools::memory_stubs::RuleFetch::new();
     if std::env::var("ATMAN_DISABLE_MIGRATION").is_ok() {
         return rule_fetch;
     }
-    let Some(home) = home else {
-        return rule_fetch;
-    };
-    let rules = crate::migration::scan_migrated_rules(project_root, home);
+    let rules = crate::migration::scan_rule_sources(project_root, home);
     rule_fetch.set_migrated(rules).await;
     rule_fetch
 }

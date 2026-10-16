@@ -25,7 +25,7 @@ fn session_info() -> SessionDescriptor {
         configuration: Default::default(),
         id: Uuid::new_v4(),
         title: "Launch".into(),
-        project_root: None,
+        project: None,
     }
 }
 
