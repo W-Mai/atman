@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Managed Goal continuation** — Main and child agent templates share an explicit delivery flow that publishes final answers and schedules active objectives through the persistent inbox. `flow.current` exposes the trusted instance and invocation identities.
+
 - **Persistent workspace execution** — Peer spawning supports isolated and shared worktrees across turns and host restarts. Allocation intent is journaled before Git effects; entry admission validates ownership, and explicit instance closure releases its reference after execution stops.
 
 - **Shared workspace references** — Multiple persistent instances can retain one managed worktree. Releasing its creator preserves other references; only the final release performs cleanup.

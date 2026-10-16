@@ -1,0 +1,17 @@
+pub flow deliver(reply: any) -> string {
+    answer = final.answer(message: reply)
+    caller = flow.current()
+    when caller.instance {
+        state = memory.goal.get()
+        when state.goal {
+            when state.goal.status == "active" {
+                memory.goal.schedule(
+                    goal_id: state.goal.id,
+                    expected_revision: state.goal.revision,
+                    message: "Goal continuation control, not a new user request. Continue the existing objective from the recorded context. Do not repeat completed effects. Pause the goal with a concrete result or blocker when no autonomous work remains, then deliver the final answer.",
+                )
+            }
+        }
+    }
+    return answer
+}

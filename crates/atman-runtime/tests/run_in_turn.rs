@@ -643,7 +643,20 @@ async fn assert_subagent_final_answer_policy(tools_before_final: bool) {
         source.replace_range(start..end, catalog);
         offset = start + catalog.len();
     }
-    let file = parse_file(&source).unwrap();
+    let path = dir.path().join("commands/managed-test.at");
+    let source = source.replace(
+        "../crates/atman-runtime/templates/flows/agent-delivery.at",
+        "user:agent-delivery.at",
+    );
+    std::fs::write(&path, source).unwrap();
+    let program = atman_runtime::source_program::load_program(
+        &path,
+        &atman_runtime::source_program::SourceRoots {
+            config_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let mut executor = Executor::new();
     executor.source_dir = Some(dir.path().join("commands"));
     atman_runtime::tools::register_tier_zero(&executor.tools);
@@ -663,8 +676,8 @@ async fn assert_subagent_final_answer_policy(tools_before_final: bool) {
         let turn = TurnId::now();
         session.begin_turn(user_msg(turn.clone(), "finish"));
         let output = executor
-            .run_in_turn(
-                &file,
+            .run_linked_in_turn_with_env(
+                &program,
                 entry,
                 vec![
                     ("goal".into(), Value::Str("finish".into())),
@@ -673,6 +686,7 @@ async fn assert_subagent_final_answer_policy(tools_before_final: bool) {
                 ],
                 Some(turn),
                 Some(session.clone()),
+                Default::default(),
             )
             .await
             .unwrap();
@@ -838,7 +852,20 @@ async fn assert_final_answer_boundary_with_extraction(
     let tools_start = source.find("tools: [").unwrap() + "tools: [".len();
     let tools_end = tools_start + source[tools_start..].find(']').unwrap();
     source.replace_range(tools_start..tools_end, "\"final.answer\", \"rule.fetch\"");
-    let file = parse_file(&source).unwrap();
+    let path = dir.path().join("commands/managed-test.at");
+    let source = source.replace(
+        "../crates/atman-runtime/templates/flows/agent-delivery.at",
+        "user:agent-delivery.at",
+    );
+    std::fs::write(&path, source).unwrap();
+    let program = atman_runtime::source_program::load_program(
+        &path,
+        &atman_runtime::source_program::SourceRoots {
+            config_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let mut executor = Executor::new();
     executor.source_dir = Some(dir.path().join("commands"));
     atman_runtime::tools::register_tier_zero(&executor.tools);
@@ -963,12 +990,13 @@ async fn assert_final_answer_boundary_with_extraction(
     session.begin_turn(user_msg(first.clone(), "finish"));
     let output = tokio::time::timeout(
         Duration::from_secs(5),
-        executor.run_in_turn(
-            &file,
+        executor.run_linked_in_turn_with_env(
+            &program,
             "agent",
             vec![("user_prompt".into(), Value::Str("finish".into()))],
             Some(first.clone()),
             Some(session.clone()),
+            Default::default(),
         ),
     )
     .await
@@ -1103,12 +1131,13 @@ async fn assert_final_answer_boundary_with_extraction(
         &session.watch_hub
     ));
     let output = executor
-        .run_in_turn(
-            &file,
+        .run_linked_in_turn_with_env(
+            &program,
             "agent",
             vec![("user_prompt".into(), Value::Str(prompt))],
             Some(second.clone()),
             Some(session.clone()),
+            Default::default(),
         )
         .await
         .unwrap();

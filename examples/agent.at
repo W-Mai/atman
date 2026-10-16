@@ -1,3 +1,5 @@
+use "../crates/atman-runtime/templates/flows/agent-delivery.at"::deliver
+
 flow agent(user_prompt: string) -> string {
     contract {
         capabilities { shell: true }
@@ -41,7 +43,7 @@ flow agent_loop(tools_called: bool, empty_wait_ms: int = 0) -> string {
     )
     reply = response.message
     when extract_final_answer(reply) {
-        return final.answer(message: reply)
+        return deliver(reply).await
     }
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
@@ -66,7 +68,7 @@ flow agent_loop(tools_called: bool, empty_wait_ms: int = 0) -> string {
                 return agent_loop(tools_called).await
             }
             when !is_empty(text_concat(reply)) {
-                return final.answer(message: reply)
+                return deliver(reply).await
             }
         }
         session.push(reply)

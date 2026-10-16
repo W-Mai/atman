@@ -12,8 +12,40 @@ const MAX_SEARCH_LIMIT: usize = 50;
 
 pub struct FlowList;
 pub struct FlowInstances;
+pub struct FlowCurrent;
 pub struct FlowSearch;
 pub struct FlowDescribe;
+
+impl Tool for FlowCurrent {
+    fn name(&self) -> &str {
+        "flow.current"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Read this invocation's trusted instance address, turn ID, and run ID. The instance is null for an invocation without persistent ownership. Inline calls share the instance and turn while keeping their own run ID.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": false })
+    }
+
+    fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let client = ctx.instance_client()?;
+            Ok(Value::from_json(serde_json::json!({
+                "instance": client.map(|client| client.source()),
+                "turn_id": ctx.turn_id,
+                "run_id": ctx.flow_run_id,
+            })))
+        })
+    }
+}
 
 #[derive(Clone)]
 struct FlowParameter {

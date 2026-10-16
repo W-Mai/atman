@@ -3188,8 +3188,16 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
 async fn entry_authored_continuation_uses_the_same_scheduler_for_direct_and_spawned_flows() {
     use atman_runtime::{ValueJson, flow_runtime::entry::EntryRecipe, memory::goal::GoalStatus};
     let source = r#"
+        flow current_identity() -> any { return flow.current() }
         flow main(input: string, label: string) -> string {
             contract { invocation { user_message: input, goal: true } }
+            caller = flow.current()
+            inline = current_identity().await
+            when is_empty(caller.instance.instance_id) { return "missing instance" }
+            when caller.instance.instance_id != inline.instance.instance_id { return "lost inline owner" }
+            when caller.instance.session_id != inline.instance.session_id { return "lost inline session" }
+            when caller.turn_id != inline.turn_id { return "lost inline turn" }
+            when caller.run_id == inline.run_id { return "missing inline run" }
             when input == "ready" { return final.answer(message: "ready") }
             goal = memory.goal.get()
             when goal.goal {
@@ -3207,9 +3215,37 @@ async fn entry_authored_continuation_uses_the_same_scheduler_for_direct_and_spaw
             return answer
         }
     "#;
-    for (spawned, mapped) in [(false, true), (true, true), (true, false)] {
+    for (spawned, mapped, managed_policy) in [
+        (false, true, false),
+        (true, true, false),
+        (true, false, false),
+        (false, true, true),
+        (true, true, true),
+        (true, false, true),
+    ] {
+        let mut source = source.to_string();
+        let continuation_text = if managed_policy {
+            source = source.replace(
+                "return final.answer(message: label + \": \" + input)",
+                "return deliver(label + \": \" + input).await",
+            );
+            let start = source
+                .find("            answer = final.answer(message: \"first answer\")")
+                .unwrap();
+            let end = start
+                + source[start..].find("            return answer").unwrap()
+                + "            return answer".len();
+            source.replace_range(
+                start..end,
+                "            return deliver(\"first answer\").await",
+            );
+            source.push_str(atman_runtime::templates::AGENT_DELIVERY_AT);
+            "Goal continuation control, not a new user request. Continue the existing objective from the recorded context. Do not repeat completed effects. Pause the goal with a concrete result or blocker when no autonomous work remains, then deliver the final answer."
+        } else {
+            "continue objective"
+        };
         let source = if mapped {
-            source.to_string()
+            source
         } else {
             source.replace("user_message: input, ", "")
         };
@@ -3321,14 +3357,14 @@ async fn entry_authored_continuation_uses_the_same_scheduler_for_direct_and_spaw
         let messages = context.messages().to_vec();
         let continuation: Vec<_> = messages
             .iter()
-            .filter(|message| message.text_concat() == "continue objective")
+            .filter(|message| message.text_concat() == continuation_text)
             .collect();
         assert_eq!(continuation.len(), 1);
         assert_eq!(continuation[0].origin, MessageOrigin::Internal);
         let expected = if mapped {
-            "carried: continue objective"
+            format!("carried: {continuation_text}")
         } else {
-            "carried: start"
+            "carried: start".into()
         };
         assert!(
             messages
