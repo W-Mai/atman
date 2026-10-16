@@ -15,7 +15,7 @@ use crate::flow_store::{
 impl RuntimeHost {
     /// Wait for owned execution and notification handoffs to settle without stopping any instance.
     ///
-    /// Active turns, scheduler preparation, unread source facts, and explicit watchers on runnable recipients keep a batch host alive. Paused or unbound input remains durable; it does not authorize execution. Spawn result routes alone do not keep an idle host alive. Scheduler and observation failures are returned rather than treated as successful completion. A frontend disconnect must not use this operation to decide instance lifetime.
+    /// Active turns, closing instances, scheduler preparation, unread source facts, and explicit watchers on runnable recipients keep a batch host alive. Paused or unbound input remains durable; it does not authorize execution. Spawn result routes alone do not keep an idle host alive. Scheduler, cleanup and observation failures are returned rather than treated as successful completion. A frontend disconnect must not use this operation to decide instance lifetime.
     pub async fn wait_quiescent(&self) -> io::Result<()> {
         loop {
             let mut changes = Changes::default();
@@ -25,6 +25,7 @@ impl RuntimeHost {
                 changes.track(worker.subscribe_commits());
                 changes.track(worker.scheduling_progress.subscribe());
                 changes.track(worker.subscribe_observation_issues());
+                changes.track(worker.subscribe_close_error());
                 let (state, cursor, subscriptions, process_watch) = worker
                     .request(|store| {
                         Ok((
@@ -44,8 +45,14 @@ impl RuntimeHost {
                 busy |= matches!(
                     state.state(),
                     InstanceState::Open(InstanceActivity::Active(_))
-                        | InstanceState::Closing { active: Some(_) }
+                        | InstanceState::Closing { .. }
                 );
+                if let Some(error) = worker.close_error.borrow().as_ref() {
+                    return Err(io::Error::other(format!(
+                        "flow {} cleanup: {error}",
+                        worker.address().instance_id
+                    )));
+                }
                 let progress = worker.scheduling_progress.borrow().clone();
                 match &progress {
                     SchedulingProgress::Busy => busy = true,

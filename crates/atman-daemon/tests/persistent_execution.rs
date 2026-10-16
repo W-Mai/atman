@@ -67,6 +67,117 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
+#[tokio::test]
+async fn close_rpc_stops_paused_execution_and_preserves_history_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, flow, launch) = setup(
+        &dir,
+        r#"flow main(label: string) -> string {
+        when label == "hold" { loop { yield } }
+        return final.answer(message: label)
+    }"#,
+    )
+    .await;
+    rpc(&state, methods::FLOW_LAUNCH, launch).await;
+    wait_completion(&state, &flow, None).await;
+    let output = rpc(&state, methods::FLOW_OUTPUT, json!({"flow": flow})).await;
+    assert_eq!(answer(&output, 0), "first");
+    rpc(
+        &state,
+        methods::FLOW_INVOKE,
+        json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"label": "hold"}}),
+    )
+    .await;
+    let active = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let view = rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await;
+            if view["execution"]["state"]["open"]["active"].is_object() {
+                break view;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "action": "pause", "expected_revision": active["execution"]["revision"]})).await;
+    let queued = json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"label": "cancelled input"}});
+    let acceptance = rpc(&state, methods::FLOW_INVOKE, queued.clone()).await;
+    let paused = rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await;
+    let close = json!({"flow": flow, "action": "close", "expected_revision": paused["execution"]["revision"]});
+    let denied = dispatch_as(
+        state.clone(),
+        JsonRpcRequest::new(1, methods::FLOW_CONTROL, close.clone()),
+        "unknown",
+    )
+    .await;
+    assert!(denied.error.is_some());
+    assert_eq!(
+        rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await["execution"],
+        paused["execution"]
+    );
+    rpc(&state, methods::FLOW_CONTROL, close).await;
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let view = rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await;
+            if view["execution"]["state"] == "closed" {
+                break view;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(closed["execution"]["can_start_turn"], false);
+    assert_eq!(
+        rpc(&state, methods::FLOW_OUTPUT, json!({"flow": flow})).await,
+        output
+    );
+    let retried = rpc(&state, methods::FLOW_INVOKE, queued).await;
+    assert_eq!(
+        retried["acceptance"]["message_id"],
+        acceptance["acceptance"]["message_id"]
+    );
+    assert_eq!(
+        retried["acceptance"]["receipt"],
+        acceptance["acceptance"]["receipt"]
+    );
+    assert_eq!(retried["acceptance"]["disposition"]["state"], "cancelled");
+    let rejected = dispatch(state.clone(), JsonRpcRequest::new(1, methods::FLOW_INVOKE, json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"label": "new input"}}))).await;
+    assert!(rejected.error.is_some());
+    let history = rpc(
+        &state,
+        methods::FLOW_EVENTS,
+        json!({"flow": flow, "limit": 128}),
+    )
+    .await;
+    state.shutdown().await.unwrap();
+    let reopened = Arc::new(DaemonState::new(dir.path().join("data")));
+    rpc(
+        &reopened,
+        methods::SESSION_OPEN,
+        json!({"session_id": flow["session_id"]}),
+    )
+    .await;
+    assert_eq!(
+        rpc(&reopened, methods::FLOW_GET, json!({"flow": flow})).await["execution"],
+        closed["execution"]
+    );
+    assert_eq!(
+        rpc(&reopened, methods::FLOW_OUTPUT, json!({"flow": flow})).await,
+        output
+    );
+    assert_eq!(
+        rpc(
+            &reopened,
+            methods::FLOW_EVENTS,
+            json!({"flow": flow, "limit": 128})
+        )
+        .await,
+        history
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_shutdown_drains_execution_and_ends_connected_streams_without_losing_queued_input() {
     use axum::{body::Body, http::Request};

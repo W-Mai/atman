@@ -1887,6 +1887,51 @@ impl Tool for AgentKill {
     }
 }
 
+pub struct FlowClose;
+impl Tool for FlowClose {
+    fn name(&self) -> &str {
+        "flow.close"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Four
+    }
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Close a persistent flow instance. Rejects new input, cancels execution, and stops its resources. Returns an acceptance receipt; flow.status reports closing until cleanup finishes. History remains readable and other instances keep running.",
+        )
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "handle": {"type": "string", "description": instance::HANDLE_DESCRIPTION},
+                "expected_revision": {"type": "integer", "minimum": 0}
+            },
+            "required": ["handle", "expected_revision"]
+        })
+    }
+    fn scheduling_claims(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<SchedulingClaims, RuntimeError> {
+        flow_handle_scheduling_claim(args, ctx, AccessMode::Exclusive)
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let handle = extract_string(&args, "handle", 0)?;
+            instance::resolve(&handle, ctx)?
+                .ok_or_else(|| {
+                    RuntimeError::ToolFailed(
+                        "flow.close requires persistent instance ownership".into(),
+                    )
+                })?
+                .close(&args)
+                .await
+        })
+    }
+}
+
 pub struct FlowInterject;
 impl Tool for FlowInterject {
     fn name(&self) -> &str {
@@ -2608,7 +2653,7 @@ fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentKill, AgentOutput, AgentSpawn, AgentStatus, FlowInterject, FlowRegistry,
+        AgentKill, AgentOutput, AgentSpawn, AgentStatus, FlowClose, FlowInterject, FlowRegistry,
         FlowRunStatus, child_flow_start, emit_child_flow_end, emit_flow_agent_start,
         extract_flow_version, inherited_context_snapshot, prepare_flow_agent,
         resolve_flow_arguments, terminal_then_emit,
@@ -2634,6 +2679,13 @@ mod tests {
         let status = AgentStatus.scheduling_claims(&args, &first_ctx).unwrap();
         let output = AgentOutput.scheduling_claims(&args, &first_ctx).unwrap();
         let kill = AgentKill.scheduling_claims(&args, &first_ctx).unwrap();
+        assert_eq!(
+            FlowClose
+                .scheduling_claims(&args, &first_ctx)
+                .unwrap()
+                .accesses,
+            kill.accesses
+        );
         let interject = FlowInterject.scheduling_claims(&args, &second_ctx).unwrap();
 
         assert_eq!(

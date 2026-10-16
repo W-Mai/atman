@@ -25,6 +25,209 @@ fn session_descriptor() -> SessionDescriptor {
     }
 }
 
+async fn wait_closed(worker: &FlowWorker) {
+    let mut state = worker.subscribe_state();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if state.borrow_and_update().state() == &InstanceState::Closed {
+                return;
+            }
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("accepted close must finish cleanup");
+}
+
+#[tokio::test]
+async fn accepted_close_unwinds_paused_execution_and_outlives_its_waiter() {
+    use atman_runtime::flow_runtime::access::PeerControl;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let worker = session
+        .create_flow(program_descriptor(
+            info.id,
+            "flow main() { loop { yield } }".into(),
+        ))
+        .await
+        .unwrap();
+    let peer = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    for worker in [&worker, &peer] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    worker
+        .accept_input(peer_request(peer.address(), worker.address()), |_| Ok(()))
+        .await
+        .unwrap();
+    let request = prepare(&worker.snapshot().await.unwrap()).unwrap().unwrap();
+    let ticket = worker.start_turn(Executor::new(), request).await.unwrap();
+    let key = Uuid::now_v7().into();
+    change(&worker, FlowTransition::ExecutionPaused { key }).await;
+    let queued = peer_request(peer.address(), worker.address());
+    let accepted = worker
+        .accept_input(queued.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    let before = worker.state().await.unwrap();
+    assert!(
+        worker
+            .request_close(before.revision(), |_| Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "denied"
+            )))
+            .await
+            .is_err()
+    );
+    assert!(
+        worker
+            .request_close(before.revision() - 1, |_| Ok(()))
+            .await
+            .is_err()
+    );
+    assert_eq!(worker.state().await.unwrap(), before);
+
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let owned = worker.clone();
+    let closing = tokio::spawn(async move {
+        owned
+            .control(before.revision(), key, PeerControl::Close, move |_| {
+                let _ = sent.send(());
+                Ok(())
+            })
+            .await
+    });
+    received.await.unwrap();
+    closing.abort();
+    let _ = closing.await;
+    wait_closed(&worker).await;
+    assert_eq!(
+        ticket.wait().await.unwrap().outcome,
+        TurnOutcome::Interrupted(atman_rt::Interruption::Cancelled)
+    );
+    assert!(worker.snapshot().await.unwrap().pending.is_empty());
+    assert!(
+        worker
+            .accept_input(peer_request(peer.address(), worker.address()), |_| Ok(()))
+            .await
+            .is_err()
+    );
+    let retry = worker
+        .accept_input(queued, |_| {
+            panic!("recorded delivery retry is not new work")
+        })
+        .await
+        .unwrap();
+    assert_eq!(retry.message_id, accepted.message_id);
+    assert_eq!(retry.receipt, accepted.receipt);
+    assert!(matches!(
+        retry.disposition,
+        InboxDisposition::Cancelled { .. }
+    ));
+    let closed = worker.state().await.unwrap();
+    let receipt = worker
+        .request_close(closed.revision(), |_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(
+        worker
+            .request_close(closed.revision(), |_| Ok(()))
+            .await
+            .unwrap(),
+        receipt
+    );
+    assert!(peer.state().await.unwrap().can_start_turn());
+    host.shutdown().await.unwrap();
+    let saved = root
+        .open_session(info.id)
+        .unwrap()
+        .open_flow(&worker.address().instance_id)
+        .unwrap();
+    assert_eq!(saved.state().state(), &InstanceState::Closed);
+    assert_eq!(saved.completions().len(), 1);
+}
+
+#[tokio::test]
+async fn close_tool_can_close_its_own_instance_without_waiting_on_its_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let worker = session
+        .create_flow(program_descriptor(
+            info.id,
+            r#"
+        flow main() -> any {
+            contract { capabilities { shell: true } }
+            current = flow.current()
+            handle = current.instance.instance_id
+            state = flow.status(handle: handle)
+            return flow.close(handle: handle, expected_revision: state.revision)
+        }
+    "#
+            .into(),
+        ))
+        .await
+        .unwrap();
+    change(&worker, FlowTransition::Activated).await;
+    let result = invoke(&worker, Executor::new()).await;
+    assert_eq!(
+        result.outcome,
+        TurnOutcome::Interrupted(atman_rt::Interruption::Cancelled),
+        "{:?}",
+        result.result
+    );
+    wait_closed(&worker).await;
+    assert!(worker.read_output(|_| Ok(())).await.unwrap().is_empty());
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reopening_closing_instances_completes_cleanup_without_replaying_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let descriptor = program_descriptor(info.id, "flow main() { loop { yield } }".into());
+    let mut catalog = root.create_session(info.clone()).unwrap();
+    let mut saved = catalog.create_flow(descriptor.clone()).unwrap();
+    saved
+        .transition(saved.state().revision(), FlowTransition::Activated)
+        .unwrap();
+    saved
+        .transition(saved.state().revision(), FlowTransition::CloseRequested)
+        .unwrap();
+    drop(saved);
+    drop(catalog);
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.open_session(info.id).unwrap())
+        .unwrap();
+    let worker = session
+        .open_flow(descriptor.address.instance_id)
+        .await
+        .unwrap();
+    let address = worker.address().clone();
+    tokio::time::timeout(Duration::from_secs(10), host.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    let saved = root
+        .open_session(info.id)
+        .unwrap()
+        .open_flow(&address.instance_id)
+        .unwrap();
+    assert_eq!(saved.state().state(), &InstanceState::Closed);
+    assert!(saved.completions().is_empty());
+    assert!(saved.execution_events().is_empty());
+}
+
 #[tokio::test]
 async fn turn_hooks_share_the_admitted_scope_for_peers_and_survive_reopen() {
     use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, Value};
@@ -1419,8 +1622,15 @@ async fn structured_watch_tools_observe_answers_completions_and_closure_through_
         .result
         .unwrap();
     wait_inputs(&observer, 2).await;
-    change(&source, FlowTransition::CloseRequested).await;
-    change(&source, FlowTransition::Closed).await;
+    source
+        .request_close(source.state().await.unwrap().revision(), |_| Ok(()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    wait_closed(&source).await;
     let pending = wait_inputs(&observer, 3).await;
     let kinds: Vec<_> = pending
         .pending
@@ -1801,7 +2011,11 @@ async fn process_resources_belong_to_flow_instances_across_turns_and_storage_han
 
     let context = first.context();
     let resources = first.resources().clone();
-    change(&first, FlowTransition::CloseRequested).await;
+    first
+        .request_close(first.state().await.unwrap().revision(), |_| Ok(()))
+        .await
+        .unwrap();
+    wait_closed(&first).await;
     let store = tokio::time::timeout(Duration::from_secs(10), first.shutdown())
         .await
         .unwrap()
@@ -1823,7 +2037,10 @@ async fn process_resources_belong_to_flow_instances_across_turns_and_storage_han
         matches!(&event.event, atman_runtime::event::Event::TerminalFinalState { handle, .. } if handle == terminal)
     }));
     let restored = FlowWorker::start(store).await.unwrap();
-    change(&restored, FlowTransition::Closed).await;
+    assert_eq!(
+        restored.state().await.unwrap().state(),
+        &InstanceState::Closed
+    );
     assert!(
         restored
             .resources()
@@ -3851,8 +4068,11 @@ async fn persistent_workspaces_share_across_peers_turns_and_host_restarts() {
             .lifecycle_state(),
         WorkspaceState::Bound
     );
-    change(&child, FlowTransition::CloseRequested).await;
-    change(&child, FlowTransition::Closed).await;
+    child
+        .request_close(child.state().await.unwrap().revision(), |_| Ok(()))
+        .await
+        .unwrap();
+    wait_closed(&child).await;
     assert!(binding.path.join("shared.txt").exists());
     manager.validate_instance(&binding, leaf.address()).unwrap();
     let leaf_address = leaf.address().clone();
@@ -3919,8 +4139,10 @@ async fn persistent_workspaces_share_across_peers_turns_and_host_restarts() {
             atman_runtime::flow_store::completion::StoredValue::String("preserved".into())
         )
     );
-    change(&leaf, FlowTransition::CloseRequested).await;
-    change(&leaf, FlowTransition::Closed).await;
+    leaf.request_close(leaf.state().await.unwrap().revision(), |_| Ok(()))
+        .await
+        .unwrap();
+    wait_closed(&leaf).await;
     let record = manager.get(&binding.workspace_id).unwrap();
     assert!(!record.is_instance_bound());
     assert_eq!(record.lifecycle_state(), WorkspaceState::Dirty);
@@ -4031,11 +4253,28 @@ async fn persistent_workspace_failed_launch_keeps_intent_and_close_retries_do_no
             .await
             .is_err()
     );
+    worker.request_close(revision, |_| Ok(())).await.unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("workspace Git registration mismatch"),
+        "{error}"
+    );
     assert_eq!(
         std::fs::read_to_string(path.join("sentinel")).unwrap(),
         "preserve"
     );
-    host.shutdown().await.unwrap();
+    let error = host.shutdown().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("workspace Git registration mismatch"),
+        "{error}"
+    );
     std::fs::remove_file(path.join("sentinel")).unwrap();
     std::fs::remove_dir(&path).unwrap();
     let host = RuntimeHost::default();
@@ -4047,7 +4286,7 @@ async fn persistent_workspace_failed_launch_keeps_intent_and_close_retries_do_no
         .await
         .unwrap();
     assert!(!path.exists());
-    change(&worker, FlowTransition::Closed).await;
+    wait_closed(&worker).await;
     assert!(
         host.launch_flow(descriptor.clone(), input.clone(), |_, _| Ok(()))
             .await
@@ -4649,6 +4888,30 @@ async fn instance_flow_tools_fail_closed_and_controls_do_not_close_the_recipient
     let lease = start(&b).await;
     let revision = b.state().await.unwrap().revision();
     for (source, grant, success) in [
+        (
+            format!(
+                "flow main() -> any {{ return flow.close(handle: \"{}\", expected_revision: {revision}) }}",
+                b.address().instance_id
+            ),
+            false,
+            false,
+        ),
+        (
+            format!(
+                "flow main() -> any {{ return flow.close(handle: \"{}\") }}",
+                b.address().instance_id
+            ),
+            true,
+            false,
+        ),
+        (
+            format!(
+                "flow main() -> any {{ return flow.close(handle: \"{}\", expected_revision: 0) }}",
+                b.address().instance_id
+            ),
+            true,
+            false,
+        ),
         (
             "flow main() -> any { return flow.status(handle: \"root\") }".to_owned(),
             false,

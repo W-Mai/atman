@@ -251,7 +251,6 @@ impl FlowWorker {
 impl FlowWorker {
     /// Stop admission under the writer, unwind active execution, then relinquish storage.
     pub(super) async fn stop_execution(self) -> io::Result<()> {
-        let mut state = self.subscribe_state();
         let stopping = self.stopping.clone();
         self.request(move |store| {
             stopping.store(true, std::sync::atomic::Ordering::Release);
@@ -269,21 +268,16 @@ impl FlowWorker {
             Ok(())
         })
         .await?;
-        loop {
-            let active = matches!(
-                state.borrow_and_update().state(),
-                InstanceState::Open(InstanceActivity::Active(_))
-                    | InstanceState::Closing { active: Some(_) }
-            );
-            if !active {
-                break;
-            }
-            state
-                .changed()
-                .await
-                .map_err(|_| io::Error::other("instance stopped before execution completed"))?;
-        }
-        self.shutdown().await.map(drop)
+        self.wait_execution_stopped().await?;
+        let closing = matches!(self.state().await?.state(), InstanceState::Closing { .. });
+        let cleanup = if closing {
+            self.finish_close().await
+        } else {
+            Ok(())
+        };
+        // A failed workspace release must not retain the journal across host shutdown.
+        let stopped = self.shutdown().await.map(drop);
+        cleanup.and(stopped)
     }
 }
 

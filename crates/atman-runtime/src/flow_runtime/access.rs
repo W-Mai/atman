@@ -27,6 +27,7 @@ pub enum PeerControl {
     Resume,
     CancelTurn,
     Recover,
+    Close,
 }
 
 /// An opaque host-issued identity for one admitted invocation, not a serializable model argument.
@@ -723,6 +724,9 @@ impl super::FlowWorker {
         control: PeerControl,
         authorize: impl FnOnce(&FlowRef) -> io::Result<()> + Send + 'static,
     ) -> io::Result<CommitReceipt> {
+        if matches!(control, PeerControl::Close) {
+            return self.request_close(expected_revision, authorize).await;
+        }
         self.request(move |store| {
             authorize(store.state().address())?;
             if store.state().revision() != expected_revision {
@@ -732,6 +736,7 @@ impl super::FlowWorker {
                 PeerControl::Pause => FlowTransition::ExecutionPaused { key },
                 PeerControl::Resume => FlowTransition::ExecutionResumed { key },
                 PeerControl::Recover => FlowTransition::InterruptionRecovered,
+                PeerControl::Close => unreachable!("closure is owned by the lifecycle coordinator"),
                 PeerControl::CancelTurn => match store.state().state() {
                     InstanceState::Open(InstanceActivity::Active(active)) => {
                         FlowTransition::PhaseChanged {

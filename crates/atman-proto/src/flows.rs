@@ -51,6 +51,8 @@ pub enum FlowControl {
     Resume,
     CancelTurn,
     Recover,
+    /// Accept closure; the execution state becomes closed after resource cleanup.
+    Close,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]

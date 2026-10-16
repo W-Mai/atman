@@ -450,8 +450,9 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
                 .scheduling_status(flow.instance_id.clone())
                 .await?;
             let scheduler = scheduler.map(|status| scheduling(&status.borrow()));
+            let close_error = worker.subscribe_close_error().borrow().clone();
             Ok(
-                json!({"flow": address(&flow), "execution": execution(&view.execution), "goal": view.goal, "last_completion": view.completion, "cursor": view.cursor, "scheduler": scheduler}),
+                json!({"flow": address(&flow), "execution": execution(&view.execution), "goal": view.goal, "last_completion": view.completion, "cursor": view.cursor, "scheduler": scheduler, "close_error": close_error}),
             )
         }
         Request::Control(request) => {
@@ -461,6 +462,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
                 FlowControl::Resume => PeerControl::Resume,
                 FlowControl::CancelTurn => PeerControl::CancelTurn,
                 FlowControl::Recover => PeerControl::Recover,
+                FlowControl::Close => PeerControl::Close,
             };
             // Stable across process restarts, distinct from peer-generated controller keys.
             let user_pause = Uuid::from_bytes(*b"atman-user-pause").into();

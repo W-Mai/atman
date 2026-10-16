@@ -8,6 +8,7 @@ pub mod goal;
 pub mod host;
 pub mod input;
 pub mod launch;
+mod lifecycle;
 pub mod observation;
 pub mod planning;
 mod process_watch;
@@ -78,6 +79,8 @@ pub struct FlowWorker {
     scheduling_progress: watch::Sender<scheduler::SchedulingProgress>,
     stopping: Arc<std::sync::atomic::AtomicBool>,
     launch_gate: Arc<tokio::sync::Mutex<()>>,
+    close_gate: Arc<tokio::sync::Mutex<()>>,
+    close_error: watch::Sender<Option<String>>,
     observation_issues: watch::Sender<Vec<observation::ObservationIssue>>,
     observation_retry: watch::Sender<()>,
 }
@@ -265,7 +268,7 @@ impl FlowWorker {
                 let _ = reply.send(store);
             }
         });
-        Ok(Self {
+        let worker = Self {
             host,
             address,
             context,
@@ -278,9 +281,18 @@ impl FlowWorker {
             scheduling_progress: watch::channel(scheduler::SchedulingProgress::Stopped).0,
             stopping: Default::default(),
             launch_gate: Default::default(),
+            close_gate: Default::default(),
+            close_error: watch::channel(None).0,
             observation_issues: watch::channel(Vec::new()).0,
             observation_retry: watch::channel(()).0,
-        })
+        };
+        if matches!(
+            worker.state.borrow().state(),
+            atman_rt::InstanceState::Closing { .. }
+        ) {
+            worker.continue_close();
+        }
+        Ok(worker)
     }
 
     pub fn address(&self) -> &FlowRef {
@@ -389,25 +401,8 @@ impl FlowWorker {
         transition: FlowTransition,
     ) -> io::Result<CommitReceipt> {
         let resources = self.resources.clone();
-        self.request(move |store| {
-            if matches!(transition, FlowTransition::Closed) && !resources.is_stopped() {
-                return Err(invalid("flow process resources are still stopping"));
-            }
-            if matches!(transition, FlowTransition::Closed) {
-                if store.state().revision() != revision {
-                    return Err(invalid("stale flow state revision"));
-                }
-                let mut candidate = store.state().clone();
-                candidate.finish_close().map_err(invalid)?;
-                if store.state().state() != &atman_rt::InstanceState::Closed
-                    && let Some(workspace) = store.workspace_request()
-                {
-                    workspace.release(store.state().address())?;
-                }
-            }
-            store.transition(revision, transition)
-        })
-        .await
+        self.request(move |store| lifecycle::transition(store, &resources, revision, transition))
+            .await
     }
 
     pub(crate) async fn validate_execution(&self, lease: TurnLease<AtmanUuid>) -> io::Result<()> {

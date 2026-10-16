@@ -44,6 +44,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent flow closure** — `flow.close` and daemon `flow.control` accept explicit closure with execution revision checks. Cleanup stops the active turn and owned processes before recording Closed, preserves history, and resumes unfinished closure after restart. Other instances keep their execution and workspace references.
+
 - **Managed Goal continuation** — Main and child agent templates share an explicit delivery flow that publishes final answers and schedules active objectives through the persistent inbox. `flow.current` exposes the trusted instance and invocation identities.
 
 - **Persistent workspace execution** — Peer spawning supports isolated and shared worktrees across turns and host restarts. Allocation intent is journaled before Git effects; entry admission validates ownership, and explicit instance closure releases its reference after execution stops.

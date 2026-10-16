@@ -61,6 +61,14 @@ impl Target<'_> {
     }
 
     pub async fn cancel(self, args: &ToolArgs) -> ToolResult {
+        self.control(args, PeerControl::CancelTurn).await
+    }
+
+    pub async fn close(self, args: &ToolArgs) -> ToolResult {
+        self.control(args, PeerControl::Close).await
+    }
+
+    async fn control(self, args: &ToolArgs, action: PeerControl) -> ToolResult {
         let revision = match args.named("expected_revision") {
             Some(Value::Int(n)) if *n >= 0 => *n as u64,
             _ => {
@@ -71,7 +79,7 @@ impl Target<'_> {
         };
         let receipt = self
             .client
-            .control(self.address, revision, PeerControl::CancelTurn)
+            .control(self.address, revision, action)
             .await
             .map_err(failed)?;
         Ok(Value::from_json(serde_json::json!({ "receipt": receipt })))

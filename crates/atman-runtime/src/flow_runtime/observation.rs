@@ -84,13 +84,26 @@ async fn observe(recipient: FlowWorker, host: WeakRuntimeHost) {
         let Ok(records) = recipient
             .request(|store| {
                 if !store.state().accepts_input() {
-                    return Ok(Vec::new());
+                    return Ok(
+                        matches!(store.state().state(), atman_rt::InstanceState::Prepared)
+                            .then(Vec::new),
+                    );
                 }
                 store.expire_flow_watches(chrono::Utc::now())?;
-                Ok(store.flow_subscriptions().cloned().collect::<Vec<_>>())
+                Ok(Some(
+                    store.flow_subscriptions().cloned().collect::<Vec<_>>(),
+                ))
             })
             .await
         else {
+            return;
+        };
+        let Some(records) = records else {
+            recipient.observation_issues.send_if_modified(|issues| {
+                let changed = !issues.is_empty();
+                issues.clear();
+                changed
+            });
             return;
         };
         let deadline = records
