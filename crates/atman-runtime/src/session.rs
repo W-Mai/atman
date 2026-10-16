@@ -203,8 +203,8 @@ impl CompactionState {
 }
 
 fn checkpoint_epoch_digest(messages: &[Message]) -> String {
-    let bytes = serde_json::to_vec(messages).expect("checkpoint messages must serialize");
-    format!("blake3:{}", blake3::hash(&bytes).to_hex())
+    crate::flow_store::context::context_digest(messages)
+        .expect("checkpoint messages must serialize")
 }
 
 fn replayed_checkpoint_epoch(messages: &[(u64, Message)]) -> Option<String> {
@@ -266,6 +266,7 @@ impl InteractionServices {
 
 pub struct Session {
     flow_instance: Option<crate::flow_store::FlowRef>,
+    instance_writer: std::sync::OnceLock<crate::flow_runtime::context::ContextWriter>,
     pub goal_control: std::sync::Arc<crate::goal::GoalController>,
     pub goal_turn: Mutex<Option<crate::goal::GoalTurn>>,
     id: SessionId,
@@ -1133,6 +1134,7 @@ impl Session {
         goal_control.bind_events(sink.clone());
         Ok(Self {
             flow_instance: None,
+            instance_writer: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
@@ -1363,6 +1365,7 @@ impl Session {
         goal_control.bind_events(sink.clone());
         Ok(Self {
             flow_instance: None,
+            instance_writer: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
@@ -1447,6 +1450,7 @@ impl Session {
         goal_control.bind_events(sink.clone());
         Self {
             flow_instance: None,
+            instance_writer: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
@@ -1494,12 +1498,14 @@ impl Session {
 
     /// Isolated execution context for one persistent instance. Persistence is owned by its FlowStore.
     pub fn open_instance_context(address: crate::flow_store::FlowRef) -> Self {
-        Self::restore_instance_context(address, Vec::new())
+        Self::restore_instance_context(address, Vec::new(), Vec::new(), None)
     }
 
     pub(crate) fn restore_instance_context(
         address: crate::flow_store::FlowRef,
         messages: Vec<Message>,
+        history: Vec<Message>,
+        checkpoint: Option<&[Message]>,
     ) -> Self {
         let mut context = Self::open_ephemeral();
         context.id = SessionId(address.session_id.0);
@@ -1516,14 +1522,31 @@ impl Session {
             .enumerate()
             .map(|(index, message)| ((index + 1) as u64, message))
             .collect();
-        context.sink.restore_seq(messages.len() as u64);
+        let full = history
+            .into_iter()
+            .enumerate()
+            .map(|(index, message)| ((index + 1) as u64, message))
+            .collect::<Vec<_>>();
+        context
+            .sink
+            .restore_seq(messages.len().max(full.len()) as u64);
         context.message_stream = crate::message_stream::MessageStream::with_initial(
             context.sink.events_handle(),
-            initial.clone(),
             initial,
+            full,
         );
         *context.messages.lock().unwrap() = messages;
+        if let Some(messages) = checkpoint {
+            context.compaction.update_context_epoch(messages);
+        }
         context
+    }
+
+    pub(crate) fn bind_instance_writer(&self, writer: crate::flow_runtime::context::ContextWriter) {
+        assert!(
+            self.instance_writer.set(writer).is_ok(),
+            "instance writer already bound"
+        );
     }
 
     pub fn flow_instance(&self) -> Option<&crate::flow_store::FlowRef> {
@@ -2428,248 +2451,173 @@ impl Session {
     /// Convenience wrapper that computes the compact range and token count
     /// from the current message window. Used by tests and internal callers
     /// that don't already have a pre-computed range.
-    pub fn compact_messages_auto(&self, summary: String) -> Option<CompactResult> {
+    pub async fn compact_messages_auto(
+        &self,
+        summary: String,
+    ) -> std::io::Result<Option<CompactResult>> {
         let msgs = self.messages();
         let tokens = crate::compaction::estimate_tokens_for_messages(&msgs);
-        let info = crate::model_registry::model_info(&self.last_model());
-        let target = info.compaction_target_after();
-        let range = crate::compaction::find_compact_range(&msgs, target)?;
-        self.compact_messages(summary, range, tokens)
+        let target =
+            crate::model_registry::model_info(&self.last_model()).compaction_target_after();
+        let Some(range) = crate::compaction::find_compact_range(&msgs, target) else {
+            return Ok(None);
+        };
+        self.compact_messages(summary, range, tokens).await
     }
 
-    pub fn commit_rewritten_window(
+    pub async fn commit_rewritten_window(
         &self,
+        expected: &[Message],
         replacement: Vec<Message>,
         before_tokens: u64,
-        before_window_tokens: u64,
         rewritten_count: usize,
-    ) -> Option<CompactResult> {
-        let after_tokens = crate::compaction::estimate_tokens_for_messages(&replacement);
-        if rewritten_count == 0 || after_tokens >= before_window_tokens {
-            return None;
-        }
-        let summary = format!(
-            "[atman: persistently compacted output from {rewritten_count} retained messages]"
-        );
-        self.sink.mark_compacted();
-        self.sink.emit(Event::ContextCompact {
-            session_id: self.id.to_string(),
-            flow_run_id: None,
+    ) -> std::io::Result<Option<CompactResult>> {
+        self.commit_context_window(
+            expected,
+            replacement,
+            format!(
+                "[atman: persistently compacted output from {rewritten_count} retained messages]"
+            ),
+            0..0,
+            rewritten_count,
             before_tokens,
-            after_tokens,
-            compacted_range_start: 0,
-            compacted_range_end: 0,
-            summary_text: Some(summary.clone()),
-            replacement_msg_seq: None,
-        });
-        self.sink.emit(Event::CompactionSummary {
-            session_id: self.id.to_string(),
-            flow_run_id: None,
-            range_start: 0,
-            range_end: 0,
-            compacted_count: rewritten_count,
-            before_tokens,
-            after_tokens,
-            summary: summary.clone(),
-        });
-        let _ = self
-            .watch
-            .stream_tx
-            .send(crate::stream::StreamFrame::CompactionSummary {
-                phase: crate::stream::CompactionPhase::Finished,
-                range_start: 0,
-                range_end: 0,
-                summary,
-                before_tokens,
-                after_tokens,
-                compacted_count: rewritten_count,
-            });
-        self.compaction
-            .store_model_window(&self.last_model(), after_tokens);
-        if let Ok(mut messages) = self.messages.lock() {
-            *messages = replacement.clone();
-        }
-        self.compaction.update_context_epoch(&replacement);
-        self.sink.emit(Event::Checkpoint {
-            session_id: self.id.to_string(),
-            flow_run_id: None,
-            messages: replacement,
-            window_tokens: after_tokens,
-        });
-        self.refresh_window_snapshot();
-        Some(CompactResult {
-            before_tokens,
-            after_tokens,
-            compacted_start: 0,
-            compacted_end: 0,
-        })
+        )
+        .await
     }
 
-    pub fn commit_compacted_window(
+    pub async fn commit_compacted_window(
         &self,
         summary: String,
+        expected: &[Message],
         replacement: Vec<Message>,
         range: crate::compaction::CompactRange,
         before_tokens: u64,
-        before_window_tokens: u64,
-    ) -> Option<CompactResult> {
-        let after_tokens = crate::compaction::estimate_tokens_for_messages(&replacement);
-        if after_tokens >= before_window_tokens {
-            self.push_system_note(format!(
-                "compaction skipped: replacement would not shrink transcript ({} >= {} tokens)",
-                after_tokens, before_window_tokens
-            ));
-            return None;
-        }
-        self.sink.mark_compacted();
-        self.sink.emit(Event::ContextCompact {
-            session_id: self.id.to_string(),
-            flow_run_id: None,
+    ) -> std::io::Result<Option<CompactResult>> {
+        let count = range.end.saturating_sub(range.start);
+        self.commit_context_window(
+            expected,
+            replacement,
+            summary,
+            range.start..range.end,
+            count,
             before_tokens,
-            after_tokens,
-            compacted_range_start: range.start as u64,
-            compacted_range_end: range.end.saturating_sub(1) as u64,
-            summary_text: Some(summary.clone()),
-            replacement_msg_seq: None,
-        });
-        self.sink.emit(Event::CompactionSummary {
-            session_id: self.id.to_string(),
-            flow_run_id: None,
-            range_start: range.start as u64,
-            range_end: range.end.saturating_sub(1) as u64,
-            compacted_count: range.end - range.start,
-            before_tokens,
-            after_tokens,
-            summary: summary.clone(),
-        });
-        let _ = self
-            .watch
-            .stream_tx
-            .send(crate::stream::StreamFrame::CompactionSummary {
-                phase: crate::stream::CompactionPhase::Finished,
-                range_start: range.start,
-                range_end: range.end.saturating_sub(1),
-                summary,
-                before_tokens,
-                after_tokens,
-                compacted_count: range.end - range.start,
-            });
-        self.compaction
-            .store_model_window(&self.last_model(), after_tokens);
-        if let Ok(mut messages) = self.messages.lock() {
-            *messages = replacement.clone();
-        }
-        self.compaction.update_context_epoch(&replacement);
-        self.sink.emit(Event::Checkpoint {
-            session_id: self.id.to_string(),
-            flow_run_id: None,
-            messages: replacement,
-            window_tokens: after_tokens,
-        });
-        self.refresh_window_snapshot();
-        Some(CompactResult {
-            before_tokens,
-            after_tokens,
-            compacted_start: range.start,
-            compacted_end: range.end,
-        })
+        )
+        .await
     }
 
-    pub fn compact_messages(
+    pub async fn compact_messages(
         &self,
         summary: String,
         range: crate::compaction::CompactRange,
         before_tokens: u64,
-    ) -> Option<CompactResult> {
-        use crate::compaction::{estimate_tokens_for_messages, replace_range_with_summary};
+    ) -> std::io::Result<Option<CompactResult>> {
         let msgs = self.messages();
         let turn_id = msgs
             .get(range.start)
-            .map(|m| m.turn_id.clone())
+            .map(|message| message.turn_id.clone())
             .unwrap_or_else(TurnId::now);
-        let after = replace_range_with_summary(&msgs, &range, summary.clone(), turn_id.clone());
-        let after_tokens = estimate_tokens_for_messages(&after);
-        if after_tokens >= before_tokens {
-            self.push_system_note(format!(
-                "compaction skipped: summary would not shrink transcript ({} >= {} tokens)",
-                after_tokens, before_tokens
-            ));
-            return None;
+        let replacement =
+            crate::compaction::replace_range_with_summary(&msgs, &range, summary.clone(), turn_id);
+        self.commit_compacted_window(summary, &msgs, replacement, range, before_tokens)
+            .await
+    }
+
+    async fn commit_context_window(
+        &self,
+        expected: &[Message],
+        replacement: Vec<Message>,
+        summary: String,
+        range: std::ops::Range<usize>,
+        count: usize,
+        before_tokens: u64,
+    ) -> std::io::Result<Option<CompactResult>> {
+        use crate::flow_store::context::{ContextCheckpoint, context_digest};
+        let after_tokens = crate::compaction::estimate_tokens_for_messages(&replacement);
+        if count == 0 || after_tokens >= crate::compaction::estimate_tokens_for_messages(expected) {
+            return Ok(None);
         }
-        let replacement_msg = after.first().cloned().unwrap_or_else(|| {
-            Message::system_compact_summary(
-                turn_id.clone(),
-                summary.clone(),
-                range.start as u64,
-                range.end.saturating_sub(1) as u64,
-                range.end - range.start,
-            )
-        });
+        let result = CompactResult {
+            before_tokens,
+            after_tokens,
+            compacted_start: range.start,
+            compacted_end: range.end,
+        };
+        let checkpoint = ContextCheckpoint {
+            id: Uuid::now_v7(),
+            expected: context_digest(expected)?,
+            messages: replacement,
+            summary,
+            range,
+            count,
+            before_tokens,
+            after_tokens,
+        };
+        if self.flow_instance.is_some() {
+            let writer = self
+                .instance_writer
+                .get()
+                .ok_or_else(|| std::io::Error::other("instance context has no storage writer"))?;
+            writer.commit(checkpoint).await?;
+        } else {
+            if self.messages().as_ref() != expected {
+                return Err(std::io::Error::other("context changed during compaction"));
+            }
+            self.project_checkpoint(&checkpoint);
+        }
+        Ok(Some(result))
+    }
+
+    /// Apply a committed replacement to the model window; full transcript messages stay intact.
+    pub(crate) fn project_checkpoint(
+        &self,
+        checkpoint: &crate::flow_store::context::ContextCheckpoint,
+    ) {
         self.sink.mark_compacted();
-        let replacement_seq = self.sink.next_seq_peek();
-        self.sink.emit(Event::SystemMsg {
-            turn_id: turn_id.clone(),
-            flow_run_id: None,
-            message: replacement_msg,
-        });
+        let start = checkpoint.range.start;
+        let end = checkpoint.range.end.saturating_sub(1);
         self.sink.emit(Event::ContextCompact {
             session_id: self.id.to_string(),
             flow_run_id: None,
-            before_tokens,
-            after_tokens,
-            compacted_range_start: range.start as u64,
-            compacted_range_end: range.end.saturating_sub(1) as u64,
-            summary_text: Some(summary.clone()),
-            replacement_msg_seq: Some(replacement_seq),
+            before_tokens: checkpoint.before_tokens,
+            after_tokens: checkpoint.after_tokens,
+            compacted_range_start: start as u64,
+            compacted_range_end: end as u64,
+            summary_text: Some(checkpoint.summary.clone()),
+            replacement_msg_seq: None,
         });
         self.sink.emit(Event::CompactionSummary {
             session_id: self.id.to_string(),
             flow_run_id: None,
-            range_start: range.start as u64,
-            range_end: range.end.saturating_sub(1) as u64,
-            compacted_count: range.end - range.start,
-            before_tokens,
-            after_tokens,
-            summary: summary.clone(),
+            range_start: start as u64,
+            range_end: end as u64,
+            compacted_count: checkpoint.count,
+            before_tokens: checkpoint.before_tokens,
+            after_tokens: checkpoint.after_tokens,
+            summary: checkpoint.summary.clone(),
         });
+        self.sink.emit(Event::Checkpoint {
+            session_id: self.id.to_string(),
+            flow_run_id: None,
+            messages: checkpoint.messages.clone(),
+            window_tokens: checkpoint.after_tokens,
+        });
+        *self.messages.lock().expect("context messages poisoned") = checkpoint.messages.clone();
+        self.compaction.update_context_epoch(&checkpoint.messages);
+        self.compaction
+            .store_model_window(&self.last_model(), checkpoint.after_tokens);
+        self.refresh_window_snapshot();
         let _ = self
             .watch
             .stream_tx
             .send(crate::stream::StreamFrame::CompactionSummary {
                 phase: crate::stream::CompactionPhase::Finished,
-                range_start: range.start,
-                range_end: range.end.saturating_sub(1),
-                summary,
-                before_tokens,
-                after_tokens,
-                compacted_count: range.end - range.start,
+                range_start: start,
+                range_end: end,
+                summary: checkpoint.summary.clone(),
+                before_tokens: checkpoint.before_tokens,
+                after_tokens: checkpoint.after_tokens,
+                compacted_count: checkpoint.count,
             });
-        let checkpoint_messages = self.messages();
-        let window_tokens = estimate_tokens_for_messages(&checkpoint_messages);
-        self.compaction
-            .store_model_window(&self.last_model(), window_tokens);
-        self.compaction
-            .update_context_epoch(checkpoint_messages.as_ref());
-        // Sync the messages Vec (root's messages_handle) with the compacted
-        // windowed view so root's llm context via messages_handle respects
-        // compaction (branch2 retired → unified on messages_handle).
-        let window_owned = checkpoint_messages.to_vec();
-        if let Ok(mut vec) = self.messages.lock() {
-            *vec = window_owned;
-        }
-        self.refresh_window_snapshot();
-        self.sink.emit(Event::Checkpoint {
-            session_id: self.id.to_string(),
-            flow_run_id: None,
-            messages: checkpoint_messages.to_vec(),
-            window_tokens,
-        });
-        Some(CompactResult {
-            before_tokens,
-            after_tokens,
-            compacted_start: range.start,
-            compacted_end: range.end,
-        })
     }
 
     pub fn begin_turn(&self, user_msg: Message) -> TurnId {
@@ -4089,8 +4037,8 @@ mod tests {
         assert_eq!(Session::open_ephemeral().successful_flow_count(), 0);
     }
 
-    #[test]
-    fn commit_rewritten_window_uses_checkpoint_without_legacy_range_replay() {
+    #[tokio::test]
+    async fn commit_rewritten_window_uses_checkpoint_without_legacy_range_replay() {
         let session = Session::open_ephemeral();
         assert_eq!(session.context_epoch(), None);
         let original = vec![
@@ -4109,7 +4057,9 @@ mod tests {
         let before_tokens = crate::compaction::estimate_tokens_for_messages(&original);
 
         session
-            .commit_rewritten_window(replacement.clone(), before_tokens, before_tokens, 1)
+            .commit_rewritten_window(&original, replacement.clone(), before_tokens, 1)
+            .await
+            .expect("checkpoint write")
             .expect("rewrite commit");
 
         assert_eq!(
@@ -4156,8 +4106,8 @@ mod tests {
         assert_eq!(expected, Some(checkpoint_epoch_digest(&checkpoint)));
     }
 
-    #[test]
-    fn commit_compacted_window_updates_live_handle_and_checkpoint_replay() {
+    #[tokio::test]
+    async fn commit_compacted_window_updates_live_handle_and_checkpoint_replay() {
         let session = Session::open_ephemeral();
         let old = vec![
             Message::user_text(TurnId::now(), "old user".repeat(2_000)),
@@ -4182,11 +4132,13 @@ mod tests {
         session
             .commit_compacted_window(
                 "anchor".into(),
+                &old,
                 replacement.clone(),
                 range,
                 before_tokens,
-                before_tokens,
             )
+            .await
+            .expect("checkpoint write")
             .expect("commit");
 
         assert_eq!(session.messages().as_ref(), replacement.as_slice());

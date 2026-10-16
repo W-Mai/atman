@@ -395,14 +395,12 @@ async fn maybe_auto_compact_locked(
             );
             return;
         }
-        match session.commit_rewritten_window(
-            replacement,
-            window_tokens,
-            window_tokens,
-            rewritten_count,
-        ) {
-            Some(_) => {}
-            None => {
+        match session
+            .commit_rewritten_window(&msgs, replacement, window_tokens, rewritten_count)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => {
                 session.emit_compact_warning(
                     model,
                     current,
@@ -411,6 +409,13 @@ async fn maybe_auto_compact_locked(
                     "retained turn output rewrite did not shrink the transcript",
                 );
             }
+            Err(error) => session.emit_compact_warning(
+                model,
+                current,
+                trigger,
+                info.context_budget,
+                &format!("context checkpoint failed: {error}"),
+            ),
         }
         return;
     };
@@ -507,14 +512,17 @@ async fn maybe_auto_compact_locked(
         ));
         return;
     }
-    match session.commit_compacted_window(
-        final_summary,
-        replacement,
-        range,
-        window_tokens,
-        window_tokens,
-    ) {
-        Some(result) => {
+    match session
+        .commit_compacted_window(
+            final_summary,
+            &msgs,
+            replacement,
+            range.clone(),
+            window_tokens,
+        )
+        .await
+    {
+        Ok(Some(result)) => {
             session.push_system_note(format!(
                 "auto-compacted {}..{} — {} → {} tokens",
                 result.compacted_start,
@@ -523,7 +531,7 @@ async fn maybe_auto_compact_locked(
                 result.after_tokens
             ));
         }
-        None => {
+        Ok(None) => {
             session.emit_compact_warning(
                 model,
                 current,
@@ -531,6 +539,11 @@ async fn maybe_auto_compact_locked(
                 info.context_budget,
                 "no compactible span — history too short or already fully compacted",
             );
+        }
+        Err(error) => {
+            let reason = format!("context checkpoint failed: {error}");
+            send_failed(session, &reason);
+            session.emit_compact_warning(model, current, trigger, info.context_budget, &reason);
         }
     }
 }

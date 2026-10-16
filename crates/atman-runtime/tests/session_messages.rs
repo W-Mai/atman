@@ -65,6 +65,8 @@ async fn interactive_returns_use_committed_root_turn_messages() {
             },
             10_000,
         )
+        .await
+        .expect("checkpoint write")
         .unwrap();
     assert!(!session.publish_flow_result(turn, "root reply".into()).await);
 

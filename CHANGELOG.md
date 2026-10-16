@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent context compaction** — Flow journals retain compressed model windows separately from full conversation history. Checkpoint commits reject stale replacements, survive caller cancellation, and restore the window and later messages without republishing replies.
+
 - **Durable synchronous replies** — Persistent spawn calls receive entry completions through the shared inbox and record consumption before returning. Caller cancellation preserves child execution and unconsumed results. Concurrent waits resume independently, and matching watchers share the same accepted event.
 
 - **Flow event subscriptions** — Final answers and entry completions use one ordered observation stream and inbox delivery path. Completion filters select all turns or one exact turn, preserve typed results and interruption outcomes, and retain queued events across pause and recovery. Multiple matching subscriptions share one accepted event.

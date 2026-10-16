@@ -26,6 +26,8 @@ async fn checkpoint_event_written_after_compaction() {
     build_long_history(&session, 20);
     session
         .compact_messages_auto("test summary".into())
+        .await
+        .expect("checkpoint write")
         .unwrap();
     session.shutdown().await;
 
@@ -49,6 +51,8 @@ async fn checkpoint_skips_dead_history_on_reopen() {
         build_long_history(&session, 20);
         session
             .compact_messages_auto("compacted summary".into())
+            .await
+            .expect("checkpoint write")
             .unwrap();
         session.append_message(
             Message::user_text(TurnId::now(), "post-compact user".to_string()),
@@ -93,7 +97,11 @@ async fn checkpoint_restores_seq_counter_on_reopen() {
         sid = session.id().to_string();
         session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
         build_long_history(&session, 20);
-        session.compact_messages_auto("summary".into()).unwrap();
+        session
+            .compact_messages_auto("summary".into())
+            .await
+            .expect("checkpoint write")
+            .unwrap();
         session.shutdown().await;
     }
 

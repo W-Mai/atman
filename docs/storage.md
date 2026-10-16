@@ -59,7 +59,17 @@ The product preparation adapter maps later text to the declared `contract { invo
 
 `FlowStore::publish_message` commits an exact message with its owning turn lease, producing invocation, and stable publication ID. An identical retry returns the original receipt without appending or republishing; conflicting content fails. New publication requires a live matching turn, rejects cancellation and stale epochs, and permits delivery while a paused turn finishes. Message origin and role remain separate. Final-answer recognition stays in the existing message protocol rather than a second storage-specific classifier.
 
-`context_messages` merges committed input and published output in journal order. Reopening restores that context without invoking tools, replaying notifications, or executing the entry. Publications do not end the turn or change Goal state.
+`context_messages` restores the latest committed model window and merges subsequent shared input and output in journal order. `history_messages` retains the complete shared conversation independently of that window. Reopening does not invoke tools, replay notifications, or execute the entry. Publications do not end the turn or change Goal state.
+
+## Model-window checkpoints
+
+`FlowStore::checkpoint_context` commits a replacement model window without changing original messages, entry results, or lifecycle state. `ContextCheckpoint` carries a stable identity, the digest of the exact prior window, the replacement messages, and compaction metadata. Matching retries return the original receipt without resetting later messages. Conflicting identities and stale windows fail before writing. Inbox acceptance and unrelated controls do not invalidate a checkpoint; newly committed context does.
+
+Session compaction calculates a replacement using the existing summary and review policy, then awaits the instance's serialized writer before updating the model handle, message projection, cache epoch, or completion frame. An accepted write survives caller cancellation. A failed or unavailable writer leaves the window unchanged and reports the failure. The weak writer binding does not retain the storage owner.
+
+Reopening seeds the model window and full history separately, preserves messages appended after the checkpoint, and restores the cache epoch from the checkpoint itself. An incomplete checkpoint retains the previous committed window and its tail. Compaction does not publish another final answer or create another notification. Persistent spawned peers use the same path as other instances; isolated inline fanout contexts remain invocation-local and are not resumable instances.
+
+## Input acceptance
 
 `FlowStore::accept_input` persists a typed delivery request before returning `Acceptance`. User submissions retain text, images, invocation configuration, and presentation data. Interjections, flow events, watcher notifications, timers, and internal controls remain distinct payload variants with sender, recipient, correlation, cause, scope, and delivery mode. A protocol message role is not used as a provenance label.
 
@@ -113,7 +123,7 @@ The host compiles the recorded source bundle, commits invocation input, and cons
 
 Inline calls share the instance context. Fanout calls retain isolated invocation contexts: their publications remain in the owning instance journal with `context_run`, and recovery does not merge them into the shared conversation. Message scheduling claims use the instance address rather than serializing every flow in a session.
 
-Worker binding covers message publication and persistent spawn execution, not the complete product scheduler. Legacy watcher/child notification migration, context compaction checkpoints, and resource ownership still require host integration. The CLI and daemon retain their existing storage and dispatch until that integration is complete.
+Worker binding covers message publication, model-window checkpoints, and persistent spawn execution. Legacy watcher/child notification migration and resource ownership still require host integration. The CLI and daemon retain their existing storage and dispatch until that integration is complete.
 
 ## Owned instance turns
 

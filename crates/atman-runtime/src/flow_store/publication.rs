@@ -7,7 +7,7 @@ use atman_rt::{FlowInstance, InstanceActivity, InstanceState, TurnLease, TurnPha
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::inbox::InputContent;
+use super::inbox::{Inbox, InputContent};
 use super::{FlowFact, FlowStore, invalid};
 use crate::event::{AtmanUuid, FlowRunId};
 use crate::event_log::journal::CommitReceipt;
@@ -109,41 +109,82 @@ impl FlowStore {
 
     /// Input and output share journal order; restoring context never republishes effects or notifications.
     pub fn context_messages(&self) -> Vec<Message> {
-        let inputs = self
-            .inbox
-            .inputs()
-            .iter()
-            .filter_map(|record| match &record.input.content {
-                InputContent::Context { messages }
-                | InputContent::InvocationInput { messages, .. } => {
-                    Some((record.receipt.sequence, messages.as_slice()))
-                }
-                InputContent::WaitingContinuation { .. } => None,
-            });
-        let publications = self
-            .publications
-            .records
-            .iter()
-            .filter(|record| record.publication.context_run.is_none())
-            .map(|record| {
-                (
-                    record.receipt.sequence,
-                    std::slice::from_ref(&record.publication.message),
-                )
-            });
-        let mut batches: Vec<_> = inputs.chain(publications).collect();
-        batches.sort_by_key(|(sequence, _)| *sequence);
-        let inherited = self
-            .activation
-            .as_ref()
-            .into_iter()
-            .flat_map(|record| record.input.inherited_context.iter().cloned());
-        inherited
-            .chain(
-                batches
-                    .into_iter()
-                    .flat_map(|(_, messages)| messages.iter().cloned()),
-            )
-            .collect()
+        context_window(
+            &self.inbox,
+            &self.publications,
+            self.activation.as_ref(),
+            self.checkpoints.latest(),
+        )
     }
+
+    /// Complete shared conversation, unaffected by model-window checkpoints.
+    pub fn history_messages(&self) -> Vec<Message> {
+        conversation(
+            &self.inbox,
+            &self.publications,
+            self.activation.as_ref(),
+            None,
+        )
+    }
+}
+
+pub(super) fn context_window(
+    inbox: &Inbox,
+    publications: &Publications,
+    activation: Option<&super::launch::Activation>,
+    checkpoint: Option<&super::context::CommittedContextCheckpoint>,
+) -> Vec<Message> {
+    let mut messages = conversation(inbox, publications, activation, checkpoint);
+    let start = messages
+        .iter()
+        .rposition(crate::compaction::is_compaction_summary)
+        .unwrap_or(0);
+    messages.drain(..start);
+    messages
+}
+
+fn conversation(
+    inbox: &Inbox,
+    publications: &Publications,
+    activation: Option<&super::launch::Activation>,
+    checkpoint: Option<&super::context::CommittedContextCheckpoint>,
+) -> Vec<Message> {
+    let after = checkpoint.map_or(0, |record| record.receipt.sequence);
+    let inputs = inbox
+        .inputs()
+        .iter()
+        .filter(|record| record.receipt.sequence > after)
+        .filter_map(|record| match &record.input.content {
+            InputContent::Context { messages } | InputContent::InvocationInput { messages, .. } => {
+                Some((record.receipt.sequence, messages.as_slice()))
+            }
+            InputContent::WaitingContinuation { .. } => None,
+        });
+    let publications = publications
+        .records
+        .iter()
+        .filter(|record| {
+            record.publication.context_run.is_none() && record.receipt.sequence > after
+        })
+        .map(|record| {
+            (
+                record.receipt.sequence,
+                std::slice::from_ref(&record.publication.message),
+            )
+        });
+    let mut batches: Vec<_> = inputs.chain(publications).collect();
+    batches.sort_by_key(|(sequence, _)| *sequence);
+    let initial = match checkpoint {
+        Some(record) => record.checkpoint.messages.as_slice(),
+        None => activation.map_or(&[][..], |record| record.input.inherited_context.as_slice()),
+    };
+    initial
+        .iter()
+        .cloned()
+        .chain(
+            batches
+                .into_iter()
+                .flat_map(|(_, messages)| messages.iter().cloned()),
+        )
+        .collect()
 }

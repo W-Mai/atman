@@ -130,7 +130,10 @@ async fn messages_full_retains_history_after_multiple_runtime_compacts() {
             total_appended += 1;
         }
         let summary = format!("Compacted summary for phase {phase}.");
-        let result = session.compact_messages_auto(summary);
+        let result = session
+            .compact_messages_auto(summary)
+            .await
+            .expect("checkpoint write");
         assert!(
             result.is_some(),
             "phase {phase}: compaction must succeed, before={}",

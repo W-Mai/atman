@@ -742,6 +742,309 @@ fn publications_preserve_input_order_and_fence_stale_delivery_across_recovery() 
     assert_eq!(flow.context_messages(), expected);
 }
 
+#[test]
+fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history() {
+    use atman_runtime::flow_store::context::{ContextCheckpoint, context_digest};
+    use atman_runtime::flow_store::publication::MessagePublication;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let lease = start(&mut flow);
+    let publish = |flow: &mut FlowStore, text: &str| {
+        flow.publish_message(MessagePublication {
+            id: Uuid::new_v4(),
+            lease: lease.clone(),
+            run: lease.run.clone(),
+            context_run: None,
+            message: Message::assistant_text(lease.turn.clone(), text),
+        })
+        .unwrap();
+    };
+    let checkpoint = |messages: &[Message], summary: &str| ContextCheckpoint {
+        id: Uuid::new_v4(),
+        expected: context_digest(messages).unwrap(),
+        messages: vec![Message::system_compact_summary(
+            lease.turn.clone(),
+            summary,
+            0,
+            (messages.len() - 1) as u64,
+            messages.len(),
+        )],
+        summary: summary.into(),
+        range: 0..messages.len(),
+        count: messages.len(),
+        before_tokens: 100,
+        after_tokens: 10,
+    };
+    publish(&mut flow, "first original");
+    let stale = checkpoint(&flow.context_messages(), "stale");
+    publish(&mut flow, "arrived during summary");
+    let cursor = flow.cursor().clone();
+    assert!(flow.checkpoint_context(stale).is_err());
+    assert_eq!(flow.cursor(), &cursor);
+    let original = flow.context_messages();
+    let first = checkpoint(&original, "first summary");
+    flow.accept_input(
+        delivery(
+            &description.address,
+            SenderIdentity::User(Uuid::new_v4()),
+            "pending",
+        ),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let saved = flow.checkpoint_context(first.clone()).unwrap();
+    assert_eq!(flow.context_messages(), first.messages);
+    assert_eq!(flow.history_messages(), original);
+    assert_eq!(flow.pending_inputs().count(), 1);
+    let input = flow
+        .reserve_context_input(&lease, |_| true)
+        .unwrap()
+        .unwrap();
+    flow.commit_input(
+        &input,
+        InputContent::Context {
+            messages: vec![Message::user_text(lease.turn.clone(), "pending")],
+        },
+    )
+    .unwrap();
+    let window = flow.context_messages();
+    let full = flow.history_messages();
+    assert_eq!(window.len(), 2);
+    assert_eq!(full.len(), 3);
+    assert_eq!(window[1], full[2]);
+    assert_eq!(flow.checkpoint_context(first.clone()).unwrap(), saved);
+    assert_eq!(
+        flow.context_messages(),
+        window,
+        "retry must not remove the tail"
+    );
+    let mut conflicting = first.clone();
+    conflicting.summary = "conflict".into();
+    assert!(flow.checkpoint_context(conflicting).is_err());
+    let second = checkpoint(&window, "second summary");
+    flow.checkpoint_context(second.clone()).unwrap();
+    publish(&mut flow, "new tail");
+    change(
+        &mut flow,
+        FlowTransition::TurnFinished {
+            lease: lease.clone(),
+            outcome: TurnOutcome::Completed,
+        },
+    );
+    let window = flow.context_messages();
+    let full = flow.history_messages();
+    let journal = flow.dir().join("events.jsonl");
+    let prefix = std::fs::metadata(&journal).unwrap().len();
+    let torn = checkpoint(&window, "uncommitted summary");
+    flow.checkpoint_context(torn).unwrap();
+    drop(flow);
+    let length = std::fs::metadata(&journal).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&journal)
+        .unwrap()
+        .set_len(length - 1)
+        .unwrap();
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert!(flow.recovered_tail.is_some());
+    assert_eq!(std::fs::metadata(&journal).unwrap().len(), prefix);
+    assert_eq!(flow.context_checkpoints().len(), 2);
+    assert_eq!(flow.context_messages(), window);
+    assert_eq!(flow.history_messages(), full);
+    assert_eq!(flow.published_messages().len(), 3);
+    change(&mut flow, FlowTransition::CloseRequested);
+    assert!(
+        flow.checkpoint_context(checkpoint(&window, "too late"))
+            .is_err()
+    );
+    assert_eq!(flow.checkpoint_context(first).unwrap(), saved);
+    assert_eq!(flow.context_messages(), window);
+}
+
+#[tokio::test]
+async fn instance_compaction_restores_window_and_raw_history_through_the_host() {
+    use atman_runtime::flow_runtime::FlowWorker;
+    use atman_runtime::model_registry::ModelEntry;
+    use atman_runtime::stream::StreamFrame;
+    let _registry = common::ModelRegistryGuard::acquire(common::config([(
+        "mock-summary".into(),
+        ModelEntry {
+            model: "mock-summary".into(),
+            context_budget: Some(40_000),
+            compact_threshold_ratio: Some(0.8),
+            ..Default::default()
+        },
+    )]))
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let lease = start(&mut flow);
+    let worker = FlowWorker::start(flow).await.unwrap();
+    let context = worker.context();
+    let executor = atman_runtime::Executor::new();
+    executor.providers.register(std::sync::Arc::new(
+        atman_runtime::providers::mock::MockProvider::new("mock-summary").with_fallback(
+            atman_runtime::Value::Str("Summary of previous work.".into()),
+        ),
+    ));
+    let body = (0..60)
+        .map(|index| {
+            format!(
+                "session.push(message.user(\"{} original {index}\"))\n",
+                "x".repeat(4000),
+            )
+        })
+        .collect::<String>();
+    let file = atman_rt::parse_file(&format!(
+        "flow main() -> string {{ {body} return final.answer(message: \"delivered\") }}"
+    ))
+    .unwrap();
+    let authority =
+        atman_runtime::flow_authority::EffectiveAuthority::root(&Default::default(), false, None);
+    executor
+        .run_with_invocation(
+            &file,
+            "main",
+            vec![],
+            atman_runtime::RootInvocation {
+                instance: Some(
+                    atman_runtime::InstanceInvocation::new(
+                        lease.clone(),
+                        authority.clone(),
+                        Default::default(),
+                    )
+                    .with_storage(worker.clone())
+                    .unwrap(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let raw = context.messages_full();
+    let before = context.messages().to_vec();
+    assert_eq!(raw.len(), 61);
+    let mut events = context.stream_subscribe();
+    context.record_llm_call("mock-summary", 0, 0, 0, 0, None, None);
+    atman_runtime::compaction::maybe_auto_compact(&context, "mock-summary", &executor.providers)
+        .await;
+    let compacted = context.messages().to_vec();
+    assert!(compacted.len() < before.len());
+    assert_eq!(context.messages_full().as_ref(), raw.as_ref());
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !matches!(event, StreamFrame::AssistantMsg { .. }),
+            "checkpoint must not republish retained answers"
+        );
+    }
+    assert!(
+        context
+            .commit_rewritten_window(
+                &before,
+                vec![Message::assistant_text(lease.turn.clone(), "stale")],
+                60_000,
+                before.len(),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(context.messages().to_vec(), compacted);
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::TurnFinished {
+                lease,
+                outcome: TurnOutcome::Completed,
+            },
+        )
+        .await
+        .unwrap();
+    let flow = worker.shutdown().await.unwrap();
+    assert_eq!(flow.context_messages(), compacted);
+    assert_eq!(flow.history_messages().as_slice(), raw.as_slice());
+    assert_eq!(flow.context_checkpoints().len(), 1);
+    assert_eq!(flow.published_messages().len(), raw.len());
+    drop(flow);
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    let next = start(&mut flow);
+    let worker = FlowWorker::start(flow).await.unwrap();
+    let context = worker.context();
+    assert_eq!(context.messages().to_vec(), compacted);
+    assert_eq!(context.messages_full().as_ref(), raw.as_ref());
+    assert!(context.stream_subscribe().try_recv().is_err());
+    let file = atman_rt::parse_file(
+        "flow main() -> string { return final.answer(message: \"after restart\") }",
+    )
+    .unwrap();
+    executor
+        .run_with_invocation(
+            &file,
+            "main",
+            vec![],
+            atman_runtime::RootInvocation {
+                instance: Some(
+                    atman_runtime::InstanceInvocation::new(
+                        next.clone(),
+                        authority,
+                        Default::default(),
+                    )
+                    .with_storage(worker.clone())
+                    .unwrap(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::TurnFinished {
+                lease: next.clone(),
+                outcome: TurnOutcome::Completed,
+            },
+        )
+        .await
+        .unwrap();
+    let window_with_tail = context.messages().to_vec();
+    let full_with_tail = context.messages_full();
+    assert_eq!(window_with_tail.len(), compacted.len() + 1);
+    assert_eq!(full_with_tail.len(), raw.len() + 1);
+    let flow = worker.shutdown().await.unwrap();
+    assert!(
+        context
+            .commit_rewritten_window(
+                &window_with_tail,
+                vec![Message::assistant_text(next.turn, "closed writer")],
+                60_000,
+                window_with_tail.len(),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(context.messages().to_vec(), window_with_tail);
+    drop(flow);
+    let worker = FlowWorker::start(session.open_flow(&description.address.instance_id).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(worker.context().messages().to_vec(), window_with_tail);
+    assert_eq!(
+        worker.context().messages_full().as_ref(),
+        full_with_tail.as_ref()
+    );
+    worker.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn owned_execution_separates_pre_admission_errors_from_interrupted_turns() {
     use atman_runtime::flow_runtime::FlowWorker;

@@ -58,6 +58,8 @@ async fn compact_messages_replaces_middle_span() {
     let before_len = session.message_count();
     let result = session
         .compact_messages_auto("test summary".into())
+        .await
+        .expect("checkpoint write")
         .expect("expected compaction");
     assert!(result.after_tokens < result.before_tokens);
     assert!(session.message_count() < before_len);
@@ -78,6 +80,8 @@ async fn compact_messages_refreshes_window_from_compacted_history() {
 
     let result = session
         .compact_messages_auto("test summary".into())
+        .await
+        .expect("checkpoint write")
         .expect("expected compaction");
 
     assert!(session.last_input_tokens() > 0);
@@ -321,6 +325,8 @@ async fn compact_messages_returns_none_below_budget() {
     assert!(
         session
             .compact_messages_auto("claude-opus-4.7".into())
+            .await
+            .expect("checkpoint write")
             .is_none()
     );
 }
@@ -562,6 +568,10 @@ async fn cooldown_blocks_repeat_compaction_within_window() {
     session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
     build_long_history(&session, 20);
     assert!(session.approval_cooldown_ok_for_compact());
-    let _ = session.compact_messages_auto("first".into()).unwrap();
+    let _ = session
+        .compact_messages_auto("first".into())
+        .await
+        .expect("checkpoint write")
+        .unwrap();
     assert!(!session.approval_cooldown_ok_for_compact());
 }

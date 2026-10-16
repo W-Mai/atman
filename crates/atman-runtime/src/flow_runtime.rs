@@ -1,6 +1,7 @@
 //! Per-instance serialized storage work without blocking asynchronous executor threads.
 
 pub mod access;
+pub(crate) mod context;
 pub mod execution;
 pub mod host;
 pub mod input;
@@ -74,6 +75,11 @@ impl FlowWorker {
             let context = Arc::new(Session::restore_instance_context(
                 store.descriptor().address.clone(),
                 store.context_messages(),
+                store.history_messages(),
+                store
+                    .context_checkpoints()
+                    .last()
+                    .map(|saved| saved.checkpoint.messages.as_slice()),
             ));
             (store, context)
         })
@@ -83,6 +89,10 @@ impl FlowWorker {
         let (state_tx, state) = watch::channel(store.state().clone());
         let (commits_tx, commits) = watch::channel(store.cursor().clone());
         let (commands, mut receiver) = mpsc::channel::<Command>(64);
+        context.bind_instance_writer(context::ContextWriter::new(
+            commands.downgrade(),
+            Arc::downgrade(&context),
+        ));
         tokio::spawn(async move {
             let mut store = store;
             let mut stopped = None;
@@ -178,19 +188,7 @@ impl FlowWorker {
         &self,
         command: impl FnOnce(&mut FlowStore) -> io::Result<T> + Send + 'static,
     ) -> io::Result<T> {
-        let (reply, received) = oneshot::channel();
-        self.commands
-            .send(Command::Apply(Box::new(move |store| {
-                let result = command(store);
-                Box::new(move || {
-                    let _ = reply.send(result);
-                })
-            })))
-            .await
-            .map_err(|_| io::Error::other("flow storage worker stopped"))?;
-        received
-            .await
-            .map_err(|_| io::Error::other("flow storage worker stopped before acknowledgement"))?
+        request(&self.commands, command).await
     }
 
     pub async fn state(&self) -> io::Result<FlowInstance<AtmanUuid>> {
@@ -312,6 +310,25 @@ impl FlowWorker {
     }
 }
 
+async fn request<T: Send + 'static>(
+    commands: &mpsc::Sender<Command>,
+    command: impl FnOnce(&mut FlowStore) -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    let (reply, received) = oneshot::channel();
+    commands
+        .send(Command::Apply(Box::new(move |store| {
+            let result = command(store);
+            Box::new(move || {
+                let _ = reply.send(result);
+            })
+        })))
+        .await
+        .map_err(|_| io::Error::other("flow storage worker stopped"))?;
+    received
+        .await
+        .map_err(|_| io::Error::other("flow storage worker stopped before acknowledgement"))?
+}
+
 fn publish_and_project(
     store: &mut FlowStore,
     publication: MessagePublication,
@@ -347,6 +364,40 @@ mod tests {
     use crate::source_program::RevisionBundle;
     use atman_rt::{RunId, TurnId};
     use uuid::Uuid;
+
+    async fn cancel_queued<T: Send + std::fmt::Debug + 'static>(
+        worker: &FlowWorker,
+        operation: impl Future<Output = T> + Send + 'static,
+    ) {
+        let (started, waiting) = oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let blocking_worker = worker.clone();
+        let blocker = tokio::spawn(async move {
+            blocking_worker
+                .request(move |_| {
+                    let _ = started.send(());
+                    blocked
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        waiting.await.unwrap();
+        let abandoned = tokio::spawn(operation);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while worker.commands.capacity() == 64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        abandoned.abort();
+        assert!(abandoned.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        worker.state().await.unwrap();
+    }
 
     #[tokio::test]
     async fn accepted_publication_survives_caller_cancellation_and_rejected_writes_stay_invisible()
@@ -406,40 +457,16 @@ mod tests {
             lease: lease.clone(),
             run: lease.run.clone(),
             context_run: None,
-            message: Message::assistant_text(lease.turn.clone(), "committed"),
+            message: Message::assistant_text(lease.turn.clone(), "committed ".repeat(50)),
         };
-
-        let (started, waiting) = oneshot::channel();
-        let (release, blocked) = std::sync::mpsc::channel();
-        let blocking_worker = worker.clone();
-        let blocker = tokio::spawn(async move {
-            blocking_worker
-                .request(move |_| {
-                    let _ = started.send(());
-                    blocked
-                        .recv_timeout(std::time::Duration::from_secs(10))
-                        .unwrap();
-                    Ok(())
-                })
-                .await
-        });
-        waiting.await.unwrap();
         let writer = worker.clone();
         let body = publication.clone();
         let destination = ctx.clone();
-        let abandoned = tokio::spawn(async move { writer.publish(body, destination).await });
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while worker.commands.capacity() == 64 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        abandoned.abort();
-        assert!(abandoned.await.unwrap_err().is_cancelled());
-        release.send(()).unwrap();
-        blocker.await.unwrap().unwrap();
-        worker.state().await.unwrap();
+        cancel_queued(
+            &worker,
+            async move { writer.publish(body, destination).await },
+        )
+        .await;
         assert_eq!(context.messages().len(), 1);
         let record = worker
             .publish(publication.clone(), ctx.clone())
@@ -449,6 +476,26 @@ mod tests {
         let mut conflict = publication.clone();
         conflict.message.parts.clear();
         assert!(worker.publish(conflict, ctx.clone()).await.is_err());
+
+        let original = context.messages().to_vec();
+        let replacement = vec![Message::assistant_text(lease.turn.clone(), "short")];
+        let checkpoint_context = context.clone();
+        let checkpoint_messages = replacement.clone();
+        cancel_queued(&worker, async move {
+            checkpoint_context
+                .commit_rewritten_window(&original, checkpoint_messages, 100, 1)
+                .await
+        })
+        .await;
+        assert_eq!(context.messages().to_vec(), replacement);
+        assert_eq!(
+            context.messages_full().as_slice(),
+            std::slice::from_ref(&record.publication.message)
+        );
+        assert_eq!(
+            context.context_epoch(),
+            Some(crate::flow_store::context::context_digest(&replacement).unwrap(),)
+        );
         let mut cancelled = publication;
         cancelled.id = Uuid::new_v4();
         worker
@@ -472,6 +519,14 @@ mod tests {
         let store = worker.shutdown().await.unwrap();
         assert!(clone.publish(cancelled, ctx).await.is_err());
         assert_eq!(store.published_messages(), [record]);
+        assert_eq!(store.context_checkpoints().len(), 1);
         assert_eq!(store.context_messages(), context.messages().to_vec());
+        let weak = Arc::downgrade(&context);
+        drop(clone);
+        drop(context);
+        assert!(
+            weak.upgrade().is_none(),
+            "context writer must not retain its owner"
+        );
     }
 }
