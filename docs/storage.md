@@ -234,3 +234,9 @@ The host owns the delivery task once started. Cancelling its waiting caller does
 `SendAttempt` returns the authoritative sender record and an optional pending reason. A failed attempt leaves `PendingDelivery`; this may include an accepted receiver message whose sender acknowledgement could not be committed. `retry_send` reads the original intent from the sender journal and reconciles that request. It can confirm prior receiver acceptance after interruption, revocation, or closure without treating the retry as new work. A confirmed send returns its existing record without contacting the receiver again. Accepted means received, not executed or successfully handled.
 
 `FlowWorker::pending_sends` and `send_record` expose durable reconciliation work. Failed attempts do not busy-loop or silently discard intent. Automatic retry policy, terminal rejection/cancellation decisions, and product-facing send tools remain host integration work.
+
+## Scoped model directories
+
+`model_registry::ModelRegistry` owns model configuration, aliases, provider catalogs, transaction serialization, and catalog notifications. Separate registries can use the same model and provider names without sharing protocol selection, capabilities, budgets, or revisions. Request snapshots remain unchanged after later directory updates. Auth-aware projections take explicit auth data and optional cache sources; management views do not install callable models.
+
+Prepared configuration and catalog updates retain a borrow of their originating registry and hold its transaction until commit or drop. Commit uses that owner, and dropping an update leaves the published state unchanged. Existing module-level model functions delegate to the process-default registry. Product callers using those functions still share the default directory; explicit directory isolation requires retaining and using a scoped registry.

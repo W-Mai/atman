@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{LazyLock, RwLock};
+use std::sync::LazyLock;
 
 use crate::auth_store::AuthStore;
 use crate::provider::{
@@ -219,11 +219,15 @@ struct RegistryState {
     catalog_revision: u64,
 }
 
-static REGISTRY_STATE: LazyLock<RwLock<RegistryState>> =
-    LazyLock::new(|| RwLock::new(RegistryState::default()));
-static CATALOG_REVISION: LazyLock<tokio::sync::watch::Sender<u64>> =
-    LazyLock::new(|| tokio::sync::watch::channel(0).0);
-static REGISTRY_TRANSACTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+mod registry;
+pub use registry::ModelRegistry;
+
+static DEFAULT_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
+
+/// The process-default model directory. Scoped hosts retain their own registry.
+pub fn default_registry() -> &'static ModelRegistry {
+    &DEFAULT_REGISTRY
+}
 
 /// Serializes tests that mutate the global model registry.
 ///
@@ -232,63 +236,32 @@ static REGISTRY_TRANSACTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new((
 pub static MODEL_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn set_discovered_models(models: Vec<String>) {
-    REGISTRY_STATE.write().unwrap().legacy_discovered_models = models;
+    DEFAULT_REGISTRY.set_discovered_models(models)
 }
 
 pub fn discovered_models() -> Vec<String> {
-    let state = REGISTRY_STATE.read().unwrap();
-    let mut models = state.legacy_discovered_models.clone();
-    let mut seen: BTreeSet<String> = models.iter().cloned().collect();
-    for catalog in state.catalogs.values() {
-        for model in catalog.models.values() {
-            if seen.insert(model.registry_key.clone()) {
-                models.push(model.registry_key.clone());
-            }
-        }
-    }
-    models
+    DEFAULT_REGISTRY.discovered_models()
 }
 
 /// Set the base model configuration (from config.toml).
 /// Dynamic provider catalogs remain in their own layer.
 pub fn set_provider_config(cfg: ProviderConfig) {
-    if let Err(error) = install_config_layer(ConfigLayer::inferred(cfg)) {
-        crate::notify!(error, "model config update rejected: {error}");
-    }
+    DEFAULT_REGISTRY.set_provider_config(cfg)
 }
 
 /// Backwards-compatible alias for [set_provider_config].
 pub fn set_model_config(cfg: ModelConfig) {
-    set_provider_config(cfg);
+    set_provider_config(cfg)
 }
 
 /// Register additional model entries without clobbering existing ones.
 pub fn register_model_entries(entries: Vec<(String, ModelEntry)>) {
-    let mut state = REGISTRY_STATE.write().unwrap();
-    for (name, entry) in entries {
-        if state.config.values.models.contains_key(&name) || state.legacy_models.contains_key(&name)
-        {
-            continue;
-        }
-        if entry.discovered {
-            state.legacy_models.insert(name, entry);
-        } else {
-            let declarations = CapabilityDeclarations::inferred(&entry);
-            state.config.capabilities.insert(name.clone(), declarations);
-            state.config.values.models.insert(name, entry);
-        }
-    }
+    DEFAULT_REGISTRY.register_model_entries(entries)
 }
 
 /// Register additional provider entries without clobbering existing ones.
 pub fn register_provider_entries(entries: Vec<(String, ProviderEntry)>) {
-    let mut config = REGISTRY_STATE.read().unwrap().config.clone();
-    for (name, entry) in entries {
-        config.values.providers.entry(name).or_insert(entry);
-    }
-    if let Err(error) = install_config_layer(config) {
-        crate::notify!(error, "provider config update rejected: {error}");
-    }
+    DEFAULT_REGISTRY.register_provider_entries(entries)
 }
 
 /// Register a legacy catalog using `<provider_name>:<api_model>` keys.
@@ -313,7 +286,7 @@ pub fn prepare_discovered_details(
     provider_id: &str,
     provider_name: &str,
     models: &[crate::provider::DiscoveredModelDetails],
-) -> Result<PreparedProviderCatalog, CatalogError> {
+) -> Result<PreparedProviderCatalog<'static>, CatalogError> {
     let profile = reasoning_wire_profile_for_provider(provider_name);
     prepare_discovered_details_with_global_auth(provider_id, provider_name, profile, models)
 }
@@ -345,33 +318,12 @@ fn register_legacy_discovered_entries(
     models: &[crate::provider::DiscoveredModel],
     api_model_uses_registry_key: bool,
 ) {
-    if models.is_empty() {
-        return;
-    }
-    let entries: Vec<_> = models
-        .iter()
-        .map(|model| {
-            let name = format!("{model_namespace}:{}", model.slug);
-            (
-                name.clone(),
-                ModelEntry {
-                    model: if api_model_uses_registry_key {
-                        name.clone()
-                    } else {
-                        model.slug.clone()
-                    },
-                    provider: Some(provider_key.to_string()),
-                    context_budget: model.context_budget,
-                    thinking: Some(model.thinking),
-                    discovered: true,
-                    ..Default::default()
-                },
-            )
-        })
-        .collect();
-    let names = entries.iter().map(|(name, _)| name.clone()).collect();
-    register_model_entries(entries);
-    set_discovered_models(names);
+    DEFAULT_REGISTRY.register_legacy_discovered_entries(
+        model_namespace,
+        provider_key,
+        models,
+        api_model_uses_registry_key,
+    )
 }
 
 pub fn register_discovered_details_for_provider(
@@ -387,7 +339,7 @@ pub fn prepare_discovered_details_for_provider(
     provider_key: &str,
     provider_name: &str,
     models: &[crate::provider::DiscoveredModelDetails],
-) -> Result<PreparedProviderCatalog, CatalogError> {
+) -> Result<PreparedProviderCatalog<'static>, CatalogError> {
     prepare_discovered_details_with_global_auth(
         provider_key,
         provider_name,
@@ -401,7 +353,7 @@ fn prepare_discovered_details_with_global_auth(
     provider_name: &str,
     wire_profile: ReasoningWireProfile,
     models: &[crate::provider::DiscoveredModelDetails],
-) -> Result<PreparedProviderCatalog, CatalogError> {
+) -> Result<PreparedProviderCatalog<'static>, CatalogError> {
     let auth = AuthStore::load().map_err(|error| CatalogError::NamespaceStore {
         message: error.to_string(),
     })?;
@@ -426,39 +378,15 @@ pub fn prepare_discovered_details_for_provider_with_auth(
     persisted_namespace: Option<&str>,
     wire_profile: ReasoningWireProfile,
     models: &[crate::provider::DiscoveredModelDetails],
-) -> Result<PreparedProviderCatalog, CatalogError> {
-    prepare_discovered_details_with_profile(
+) -> Result<PreparedProviderCatalog<'static>, CatalogError> {
+    DEFAULT_REGISTRY.prepare_discovered_details_for_provider_with_auth(
         provider_key,
         provider_name,
-        wire_profile,
         auth,
         persisted_namespace,
+        wire_profile,
         models,
     )
-}
-
-fn prepare_discovered_details_with_profile(
-    provider_key: &str,
-    provider_name: &str,
-    wire_profile: ReasoningWireProfile,
-    auth: &AuthStore,
-    persisted_namespace: Option<&str>,
-    models: &[crate::provider::DiscoveredModelDetails],
-) -> Result<PreparedProviderCatalog, CatalogError> {
-    let model_namespace = provider_namespace(
-        &REGISTRY_STATE.read().unwrap(),
-        provider_key,
-        provider_name,
-        auth,
-        persisted_namespace,
-    )?;
-    let descriptor = ProviderDescriptor {
-        provider_key: provider_key.to_string(),
-        provider_name: provider_name.to_string(),
-        namespace: model_namespace,
-        wire_profile,
-    };
-    prepare_provider_catalog(descriptor, models)
 }
 
 fn provider_namespace(
@@ -573,131 +501,52 @@ pub enum CatalogError {
     NamespaceStore { message: String },
 }
 
-pub struct PreparedProviderCatalog {
-    _transaction: std::sync::MutexGuard<'static, ()>,
+pub struct PreparedProviderCatalog<'a> {
+    registry: &'a ModelRegistry,
+    _transaction: std::sync::MutexGuard<'a, ()>,
     catalog: ProviderCatalog,
 }
 
-impl PreparedProviderCatalog {
+impl PreparedProviderCatalog<'_> {
     pub fn namespace(&self) -> &str {
         &self.catalog.descriptor.namespace
     }
 }
 
-pub(crate) struct PreparedConfigLayer {
-    _transaction: std::sync::MutexGuard<'static, ()>,
+pub(crate) struct PreparedConfigLayer<'a> {
+    registry: &'a ModelRegistry,
+    _transaction: std::sync::MutexGuard<'a, ()>,
     config: ConfigLayer,
     presets: BTreeMap<ModelIdentity, PresetModelEntry>,
 }
 
-impl PreparedConfigLayer {
+impl PreparedConfigLayer<'_> {
     pub(crate) fn snapshot(&self) -> ProviderConfig {
         self.config.values.clone()
     }
 }
 
-fn prepare_config_layer(config: ConfigLayer) -> Result<PreparedConfigLayer, CatalogError> {
-    for (name, entry) in &config.values.providers {
-        if entry.api.is_some() && !entry.supports_api_selection() {
-            return Err(CatalogError::InvalidApiConfiguration {
-                message: format!(
-                    "provider `{name}` of kind `{}` does not support API selection",
-                    entry.kind
-                ),
-            });
-        }
-        if entry.supports_api_selection()
-            && let Some(base_url) = entry
-                .base_url
-                .as_deref()
-                .filter(|url| !url.trim().is_empty())
-        {
-            crate::config_provider::validate_openai_base_url(base_url).map_err(|message| {
-                CatalogError::InvalidApiConfiguration {
-                    message: format!("provider `{name}`: {message}"),
-                }
-            })?;
-        }
-    }
-    let presets = build_preset_models(&config);
-    let transaction = REGISTRY_TRANSACTION_LOCK.lock().unwrap();
-    let state = REGISTRY_STATE.read().unwrap();
-    let candidate = RegistryState {
-        config: config.clone(),
-        preset_models: presets.clone(),
-        ..state.clone()
-    };
-    for (name, entry) in &config.values.models {
-        if entry.api.is_none() {
-            continue;
-        }
-        let provider = entry.provider.as_deref().map(str::to_owned).or_else(|| {
-            resolved_model_in_state(&candidate, name).and_then(|model| model.entry.provider)
-        });
-        let supported = provider
-            .as_deref()
-            .and_then(|key| config.values.providers.get(key))
-            .is_some_and(ProviderEntry::supports_api_selection);
-        if !supported {
-            return Err(CatalogError::InvalidApiConfiguration {
-                message: format!(
-                    "model `{name}` can select an API only on an OpenAI-compatible config provider"
-                ),
-            });
-        }
-    }
-    for (preset_identity, preset) in &presets {
-        if let Some(catalog) = state.catalogs.values().find(|catalog| {
-            catalog.models.values().any(|model| {
-                model.registry_key == preset.registry_key
-                    && ModelIdentity::new(&catalog.descriptor.provider_key, &model.api_model)
-                        != *preset_identity
-            })
-        }) {
-            return Err(CatalogError::RegistryKeyInUse {
-                registry_key: preset.registry_key.clone(),
-                provider_key: catalog.descriptor.provider_key.clone(),
-            });
-        }
-    }
-    drop(state);
-    Ok(PreparedConfigLayer {
-        _transaction: transaction,
-        config,
-        presets,
-    })
+pub(crate) fn prepare_config_text(text: &str) -> anyhow::Result<PreparedConfigLayer<'static>> {
+    DEFAULT_REGISTRY.prepare_config_text(text)
 }
 
-pub(crate) fn prepare_config_text(text: &str) -> anyhow::Result<PreparedConfigLayer> {
-    let config = parse_config_layer(text)
-        .map_err(|error| anyhow::anyhow!("parse config.toml: {error}"))?
-        .unwrap_or_default();
-    prepare_config_layer(config).map_err(Into::into)
-}
-
-pub(crate) fn commit_prepared_config(prepared: PreparedConfigLayer) {
+pub(crate) fn commit_prepared_config(prepared: PreparedConfigLayer<'_>) {
     let PreparedConfigLayer {
+        registry,
         _transaction,
         config,
         presets,
     } = prepared;
-    let mut state = REGISTRY_STATE.write().unwrap();
+    let mut state = registry.state.write().unwrap();
     state.config = config;
     state.preset_models = presets;
-}
-
-fn install_config_layer(config: ConfigLayer) -> Result<(), CatalogError> {
-    let prepared = prepare_config_layer(config)?;
-    commit_prepared_config(prepared);
-    Ok(())
 }
 
 pub fn replace_provider_catalog(
     descriptor: ProviderDescriptor,
     models: &[crate::provider::DiscoveredModelDetails],
 ) -> Result<CatalogDelta, CatalogError> {
-    let prepared = prepare_provider_catalog(descriptor, models)?;
-    Ok(commit_prepared_provider_catalog(prepared))
+    DEFAULT_REGISTRY.replace_provider_catalog(descriptor, models)
 }
 
 fn build_provider_catalog(
@@ -740,80 +589,13 @@ fn build_provider_catalog(
 pub fn prepare_provider_catalog(
     descriptor: ProviderDescriptor,
     models: &[crate::provider::DiscoveredModelDetails],
-) -> Result<PreparedProviderCatalog, CatalogError> {
-    let ProviderCatalog {
-        descriptor,
-        models: next_models,
-    } = build_provider_catalog(descriptor, models)?;
-    let transaction = REGISTRY_TRANSACTION_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let state = REGISTRY_STATE
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let previous = state.catalogs.get(&descriptor.provider_key);
-    if let Some(previous) = previous
-        && previous.descriptor.namespace != descriptor.namespace
-    {
-        return Err(CatalogError::NamespaceChanged {
-            provider_key: descriptor.provider_key,
-            current: previous.descriptor.namespace.clone(),
-            requested: descriptor.namespace,
-        });
-    }
-    if let Some((provider_key, _)) = state.catalogs.iter().find(|(provider_key, catalog)| {
-        provider_key.as_str() != descriptor.provider_key
-            && catalog.descriptor.namespace == descriptor.namespace
-    }) {
-        return Err(CatalogError::NamespaceInUse {
-            namespace: descriptor.namespace,
-            provider_key: provider_key.clone(),
-        });
-    }
-    for model in next_models.values() {
-        if let Some((provider_key, _)) = state
-            .catalogs
-            .iter()
-            .filter(|(provider_key, _)| provider_key.as_str() != descriptor.provider_key)
-            .find(|(_, catalog)| {
-                catalog
-                    .models
-                    .values()
-                    .any(|existing| existing.registry_key == model.registry_key)
-            })
-        {
-            return Err(CatalogError::RegistryKeyInUse {
-                registry_key: model.registry_key.clone(),
-                provider_key: provider_key.clone(),
-            });
-        }
-        let identity = ModelIdentity::new(&descriptor.provider_key, &model.api_model);
-        if let Some((preset_identity, _)) =
-            state
-                .preset_models
-                .iter()
-                .find(|(preset_identity, preset)| {
-                    preset.registry_key == model.registry_key && **preset_identity != identity
-                })
-        {
-            return Err(CatalogError::RegistryKeyInUse {
-                registry_key: model.registry_key.clone(),
-                provider_key: preset_identity.provider_key.clone(),
-            });
-        }
-    }
-    drop(state);
-    Ok(PreparedProviderCatalog {
-        _transaction: transaction,
-        catalog: ProviderCatalog {
-            descriptor,
-            models: next_models,
-        },
-    })
+) -> Result<PreparedProviderCatalog<'static>, CatalogError> {
+    DEFAULT_REGISTRY.prepare_provider_catalog(descriptor, models)
 }
 
-pub fn commit_prepared_provider_catalog(prepared: PreparedProviderCatalog) -> CatalogDelta {
+pub fn commit_prepared_provider_catalog(prepared: PreparedProviderCatalog<'_>) -> CatalogDelta {
     let PreparedProviderCatalog {
+        registry,
         _transaction,
         catalog,
     } = prepared;
@@ -821,7 +603,8 @@ pub fn commit_prepared_provider_catalog(prepared: PreparedProviderCatalog) -> Ca
         descriptor,
         models: next_models,
     } = catalog;
-    let mut state = REGISTRY_STATE
+    let mut state = registry
+        .state
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous = state.catalogs.get(&descriptor.provider_key);
@@ -865,7 +648,9 @@ pub fn commit_prepared_provider_catalog(prepared: PreparedProviderCatalog) -> Ca
     );
     if changed {
         state.catalog_revision = state.catalog_revision.wrapping_add(1);
-        CATALOG_REVISION.send_replace(state.catalog_revision);
+        registry
+            .catalog_revision
+            .send_replace(state.catalog_revision);
     }
     CatalogDelta {
         added,
@@ -876,31 +661,19 @@ pub fn commit_prepared_provider_catalog(prepared: PreparedProviderCatalog) -> Ca
 }
 
 pub fn remove_provider_catalog(provider_key: &str) -> bool {
-    let _transaction = REGISTRY_TRANSACTION_LOCK.lock().unwrap();
-    let mut state = REGISTRY_STATE.write().unwrap();
-    let removed = state.catalogs.remove(provider_key).is_some();
-    if removed {
-        state.catalog_revision = state.catalog_revision.wrapping_add(1);
-        CATALOG_REVISION.send_replace(state.catalog_revision);
-    }
-    removed
+    DEFAULT_REGISTRY.remove_provider_catalog(provider_key)
 }
 
 pub(crate) fn provider_catalog_namespace(provider_key: &str) -> Option<String> {
-    REGISTRY_STATE
-        .read()
-        .unwrap()
-        .catalogs
-        .get(provider_key)
-        .map(|catalog| catalog.descriptor.namespace.clone())
+    DEFAULT_REGISTRY.provider_catalog_namespace(provider_key)
 }
 
 pub fn model_catalog_revision() -> u64 {
-    REGISTRY_STATE.read().unwrap().catalog_revision
+    DEFAULT_REGISTRY.model_catalog_revision()
 }
 
 pub fn subscribe_model_catalog() -> tokio::sync::watch::Receiver<u64> {
-    CATALOG_REVISION.subscribe()
+    DEFAULT_REGISTRY.subscribe_model_catalog()
 }
 
 fn catalog_model_eq(left: &CatalogModelEntry, right: &CatalogModelEntry) -> bool {
@@ -1373,7 +1146,7 @@ pub struct ProviderGroup {
 /// Single canonical source for UI — no manual union of all_model_entries +
 /// discovered_models + aliases.
 pub fn all_provider_groups() -> Vec<ProviderGroup> {
-    provider_groups(false)
+    DEFAULT_REGISTRY.all_provider_groups()
 }
 
 pub fn enabled_provider_names() -> std::collections::HashSet<String> {
@@ -1382,83 +1155,20 @@ pub fn enabled_provider_names() -> std::collections::HashSet<String> {
 }
 
 fn enabled_provider_names_from_auth(auth: &AuthStore) -> std::collections::HashSet<String> {
-    let mut names: std::collections::HashSet<String> = all_provider_entries()
-        .into_iter()
-        .filter(|(_, entry)| entry.enabled.unwrap_or(true))
-        .map(|(name, _)| name)
-        .collect();
-    names.extend(
-        auth.providers
-            .iter()
-            .filter(|provider| provider.enabled)
-            .map(|provider| provider.id.clone()),
-    );
-    names
+    DEFAULT_REGISTRY.enabled_provider_names(auth)
 }
 
 /// Return enabled configured providers even when no model has been registered yet.
 pub fn all_provider_groups_with_empty() -> Vec<ProviderGroup> {
-    provider_groups(true)
+    DEFAULT_REGISTRY.all_provider_groups_with_empty()
 }
 
 /// Return configuration and cached catalogs for management, including disabled providers. Cached records are projected without registering callable models or changing provider state.
 pub fn all_provider_groups_for_management() -> Vec<ProviderGroup> {
-    let mut state = REGISTRY_STATE.read().unwrap().clone();
-    let auth = AuthStore::load().unwrap_or_default();
-    let hub = crate::config_hub::ConfigHub::global().ok();
-    for provider in &auth.providers {
-        if state.catalogs.contains_key(&provider.id) {
-            continue;
-        }
-        let namespace = hub
-            .as_ref()
-            .and_then(|hub| hub.load_auth_model_namespace(&provider.id).ok().flatten());
-        let Ok(namespace) = provider_namespace(
-            &state,
-            &provider.id,
-            &provider.name,
-            &auth,
-            namespace.as_deref(),
-        ) else {
-            continue;
-        };
-        let models = hub
-            .as_ref()
-            .and_then(|hub| {
-                hub.load_auth_model_cache_details(&provider.id)
-                    .ok()
-                    .flatten()
-            })
-            .or_else(|| {
-                provider
-                    .model_cache
-                    .as_ref()
-                    .map(crate::auth_store::cached_to_discovered_details)
-            })
-            .unwrap_or_default();
-        let descriptor = ProviderDescriptor {
-            provider_key: provider.id.clone(),
-            provider_name: provider.name.clone(),
-            namespace,
-            wire_profile: match provider.kind {
-                crate::auth_store::ProviderKind::Codex => ReasoningWireProfile::CodexResponses,
-                crate::auth_store::ProviderKind::AnthropicOauth => {
-                    ReasoningWireProfile::AnthropicMessages
-                }
-                crate::auth_store::ProviderKind::GitHubCopilot
-                | crate::auth_store::ProviderKind::Custom => ReasoningWireProfile::Unknown,
-            },
-        };
-        if let Ok(catalog) = build_provider_catalog(descriptor, &models) {
-            state.catalogs.insert(provider.id.clone(), catalog);
-        }
-    }
-    provider_groups_in_state(&state, true, true)
-}
-
-fn provider_groups(include_empty: bool) -> Vec<ProviderGroup> {
-    let state = REGISTRY_STATE.read().unwrap();
-    provider_groups_in_state(&state, include_empty, false)
+    DEFAULT_REGISTRY.all_provider_groups_for_management(
+        &AuthStore::load().unwrap_or_default(),
+        crate::config_hub::ConfigHub::global().ok().as_ref(),
+    )
 }
 
 fn provider_groups_in_state(
@@ -1514,17 +1224,15 @@ fn provider_groups_in_state(
 }
 
 pub fn resolve_alias(name: &str) -> String {
-    resolve_alias_in_state(&REGISTRY_STATE.read().unwrap(), name)
+    DEFAULT_REGISTRY.resolve_alias(name)
 }
 
 pub fn model_entry(name: &str) -> Option<ModelEntry> {
-    resolved_model_in_state(&REGISTRY_STATE.read().unwrap(), name).map(|model| model.entry)
+    DEFAULT_REGISTRY.model_entry(name)
 }
 
 pub fn api_model_id(name: &str) -> String {
-    model_entry(name)
-        .and_then(|entry| (!entry.model.is_empty()).then_some(entry.model))
-        .unwrap_or_else(|| name.to_string())
+    DEFAULT_REGISTRY.api_model_id(name)
 }
 
 /// Immutable model configuration used for one provider call and its cache projection.
@@ -1567,9 +1275,7 @@ impl ModelCallConfig {
 }
 
 pub fn model_call_config(name: &str) -> ModelCallConfig {
-    let state = REGISTRY_STATE.read().unwrap();
-    let resolved = resolved_model_in_state(&state, name);
-    model_call_config_from_resolved(&state, name, resolved)
+    DEFAULT_REGISTRY.model_call_config(name)
 }
 
 /// Resolves an unsaved model draft through the same capability and protocol projection as saved models.
@@ -1580,34 +1286,7 @@ pub fn draft_model_call_config(
     api: Option<OpenAiApi>,
     max_tokens: Option<u32>,
 ) -> ModelCallConfig {
-    let state = REGISTRY_STATE.read().unwrap();
-    let key = identity.unwrap_or(api_model);
-    let target = ModelIdentity::new(provider, api_model);
-    let mut bases = base_models_in_state(&state);
-    let base_max_tokens = bases.get(&target).and_then(|base| base.entry.max_tokens);
-    let mut resolved = identity
-        .and_then(|name| resolved_model_in_state(&state, name))
-        .filter(|model| model.identity.as_ref() == Some(&target))
-        .or_else(|| bases.remove(&target))
-        .unwrap_or_else(|| {
-            model_entry_to_resolved(
-                &state,
-                key.into(),
-                ModelEntry {
-                    model: api_model.into(),
-                    provider: Some(provider.into()),
-                    ..Default::default()
-                },
-                &CapabilityDeclarations::default(),
-                false,
-            )
-        });
-    resolved.key = key.into();
-    resolved.entry.api = api;
-    resolved.entry.max_tokens = max_tokens.or(base_max_tokens);
-    resolved.entry.enabled = Some(true);
-    resolved.wire_profile = model_profile_in_state(&state, &resolved.entry);
-    model_call_config_from_resolved(&state, key, Some(resolved))
+    DEFAULT_REGISTRY.draft_model_call_config(identity, provider, api_model, api, max_tokens)
 }
 
 fn model_call_config_from_resolved(
@@ -1656,10 +1335,7 @@ fn model_call_config_from_resolved(
 }
 
 pub fn all_model_entries() -> Vec<(String, ModelEntry)> {
-    resolved_models_in_state(&REGISTRY_STATE.read().unwrap())
-        .into_iter()
-        .map(|(name, model)| (name, model.entry))
-        .collect()
+    DEFAULT_REGISTRY.all_model_entries()
 }
 
 pub fn provider_display_name(provider_key: &str) -> String {
@@ -1678,54 +1354,19 @@ pub fn provider_display_name(provider_key: &str) -> String {
 }
 
 pub fn is_provider_enabled(name: &str) -> bool {
-    let state = REGISTRY_STATE.read().unwrap();
-    if let Some(entry) = provider_entries_in_state(&state).get(name) {
-        return entry.enabled.unwrap_or(true);
-    }
-    let auth_provider = AuthStore::load().ok().and_then(|auth| {
-        auth.providers
-            .into_iter()
-            .find(|provider| provider.id == name)
-    });
-    if state.catalogs.contains_key(name) {
-        return auth_provider.is_some_and(|provider| provider.enabled);
-    }
-    auth_provider.is_none_or(|provider| provider.enabled)
+    DEFAULT_REGISTRY.is_provider_enabled(name, &AuthStore::load().unwrap_or_default())
 }
 
 pub fn all_provider_entries() -> Vec<(String, ProviderEntry)> {
-    provider_entries_in_state(&REGISTRY_STATE.read().unwrap())
-        .into_iter()
-        .collect()
+    DEFAULT_REGISTRY.all_provider_entries()
 }
 
 pub fn all_aliases() -> Vec<(String, String)> {
-    let state = REGISTRY_STATE.read().unwrap();
-    let mut aliases: Vec<(String, String)> = state
-        .config
-        .values
-        .aliases
-        .iter()
-        .map(|(name, entry)| (name.clone(), entry.model.clone()))
-        .collect();
-    aliases.sort_by(|left, right| left.0.cmp(&right.0));
-    aliases
+    DEFAULT_REGISTRY.all_aliases()
 }
 
 pub fn model_info(name: &str) -> ModelInfo {
-    let state = REGISTRY_STATE.read().unwrap();
-    if let Some(model) = resolved_model_in_state(&state, name) {
-        return model_info_from_resolved(&model);
-    }
-    ModelInfo {
-        name: resolve_alias_in_state(&state, name),
-        context_budget: 0,
-        compact_threshold_ratio: 0.8,
-        reasoning: crate::provider::ReasoningSelection::ProviderDefault,
-        capabilities: ModelCapabilities::default(),
-        image_detail: ImageDetail::Auto,
-        max_output_tokens: None,
-    }
+    DEFAULT_REGISTRY.model_info(name)
 }
 
 fn model_info_from_resolved(model: &ResolvedModel) -> ModelInfo {
@@ -1746,26 +1387,18 @@ fn model_info_from_resolved(model: &ResolvedModel) -> ModelInfo {
 }
 
 pub fn reasoning_wire_profile_for_provider(provider: &str) -> ReasoningWireProfile {
-    provider_profile_in_state(&REGISTRY_STATE.read().unwrap(), provider)
+    DEFAULT_REGISTRY.reasoning_wire_profile_for_provider(provider)
 }
 
 pub fn reasoning_wire_profile_for_model(model: &str) -> ReasoningWireProfile {
-    resolved_model_in_state(&REGISTRY_STATE.read().unwrap(), model)
-        .map(|model| model.wire_profile)
-        .unwrap_or(ReasoningWireProfile::Unknown)
+    DEFAULT_REGISTRY.reasoning_wire_profile_for_model(model)
 }
 
 pub fn resolve_reasoning_for_model(
     model: &str,
     selection: &ReasoningSelection,
 ) -> Result<ReasoningSelection, String> {
-    let state = REGISTRY_STATE.read().unwrap();
-    let Some(model) = resolved_model_in_state(&state, model) else {
-        return ReasoningWireProfile::Unknown
-            .validate(selection, None)
-            .map(|()| selection.clone());
-    };
-    resolve_reasoning_for_resolved(&model, selection)
+    DEFAULT_REGISTRY.resolve_reasoning_for_model(model, selection)
 }
 
 /// Return whether a wire-valid selection still requires capability fields that are unknown.
@@ -1773,31 +1406,7 @@ pub fn reasoning_selection_uses_legacy_capabilities(
     model: &str,
     selection: &ReasoningSelection,
 ) -> bool {
-    let state = REGISTRY_STATE.read().unwrap();
-    let Some(model) = resolved_model_in_state(&state, model) else {
-        return false;
-    };
-    if model
-        .wire_profile
-        .validate(selection, model.reasoning_max_tokens())
-        .is_err()
-    {
-        return false;
-    }
-    let checks_effort_metadata = matches!(
-        selection,
-        ReasoningSelection::Effort { effort, .. } if !matches!(effort, ReasoningEffort::None)
-    ) || matches!(selection, ReasoningSelection::BudgetTokens { .. });
-    (checks_effort_metadata
-        && matches!(
-            model.capability_knowledge.reasoning_efforts,
-            CapabilityFieldKnowledge::Legacy
-        ))
-        || (selection.execution_mode().is_some()
-            && matches!(
-                model.capability_knowledge.reasoning_modes,
-                CapabilityFieldKnowledge::Legacy
-            ))
+    DEFAULT_REGISTRY.reasoning_selection_uses_legacy_capabilities(model, selection)
 }
 
 fn validate_reasoning_for_resolved(
@@ -1950,17 +1559,7 @@ fn reasoning_selections(
 }
 
 pub fn reasoning_selections_for_model(model: &str) -> Vec<ReasoningSelection> {
-    let state = REGISTRY_STATE.read().unwrap();
-    let Some(model) = resolved_model_in_state(&state, model) else {
-        return vec![
-            ReasoningSelection::ProviderDefault,
-            ReasoningSelection::Disabled,
-            ReasoningSelection::Auto {
-                execution_mode: None,
-            },
-        ];
-    };
-    reasoning_selections_for_resolved(&model)
+    DEFAULT_REGISTRY.reasoning_selections_for_model(model)
 }
 
 pub fn reasoning_selections_for_model_draft(
@@ -1970,12 +1569,8 @@ pub fn reasoning_selections_for_model_draft(
     api: Option<OpenAiApi>,
     max_tokens: Option<u32>,
 ) -> Vec<ReasoningSelection> {
-    let snapshot = draft_model_call_config(identity, provider, api_model, api, max_tokens);
-    snapshot
-        .resolved
-        .as_ref()
-        .map(reasoning_selections_for_resolved)
-        .unwrap_or_default()
+    DEFAULT_REGISTRY
+        .reasoning_selections_for_model_draft(identity, provider, api_model, api, max_tokens)
 }
 
 fn reasoning_selections_for_resolved(model: &ResolvedModel) -> Vec<ReasoningSelection> {
@@ -2003,22 +1598,7 @@ pub fn effective_reasoning_for_model(
     model: &str,
     input_selection: Option<&ReasoningSelection>,
 ) -> Result<Option<ReasoningSelection>, String> {
-    let state = REGISTRY_STATE.read().unwrap();
-    let Some(model) = resolved_model_in_state(&state, model) else {
-        return Ok(None);
-    };
-    let info = model_info_from_resolved(&model);
-    let requested = input_selection.unwrap_or(&info.reasoning);
-    let provider_supports_reasoning = model.wire_profile != ReasoningWireProfile::Unknown;
-    let should_display = input_selection.is_some()
-        || !matches!(&info.reasoning, ReasoningSelection::ProviderDefault)
-        || !info.capabilities.reasoning_efforts.is_empty()
-        || info.capabilities.default_reasoning_effort.is_some()
-        || provider_supports_reasoning;
-    if !should_display {
-        return Ok(None);
-    }
-    resolve_reasoning_for_resolved(&model, requested).map(Some)
+    DEFAULT_REGISTRY.effective_reasoning_for_model(model, input_selection)
 }
 
 impl ModelInfo {
@@ -2178,30 +1758,12 @@ pub use crate::known_models::{KNOWN_MODELS, lookup_known_model};
 /// Register derived preset models for a provider with a matching base URL.
 /// User configuration overlays take priority over this layer.
 pub fn register_preset_models_for(provider_name: &str, base_url: &str) {
-    let config = {
-        let state = REGISTRY_STATE.read().unwrap();
-        let configured = state
-            .config
-            .values
-            .providers
-            .get(provider_name)
-            .and_then(|provider| provider.base_url.as_deref());
-        if configured != Some(base_url) {
-            return;
-        }
-        state.config.clone()
-    };
-    if let Err(error) = install_config_layer(config) {
-        crate::notify!(error, "preset model update rejected: {error}");
-    }
+    DEFAULT_REGISTRY.register_preset_models_for(provider_name, base_url)
 }
 
 /// Register preset models for all configured providers with matching base URLs.
 pub fn register_all_preset_models() {
-    let config = REGISTRY_STATE.read().unwrap().config.clone();
-    if let Err(error) = install_config_layer(config) {
-        crate::notify!(error, "preset model update rejected: {error}");
-    }
+    DEFAULT_REGISTRY.register_all_preset_models()
 }
 
 // Config migration (v1 to v2)
@@ -2952,8 +2514,8 @@ mod tests {
 
     impl Drop for IsolatedRegistry {
         fn drop(&mut self) {
-            *REGISTRY_STATE.write().unwrap() = RegistryState::default();
-            CATALOG_REVISION.send_replace(0);
+            *DEFAULT_REGISTRY.state.write().unwrap() = RegistryState::default();
+            DEFAULT_REGISTRY.catalog_revision.send_replace(0);
         }
     }
 
@@ -2961,8 +2523,8 @@ mod tests {
         let lock = TEST_CFG_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *REGISTRY_STATE.write().unwrap() = RegistryState::default();
-        CATALOG_REVISION.send_replace(0);
+        *DEFAULT_REGISTRY.state.write().unwrap() = RegistryState::default();
+        DEFAULT_REGISTRY.catalog_revision.send_replace(0);
         IsolatedRegistry { _lock: lock }
     }
 
@@ -3360,7 +2922,7 @@ max_tokens = 4096
     fn management_projection_keeps_cached_identity_without_enabling_runtime_models() {
         let _registry = isolated_registry();
         let revision = model_catalog_revision();
-        let mut snapshot = REGISTRY_STATE.read().unwrap().clone();
+        let mut snapshot = DEFAULT_REGISTRY.state.read().unwrap().clone();
         snapshot.config.values.providers.insert(
             "disabled-config".into(),
             ProviderEntry {
@@ -3478,7 +3040,7 @@ max_tokens = 4096
     #[test]
     fn unregistered_model_returns_zero_budget() {
         let _registry = isolated_registry();
-        *REGISTRY_STATE.write().unwrap() = RegistryState::default();
+        *DEFAULT_REGISTRY.state.write().unwrap() = RegistryState::default();
         assert_eq!(model_info("mystery-model").context_budget, 0);
         assert_eq!(model_info("").context_budget, 0);
     }
