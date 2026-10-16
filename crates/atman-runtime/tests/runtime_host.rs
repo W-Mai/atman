@@ -213,6 +213,138 @@ async fn late_form_replies_use_the_instance_inbox_and_commit_before_transport_ac
 }
 
 #[tokio::test]
+async fn view_pages_and_live_updates_share_commit_order_across_turns_pause_and_reopen() {
+    use atman_runtime::flow_store::view::FlowUpdate;
+    use futures::StreamExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let worker = session
+        .create_flow(program_descriptor(
+            info.id,
+            "flow main() -> string { return final.answer(message: \"view answer\") }".into(),
+        ))
+        .await
+        .unwrap();
+    let limit = NonZeroUsize::new(2).unwrap();
+    let mut live = worker.subscribe_updates(None, limit).await.unwrap();
+    // Work commits after registration but before the consumer first polls the stream.
+    change(&worker, FlowTransition::Activated).await;
+    invoke(&worker, Executor::new()).await.result.unwrap();
+    invoke(&worker, Executor::new()).await.result.unwrap();
+    change(
+        &worker,
+        FlowTransition::ExecutionPaused {
+            key: Uuid::new_v4().into(),
+        },
+    )
+    .await;
+    let tip = worker.status().await.unwrap().cursor;
+    let mut received = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let page = live.next().await.unwrap().unwrap();
+            assert!(page.batches.len() <= limit.get());
+            received.extend(page.batches);
+            if page.next == Some(tip.clone()) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        received
+            .iter()
+            .map(|batch| batch.receipt.sequence)
+            .collect::<Vec<_>>(),
+        (1..=tip.sequence).collect::<Vec<_>>()
+    );
+    assert!(
+        received.iter().any(|batch| batch.facts.len() > 1),
+        "turn admission must remain atomic"
+    );
+    assert_eq!(received.iter().flat_map(|batch| &batch.facts).filter(|fact| matches!(fact, FlowUpdate::MessagePublished(message) if message.message.origin == MessageOrigin::FinalAnswer)).count(), 2);
+    assert_eq!(
+        received
+            .iter()
+            .flat_map(|batch| &batch.facts)
+            .filter(|fact| matches!(fact, FlowUpdate::TurnCompleted(_)))
+            .count(),
+        2
+    );
+    assert!(
+        received
+            .iter()
+            .flat_map(|batch| &batch.facts)
+            .any(|fact| matches!(fact, FlowUpdate::ExecutionEvents(_)))
+    );
+    let encoded = serde_json::to_value(&received).unwrap();
+    assert!(
+        !serde_json::to_string(&encoded[0])
+            .unwrap()
+            .contains("flow main()")
+    );
+    let first = received[0].receipt.clone();
+    let mut foreign = first.clone();
+    foreign.journal_id = Uuid::new_v4();
+    assert!(
+        worker
+            .subscribe_updates(Some(foreign), limit)
+            .await
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(40), live.next())
+            .await
+            .is_err(),
+        "idle streams must wait, without empty updates"
+    );
+    let before = worker.state().await.unwrap();
+    drop(live);
+    assert_eq!(worker.state().await.unwrap(), before);
+    let address = worker.address().clone();
+    drop(worker.shutdown().await.unwrap());
+    let reopened = session.open_flow(address.instance_id).await.unwrap();
+    let mut after = None;
+    let mut history = Vec::new();
+    loop {
+        let page = reopened.read_updates(after, limit).await.unwrap();
+        after = page.next;
+        history.extend(page.batches);
+        if !page.has_more {
+            break;
+        }
+    }
+    assert_eq!(serde_json::to_value(&history).unwrap(), encoded);
+    assert_eq!(reopened.state().await.unwrap(), before);
+    let mut resumed = reopened
+        .subscribe_updates(Some(first), limit)
+        .await
+        .unwrap();
+    let mut tail = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let page = resumed.next().await.unwrap().unwrap();
+            tail.extend(page.batches);
+            if page.next == Some(tip.clone()) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(tail).unwrap(),
+        serde_json::to_value(&history[1..]).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn permission_endpoint_lifetime_is_independent_of_retained_instance_handles() {
     use atman_runtime::{
         flow_runtime::host::HostServices,

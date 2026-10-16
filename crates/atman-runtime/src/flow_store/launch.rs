@@ -83,7 +83,7 @@ pub(super) struct Activation {
 }
 
 impl Activation {
-    fn envelope(&self) -> AcceptedEnvelope {
+    pub(super) fn envelope(&self) -> AcceptedEnvelope {
         AcceptedEnvelope {
             id: self.id,
             accepted_at: self.accepted_at,

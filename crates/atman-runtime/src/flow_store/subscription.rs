@@ -204,11 +204,11 @@ fn event_request_id(source: &FlowEventRef) -> Uuid {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub(super) struct Observation {
-    source: FlowRef,
-    through: u64,
-    updates: Vec<(Uuid, SubscriptionStatus)>,
-    envelopes: Vec<AcceptedEnvelope>,
+pub struct Observation {
+    pub source: FlowRef,
+    pub through: u64,
+    pub updates: Vec<(Uuid, SubscriptionStatus)>,
+    pub envelopes: Vec<AcceptedEnvelope>,
 }
 
 #[derive(Default)]

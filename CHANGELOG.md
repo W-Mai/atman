@@ -28,6 +28,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Committed flow views** — History pages and live subscriptions share typed updates and validated commit cursors. Atomic batches retain input provenance, final replies, completion, and execution diagnostics across turns and reopening; disconnected views leave execution running.
+
 - **Journal history pages** — Bounded reads preserve atomic batches and validate journal-scoped commit receipts. Recovery rebuilds file positions, and resumed reads avoid rescanning preceding history or moving the append boundary.
 
 - **Persistent flow approvals** — Daemon permission RPCs address each flow's broker independently. Direct and spawned instances register with a host-owned approval endpoint before execution; disconnected endpoints cancel pending user decisions without retaining flow contexts. Groups, revisions, and scoped grants share existing permission validation.

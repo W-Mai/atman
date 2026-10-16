@@ -15,6 +15,7 @@ pub mod planning;
 pub mod publication;
 pub mod subscription;
 pub mod trace;
+pub mod view;
 pub mod waiter;
 
 use std::fs::File;

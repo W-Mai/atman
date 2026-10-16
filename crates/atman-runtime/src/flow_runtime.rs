@@ -15,6 +15,7 @@ pub mod resources;
 pub mod scheduler;
 pub mod send;
 mod trace;
+mod view;
 
 use std::{io, sync::Arc};
 
