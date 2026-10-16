@@ -33,6 +33,15 @@ pub enum SchedulingStatus {
     Failed(String),
 }
 
+/// An idle checkpoint acknowledges the scheduling policy, including input it cannot consume.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum SchedulingProgress {
+    Busy,
+    Idle(crate::event_log::journal::CommitReceipt),
+    Stopped,
+    Failed(String),
+}
+
 pub(crate) type PrepareTurn =
     Box<dyn FnMut(&FlowSnapshot) -> io::Result<Option<TurnRequest>> + Send>;
 pub(crate) type CompletedTurn = Box<dyn FnMut(TurnCompletion) + Send>;
@@ -99,12 +108,14 @@ impl FlowWorker {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| invalid("instance already has a scheduler"))?;
         let ownership = SchedulerOwnership(self.scheduler_owned.clone());
+        let progress = self.scheduling_progress.clone();
+        progress.send_replace(SchedulingProgress::Busy);
+        let scanning = progress.clone();
         let worker = self.clone();
         let stop = CancellationToken::new();
         let stopping = stop.clone();
         let (status_tx, status) = watch::channel(SchedulingStatus::Running);
         let execution = async move {
-            let _ownership = ownership;
             let mut commits = worker.subscribe_commits();
             loop {
                 if stopping.is_cancelled() || worker.is_stopping() {
@@ -124,6 +135,11 @@ impl FlowWorker {
                     && !snapshot.pending.is_empty()
                     && let Some(request) = prepare(&snapshot)?
                 {
+                    scanning.send_if_modified(|previous| {
+                        let changed = *previous != SchedulingProgress::Busy;
+                        *previous = SchedulingProgress::Busy;
+                        changed
+                    });
                     if stopping.is_cancelled() {
                         return Ok(());
                     }
@@ -140,6 +156,14 @@ impl FlowWorker {
                     // Admission and completion both recheck the queue; no notification needs to survive this scan.
                     continue;
                 }
+                scanning.send_if_modified(|previous| {
+                    let next = SchedulingProgress::Idle(snapshot.cursor);
+                    if *previous == next {
+                        return false;
+                    }
+                    *previous = next;
+                    true
+                });
                 tokio::select! {
                     biased;
                     _ = stopping.cancelled() => return Ok(()),
@@ -150,6 +174,7 @@ impl FlowWorker {
             }
         };
         let task = runtime.spawn(async move {
+            let _ownership = ownership;
             let result = std::panic::AssertUnwindSafe(execution)
                 .catch_unwind()
                 .await
@@ -157,6 +182,10 @@ impl FlowWorker {
             status_tx.send_replace(match &result {
                 Ok(()) => SchedulingStatus::Stopped,
                 Err(error) => SchedulingStatus::Failed(error.to_string()),
+            });
+            progress.send_replace(match &result {
+                Ok(()) => SchedulingProgress::Stopped,
+                Err(error) => SchedulingProgress::Failed(error.to_string()),
             });
             result
         });

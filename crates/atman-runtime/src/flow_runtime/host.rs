@@ -176,6 +176,29 @@ impl RuntimeHost {
         sessions
     }
 
+    pub(super) fn owned_flows(&self) -> io::Result<Vec<FlowWorker>> {
+        let sessions = self.directory.sessions.lock().unwrap();
+        if self
+            .directory
+            .stopping
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(invalid("instance host is stopping"));
+        }
+        Ok(sessions
+            .values()
+            .flat_map(|session| {
+                session
+                    .flows
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect())
+    }
+
     pub async fn flow(&self, address: &FlowRef) -> io::Result<FlowWorker> {
         self.session(address.session_id.0)?
             .open_flow(address.instance_id.clone())

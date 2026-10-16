@@ -5847,6 +5847,123 @@ async fn catalog_owned_schedulers_run_subscribed_inputs_after_callers_and_views_
 }
 
 #[tokio::test]
+async fn quiescence_drains_handoffs_without_consuming_paused_or_unbound_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let a = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let b = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let c = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    for worker in [&a, &b, &c] {
+        change(worker, FlowTransition::Activated).await;
+        session
+            .schedule_flow(
+                worker.address().instance_id.clone(),
+                Executor::new(),
+                prepare,
+            )
+            .await
+            .unwrap();
+    }
+    for (recipient, source) in [(&a, &b), (&b, &c)] {
+        let lease = start(recipient).await;
+        let mut subscription = answer_watch(source);
+        subscription.once = true;
+        host.bind_invocation(lease.clone())
+            .await
+            .unwrap()
+            .watch_events(subscription)
+            .await
+            .unwrap();
+        change(
+            recipient,
+            FlowTransition::TurnFinished {
+                lease,
+                outcome: TurnOutcome::Completed,
+            },
+        )
+        .await;
+    }
+    // Cancelling a batch waiter does not cancel the watchers or their owners.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), host.wait_quiescent())
+            .await
+            .is_err()
+    );
+    let key = Uuid::now_v7().into();
+    for worker in [&a, &b] {
+        change(worker, FlowTransition::ExecutionPaused { key }).await;
+    }
+    tokio::time::timeout(Duration::from_secs(5), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    change(&b, FlowTransition::ExecutionResumed { key }).await;
+    c.accept_input(peer_request(c.address(), c.address()), |_| Ok(()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(b.completion(None).await.unwrap().is_some());
+    assert_eq!(a.snapshot().await.unwrap().pending.len(), 1);
+    assert!(a.read_output(|_| Ok(())).await.unwrap().is_empty());
+    change(&a, FlowTransition::ExecutionResumed { key }).await;
+    tokio::time::timeout(Duration::from_secs(5), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    for worker in [&a, &b, &c] {
+        assert!(worker.snapshot().await.unwrap().pending.is_empty());
+        assert_eq!(worker.read_output(|_| Ok(())).await.unwrap().len(), 1);
+    }
+    session
+        .stop_scheduling(a.address().instance_id.clone())
+        .await
+        .unwrap();
+    a.accept_input(peer_request(c.address(), a.address()), |_| Ok(()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.snapshot().await.unwrap().pending.len(), 1);
+    // Only the installed policy decides whether input can form a turn.
+    session
+        .schedule_flow(a.address().instance_id.clone(), Executor::new(), |_| {
+            Ok(None)
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.snapshot().await.unwrap().pending.len(), 1);
+    session
+        .stop_scheduling(a.address().instance_id.clone())
+        .await
+        .unwrap();
+    session
+        .schedule_flow(a.address().instance_id.clone(), Executor::new(), prepare)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(a.snapshot().await.unwrap().pending.is_empty());
+    assert_eq!(a.read_output(|_| Ok(())).await.unwrap().len(), 2);
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn host_scheduler_failures_remain_observable_and_replacement_keeps_unconsumed_input() {
     use atman_runtime::flow_runtime::scheduler::SchedulingStatus;
     let dir = tempfile::tempdir().unwrap();
@@ -5890,6 +6007,13 @@ async fn host_scheduler_failures_remain_observable_and_replacement_keeps_unconsu
     ));
     assert_eq!(worker.snapshot().await.unwrap().pending.len(), 1);
     assert!(worker.state().await.unwrap().can_start_turn());
+    assert!(
+        host.wait_quiescent()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("scheduler")
+    );
     session
         .schedule_flow(
             worker.address().instance_id.clone(),
@@ -5899,5 +6023,6 @@ async fn host_scheduler_failures_remain_observable_and_replacement_keeps_unconsu
         .await
         .unwrap();
     wait_answers(&worker, 1).await;
+    host.wait_quiescent().await.unwrap();
     assert!(worker.snapshot().await.unwrap().pending.is_empty());
 }

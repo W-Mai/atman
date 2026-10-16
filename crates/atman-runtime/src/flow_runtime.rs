@@ -11,6 +11,7 @@ pub mod launch;
 pub mod observation;
 pub mod planning;
 mod process_watch;
+mod quiescence;
 pub mod reply;
 pub mod resources;
 pub mod scheduler;
@@ -74,6 +75,7 @@ pub struct FlowWorker {
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
     commits: watch::Receiver<CommitReceipt>,
     scheduler_owned: Arc<std::sync::atomic::AtomicBool>,
+    scheduling_progress: watch::Sender<scheduler::SchedulingProgress>,
     stopping: Arc<std::sync::atomic::AtomicBool>,
     launch_gate: Arc<tokio::sync::Mutex<()>>,
     observation_issues: watch::Sender<Vec<observation::ObservationIssue>>,
@@ -273,6 +275,7 @@ impl FlowWorker {
             state,
             commits,
             scheduler_owned: Default::default(),
+            scheduling_progress: watch::channel(scheduler::SchedulingProgress::Stopped).0,
             stopping: Default::default(),
             launch_gate: Default::default(),
             observation_issues: watch::channel(Vec::new()).0,
