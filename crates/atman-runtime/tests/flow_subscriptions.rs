@@ -91,6 +91,259 @@ fn subscription(source: &FlowStore, purpose: SubscriptionPurpose, once: bool) ->
 }
 
 #[test]
+fn delayed_closure_observation_cannot_suppress_an_elapsed_watcher_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let id = Uuid::new_v4();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            configuration: Default::default(),
+            id,
+            title: "Deadline".into(),
+            project: None,
+        })
+        .unwrap();
+    let mut source = session.create_flow(descriptor(id)).unwrap();
+    let mut recipient = session.create_flow(descriptor(id)).unwrap();
+    transition(&mut recipient, FlowTransition::Activated);
+    let anchor = source.observation_anchor();
+    let deadline = chrono::Utc::now() + chrono::Duration::seconds(1);
+    let watch = FlowSubscription {
+        filter: FlowEventFilter::InstanceClosed,
+        expires_at: Some(deadline),
+        ..subscription(&source, SubscriptionPurpose::Watcher, true)
+    };
+    recipient.subscribe_events(watch, &anchor).unwrap();
+    transition(&mut source, FlowTransition::CloseRequested);
+    transition(&mut source, FlowTransition::Closed);
+    std::thread::sleep((deadline - chrono::Utc::now()).to_std().unwrap_or_default());
+    let page = source
+        .events_after(anchor.cursor().sequence, NonZeroUsize::new(1).unwrap())
+        .unwrap();
+    recipient.observe_events(&page).unwrap();
+    assert!(recipient.pending_inputs().next().is_none());
+    assert_eq!(
+        recipient.flow_subscriptions().next().unwrap().status,
+        SubscriptionStatus::Active
+    );
+    recipient.expire_flow_watches(chrono::Utc::now()).unwrap();
+    assert_eq!(
+        recipient.flow_subscriptions().next().unwrap().status,
+        SubscriptionStatus::Expired
+    );
+    let pending: Vec<_> = recipient.pending_inputs().cloned().collect();
+    assert_eq!(pending.len(), 1);
+    assert!(
+        matches!(&pending[0].request.payload, InboxPayload::Timer { content, .. } if content["kind"] == "flow_watch_expired")
+    );
+    let cursor = recipient.cursor().clone();
+    let address = recipient.descriptor().address.clone();
+    drop(recipient);
+    let mut recipient = session.open_flow(&address.instance_id).unwrap();
+    assert_eq!(recipient.observe_events(&page).unwrap(), cursor);
+    assert_eq!(
+        recipient.expire_flow_watches(chrono::Utc::now()).unwrap(),
+        cursor
+    );
+    assert_eq!(
+        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
+        pending
+    );
+}
+
+#[test]
+fn closure_retires_routes_without_losing_accepted_replies_or_replaying_events() {
+    use atman_runtime::flow_store::{
+        inbox::SenderIdentity,
+        waiter::{ReplyStatus, ReplyWaiter},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let id = Uuid::new_v4();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            configuration: Default::default(),
+            id,
+            title: "Closure".into(),
+            project: None,
+        })
+        .unwrap();
+    let mut source = session.create_flow(descriptor(id)).unwrap();
+    let mut recipient = session.create_flow(descriptor(id)).unwrap();
+    transition(&mut source, FlowTransition::Activated);
+    transition(&mut recipient, FlowTransition::Activated);
+    let lease = recipient
+        .state()
+        .clone()
+        .begin_turn(TurnId::now(), RunId::now())
+        .unwrap();
+    transition(
+        &mut recipient,
+        FlowTransition::TurnStarted {
+            turn: lease.turn.clone(),
+            run: lease.run.clone(),
+        },
+    );
+    let anchor = source.observation_anchor();
+    answer(&mut source, "ready", false);
+    let completed = source
+        .completion(None)
+        .unwrap()
+        .completion
+        .lease
+        .turn
+        .clone();
+    // Closure can race with registration after the source owner has supplied its anchor.
+    transition(&mut source, FlowTransition::CloseRequested);
+    transition(&mut source, FlowTransition::Closed);
+    let closure = source.cursor().clone();
+    let waiter = ReplyWaiter {
+        correlation: Uuid::new_v4(),
+        lease: lease.clone(),
+        sender: SenderIdentity::Flow(source.descriptor().address.clone()),
+    };
+    let abandoned = ReplyWaiter {
+        correlation: Uuid::new_v4(),
+        ..waiter.clone()
+    };
+    let mut routes = vec![
+        subscription(&source, SubscriptionPurpose::Watcher, false),
+        FlowSubscription {
+            filter: FlowEventFilter::InstanceClosed,
+            ..subscription(&source, SubscriptionPurpose::Watcher, true)
+        },
+        FlowSubscription {
+            filter: FlowEventFilter::InstanceClosed,
+            ..subscription(&source, SubscriptionPurpose::Watcher, false)
+        },
+    ];
+    for (turn, reply) in [
+        (completed, waiter.clone()),
+        (TurnId::now(), waiter.clone()),
+        (TurnId::now(), abandoned.clone()),
+    ] {
+        routes.push(FlowSubscription {
+            filter: FlowEventFilter::TurnCompleted { turn: Some(turn) },
+            reply: Some(reply),
+            ..subscription(&source, SubscriptionPurpose::SpawnResult, true)
+        });
+    }
+    for route in &routes {
+        recipient.subscribe_events(route.clone(), &anchor).unwrap();
+    }
+    let before = recipient.cursor().clone();
+    assert!(
+        recipient
+            .subscribe_events(
+                subscription(&source, SubscriptionPurpose::Watcher, true),
+                &source.observation_anchor()
+            )
+            .is_err()
+    );
+    assert_eq!(recipient.cursor(), &before);
+    let source_address = source.descriptor().address.clone();
+    drop(source);
+    let source = session.open_flow(&source_address.instance_id).unwrap();
+    let mut position = anchor.cursor().sequence;
+    for (index, event_name) in ["final_answer", "turn_completed", "instance_closed"]
+        .into_iter()
+        .enumerate()
+    {
+        let page = source
+            .events_after(position, NonZeroUsize::new(1).unwrap())
+            .unwrap();
+        assert!(page.through() > position);
+        position = page.through();
+        let receipt = recipient.observe_events(&page).unwrap();
+        assert_eq!(recipient.observe_events(&page).unwrap(), receipt);
+        let inputs: Vec<_> = recipient.pending_inputs().collect();
+        assert_eq!(inputs.len(), index + 1);
+        let InboxPayload::FlowEvent { event, content, .. } = &inputs[index].request.payload else {
+            panic!("flow event")
+        };
+        assert_eq!(event, event_name);
+        if event_name == "instance_closed" {
+            assert_eq!(content["subscriptions"].as_array().unwrap().len(), 2);
+            assert_eq!(content["receipt"], serde_json::to_value(&closure).unwrap());
+        }
+    }
+    assert_eq!(position, closure.sequence);
+    let empty = source
+        .events_after(position, NonZeroUsize::new(1).unwrap())
+        .unwrap();
+    assert_eq!(empty.through(), position);
+    let cursor = recipient.cursor().clone();
+    assert_eq!(recipient.observe_events(&empty).unwrap(), cursor);
+    for (index, route) in routes.iter().enumerate() {
+        let record = recipient
+            .flow_subscriptions()
+            .find(|record| record.subscription.id == route.id)
+            .unwrap();
+        assert_eq!(
+            record.status,
+            if (1..=3).contains(&index) {
+                SubscriptionStatus::Matched
+            } else {
+                SubscriptionStatus::SourceClosed
+            }
+        );
+    }
+    assert_eq!(
+        recipient
+            .reply_waiters()
+            .iter()
+            .find(|record| record.waiter == waiter)
+            .unwrap()
+            .status,
+        ReplyStatus::Pending
+    );
+    assert!(matches!(
+        recipient
+            .reply_waiters()
+            .iter()
+            .find(|record| record.waiter == abandoned)
+            .unwrap()
+            .status,
+        ReplyStatus::Cancelled { .. }
+    ));
+    let records: Vec<_> = recipient.flow_subscriptions().cloned().collect();
+    let pending: Vec<_> = recipient.pending_inputs().cloned().collect();
+    let address = recipient.descriptor().address.clone();
+    drop(recipient);
+    let mut recipient = session.open_flow(&address.instance_id).unwrap();
+    // Reopening interrupts the lost receiver turn, but cannot discard its accepted replies.
+    let restored = recipient.cursor().clone();
+    assert_eq!(restored.sequence, cursor.sequence + 1);
+    assert_eq!(
+        recipient.flow_subscriptions().cloned().collect::<Vec<_>>(),
+        records
+    );
+    assert_eq!(
+        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
+        pending
+    );
+    assert_eq!(
+        recipient
+            .observe_events(
+                &source
+                    .events_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
+                    .unwrap()
+            )
+            .unwrap(),
+        restored
+    );
+    assert!(matches!(
+        recipient
+            .reply_waiters()
+            .iter()
+            .find(|record| record.waiter == waiter)
+            .unwrap()
+            .status,
+        ReplyStatus::Cancelled { .. }
+    ));
+}
+
+#[test]
 fn watcher_expiry_preserves_accepted_answers_and_recovers_without_repeating_deadlines() {
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();

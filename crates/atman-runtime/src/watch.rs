@@ -546,8 +546,10 @@ impl Tool for Watch {
     }
     fn description(&self) -> Option<&str> {
         Some(
-            "Register a watcher on terminal/Bash output or future public flow answers.\n\
-             When pattern appears in the task's output, the agent is woken up.\n\n\
+            "Register a watcher on terminal/Bash output or future committed Flow events.\n\
+             Flow event: final_answer (default), turn_completed, or instance_closed.\n\
+             pattern: optional final-answer substring; required for process output.\n\
+             turn_id: optional UUID selecting one turn_completed event.\n\n\
              Non-blocking: returns watcher_id immediately.\n\
              mode: \"once\" (default) or \"persist\".\n\
              Persistent flow handles use an instance UUID, or session UUID/instance UUID across sessions.\n\
@@ -560,22 +562,64 @@ impl Tool for Watch {
             "properties": {
                 "handle": {"type": "string"},
                 "pattern": {"type": "string", "minLength": 1},
+                "event": {"type": "string", "enum": ["final_answer", "turn_completed", "instance_closed"], "description": "Persistent Flow source event; cannot be used with process or legacy task sources."},
+                "turn_id": {"type": "string", "format": "uuid", "description": "Only valid with event=turn_completed."},
                 "mode": {"type": "string", "enum": ["once", "persist"], "default": "once"},
                 "timeout_ms": {"type": "integer", "minimum": 1}
             },
-            "required": ["handle", "pattern"]
+            "required": ["handle"]
         })
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
-            let pattern = extract_string(&args, "pattern", 1)?;
-            if pattern.is_empty() {
+            let pattern = if args.named("pattern").is_some() || args.positional(1).is_ok() {
+                Some(extract_string(&args, "pattern", 1)?)
+            } else {
+                None
+            };
+            if pattern.as_ref().is_some_and(String::is_empty) {
                 return Err(RuntimeError::ToolFailed(
                     "watch: pattern must not be empty".into(),
                 ));
             }
+            let event = extract_optional_string(&args, "event")?;
+            let turn = extract_optional_string(&args, "turn_id")?;
             if let Some(client) = ctx.instance_client()? {
+                use crate::flow_runtime::access::WatchSelection;
+                use crate::flow_store::subscription::FlowEventFilter;
+                let selection = match (event.as_deref(), pattern, turn) {
+                    (None, Some(pattern), None) => WatchSelection::OutputPattern(pattern),
+                    (None | Some("final_answer"), pattern, None) => {
+                        WatchSelection::Flow(pattern.map_or(
+                            FlowEventFilter::FinalAnswers,
+                            FlowEventFilter::AnswerContains,
+                        ))
+                    }
+                    (Some("turn_completed"), None, turn) => {
+                        WatchSelection::Flow(FlowEventFilter::TurnCompleted {
+                            turn: turn
+                                .map(|value| {
+                                    uuid::Uuid::parse_str(&value)
+                                        .map(|id| crate::event::TurnId::new(id.into()))
+                                })
+                                .transpose()
+                                .map_err(|error| {
+                                    RuntimeError::ToolFailed(format!(
+                                        "watch: invalid turn_id: {error}"
+                                    ))
+                                })?,
+                        })
+                    }
+                    (Some("instance_closed"), None, None) => {
+                        WatchSelection::Flow(FlowEventFilter::InstanceClosed)
+                    }
+                    _ => {
+                        return Err(RuntimeError::ToolFailed(
+                            "watch: invalid event, pattern, or turn_id combination".into(),
+                        ));
+                    }
+                };
                 let once = match extract_optional_string(&args, "mode")?.as_deref() {
                     Some("persist") => false,
                     None | Some("once") => true,
@@ -597,7 +641,7 @@ impl Tool for Watch {
                     .transpose()?;
                 let id = uuid::Uuid::now_v7();
                 client
-                    .watch_output(id, handle, pattern, once, expires_at)
+                    .watch(id, handle, selection, once, expires_at)
                     .await
                     .map_err(|error| RuntimeError::ToolFailed(format!("watch: {error}")))?;
                 return Ok(Value::Struct(vec![(
@@ -605,6 +649,14 @@ impl Tool for Watch {
                     Value::Str(format!("w_{}", id.simple())),
                 )]));
             }
+            if event.is_some() || turn.is_some() {
+                return Err(RuntimeError::ToolFailed(
+                    "watch: structured events require a persistent Flow invocation".into(),
+                ));
+            }
+            let pattern = pattern.ok_or_else(|| {
+                RuntimeError::ToolFailed("watch: legacy task output requires pattern".into())
+            })?;
             let mode = match extract_optional_string(&args, "mode")?.as_deref() {
                 Some("persist") => WatchMode::Persist,
                 _ => WatchMode::Once,

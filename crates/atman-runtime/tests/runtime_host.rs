@@ -1026,6 +1026,150 @@ async fn process_watch_tools_share_instance_delivery_across_pause_turns_and_expl
 }
 
 #[tokio::test]
+async fn structured_watch_tools_observe_answers_completions_and_closure_through_one_inbox() {
+    use atman_runtime::ValueJson;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let observer = session
+        .create_flow(program_descriptor(
+            info.id,
+            r#"
+        flow main() -> any {
+            contract { capabilities { shell: true } }
+            when env("action") == "invalid" {
+                return watch(handle: env("source"), event: "instance_closed", pattern: "bad")
+            }
+            when env("action") == "consume" {
+                return [wait_for_watcher(timeout_ms: 4000), watcher.list()]
+            }
+            first = watch(handle: env("source"))
+            second = watch(handle: env("source"), event: "turn_completed", turn_id: env("turn"))
+            third = watch(handle: env("source"), event: "instance_closed", mode: "persist")
+            return watcher.list()
+        }
+    "#
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let source = session
+        .create_flow(program_descriptor(
+            info.id,
+            r#"
+        flow main() -> string { return final.answer(message: "structured-ready") }
+    "#
+            .into(),
+        ))
+        .await
+        .unwrap();
+    for worker in [&observer, &source] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    let executor = Executor::new();
+    atman_runtime::tools::register_watch(&executor.tools);
+    let address = source.address().instance_id.to_string();
+    let invalid = invoke_with_env(
+        &observer,
+        executor.clone(),
+        [
+            ("action".into(), "invalid".into()),
+            ("source".into(), address.clone().into()),
+        ]
+        .into(),
+    )
+    .await;
+    let error = invalid.result.unwrap_err().to_string();
+    assert!(
+        error.contains("invalid event, pattern, or turn_id combination"),
+        "{error}"
+    );
+    assert!(observer.flow_subscriptions().await.unwrap().is_empty());
+    change(&observer, FlowTransition::InterruptionRecovered).await;
+    source
+        .accept_input(peer_request(observer.address(), source.address()), |_| {
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let request = prepare(&source.snapshot().await.unwrap()).unwrap().unwrap();
+    let list = invoke_with_env(
+        &observer,
+        executor.clone(),
+        [
+            ("source".into(), address.into()),
+            ("turn".into(), request.turn.to_string().into()),
+        ]
+        .into(),
+    )
+    .await
+    .result
+    .unwrap()
+    .to_json()
+    .unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 3);
+    assert_eq!(list[0]["filter"]["kind"], "final_answers");
+    assert_eq!(list[1]["filter"]["kind"], "turn_completed");
+    assert_eq!(list[2]["filter"]["kind"], "instance_closed");
+    let pause = Uuid::new_v4().into();
+    change(&observer, FlowTransition::ExecutionPaused { key: pause }).await;
+    source
+        .start_turn(executor.clone(), request)
+        .await
+        .unwrap()
+        .wait()
+        .await
+        .unwrap()
+        .result
+        .unwrap();
+    wait_inputs(&observer, 2).await;
+    change(&source, FlowTransition::CloseRequested).await;
+    change(&source, FlowTransition::Closed).await;
+    let pending = wait_inputs(&observer, 3).await;
+    let kinds: Vec<_> = pending
+        .pending
+        .iter()
+        .map(|input| {
+            let InboxPayload::FlowEvent { event, .. } = &input.request.payload else {
+                panic!("flow event")
+            };
+            event.as_str()
+        })
+        .collect();
+    assert_eq!(kinds, ["final_answer", "turn_completed", "instance_closed"]);
+    change(&observer, FlowTransition::ExecutionResumed { key: pause }).await;
+    let consumed = invoke_with_env(
+        &observer,
+        executor,
+        [("action".into(), "consume".into())].into(),
+    )
+    .await
+    .result
+    .unwrap()
+    .to_json()
+    .unwrap();
+    assert_eq!(consumed, serde_json::json!([null, []]));
+    assert!(observer.snapshot().await.unwrap().pending.is_empty());
+    assert_eq!(
+        observer
+            .context()
+            .messages_full()
+            .iter()
+            .filter(|message| message.origin == MessageOrigin::Watcher)
+            .count(),
+        3
+    );
+    let cursor = observer.snapshot().await.unwrap().cursor;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(observer.snapshot().await.unwrap().cursor, cursor);
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn flow_watch_tools_merge_spawn_results_and_support_bidirectional_delivery() {
     use atman_runtime::{
         Value, ValueJson,

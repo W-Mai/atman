@@ -815,6 +815,7 @@ pub struct FlowStore {
     journal: FlowJournal,
     descriptor: FlowDescriptor,
     state: FlowInstance<AtmanUuid>,
+    closed: Option<CommitReceipt>,
     inbox: Inbox,
     outbox: outbox::Outbox,
     publications: publication::Publications,
@@ -861,6 +862,7 @@ impl FlowStore {
             journal,
             descriptor,
             state,
+            closed: None,
             inbox: Inbox::default(),
             outbox: outbox::Outbox::default(),
             publications: publication::Publications::default(),
@@ -886,6 +888,7 @@ impl FlowStore {
         let mut subscriptions = subscription::Subscriptions::default();
         let mut process_watches = process_watch::ProcessWatches::default();
         let mut activation = None;
+        let mut closed = None;
         let mut completions = completion::Completions::default();
         let mut checkpoints = context::Checkpoints::default();
         let mut goals = goal::Goals::default();
@@ -924,6 +927,9 @@ impl FlowStore {
                                 return Err(invalid("noncanonical flow transition"));
                             }
                             inbox.state_changed(state, &receipt);
+                            if matches!(state.state(), InstanceState::Closed) {
+                                closed = Some(receipt.clone());
+                            }
                             if matches!(
                                 state.state(),
                                 InstanceState::Closing { .. } | InstanceState::Closed
@@ -1114,6 +1120,7 @@ impl FlowStore {
             journal,
             descriptor,
             state,
+            closed,
             inbox,
             outbox,
             publications,
@@ -1212,6 +1219,9 @@ impl FlowStore {
         }
         let cursor = self.journal.commit(&[FlowFact::Transition(transition)])?;
         self.state = candidate;
+        if matches!(self.state.state(), InstanceState::Closed) {
+            self.closed = Some(cursor.clone());
+        }
         self.inbox.state_changed(&self.state, &cursor);
         if matches!(
             self.state.state(),

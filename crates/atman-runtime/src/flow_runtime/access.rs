@@ -16,7 +16,7 @@ use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::access::{FlowAction, SessionAccess};
 use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity};
 use crate::flow_store::publication::PublishedMessage;
-use crate::flow_store::subscription::{FlowSubscription, SubscriptionRecord};
+use crate::flow_store::subscription::{FlowEventFilter, FlowSubscription, SubscriptionRecord};
 use crate::flow_store::{FlowInstanceId, FlowRef, FlowTransition, invalid};
 use crate::message::{Message, MessageOrigin};
 
@@ -42,6 +42,12 @@ pub struct FlowClient {
 pub struct OwnedWatchers {
     pub processes: Vec<crate::flow_store::process_watch::ProcessWatchRecord>,
     pub flows: Vec<SubscriptionRecord>,
+}
+
+/// Output patterns accept process or Flow sources; structured events require a Flow source.
+pub enum WatchSelection {
+    OutputPattern(String),
+    Flow(FlowEventFilter),
 }
 
 /// A bounded catalog page. Execution states are sampled independently of catalog membership.
@@ -132,25 +138,32 @@ impl FlowClient {
         })
     }
 
-    /// Register output observation using the source's existing owner and durable subscription path.
-    pub async fn watch_output(
+    /// Register observation using the source's existing owner and durable subscription path.
+    pub async fn watch(
         &self,
         id: Uuid,
         handle: String,
-        pattern: String,
+        selection: WatchSelection,
         once: bool,
         expires_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> io::Result<()> {
         self.authenticate()?;
         let worker = self.host.flow(self.source()).await?;
         if worker.resources.tasks().lookup_by_handle(&handle).is_some() {
+            let WatchSelection::OutputPattern(pattern) = selection else {
+                return Err(invalid("structured watch events require a Flow source"));
+            };
             self.watch_process(id, handle, pattern, once, expires_at)
                 .await?;
         } else {
+            let filter = match selection {
+                WatchSelection::OutputPattern(pattern) => FlowEventFilter::AnswerContains(pattern),
+                WatchSelection::Flow(filter) => filter,
+            };
             self.watch_events(FlowSubscription {
                 id,
                 source: self.resolve_address(&handle)?,
-                filter: crate::flow_store::subscription::FlowEventFilter::AnswerContains(pattern),
+                filter,
                 once,
                 expires_at,
                 purpose: crate::flow_store::subscription::SubscriptionPurpose::Watcher,

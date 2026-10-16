@@ -34,6 +34,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Structured Flow observation** — Select final replies, turn completion, or instance closure with `watch`. Preserve source ordering and exact close receipts across reopening, retire closed-source subscriptions, and release unresolved correlated waits without discarding accepted replies.
+
 - **Instance Flow watcher tools** — Observe public peer replies through durable subscriptions, list Flow and process watchers together, and retain accepted notifications across cancellation and pauses. Merge overlapping result and watcher matches into one input. Commit deadline notifications with expiration state, including when source access is revoked or the source is unavailable.
 
 - **Instance process watcher tools** — Bind Bash and Terminal watches to persistent flow resources, receive output changes without polling, and commit explicit waits through the same inbox as model-boundary delivery. Preserve unread notifications across pauses and cancellation, synchronize context updates with compaction, and report lost output history explicitly.

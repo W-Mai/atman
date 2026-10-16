@@ -27,6 +27,7 @@ use crate::message::MessageOrigin;
 pub struct ObservationAnchor {
     source: FlowRef,
     cursor: CommitReceipt,
+    closed: bool,
 }
 
 impl ObservationAnchor {
@@ -45,11 +46,13 @@ pub enum FlowEventFilter {
     AnswerContains(String),
     AnswersExceptTurn(crate::event::TurnId),
     TurnCompleted { turn: Option<crate::event::TurnId> },
+    InstanceClosed,
 }
 
 impl FlowEventFilter {
     fn matches(&self, event: &ObservedEvent) -> bool {
         match (self, event) {
+            (Self::InstanceClosed, ObservedEvent::InstanceClosed { .. }) => true,
             (Self::FinalAnswers, ObservedEvent::FinalAnswer { .. }) => true,
             (Self::AnswerContains(text), ObservedEvent::FinalAnswer { message }) => {
                 message.text_concat().contains(text)
@@ -92,6 +95,7 @@ pub enum SubscriptionStatus {
     Matched,
     Cancelled,
     Expired,
+    SourceClosed,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -115,7 +119,7 @@ pub(super) struct ResultRegistration {
     pub receipt: CommitReceipt,
 }
 
-/// Source-authenticated page of final answers and entry completions; private context is absent.
+/// Source-authenticated page of final answers, entry completions, and closure; private context is absent.
 #[derive(Clone, Debug)]
 pub struct FlowEventPage {
     source: FlowRef,
@@ -141,6 +145,7 @@ struct SubscriptionMatch {
 enum ObservedEvent {
     FinalAnswer { message: crate::message::Message },
     TurnCompleted { completion: CommittedCompletion },
+    InstanceClosed { receipt: CommitReceipt },
 }
 
 impl ObservedEvent {
@@ -148,12 +153,17 @@ impl ObservedEvent {
         match self {
             Self::FinalAnswer { .. } => "final_answer",
             Self::TurnCompleted { .. } => "turn_completed",
+            Self::InstanceClosed { .. } => "instance_closed",
         }
     }
 
     fn validate_source(&self, source: &FlowEventRef) -> io::Result<()> {
         let valid = match self {
             Self::FinalAnswer { message } => message.origin == MessageOrigin::FinalAnswer,
+            Self::InstanceClosed { receipt } => {
+                receipt.journal_id == source.flow.instance_id.0.0
+                    && receipt.sequence == source.sequence
+            }
             Self::TurnCompleted { completion } => {
                 completion.completion.lease.flow == source.flow
                     && completion.receipt.journal_id == source.flow.instance_id.0.0
@@ -234,6 +244,7 @@ pub struct Observation {
     pub source: FlowRef,
     pub observed_at: DateTime<Utc>,
     pub through: u64,
+    pub source_closed: Option<CommitReceipt>,
     pub updates: Vec<(Uuid, SubscriptionStatus)>,
     pub envelopes: Vec<AcceptedEnvelope>,
 }
@@ -348,15 +359,23 @@ impl Subscriptions {
             .reply
             .as_ref()
             .map(|reply| reply.correlation);
-        if let Some(correlation) = correlation
-            && !self.records.values().any(|record| {
-                record.status == SubscriptionStatus::Active
-                    && record
-                        .subscription
-                        .reply
-                        .as_ref()
-                        .is_some_and(|reply| reply.correlation == correlation)
-            })
+        if let Some(correlation) = correlation {
+            self.cancel_unrouted_reply(correlation, inbox, receipt);
+        }
+        Ok(())
+    }
+
+    fn cancel_unrouted_reply(&self, correlation: Uuid, inbox: &mut Inbox, receipt: &CommitReceipt) {
+        if !self.records.values().any(|record| {
+            record.status == SubscriptionStatus::Active
+                && record
+                    .subscription
+                    .reply
+                    .as_ref()
+                    .is_some_and(|reply| reply.correlation == correlation)
+        }) && !inbox
+            .pending()
+            .any(|envelope| envelope.request.correlation == Some(correlation))
             && inbox
                 .waiters
                 .get(correlation)
@@ -365,7 +384,6 @@ impl Subscriptions {
             inbox.invalidate();
             inbox.waiters.cancel(correlation, receipt.clone());
         }
-        Ok(())
     }
 
     pub fn close(&mut self) {
@@ -460,6 +478,10 @@ impl Subscriptions {
             .get(&observation.source)
             .is_some_and(|cursor| *cursor >= observation.through)
             || observation.updates.is_empty()
+            || observation.source_closed.as_ref().is_some_and(|receipt| {
+                receipt.journal_id != observation.source.instance_id.0.0
+                    || receipt.sequence != observation.through
+            })
         {
             return Err(invalid("duplicate or empty source observation"));
         }
@@ -506,6 +528,13 @@ impl Subscriptions {
             let notification: EventNotification =
                 serde_json::from_value(content.clone()).map_err(invalid)?;
             notification.event.validate_source(source)?;
+            if let ObservedEvent::InstanceClosed { receipt } = &notification.event
+                && observation.source_closed.as_ref() != Some(receipt)
+            {
+                return Err(invalid(
+                    "closure notification does not match the observed closure",
+                ));
+            }
             if event != notification.event.name() {
                 return Err(invalid("observation event type does not match its content"));
             }
@@ -527,7 +556,9 @@ impl Subscriptions {
                     if let Some(reply) = &record.subscription.reply {
                         correlation = Some(reply.correlation);
                     }
-                    if record.subscription.once {
+                    if record.subscription.once
+                        || matches!(notification.event, ObservedEvent::InstanceClosed { .. })
+                    {
                         updates.insert(record.subscription.id, SubscriptionStatus::Matched);
                     }
                 }
@@ -540,6 +571,9 @@ impl Subscriptions {
             }
             last_sequence = source.sequence;
             inbox.validate(envelope)?;
+        }
+        if observation.source_closed.is_some() {
+            retire_closed_source(&records, observation.observed_at, &mut updates);
         }
         if observation.updates != updates.into_iter().collect::<Vec<_>>() {
             return Err(invalid("observation cursor updates are incomplete"));
@@ -557,6 +591,30 @@ impl Subscriptions {
             .insert(observation.source.clone(), observation.through);
         for envelope in &observation.envelopes {
             inbox.apply(envelope.clone(), receipt.clone());
+        }
+        for (id, status) in &observation.updates {
+            if *status == SubscriptionStatus::SourceClosed
+                && let Some(reply) = &self.records[id].subscription.reply
+            {
+                self.cancel_unrouted_reply(reply.correlation, inbox, receipt);
+            }
+        }
+    }
+}
+
+fn retire_closed_source(
+    records: &[&SubscriptionRecord],
+    observed_at: DateTime<Utc>,
+    updates: &mut BTreeMap<Uuid, SubscriptionStatus>,
+) {
+    for record in records {
+        if updates[&record.subscription.id] == SubscriptionStatus::Active
+            && record
+                .subscription
+                .expires_at
+                .is_none_or(|expiry| observed_at < expiry)
+        {
+            updates.insert(record.subscription.id, SubscriptionStatus::SourceClosed);
         }
     }
 }
@@ -617,6 +675,7 @@ impl FlowStore {
         ObservationAnchor {
             source: self.descriptor.address.clone(),
             cursor: self.cursor.clone(),
+            closed: matches!(self.state.state(), InstanceState::Closed),
         }
     }
 
@@ -661,6 +720,19 @@ impl FlowStore {
             (_, Some(_)) => completions.next(),
             (None, None) => None,
         })
+        .chain(
+            self.closed
+                .iter()
+                .filter(|receipt| receipt.sequence > after)
+                .map(|receipt| {
+                    (
+                        receipt.clone(),
+                        ObservedEvent::InstanceClosed {
+                            receipt: receipt.clone(),
+                        },
+                    )
+                }),
+        )
         .take(limit.get())
         .collect();
         // Advance only for observable source facts. Advancing to unrelated commits would make
@@ -702,6 +774,11 @@ impl FlowStore {
         }
         if !self.state.accepts_input() {
             return Err(invalid("recipient cannot register subscriptions"));
+        }
+        if anchor.closed {
+            return Err(invalid(
+                "cannot register a new subscription to a closed source",
+            ));
         }
         if self.process_watches.contains(subscription.id) {
             return Err(invalid("watcher identity is already assigned to a process"));
@@ -842,7 +919,9 @@ impl FlowStore {
                         .is_none_or(|expiry| observed_at < expiry)
                     && record.subscription.filter.matches(event)
                 {
-                    if record.subscription.once {
+                    if record.subscription.once
+                        || matches!(event, ObservedEvent::InstanceClosed { .. })
+                    {
                         updates.insert(record.subscription.id, SubscriptionStatus::Matched);
                     }
                     matches.push(SubscriptionMatch {
@@ -886,10 +965,18 @@ impl FlowStore {
                 },
             });
         }
+        let source_closed = page.records.last().and_then(|(_, event)| match event {
+            ObservedEvent::InstanceClosed { receipt } => Some(receipt.clone()),
+            _ => None,
+        });
+        if source_closed.is_some() {
+            retire_closed_source(&records, observed_at, &mut updates);
+        }
         let observation = Observation {
             source: page.source.clone(),
             observed_at,
             through: page.through,
+            source_closed,
             updates: updates.into_iter().collect(),
             envelopes,
         };
