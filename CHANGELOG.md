@@ -34,6 +34,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Instance Flow watcher tools** — Observe public peer replies through durable subscriptions, list Flow and process watchers together, and retain accepted notifications across cancellation and pauses. Merge overlapping result and watcher matches into one input. Commit deadline notifications with expiration state, including when source access is revoked or the source is unavailable.
+
 - **Instance process watcher tools** — Bind Bash and Terminal watches to persistent flow resources, receive output changes without polling, and commit explicit waits through the same inbox as model-boundary delivery. Preserve unread notifications across pauses and cancellation, synchronize context updates with compaction, and report lost output history explicitly.
 
 - **Persistent process observations** — Store process-watch identities, absolute deadlines, and matching results in each flow journal. Merge matches at one source position into one inbox input, retain accepted input after unwatch, and report unavailable process incarnations once when resource ownership restarts.

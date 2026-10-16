@@ -38,6 +38,12 @@ pub struct FlowClient {
     access: Arc<RwLock<SessionAccess>>,
 }
 
+/// One owner snapshot of externally registered watchers. Internal result routes are excluded.
+pub struct OwnedWatchers {
+    pub processes: Vec<crate::flow_store::process_watch::ProcessWatchRecord>,
+    pub flows: Vec<SubscriptionRecord>,
+}
+
 /// A bounded catalog page. Execution states are sampled independently of catalog membership.
 pub struct InstancePage {
     pub instances: Vec<InstanceSummary>,
@@ -114,6 +120,47 @@ impl super::host::SessionHandle {
 }
 
 impl FlowClient {
+    /// Resolve a persistent flow address relative to the invoking session.
+    pub fn resolve_address(&self, handle: &str) -> io::Result<FlowRef> {
+        let (session, instance) = match handle.split_once('/') {
+            Some((session, instance)) => (Uuid::parse_str(session).map_err(invalid)?, instance),
+            None => (self.source().session_id.0, handle),
+        };
+        Ok(FlowRef {
+            session_id: session.into(),
+            instance_id: FlowInstanceId::new(Uuid::parse_str(instance).map_err(invalid)?.into()),
+        })
+    }
+
+    /// Register output observation using the source's existing owner and durable subscription path.
+    pub async fn watch_output(
+        &self,
+        id: Uuid,
+        handle: String,
+        pattern: String,
+        once: bool,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> io::Result<()> {
+        self.authenticate()?;
+        let worker = self.host.flow(self.source()).await?;
+        if worker.resources.tasks().lookup_by_handle(&handle).is_some() {
+            self.watch_process(id, handle, pattern, once, expires_at)
+                .await?;
+        } else {
+            self.watch_events(FlowSubscription {
+                id,
+                source: self.resolve_address(&handle)?,
+                filter: crate::flow_store::subscription::FlowEventFilter::AnswerContains(pattern),
+                once,
+                expires_at,
+                purpose: crate::flow_store::subscription::SubscriptionPurpose::Watcher,
+                reply: None,
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Observe an owned process through the instance resource owner. Registration survives the calling turn.
     pub async fn watch_process(
         &self,
@@ -139,9 +186,7 @@ impl FlowClient {
             .await
     }
 
-    pub async fn process_watches(
-        &self,
-    ) -> io::Result<Vec<crate::flow_store::process_watch::ProcessWatchRecord>> {
+    pub async fn watchers(&self) -> io::Result<OwnedWatchers> {
         self.authenticate()?;
         let client = self.clone();
         self.host
@@ -149,12 +194,22 @@ impl FlowClient {
             .await?
             .request(move |store| {
                 client.authenticate()?;
-                Ok(store.process_watches().cloned().collect())
+                Ok(OwnedWatchers {
+                    processes: store.process_watches().cloned().collect(),
+                    flows: store
+                        .flow_subscriptions()
+                        .filter(|record| {
+                            record.subscription.purpose
+                                == crate::flow_store::subscription::SubscriptionPurpose::Watcher
+                        })
+                        .cloned()
+                        .collect(),
+                })
             })
             .await
     }
 
-    pub async fn unwatch_process(&self, id: Uuid) -> io::Result<CommitReceipt> {
+    pub async fn unwatch(&self, id: Uuid) -> io::Result<CommitReceipt> {
         self.authenticate()?;
         let client = self.clone();
         let worker = self.host.flow(self.source()).await?;
@@ -162,7 +217,21 @@ impl FlowClient {
         worker
             .request(move |store| {
                 client.authenticate()?;
-                let receipt = store.unregister_process_watch(id)?;
+                let flow = store
+                    .flow_subscriptions()
+                    .find(|record| record.subscription.id == id);
+                let receipt = match flow {
+                    Some(record)
+                        if record.subscription.purpose
+                            == crate::flow_store::subscription::SubscriptionPurpose::Watcher =>
+                    {
+                        store.unsubscribe_events(id)?
+                    }
+                    Some(_) => {
+                        return Err(invalid("internal result routes are not watcher controls"));
+                    }
+                    None => store.unregister_process_watch(id)?,
+                };
                 resources.observers.refresh();
                 Ok(receipt)
             })

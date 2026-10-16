@@ -46,6 +46,7 @@ impl ResultRoute {
             },
             once: true,
             purpose: SubscriptionPurpose::SpawnResult,
+            expires_at: None,
             reply: Some(reply.waiter.clone()),
         })
     }

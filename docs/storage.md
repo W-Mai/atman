@@ -341,7 +341,7 @@ The directory does not yet replace CLI/daemon session ownership. Grant managemen
 
 ## Flow event subscriptions
 
-Flow event subscriptions belong to the receiving flow's journal. Registration records a source-owner cursor, an event filter, one-shot behavior, and the notification purpose. A source can remain Prepared while a creator records its result subscription; activation is a separate authorized operation. Repeating an identical registration is idempotent, and cancellation never reactivates its identity. Closing a recipient cancels active subscriptions while preserving their history.
+Flow event subscriptions belong to the receiving flow's journal. Registration records a source-owner cursor, an event filter, one-shot behavior, the notification purpose, and registration time. Watchers may specify an absolute deadline; internal result routes and correlated reply subscriptions cannot expire. A source can remain Prepared while a creator records its result subscription; activation is a separate authorized operation. Repeating an identical registration is idempotent, and cancellation never reactivates its identity. Closing a recipient cancels active subscriptions while preserving their history.
 
 `FlowSubscription` selects events with `FlowEventFilter`: all final answers, answers containing text, answers outside a specified turn, or entry completions for all turns or one exact turn. `events_after` merges committed final answers and entry completions in source journal order and returns bounded pages; private branch output is excluded. Completion notifications carry the saved typed result, execution outcome, lease, and receipt. An entry completion is distinct from a final answer; observing an ordinary return or interruption does not publish a reply.
 
@@ -355,7 +355,9 @@ Each opened host-owned worker has an observation task owned by its session catal
 
 The observer establishes change receivers before scanning source events and advances bounded pages through the receiving worker's single writer. Watch authority is checked before source reads and again at receiver admission. Revocation retains the subscription and cursor without delivering new content; granting access again wakes observation and permits catch-up. Source commits, recipient commits, session attachment, and access changes drive scans without a polling timer. A newly attached source session also wakes retained subscriptions. Catalog ownership uses weak host references, so idle observers do not keep the directory alive.
 
-`FlowWorker::subscribe_observation_issues` exposes blocked sources and their reasons. Storage failures retain progress and can be retried with `retry_observations`; no empty turn is started to retry delivery. Reopening a worker restores its subscriptions, while a catalog attachment alone does not eagerly open every recorded flow. Product bootstrap and generic watcher tool routing still require integration with these host APIs.
+`FlowWorker::subscribe_observation_issues` exposes blocked sources and their reasons. Storage failures retain progress and can be retried with `retry_observations`; no empty turn is started to retry delivery. Reopening a worker restores its subscriptions, while a catalog attachment alone does not eagerly open every recorded flow.
+
+`expire_flow_watches` commits expiry and its timer notification together. Matching uses the receiver's observation time: an answer accepted before the deadline remains queued, and an answer observed at or after the deadline does not match that registration. The host observer handles deadlines independently of source access, source availability, or execution pauses. Expired, matched one-shot, and cancelled registrations do not produce another deadline notification after reopening. Flow and process watchers share one identity namespace within their owner.
 
 ## Process watch storage
 
@@ -367,13 +369,15 @@ The trusted resource owner establishes the source stream before registration and
 
 Starting a new `FlowWorker` creates a new process-resource owner. Outstanding registrations for old process incarnations become `SourceLost`, or `Expired` if their recorded deadline has passed, and their notifications enter the same durable inbox. Reopening does not restart a process or generate a second loss notification. Execution pauses retain those inputs without granting permission to run. Storage-only inspection and recovery do not declare source loss; ownership startup does.
 
-## Instance process watcher tools
+## Instance watcher tools
 
 For persistent invocations, `watch`, `watcher.list`, and `watcher.unwatch` address process registrations owned by the invoking instance. Resource identities come from the actual Bash or Terminal task, and registration rechecks the invocation's authority at the journal owner. Each process has one observer holding its source subscription and match cursors across turns. Registration captures the initial source state before acknowledgement. Bash output changes and terminal screen revisions drive matching without polling; all matching registrations at one observed position share one inbox input. An optional `timeout_ms` becomes an absolute deadline without a default limit. A Bash output cursor that falls behind retained history produces `HistoryGap` and retires its registrations; a fresh registration can observe the same live process.
 
+The same tools accept a persistent flow instance UUID, or `session UUID/instance UUID` across sessions. Flow patterns match future committed public final answers through `FlowClient::watch_events`, with the same source cursor and grants as native subscriptions. Peer invocations can watch in either direction. A final answer matching both a spawn-result route and watchers produces one input with all reasons. `watcher.list` returns active process and Flow watcher registrations in registration order, including deadlines and source identities. Internal result routes are excluded from the list and cannot be cancelled through `watcher.unwatch`.
+
 `wait_for_watcher` and the next general model call consume the same durable inbox. Explicit waiting takes the context compaction lock before reservation, commits accepted notifications and their context representation together, and returns a count acknowledgement without duplicating the body in a tool result. Timeout, cancellation before pickup, execution pause, and turn finishing leave unread input pending. Once queued at the owner, context commit and projection retain lock ownership even if the waiting caller disappears. Notification messages preserve watcher provenance and do not grant user authority.
 
-Unwatch refreshes the process observer at the successful storage commit, independently of the caller awaiting its reply. Instance shutdown cancels and joins observers together with process resources. Legacy invocations retain their existing watcher hub. Flow-event subscriptions remain available through `FlowClient::watch_events`; generic `watch` routing and listing for flow sources are not yet connected to that API.
+Unwatch cancels the owned Flow or process registration while retaining accepted input, and refreshes the process observer at the successful storage commit independently of the caller awaiting its reply. Instance shutdown cancels and joins observers together with process resources. Legacy invocations retain their existing watcher hub.
 
 ## Owned send attempts
 

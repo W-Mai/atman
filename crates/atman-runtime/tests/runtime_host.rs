@@ -1026,6 +1026,209 @@ async fn process_watch_tools_share_instance_delivery_across_pause_turns_and_expl
 }
 
 #[tokio::test]
+async fn flow_watch_tools_merge_spawn_results_and_support_bidirectional_delivery() {
+    use atman_runtime::{
+        Value, ValueJson,
+        tool::{Tier, ToolDefinition},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let child_file = dir.path().join("watched.at");
+    std::fs::write(
+        &child_file,
+        r#"
+        flow child(input: string) -> string {
+            contract { invocation { user_message: input } capabilities { shell: true } }
+            when input == "start" {
+                reverse = watch(handle: env("parent"), pattern: "parent-finished")
+                await_release()
+            }
+            return final.answer(message: "child-ready")
+        }
+    "#,
+    )
+    .unwrap();
+    let target = serde_json::to_string(&format!("{}@child", child_file.display())).unwrap();
+    let source = format!(
+        r#"
+        flow main() -> any {{
+            contract {{ capabilities {{ shell: true }} }}
+            when env("action") == "finish" {{ return final.answer(message: "parent-finished") }}
+            when env("action") == "consume" {{
+                next = watch(handle: env("child"), pattern: "child-ready")
+                flow.interject(handle: env("child"), text: "again")
+                received = wait_for_watcher(timeout_ms: 4000)
+                watcher.unwatch(watcher_id: env("persist"))
+                absent = watch(handle: env("child"), pattern: "absent", timeout_ms: 100)
+                expired = wait_for_watcher(timeout_ms: 4000)
+                return [received, expired, watcher.list()]
+            }}
+            inventory = flow.instances()
+            child = flow.spawn(flow: {target}, spawn_token: inventory.spawn_token, arguments: {{input: "start"}})
+            first = watch(handle: child.handle, pattern: "child-ready", mode: "persist")
+            second = watch(handle: child.handle, pattern: "child-ready")
+            return [child, first, second, watcher.list()]
+        }}
+    "#
+    );
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let parent = session
+        .create_flow(program_descriptor(info.id, source))
+        .await
+        .unwrap();
+    change(&parent, FlowTransition::Activated).await;
+    let executor = Executor::new();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    atman_runtime::tools::register_watch(&executor.tools);
+    let gate = release.clone();
+    executor
+        .tools
+        .register_fn(
+            ToolDefinition::new("await_release", Tier::Zero),
+            move |_, _| {
+                let gate = gate.clone();
+                async move {
+                    gate.acquire().await.unwrap().forget();
+                    Ok(Value::Unit)
+                }
+            },
+        )
+        .unwrap();
+    let setup = invoke_with_env(
+        &parent,
+        executor.clone(),
+        [(
+            "parent".into(),
+            parent.address().instance_id.to_string().into(),
+        )]
+        .into(),
+    )
+    .await
+    .result
+    .unwrap()
+    .to_json()
+    .unwrap();
+    assert_eq!(
+        setup[3].as_array().unwrap().len(),
+        2,
+        "internal spawn routes must not appear in watcher.list"
+    );
+    assert_eq!(setup[3][0]["source"]["kind"], "flow");
+    let child_address: FlowRef = serde_json::from_value(setup[0]["address"].clone()).unwrap();
+    let child = host.flow(&child_address).await.unwrap();
+    let pause = Uuid::new_v4().into();
+    change(&parent, FlowTransition::ExecutionPaused { key: pause }).await;
+    release.add_permits(1);
+    let accepted = wait_inputs(&parent, 1).await;
+    assert!(
+        matches!(&accepted.pending[0].request.payload, InboxPayload::FlowEvent { content, .. } if content["subscriptions"].as_array().unwrap().len() == 3)
+    );
+    change(&parent, FlowTransition::ExecutionResumed { key: pause }).await;
+    let result = invoke_with_env(
+        &parent,
+        executor.clone(),
+        [
+            ("action".into(), "consume".into()),
+            ("child".into(), setup[0]["handle"].clone()),
+            ("persist".into(), setup[1]["watcher_id"].clone()),
+        ]
+        .into(),
+    )
+    .await
+    .result
+    .unwrap()
+    .to_json()
+    .unwrap();
+    assert!(
+        result[0].as_str().unwrap().starts_with("1 watcher"),
+        "{result}"
+    );
+    assert!(
+        result[1].as_str().unwrap().starts_with("1 watcher"),
+        "{result}"
+    );
+    assert_eq!(result[2], serde_json::json!([]));
+    assert!(parent.snapshot().await.unwrap().pending.is_empty());
+    assert_eq!(
+        parent
+            .context()
+            .messages_full()
+            .iter()
+            .filter(|message| message.origin == MessageOrigin::Watcher)
+            .count(),
+        3
+    );
+    invoke_with_env(
+        &parent,
+        executor,
+        [("action".into(), "finish".into())].into(),
+    )
+    .await
+    .result
+    .unwrap();
+    wait_inputs(&parent, 1).await;
+    wait_answers(&child, 3).await;
+    let completion = child.completion(None).await.unwrap().unwrap();
+    let mut observed = parent.subscribe_commits();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            observed.borrow_and_update();
+            if parent
+                .flow_subscriptions()
+                .await
+                .unwrap()
+                .iter()
+                .any(|record| {
+                    record.subscription.purpose
+                        == atman_runtime::flow_store::subscription::SubscriptionPurpose::SpawnResult
+                        && record.cursor >= completion.receipt.sequence
+                })
+            {
+                break;
+            }
+            observed.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        child
+            .context()
+            .messages_full()
+            .iter()
+            .filter(|message| message.origin == MessageOrigin::Watcher)
+            .count(),
+        1
+    );
+    let cursor = parent.snapshot().await.unwrap().cursor;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        parent.snapshot().await.unwrap().cursor,
+        cursor,
+        "idle subscriptions must not spin"
+    );
+    host.shutdown().await.unwrap();
+    let stored = root
+        .open_session(info.id)
+        .unwrap()
+        .open_flow(&parent.address().instance_id)
+        .unwrap();
+    assert_eq!(stored.pending_inputs().count(), 1);
+    assert!(
+        stored
+            .flow_subscriptions()
+            .filter(|record| record.subscription.purpose
+                == atman_runtime::flow_store::subscription::SubscriptionPurpose::Watcher)
+            .all(|record| record.status
+                != atman_runtime::flow_store::subscription::SubscriptionStatus::Active)
+    );
+}
+
+#[tokio::test]
 async fn process_resources_belong_to_flow_instances_across_turns_and_storage_handoff() {
     use atman_runtime::task_registry::{TaskFilter, TaskKind};
     use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};
@@ -4723,8 +4926,98 @@ fn answer_watch(source: &FlowWorker) -> atman_runtime::flow_store::subscription:
         filter: FlowEventFilter::FinalAnswers,
         once: false,
         purpose: SubscriptionPurpose::Watcher,
+        expires_at: None,
         reply: None,
     }
+}
+
+#[tokio::test]
+async fn flow_watch_expiry_survives_revocation_pause_and_reopen_without_source() {
+    use atman_runtime::flow_store::{
+        access::{AccessTarget, FlowAction, FlowGrant},
+        subscription::SubscriptionStatus,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let remote_info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let remote = host
+        .attach_session(root.create_session(remote_info.clone()).unwrap())
+        .unwrap();
+    let recipient = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let source = remote
+        .create_flow(flow_descriptor(remote_info.id))
+        .await
+        .unwrap();
+    change(&recipient, FlowTransition::Activated).await;
+    let lease = start(&recipient).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    let grant = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: recipient.address().clone(),
+        target: AccessTarget::Flow(source.address().clone()),
+        actions: [FlowAction::Watch].into(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
+        .await
+        .unwrap();
+    let watch = atman_runtime::flow_store::subscription::FlowSubscription {
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::seconds(1)),
+        ..answer_watch(&source)
+    };
+    client.watch_events(watch.clone()).await.unwrap();
+    change(
+        &recipient,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    change(
+        &recipient,
+        FlowTransition::ExecutionPaused {
+            key: Uuid::new_v4().into(),
+        },
+    )
+    .await;
+    session
+        .revoke_access(session.snapshot().await.unwrap().cursor, grant.id)
+        .await
+        .unwrap();
+    // The deadline belongs to the receiver; neither source access nor execution is required.
+    let pending = wait_inputs(&recipient, 1).await;
+    assert!(matches!(
+        &pending.pending[0].request.payload,
+        InboxPayload::Timer { timer, content, .. }
+            if *timer == watch.id && content["kind"] == "flow_watch_expired"
+    ));
+    assert_eq!(
+        recipient.flow_subscriptions().await.unwrap()[0].status,
+        SubscriptionStatus::Expired
+    );
+    let address = recipient.address().clone();
+    host.shutdown().await.unwrap();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.open_session(info.id).unwrap())
+        .unwrap();
+    let restored = session.open_flow(address.instance_id).await.unwrap();
+    let snapshot = restored.snapshot().await.unwrap();
+    assert_eq!(snapshot.pending, pending.pending);
+    assert_eq!(
+        restored.flow_subscriptions().await.unwrap()[0].status,
+        SubscriptionStatus::Expired
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(restored.snapshot().await.unwrap().cursor, snapshot.cursor);
+    assert!(restored.subscribe_observation_issues().borrow().is_empty());
+    host.shutdown().await.unwrap();
 }
 
 #[tokio::test]

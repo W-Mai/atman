@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use super::{RuntimeError, ToolArgs, ToolCtx, ToolResult, Value, ValueJson};
 use crate::flow_runtime::access::{FlowClient, PeerControl};
+use crate::flow_store::FlowRef;
 use crate::flow_store::inbox::DeliveryMode;
-use crate::flow_store::{FlowInstanceId, FlowRef};
 
 pub(super) const HANDLE_DESCRIPTION: &str = "Flow handle. Persistent instances use an instance UUID in the current session or session UUID/instance UUID across sessions.";
 
@@ -23,14 +23,7 @@ pub(in crate::tools) fn resolve<'a>(
     let Some(client) = ctx.instance_client()? else {
         return Ok(None);
     };
-    let (session, instance) = match handle.split_once('/') {
-        Some((session, instance)) => (Uuid::parse_str(session).map_err(failed)?, instance),
-        None => (client.source().session_id.0, handle),
-    };
-    let address = FlowRef {
-        session_id: session.into(),
-        instance_id: FlowInstanceId::new(Uuid::parse_str(instance).map_err(failed)?.into()),
-    };
+    let address = client.resolve_address(handle).map_err(failed)?;
     Ok(Some(Target { client, address }))
 }
 

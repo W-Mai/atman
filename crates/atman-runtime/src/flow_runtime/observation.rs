@@ -81,9 +81,23 @@ async fn observe(recipient: FlowWorker, host: WeakRuntimeHost) {
         directory_changes.borrow_and_update();
         recipient_changes.borrow_and_update();
         retries.borrow_and_update();
-        let Ok(records) = recipient.flow_subscriptions().await else {
+        let Ok(records) = recipient
+            .request(|store| {
+                if !store.state().accepts_input() {
+                    return Ok(Vec::new());
+                }
+                store.expire_flow_watches(chrono::Utc::now())?;
+                Ok(store.flow_subscriptions().cloned().collect::<Vec<_>>())
+            })
+            .await
+        else {
             return;
         };
+        let deadline = records
+            .iter()
+            .filter(|record| record.status == SubscriptionStatus::Active)
+            .filter_map(|record| record.subscription.expires_at)
+            .min();
         let mut positions: HashMap<FlowRef, u64> = HashMap::new();
         for record in records
             .into_iter()
@@ -121,6 +135,7 @@ async fn observe(recipient: FlowWorker, host: WeakRuntimeHost) {
             result = directory_changes.changed() => { if result.is_err() { return; } }
             result = recipient_changes.changed() => { if result.is_err() { return; } }
             result = retries.changed() => { if result.is_err() { return; } }
+            _ = async { match deadline { Some(at) => tokio::time::sleep((at - chrono::Utc::now()).to_std().unwrap_or_default()).await, None => std::future::pending().await } } => {}
             _ = async { futures::future::select_all(waits).await }, if has_sources => {}
         }
         // Continuously ready sources must not monopolize the executor.

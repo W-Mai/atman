@@ -114,6 +114,9 @@ pub(super) struct ProcessWatches {
 }
 
 impl ProcessWatches {
+    pub fn contains(&self, id: Uuid) -> bool {
+        self.records.contains_key(&id)
+    }
     fn position(&self, source: &ProcessSource) -> u64 {
         self.reports
             .get(source)
@@ -432,6 +435,11 @@ impl FlowStore {
         }
         if !self.state.accepts_input() {
             return Err(invalid("recipient cannot register process watches"));
+        }
+        if self.subscriptions.contains(watch.id) {
+            return Err(invalid(
+                "watcher identity is already assigned to a flow subscription",
+            ));
         }
         let record = ProcessWatchRecord {
             watch,

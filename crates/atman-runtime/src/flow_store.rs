@@ -229,6 +229,7 @@ enum FlowFact {
     FlowSubscribed(Box<subscription::SubscriptionRecord>),
     FlowUnsubscribed(Uuid),
     EventsObserved(Box<subscription::Observation>),
+    FlowWatchesExpired(Box<subscription::FlowWatchExpiry>),
     ProcessWatchRegistered(Box<process_watch::ProcessWatchRecord>),
     ProcessWatchCancelled(Uuid),
     ProcessObserved(Box<process_watch::ProcessObservation>),
@@ -332,6 +333,7 @@ impl FlowFact {
                 Self::FlowSubscribed(_)
                     | Self::FlowUnsubscribed(_)
                     | Self::EventsObserved(_)
+                    | Self::FlowWatchesExpired(_)
                     | Self::ProcessWatchRegistered(_)
                     | Self::ProcessWatchCancelled(_)
                     | Self::ProcessObserved(_)
@@ -995,7 +997,9 @@ impl FlowStore {
                             checkpoints.apply(*checkpoint, receipt.clone());
                         }
                         (Some((_, state, inbox)), FlowFact::FlowSubscribed(record)) => {
-                            if !state.accepts_input() {
+                            if !state.accepts_input()
+                                || process_watches.contains(record.subscription.id)
+                            {
                                 return Err(invalid("subscription recipient is unavailable"));
                             }
                             subscription::Subscriptions::validate_reply(&record, inbox, address)?;
@@ -1011,8 +1015,15 @@ impl FlowStore {
                             subscriptions.validate(&observation, inbox, address)?;
                             subscriptions.apply(&observation, inbox, &receipt);
                         }
-                        (Some((_, state, _)), FlowFact::ProcessWatchRegistered(record)) => {
+                        (Some((_, state, inbox)), FlowFact::FlowWatchesExpired(expiry)) => {
                             if !state.accepts_input() {
+                                return Err(invalid("flow expiry recipient is unavailable"));
+                            }
+                            subscriptions.validate_expiry(&expiry, inbox, address)?;
+                            subscriptions.apply_expiry(*expiry, inbox, &receipt);
+                        }
+                        (Some((_, state, _)), FlowFact::ProcessWatchRegistered(record)) => {
+                            if !state.accepts_input() || subscriptions.contains(record.watch.id) {
                                 return Err(invalid("process watch recipient is unavailable"));
                             }
                             process_watches.register(*record)?;

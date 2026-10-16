@@ -7,6 +7,7 @@ use std::{
 };
 
 use atman_rt::InstanceState;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -78,6 +79,8 @@ pub struct FlowSubscription {
     pub filter: FlowEventFilter,
     pub once: bool,
     pub purpose: SubscriptionPurpose,
+    /// Optional receiver-side deadline for a watcher; result routes have no implicit expiry.
+    pub expires_at: Option<DateTime<Utc>>,
     /// An exact one-shot completion can belong to an existing continuation.
     pub reply: Option<ReplyWaiter>,
 }
@@ -88,11 +91,13 @@ pub enum SubscriptionStatus {
     Active,
     Matched,
     Cancelled,
+    Expired,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SubscriptionRecord {
     pub subscription: FlowSubscription,
+    pub registered_at: DateTime<Utc>,
     pub started_after: CommitReceipt,
     pub cursor: u64,
     pub status: SubscriptionStatus,
@@ -174,7 +179,10 @@ pub(crate) fn is_watcher_notification(envelope: &AcceptedEnvelope) -> bool {
     match &envelope.request.payload {
         InboxPayload::Watcher { .. } | InboxPayload::ProcessEvent { .. } => true,
         InboxPayload::Timer { content, .. } => {
-            content.get("kind").and_then(|kind| kind.as_str()) == Some("process_watch_expired")
+            matches!(
+                content.get("kind").and_then(|kind| kind.as_str()),
+                Some("process_watch_expired" | "flow_watch_expired")
+            )
         }
         InboxPayload::FlowEvent { content, .. } => {
             serde_json::from_value::<EventNotification>(content.clone()).is_ok_and(|notification| {
@@ -224,8 +232,15 @@ fn event_request_id(source: &FlowEventRef) -> Uuid {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Observation {
     pub source: FlowRef,
+    pub observed_at: DateTime<Utc>,
     pub through: u64,
     pub updates: Vec<(Uuid, SubscriptionStatus)>,
+    pub envelopes: Vec<AcceptedEnvelope>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct FlowWatchExpiry {
+    pub at: DateTime<Utc>,
     pub envelopes: Vec<AcceptedEnvelope>,
 }
 
@@ -237,6 +252,10 @@ pub(super) struct Subscriptions {
 }
 
 impl Subscriptions {
+    pub fn contains(&self, id: Uuid) -> bool {
+        self.records.contains_key(&id)
+    }
+
     pub fn register(&mut self, record: SubscriptionRecord) -> io::Result<()> {
         self.validate_registration(&record)?;
         self.records.insert(record.subscription.id, record);
@@ -250,6 +269,11 @@ impl Subscriptions {
             || record.cursor != record.started_after.sequence
             || record.status != SubscriptionStatus::Active
             || self.records.contains_key(&record.subscription.id)
+            || record.subscription.expires_at.is_some_and(|at| {
+                at <= record.registered_at
+                    || record.subscription.purpose != SubscriptionPurpose::Watcher
+                    || record.subscription.reply.is_some()
+            })
             || self
                 .observed
                 .get(&record.subscription.source)
@@ -352,6 +376,79 @@ impl Subscriptions {
         }
     }
 
+    fn expiry_requests(&self, recipient: &FlowRef, at: DateTime<Utc>) -> Vec<DeliveryRequest> {
+        self.records
+            .values()
+            .filter(|record| record.status == SubscriptionStatus::Active)
+            .filter_map(|record| {
+                let due_at = record
+                    .subscription
+                    .expires_at
+                    .filter(|expiry| *expiry <= at)?;
+                Some(DeliveryRequest {
+                    request_id: record.subscription.id,
+                    sender: SenderIdentity::Host(recipient.instance_id.0.0),
+                    recipient: recipient.clone(),
+                    delivery: DeliveryMode::AtBoundary,
+                    cause: None,
+                    correlation: None,
+                    scope: None,
+                    payload: InboxPayload::Timer {
+                        timer: record.subscription.id,
+                        due_at,
+                        content: serde_json::json!({
+                            "kind": "flow_watch_expired",
+                            "source": record.subscription.source,
+                            "filter": record.subscription.filter,
+                        }),
+                    },
+                })
+            })
+            .collect()
+    }
+
+    pub fn validate_expiry(
+        &self,
+        expiry: &FlowWatchExpiry,
+        inbox: &Inbox,
+        recipient: &FlowRef,
+    ) -> io::Result<()> {
+        let expected = self.expiry_requests(recipient, expiry.at);
+        if expected.is_empty()
+            || expected
+                != expiry
+                    .envelopes
+                    .iter()
+                    .map(|envelope| envelope.request.clone())
+                    .collect::<Vec<_>>()
+        {
+            return Err(invalid("invalid flow watch expiry batch"));
+        }
+        let mut identities = std::collections::HashSet::new();
+        for envelope in &expiry.envelopes {
+            if !identities.insert(envelope.id) {
+                return Err(invalid("duplicate message identity in expiry batch"));
+            }
+            inbox.validate(envelope)?;
+        }
+        Ok(())
+    }
+
+    pub fn apply_expiry(
+        &mut self,
+        expiry: FlowWatchExpiry,
+        inbox: &mut Inbox,
+        receipt: &CommitReceipt,
+    ) {
+        for envelope in expiry.envelopes {
+            self.records
+                .get_mut(&envelope.request.request_id)
+                .expect("validated flow expiry")
+                .status = SubscriptionStatus::Expired;
+            inbox.apply(envelope, receipt.clone());
+        }
+    }
+
     pub fn validate(
         &self,
         observation: &Observation,
@@ -417,6 +514,10 @@ impl Subscriptions {
             for record in &records {
                 if record.cursor < source.sequence
                     && updates[&record.subscription.id] == SubscriptionStatus::Active
+                    && record
+                        .subscription
+                        .expires_at
+                        .is_none_or(|expiry| observation.observed_at < expiry)
                     && record.subscription.filter.matches(&notification.event)
                 {
                     expected.push(SubscriptionMatch {
@@ -602,8 +703,12 @@ impl FlowStore {
         if !self.state.accepts_input() {
             return Err(invalid("recipient cannot register subscriptions"));
         }
+        if self.process_watches.contains(subscription.id) {
+            return Err(invalid("watcher identity is already assigned to a process"));
+        }
         let record = SubscriptionRecord {
             subscription,
+            registered_at: Utc::now(),
             started_after: anchor.cursor.clone(),
             cursor: anchor.cursor.sequence,
             status: SubscriptionStatus::Active,
@@ -656,11 +761,42 @@ impl FlowStore {
         Ok(receipt)
     }
 
+    /// Expiry and its notification share one commit and do not remove previously accepted input.
+    pub fn expire_flow_watches(&mut self, at: DateTime<Utc>) -> io::Result<CommitReceipt> {
+        if !self.state.accepts_input() {
+            return Err(invalid("recipient cannot expire flow watches"));
+        }
+        let envelopes = self
+            .subscriptions
+            .expiry_requests(&self.descriptor.address, at)
+            .into_iter()
+            .map(|request| AcceptedEnvelope {
+                id: Uuid::now_v7(),
+                accepted_at: at,
+                request,
+            })
+            .collect::<Vec<_>>();
+        if envelopes.is_empty() {
+            return Ok(self.cursor.clone());
+        }
+        let expiry = FlowWatchExpiry { at, envelopes };
+        self.subscriptions
+            .validate_expiry(&expiry, &self.inbox, &self.descriptor.address)?;
+        let receipt = self
+            .journal
+            .commit(&[FlowFact::FlowWatchesExpired(Box::new(expiry.clone()))])?;
+        self.subscriptions
+            .apply_expiry(expiry, &mut self.inbox, &receipt);
+        self.cursor = receipt.clone();
+        Ok(receipt)
+    }
+
     /// Cursor movement and every matched input share one durable receiver commit.
     ///
     /// Register or cancel before this command to determine participation. No active turn is needed;
     /// execution pauses retain these inputs in the common inbox without running the recipient.
     pub fn observe_events(&mut self, page: &FlowEventPage) -> io::Result<CommitReceipt> {
+        let observed_at = Utc::now();
         if matches!(
             self.state.state(),
             InstanceState::Closing { .. } | InstanceState::Closed
@@ -700,6 +836,10 @@ impl FlowStore {
             for record in &records {
                 if record.cursor < receipt.sequence
                     && updates[&record.subscription.id] == SubscriptionStatus::Active
+                    && record
+                        .subscription
+                        .expires_at
+                        .is_none_or(|expiry| observed_at < expiry)
                     && record.subscription.filter.matches(event)
                 {
                     if record.subscription.once {
@@ -748,6 +888,7 @@ impl FlowStore {
         }
         let observation = Observation {
             source: page.source.clone(),
+            observed_at,
             through: page.through,
             updates: updates.into_iter().collect(),
             envelopes,

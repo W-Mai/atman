@@ -85,8 +85,185 @@ fn subscription(source: &FlowStore, purpose: SubscriptionPurpose, once: bool) ->
         filter: FlowEventFilter::FinalAnswers,
         once,
         purpose,
+        expires_at: None,
         reply: None,
     }
+}
+
+#[test]
+fn watcher_expiry_preserves_accepted_answers_and_recovers_without_repeating_deadlines() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let id = Uuid::new_v4();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            configuration: Default::default(),
+            id,
+            title: "Expiry".into(),
+            project: None,
+        })
+        .unwrap();
+    let mut source = session.create_flow(descriptor(id)).unwrap();
+    let mut recipient = session.create_flow(descriptor(id)).unwrap();
+    transition(&mut source, FlowTransition::Activated);
+    transition(&mut recipient, FlowTransition::Activated);
+    let anchor = source.observation_anchor();
+    let deadline = chrono::Utc::now() + chrono::Duration::days(1);
+    let mut bounded = subscription(&source, SubscriptionPurpose::Watcher, false);
+    bounded.expires_at = Some(deadline);
+    let once = FlowSubscription {
+        id: Uuid::new_v4(),
+        once: true,
+        ..bounded.clone()
+    };
+    let unbounded = subscription(&source, SubscriptionPurpose::Watcher, false);
+    for watch in [&bounded, &once, &unbounded] {
+        recipient.subscribe_events(watch.clone(), &anchor).unwrap();
+    }
+    let pause = Uuid::new_v4().into();
+    transition(
+        &mut recipient,
+        FlowTransition::ExecutionPaused { key: pause },
+    );
+    answer(&mut source, "ready", false);
+    recipient
+        .observe_events(
+            &source
+                .events_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(recipient.pending_inputs().count(), 1);
+    let expiry_receipt = recipient.expire_flow_watches(deadline).unwrap();
+    assert_eq!(
+        recipient.expire_flow_watches(deadline).unwrap(),
+        expiry_receipt
+    );
+    assert_eq!(recipient.pending_inputs().count(), 2);
+    let last = recipient.pending_inputs().last().unwrap();
+    assert!(
+        matches!(&last.request.payload, InboxPayload::Timer { timer, due_at, .. } if *timer == bounded.id && *due_at == deadline)
+    );
+    assert_eq!(
+        atman_runtime::flow_runtime::input::context_message(last, &TurnId::now())
+            .unwrap()
+            .origin,
+        MessageOrigin::Watcher
+    );
+    let prior = source.observation_anchor();
+    answer(&mut source, "later", false);
+    recipient
+        .observe_events(
+            &source
+                .events_after(prior.cursor().sequence, NonZeroUsize::new(10).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    let last = recipient.pending_inputs().last().unwrap();
+    assert!(
+        matches!(&last.request.payload, InboxPayload::FlowEvent { content, .. } if content["subscriptions"].as_array().unwrap().len() == 1)
+    );
+    recipient
+        .subscribe_events(bounded.clone(), &anchor)
+        .unwrap();
+    let mut changed = bounded.clone();
+    changed.expires_at = Some(deadline + chrono::Duration::days(1));
+    assert!(recipient.subscribe_events(changed, &anchor).is_err());
+    let records: Vec<_> = recipient.flow_subscriptions().cloned().collect();
+    let inputs: Vec<_> = recipient.pending_inputs().cloned().collect();
+    let address = recipient.descriptor().address.clone();
+    drop(recipient);
+    let mut recipient = session.open_flow(&address.instance_id).unwrap();
+    let before = recipient.cursor().clone();
+    assert_eq!(recipient.expire_flow_watches(deadline).unwrap(), before);
+    assert_eq!(
+        recipient.flow_subscriptions().cloned().collect::<Vec<_>>(),
+        records
+    );
+    assert_eq!(
+        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
+        inputs
+    );
+    assert_eq!(
+        records
+            .iter()
+            .find(|r| r.subscription.id == once.id)
+            .unwrap()
+            .status,
+        SubscriptionStatus::Matched
+    );
+    assert_eq!(
+        records
+            .iter()
+            .find(|r| r.subscription.id == bounded.id)
+            .unwrap()
+            .status,
+        SubscriptionStatus::Expired
+    );
+    transition(&mut recipient, FlowTransition::CloseRequested);
+    assert!(recipient.expire_flow_watches(deadline).is_err());
+}
+
+#[test]
+fn watcher_ids_cannot_alias_sources_and_result_routes_cannot_expire() {
+    use atman_runtime::flow_store::process_watch::{ProcessSource, ProcessWatch};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let id = Uuid::new_v4();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            configuration: Default::default(),
+            id,
+            title: "Watcher identities".into(),
+            project: None,
+        })
+        .unwrap();
+    let source = session.create_flow(descriptor(id)).unwrap();
+    let mut recipient = session.create_flow(descriptor(id)).unwrap();
+    transition(&mut recipient, FlowTransition::Activated);
+    let anchor = source.observation_anchor();
+    let flow = subscription(&source, SubscriptionPurpose::Watcher, false);
+    recipient.subscribe_events(flow.clone(), &anchor).unwrap();
+    let mut process = ProcessWatch {
+        id: flow.id,
+        source: ProcessSource::Bash {
+            incarnation: Uuid::new_v4(),
+            handle: "bg-owned".into(),
+        },
+        pattern: "ready".into(),
+        once: false,
+        expires_at: None,
+    };
+    assert!(
+        recipient
+            .register_process_watch(process.clone(), 0)
+            .is_err()
+    );
+    process.id = Uuid::new_v4();
+    recipient
+        .register_process_watch(process.clone(), 0)
+        .unwrap();
+    assert!(
+        recipient
+            .subscribe_events(
+                FlowSubscription {
+                    id: process.id,
+                    ..flow
+                },
+                &anchor
+            )
+            .is_err()
+    );
+    let mut result = subscription(&source, SubscriptionPurpose::SpawnResult, false);
+    result.expires_at = Some(chrono::Utc::now() + chrono::Duration::days(1));
+    assert!(recipient.subscribe_events(result, &anchor).is_err());
+    let before = recipient.cursor().clone();
+    assert_eq!(
+        recipient
+            .expire_flow_watches(chrono::Utc::now() + chrono::Duration::days(2))
+            .unwrap(),
+        before
+    );
 }
 
 #[test]

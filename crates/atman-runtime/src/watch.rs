@@ -546,11 +546,12 @@ impl Tool for Watch {
     }
     fn description(&self) -> Option<&str> {
         Some(
-            "Register a background watcher on any running task (terminal, bash, or agent).\n\
+            "Register a watcher on terminal/Bash output or future public flow answers.\n\
              When pattern appears in the task's output, the agent is woken up.\n\n\
              Non-blocking: returns watcher_id immediately.\n\
              mode: \"once\" (default) or \"persist\".\n\
-             timeout_ms: optional lifetime for persistent process watches. Legacy task watches default to 120000 (120s), max 600000 (10min).",
+             Persistent flow handles use an instance UUID, or session UUID/instance UUID across sessions.\n\
+             timeout_ms: optional lifetime for persistent watches. Legacy task watches default to 120000 (120s), max 600000 (10min).",
         )
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -594,13 +595,14 @@ impl Tool for Watch {
                             })
                     })
                     .transpose()?;
-                let record = client
-                    .watch_process(uuid::Uuid::now_v7(), handle, pattern, once, expires_at)
+                let id = uuid::Uuid::now_v7();
+                client
+                    .watch_output(id, handle, pattern, once, expires_at)
                     .await
                     .map_err(|error| RuntimeError::ToolFailed(format!("watch: {error}")))?;
                 return Ok(Value::Struct(vec![(
                     "watcher_id".into(),
-                    Value::Str(format!("w_{}", record.watch.id.simple())),
+                    Value::Str(format!("w_{}", id.simple())),
                 )]));
             }
             let mode = match extract_optional_string(&args, "mode")?.as_deref() {
@@ -734,14 +736,27 @@ impl Tool for WatcherList {
         Box::pin(async move {
             if let Some(client) = ctx.instance_client()? {
                 let records = client
-                    .process_watches()
+                    .watchers()
                     .await
                     .map_err(|error| RuntimeError::ToolFailed(format!("watcher.list: {error}")))?;
-                return Ok(Value::List(records.into_iter().filter(|record| record.status == crate::flow_store::process_watch::ProcessWatchStatus::Active).map(|record| Value::from_json(serde_json::json!({
+                let mut items: Vec<_> = records.processes.into_iter().filter(|record| record.status == crate::flow_store::process_watch::ProcessWatchStatus::Active).map(|record| (record.registered_at, record.watch.id, Value::from_json(serde_json::json!({
                     "watcher_id": format!("w_{}", record.watch.id.simple()), "source": record.watch.source,
                     "pattern": record.watch.pattern, "mode": if record.watch.once { "once" } else { "persist" },
                     "age_ms": (chrono::Utc::now() - record.registered_at).num_milliseconds().max(0), "expires_at": record.watch.expires_at,
-                }))).collect()));
+                })))).collect();
+                items.extend(records.flows.into_iter().filter(|record| record.status == crate::flow_store::subscription::SubscriptionStatus::Active).map(|record| {
+                    let pattern = match &record.subscription.filter { crate::flow_store::subscription::FlowEventFilter::AnswerContains(text) => Some(text), _ => None };
+                    (record.registered_at, record.subscription.id, Value::from_json(serde_json::json!({
+                        "watcher_id": format!("w_{}", record.subscription.id.simple()),
+                        "source": {"kind": "flow", "address": record.subscription.source, "handle": format!("{}/{}", record.subscription.source.session_id, record.subscription.source.instance_id)},
+                        "pattern": pattern, "filter": record.subscription.filter, "mode": if record.subscription.once { "once" } else { "persist" },
+                        "age_ms": (chrono::Utc::now() - record.registered_at).num_milliseconds().max(0), "expires_at": record.subscription.expires_at,
+                    })))
+                }));
+                items.sort_by_key(|(registered, id, _)| (*registered, *id));
+                return Ok(Value::List(
+                    items.into_iter().map(|(_, _, item)| item).collect(),
+                ));
             }
             let hub = ctx.watch_hub.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("watcher.list: watch hub not available".into())
@@ -804,7 +819,7 @@ impl Tool for WatcherUnwatch {
                 let id = uuid::Uuid::parse_str(id.strip_prefix("w_").unwrap_or(&id)).map_err(
                     |error| RuntimeError::ToolFailed(format!("watcher.unwatch: {error}")),
                 )?;
-                client.unwatch_process(id).await.map_err(|error| {
+                client.unwatch(id).await.map_err(|error| {
                     RuntimeError::ToolFailed(format!("watcher.unwatch: {error}"))
                 })?;
                 return Ok(Value::Unit);

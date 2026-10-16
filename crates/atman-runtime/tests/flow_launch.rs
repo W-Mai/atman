@@ -443,6 +443,7 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
                 filter: FlowEventFilter::FinalAnswers,
                 once: false,
                 purpose: SubscriptionPurpose::SpawnResult,
+                expires_at: None,
                 reply: None,
             },
             &source.observation_anchor(),
