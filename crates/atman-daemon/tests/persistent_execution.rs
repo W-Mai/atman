@@ -585,6 +585,78 @@ async fn persistent_goal_controls_resume_once_without_bypassing_execution_or_rep
 }
 
 #[tokio::test]
+async fn cancel_run_targets_only_the_current_invocation_and_requires_its_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, flow, launch) = setup(
+        &dir,
+        r#"flow main(label: string) -> string {
+        when label == "hold" { loop { yield } }
+        return final.answer(message: label)
+    }"#,
+    )
+    .await;
+    rpc(&state, methods::FLOW_LAUNCH, launch).await;
+    let first = wait_completion(&state, &flow, None).await;
+    rpc(
+        &state,
+        methods::FLOW_INVOKE,
+        json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"label": "hold"}}),
+    )
+    .await;
+    let running = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let view = rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await;
+            if view["execution"]["state"]["open"]["active"].is_object() {
+                break view;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let old_run = &first["last_completion"]["lease"]["run"];
+    assert_eq!(
+        rpc(&state, methods::CANCEL_RUN, json!({"run_id": old_run})).await["cancelled"],
+        false
+    );
+    let run = &running["execution"]["state"]["open"]["active"]["lease"]["run"];
+    assert_ne!(run, old_run);
+    assert!(!run.is_null());
+    let denied = dispatch_as(
+        state.clone(),
+        JsonRpcRequest::new(1, methods::CANCEL_RUN, json!({"run_id": run})),
+        "another-client",
+    )
+    .await;
+    assert!(denied.error.unwrap().message.contains("permission denied"));
+    assert_eq!(
+        rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await["execution"]["state"]["open"]["active"]
+            ["lease"]["run"],
+        *run
+    );
+    assert_eq!(
+        rpc(&state, methods::CANCEL_RUN, json!({"run_id": run})).await["cancelled"],
+        true
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let view = rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await;
+            if view["execution"]["state"]["open"]["interrupted"].is_object() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        rpc(&state, methods::CANCEL_RUN, json!({"run_id": run})).await["cancelled"],
+        false
+    );
+    state.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn failed_preparation_and_stale_inventory_do_not_register_executable_flows() {
     let dir = tempfile::tempdir().unwrap();
     let (state, flow, mut launch) =
@@ -770,8 +842,16 @@ async fn permission_rpc_targets_instances_through_real_tool_execution() {
             *requests
         );
     }
+    assert_eq!(
+        rpc(
+            &state,
+            methods::LIST_PERMISSION_REQUESTS,
+            json!({"session_id": first["session_id"]})
+        )
+        .await,
+        second_requests
+    );
     for params in [
-        json!({"session_id": first["session_id"]}),
         json!({"session_id": first["session_id"], "instance_id": Uuid::now_v7()}),
         json!({"session_id": first["session_id"], "instance_id": Uuid::nil()}),
     ] {

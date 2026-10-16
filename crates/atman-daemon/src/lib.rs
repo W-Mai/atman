@@ -53,16 +53,11 @@ async fn authorized_permission_session(
     target: &atman_proto::PermissionTarget,
     principal_id: &str,
 ) -> Result<Arc<atman_runtime::Session>, JsonRpcError> {
-    if let Some(instance_id) = target.instance_id {
-        return flow_service::context(
-            state,
-            atman_proto::flows::FlowAddress {
-                session_id: target.session_id.clone(),
-                instance_id,
-            },
-            principal_id,
-        )
-        .await;
+    if let Some(flow) =
+        flow_service::resolve_target(state, &target.session_id, target.instance_id, principal_id)
+            .await?
+    {
+        return flow_service::context(state, flow, principal_id).await;
     }
     state
         .authorized_live_session(&target.session_id, principal_id)
@@ -176,10 +171,12 @@ pub async fn dispatch_as(
             let params = req.params.unwrap_or(json!({}));
             let parsed: Result<CancelRunRequest, _> = serde_json::from_value(params);
             match parsed {
-                Ok(p) => {
-                    let cancelled = state.cancel_run(&p.run_id);
-                    JsonRpcResponse::ok(id, json!({"cancelled": cancelled}))
-                }
+                Ok(p) => match state.cancel_run_as(&p.run_id, principal_id).await {
+                    Ok(cancelled) => JsonRpcResponse::ok(id, json!({"cancelled": cancelled})),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                    }
+                },
                 Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
             }
         }
@@ -376,7 +373,7 @@ pub async fn dispatch_as(
                     return JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string()));
                 }
             };
-            if flow_service::goal::handles(&state, &p) {
+            if flow_service::uses_persistent(&state, &p.session_id, p.instance_id) {
                 return match flow_service::goal::dispatch(state, req.method, p, principal_id).await
                 {
                     Ok(value) => JsonRpcResponse::ok(id, value),

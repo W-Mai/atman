@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Daemon execution targeting** — Goal reads, approvals, and event streams resolve the default persistent flow. Run cancellation verifies the active invocation identity and caller; `DaemonState::cancel_run` is asynchronous and returns errors explicitly.
+
 - **Persistent Goal control** — Daemon Goal methods address explicit flow instances with request identities and revision checks. User resume commits the objective change and one next-turn input atomically, preserving execution pauses and retry receipts.
 
 - **Instance activation** — `LaunchInput.initial_goal` and RPC `flow.launch` accept an explicit objective committed atomically with the initial invocation. The objective is visible before entry execution; retries do not reset later Goal changes.

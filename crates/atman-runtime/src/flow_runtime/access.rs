@@ -669,6 +669,32 @@ impl FlowClient {
 }
 
 impl super::FlowWorker {
+    /// Cancel only the named active invocation, atomically with checking its identity.
+    pub async fn cancel_run(
+        &self,
+        run: crate::event::FlowRunId,
+        authorize: impl FnOnce(&FlowRef) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<Option<CommitReceipt>> {
+        self.request(move |store| {
+            authorize(store.state().address())?;
+            let InstanceState::Open(InstanceActivity::Active(active)) = store.state().state()
+            else {
+                return Ok(None);
+            };
+            if active.lease.run != run {
+                return Ok(None);
+            }
+            let transition = FlowTransition::PhaseChanged {
+                lease: active.lease.clone(),
+                phase: TurnPhase::Cancelling,
+            };
+            store
+                .transition(store.state().revision(), transition)
+                .map(Some)
+        })
+        .await
+    }
+
     /// Read committed final answers under the writer's authorization boundary.
     pub async fn read_output(
         &self,

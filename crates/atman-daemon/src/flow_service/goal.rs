@@ -4,25 +4,15 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use atman_proto::{GoalRequest, JsonRpcError, methods};
-use atman_rt::FlowInstanceId;
 use atman_runtime::flow_store::{
-    FlowRef,
     goal::{GoalRequest as StoredRequest, GoalVersion},
     inbox::SenderIdentity,
 };
 use atman_runtime::memory::goal::{GoalActor, GoalEdit, GoalPauseReason};
 use serde_json::{Value, json};
 
-use super::{OPERATOR, address, authorize_operator, execution};
+use super::{OPERATOR, address, authorize_operator, core_address, execution, resolve_target};
 use crate::DaemonState;
-
-pub(crate) fn handles(state: &DaemonState, request: &GoalRequest) -> bool {
-    request.instance_id.is_some()
-        || state
-            .session_service
-            .get()
-            .is_some_and(|service| service.host.session(request.session_id.0).is_ok())
-}
 
 pub(crate) async fn dispatch(
     state: Arc<DaemonState>,
@@ -61,20 +51,17 @@ async fn apply(state: &DaemonState, method: &str, request: GoalRequest) -> Resul
         .session_service
         .get()
         .context("open the persistent session before accessing its flows")?;
-    let session = service.session(request.session_id.0)?;
-    let instance_id = match request.instance_id {
-        Some(id) => FlowInstanceId(id.into()),
-        None => session
-            .snapshot()
-            .await?
-            .catalog
-            .default_flow
-            .context("session has no default flow")?,
-    };
-    let flow = FlowRef {
-        session_id: request.session_id.0.into(),
-        instance_id,
-    };
+    let flow = core_address(
+        resolve_target(
+            state,
+            &request.session_id,
+            request.instance_id,
+            crate::state::LOCAL_OPERATOR,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.message))?
+        .context("persistent session is not attached")?,
+    );
     let worker = service.host.flow(&flow).await?;
     let committed = if method == methods::GOAL_GET {
         None

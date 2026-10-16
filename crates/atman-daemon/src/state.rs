@@ -439,20 +439,30 @@ impl DaemonState {
             .and_then(|entry| entry.broker.clone())
     }
 
-    pub fn cancel_run(&self, run_id: &FlowRunId) -> bool {
-        let live = self.live.lock().unwrap();
-        for entry in live.values() {
-            if let Some(run) = entry.live.as_ref()
-                && &run.run_id == run_id
-            {
-                if let Some(session) = &entry.broker {
-                    session.cancel_flow();
+    pub async fn cancel_run(&self, run_id: &FlowRunId) -> Result<bool> {
+        self.cancel_run_as(run_id, LOCAL_OPERATOR).await
+    }
+
+    pub(crate) async fn cancel_run_as(&self, run_id: &FlowRunId, principal: &str) -> Result<bool> {
+        {
+            let live = self.live.lock().unwrap();
+            for entry in live.values() {
+                if let Some(run) = entry.live.as_ref()
+                    && &run.run_id == run_id
+                {
+                    anyhow::ensure!(
+                        entry.owner_principal.as_deref() == Some(principal),
+                        "permission denied for run"
+                    );
+                    if let Some(session) = &entry.broker {
+                        session.cancel_flow();
+                    }
+                    run.cancel.cancel();
+                    return Ok(true);
                 }
-                run.cancel.cancel();
-                return true;
             }
         }
-        false
+        crate::flow_service::cancel_run(self, run_id, principal).await
     }
 
     pub fn rename_session(&self, sid: &SessionId, title: &str) -> Result<SessionSummary> {

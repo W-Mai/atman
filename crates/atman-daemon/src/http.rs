@@ -81,9 +81,18 @@ async fn sse_handler(
     Query(q): Query<SseQuery>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::io::Error>>>, (StatusCode, String)> {
-    if let Some(instance_id) = q.instance_id {
+    let target = crate::flow_service::resolve_target(
+        &state.daemon,
+        &q.session_id,
+        q.instance_id,
+        &principal_id,
+    )
+    .await
+    .map_err(|error| (StatusCode::BAD_REQUEST, error.message))?;
+    if let Some(flow) = target {
         let stream =
-            flow_events::subscribe(&state.daemon, &principal_id, q, instance_id, &headers).await?;
+            flow_events::subscribe(&state.daemon, &principal_id, q, flow.instance_id, &headers)
+                .await?;
         return Ok(event_stream(
             stream
                 .take_until(state.daemon.shutdown_signal().cancelled_owned())

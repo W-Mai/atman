@@ -10,9 +10,11 @@ async fn cancel_run_hits_matching_live_session() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
 
-    let sid = SessionId(Uuid::now_v7());
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let sid = SessionId(session.id().0);
     let run_id = FlowRunId(Uuid::now_v7());
     let cancel = CancellationToken::new();
+    state.register_broker(sid.clone(), session, atman_daemon::state::LOCAL_OPERATOR);
     state
         .register_live(
             sid,
@@ -25,6 +27,18 @@ async fn cancel_run_hits_matching_live_session() {
         )
         .unwrap();
 
+    let denied = atman_daemon::dispatch_as(
+        state.clone(),
+        JsonRpcRequest::new(
+            1,
+            methods::CANCEL_RUN,
+            serde_json::json!({"run_id": run_id}),
+        ),
+        "another-client",
+    )
+    .await;
+    assert!(denied.error.is_some());
+    assert!(!cancel.is_cancelled());
     let req = JsonRpcRequest::new(
         1,
         methods::CANCEL_RUN,

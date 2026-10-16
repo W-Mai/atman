@@ -141,8 +141,25 @@ async fn instance_sse_and_rpc_share_atomic_history_across_pause_and_reconnection
         "/events?session_id={id}&instance_id={}&token=secret",
         flow["instance_id"].as_str().unwrap()
     );
-    let stream = events(&app, &uri, Some(&initial.to_string())).await;
+    let default_uri = format!("/events?session_id={id}&token=secret");
+    let stream = events(&app, &default_uri, Some(&initial.to_string())).await;
     assert_eq!(stream.status(), StatusCode::OK);
+    // Default selection is resolved before headers, never again while this stream is connected.
+    let catalog = rpc(&app, methods::SESSION_FLOWS, json!({"session_id": id})).await;
+    let peer = json!({"session_id": id, "instance_id": Uuid::now_v7()});
+    rpc(&app, methods::FLOW_LAUNCH, json!({"flow": peer, "request_id": Uuid::now_v7(), "expected_catalog_sequence": catalog["catalog"]["sequence"], "path": path, "entry": "main", "arguments": {"label": "peer"}})).await;
+    completed(&app, &peer, None).await;
+    rpc(&app, methods::SESSION_SELECT_FLOW, json!({"flow": peer})).await;
+    assert_eq!(
+        rpc(&app, methods::GOAL_GET, json!({"session_id": id})).await["flow"],
+        peer
+    );
+    assert_eq!(
+        events(&app, &default_uri, Some(&initial.to_string()))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
     // Registration has completed; no body polling is needed to retain later commits.
     rpc(&app, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": first["execution"]["revision"], "action": "pause"})).await;
     rpc(

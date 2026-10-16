@@ -153,6 +153,90 @@ pub(crate) async fn context(
     Ok(worker(state, flow, principal).await?.context())
 }
 
+pub(crate) fn uses_persistent(
+    state: &DaemonState,
+    session: &atman_proto::SessionId,
+    instance: Option<Uuid>,
+) -> bool {
+    instance.is_some()
+        || state
+            .session_service
+            .get()
+            .is_some_and(|service| service.host.session(session.0).is_ok())
+}
+
+/// Resolve a view once at admission. Subsequent default-view changes do not retarget accepted work.
+pub(crate) async fn resolve_target(
+    state: &DaemonState,
+    session: &atman_proto::SessionId,
+    instance: Option<Uuid>,
+    principal: &str,
+) -> Result<Option<FlowAddress>, JsonRpcError> {
+    if !uses_persistent(state, session, instance) {
+        return Ok(None);
+    }
+    authorize_operator(principal)?;
+    if session.0.is_nil() || instance.is_some_and(|id| id.is_nil()) {
+        return Err(JsonRpcError::invalid_params(
+            "session and flow identities must not be nil",
+        ));
+    }
+    let instance_id = match instance {
+        Some(id) => id,
+        None => {
+            let service = state
+                .session_service
+                .get()
+                .expect("attached session has a service");
+            let snapshot = service
+                .session(session.0)
+                .map_err(|error| JsonRpcError::application(error.to_string()))?
+                .snapshot()
+                .await
+                .map_err(|error| JsonRpcError::application(error.to_string()))?;
+            snapshot
+                .catalog
+                .default_flow
+                .ok_or_else(|| JsonRpcError::application("session has no default flow"))?
+                .0
+                .0
+        }
+    };
+    Ok(Some(FlowAddress {
+        session_id: session.clone(),
+        instance_id,
+    }))
+}
+
+pub(crate) async fn cancel_run(
+    state: &DaemonState,
+    run: &atman_proto::FlowRunId,
+    principal: &str,
+) -> Result<bool> {
+    authorize_operator(principal).map_err(|error| anyhow::anyhow!(error.message))?;
+    let Some(service) = state.session_service.get() else {
+        return Ok(false);
+    };
+    // Observe only already-owned instances; cancellation must not recover unrelated journals.
+    for id in service.host.sessions() {
+        for view in service.session(id)?.observe().await?.loaded {
+            if !matches!(view.execution.state(), atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) if active.lease.run.0.0 == run.0)
+            {
+                continue;
+            }
+            let worker = service.host.flow(view.execution.address()).await?;
+            if worker
+                .cancel_run(run.clone().into_core(), |_| Ok(()))
+                .await?
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) async fn worker(
     state: &DaemonState,
     flow: FlowAddress,

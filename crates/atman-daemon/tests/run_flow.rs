@@ -136,7 +136,18 @@ async fn goal_driver_finishes_turns_and_resumes_without_replacing_the_session() 
             .count(),
         1
     );
-    assert!(state.cancel_run(&spawned.run_id));
+    let cancelled = atman_daemon::dispatch_as(
+        state,
+        atman_proto::JsonRpcRequest::new(
+            1,
+            atman_proto::methods::CANCEL_RUN,
+            serde_json::json!({"run_id": spawned.run_id}),
+        ),
+        "goal-owner",
+    )
+    .await;
+    assert!(cancelled.error.is_none(), "{:?}", cancelled.error);
+    assert_eq!(cancelled.result.unwrap()["cancelled"], true);
 }
 
 #[tokio::test(flavor = "multi_thread")]
