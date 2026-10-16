@@ -51,6 +51,12 @@ pub struct FlowGrant {
     pub actions: BTreeSet<FlowAction>,
 }
 
+impl FlowGrant {
+    pub(crate) fn allows(&self, source: &FlowRef, target: &FlowRef, action: FlowAction) -> bool {
+        self.grantee == *source && self.target.contains(target) && self.actions.contains(&action)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct GrantRecord {
     pub grant: FlowGrant,
@@ -83,12 +89,9 @@ impl SessionAccess {
         {
             return true;
         }
-        self.grants.values().any(|record| {
-            !record.revoked
-                && record.grant.grantee == *source
-                && record.grant.target.contains(target)
-                && record.grant.actions.contains(&action)
-        })
+        self.grants
+            .values()
+            .any(|record| !record.revoked && record.grant.allows(source, target, action))
     }
 
     pub(super) fn grant(&mut self, grant: FlowGrant) -> io::Result<()> {

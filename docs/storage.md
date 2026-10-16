@@ -347,6 +347,12 @@ Input policy, instance directory ownership, management authorization, and CLI/da
 
 ## Host directory
 
+`flow_store::profile::ProfileStore` owns `runtime-v1/host/identity.json` and its fact journal under an exclusive profile lock. The identity records the schema version and profile UUID. The journal records a management Session binding and explicit per-flow grants in one replacement transaction; display names and Session membership confer no management authority.
+
+`bootstrap` prepares a stable Session descriptor before creating its projectless container. Recovery completes that same creation across either crash boundary. Bootstrap does not create flows or schedule work. Once bound, a missing, corrupt, or mismatched Session is an error and requires explicit repair or replacement. Existing catalog writers may remain active during profile validation.
+
+`replace` requires a request UUID, the current profile receipt, and a binding whose grantees are registered in that Session. Binding and grants change atomically. Identical retries return the original receipt even after subsequent replacements; conflicting reuse and stale new requests fail. Replacing management does not close either Session or delete history. The store is a trusted-host primitive; frontends must authenticate management commands before calling it.
+
 Session journals retain explicit peer access grants and revocations. Grants name a registered source flow, a target flow/session or all sessions in the same host, and a set of actions. Same-session discovery, sending, watching public output, and reading public output are default capabilities. Full context reads, peer execution control, Goal management, and delegation require explicit authority; default-view selection and creation provenance do not supply it.
 
 `SessionStore::grant_access` and `revoke_access` require the expected catalog cursor for new changes. Repeating an unchanged grant or revocation does not write another fact. A revoked grant identity cannot be reused to restore permission; renewed authority uses a new grant identity. Recovery rebuilds policy from the journal, ignoring disposable metadata. These storage operations are trusted-host primitives, not direct peer commands; callers still authenticate sources and enforce the resulting policy at operation admission.

@@ -15,6 +15,7 @@ pub mod migration;
 pub mod outbox;
 pub mod planning;
 pub mod process_watch;
+pub mod profile;
 pub mod publication;
 pub mod subscription;
 pub mod trace;
