@@ -9,7 +9,7 @@ use crate::{
     memory::goal::GoalRecord,
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct GoalView {
     pub goal: Option<GoalRecord>,
     pub execution: atman_rt::FlowInstance<AtmanUuid>,

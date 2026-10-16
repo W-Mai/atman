@@ -133,7 +133,13 @@ pub async fn dispatch_as(
                 .get("limit")
                 .and_then(|value| value.as_u64())
                 .map(|value| value as usize);
-            match state.list_sessions_query(project_root, search, limit) {
+            if principal_id != crate::state::LOCAL_OPERATOR {
+                return JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::application("permission denied for session discovery"),
+                );
+            }
+            match state.list_sessions_query(project_root, search, limit).await {
                 Ok(summaries) => match serde_json::to_value(&summaries) {
                     Ok(v) => JsonRpcResponse::ok(id, v),
                     Err(e) => JsonRpcResponse::err(id, JsonRpcError::internal(e.to_string())),

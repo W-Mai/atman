@@ -457,29 +457,37 @@ impl DaemonState {
 
     pub fn rename_session(&self, sid: &SessionId, title: &str) -> Result<SessionSummary> {
         let path = self.sessions_root().join(sid.0.to_string());
+        anyhow::ensure!(path.is_dir(), "legacy session not found: {sid}");
         atman_runtime::session_meta::SessionMeta::rename(&path, title)
             .with_context(|| format!("rename session {sid}"))?;
-        self.list_sessions()?
+        self.list_legacy_sessions()?
             .into_iter()
             .find(|summary| &summary.id == sid)
             .ok_or_else(|| anyhow::anyhow!("session not found: {sid}"))
     }
 
-    pub fn list_sessions_query(
-        &self,
+    pub async fn list_sessions_query(
+        self: &std::sync::Arc<Self>,
         project_root: Option<&str>,
         search: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<SessionSummary>> {
-        let mut summaries = self.list_sessions()?;
+        let mut summaries = self.list_sessions().await?;
         if let Some(project_root) = project_root {
-            let query = atman_runtime::session_meta::SessionDiscoveryQuery::current_project(
-                std::path::Path::new(project_root),
+            let project = atman_runtime::session_meta::canonical_root(Path::new(project_root));
+            let legacy_query = atman_runtime::session_meta::SessionDiscoveryQuery::current_project(
+                Path::new(project_root),
             );
-            let sessions_root = self.sessions_root();
             summaries.retain(|summary| {
-                let path = sessions_root.join(summary.id.to_string());
-                query.matches_meta(atman_runtime::session_meta::SessionMeta::load(&path).as_ref())
+                if summary.persistent.is_none() {
+                    let path = self.sessions_root().join(summary.id.to_string());
+                    return legacy_query.matches_meta(
+                        atman_runtime::session_meta::SessionMeta::load(&path).as_ref(),
+                    );
+                }
+                summary.project_root.as_ref().is_some_and(|root| {
+                    atman_runtime::session_meta::canonical_root(Path::new(root)) == project
+                })
             });
         }
         if let Some(search) = search.map(str::trim).filter(|value| !value.is_empty()) {
@@ -499,7 +507,15 @@ impl DaemonState {
         Ok(summaries)
     }
 
-    pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
+    pub async fn list_sessions(self: &std::sync::Arc<Self>) -> Result<Vec<SessionSummary>> {
+        let state = self.clone();
+        let mut rows = tokio::task::spawn_blocking(move || state.list_legacy_sessions()).await??;
+        rows.extend(crate::flow_service::catalog::list(self).await?);
+        rows.sort_by_key(|row| (std::cmp::Reverse(row.id.0), row.persistent.is_none()));
+        Ok(rows)
+    }
+
+    fn list_legacy_sessions(&self) -> Result<Vec<SessionSummary>> {
         let live_ids: HashMap<SessionId, chrono::DateTime<chrono::Utc>> = {
             let live = self.live.lock().unwrap();
             live.iter()
@@ -540,7 +556,8 @@ impl DaemonState {
                 let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
                 out.push(SessionSummary {
                     id: sid.clone(),
-                    event_count: stats.event_count as usize,
+                    event_count: Some(stats.event_count as usize),
+                    persistent: None,
                     first_ts: stats.first_ts,
                     status,
                     title: meta
@@ -574,7 +591,8 @@ impl DaemonState {
             if !seen.contains(sid) {
                 out.push(SessionSummary {
                     id: sid.clone(),
-                    event_count: 0,
+                    event_count: Some(0),
+                    persistent: None,
                     first_ts: Some(*started_at),
                     status: SessionStatus::Running,
                     title: "Untitled session".into(),

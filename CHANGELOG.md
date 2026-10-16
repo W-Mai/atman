@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Daemon session summaries** — `event_count` is nullable when unknown. Session listing methods are asynchronous and include persistent catalog metadata with idle, detached, and unavailable states.
+
 - **Daemon execution registration** — `DaemonState::register_live` returns an error after shutdown admission closes.
 
 - **Invocation input** — Explicit instance invocations accept optional authenticated user text and images. `InboxPayload::UserSubmission` and `Invocation` share `UserContent`, preserving original content separately from entry arguments.

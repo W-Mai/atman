@@ -469,9 +469,9 @@ pub fn fingerprint_from_root(root: &Path) -> String {
     hex_prefix(digest.as_bytes(), 16)
 }
 
-/// Return the canonical form of the project root, falling back to the raw path.
+/// Resolve existing ancestors even when the project directory is missing.
 pub fn canonical_root(root: &Path) -> PathBuf {
-    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+    crate::fs_access::canonicalize_stable(root)
 }
 
 fn hex_prefix(bytes: &[u8], hex_chars: usize) -> String {

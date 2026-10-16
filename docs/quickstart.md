@@ -396,7 +396,7 @@ The HTTP handshake requests protocol version `2025-11-25` and accepts the server
 
 ## 8. Session discovery and spec state
 
-Session listings default to the current project. Use `atman session list --all` for every project or `--project <path>` for an explicit project root. Session metadata retains a title and project root; manual rename is persistent, while automatic naming cannot overwrite a user title. Daemon clients can pass `project_root`, `search`, and `limit` to `list_sessions`.
+Session listings default to the current project. Use `atman session list --all` for every project or `--project <path>` for an explicit project root. Session metadata retains a title and project root; manual rename is persistent, while automatic naming cannot overwrite a user title. Daemon clients can pass `project_root`, `search`, and `limit` to `list_sessions`, which includes legacy history and persistent catalogs. Persistent rows expose their default flow and flow count; an idle instance remains available, while `detached` means execution state has not been observed by this daemon.
 
 `session list` includes persistent session catalogs and flat legacy history; `--all` also includes legacy sessions without project metadata. `session show <uuid>` displays a persistent catalog's title, project, default flow, and registered flow IDs without opening execution; if both layouts contain the UUID, both are displayed. Recorded projects remain accessible after their directories disappear. Incomplete journal tails are reported and left unchanged; catalog inspection does not resume work or modify configuration.
 

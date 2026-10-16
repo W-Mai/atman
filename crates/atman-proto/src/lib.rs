@@ -244,7 +244,8 @@ pub struct CancelRunRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SessionSummary {
     pub id: SessionId,
-    pub event_count: usize,
+    /// None when an event count has not been read from this storage layout.
+    pub event_count: Option<usize>,
     pub first_ts: Option<chrono::DateTime<chrono::Utc>>,
     pub status: SessionStatus,
     #[serde(default)]
@@ -255,6 +256,21 @@ pub struct SessionSummary {
     pub project_root: Option<String>,
     #[serde(default)]
     pub name_source: NameSource,
+    /// Present for the persistent instance layout; the same UUID can also identify a separate legacy archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persistent: Option<PersistentSessionSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PersistentSessionSummary {
+    pub default_flow: Option<uuid::Uuid>,
+    pub flow_count: Option<usize>,
+    /// None for an offline catalog; zero means an attached catalog has no loaded flows.
+    pub loaded_flows: Option<usize>,
+    pub catalog_sequence: Option<u64>,
+    /// Recorded incomplete bytes, left untouched by discovery. None for an owner observation.
+    pub trailing_bytes: Option<u64>,
+    pub unavailable: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
@@ -271,6 +287,11 @@ pub enum SessionStatus {
     Running,
     Finished,
     Pending,
+    /// Attached persistent instances with no active turn. Idle does not mean closed.
+    Idle,
+    /// Recorded catalog only; this daemon has not observed its execution owners.
+    Detached,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::DaemonState;
 
+pub(crate) mod catalog;
 pub(crate) mod events;
 mod execution;
 

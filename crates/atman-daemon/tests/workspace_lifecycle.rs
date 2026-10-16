@@ -119,11 +119,12 @@ async fn launcher_runs_child_flow_in_dirty_managed_workspace() {
     }));
 }
 
-async fn wait_for_finished_session(state: &DaemonState, session_id: &atman_proto::SessionId) {
+async fn wait_for_finished_session(state: &Arc<DaemonState>, session_id: &atman_proto::SessionId) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let finished = state
             .list_sessions()
+            .await
             .unwrap()
             .into_iter()
             .find(|session| &session.id == session_id)

@@ -275,6 +275,13 @@ pub struct SessionSnapshot {
     pub cursor: CommitReceipt,
 }
 
+/// Catalog and acknowledged states of already loaded instances. Observation never opens an inactive journal, recovers a turn, or installs scheduling. Instance reads are independent, not a cross-flow transaction; conversation and completed output bodies are not copied.
+#[derive(Clone, Debug)]
+pub struct SessionObservation {
+    pub snapshot: SessionSnapshot,
+    pub loaded: Vec<super::goal::GoalView>,
+}
+
 enum CatalogCommand {
     Shutdown(oneshot::Sender<io::Result<()>>),
     Describe {
@@ -435,6 +442,26 @@ impl SessionHandle {
 
     pub async fn snapshot(&self) -> io::Result<SessionSnapshot> {
         self.request(CatalogCommand::Snapshot).await
+    }
+
+    pub async fn observe(&self) -> io::Result<SessionObservation> {
+        let snapshot = self.snapshot().await?;
+        let workers: Vec<_> = {
+            let flows = self.flows.lock().unwrap();
+            snapshot
+                .catalog
+                .flows
+                .iter()
+                .filter_map(|row| flows.get(&row.id))
+                .filter(|worker| !worker.is_stopped())
+                .cloned()
+                .collect()
+        };
+        let mut loaded = Vec::with_capacity(workers.len());
+        for worker in workers {
+            loaded.push(worker.goal().await?);
+        }
+        Ok(SessionObservation { snapshot, loaded })
     }
 
     pub async fn create_flow(&self, descriptor: FlowDescriptor) -> io::Result<FlowWorker> {
