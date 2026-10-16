@@ -265,6 +265,7 @@ mod tests {
             },
         };
         let input = LaunchInput {
+            execution: None,
             request: DeliveryRequest {
                 request_id: descriptor.creation_request,
                 sender: SenderIdentity::User(Uuid::new_v4()),

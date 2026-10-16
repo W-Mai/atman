@@ -33,7 +33,7 @@ pub enum ChildWorkspaceAuthority {
     TrustedDelegation(PathBuf),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EffectiveAuthority {
     pub execution_policy: ExecutionPolicy,
     pub allowed_tiers: [bool; 5],

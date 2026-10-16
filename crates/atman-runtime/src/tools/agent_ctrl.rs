@@ -2328,7 +2328,9 @@ fn invocation_user_message(
     flow: &atman_rt::ast::FlowDecl,
     flow_args: &[(String, Value)],
 ) -> Result<Option<String>, RuntimeError> {
-    let Some(parameter_name) = invocation_message_parameter(flow)? else {
+    let Some(parameter_name) = crate::validate::invocation_message_parameter(flow)
+        .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?
+    else {
         return Ok(None);
     };
     let parameter = flow
@@ -2358,49 +2360,6 @@ fn invocation_user_message(
             ))),
         },
     }
-}
-
-fn invocation_message_parameter(
-    flow: &atman_rt::ast::FlowDecl,
-) -> Result<Option<&str>, RuntimeError> {
-    let Some((_, parameter_value)) = flow.contract.as_ref().and_then(|contract| {
-        contract
-            .blocks
-            .iter()
-            .find(|block| block.name.name == "invocation")
-            .and_then(|block| {
-                block
-                    .kwargs
-                    .iter()
-                    .find(|(name, _)| name.name == "user_message")
-            })
-    }) else {
-        return Ok(None);
-    };
-    let atman_rt::ast::Expr::Ident(parameter_name) = parameter_value else {
-        return Err(RuntimeError::ToolFailed(
-            "flow.spawn: invocation user_message must reference a string flow parameter".into(),
-        ));
-    };
-    let parameter_name = parameter_name.name.as_str();
-    let Some(parameter) = flow
-        .params
-        .iter()
-        .find(|parameter| parameter.name.name == parameter_name)
-    else {
-        return Err(RuntimeError::ToolFailed(format!(
-            "flow.spawn: invocation user_message references unknown parameter `{parameter_name}`"
-        )));
-    };
-    if !matches!(
-        &parameter.ty,
-        atman_rt::ast::TypeExpr::Named(name) if name.name == "string"
-    ) {
-        return Err(RuntimeError::ToolFailed(format!(
-            "flow.spawn: invocation user_message parameter `{parameter_name}` must be a string"
-        )));
-    }
-    Ok(Some(parameter_name))
 }
 
 fn seed_child_message_context(ctx: &ToolCtx, prompt: String) -> Result<(), RuntimeError> {

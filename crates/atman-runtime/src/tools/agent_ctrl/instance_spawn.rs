@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::*;
 use crate::flow_runtime::{entry::EntryRecipe, launch::LaunchExecution};
 use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity};
-use crate::flow_store::launch::{LaunchInput, ResultRoute, SynchronousReply};
+use crate::flow_store::launch::{EntryBinding, LaunchInput, ResultRoute, SynchronousReply};
 use crate::flow_store::{EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef};
 
 pub(super) async fn spawn(
@@ -32,7 +32,6 @@ pub(super) async fn spawn(
     let prepared = prepare_flow_agent(&reference, version.as_deref(), ctx).await?;
     let flow_args = resolve_flow_arguments(&prepared.flow, &args)?;
     let prompt = invocation_user_message(&prepared.flow, &flow_args)?;
-    let parameter = invocation_message_parameter(&prepared.flow)?.map(str::to_owned);
     let arguments = flow_args
         .iter()
         .map(|(key, value)| Ok((key.clone(), value.to_json()?)))
@@ -108,6 +107,11 @@ pub(super) async fn spawn(
         )
     };
     let input = LaunchInput {
+        execution: Some(EntryBinding {
+            first_turn: first_turn.clone(),
+            first_run,
+            authority: authority.clone(),
+        }),
         request: DeliveryRequest {
             request_id: creation,
             sender: SenderIdentity::Flow(client.source().clone()),
@@ -132,16 +136,8 @@ pub(super) async fn spawn(
             }),
         }),
     };
-    let recipe = EntryRecipe {
-        creation,
-        first_turn: first_turn.clone(),
-        first_run,
-        arguments,
-        invocation,
-        parameter,
-        authority,
-        yield_interval,
-    };
+    let recipe = EntryRecipe::from_launch(&descriptor, &input, &authority, yield_interval)
+        .map_err(failed)?;
     let executor = executor(ctx)?;
     let launched = client
         .spawn(

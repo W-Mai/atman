@@ -345,6 +345,227 @@ fn goal_executor(dir: &std::path::Path) -> Executor {
 }
 
 #[tokio::test]
+async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_without_resuming_work()
+ {
+    use atman_runtime::{
+        Value, ValueJson,
+        flow_store::launch::{EntryBinding, LaunchInput},
+        tool::{Tier, ToolDefinition},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let descriptor = program_descriptor(
+        info.id,
+        r#"
+        flow main(input: string) -> string {
+            contract { capabilities { shell: true } invocation { user_message: input } }
+            return final.answer(message: binding.inspect(input: input, effort: env("effort")))
+        }
+    "#
+        .into(),
+    );
+    let address = descriptor.address.clone();
+    let initial_turn = TurnId::now();
+    let initial_run = RunId::now();
+    let workspace = dir.path().canonicalize().unwrap();
+    let mut ceiling = EffectiveAuthority::root(&Default::default(), false, Some(workspace.clone()));
+    ceiling.allowed_tiers[1] = false;
+    ceiling.permission_management = false;
+    let worker = host
+        .launch_flow(
+            descriptor.clone(),
+            LaunchInput {
+                request: DeliveryRequest {
+                    request_id: descriptor.creation_request,
+                    sender: SenderIdentity::User(Uuid::new_v4()),
+                    recipient: address.clone(),
+                    delivery: DeliveryMode::NextTurn,
+                    cause: None,
+                    correlation: None,
+                    scope: None,
+                    payload: InboxPayload::Invocation {
+                        arguments: [("input".into(), "first".into())].into(),
+                        invocation: [("effort".into(), "high".into())].into(),
+                    },
+                },
+                inherited_context: Vec::new(),
+                result_route: None,
+                execution: Some(EntryBinding {
+                    first_turn: initial_turn.clone(),
+                    first_run: initial_run.clone(),
+                    authority: ceiling.clone(),
+                }),
+            },
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap()
+        .worker;
+    let key = Uuid::new_v4().into();
+    change(&worker, FlowTransition::ExecutionPaused { key }).await;
+    let mut next = peer_request(&address, &address);
+    next.request_id = descriptor.creation_request; // Equal request IDs from distinct senders are not the initial invocation.
+    next.sender = SenderIdentity::User(Uuid::new_v4());
+    next.delivery = DeliveryMode::NextTurn;
+    next.payload = InboxPayload::UserSubmission {
+        text: "second".into(),
+        images: vec![],
+        invocation: [("effort".into(), "low".into())].into(),
+        presentation: Default::default(),
+    };
+    worker.accept_input(next, |_| Ok(())).await.unwrap();
+    let mut commits = worker.subscribe_commits();
+    drop(worker);
+    drop(session);
+    drop(host);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while commits.changed().await.is_ok() {}
+    })
+    .await
+    .unwrap();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.open_session(info.id).unwrap())
+        .unwrap();
+    let worker = host.flow(&address).await.unwrap();
+    assert!(worker.completion(None).await.unwrap().is_none());
+    assert!(
+        session
+            .scheduling_status(address.instance_id.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let executor = Executor::new();
+    executor
+        .tools
+        .register_fn(
+            ToolDefinition::new("binding.inspect", Tier::Zero),
+            |args, ctx| {
+                let value = serde_json::json!({
+                    "input": args.named("input").unwrap().to_json().unwrap(),
+                    "effort": args.named("effort").unwrap().to_json().unwrap(),
+                    "authority": ctx.flow_identity.as_ref().unwrap().effective_authority,
+                });
+                async move { Ok(Value::Str(value.to_string())) }
+            },
+        )
+        .unwrap();
+    let mut current = EffectiveAuthority::root(&Default::default(), true, Some(workspace.clone()));
+    current.allowed_tiers[2] = false;
+    let interval = NonZeroUsize::new(16).unwrap();
+    let binding = worker
+        .entry_recipe(current.clone(), interval)
+        .await
+        .unwrap();
+    assert_eq!(binding.first_turn, initial_turn);
+    assert_eq!(binding.first_run, initial_run);
+    assert!(!binding.authority.shell);
+    assert!(!binding.authority.allowed_tiers[1]);
+    assert!(!binding.authority.allowed_tiers[2]);
+    assert!(!binding.authority.permission_management);
+    session
+        .bind_entry(
+            address.instance_id.clone(),
+            executor.clone(),
+            current.clone(),
+            interval,
+        )
+        .await
+        .unwrap();
+    assert!(
+        session
+            .bind_entry(
+                address.instance_id.clone(),
+                executor.clone(),
+                current.clone(),
+                interval
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(worker.state().await.unwrap().pauses(), &[key]);
+    assert_eq!(worker.snapshot().await.unwrap().pending.len(), 2);
+    assert!(worker.completion(None).await.unwrap().is_none());
+    change(&worker, FlowTransition::ExecutionResumed { key }).await;
+    wait_answers(&worker, 2).await;
+    let context = worker.context();
+    let answers: Vec<_> = context
+        .messages()
+        .iter()
+        .filter(|message| message.origin == MessageOrigin::FinalAnswer)
+        .cloned()
+        .collect();
+    assert_eq!(answers[0].turn_id, initial_turn);
+    assert_ne!(answers[1].turn_id, initial_turn);
+    let first = worker
+        .completion(Some(initial_turn))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.completion.lease.run, initial_run);
+    for (message, expected_input, expected_effort) in [
+        (&answers[0], "first", "high"),
+        (&answers[1], "second", "low"),
+    ] {
+        let result: serde_json::Value = serde_json::from_str(&message.text_concat()).unwrap();
+        assert_eq!(result["input"], expected_input);
+        assert_eq!(result["effort"], expected_effort);
+        let actual: EffectiveAuthority =
+            serde_json::from_value(result["authority"].clone()).unwrap();
+        assert_eq!(actual, binding.authority);
+    }
+    session
+        .stop_scheduling(address.instance_id.clone())
+        .await
+        .unwrap();
+    let _lost = start(&worker).await;
+    let mut pending = peer_request(&address, &address);
+    pending.sender = SenderIdentity::User(Uuid::new_v4());
+    pending.payload = InboxPayload::Interjection {
+        text: "after explicit recovery".into(),
+    };
+    worker.accept_input(pending, |_| Ok(())).await.unwrap();
+    drop(worker.shutdown().await.unwrap());
+    let worker = host.flow(&address).await.unwrap();
+    session
+        .bind_entry(
+            address.instance_id.clone(),
+            executor.clone(),
+            current,
+            interval,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        worker.state().await.unwrap().state(),
+        InstanceState::Open(InstanceActivity::Interrupted { .. })
+    ));
+    assert_eq!(worker.snapshot().await.unwrap().pending.len(), 1);
+    change(&worker, FlowTransition::InterruptionRecovered).await;
+    wait_answers(&worker, 3).await;
+    session
+        .stop_scheduling(address.instance_id.clone())
+        .await
+        .unwrap();
+    let outside =
+        EffectiveAuthority::root(&Default::default(), true, Some(workspace.join("other")));
+    assert!(
+        session
+            .bind_entry(address.instance_id.clone(), executor, outside, interval)
+            .await
+            .is_err()
+    );
+    assert!(worker.state().await.unwrap().can_start_turn());
+    assert!(worker.snapshot().await.unwrap().pending.is_empty());
+}
+
+#[tokio::test]
 async fn entry_authored_continuation_uses_the_same_scheduler_for_direct_and_spawned_flows() {
     use atman_runtime::{ValueJson, flow_runtime::entry::EntryRecipe, memory::goal::GoalStatus};
     let source = r#"

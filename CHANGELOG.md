@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Recoverable entry bindings** — Persistent flow launches retain initial invocation identities and authority ceilings. Hosts can explicitly rebind the shared scheduler after reopening without resuming paused or interrupted execution, and current authority can only narrow recorded permissions.
+
 - **Explicit goal scheduling** — Persistent entries can propose another turn with `memory.goal.schedule`. Direct and spawned flows share input preparation, ordinary input takes priority, and continuations retain their source turn's arguments and invocation settings.
 
 - **Durable goal continuation requests** — Explicit continuation proposals use the shared inbox, retain stable receipts, and wait for successful turn completion. Goal changes and interrupted execution invalidate stale proposals; admitted input supersedes unselected proposals without discarding other messages.

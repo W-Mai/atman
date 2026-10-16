@@ -27,7 +27,9 @@ pub enum ValidationError {
 
 pub fn validate(flow: &FlowDecl, tools: &ToolRegistry) -> Result<(), Vec<ValidationError>> {
     let mut errors = Vec::new();
-    validate_invocation_contract(flow, &mut errors);
+    if let Err(error) = invocation_message_parameter(flow) {
+        errors.push(error);
+    }
     let report = validate_flow(flow, BUILTIN_VARS);
     errors.extend(report.errors.into_iter().map(|error| match error {
         LanguageValidationError::UndefinedVar(name) => ValidationError::UndefinedVar(name),
@@ -55,7 +57,8 @@ pub fn validate(flow: &FlowDecl, tools: &ToolRegistry) -> Result<(), Vec<Validat
     }
 }
 
-fn validate_invocation_contract(flow: &FlowDecl, errors: &mut Vec<ValidationError>) {
+/// Validate and resolve the product entry's explicit text-input mapping.
+pub fn invocation_message_parameter(flow: &FlowDecl) -> Result<Option<&str>, ValidationError> {
     let Some((_, value)) = flow.contract.as_ref().and_then(|contract| {
         contract
             .blocks
@@ -68,19 +71,17 @@ fn validate_invocation_contract(flow: &FlowDecl, errors: &mut Vec<ValidationErro
                     .find(|(name, _)| name.name == "user_message")
             })
     }) else {
-        return;
+        return Ok(None);
     };
     let Expr::Ident(parameter_name) = value else {
-        errors.push(ValidationError::InvalidInvocationUserMessage);
-        return;
+        return Err(ValidationError::InvalidInvocationUserMessage);
     };
     let Some(parameter) = flow
         .params
         .iter()
         .find(|parameter| parameter.name.name == parameter_name.name)
     else {
-        errors.push(ValidationError::InvalidInvocationUserMessage);
-        return;
+        return Err(ValidationError::InvalidInvocationUserMessage);
     };
     let is_string = matches!(
         &parameter.ty,
@@ -91,8 +92,9 @@ fn validate_invocation_contract(flow: &FlowDecl, errors: &mut Vec<ValidationErro
         .as_ref()
         .is_none_or(|default| matches!(default, Expr::Literal(Literal::Str(_))));
     if !is_string || !has_supported_default {
-        errors.push(ValidationError::InvalidInvocationUserMessage);
+        return Err(ValidationError::InvalidInvocationUserMessage);
     }
+    Ok(Some(parameter_name.name.as_str()))
 }
 
 const BUILTIN_VARS: &[&str] = &[

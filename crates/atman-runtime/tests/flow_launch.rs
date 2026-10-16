@@ -50,6 +50,7 @@ fn initial(info: &FlowDescriptor, recipient: &FlowRef) -> LaunchInput {
     let mut previous_answer = Message::assistant_text(TurnId::now(), "inherited answer");
     previous_answer.origin = MessageOrigin::FinalAnswer;
     LaunchInput {
+        execution: None,
         request: DeliveryRequest {
             request_id: info.creation_request,
             sender: SenderIdentity::Flow(recipient.clone()),
@@ -169,6 +170,19 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     let proof = recipient
         .result_subscription_proof(route.subscription, None)
         .unwrap();
+    let mut invalid_binding = input.clone();
+    invalid_binding.execution = Some(atman_runtime::flow_store::launch::EntryBinding {
+        first_turn: TurnId(Uuid::nil().into()),
+        first_run: RunId::now(),
+        authority: EffectiveAuthority::root(&Default::default(), false, None),
+    });
+    assert!(
+        source
+            .activate_with_input(invalid_binding, Some(proof.clone()), |_| Ok(()))
+            .is_err()
+    );
+    assert_eq!(source.state().state(), &InstanceState::Prepared);
+    assert!(source.pending_inputs().next().is_none());
     let pause = Uuid::new_v4().into();
     let activation_start = std::fs::metadata(source.dir().join("events.jsonl"))
         .unwrap()

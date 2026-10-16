@@ -57,6 +57,15 @@ pub struct LaunchInput {
     pub request: DeliveryRequest,
     pub inherited_context: Vec<Message>,
     pub result_route: Option<ResultRoute>,
+    pub execution: Option<EntryBinding>,
+}
+
+/// Recorded identity and structural ceilings; restoring them does not authorize execution.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct EntryBinding {
+    pub first_turn: crate::event::TurnId,
+    pub first_run: crate::event::FlowRunId,
+    pub authority: crate::flow_authority::EffectiveAuthority,
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +108,20 @@ impl Activation {
         {
             return Err(invalid(
                 "activation requires the prepared instance's original invocation",
+            ));
+        }
+        if let Some(binding) = &self.input.execution
+            && (binding.first_turn.0.0.is_nil()
+                || binding.first_run.0.0.is_nil()
+                || self
+                    .input
+                    .result_route
+                    .as_ref()
+                    .and_then(|route| route.synchronous.as_ref())
+                    .is_some_and(|reply| reply.turn != binding.first_turn))
+        {
+            return Err(invalid(
+                "entry binding has an invalid initial invocation identity",
             ));
         }
         match (&self.input.result_route, &self.registration) {
