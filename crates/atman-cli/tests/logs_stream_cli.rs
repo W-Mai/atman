@@ -31,7 +31,11 @@ async fn spawn_server(
     let daemon = Arc::new(DaemonState::new(root.to_path_buf()));
     let session = Arc::new(atman_runtime::Session::open_ephemeral());
     let session_id = atman_proto::SessionId(uuid::Uuid::parse_str(session_id).unwrap());
-    daemon.register_broker(session_id.clone(), session, "authenticated-daemon-client");
+    daemon.register_broker(
+        session_id.clone(),
+        session,
+        atman_daemon::state::LOCAL_OPERATOR,
+    );
     daemon.register_live(
         session_id,
         atman_daemon::LiveSession {
@@ -41,6 +45,13 @@ async fn spawn_server(
             started_at: chrono::Utc::now(),
         },
     );
+    serve(daemon, token).await
+}
+
+async fn serve(
+    daemon: Arc<DaemonState>,
+    token: &str,
+) -> (u16, tokio_util::sync::CancellationToken) {
     let state = Arc::new(HttpState {
         daemon,
         auth_token: token.to_string(),
@@ -57,6 +68,127 @@ async fn spawn_server(
     });
     tokio::time::sleep(Duration::from_millis(80)).await;
     (port, shutdown)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_logs_resume_atomic_batches_and_report_bad_cursors() {
+    use atman_proto::{JsonRpcRequest, flows::FlowCursor, methods};
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use uuid::Uuid;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    let config = tmp.path().join("config");
+    std::fs::create_dir(&config).unwrap();
+    let daemon = Arc::new(DaemonState::new(data.clone()));
+    daemon.set_launcher(Arc::new(
+        atman_daemon::run::RunLauncher::new(tmp.path().to_path_buf(), Some(config), None).unwrap(),
+    ));
+    let sid = Uuid::now_v7();
+    let iid = Uuid::now_v7();
+    let flow = json!({"session_id": sid, "instance_id": iid});
+    let call = |method, params| {
+        let daemon = daemon.clone();
+        async move {
+            let result =
+                atman_daemon::dispatch(daemon, JsonRpcRequest::new(1, method, params)).await;
+            assert!(result.error.is_none(), "{result:?}");
+            result.result.unwrap()
+        }
+    };
+    let created = call(
+        methods::SESSION_CREATE,
+        json!({"session_id": sid, "title": "CLI events", "project_root": tmp.path()}),
+    )
+    .await;
+    let path = tmp.path().join("main.at");
+    std::fs::write(
+        &path,
+        "flow main() -> string { return final.answer(message: \"cli final\") }",
+    )
+    .unwrap();
+    call(methods::FLOW_LAUNCH, json!({"flow": flow, "request_id": Uuid::now_v7(), "expected_catalog_sequence": created["catalog"]["sequence"], "path": path, "entry": "main"})).await;
+    let status = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let status = call(methods::FLOW_GET, json!({"flow": flow})).await;
+            if !status["last_completion"].is_null() {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let first = call(methods::FLOW_EVENTS, json!({"flow": flow, "limit": 1})).await;
+    let cursor: FlowCursor = serde_json::from_value(first["next"].clone()).unwrap();
+    let expected = call(methods::FLOW_EVENTS, json!({"flow": flow, "after": cursor})).await;
+    assert_eq!(expected["has_more"], false);
+    let (port, shutdown) = serve(daemon.clone(), "instance-token").await;
+    let daemon_cfg = tmp.path().join("daemon.toml");
+    write_daemon_config(&daemon_cfg, "instance-token");
+    let command = || {
+        let mut command = tokio::process::Command::new(atman_bin());
+        command
+            .args([
+                "logs",
+                "stream",
+                &sid.to_string(),
+                "--instance",
+                &iid.to_string(),
+                "--port",
+                &port.to_string(),
+            ])
+            .env("ATMAN_DATA_DIR", &data)
+            .env("ATMAN_DAEMON_CONFIG_PATH", &daemon_cfg)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        command
+    };
+    let mut child = command()
+        .args(["--after", &cursor.to_string()])
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let observed = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut batches = Vec::new();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let batch: Value = serde_json::from_str(&line)
+                .unwrap_or_else(|error| panic!("invalid batch: {line:?}: {error}"));
+            let finished = batch["receipt"] == status["cursor"];
+            batches.push(batch);
+            if finished {
+                return batches;
+            }
+        }
+        panic!("logs stream ended before the last commit");
+    })
+    .await
+    .unwrap();
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+    assert_eq!(json!(observed), expected["batches"]);
+    assert_eq!(
+        call(methods::FLOW_GET, json!({"flow": flow})).await["execution"],
+        status["execution"]
+    );
+
+    let bad = FlowCursor {
+        journal_id: Uuid::new_v4(),
+        ..cursor
+    };
+    let rejected = tokio::time::timeout(
+        Duration::from_secs(10),
+        command().args(["--after", &bad.to_string()]).output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("journal cursor"));
+    assert!(rejected.stdout.is_empty());
+    shutdown.cancel();
 }
 
 fn write_daemon_config(cfg_path: &Path, token: &str) {

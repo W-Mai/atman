@@ -271,6 +271,19 @@ enum LogsAction {
         port: u16,
         #[arg(long)]
         since_seq: Option<u64>,
+        #[arg(
+            long,
+            requires = "session_id",
+            conflicts_with = "since_seq",
+            help = "Read committed updates for this persistent flow instance"
+        )]
+        instance: Option<uuid::Uuid>,
+        #[arg(
+            long,
+            requires = "instance",
+            help = "Resume after a flow cursor: journal UUID:sequence:digest"
+        )]
+        after: Option<atman_proto::flows::FlowCursor>,
     },
 }
 
@@ -427,8 +440,10 @@ async fn async_main() -> Result<()> {
                     session_id,
                     port,
                     since_seq,
+                    instance,
+                    after,
                 },
-        }) => cmd_logs_stream(session_id, port, since_seq).await,
+        }) => cmd_logs_stream(session_id, port, since_seq, instance, after).await,
         Some(Cmd::Session {
             action: SessionAction::List { all, project },
         }) => cmd_session_list(all, project).await,
@@ -565,8 +580,29 @@ async fn cmd_daemon_run(
     if !follow {
         return Ok(());
     }
-    stream_daemon_events(&client, &base, &cfg.auth_token, &sid, None, true).await?;
+    stream_daemon_events(
+        &client,
+        &base,
+        &cfg.auth_token,
+        &sid,
+        DaemonEventSource::Session {
+            since_seq: None,
+            stop_on_flow_end: true,
+        },
+    )
+    .await?;
     Ok(())
+}
+
+enum DaemonEventSource {
+    Session {
+        since_seq: Option<u64>,
+        stop_on_flow_end: bool,
+    },
+    Flow {
+        instance_id: uuid::Uuid,
+        after: Option<atman_proto::flows::FlowCursor>,
+    },
 }
 
 async fn stream_daemon_events(
@@ -574,37 +610,55 @@ async fn stream_daemon_events(
     base: &str,
     token: &str,
     sid: &str,
-    since_seq: Option<u64>,
-    stop_on_flow_end: bool,
+    source: DaemonEventSource,
 ) -> Result<()> {
-    let mut url = format!("{base}/events?session_id={sid}");
-    if let Some(seq) = since_seq {
-        url.push_str(&format!("&since_seq={seq}"));
+    let stop_on_flow_end = matches!(
+        &source,
+        DaemonEventSource::Session {
+            stop_on_flow_end: true,
+            ..
+        }
+    );
+    let mut url = reqwest::Url::parse(&format!("{base}/events"))?;
+    url.query_pairs_mut().append_pair("session_id", sid);
+    match source {
+        DaemonEventSource::Session { since_seq, .. } => {
+            if let Some(seq) = since_seq {
+                url.query_pairs_mut()
+                    .append_pair("since_seq", &seq.to_string());
+            }
+        }
+        DaemonEventSource::Flow { instance_id, after } => {
+            url.query_pairs_mut()
+                .append_pair("instance_id", &instance_id.to_string());
+            if let Some(after) = after {
+                url.query_pairs_mut()
+                    .append_pair("after", &after.to_string());
+            }
+        }
     }
     let sse = client
-        .get(&url)
+        .get(url.clone())
         .bearer_auth(token)
         .send()
         .await
         .with_context(|| format!("GET {url} (is atman-daemon running?)"))?;
     if !sse.status().is_success() {
-        bail!("daemon SSE returned HTTP {}", sse.status());
+        let status = sse.status();
+        let reason = sse.text().await?;
+        bail!("daemon SSE returned HTTP {status}: {reason}");
     }
+    use eventsource_stream::Eventsource;
     use futures::StreamExt;
-    let mut stream = sse.bytes_stream();
-    let mut buf = Vec::new();
+    let mut stream = sse.bytes_stream().eventsource();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        buf.extend_from_slice(&chunk);
-        while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
-            let line = buf.drain(..=nl).collect::<Vec<u8>>();
-            let text = String::from_utf8_lossy(&line).trim().to_string();
-            if let Some(data) = text.strip_prefix("data: ") {
-                println!("{data}");
-                if stop_on_flow_end && data.contains("\"flow_end\"") {
-                    return Ok(());
-                }
-            }
+        let event = chunk?;
+        println!("{}", event.data);
+        if stop_on_flow_end
+            && serde_json::from_str::<serde_json::Value>(&event.data)
+                .is_ok_and(|value| value["type"] == "flow_end")
+        {
+            return Ok(());
         }
     }
     Ok(())
@@ -8492,10 +8546,15 @@ async fn cmd_logs_stream(
     session_id: Option<String>,
     port: u16,
     since_seq: Option<u64>,
+    instance: Option<uuid::Uuid>,
+    after: Option<atman_proto::flows::FlowCursor>,
 ) -> Result<()> {
     let root = data_dir()?;
     let sid = match session_id {
         Some(s) => s,
+        None if instance.is_some() => {
+            bail!("persistent flow events require an explicit session UUID")
+        }
         None => latest_session(&root)?
             .with_context(|| format!("no sessions found under {}", root.display()))?,
     };
@@ -8504,11 +8563,33 @@ async fn cmd_logs_stream(
         .load_or_init_daemon_config()?;
     let base = format!("http://127.0.0.1:{port}");
     let client = reqwest::Client::new();
-    atman_runtime::notify!(
-        info,
-        "streaming events for session {sid} from {base}/events"
-    );
-    stream_daemon_events(&client, &base, &cfg.auth_token, &sid, since_seq, false).await
+    let source = if let Some(instance_id) = instance {
+        let session_id = atman_proto::SessionId(uuid::Uuid::parse_str(&sid)?);
+        let response = client
+            .post(format!("{base}/rpc"))
+            .bearer_auth(&cfg.auth_token)
+            .json(&atman_proto::JsonRpcRequest::new(
+                1,
+                atman_proto::methods::SESSION_OPEN,
+                serde_json::to_value(atman_proto::flows::SessionRequest { session_id })?,
+            ))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<atman_proto::JsonRpcResponse>()
+            .await?;
+        if let Some(error) = response.error {
+            bail!("daemon session open failed: {}", error.message);
+        }
+        DaemonEventSource::Flow { instance_id, after }
+    } else {
+        DaemonEventSource::Session {
+            since_seq,
+            stop_on_flow_end: false,
+        }
+    };
+    eprintln!("[atman] streaming events for session {sid} from {base}/events");
+    stream_daemon_events(&client, &base, &cfg.auth_token, &sid, source).await
 }
 
 async fn cmd_logs_tail(session_id: Option<String>, n: usize, follow: bool) -> Result<()> {

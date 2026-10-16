@@ -212,6 +212,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "eventsource-stream",
  "futures",
  "libc",
  "open",
