@@ -23,12 +23,12 @@ impl PromptResolver for FormPromptResolver {
     }
 
     fn drop_pending(&self, id: &PromptId) {
-        let form_id = format!("prompt_{}", id);
-        self.forms.submit(&form_id, FormSubmission::Rejected);
+        let form_id = id.to_string();
+        self.forms.cancel(&form_id);
     }
 
     fn expire_pending(&self, id: &PromptId) -> bool {
-        self.forms.expire(&format!("prompt_{}", id))
+        self.forms.expire(&id.to_string())
     }
 
     fn register_with_payload(
@@ -60,7 +60,7 @@ impl FormPromptResolver {
         context: Option<&PromptContext>,
     ) -> oneshot::Receiver<serde_json::Value> {
         let (tx, rx) = oneshot::channel();
-        let form_id = format!("prompt_{}", id);
+        let form_id = id.to_string();
         let mut form = composite_pending_form(&form_id, &id, kind, &payload);
         if let Some(context) = context {
             if let Some(run_id) = &context.run_id {
@@ -236,12 +236,15 @@ mod tests {
                 );
             }
             assert_eq!(forms.list_pending().len(), usize::from(expirable));
-            let form_id = format!("prompt_{id}");
+            let form_id = id.to_string();
             let submitted = FormSubmission::Submitted {
                 answers: vec![FormAnswer::Confirmed { value: true }],
             };
-            assert_eq!(forms.submit(&form_id, submitted.clone()), expirable);
-            assert!(!forms.submit(&form_id, submitted));
+            assert_eq!(
+                forms.submit(&form_id, submitted.clone()).await.unwrap(),
+                expirable
+            );
+            assert!(!forms.submit(&form_id, submitted).await.unwrap());
         }
         assert_eq!(owner.deferred_form_inbox().pending_count(), 1);
         assert!(forms.list_pending().is_empty());

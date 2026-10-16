@@ -2680,41 +2680,17 @@ async fn cmd_repl_once(
                         }
                     }
                     atman_tui::TuiControl::FormSubmit {
+                        request_id,
                         form_id,
                         submission,
                     } => {
-                        if form_id == "session_move_path"
-                            && let atman_runtime::form::FormSubmission::Submitted { answers } =
-                                &submission
-                            && let Some(atman_runtime::form::FormAnswer::TextEntered { text }) =
-                                answers.first()
-                        {
-                            let cwd = std::path::PathBuf::from(text);
-                            let mut meta = atman_runtime::session_meta::SessionMeta::load(
-                                session_for_ctrl.dir(),
-                            )
-                            .unwrap_or_default();
-                            meta.rebase(&cwd);
-                            let _ = meta.save(session_for_ctrl.dir());
-                        }
-                        if form_id == atman_tui::PROJECT_STORAGE_SCOPE_FORM_ID {
-                            if let Some(command) = project_storage_scope_result_command(
-                                apply_project_storage_scope_submission(
-                                    &session_for_ctrl,
-                                    &submission,
-                                ),
-                            ) {
-                                let _ = cmd_tx_for_models.send(command);
-                            }
-                        }
-                        if form_id == atman_tui::FORMULA_RENDERING_FORM_ID {
-                            if let Some(command) = formula_rendering_result_command(
-                                apply_formula_rendering_submission(&submission),
-                            ) {
-                                let _ = cmd_tx_for_models.send(command);
-                            }
-                        }
-                        let _ = session_for_ctrl.forms().submit(&form_id, submission);
+                        submit_form_to_tui(
+                            session_for_ctrl.clone(),
+                            request_id,
+                            form_id,
+                            submission,
+                            cmd_tx_for_models.clone(),
+                        );
                     }
                     atman_tui::TuiControl::MutateProvider(request) => {
                         let lifecycle = provider_lifecycle_for_ctrl.clone();
@@ -4434,6 +4410,59 @@ fn apply_formula_rendering_submission(
     };
     atman_runtime::config_hub::ConfigHub::global()?.set_math_rendering_enabled(enabled)?;
     Ok(Some(enabled))
+}
+
+fn apply_form_settings(
+    session: &atman_runtime::Session,
+    form_id: &str,
+    submission: &atman_runtime::form::FormSubmission,
+) -> Result<Option<atman_tui::TuiCommand>> {
+    match form_id {
+        atman_tui::PROJECT_STORAGE_SCOPE_FORM_ID => Ok(project_storage_scope_result_command(Ok(
+            apply_project_storage_scope_submission(session, submission)?,
+        ))),
+        atman_tui::FORMULA_RENDERING_FORM_ID => Ok(formula_rendering_result_command(Ok(
+            apply_formula_rendering_submission(submission)?,
+        ))),
+        "session_move_path" => {
+            if let atman_runtime::form::FormSubmission::Submitted { answers } = submission {
+                let Some(atman_runtime::form::FormAnswer::TextEntered { text }) = answers.first()
+                else {
+                    anyhow::bail!("working directory is missing");
+                };
+                let mut meta = atman_runtime::session_meta::SessionMeta::load(session.dir())
+                    .context("session metadata is unavailable")?;
+                meta.rebase(&PathBuf::from(text));
+                meta.save(session.dir())?;
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn submit_form_to_tui(
+    session: std::sync::Arc<atman_runtime::Session>,
+    request_id: u64,
+    form_id: String,
+    submission: atman_runtime::form::FormSubmission,
+    commands: tokio::sync::mpsc::UnboundedSender<atman_tui::TuiCommand>,
+) {
+    tokio::spawn(async move {
+        let result = async {
+            if let Some(command) = apply_form_settings(&session, &form_id, &submission)? {
+                let _ = commands.send(command);
+            }
+            Ok::<_, anyhow::Error>(session.forms().submit(&form_id, submission).await?)
+        }
+        .await
+        .map_err(|error| error.to_string());
+        let _ = commands.send(atman_tui::TuiCommand::FormSubmissionResult {
+            request_id,
+            form_id,
+            result,
+        });
+    });
 }
 
 fn formula_rendering_result_command(result: Result<Option<bool>>) -> Option<atman_tui::TuiCommand> {
@@ -6583,24 +6612,17 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                     }
                 }
                 atman_tui::TuiControl::FormSubmit {
+                    request_id,
                     form_id,
                     submission,
                 } => {
-                    if form_id == atman_tui::PROJECT_STORAGE_SCOPE_FORM_ID {
-                        if let Some(command) = project_storage_scope_result_command(
-                            apply_project_storage_scope_submission(&ctrl_session, &submission),
-                        ) {
-                            let _ = cmd_tx.send(command);
-                        }
-                    }
-                    if form_id == atman_tui::FORMULA_RENDERING_FORM_ID {
-                        if let Some(command) = formula_rendering_result_command(
-                            apply_formula_rendering_submission(&submission),
-                        ) {
-                            let _ = cmd_tx.send(command);
-                        }
-                    }
-                    ctrl_session.forms().submit(&form_id, submission);
+                    submit_form_to_tui(
+                        ctrl_session.clone(),
+                        request_id,
+                        form_id,
+                        submission,
+                        cmd_tx.clone(),
+                    );
                 }
                 atman_tui::TuiControl::MutateProvider(request) => {
                     let _ = cmd_tx.send(atman_tui::TuiCommand::ProviderMutationResult {
@@ -9158,6 +9180,66 @@ async fn test_provider_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn form_submission_acknowledges_settings_errors_without_removing_the_form() {
+        use atman_runtime::form::{
+            CompositeForm, FormAnswer, FormKind, FormQuestion, FormSubmission, PendingForm,
+        };
+        let session = std::sync::Arc::new(Session::open_ephemeral());
+        let forms = session.forms();
+        let _view = forms.subscribe();
+        let kind = FormKind::SingleSelect {
+            prompt: "Storage".into(),
+            options: vec!["Global".into()],
+        };
+        let id = atman_tui::PROJECT_STORAGE_SCOPE_FORM_ID;
+        let _answer = forms.request(PendingForm {
+            form_id: id.into(),
+            run_id: atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now(),
+            tool_use_id: id.into(),
+            kind: kind.clone(),
+            form: CompositeForm {
+                questions: vec![FormQuestion {
+                    id: "scope".into(),
+                    kind,
+                }],
+            },
+            emitted_at: chrono::Utc::now(),
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        submit_form_to_tui(
+            session.clone(),
+            1,
+            id.into(),
+            FormSubmission::Submitted {
+                answers: vec![FormAnswer::Selected {
+                    index: 0,
+                    label: "Global".into(),
+                }],
+            },
+            tx.clone(),
+        );
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            atman_tui::TuiCommand::FormSubmissionResult {
+                request_id: 1,
+                result: Err(_),
+                ..
+            }
+        ));
+        assert_eq!(forms.list_pending().len(), 1);
+        submit_form_to_tui(session, 2, id.into(), FormSubmission::Rejected, tx);
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            atman_tui::TuiCommand::FormSubmissionResult {
+                request_id: 2,
+                result: Ok(true),
+                ..
+            }
+        ));
+        assert!(forms.list_pending().is_empty());
+    }
 
     #[tokio::test]
     async fn interactive_entry_publishes_returns_without_duplicating_explicit_delivery() {

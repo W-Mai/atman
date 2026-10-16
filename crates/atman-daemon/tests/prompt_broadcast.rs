@@ -199,8 +199,8 @@ async fn persistent_peers_share_transport_without_sharing_prompt_events_or_cance
     })
     .unwrap();
     for prompt in prompts.iter().rev() {
-        assert!(state.resolve_prompt(prompt, answer.clone()));
-        assert!(!state.resolve_prompt(prompt, answer.clone()));
+        assert!(state.resolve_prompt(prompt, answer.clone()).await.unwrap());
+        assert!(!state.resolve_prompt(prompt, answer.clone()).await.unwrap());
     }
     for ticket in [first, second] {
         assert!(
@@ -259,6 +259,66 @@ async fn persistent_peers_share_transport_without_sharing_prompt_events_or_cance
             serde_json::to_value(reopened.execution_events()).unwrap(),
             expected
         );
+        if index == 0 {
+            let worker = FlowWorker::start(reopened).await.unwrap();
+            let context = worker.context();
+            let owner = atman_proto::SessionId(context.id().0);
+            let prompt = atman_proto::PromptId(uuid::Uuid::now_v7());
+            let payload = serde_json::to_value(atman_runtime::form::CompositeForm {
+                questions: vec![atman_runtime::form::FormQuestion {
+                    id: "choice".into(),
+                    kind: atman_runtime::form::FormKind::Confirm {
+                        prompt: "Proceed?".into(),
+                    },
+                }],
+            })
+            .unwrap();
+            let waiting = state.register_pending_prompt_broadcast_with_session(
+                prompt.clone(),
+                "form_ask",
+                payload.clone(),
+                EventSink::new(),
+                Some(&context),
+            );
+            assert!(state.expire_pending_prompt(&prompt));
+            assert!(waiting.await.is_err());
+            let wrong_owner = atman_proto::SessionId(uuid::Uuid::now_v7());
+            assert!(
+                !state
+                    .resolve_prompt_for_session(&prompt, answer.clone(), Some(&wrong_owner))
+                    .await
+                    .unwrap()
+            );
+            let (first, retry) = tokio::join!(
+                state.resolve_prompt_for_session(&prompt, answer.clone(), Some(&owner)),
+                state.resolve_prompt_for_session(&prompt, answer.clone(), Some(&owner)),
+            );
+            assert_eq!(usize::from(first.unwrap()) + usize::from(retry.unwrap()), 1);
+            assert_eq!(worker.snapshot().await.unwrap().pending.len(), 1);
+            let unavailable = atman_proto::PromptId(uuid::Uuid::now_v7());
+            let waiting = state.register_pending_prompt_broadcast_with_session(
+                unavailable.clone(),
+                "form_ask",
+                payload,
+                EventSink::new(),
+                Some(&context),
+            );
+            assert!(state.expire_pending_prompt(&unavailable));
+            assert!(waiting.await.is_err());
+            drop(worker.shutdown().await.unwrap());
+            assert!(
+                state
+                    .resolve_prompt_for_session(&unavailable, answer.clone(), Some(&owner))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(state.pending_prompt_ids(), vec![unavailable]);
+            let reopened = FlowWorker::start(session.open_flow(&address.instance_id).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(reopened.snapshot().await.unwrap().pending.len(), 1);
+            drop(reopened.shutdown().await.unwrap());
+        }
     }
 }
 
@@ -299,7 +359,10 @@ async fn hunk_review_emits_pending_and_resolved_events_to_shared_sink() {
         loop {
             let pending = state_for_resolver.pending_prompt_ids();
             if let Some(pid) = pending.first() {
-                let ok = state_for_resolver.resolve_prompt(pid, answer_clone);
+                let ok = state_for_resolver
+                    .resolve_prompt(pid, answer_clone)
+                    .await
+                    .unwrap();
                 assert!(ok, "resolve should succeed");
                 return;
             }
@@ -407,10 +470,25 @@ async fn expired_form_answer_is_recorded_once_for_its_session() {
     })
     .unwrap();
     let wrong_session = atman_proto::SessionId(uuid::Uuid::now_v7());
-    assert!(!state.resolve_prompt_for_session(&prompt_id, answer.clone(), Some(&wrong_session)));
+    assert!(
+        !state
+            .resolve_prompt_for_session(&prompt_id, answer.clone(), Some(&wrong_session))
+            .await
+            .unwrap()
+    );
     let owner = atman_proto::SessionId(session.id().0);
-    assert!(state.resolve_prompt_for_session(&prompt_id, answer.clone(), Some(&owner)));
-    assert!(!state.resolve_prompt_for_session(&prompt_id, answer, Some(&owner)));
+    assert!(
+        state
+            .resolve_prompt_for_session(&prompt_id, answer.clone(), Some(&owner))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !state
+            .resolve_prompt_for_session(&prompt_id, answer, Some(&owner))
+            .await
+            .unwrap()
+    );
     assert_eq!(session.deferred_form_inbox().pending_count(), 1);
     assert!(
         sink.snapshot()

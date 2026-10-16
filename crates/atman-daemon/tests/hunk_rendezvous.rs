@@ -42,7 +42,12 @@ async fn hunk_review_reuses_daemon_rendezvous_when_resolver_present() {
         loop {
             let pending = state_for_resolver.pending_prompt_ids();
             if let Some(pid) = pending.first() {
-                assert!(state_for_resolver.resolve_prompt(pid, serde_json::json!({"hunks": [1]})));
+                assert!(
+                    state_for_resolver
+                        .resolve_prompt(pid, serde_json::json!({"hunks": [1]}))
+                        .await
+                        .unwrap()
+                );
                 return;
             }
             if std::time::Instant::now() >= deadline {

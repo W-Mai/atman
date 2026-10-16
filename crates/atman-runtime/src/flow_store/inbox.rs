@@ -64,6 +64,10 @@ pub enum InboxPayload {
     Interjection {
         text: String,
     },
+    /// A host-validated answer to a prior form; never a permission grant.
+    FormReply {
+        answer: crate::form::DeferredFormAnswer,
+    },
     FlowEvent {
         source: FlowEventRef,
         event: String,
@@ -110,6 +114,18 @@ impl DeliveryRequest {
             };
         }
         let valid = match (&self.sender, &self.payload) {
+            (SenderIdentity::Host(_), InboxPayload::FormReply { answer }) => {
+                self.delivery == DeliveryMode::AtBoundary
+                    && self.correlation.is_none()
+                    && self.scope.is_none()
+                    && self.cause.is_none()
+                    && !answer.prompt_id.is_empty()
+                    && matches!(
+                        answer.submission,
+                        crate::form::FormSubmission::Submitted { .. }
+                    )
+                    && answer.form.accepts(&answer.submission)
+            }
             (SenderIdentity::Flow(sender), InboxPayload::GoalContinuation { source, .. }) => {
                 sender == &source.flow
                     && sender == &self.recipient

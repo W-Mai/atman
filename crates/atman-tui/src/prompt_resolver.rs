@@ -32,11 +32,12 @@ mod tests {
         let crate::TuiControl::FormSubmit {
             form_id,
             submission,
+            ..
         } = control_rx.try_recv().unwrap()
         else {
             panic!("expected form submission");
         };
-        assert!(forms.submit(&form_id, submission));
+        assert!(forms.submit(&form_id, submission).await.unwrap());
         let response: FormSubmission = serde_json::from_value(rx.await.unwrap()).unwrap();
         assert_eq!(
             response,

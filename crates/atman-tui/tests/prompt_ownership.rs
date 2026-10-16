@@ -72,7 +72,7 @@ async fn shared_display_preserves_invocation_identity_and_late_answer_destinatio
         let item = forms
             .list_pending()
             .into_iter()
-            .find(|form| form.form_id == format!("prompt_{id}"))
+            .find(|form| form.form_id == id.to_string())
             .unwrap();
         assert_eq!(Some(item.run_id), ctx.flow_run_id);
         assert_eq!(item.tool_use_id, "form-call");
@@ -85,13 +85,28 @@ async fn shared_display_preserves_invocation_identity_and_late_answer_destinatio
         answers: vec![FormAnswer::Confirmed { value: true }],
     };
     let (second_id, _, second_rx) = pending.remove(0);
-    assert!(forms.submit(&format!("prompt_{second_id}"), submitted.clone()));
+    assert!(
+        forms
+            .submit(&second_id.to_string(), submitted.clone())
+            .await
+            .unwrap()
+    );
     assert_eq!(
         serde_json::from_value::<FormSubmission>(second_rx.await.unwrap()).unwrap(),
         submitted
     );
-    assert!(forms.submit(&format!("prompt_{first_id}"), submitted.clone()));
-    assert!(!forms.submit(&format!("prompt_{first_id}"), submitted));
+    assert!(
+        forms
+            .submit(&first_id.to_string(), submitted.clone())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !forms
+            .submit(&first_id.to_string(), submitted)
+            .await
+            .unwrap()
+    );
     assert_eq!(first.deferred_form_inbox().pending_count(), 1);
     assert_eq!(second.deferred_form_inbox().pending_count(), 0);
     assert_eq!(display.deferred_form_inbox().pending_count(), 0);
@@ -130,7 +145,7 @@ async fn language_confirmation_accepts_the_same_submission_from_both_transports(
                         async {
                             loop {
                                 if let Some(form) = forms.list_pending().first() {
-                                    assert!(forms.submit(&form.form_id, submission));
+                                    assert!(forms.submit(&form.form_id, submission).await.unwrap());
                                     break;
                                 }
                                 updates.changed().await.unwrap();

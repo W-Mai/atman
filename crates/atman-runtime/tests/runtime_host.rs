@@ -26,6 +26,193 @@ fn session_descriptor() -> SessionDescriptor {
 }
 
 #[tokio::test]
+async fn late_form_replies_use_the_instance_inbox_and_commit_before_transport_acknowledgement() {
+    use atman_runtime::form::{
+        CompositeForm, DeferredFormAnswer, FormAnswer, FormKind, FormQuestion, FormSubmission,
+    };
+    use atman_runtime::rendezvous::PromptId;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut catalog = root.create_session(info.clone()).unwrap();
+    let worker = FlowWorker::start(
+        catalog
+            .create_flow(program_descriptor(
+                info.id,
+                "flow main() -> string { return \"done\" }".into(),
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    change(&worker, FlowTransition::Activated).await;
+    let pause = Uuid::now_v7().into();
+    change(&worker, FlowTransition::ExecutionPaused { key: pause }).await;
+    let forms = Arc::new(atman_runtime::session::FormRegistry::new());
+    let _view = forms.subscribe();
+    let ctx = atman_runtime::tool::ToolCtx::new()
+        .with_session_runtime(worker.context())
+        .with_forms(forms.clone());
+    let resolver = ctx.form_resolver().unwrap();
+    let id = PromptId::now();
+    let form = CompositeForm {
+        questions: vec![FormQuestion {
+            id: "scope".into(),
+            kind: FormKind::Text {
+                prompt: "Which scope?".into(),
+                placeholder: None,
+                multiline: false,
+            },
+        }],
+    };
+    assert!(
+        atman_runtime::rendezvous::await_expirable_prompt_with_payload_cancel(
+            &resolver,
+            id,
+            "form_ask",
+            serde_json::to_value(&form).unwrap(),
+            Duration::ZERO,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let submission = FormSubmission::Submitted {
+        answers: vec![FormAnswer::TextEntered {
+            text: "selected scope".into(),
+        }],
+    };
+    let form_id = id.to_string();
+    let (first, retry) = tokio::join!(
+        forms.submit(&form_id, submission.clone()),
+        forms.submit(&form_id, submission.clone()),
+    );
+    assert_eq!(usize::from(first.unwrap()) + usize::from(retry.unwrap()), 1);
+    assert!(forms.list_pending().is_empty());
+    let snapshot = worker.snapshot().await.unwrap();
+    assert!(!snapshot.state.can_start_turn());
+    assert_eq!(snapshot.pending.len(), 1);
+    assert!(matches!(
+        snapshot.pending[0].request.payload,
+        InboxPayload::FormReply { .. }
+    ));
+    assert_eq!(
+        worker.context().deferred_form_inbox().pending_count(),
+        0,
+        "persistent answers have only one inbox"
+    );
+    let answer = DeferredFormAnswer {
+        prompt_id: id.to_string(),
+        form,
+        submission,
+    };
+    let address = worker.address().clone();
+    drop(worker.shutdown().await.unwrap());
+    let reopened = FlowWorker::start(catalog.open_flow(&address.instance_id).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(reopened.snapshot().await.unwrap().pending.len(), 1);
+    assert!(
+        reopened
+            .context()
+            .deferred_form_inbox()
+            .record(answer.clone())
+            .await
+            .unwrap()
+    );
+    assert_eq!(reopened.snapshot().await.unwrap().cursor, snapshot.cursor);
+    change(&reopened, FlowTransition::ExecutionResumed { key: pause }).await;
+    let request = prepare(&reopened.snapshot().await.unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.context.len(), 1);
+    assert_eq!(request.context[0].origin, MessageOrigin::Interjection);
+    assert!(
+        request.context[0]
+            .text_concat()
+            .contains("Which scope?: selected scope")
+    );
+    assert!(
+        reopened
+            .start_turn(Executor::new(), request)
+            .await
+            .unwrap()
+            .wait()
+            .await
+            .unwrap()
+            .result
+            .is_ok()
+    );
+    assert!(reopened.snapshot().await.unwrap().pending.is_empty());
+    let consumed = reopened.snapshot().await.unwrap().cursor;
+    assert!(
+        reopened
+            .context()
+            .deferred_form_inbox()
+            .record(answer.clone())
+            .await
+            .unwrap()
+    );
+    assert_eq!(reopened.snapshot().await.unwrap().cursor, consumed);
+    let mut conflicting = answer.clone();
+    conflicting.submission = FormSubmission::Submitted {
+        answers: vec![FormAnswer::TextEntered {
+            text: "different scope".into(),
+        }],
+    };
+    assert!(
+        reopened
+            .context()
+            .deferred_form_inbox()
+            .record(conflicting)
+            .await
+            .is_err()
+    );
+
+    let ctx = atman_runtime::tool::ToolCtx::new()
+        .with_session_runtime(reopened.context())
+        .with_forms(forms.clone());
+    let resolver = ctx.form_resolver().unwrap();
+    let failed_id = PromptId::now();
+    let _waiting = resolver.register_with_payload(
+        failed_id,
+        "form_ask",
+        serde_json::to_value(&answer.form).unwrap(),
+    );
+    assert!(resolver.expire_pending(&failed_id));
+    drop(reopened.shutdown().await.unwrap());
+    assert!(
+        forms
+            .submit(&failed_id.to_string(), answer.submission.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        forms.list_pending().len(),
+        1,
+        "failed commits must retain the answer form"
+    );
+    let restored = FlowWorker::start(catalog.open_flow(&address.instance_id).unwrap())
+        .await
+        .unwrap();
+    assert!(restored.snapshot().await.unwrap().pending.is_empty());
+    assert_eq!(
+        restored
+            .context()
+            .messages()
+            .iter()
+            .filter(|message| message
+                .text_concat()
+                .contains("Which scope?: selected scope"))
+            .count(),
+        1
+    );
+    restored.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn permission_audit_uses_instance_scope_and_retains_source_runs_across_turns() {
     use atman_runtime::{
         Value,

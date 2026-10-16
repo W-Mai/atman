@@ -641,12 +641,17 @@ mod tests {
                 FormKind::Confirm { prompt }
                     if prompt == "Approve design revision `rev-1` for `copy-selection` and allow implementation?"
             ));
-            assert!(forms.submit(
-                &pending.form_id,
-                crate::form::FormSubmission::Submitted {
-                    answers: vec![FormAnswer::Confirmed { value: true }],
-                },
-            ));
+            assert!(
+                forms
+                    .submit(
+                        &pending.form_id,
+                        crate::form::FormSubmission::Submitted {
+                            answers: vec![FormAnswer::Confirmed { value: true }],
+                        },
+                    )
+                    .await
+                    .unwrap()
+            );
         };
         let (result, ()) = tokio::join!(call, answer);
         let result = result.unwrap();

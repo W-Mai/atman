@@ -1703,12 +1703,17 @@ pub(crate) async fn run_frames(
                             != Some(target.form_id.as_str())
                     {
                         app.wm.modals.form_modal.attach(target);
+                    } else if latest.is_empty() {
+                        app.wm.modals.form_modal.close();
                     }
                 }
             }
             cmd = recv_cmd(handle.cmd_rx.as_mut()) => {
                 if let Some(cmd) = cmd {
                     match cmd {
+                        TuiCommand::FormSubmissionResult { request_id, form_id, result } => {
+                            app.wm.modals.form_modal.submission_result(&form_id, request_id, result);
+                        }
                         TuiCommand::SetSidebar(mode) => {
                             app.app.sidebar_mode = mode;
                         }

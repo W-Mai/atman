@@ -18,6 +18,7 @@ pub enum FormPhase {
 #[derive(Debug, Clone)]
 pub enum SubmitOutcome {
     Submit {
+        request_id: u64,
         form_id: String,
         submission: FormSubmission,
     },
@@ -35,6 +36,8 @@ pub struct FormModal {
     pub multi_selected: Vec<bool>,
     pub text_editor: InputEditor,
     pub error: Option<String>,
+    pending_submission: Option<u64>,
+    next_submission_id: u64,
     pub last_input_rect: Option<Rect>,
     pub yes_rect: Option<Rect>,
     pub no_rect: Option<Rect>,
@@ -54,6 +57,7 @@ impl FormModal {
         self.phase = FormPhase::Editing;
         self.confirm_focus = 0;
         self.error = None;
+        self.pending_submission = None;
         self.last_input_rect = None;
         self.yes_rect = None;
         self.no_rect = None;
@@ -65,6 +69,7 @@ impl FormModal {
     }
 
     pub fn close(&mut self) {
+        self.pending_submission = None;
         self.open = false;
         self.pending = None;
         self.current_index = 0;
@@ -245,6 +250,9 @@ impl FormModal {
     }
 
     pub fn submit(&mut self) -> SubmitOutcome {
+        if self.is_submitting() {
+            return SubmitOutcome::None;
+        }
         if self.phase == FormPhase::Editing {
             if self.current_index + 1 < self.questions().len() {
                 self.move_question(1);
@@ -267,19 +275,24 @@ impl FormModal {
             return SubmitOutcome::None;
         };
         let answers = self.draft_answers.iter().filter_map(Clone::clone).collect();
-        self.close();
+        let request_id = self.begin_submission();
         SubmitOutcome::Submit {
+            request_id,
             form_id,
             submission: FormSubmission::Submitted { answers },
         }
     }
 
     pub fn reject(&mut self) -> SubmitOutcome {
+        if self.is_submitting() {
+            return SubmitOutcome::None;
+        }
         let Some(form_id) = self.active_form_id().map(str::to_owned) else {
             return SubmitOutcome::None;
         };
-        self.close();
+        let request_id = self.begin_submission();
         SubmitOutcome::Submit {
+            request_id,
             form_id,
             submission: FormSubmission::Rejected,
         }
@@ -293,12 +306,71 @@ impl FormModal {
         }
     }
 
+    pub fn is_submitting(&self) -> bool {
+        self.pending_submission.is_some()
+    }
+
+    fn begin_submission(&mut self) -> u64 {
+        self.next_submission_id += 1;
+        self.pending_submission = Some(self.next_submission_id);
+        self.error = None;
+        self.next_submission_id
+    }
+
+    pub fn submission_result(
+        &mut self,
+        form_id: &str,
+        request_id: u64,
+        result: Result<bool, String>,
+    ) {
+        if self.active_form_id() != Some(form_id) || self.pending_submission != Some(request_id) {
+            return;
+        }
+        self.pending_submission = None;
+        match result {
+            Ok(true) => self.close(),
+            Ok(false) => {
+                self.error = Some("Form is no longer available or the answer is invalid".into())
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    fn dispatch_submission(
+        &mut self,
+        outcome: SubmitOutcome,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        if let SubmitOutcome::Submit {
+            request_id,
+            form_id,
+            submission,
+        } = outcome
+        {
+            let sent = tx.is_some_and(|tx| {
+                tx.send(crate::TuiControl::FormSubmit {
+                    request_id,
+                    form_id: form_id.clone(),
+                    submission,
+                })
+                .is_ok()
+            });
+            if !sent {
+                self.submission_result(
+                    &form_id,
+                    request_id,
+                    Err("Form submission is unavailable".into()),
+                );
+            }
+        }
+    }
+
     pub fn handle_mouse(
         &mut self,
         event: &MouseEvent,
         tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
-        if !self.open {
+        if !self.open || self.is_submitting() {
             return;
         }
         let point = (event.column, event.row).into();
@@ -368,17 +440,8 @@ impl FormModal {
         };
         if let Some(choice) = choice {
             self.confirm_focus = choice;
-            if let SubmitOutcome::Submit {
-                form_id,
-                submission,
-            } = self.submit()
-                && let Some(tx) = tx
-            {
-                let _ = tx.send(crate::TuiControl::FormSubmit {
-                    form_id,
-                    submission,
-                });
-            }
+            let outcome = self.submit();
+            self.dispatch_submission(outcome, tx);
         }
     }
 
@@ -589,6 +652,12 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 }
             }
         }
+        if self.is_submitting() {
+            lines.push(Line::from(Span::styled(
+                "Submitting…",
+                Style::default().fg(t.subtle_fg.into()),
+            )));
+        }
         if let Some(error) = &self.error {
             lines.push(Line::from(Span::styled(
                 format!("! {error}"),
@@ -600,6 +669,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 + 1
                 + text_height
                 + usize::from(self.error.is_some())
+                + usize::from(self.is_submitting())
         } else {
             row_count(&lines)
         } as u16;
@@ -688,6 +758,9 @@ impl crate::wm::modal::ModalOverlay for FormModal {
     ) -> Option<ModalAction> {
         if !self.open {
             return None;
+        }
+        if self.is_submitting() {
+            return Some(ModalAction::Consumed);
         }
         let outcome = match action {
             KeyAction::Escape => Some(self.cancel()),
@@ -830,23 +903,14 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             }
             _ => None,
         };
-        if let Some(Some(SubmitOutcome::Submit {
-            form_id,
-            submission,
-        })) = outcome.map(Some)
-        {
-            if let Some(tx) = tx {
-                let _ = tx.send(crate::TuiControl::FormSubmit {
-                    form_id,
-                    submission,
-                });
-            }
+        if let Some(outcome) = outcome {
+            self.dispatch_submission(outcome, tx);
         }
         Some(ModalAction::Consumed)
     }
 
     fn handle_paste(&mut self, text: &str) {
-        if !self.open || self.phase != FormPhase::Editing {
+        if !self.open || self.is_submitting() || self.phase != FormPhase::Editing {
             return;
         }
         match self.current_kind() {
@@ -971,6 +1035,55 @@ mod tests {
         assert_eq!(m.draft_answers.len(), 2);
     }
     #[test]
+    fn submissions_keep_drafts_until_the_matching_acknowledgement() {
+        let mut modal = FormModal::default();
+        let form = mk_questions(vec![FormKind::Confirm {
+            prompt: "Proceed?".into(),
+        }]);
+        modal.attach_test(form.clone());
+        modal.submit();
+        let SubmitOutcome::Submit {
+            request_id: first, ..
+        } = modal.submit()
+        else {
+            panic!("expected submission");
+        };
+        let draft = modal.draft_answers.clone();
+        assert!(modal.open && modal.is_submitting());
+        assert!(matches!(modal.submit(), SubmitOutcome::None));
+        modal.submission_result("another form", first, Ok(true));
+        assert!(modal.is_submitting());
+        modal.submission_result(&form.form_id, first, Err("storage unavailable".into()));
+        assert!(modal.open && !modal.is_submitting());
+        assert_eq!(modal.draft_answers, draft);
+        assert_eq!(modal.error.as_deref(), Some("storage unavailable"));
+
+        let SubmitOutcome::Submit {
+            request_id: retry, ..
+        } = modal.submit()
+        else {
+            panic!("expected retry");
+        };
+        modal.submission_result(&form.form_id, first, Ok(true));
+        assert!(modal.open && modal.is_submitting());
+        modal.submission_result(&form.form_id, retry, Ok(true));
+        assert!(!modal.open);
+
+        modal.attach_test(form.clone());
+        modal.submit();
+        let SubmitOutcome::Submit {
+            request_id: next, ..
+        } = modal.submit()
+        else {
+            panic!("expected another interaction");
+        };
+        modal.submission_result(&form.form_id, retry, Ok(true));
+        assert!(modal.open && modal.is_submitting());
+        modal.submission_result(&form.form_id, next, Ok(true));
+        assert!(!modal.open);
+    }
+
+    #[test]
     fn tab_navigates_without_registry_order() {
         let mut m = FormModal::default();
         m.attach_test(mk_questions(vec![
@@ -1067,7 +1180,8 @@ mod tests {
             None,
         );
         assert!(matches!(out, Some(ModalAction::Consumed)));
-        assert!(!m.open);
+        assert!(m.open);
+        assert_eq!(m.error.as_deref(), Some("Form submission is unavailable"));
 
         let mut m = FormModal::default();
         m.attach_test(mk_questions(vec![FormKind::Text {
@@ -1357,7 +1471,7 @@ mod tests {
             ..click
         };
         modal.handle_mouse(&click, Some(&tx));
-        assert!(!modal.open);
+        assert!(modal.open && modal.is_submitting());
         assert!(matches!(
             rx.try_recv(),
             Ok(crate::TuiControl::FormSubmit {

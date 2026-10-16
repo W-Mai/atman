@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Form submission acknowledgement** — `FormRegistry::submit`, `DeferredFormInbox::record`, and daemon prompt resolution are asynchronous and return storage errors. TUI form submissions and results carry a matching request ID.
+
 - **Daemon prompt transport** — `DaemonPromptResolver` accepts shared daemon state without session or sink fields. Prompt ownership is supplied by `ToolCtx::prompt_resolver()` through `PromptResolver::register_in_context` for each invocation.
 
 - **MCP bootstrap ownership** — `bootstrap::spawn_mcp_boot` is removed. `AtmanRuntime::build` starts the connection service; embedded callers use `executor.tool_ctx.mcp_service()` to subscribe, reload, or shut it down.
@@ -21,6 +23,8 @@ All notable changes to atman are documented in this file.
 - **Embedded provider lifecycle construction** — `ProviderLifecycle::new` returns `Result`, and executor attachment returns `ProviderLifecycleError`. Provider connections must use `ProviderRegistry::with_models(hub.models().clone())`; mismatched configuration scopes are rejected.
 
 ### ✨ Features
+
+- **Durable late form answers** — Persistent flows retain accepted answers in their own inbox across reopening. Matching retries are deduplicated, conflicting replies are rejected, and paused flows keep answers pending. Daemon and TUI acknowledge acceptance after storage succeeds; failed submissions retain the form and draft.
 
 - **Persistent permission audit** — Instance journals retain permission requests, groups, grants, and decisions alongside invocation diagnostics. Service events preserve their source identities across turns and idle periods, use the owner's redaction policy, and survive reopening without replaying decisions.
 

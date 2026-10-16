@@ -167,6 +167,7 @@ pub enum TuiControl {
         title: Option<String>,
     },
     FormSubmit {
+        request_id: u64,
         form_id: String,
         submission: atman_runtime::form::FormSubmission,
     },
@@ -250,6 +251,11 @@ pub struct SessionPickerRow {
 
 #[non_exhaustive]
 pub enum TuiCommand {
+    FormSubmissionResult {
+        request_id: u64,
+        form_id: String,
+        result: Result<bool, String>,
+    },
     SetSidebar(sidebar::SidebarMode),
     OpenSessionSwitcher,
     OpenProjectHub,

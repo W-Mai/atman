@@ -9,6 +9,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 struct PendingPrompt {
+    submission: std::sync::Arc<tokio::sync::Mutex<()>>,
     tx: Option<oneshot::Sender<serde_json::Value>>,
     broadcast_sink: Option<EventSink>,
     form_context: Option<(
@@ -107,6 +108,7 @@ impl DaemonState {
         self.prompts.lock().unwrap().insert(
             id,
             PendingPrompt {
+                submission: Default::default(),
                 tx: Some(tx),
                 broadcast_sink: None,
                 form_context: None,
@@ -160,6 +162,7 @@ impl DaemonState {
         prompts.insert(
             id.clone(),
             PendingPrompt {
+                submission: Default::default(),
                 tx: Some(tx),
                 broadcast_sink: Some(sink.clone()),
                 form_context,
@@ -174,50 +177,77 @@ impl DaemonState {
         rx
     }
 
-    pub fn resolve_prompt(&self, id: &PromptId, answer: serde_json::Value) -> bool {
-        self.resolve_prompt_for_session(id, answer, None)
+    pub async fn resolve_prompt(
+        &self,
+        id: &PromptId,
+        answer: serde_json::Value,
+    ) -> std::io::Result<bool> {
+        self.resolve_prompt_for_session(id, answer, None).await
     }
 
-    pub fn resolve_prompt_for_session(
+    pub async fn resolve_prompt_for_session(
         &self,
         id: &PromptId,
         answer: serde_json::Value,
         session_id: Option<&SessionId>,
-    ) -> bool {
-        let mut prompts = self.prompts.lock().unwrap();
-        let Some(entry) = prompts.get(id) else {
-            return false;
-        };
-        let late = entry.tx.is_none();
-        let submission = if late {
+    ) -> std::io::Result<bool> {
+        let guard = self
+            .prompts
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|entry| entry.submission.clone());
+        let Some(guard) = guard else { return Ok(false) };
+        let _submission_guard = guard.lock().await;
+        let (inbox, deferred) = {
+            let mut prompts = self.prompts.lock().unwrap();
+            let Some(entry) = prompts
+                .get(id)
+                .filter(|entry| std::sync::Arc::ptr_eq(&entry.submission, &guard))
+            else {
+                return Ok(false);
+            };
+            if entry.tx.is_some() {
+                let entry = prompts.remove(id).unwrap();
+                return Ok(Self::deliver_prompt(entry, id, answer));
+            }
             let Some((owner, form, _)) = &entry.form_context else {
-                return false;
+                return Ok(false);
             };
             if session_id != Some(owner) {
-                return false;
+                return Ok(false);
             }
             let Ok(submission) =
                 serde_json::from_value::<atman_runtime::form::FormSubmission>(answer.clone())
             else {
-                return false;
+                return Ok(false);
             };
             if !form.accepts(&submission) {
-                return false;
+                return Ok(false);
             }
-            Some(submission)
-        } else {
-            None
+            let (_, form, inbox) = entry.form_context.as_ref().unwrap();
+            (
+                inbox.clone(),
+                atman_runtime::form::DeferredFormAnswer {
+                    prompt_id: id.0.to_string(),
+                    form: form.clone(),
+                    submission,
+                },
+            )
         };
-        let entry = prompts
-            .remove(id)
-            .expect("pending prompt was checked under the same lock");
-        if let (Some(submission), Some((_, form, inbox))) = (submission, entry.form_context) {
-            inbox.record(atman_runtime::form::DeferredFormAnswer {
-                prompt_id: id.0.to_string(),
-                form,
-                submission,
-            });
+        inbox.record(deferred).await?;
+        let mut prompts = self.prompts.lock().unwrap();
+        if prompts
+            .get(id)
+            .is_some_and(|entry| std::sync::Arc::ptr_eq(&entry.submission, &guard))
+        {
+            let entry = prompts.remove(id).unwrap();
+            Self::deliver_prompt(entry, id, answer);
         }
+        Ok(true)
+    }
+
+    fn deliver_prompt(entry: PendingPrompt, id: &PromptId, answer: serde_json::Value) -> bool {
         if let Some(sink) = &entry.broadcast_sink {
             sink.emit(Event::PromptResolved {
                 prompt_id: id.0,

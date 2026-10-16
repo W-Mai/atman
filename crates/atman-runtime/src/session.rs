@@ -435,6 +435,8 @@ pub enum ApprovalDecision {
 pub struct DeferredFormInbox {
     entries: std::sync::Mutex<VecDeque<crate::form::DeferredFormAnswer>>,
     sink: EventSink,
+    instance: std::sync::OnceLock<crate::flow_store::FlowRef>,
+    writer: std::sync::OnceLock<crate::flow_runtime::context::ContextWriter>,
 }
 
 impl DeferredFormInbox {
@@ -442,28 +444,41 @@ impl DeferredFormInbox {
         Self {
             entries: std::sync::Mutex::new(pending.into()),
             sink,
+            instance: Default::default(),
+            writer: Default::default(),
         }
     }
 
-    pub fn record(&self, answer: crate::form::DeferredFormAnswer) -> bool {
+    pub async fn record(&self, answer: crate::form::DeferredFormAnswer) -> std::io::Result<bool> {
         if !matches!(
             answer.submission,
             crate::form::FormSubmission::Submitted { .. }
         ) {
-            return false;
+            return Ok(false);
+        }
+        if !answer.form.accepts(&answer.submission) {
+            return Err(std::io::Error::other("answer does not match its form"));
+        }
+        if self.instance.get().is_some() {
+            self.writer
+                .get()
+                .ok_or_else(|| std::io::Error::other("flow storage writer is unavailable"))?
+                .record_form(answer)
+                .await?;
+            return Ok(true);
         }
         let mut entries = self.entries.lock().unwrap();
         if entries
             .iter()
             .any(|item| item.prompt_id == answer.prompt_id)
         {
-            return false;
+            return Ok(false);
         }
         self.sink.emit(Event::DeferredFormRecorded {
             answer: answer.clone(),
         });
         entries.push_back(answer);
-        true
+        Ok(true)
     }
 
     fn claim(&self, turn_id: &TurnId) -> Vec<Message> {
@@ -499,6 +514,7 @@ struct FormEntry {
     responder: Option<tokio::sync::oneshot::Sender<crate::form::FormSubmission>>,
     expired: bool,
     inbox: std::sync::Arc<DeferredFormInbox>,
+    submission: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Default for FormRegistry {
@@ -598,39 +614,85 @@ impl FormRegistry {
                 responder: Some(tx),
                 expired: false,
                 inbox,
+                submission: Default::default(),
             });
         }
         self.broadcast_snapshot();
         rx
     }
 
-    pub fn submit(&self, form_id: &str, submission: crate::form::FormSubmission) -> bool {
-        let entry = {
+    pub async fn submit(
+        &self,
+        form_id: &str,
+        submission: crate::form::FormSubmission,
+    ) -> std::io::Result<bool> {
+        let guard = self
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| e.pending.form_id == form_id)
+            .map(|e| e.submission.clone());
+        let Some(guard) = guard else { return Ok(false) };
+        let _submission_guard = guard.lock().await;
+        let (inbox, answer) = {
             let mut entries = self.entries.lock().unwrap();
-            let pos = entries.iter().position(|e| e.pending.form_id == form_id);
-            pos.filter(|&p| entries[p].pending.form.accepts(&submission))
-                .map(|p| entries.remove(p))
-        };
-        match entry {
-            Some(e) => {
-                if e.expired {
-                    e.inbox.record(crate::form::DeferredFormAnswer {
-                        prompt_id: e.pending.form_id,
-                        form: e.pending.form,
-                        submission,
-                    });
-                } else if let Some(responder) = e.responder {
+            let Some(index) = entries
+                .iter()
+                .position(|e| std::sync::Arc::ptr_eq(&e.submission, &guard))
+            else {
+                return Ok(false);
+            };
+            let entry = &entries[index];
+            if !entry.pending.form.accepts(&submission) {
+                return Ok(false);
+            }
+            if !entry.expired {
+                let entry = entries.remove(index);
+                if let Some(responder) = entry.responder {
                     let _ = responder.send(submission);
                 }
+                drop(entries);
                 self.broadcast_snapshot();
-                true
+                return Ok(true);
             }
-            None => false,
+            (
+                entry.inbox.clone(),
+                crate::form::DeferredFormAnswer {
+                    prompt_id: entry.pending.form_id.clone(),
+                    form: entry.pending.form.clone(),
+                    submission: submission.clone(),
+                },
+            )
+        };
+        inbox.record(answer).await?;
+        {
+            let mut entries = self.entries.lock().unwrap();
+            if let Some(index) = entries
+                .iter()
+                .position(|e| std::sync::Arc::ptr_eq(&e.submission, &guard))
+            {
+                entries.remove(index);
+            }
         }
+        self.broadcast_snapshot();
+        Ok(true)
     }
 
     pub fn cancel(&self, form_id: &str) -> bool {
-        self.submit(form_id, crate::form::FormSubmission::Rejected)
+        let entry = {
+            let mut entries = self.entries.lock().unwrap();
+            entries
+                .iter()
+                .position(|e| e.pending.form_id == form_id)
+                .map(|p| entries.remove(p))
+        };
+        let Some(entry) = entry else { return false };
+        if let Some(responder) = entry.responder {
+            let _ = responder.send(crate::form::FormSubmission::Rejected);
+        }
+        self.broadcast_snapshot();
+        true
     }
 
     pub fn expire(&self, form_id: &str) -> bool {
@@ -1555,6 +1617,11 @@ impl Session {
         context.goal_control.bind_events(context.sink.clone());
         context.watch_hub = context.goal_control.watch_hub.clone();
         context.flow_instance = Some(address);
+        context
+            .deferred_form_inbox
+            .instance
+            .set(context.flow_instance.clone().unwrap())
+            .unwrap();
         context.configuration = configuration;
         context.project = project;
         // Seed the same message projection used by live delivery without emitting new events or notifications.
@@ -1586,6 +1653,10 @@ impl Session {
     }
 
     pub(crate) fn bind_instance_writer(&self, writer: crate::flow_runtime::context::ContextWriter) {
+        assert!(
+            self.deferred_form_inbox.writer.set(writer.clone()).is_ok(),
+            "form writer already bound"
+        );
         assert!(
             self.instance_writer.set(writer).is_ok(),
             "instance writer already bound"
@@ -4682,8 +4753,8 @@ mod tests {
         assert!(reviews.subscribe().borrow().is_none());
     }
 
-    #[test]
-    fn form_registry_delivers_answer_by_form_id() {
+    #[tokio::test]
+    async fn form_registry_delivers_answer_by_form_id() {
         let reg = std::sync::Arc::new(FormRegistry::new());
         let _sub = reg.subscribe();
         let rx = reg.request(mk_form("fA", "?"));
@@ -4694,8 +4765,8 @@ mod tests {
                 answers: vec![crate::form::FormAnswer::Confirmed { value: true }],
             },
         );
-        assert!(ok);
-        let got = rx.blocking_recv().unwrap();
+        assert!(ok.await.unwrap());
+        let got = rx.await.unwrap();
         assert_eq!(
             got,
             crate::form::FormSubmission::Submitted {
@@ -4705,12 +4776,16 @@ mod tests {
         assert!(reg.list_pending().is_empty());
     }
 
-    #[test]
-    fn form_registry_submit_unknown_id_is_noop() {
+    #[tokio::test]
+    async fn form_registry_submit_unknown_id_is_noop() {
         let reg = std::sync::Arc::new(FormRegistry::new());
         let _sub = reg.subscribe();
         let _rx = reg.request(mk_form("real", "?"));
-        assert!(!reg.submit("ghost", crate::form::FormSubmission::Rejected));
+        assert!(
+            !reg.submit("ghost", crate::form::FormSubmission::Rejected)
+                .await
+                .unwrap()
+        );
         assert_eq!(reg.list_pending().len(), 1);
     }
 
@@ -5207,7 +5282,13 @@ mod tests {
                 }],
             },
         };
-        assert!(session.deferred_form_inbox().record(answer.clone()));
+        assert!(
+            session
+                .deferred_form_inbox()
+                .record(answer.clone())
+                .await
+                .unwrap()
+        );
         session.flush_writer().await;
         drop(session);
 

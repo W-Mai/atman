@@ -104,6 +104,18 @@ pub fn context_message(
     envelope: &AcceptedEnvelope,
     turn: &atman_rt::TurnId<AtmanUuid>,
 ) -> io::Result<Message> {
+    if let InboxPayload::FormReply { answer } = &envelope.request.payload {
+        let mut message = Message::user_text(
+            turn.clone(),
+            format!(
+                "Form reply {}.\n{}",
+                answer.prompt_id,
+                answer.as_user_text()
+            ),
+        );
+        message.origin = MessageOrigin::Interjection;
+        return Ok(message);
+    }
     if let InboxPayload::GoalContinuation { text, .. } = &envelope.request.payload {
         let mut message = Message::user_text(turn.clone(), text.clone());
         message.origin = MessageOrigin::Internal;
