@@ -8,6 +8,260 @@ use atman_runtime::event::{Event, EventSink};
 use atman_runtime::{Executor, tools};
 use tempfile::TempDir;
 
+#[tokio::test]
+async fn persistent_peers_share_transport_without_sharing_prompt_events_or_cancellation() {
+    use atman_runtime::flow_authority::EffectiveAuthority;
+    use atman_runtime::flow_runtime::{FlowWorker, execution::TurnRequest};
+    use atman_runtime::flow_store::inbox::{
+        DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity,
+    };
+    use atman_runtime::flow_store::{
+        EntrySnapshot, FlowDescriptor, FlowRef, FlowTransition, RuntimeStore, SessionDescriptor,
+    };
+    use atman_runtime::rendezvous::{PromptContext, PromptId, PromptResolver};
+    use atman_runtime::source_program::RevisionBundle;
+    use atman_runtime::trust::{TrustConfig, TrustMode};
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    struct RecordingResolver {
+        transport: DaemonPromptResolver,
+        owners: Mutex<BTreeMap<uuid::Uuid, Arc<atman_runtime::Session>>>,
+    }
+
+    impl PromptResolver for RecordingResolver {
+        fn register(&self, id: PromptId) -> tokio::sync::oneshot::Receiver<serde_json::Value> {
+            self.transport.register(id)
+        }
+
+        fn register_in_context(
+            &self,
+            id: PromptId,
+            kind: &str,
+            payload: serde_json::Value,
+            context: &PromptContext,
+        ) -> tokio::sync::oneshot::Receiver<serde_json::Value> {
+            self.owners
+                .lock()
+                .unwrap()
+                .insert(id.0, context.session.clone().unwrap());
+            self.transport
+                .register_in_context(id, kind, payload, context)
+        }
+
+        fn drop_pending(&self, id: &PromptId) {
+            self.transport.drop_pending(id);
+        }
+
+        fn expire_pending(&self, id: &PromptId) -> bool {
+            self.transport.expire_pending(id)
+        }
+    }
+
+    async fn start(
+        worker: &FlowWorker,
+        executor: Executor,
+    ) -> atman_runtime::flow_runtime::execution::TurnTicket {
+        let trust = TrustConfig {
+            mode: TrustMode::Reckless,
+            ..Default::default()
+        };
+        worker
+            .context()
+            .update_trust(trust.clone(), |_| Ok(()))
+            .unwrap();
+        let input = worker
+            .accept_input(
+                DeliveryRequest {
+                    request_id: uuid::Uuid::new_v4(),
+                    sender: SenderIdentity::User(uuid::Uuid::new_v4()),
+                    recipient: worker.address().clone(),
+                    delivery: DeliveryMode::NextTurn,
+                    cause: None,
+                    correlation: None,
+                    scope: None,
+                    payload: InboxPayload::Interjection { text: "ask".into() },
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        worker
+            .start_turn(
+                executor,
+                TurnRequest {
+                    turn: atman_rt::TurnId::now(),
+                    run: atman_rt::RunId::now(),
+                    messages: vec![input.message_id],
+                    arguments: BTreeMap::new(),
+                    invocation: BTreeMap::new(),
+                    context: Vec::new(),
+                    authority: EffectiveAuthority::root(&trust, false, None),
+                    yield_interval: std::num::NonZeroUsize::new(64).unwrap(),
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn wait_pending(state: &DaemonState, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.pending_prompt_ids().len() != count {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().join("daemon")));
+    let mut executor = Executor::new();
+    let resolver = Arc::new(RecordingResolver {
+        transport: DaemonPromptResolver {
+            state: state.clone(),
+        },
+        owners: Mutex::new(BTreeMap::new()),
+    });
+    executor.tool_ctx.prompt_resolver = Some(resolver.clone());
+    let root = RuntimeStore::open(tmp.path()).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            id,
+            title: "Prompts".into(),
+            project: None,
+            configuration: Default::default(),
+        })
+        .unwrap();
+    let mut workers = Vec::new();
+    for parallel in [false, true] {
+        let call = if parallel {
+            "fanout [helper()]"
+        } else {
+            "helper().await"
+        };
+        let descriptor = FlowDescriptor {
+            address: FlowRef {
+                session_id: id.into(),
+                instance_id: atman_rt::FlowInstanceId::now(),
+            },
+            creation_request: uuid::Uuid::new_v4(),
+            created_by: None,
+            entry: EntrySnapshot {
+                name: "main".into(),
+                path: "main.at".into(),
+                bundle: RevisionBundle {
+                    entry: "entry:main.at".into(),
+                    edges: BTreeMap::new(),
+                    sources: BTreeMap::from([(
+                        "entry:main.at".into(),
+                        format!(
+                            r#"
+                        flow main() -> any {{ return {call} }}
+                        flow helper() -> any {{ return form.ask(kind: "confirm", prompt: "Proceed?") }}
+                    "#
+                        ),
+                    )]),
+                },
+            },
+        };
+        let mut store = session.create_flow(descriptor).unwrap();
+        store
+            .transition(store.state().revision(), FlowTransition::Activated)
+            .unwrap();
+        workers.push(FlowWorker::start(store).await.unwrap());
+    }
+    let first = start(&workers[0], executor.clone()).await;
+    let second = start(&workers[1], executor.clone()).await;
+    wait_pending(&state, 2).await;
+    let mut prompts = Vec::new();
+    for worker in &workers {
+        let trace = worker.execution_events().await.unwrap();
+        let ids: Vec<_> = trace
+            .iter()
+            .flat_map(|batch| &batch.events)
+            .filter_map(|event| match event.event {
+                Event::PendingPrompt { prompt_id, .. } => Some(prompt_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 1);
+        assert!(Arc::ptr_eq(
+            &resolver.owners.lock().unwrap()[&ids[0]],
+            &worker.context()
+        ));
+        prompts.push(atman_proto::PromptId(ids[0]));
+    }
+    assert_ne!(prompts[0], prompts[1]);
+    let answer = serde_json::to_value(atman_runtime::form::FormSubmission::Submitted {
+        answers: vec![atman_runtime::form::FormAnswer::Confirmed { value: true }],
+    })
+    .unwrap();
+    for prompt in prompts.iter().rev() {
+        assert!(state.resolve_prompt(prompt, answer.clone()));
+        assert!(!state.resolve_prompt(prompt, answer.clone()));
+    }
+    for ticket in [first, second] {
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), ticket.wait())
+                .await
+                .unwrap()
+                .unwrap()
+                .result
+                .is_ok()
+        );
+    }
+    let cancelled = start(&workers[0], executor.clone()).await;
+    wait_pending(&state, 1).await;
+    let cancelled_prompt = state.pending_prompt_ids().remove(0);
+    workers[0]
+        .transition(
+            workers[0].state().await.unwrap().revision(),
+            FlowTransition::PhaseChanged {
+                lease: cancelled.lease.clone(),
+                phase: atman_rt::TurnPhase::Cancelling,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), cancelled.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .result
+            .is_err()
+    );
+    assert!(state.pending_prompt_ids().is_empty());
+    assert!(executor.events.snapshot().is_empty());
+    for (index, worker) in workers.into_iter().enumerate() {
+        let address = worker.address().clone();
+        let store = worker.shutdown().await.unwrap();
+        let trace = store.execution_events();
+        let resolved: Vec<_> = trace
+            .iter()
+            .flat_map(|batch| &batch.events)
+            .filter_map(|event| match &event.event {
+                Event::PromptResolved { prompt_id, answer } => Some((*prompt_id, answer.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resolved[0], (prompts[index].0, answer.clone()));
+        assert_eq!(resolved.len(), if index == 0 { 2 } else { 1 });
+        if index == 0 {
+            assert_eq!(resolved[1], (cancelled_prompt.0, serde_json::Value::Null));
+        }
+        let expected = serde_json::to_value(trace).unwrap();
+        drop(store);
+        let reopened = session.open_flow(&address.instance_id).unwrap();
+        assert_eq!(
+            serde_json::to_value(reopened.execution_events()).unwrap(),
+            expected
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn hunk_review_emits_pending_and_resolved_events_to_shared_sink() {
     let tmp = TempDir::new().unwrap();
@@ -21,8 +275,6 @@ async fn hunk_review_emits_pending_and_resolved_events_to_shared_sink() {
     tools::register_tier_zero(&ex.tools);
     ex.tool_ctx.prompt_resolver = Some(Arc::new(DaemonPromptResolver {
         state: daemon_state.clone(),
-        sink: sink.clone(),
-        session: Arc::new(atman_runtime::Session::open_ephemeral()),
     }));
 
     let src = format!(

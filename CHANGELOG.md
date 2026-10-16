@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Daemon prompt transport** — `DaemonPromptResolver` accepts shared daemon state without session or sink fields. Prompt ownership is supplied by `ToolCtx::prompt_resolver()` through `PromptResolver::register_in_context` for each invocation.
+
 - **MCP bootstrap ownership** — `bootstrap::spawn_mcp_boot` is removed. `AtmanRuntime::build` starts the connection service; embedded callers use `executor.tool_ctx.mcp_service()` to subscribe, reload, or shut it down.
 
 - **Memory tool construction** — Goal, Todo, and Plan tool structs accept `Option<Arc<Store>>` for explicit legacy storage. Their defaults use invocation context without creating file stores; `tools::register_memory` retains its existing signature.
@@ -19,6 +21,8 @@ All notable changes to atman are documented in this file.
 - **Embedded provider lifecycle construction** — `ProviderLifecycle::new` returns `Result`, and executor attachment returns `ProviderLifecycleError`. Provider connections must use `ProviderRegistry::with_models(hub.models().clone())`; mismatched configuration scopes are rejected.
 
 ### ✨ Features
+
+- **Invocation-owned prompts** — Shared daemon and TUI transports preserve each flow's prompt events, run identity, and late-answer destination across inline and parallel calls. Dropping an execution future removes its pending prompts; expired forms retain their original reply route.
 
 - **Persistent execution diagnostics** — Flow instances retain independently attributed workflow, tool, model, and resource events in their journals. Concurrent emission preserves one order, and turn completion waits for preceding diagnostics to commit. Reopening preserves recorded traces without rerunning work.
 

@@ -169,6 +169,14 @@ Background processes use the resource owner's cancellation lifetime. Completing 
 
 Process logs, attachments, and large tool output use the owning `FlowStore` directory under `sessions/<session>/flows/<flow>`. Legacy Plan/Todo refresh entry points leave journal-backed projections intact. Legacy invocations retain their existing turn cancellation behavior and process registration APIs.
 
+### Invocation-owned interactions
+
+`ToolCtx::prompt_resolver()` binds the configured host transport to the calling invocation. `PromptResolver::register_in_context` receives the original event sink, owning context, run identity, and tool-call identity. The daemon bridge retains only shared transport state; it no longer captures one session or event sink at construction. Inline and fanout calls retain their owning instance even when a branch isolates its model context.
+
+Pending and resolved daemon events use the same captured sink, including cancellation and late responses. Registration publishes the pending event before concurrent resolution can publish its answer. Prompt waits release their registration when their future is dropped, even if their own cancellation branch never runs. Expired forms intentionally retain their late-answer route.
+
+The TUI can display forms from multiple flows through one registry. Each record retains its originating run, tool call, and deferred-answer inbox independently of the current view. `FormRegistry::request_with_inbox` makes that destination explicit; ordinary `request` uses the registry's default inbox. Late submissions are accepted once into the original context. Deferred-form inbox persistence and permission-audit integration with the instance journal remain separate host integration work.
+
 ## Execution diagnostics
 
 Persistent instance execution sends node, tool, model-usage, and resource diagnostics to the owning flow's event sink. Inline calls and fanout retain that instance binding; peer instances use separate sinks. Concurrent producers allocate sequence positions, forward, and update the live projection in one order.

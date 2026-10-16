@@ -1047,7 +1047,7 @@ async fn eval_confirm(v: Value, ctx: &AtmanHost<'_>) -> Value {
     // over RPC; in-process TUI subscribes to FormRegistry. Boot /
     // headless / unit tests without either wired keep the historical
     // auto-approve so they don't deadlock.
-    if let Some(resolver) = ctx.tool_ctx.prompt_resolver.clone() {
+    if let Some(resolver) = ctx.tool_ctx.prompt_resolver() {
         let id = crate::rendezvous::PromptId::now();
         let payload = serde_json::to_value(&confirm_kind).unwrap_or(serde_json::Value::Null);
         let timeout = std::time::Duration::from_secs(300);

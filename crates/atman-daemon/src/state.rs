@@ -156,7 +156,8 @@ impl DaemonState {
                 session.deferred_form_inbox(),
             ))
         });
-        self.prompts.lock().unwrap().insert(
+        let mut prompts = self.prompts.lock().unwrap();
+        prompts.insert(
             id.clone(),
             PendingPrompt {
                 tx: Some(tx),
@@ -169,6 +170,7 @@ impl DaemonState {
             kind: kind.to_string(),
             payload,
         });
+        drop(prompts);
         rx
     }
 

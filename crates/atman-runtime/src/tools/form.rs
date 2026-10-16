@@ -122,7 +122,7 @@ impl Tool for FormAsk {
             // resolver; the in-process TUI subscribes to FormRegistry.
             // Pick whichever the runtime host wired up, prefer the
             // resolver so daemon overrides an accidental fallback.
-            if let Some(resolver) = ctx.prompt_resolver.clone() {
+            if let Some(resolver) = ctx.prompt_resolver() {
                 let id = crate::rendezvous::PromptId::now();
                 let confirmation_id = id.0.to_string();
                 let payload = if composite {

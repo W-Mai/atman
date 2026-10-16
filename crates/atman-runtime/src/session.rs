@@ -493,6 +493,7 @@ struct FormEntry {
     pending: crate::form::PendingForm,
     responder: Option<tokio::sync::oneshot::Sender<crate::form::FormSubmission>>,
     expired: bool,
+    inbox: std::sync::Arc<DeferredFormInbox>,
 }
 
 impl Default for FormRegistry {
@@ -571,6 +572,15 @@ impl FormRegistry {
         &self,
         pending: crate::form::PendingForm,
     ) -> tokio::sync::oneshot::Receiver<crate::form::FormSubmission> {
+        self.request_with_inbox(pending, self.inbox.clone())
+    }
+
+    /// Display a form here while retaining its original destination for late answers.
+    pub fn request_with_inbox(
+        &self,
+        pending: crate::form::PendingForm,
+        inbox: std::sync::Arc<DeferredFormInbox>,
+    ) -> tokio::sync::oneshot::Receiver<crate::form::FormSubmission> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self.watch_tx.receiver_count() == 0 {
             let _ = tx.send(crate::form::FormSubmission::Rejected);
@@ -582,6 +592,7 @@ impl FormRegistry {
                 pending: pending.clone(),
                 responder: Some(tx),
                 expired: false,
+                inbox,
             });
         }
         self.broadcast_snapshot();
@@ -598,7 +609,7 @@ impl FormRegistry {
         match entry {
             Some(e) => {
                 if e.expired {
-                    self.inbox.record(crate::form::DeferredFormAnswer {
+                    e.inbox.record(crate::form::DeferredFormAnswer {
                         prompt_id: e.pending.form_id,
                         form: e.pending.form,
                         submission,

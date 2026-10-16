@@ -4,7 +4,7 @@ type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::form::{
     CompositeForm, FormAnswer, FormKind, FormQuestion, FormSubmission, PendingForm,
 };
-use atman_runtime::rendezvous::{PromptId, PromptResolver};
+use atman_runtime::rendezvous::{PromptContext, PromptId, PromptResolver};
 use atman_runtime::session::FormRegistry;
 use tokio::sync::oneshot;
 
@@ -38,10 +38,45 @@ impl PromptResolver for TuiPromptResolver {
         kind: &str,
         payload: serde_json::Value,
     ) -> oneshot::Receiver<serde_json::Value> {
+        self.register_form(id, kind, payload, None)
+    }
+
+    fn register_in_context(
+        &self,
+        id: PromptId,
+        kind: &str,
+        payload: serde_json::Value,
+        context: &PromptContext,
+    ) -> oneshot::Receiver<serde_json::Value> {
+        self.register_form(id, kind, payload, Some(context))
+    }
+}
+
+impl TuiPromptResolver {
+    fn register_form(
+        &self,
+        id: PromptId,
+        kind: &str,
+        payload: serde_json::Value,
+        context: Option<&PromptContext>,
+    ) -> oneshot::Receiver<serde_json::Value> {
         let (tx, rx) = oneshot::channel();
         let form_id = format!("prompt_{}", id);
-        let form = composite_pending_form(&form_id, &id, kind, &payload);
-        let answer_rx = self.forms.request(form);
+        let mut form = composite_pending_form(&form_id, &id, kind, &payload);
+        if let Some(context) = context {
+            if let Some(run_id) = &context.run_id {
+                form.run_id = run_id.clone();
+            }
+            if let Some(tool_use_id) = &context.tool_use_id {
+                form.tool_use_id = tool_use_id.clone();
+            }
+        }
+        let answer_rx = match context.and_then(|context| context.session.as_ref()) {
+            Some(session) => self
+                .forms
+                .request_with_inbox(form, session.deferred_form_inbox()),
+            None => self.forms.request(form),
+        };
         let payload_clone = payload;
         let kind_str = kind.to_string();
         tokio::spawn(async move {

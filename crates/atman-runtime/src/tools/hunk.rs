@@ -91,7 +91,7 @@ impl Tool for HunkReview {
                 _ => 300,
             };
             let default_selection: Vec<u32> = proposal.hunks.iter().map(|h| h.id).collect();
-            let Some(resolver) = ctx.prompt_resolver.clone() else {
+            let Some(resolver) = ctx.prompt_resolver() else {
                 return Ok(Value::Struct(vec![
                     ("mode".into(), Value::Str("auto".into())),
                     (
