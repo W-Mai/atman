@@ -23,7 +23,7 @@ fn descriptor(session: Uuid) -> FlowDescriptor {
         },
         creation_request: Uuid::now_v7(),
         created_by: None,
-        entry: EntrySnapshot {
+        content: EntrySnapshot {
             name: "main".into(),
             path: "main.at".into(),
             bundle: RevisionBundle {
@@ -34,7 +34,8 @@ fn descriptor(session: Uuid) -> FlowDescriptor {
                     "flow main() -> string { return \"saved\" }".into(),
                 )]),
             },
-        },
+        }
+        .into(),
     }
 }
 

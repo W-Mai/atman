@@ -33,7 +33,7 @@ fn descriptor(session: Uuid) -> FlowDescriptor {
     FlowDescriptor {
         address: FlowRef { session_id: session.into(), instance_id: FlowInstanceId::now() },
         creation_request: Uuid::new_v4(), created_by: None,
-        entry: EntrySnapshot {
+        content: EntrySnapshot {
             name: "main".into(), path: "main.at".into(),
             bundle: RevisionBundle {
                 entry: "entry:main.at".into(), edges: Default::default(),
@@ -43,7 +43,7 @@ fn descriptor(session: Uuid) -> FlowDescriptor {
                     return final.answer(message: label)
                 }"#.into())].into(),
             },
-        },
+        }.into(),
     }
 }
 
@@ -165,7 +165,7 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
         .attach_session(root.create_session(info.clone()).unwrap())
         .unwrap();
     let mut entry = descriptor(info.id);
-    entry.entry.bundle.sources.insert(
+    entry.entry_mut().unwrap().bundle.sources.insert(
         "entry:main.at".into(),
         r#"
         flow main(label: string, amount: int) -> string {
@@ -177,18 +177,27 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
     "#
         .into(),
     );
-    entry.entry.path = dir.path().join("main.at");
+    entry.entry_mut().unwrap().path = dir.path().join("main.at");
     std::fs::write(
-        &entry.entry.path,
-        &entry.entry.bundle.sources["entry:main.at"],
+        &entry.entry().unwrap().path,
+        &entry.entry().unwrap().bundle.sources["entry:main.at"],
     )
     .unwrap();
-    entry.entry.bundle =
-        atman_runtime::source_program::load_program(&entry.entry.path, &info.source_roots())
+    entry.entry_mut().unwrap().bundle = atman_runtime::source_program::load_program(
+        &entry.entry().unwrap().path,
+        &info.source_roots(),
+    )
+    .unwrap()
+    .revision_bundle();
+    assert!(
+        entry
+            .entry_mut()
             .unwrap()
-            .revision_bundle();
-    assert!(entry.entry.bundle.entry.starts_with("project:"));
-    std::fs::remove_file(&entry.entry.path).unwrap();
+            .bundle
+            .entry
+            .starts_with("project:")
+    );
+    std::fs::remove_file(&entry.entry().unwrap().path).unwrap();
     let authority = EffectiveAuthority::root(&Default::default(), false, None);
     let mut input = initial(&entry, &entry.address);
     input.request.sender = SenderIdentity::User(Uuid::new_v4());

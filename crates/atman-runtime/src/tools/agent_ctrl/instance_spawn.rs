@@ -86,7 +86,7 @@ pub(super) async fn spawn(
         address: address.clone(),
         creation_request: creation,
         created_by: Some(client.source().clone()),
-        entry: EntrySnapshot {
+        content: EntrySnapshot {
             name: prepared.flow.name.name.clone(),
             path: prepared
                 .program
@@ -94,7 +94,8 @@ pub(super) async fn spawn(
                 .ok_or_else(|| failed("entry source path is unavailable"))?
                 .into(),
             bundle: prepared.program.revision_bundle(),
-        },
+        }
+        .into(),
     };
     let reply = if asynchronous {
         None

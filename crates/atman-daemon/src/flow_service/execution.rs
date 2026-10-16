@@ -82,15 +82,13 @@ impl SessionService {
         EffectiveAuthority,
         atman_runtime::trust::TrustConfig,
     )> {
+        let source = descriptor.entry()?;
         let hub = config(session)?;
         let trust = hub.trust_config()?;
-        let program = load_program_from_bundle(
-            &descriptor.entry.bundle,
-            &descriptor.entry.path,
-            &session.source_roots(),
-        )?;
+        let program =
+            load_program_from_bundle(&source.bundle, &source.path, &session.source_roots())?;
         let entry = program
-            .entry_flow(&descriptor.entry.name)
+            .entry_flow(&source.name)
             .and_then(|id| program.flow(&id))
             .context("entry flow is unavailable")?;
         let authority = EffectiveAuthority::root(
@@ -160,10 +158,11 @@ impl SessionService {
         {
             let worker = self.host.flow(&flow).await?;
             let descriptor = worker.descriptor().await?;
+            let entry = descriptor.entry()?;
             ensure!(
                 descriptor.creation_request == request.request_id
-                    && descriptor.entry.path == request.path
-                    && descriptor.entry.name == request.entry,
+                    && entry.path == request.path
+                    && entry.name == request.entry,
                 "launch conflicts with the recorded entry"
             );
             if let Some(record) = worker.launch_record().await? {
@@ -200,7 +199,7 @@ impl SessionService {
                 address: flow.clone(),
                 creation_request: request.request_id,
                 created_by: None,
-                entry: loaded,
+                content: loaded.into(),
             }
         };
         let (executor, authority, trust) = self

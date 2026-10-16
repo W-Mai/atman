@@ -323,7 +323,7 @@ mod tests {
             },
             creation_request: Uuid::new_v4(),
             created_by: None,
-            entry: EntrySnapshot {
+            content: EntrySnapshot {
                 name: "main".into(),
                 path: "main.at".into(),
                 bundle: crate::source_program::RevisionBundle {
@@ -335,7 +335,8 @@ mod tests {
                     )]
                     .into(),
                 },
-            },
+            }
+            .into(),
         };
         let input = LaunchInput {
             execution: None,

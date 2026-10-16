@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Flow content types** — `FlowDescriptor.content` distinguishes retained executable entries from read-only history. Creation updates expose a typed content summary; entry access returns an error for historical flows.
+
 - **Permission RPC types** — Permission request structs use a flattened `PermissionTarget`; serialized requests retain `session_id` and accept an optional `instance_id`. Permission views include the instance identity when present.
 
 - **Retained entry binding** — `SessionHandle::bind_entry` accepts current host trust alongside the executor and authority ceiling.
@@ -27,6 +29,8 @@ All notable changes to atman are documented in this file.
 - **Embedded provider lifecycle construction** — `ProviderLifecycle::new` returns `Result`, and executor attachment returns `ProviderLifecycleError`. Provider connections must use `ProviderRegistry::with_models(hub.models().clone())`; mismatched configuration scopes are rejected.
 
 ### ✨ Features
+
+- **Historical flow journals** — Read-only flows retain exact legacy records with source identities, ownership, ordering, and integrity validation. Committed history pages remain available after the original source disappears and do not replay execution or notifications.
 
 - **Legacy history inspection** — `migrate inspect` maps recorded agent ownership across turns while retaining byte ranges and integrity checks for every nonempty record. Malformed, conflicting, and unscoped records remain visible without rewriting history or starting execution.
 

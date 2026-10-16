@@ -1456,7 +1456,7 @@ fn flow_descriptor(session: Uuid) -> FlowDescriptor {
         },
         creation_request: Uuid::new_v4(),
         created_by: None,
-        entry: EntrySnapshot {
+        content: EntrySnapshot {
             name: "main".into(),
             path: "main.at".into(),
             bundle: RevisionBundle {
@@ -1468,14 +1468,16 @@ fn flow_descriptor(session: Uuid) -> FlowDescriptor {
                 .into(),
                 edges: Default::default(),
             },
-        },
+        }
+        .into(),
     }
 }
 
 fn program_descriptor(session: Uuid, source: String) -> FlowDescriptor {
     let mut descriptor = flow_descriptor(session);
     descriptor
-        .entry
+        .entry_mut()
+        .unwrap()
         .bundle
         .sources
         .insert("entry:main.at".into(), source);
@@ -3670,7 +3672,7 @@ async fn directory_reuses_active_instances_and_default_binding_has_no_execution_
     assert!(Arc::ptr_eq(&created.unwrap().context(), &a.context()));
     assert_eq!(a.state().await.unwrap(), before);
     let mut conflict = first.clone();
-    conflict.entry.name = "other".into();
+    conflict.entry_mut().unwrap().name = "other".into();
     assert!(session.create_flow(conflict).await.is_err());
     let mut request_reuse = second.clone();
     request_reuse.address.instance_id = FlowInstanceId::now();

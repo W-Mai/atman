@@ -146,7 +146,7 @@ async fn persistent_peers_share_transport_without_sharing_prompt_events_or_cance
             },
             creation_request: uuid::Uuid::new_v4(),
             created_by: None,
-            entry: EntrySnapshot {
+            content: EntrySnapshot {
                 name: "main".into(),
                 path: "main.at".into(),
                 bundle: RevisionBundle {
@@ -162,7 +162,7 @@ async fn persistent_peers_share_transport_without_sharing_prompt_events_or_cance
                         ),
                     )]),
                 },
-            },
+            }.into(),
         };
         let mut store = session.create_flow(descriptor).unwrap();
         store

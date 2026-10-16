@@ -7,7 +7,7 @@ use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -15,7 +15,7 @@ use crate::event::Event;
 use ownership::{Lineage, Subject};
 
 /// Content identity of the entire source, including whitespace and invalid records.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct LegacySource {
     pub path: PathBuf,
     pub bytes: u64,
@@ -42,7 +42,7 @@ impl LegacySource {
 }
 
 /// Legacy identities are mapping keys, never executable instance addresses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LegacyOwner {
     Default,
@@ -51,7 +51,32 @@ pub enum LegacyOwner {
     Unassigned { reason: UnassignedReason },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Stable grouping for retained history; unassigned reasons remain on individual records.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LegacyFlowKey {
+    Default,
+    Agent { owner: String },
+    SpawnedRun { run_id: String },
+    Unassigned,
+}
+
+impl LegacyOwner {
+    pub fn key(&self) -> LegacyFlowKey {
+        match self {
+            Self::Default => LegacyFlowKey::Default,
+            Self::Agent { owner } => LegacyFlowKey::Agent {
+                owner: owner.clone(),
+            },
+            Self::SpawnedRun { run_id } => LegacyFlowKey::SpawnedRun {
+                run_id: run_id.clone(),
+            },
+            Self::Unassigned { .. } => LegacyFlowKey::Unassigned,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnassignedReason {
     InvalidRecord,
@@ -62,7 +87,7 @@ pub enum UnassignedReason {
     CyclicLineage,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordIssue {
     InvalidJson,
@@ -75,7 +100,7 @@ pub enum RecordIssue {
 }
 
 /// A physical nonempty line. Ranges include its original line terminator when present.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct LegacyRecord {
     pub line: u64,
     pub offset: u64,

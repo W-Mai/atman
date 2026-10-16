@@ -398,7 +398,12 @@ impl SessionHandle {
             .cloned();
         if let Some(worker) = existing {
             return worker
-                .request(|store| Ok((store.descriptor().entry.name.clone(), store.state().clone())))
+                .request(|store| {
+                    Ok((
+                        store.descriptor().content.title().to_owned(),
+                        store.state().clone(),
+                    ))
+                })
                 .await;
         }
         self.request(|reply| CatalogCommand::Describe { id, reply })
@@ -435,13 +440,19 @@ async fn serve_catalog(
                 let result = if let Some(worker) = existing {
                     worker
                         .request(|store| {
-                            Ok((store.descriptor().entry.name.clone(), store.state().clone()))
+                            Ok((
+                                store.descriptor().content.title().to_owned(),
+                                store.state().clone(),
+                            ))
                         })
                         .await
                 } else {
                     let returned = tokio::task::spawn_blocking(move || {
                         let result = store.open_flow(&id).map(|flow| {
-                            (flow.descriptor().entry.name.clone(), flow.state().clone())
+                            (
+                                flow.descriptor().content.title().to_owned(),
+                                flow.state().clone(),
+                            )
                         });
                         (store, result)
                     })

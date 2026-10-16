@@ -7,6 +7,7 @@ pub mod completion;
 pub mod context;
 pub mod continuation;
 pub mod goal;
+pub mod history;
 pub mod inbox;
 mod input;
 pub mod launch;
@@ -98,12 +99,60 @@ pub struct EntrySnapshot {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum FlowContent {
+    Entry(EntrySnapshot),
+    History(history::LegacyArchive),
+}
+
+impl From<EntrySnapshot> for FlowContent {
+    fn from(entry: EntrySnapshot) -> Self {
+        Self::Entry(entry)
+    }
+}
+
+impl FlowContent {
+    pub fn title(&self) -> &str {
+        match self {
+            Self::Entry(entry) => &entry.name,
+            Self::History(history) => history.title(),
+        }
+    }
+
+    fn initial_state(&self, address: FlowRef) -> io::Result<FlowInstance<AtmanUuid>> {
+        let mut state = FlowInstance::prepared(address);
+        if let Self::History(history) = self {
+            history.validate()?;
+            state.begin_close().map_err(invalid)?;
+            state.finish_close().map_err(invalid)?;
+        }
+        Ok(state)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FlowDescriptor {
     pub address: FlowRef,
     pub creation_request: Uuid,
-    pub entry: EntrySnapshot,
+    pub content: FlowContent,
     /// Audit provenance only; this does not confer control or propagate cancellation.
     pub created_by: Option<FlowRef>,
+}
+
+impl FlowDescriptor {
+    pub fn entry(&self) -> io::Result<&EntrySnapshot> {
+        match &self.content {
+            FlowContent::Entry(entry) => Ok(entry),
+            FlowContent::History(_) => Err(invalid("history-only flow has no executable entry")),
+        }
+    }
+
+    pub fn entry_mut(&mut self) -> io::Result<&mut EntrySnapshot> {
+        match &mut self.content {
+            FlowContent::Entry(entry) => Ok(entry),
+            FlowContent::History(_) => Err(invalid("history-only flow has no executable entry")),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -157,6 +206,7 @@ impl FlowTransition {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 enum FlowFact {
+    LegacyRecords(Vec<history::LegacyHistoryRecord>),
     ExecutionEvents(Vec<trace::ExecutionEvent>),
     Created(Box<FlowDescriptor>),
     Activated(Box<launch::Activation>),
@@ -183,8 +233,56 @@ enum FlowFact {
     },
 }
 
+/// All mutation paths share the content boundary, including input commit closures.
+struct FlowJournal {
+    inner: Journal,
+    history_only: bool,
+}
+
+impl FlowJournal {
+    fn validate(history_only: bool, facts: &[FlowFact]) -> io::Result<()> {
+        FlowFact::validate_batch(facts)?;
+        if history_only {
+            if !matches!(facts, [FlowFact::LegacyRecords(_)]) {
+                return Err(invalid("history-only flow rejects execution facts"));
+            }
+        } else if facts
+            .iter()
+            .any(|fact| matches!(fact, FlowFact::LegacyRecords(_)))
+        {
+            return Err(invalid("executable flow rejects legacy history batches"));
+        }
+        Ok(())
+    }
+
+    fn commit(&mut self, facts: &[FlowFact]) -> io::Result<CommitReceipt> {
+        Self::validate(self.history_only, facts)?;
+        self.inner.commit(facts)
+    }
+
+    fn read_after(
+        &mut self,
+        after: Option<&CommitReceipt>,
+        limit: std::num::NonZeroUsize,
+    ) -> io::Result<crate::event_log::journal::JournalPage<FlowFact>> {
+        self.inner.read_after(after, limit)
+    }
+}
+
 impl FlowFact {
     fn validate_batch(facts: &[Self]) -> io::Result<()> {
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, Self::Created(_) | Self::LegacyRecords(_)))
+        {
+            return if matches!(facts, [Self::Created(_)] | [Self::LegacyRecords(_)]) {
+                Ok(())
+            } else {
+                Err(invalid(
+                    "creation and legacy history require dedicated batches",
+                ))
+            };
+        }
         if facts
             .iter()
             .any(|fact| matches!(fact, Self::ExecutionEvents(_)))
@@ -499,6 +597,9 @@ impl SessionStore {
         if descriptor.address.session_id.0 != self.projection.descriptor.id {
             return Err(invalid("flow belongs to another session"));
         }
+        descriptor
+            .content
+            .initial_state(descriptor.address.clone())?;
         let id = descriptor.address.instance_id.clone();
         let existing = self
             .projection
@@ -529,8 +630,7 @@ impl SessionStore {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 // A crash between flow creation and container registration leaves a prepared orphan.
                 let store = FlowStore::open(&dir, self.owner.clone(), &descriptor.address)?;
-                if store.descriptor != descriptor || store.state.state() != &InstanceState::Prepared
-                {
+                if store.descriptor != descriptor || store.cursor.sequence != 1 {
                     return Err(invalid(
                         "unregistered flow does not match the prepared creation",
                     ));
@@ -611,7 +711,7 @@ impl SessionStore {
 pub struct FlowStore {
     dir: PathBuf,
     _owner: Arc<SessionOwner>,
-    journal: Journal,
+    journal: FlowJournal,
     descriptor: FlowDescriptor,
     state: FlowInstance<AtmanUuid>,
     inbox: Inbox,
@@ -624,6 +724,7 @@ pub struct FlowStore {
     goals: goal::Goals,
     planning: planning::Planning,
     trace: trace::ExecutionTrace,
+    history: history::HistoryProgress,
     cursor: CommitReceipt,
     projection_error: Option<io::Error>,
     pub recovered_tail: Option<RecoveredTail>,
@@ -645,7 +746,13 @@ impl FlowStore {
             descriptor.address.instance_id.0.0,
         )?;
         let cursor = journal.commit(&[FlowFact::Created(Box::new(descriptor.clone()))])?;
-        let state = FlowInstance::prepared(descriptor.address.clone());
+        let state = descriptor
+            .content
+            .initial_state(descriptor.address.clone())?;
+        let journal = FlowJournal {
+            inner: journal,
+            history_only: matches!(descriptor.content, FlowContent::History(_)),
+        };
         Ok(Self {
             dir: dir.into(),
             _owner: owner,
@@ -662,6 +769,7 @@ impl FlowStore {
             goals: Default::default(),
             planning: Default::default(),
             trace: Default::default(),
+            history: Default::default(),
             cursor,
             projection_error: None,
             recovered_tail: None,
@@ -679,20 +787,30 @@ impl FlowStore {
         let mut goals = goal::Goals::default();
         let mut planning = planning::Planning::default();
         let mut trace = trace::ExecutionTrace::default();
+        let mut history = history::HistoryProgress::default();
         let mut cursor = None;
         let (journal, recovered_tail) = Journal::open(
             &dir.join("events.jsonl"),
             address.instance_id.0.0,
             |receipt, facts| {
                 FlowFact::validate_batch(&facts)?;
+                if let Some((descriptor, _, _)) = &projection {
+                    FlowJournal::validate(
+                        matches!(descriptor.content, FlowContent::History(_)),
+                        &facts,
+                    )?;
+                }
                 for fact in facts {
                     match (&mut projection, fact) {
                         (None, FlowFact::Created(descriptor)) if &descriptor.address == address => {
-                            projection = Some((
-                                *descriptor,
-                                FlowInstance::prepared(address.clone()),
-                                Inbox::default(),
-                            ));
+                            let state = descriptor.content.initial_state(address.clone())?;
+                            projection = Some((*descriptor, state, Inbox::default()));
+                        }
+                        (Some((descriptor, _, _)), FlowFact::LegacyRecords(records)) => {
+                            let FlowContent::History(archive) = &descriptor.content else {
+                                return Err(invalid("legacy records require a history-only flow"));
+                            };
+                            history = history.advance(archive, &records)?;
                         }
                         (Some((_, state, inbox)), FlowFact::Transition(mut transition)) => {
                             let original = transition.clone();
@@ -847,6 +965,10 @@ impl FlowStore {
         )?;
         let (descriptor, state, inbox) =
             projection.ok_or_else(|| invalid("flow creation was not committed"))?;
+        let journal = FlowJournal {
+            inner: journal,
+            history_only: matches!(descriptor.content, FlowContent::History(_)),
+        };
         let mut store = Self {
             dir: dir.into(),
             _owner: owner,
@@ -863,6 +985,7 @@ impl FlowStore {
             goals,
             planning,
             trace,
+            history,
             cursor: cursor.ok_or_else(|| invalid("empty flow journal"))?,
             projection_error: None,
             recovered_tail,
@@ -983,7 +1106,7 @@ impl FlowStore {
 
     fn refresh_projection(&mut self) {
         // Source bodies remain in the creation fact; metadata contains only the entry reference.
-        let value = serde_json::json!({ "address": self.descriptor.address, "entry": self.descriptor.entry.name, "creation_request": self.descriptor.creation_request, "created_by": self.descriptor.created_by, "state": self.state.state(), "revision": self.state.revision(), "pauses": self.state.pauses() });
+        let value = serde_json::json!({ "address": self.descriptor.address, "content": self.descriptor.content.summary(), "history": self.history, "creation_request": self.descriptor.creation_request, "created_by": self.descriptor.created_by, "state": self.state.state(), "revision": self.state.revision(), "pauses": self.state.pauses() });
         self.projection_error =
             write_projection(&self.dir.join("flow.json"), &self.cursor, &value).err();
     }

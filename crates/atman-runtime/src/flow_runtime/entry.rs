@@ -58,14 +58,15 @@ impl EntryRecipe {
         else {
             return Err(invalid("entry binding requires invocation input"));
         };
+        let entry = descriptor.entry()?;
         let program = crate::source_program::load_program_from_bundle(
-            &descriptor.entry.bundle,
-            &descriptor.entry.path,
+            &entry.bundle,
+            &entry.path,
             &session.source_roots(),
         )
         .map_err(invalid)?;
         let flow = program
-            .entry_flow(&descriptor.entry.name)
+            .entry_flow(&entry.name)
             .and_then(|id| program.flow(&id))
             .ok_or_else(|| invalid("recorded entry is unavailable"))?;
         let parameter = crate::validate::invocation_message_parameter(flow)

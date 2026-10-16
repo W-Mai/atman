@@ -45,6 +45,14 @@ Flow transitions validate an expected state revision, apply to a private candida
 
 These storage APIs do not start schedulers, grant permissions, or migrate published sessions. Hosts authorize commands, validate entry programs, and decide when restored instances may execute.
 
+### Read-only historical flows
+
+`FlowDescriptor.content` distinguishes `FlowContent::Entry(EntrySnapshot)` from `FlowContent::History(LegacyArchive)`. Historical flows have no executable entry. Their instance state is closed from creation, without fabricating a completion or cancellation for any old invocation. Catalog discovery, default-view selection, committed pagination, and subscriptions use the same interfaces as executable flows. Entry preparation explicitly rejects historical flows.
+
+`LegacyArchive` records the original session, file identity, ownership group, and expected record count. `FlowStore::append_legacy_history` commits ordered `LegacyHistoryRecord` batches containing exact original bytes in base64 alongside their source metadata. It validates ownership, byte ranges, per-record digests, ordering, and count before writing. Duplicate, altered, and excess records are rejected without advancing the cursor. Reopening rebuilds only the import position; history pages read record bodies from the journal and remain available without the original file or project directory.
+
+The journal's content boundary rejects execution facts in historical flows and legacy batches in executable flows. `FlowUpdate::Created` exposes the typed content summary; `FlowUpdate::LegacyRecords` preserves complete imported batches through the existing view feed. These records are history, not newly accepted messages or final-answer notifications. Importing records does not replay tools, create watchers, or wake agents.
+
 ## Persistent session management over RPC
 
 The daemon exposes persistent catalogs through the authenticated `/rpc` endpoint and Unix socket. Both transports represent the local daemon operator; arbitrary external principal names cannot acquire a catalog. Catalog ownership stays with the daemon after an RPC connection closes. These methods address `runtime-v1` storage; `run_flow`, `list_sessions`, and `/events` without an instance address retain their existing session execution and history format.

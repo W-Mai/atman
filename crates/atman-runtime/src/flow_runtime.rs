@@ -564,7 +564,7 @@ mod tests {
                 address: address.clone(),
                 creation_request: Uuid::new_v4(),
                 created_by: None,
-                entry: EntrySnapshot {
+                content: EntrySnapshot {
                     name: "main".into(),
                     path: "main.at".into(),
                     bundle: RevisionBundle {
@@ -572,7 +572,8 @@ mod tests {
                         sources: [("main.at".into(), "flow main() { }".into())].into(),
                         edges: Default::default(),
                     },
-                },
+                }
+                .into(),
             })
             .unwrap();
         store

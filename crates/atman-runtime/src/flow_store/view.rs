@@ -7,9 +7,28 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
-    FlowFact, FlowRef, FlowStore, FlowTransition, completion, context, goal, inbox, outbox,
-    planning, publication, subscription, trace, waiter,
+    FlowContent, FlowFact, FlowRef, FlowStore, FlowTransition, completion, context, goal, history,
+    inbox, outbox, planning, publication, subscription, trace, waiter,
 };
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum FlowContentSummary {
+    Entry { name: String, path: PathBuf },
+    History(history::LegacyArchive),
+}
+
+impl FlowContent {
+    pub fn summary(&self) -> FlowContentSummary {
+        match self {
+            Self::Entry(entry) => FlowContentSummary::Entry {
+                name: entry.name.clone(),
+                path: entry.path.clone(),
+            },
+            Self::History(archive) => FlowContentSummary::History(archive.clone()),
+        }
+    }
+}
 use crate::{
     event::AtmanUuid,
     event_log::journal::{CommitReceipt, CommittedBatch, JournalPage},
@@ -22,8 +41,7 @@ use crate::{
 pub enum FlowUpdate {
     Created {
         flow: FlowRef,
-        entry: String,
-        path: PathBuf,
+        content: FlowContentSummary,
         created_by: Option<FlowRef>,
     },
     Activated {
@@ -39,6 +57,7 @@ pub enum FlowUpdate {
     GoalUpdated(Box<goal::GoalUpdate>),
     PlanningUpdated(Box<planning::PlanningUpdate>),
     ExecutionEvents(Vec<trace::ExecutionEvent>),
+    LegacyRecords(Vec<history::LegacyHistoryRecord>),
     ReplyWaiterRegistered(Box<waiter::ReplyWaiter>),
     ReplyWaiterCancelled {
         lease: TurnLease<AtmanUuid>,
@@ -59,8 +78,7 @@ impl From<FlowFact> for FlowUpdate {
         match fact {
             FlowFact::Created(descriptor) => Self::Created {
                 flow: descriptor.address,
-                entry: descriptor.entry.name,
-                path: descriptor.entry.path,
+                content: descriptor.content.summary(),
                 created_by: descriptor.created_by,
             },
             FlowFact::Activated(activation) => Self::Activated {
@@ -76,6 +94,7 @@ impl From<FlowFact> for FlowUpdate {
             FlowFact::GoalUpdated(value) => Self::GoalUpdated(value),
             FlowFact::PlanningUpdated(value) => Self::PlanningUpdated(value),
             FlowFact::ExecutionEvents(value) => Self::ExecutionEvents(value),
+            FlowFact::LegacyRecords(value) => Self::LegacyRecords(value),
             FlowFact::ReplyWaiterRegistered(value) => Self::ReplyWaiterRegistered(value),
             FlowFact::ReplyWaiterCancelled { lease, correlation } => {
                 Self::ReplyWaiterCancelled { lease, correlation }
@@ -101,7 +120,7 @@ impl FlowStore {
         after: Option<&CommitReceipt>,
         limit: NonZeroUsize,
     ) -> io::Result<JournalPage<FlowUpdate>> {
-        let page = self.journal.read_after::<FlowFact>(after, limit)?;
+        let page = self.journal.read_after(after, limit)?;
         Ok(JournalPage {
             batches: page
                 .batches

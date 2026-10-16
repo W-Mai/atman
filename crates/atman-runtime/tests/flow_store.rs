@@ -364,7 +364,7 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
     let info = session_descriptor();
     let mut session = root.create_session(info.clone()).unwrap();
     let mut description = descriptor(info.id);
-    description.entry.bundle.sources.insert("entry:main.at".into(), r#"
+    description.entry_mut().unwrap().bundle.sources.insert("entry:main.at".into(), r#"
         flow shared() {
             llm.call(model: "mock", prompt: "shared", context: "session", record: false)
         }
@@ -558,7 +558,7 @@ async fn owned_execution_commits_admission_and_completion_even_when_the_observer
     let info = session_descriptor();
     let mut session = root.create_session(info.clone()).unwrap();
     let mut description = descriptor(info.id);
-    description.entry.bundle.sources.insert(
+    description.entry_mut().unwrap().bundle.sources.insert(
         "entry:main.at".into(),
         r#"flow main(input: int) -> string {
         when env("marker") != "recorded" { return "invalid environment" }
@@ -730,7 +730,7 @@ async fn cooperative_instance_execution_can_be_cancelled_while_paused_without_re
     let info = session_descriptor();
     let mut session = root.create_session(info.clone()).unwrap();
     let mut description = descriptor(info.id);
-    description.entry.bundle.sources.insert(
+    description.entry_mut().unwrap().bundle.sources.insert(
         "entry:main.at".into(),
         "flow main(input: int) { loop { value = input + 1 } }".into(),
     );
@@ -813,7 +813,7 @@ fn descriptor(session: Uuid) -> FlowDescriptor {
             instance_id: FlowInstanceId::now(),
         },
         creation_request: Uuid::new_v4(),
-        entry: EntrySnapshot {
+        content: EntrySnapshot {
             name: "main".into(),
             path: "/missing/project/main.at".into(),
             bundle: RevisionBundle {
@@ -824,7 +824,8 @@ fn descriptor(session: Uuid) -> FlowDescriptor {
                 )]),
                 edges: BTreeMap::new(),
             },
-        },
+        }
+        .into(),
         created_by: None,
     }
 }
@@ -1723,7 +1724,8 @@ async fn owned_execution_separates_pre_admission_errors_from_interrupted_turns()
     ] {
         let mut description = descriptor(info.id);
         description
-            .entry
+            .entry_mut()
+            .unwrap()
             .bundle
             .sources
             .insert("entry:main.at".into(), source.into());
@@ -1939,7 +1941,7 @@ fn prepared_orphan_is_unaddressable_until_registration_and_retry_is_idempotent()
     drop(session.create_flow(descriptor.clone()).unwrap());
     assert_eq!(session.cursor(), &receipt);
     let mut conflict = descriptor.clone();
-    conflict.entry.name = "different".into();
+    conflict.entry_mut().unwrap().name = "different".into();
     assert!(session.create_flow(conflict).is_err());
     let mut conflict = descriptor;
     conflict.address.instance_id = FlowInstanceId::now();
@@ -2101,7 +2103,7 @@ async fn instance_scheduler_rechecks_preparation_races_and_runs_pending_turns_wi
     let info = session_descriptor();
     let mut session = root.create_session(info.clone()).unwrap();
     let mut description = descriptor(info.id);
-    description.entry.bundle.sources.insert("entry:main.at".into(), r#"flow main(input: int) -> string { return final.answer(message: to_json_string(input)) }"#.into());
+    description.entry_mut().unwrap().bundle.sources.insert("entry:main.at".into(), r#"flow main(input: int) -> string { return final.answer(message: to_json_string(input)) }"#.into());
     let mut store = session.create_flow(description.clone()).unwrap();
     change(&mut store, FlowTransition::Activated);
     let worker = FlowWorker::start(store).await.unwrap();
@@ -2208,7 +2210,7 @@ async fn instance_scheduler_stop_releases_admission_ownership_without_cancelling
     let info = session_descriptor();
     let mut session = root.create_session(info.clone()).unwrap();
     let mut description = descriptor(info.id);
-    description.entry.bundle.sources.insert("entry:main.at".into(), r#"flow main(input: int) -> string { execution_probe(); return final.answer(message: "settled") }"#.replace(";", "\n"));
+    description.entry_mut().unwrap().bundle.sources.insert("entry:main.at".into(), r#"flow main(input: int) -> string { execution_probe(); return final.answer(message: "settled") }"#.replace(";", "\n"));
     let mut store = session.create_flow(description.clone()).unwrap();
     change(&mut store, FlowTransition::Activated);
     let worker = FlowWorker::start(store).await.unwrap();
@@ -2286,7 +2288,7 @@ async fn instance_scheduler_keeps_declined_input_and_never_retries_interrupted_e
     let info = session_descriptor();
     let mut session = root.create_session(info.clone()).unwrap();
     let mut description = descriptor(info.id);
-    description.entry.bundle.sources.insert(
+    description.entry_mut().unwrap().bundle.sources.insert(
         "entry:main.at".into(),
         "flow main(input: int) { unavailable_tool() }".into(),
     );
@@ -3383,7 +3385,7 @@ async fn recorded_source_and_committed_input_execute_with_the_persistent_instanc
     let info = session_descriptor();
     let mut session = root.create_session(info.clone()).unwrap();
     let mut description = descriptor(info.id);
-    description.entry.bundle.sources.insert("entry:main.at".into(),
+    description.entry_mut().unwrap().bundle.sources.insert("entry:main.at".into(),
         "flow helper(input: int) -> int { return input * 2 } flow main(input: int) -> int { when env(\"marker\") != \"persisted\" { return 0 } return helper(input).await }".into());
     let mut flow = session.create_flow(description.clone()).unwrap();
     change(&mut flow, FlowTransition::Activated);
@@ -3397,8 +3399,8 @@ async fn recorded_source_and_committed_input_execute_with_the_persistent_instanc
     )
     .unwrap();
     let program = atman_runtime::source_program::load_program_from_bundle(
-        &description.entry.bundle,
-        &description.entry.path,
+        &description.entry().unwrap().bundle,
+        &description.entry().unwrap().path,
         &Default::default(),
     )
     .unwrap();
@@ -3443,7 +3445,7 @@ async fn recorded_source_and_committed_input_execute_with_the_persistent_instanc
     let result = executor
         .run_linked_with_invocation(
             &program,
-            &description.entry.name,
+            &description.entry().unwrap().name,
             args,
             atman_runtime::RootInvocation {
                 session: Some(context.clone()),

@@ -107,7 +107,7 @@ impl FlowWorker {
                 return Err(invalid("a turn requires selected pending input"));
             }
             worker.context().bind_executor(&executor).map_err(invalid)?;
-            let entry = &store.descriptor().entry;
+            let entry = store.descriptor().entry()?;
             let program = crate::source_program::load_program_from_bundle(
                 &entry.bundle,
                 &entry.path,
