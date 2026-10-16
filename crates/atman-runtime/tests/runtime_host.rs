@@ -124,7 +124,7 @@ async fn entry_results_survive_worker_reopen_and_are_read_through_the_shared_too
     let worker = session
         .create_flow(program_descriptor(
             info.id,
-            "flow main() -> any { return { answer: 42, values: [true, 2.5] } }".into(),
+            "flow main() -> any { return { answer: 42, values: [true, -2.1] } }".into(),
         ))
         .await
         .unwrap();

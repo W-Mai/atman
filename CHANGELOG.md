@@ -54,6 +54,10 @@ All notable changes to atman are documented in this file.
 - **Durable sends** — Flow storage retains outbound delivery intents, atomically registers attached reply waiters, and reconciles receiver acknowledgements after restart without duplicate acceptance across session boundaries.
 - **Instance execution** — The executor accepts host-admitted instance bindings with explicit authority and cancellation, isolates instance contexts, preserves identity through inline calls, and rejects reused or mismatched execution bindings.
 
+### 🐛 Fixes
+
+- **Stored floating-point results** — Typed result snapshots encode floating-point bits as eight bytes, preserving their exact representation through tool JSON conversion.
+
 ## [1.17.2] — 2026-10-26
 
 ### 🐛 Fixes

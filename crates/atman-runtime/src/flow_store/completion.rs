@@ -18,7 +18,8 @@ pub enum StoredValue {
     Unit,
     Bool(bool),
     Int(i64),
-    Float(u64),
+    /// Big-endian IEEE 754 bytes survive JSON adapters with signed-integer numeric values.
+    Float([u8; 8]),
     String(String),
     List(Vec<Self>),
     Struct(Vec<(String, Self)>),
@@ -35,7 +36,7 @@ impl StoredValue {
             Value::Unit => Self::Unit,
             Value::Bool(value) => Self::Bool(*value),
             Value::Int(value) => Self::Int(*value),
-            Value::Float(value) => Self::Float(value.to_bits()),
+            Value::Float(value) => Self::Float(value.to_be_bytes()),
             Value::Str(value) => Self::String(value.clone()),
             Value::List(values) => Self::List(values.iter().map(Self::capture).collect()),
             Value::Struct(fields) => Self::Struct(
@@ -66,7 +67,7 @@ impl StoredValue {
             Self::Unit => Value::Unit,
             Self::Bool(value) => Value::Bool(*value),
             Self::Int(value) => Value::Int(*value),
-            Self::Float(bits) => Value::Float(f64::from_bits(*bits)),
+            Self::Float(bytes) => Value::Float(f64::from_be_bytes(*bytes)),
             Self::String(value) => Value::Str(value.clone()),
             Self::List(values) => {
                 Value::List(values.iter().map(Self::restore).collect::<Result<_, _>>()?)
@@ -250,11 +251,13 @@ mod tests {
 
     #[test]
     fn typed_results_round_trip_without_changing_values_or_executing_closures() {
+        use crate::ValueJson;
         let value = Value::List(vec![
             Value::Unit,
             Value::Bool(true),
             Value::Int(i64::MAX),
             Value::Float(-0.0),
+            Value::Float(-1.1),
             Value::Float(f64::from_bits(0x7ff8_0000_0000_0042)),
             Value::Str("text".into()),
             Value::Struct(vec![
@@ -283,6 +286,10 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
         assert_eq!(snapshot, decoded);
         assert_eq!(StoredValue::capture(&decoded.restore().unwrap()), snapshot);
+        let through_tool = Value::from_json(serde_json::to_value(&snapshot).unwrap());
+        let restored: StoredValue =
+            serde_json::from_value(through_tool.to_json().unwrap()).unwrap();
+        assert_eq!(restored, snapshot);
         let closure = Value::Lambda {
             params: vec![],
             body: std::sync::Arc::new(atman_rt::ast::Expr::Literal(atman_rt::ast::Literal::Int(1))),
