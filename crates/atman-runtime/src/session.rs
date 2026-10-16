@@ -266,6 +266,7 @@ impl InteractionServices {
 
 pub struct Session {
     flow_instance: Option<crate::flow_store::FlowRef>,
+    models: std::sync::OnceLock<std::sync::Arc<crate::model_registry::ModelRegistry>>,
     instance_writer: std::sync::OnceLock<crate::flow_runtime::context::ContextWriter>,
     pub goal_control: std::sync::Arc<crate::goal::GoalController>,
     pub goal_turn: Mutex<Option<crate::goal::GoalTurn>>,
@@ -1135,6 +1136,7 @@ impl Session {
         Ok(Self {
             flow_instance: None,
             instance_writer: Default::default(),
+            models: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
@@ -1366,6 +1368,7 @@ impl Session {
         Ok(Self {
             flow_instance: None,
             instance_writer: Default::default(),
+            models: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
@@ -1451,6 +1454,7 @@ impl Session {
         Self {
             flow_instance: None,
             instance_writer: Default::default(),
+            models: Default::default(),
             watch_hub: goal_control.watch_hub.clone(),
             goal_control,
             goal_turn: Mutex::new(None),
@@ -2030,7 +2034,9 @@ impl Session {
         } else {
             estimated
         };
-        let budget = crate::model_registry::model_info(&model).context_budget;
+        let budget = self
+            .model_registry()
+            .map_or(0, |models| models.model_info(&model).context_budget);
         self.watch.context.send_modify(|snap| {
             snap.window_tokens = window;
             if budget > 0 {
@@ -2063,9 +2069,34 @@ impl Session {
         self.watch.context.borrow().model.clone()
     }
 
+    /// Bind the context to one model directory without allowing another host scope to replace it.
+    pub fn bind_model_registry(
+        &self,
+        models: std::sync::Arc<crate::model_registry::ModelRegistry>,
+    ) -> Result<(), crate::error::RuntimeError> {
+        let bound = self.models.get_or_init(|| models.clone());
+        if !std::sync::Arc::ptr_eq(bound, &models) {
+            return Err(crate::error::RuntimeError::ToolFailed(
+                "session is bound to a different model registry scope".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Persistent contexts require host binding; unbound legacy contexts use the default directory.
+    pub fn model_registry(&self) -> Option<&std::sync::Arc<crate::model_registry::ModelRegistry>> {
+        self.models.get().or_else(|| {
+            self.flow_instance
+                .is_none()
+                .then(crate::model_registry::default_registry)
+        })
+    }
+
     pub fn set_current_model(&self, model: impl Into<String>) {
         let model = model.into();
-        let budget = crate::model_registry::model_info(&model).context_budget;
+        let budget = self
+            .model_registry()
+            .map_or(0, |models| models.model_info(&model).context_budget);
         let estimated = crate::compaction::estimate_tokens_for_messages(&self.messages());
         let changed = self.last_model() != model;
         if changed {
@@ -2503,8 +2534,12 @@ impl Session {
     ) -> std::io::Result<Option<CompactResult>> {
         let msgs = self.messages();
         let tokens = crate::compaction::estimate_tokens_for_messages(&msgs);
-        let target =
-            crate::model_registry::model_info(&self.last_model()).compaction_target_after();
+        let models = self
+            .model_registry()
+            .ok_or_else(|| std::io::Error::other("instance model registry is not bound"))?;
+        let target = models
+            .model_info(&self.last_model())
+            .compaction_target_after();
         let Some(range) = crate::compaction::find_compact_range(&msgs, target) else {
             return Ok(None);
         };

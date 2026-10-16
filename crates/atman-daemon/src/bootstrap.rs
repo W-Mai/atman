@@ -154,7 +154,7 @@ pub fn spawn_mcp_boot(
                                     let providers = providers.clone();
                                     Box::pin(async move {
                                         let model = req.model.unwrap_or_default();
-                                        let model_config = atman_runtime::model_registry::model_call_config(&model);
+                                        let model_config = providers.models().model_call_config(&model);
                                         let provider =
                                             providers.resolve_call(&model_config)?.ok_or_else(|| {
                                                 atman_runtime::RuntimeError::ToolFailed(format!(

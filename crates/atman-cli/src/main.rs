@@ -1926,11 +1926,11 @@ async fn suggest_confession_organization(
     }
     let model = session.last_model();
     let model = if model.is_empty() {
-        atman_runtime::model_registry::resolve_alias("smart")
+        executor.providers.models().resolve_alias("smart")
     } else {
         model
     };
-    let call_config = atman_runtime::model_registry::model_call_config(&model);
+    let call_config = executor.providers.models().model_call_config(&model);
     let provider = executor
         .providers
         .resolve_call(&call_config)?
@@ -5684,8 +5684,8 @@ async fn handle_suggest(
         return Ok(());
     }
 
-    let model = load_suggest_model();
-    let call_config = atman_runtime::model_registry::model_call_config(&model);
+    let model = load_suggest_model(executor);
+    let call_config = executor.providers.models().model_call_config(&model);
     let provider = executor
         .providers
         .resolve_call(&call_config)?
@@ -5979,12 +5979,13 @@ fn auto_snapshot_flows(source_path: &Path, program: &LinkedProgram) {
     }
 }
 
-fn load_suggest_model() -> String {
-    let configured = atman_runtime::config_hub::ConfigHub::global()
-        .and_then(|hub| hub.suggest_model())
-        .ok()
-        .flatten();
-    atman_runtime::model_registry::resolve_alias(&select_suggest_model(configured))
+fn load_suggest_model(executor: &Executor) -> String {
+    let hub = executor
+        .provider_lifecycle()
+        .map(|lifecycle| lifecycle.config_hub().clone())
+        .or_else(|| atman_runtime::config_hub::ConfigHub::global().ok());
+    let configured = hub.and_then(|hub| hub.suggest_model().ok().flatten());
+    select_suggest_model(configured)
 }
 
 fn select_suggest_model(configured: Option<String>) -> String {
@@ -9061,7 +9062,7 @@ async fn test_model_endpoint(
     if draft.cancel.is_cancelled() {
         return Err("Model test cancelled".into());
     }
-    let snapshot = atman_runtime::model_registry::draft_model_call_config(
+    let snapshot = registry.models().draft_model_call_config(
         draft.identity.as_deref(),
         &draft.provider,
         &draft.model,
@@ -9073,7 +9074,9 @@ async fn test_model_endpoint(
         .resolve_call(&snapshot)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("Provider {} is unavailable", draft.provider))?;
-    let endpoint = atman_runtime::model_registry::all_provider_entries()
+    let endpoint = registry
+        .models()
+        .all_provider_entries()
         .into_iter()
         .find(|(name, _)| name == &draft.provider)
         .and_then(|(_, entry)| entry.api_endpoint(draft.api))

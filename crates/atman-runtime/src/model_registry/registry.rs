@@ -4,6 +4,7 @@ use std::sync::{Mutex, RwLock};
 /// Model configuration, catalogs, and change notifications owned by one host scope.
 /// Preparation holds this registry's transaction until commit or drop; no process-global configuration is read by the registry.
 pub struct ModelRegistry {
+    identity: std::sync::Arc<()>,
     pub(super) state: RwLock<RegistryState>,
     pub(super) catalog_revision: tokio::sync::watch::Sender<u64>,
     transaction: Mutex<()>,
@@ -20,6 +21,7 @@ impl std::fmt::Debug for ModelRegistry {
 impl Default for ModelRegistry {
     fn default() -> Self {
         Self {
+            identity: std::sync::Arc::new(()),
             state: RwLock::new(RegistryState::default()),
             catalog_revision: tokio::sync::watch::channel(0).0,
             transaction: Mutex::new(()),
@@ -30,6 +32,10 @@ impl Default for ModelRegistry {
 impl ModelRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn owns_call(&self, config: &ModelCallConfig) -> bool {
+        std::sync::Arc::ptr_eq(&self.identity, &config.registry_identity)
     }
 
     /// Atomically replace configured models, aliases, and providers while preserving dynamic catalogs.
@@ -518,7 +524,7 @@ impl ModelRegistry {
     pub fn model_call_config(&self, name: &str) -> ModelCallConfig {
         let state = self.state.read().unwrap();
         let resolved = resolved_model_in_state(&state, name);
-        model_call_config_from_resolved(&state, name, resolved)
+        model_call_config_from_resolved(self.identity.clone(), &state, name, resolved)
     }
 
     /// Resolves an unsaved model draft through the same capability and protocol projection as saved models.
@@ -557,7 +563,7 @@ impl ModelRegistry {
         resolved.entry.max_tokens = max_tokens.or(base_max_tokens);
         resolved.entry.enabled = Some(true);
         resolved.wire_profile = model_profile_in_state(&state, &resolved.entry);
-        model_call_config_from_resolved(&state, key, Some(resolved))
+        model_call_config_from_resolved(self.identity.clone(), &state, key, Some(resolved))
     }
 
     pub fn all_model_entries(&self) -> Vec<(String, ModelEntry)> {

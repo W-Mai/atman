@@ -303,13 +303,6 @@ impl Executor {
             }
             invocation.turn_id = Some(binding.lease.turn.clone());
             invocation.first_run_id = Some(binding.lease.run.clone());
-            binding.claim()?;
-            if let Some(storage) = &binding.storage {
-                storage
-                    .validate_execution(binding.lease.clone())
-                    .await
-                    .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
-            }
         } else if invocation
             .session
             .as_ref()
@@ -318,6 +311,18 @@ impl Executor {
             return Err(RuntimeError::ToolFailed(
                 "instance context requires an explicit execution binding".into(),
             ));
+        }
+        if let Some(session) = &invocation.session {
+            session.bind_model_registry(self.providers.models().clone())?;
+        }
+        if let Some(binding) = &invocation.instance {
+            binding.claim()?;
+            if let Some(storage) = &binding.storage {
+                storage
+                    .validate_execution(binding.lease.clone())
+                    .await
+                    .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
+            }
         }
         let flows = program.flatten_flows();
         if let Some(session) = &invocation.session

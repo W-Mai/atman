@@ -72,15 +72,19 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         .as_ref()
         .map(|p| (**p).clone())
         .unwrap_or_default();
-    let model_config = crate::model_registry::model_call_config(&model);
+    if let Some(session) = &ctx.session_runtime
+        && let Err(error) = session.bind_model_registry(providers_reg.models().clone())
+    {
+        return Value::Err(error);
+    }
+    let model_config = providers_reg.models().model_call_config(&model);
     let provider = match providers_reg.resolve_call(&model_config) {
         Ok(provider) => provider,
         Err(error) => return Value::Err(error),
     };
     let Some(provider) = provider else {
-        if let Some(entry) = crate::model_registry::model_entry(&model)
-            && let Some(ref pname) = entry.provider
-            && !crate::model_registry::is_provider_enabled(pname)
+        if let Some(pname) = model_config.provider()
+            && !model_config.provider_enabled()
         {
             return Value::Err(RuntimeError::ToolFailed(format!(
                 "provider `{pname}` is disabled — enable it in Provider Manager"
@@ -90,6 +94,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             "no provider registered for model `{model}`"
         )));
     };
+    let model = model_config.info.name.clone();
     if let Some(limit) = provider.capabilities().max_tools
         && tool_specs.len() > limit
     {

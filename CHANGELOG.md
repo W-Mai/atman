@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Scoped provider requests** — Provider registries bind model resolution to their directory across LLM calls, extraction, compaction, sampling, and connection checks. Sessions retain the same directory for context and budgets, and mismatched request or session bindings fail before execution.
+
 - **Scoped model directories** — Explicit model registries isolate aliases, provider catalogs, protocol selection, capabilities, budgets, and change notifications. Prepared updates commit to their originating registry, and request snapshots remain stable across refreshes.
 
 - **Instance plans and todos** — Planning tools use the calling flow's journal and live projection, including inline calls and spawned peers. Writes retain stable retry receipts, reopening restores exact records, and plan updates stay separate from execution control and unrelated session files.

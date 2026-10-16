@@ -161,7 +161,7 @@ pub fn parse_llm_args_from_toolargs(
         }
         match k.as_str() {
             "model" => match v {
-                Value::Str(s) => model = Some(crate::model_registry::resolve_alias(s)),
+                Value::Str(s) => model = Some(s.clone()),
                 other => {
                     return Err(RuntimeError::TypeMismatch {
                         expected: "string".into(),

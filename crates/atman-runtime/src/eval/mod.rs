@@ -232,7 +232,9 @@ pub(super) async fn session_context_record_specs(
         (
             "session.models",
             ContextRecordAuthority::Runtime,
-            available_models_context(),
+            session
+                .model_registry()
+                .and_then(|models| available_models_context(models)),
         ),
     ]
     .into_iter()
@@ -881,9 +883,9 @@ pub(crate) fn preview_tool_args(positional: &[Value], named: &[(String, Value)])
     truncate(&parts.join(", "), 4000)
 }
 
-fn available_models_context() -> Option<String> {
-    let mut aliases = crate::model_registry::all_aliases();
-    let mut models = crate::model_registry::all_model_entries();
+fn available_models_context(registry: &crate::model_registry::ModelRegistry) -> Option<String> {
+    let mut aliases = registry.all_aliases();
+    let mut models = registry.all_model_entries();
     if aliases.is_empty() && models.is_empty() {
         return None;
     }
@@ -906,7 +908,7 @@ fn available_models_context() -> Option<String> {
             models
                 .into_iter()
                 .map(|(name, _)| {
-                    let info = crate::model_registry::model_info(&name);
+                    let info = registry.model_info(&name);
                     let thinking = if info.thinking_enabled() {
                         ", thinking"
                     } else {

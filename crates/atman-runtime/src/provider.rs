@@ -797,8 +797,9 @@ pub fn user_text_message(text: impl Into<String>) -> Message {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct ProviderRegistry {
+    models: Arc<crate::model_registry::ModelRegistry>,
     providers: std::sync::Arc<std::sync::RwLock<HashMap<String, Arc<dyn Provider>>>>,
     default: std::sync::Arc<std::sync::RwLock<Option<String>>>,
     lifecycle_owner:
@@ -807,6 +808,7 @@ pub struct ProviderRegistry {
 
 #[derive(Clone)]
 pub(crate) struct WeakProviderRegistry {
+    models: std::sync::Weak<crate::model_registry::ModelRegistry>,
     providers: std::sync::Weak<std::sync::RwLock<HashMap<String, Arc<dyn Provider>>>>,
     default: std::sync::Weak<std::sync::RwLock<Option<String>>>,
     lifecycle_owner: std::sync::Weak<
@@ -814,9 +816,29 @@ pub(crate) struct WeakProviderRegistry {
     >,
 }
 
+impl Default for ProviderRegistry {
+    fn default() -> Self {
+        Self::with_models(crate::model_registry::default_registry().clone())
+    }
+}
+
 impl ProviderRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Bind provider connections to the model directory used for all request snapshots.
+    pub fn with_models(models: Arc<crate::model_registry::ModelRegistry>) -> Self {
+        Self {
+            models,
+            providers: Default::default(),
+            default: Default::default(),
+            lifecycle_owner: Default::default(),
+        }
+    }
+
+    pub fn models(&self) -> &Arc<crate::model_registry::ModelRegistry> {
+        &self.models
     }
 
     pub fn register(&self, provider: Arc<dyn Provider>) {
@@ -909,6 +931,7 @@ impl ProviderRegistry {
 
     pub(crate) fn downgrade(&self) -> WeakProviderRegistry {
         WeakProviderRegistry {
+            models: Arc::downgrade(&self.models),
             providers: Arc::downgrade(&self.providers),
             default: Arc::downgrade(&self.default),
             lifecycle_owner: Arc::downgrade(&self.lifecycle_owner),
@@ -920,23 +943,29 @@ impl ProviderRegistry {
     }
 
     pub fn try_resolve(&self, model: &str) -> Result<Option<Arc<dyn Provider>>, RuntimeError> {
-        self.resolve_call(&crate::model_registry::model_call_config(model))
+        self.resolve_call(&self.models.model_call_config(model))
     }
 
     pub fn resolve_call(
         &self,
         config: &crate::model_registry::ModelCallConfig,
     ) -> Result<Option<Arc<dyn Provider>>, RuntimeError> {
+        if !self.models.owns_call(config) {
+            return Err(RuntimeError::ToolFailed(
+                "model configuration belongs to a different provider registry scope".into(),
+            ));
+        }
+        if !config.provider_enabled() {
+            return Ok(None);
+        }
         let model = config.requested();
         let provider = {
             let providers = self.providers.read().unwrap();
             if let Some(provider_name) = config.provider() {
                 if let Some(provider) = providers.get(provider_name) {
                     Some(provider.clone())
-                } else if crate::model_registry::is_provider_enabled(provider_name) {
-                    providers.get(&format!("config:{provider_name}")).cloned()
                 } else {
-                    None
+                    providers.get(&format!("config:{provider_name}")).cloned()
                 }
             } else {
                 providers
@@ -971,6 +1000,7 @@ impl ProviderRegistry {
 impl WeakProviderRegistry {
     pub(crate) fn upgrade(&self) -> Option<ProviderRegistry> {
         Some(ProviderRegistry {
+            models: self.models.upgrade()?,
             providers: self.providers.upgrade()?,
             default: self.default.upgrade()?,
             lifecycle_owner: self.lifecycle_owner.upgrade()?,

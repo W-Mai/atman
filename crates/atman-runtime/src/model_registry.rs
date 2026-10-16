@@ -222,10 +222,11 @@ struct RegistryState {
 mod registry;
 pub use registry::ModelRegistry;
 
-static DEFAULT_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
+static DEFAULT_REGISTRY: LazyLock<std::sync::Arc<ModelRegistry>> =
+    LazyLock::new(|| std::sync::Arc::new(ModelRegistry::new()));
 
 /// The process-default model directory. Scoped hosts retain their own registry.
-pub fn default_registry() -> &'static ModelRegistry {
+pub fn default_registry() -> &'static std::sync::Arc<ModelRegistry> {
     &DEFAULT_REGISTRY
 }
 
@@ -1238,12 +1239,14 @@ pub fn api_model_id(name: &str) -> String {
 /// Immutable model configuration used for one provider call and its cache projection.
 #[derive(Debug, Clone)]
 pub struct ModelCallConfig {
+    registry_identity: std::sync::Arc<()>,
     requested: String,
     resolved: Option<ResolvedModel>,
     pub api_model: String,
     pub info: ModelInfo,
     pub api: Option<OpenAiApi>,
     explicit_api: bool,
+    provider_enabled: bool,
 }
 
 impl ModelCallConfig {
@@ -1259,6 +1262,10 @@ impl ModelCallConfig {
 
     pub fn explicitly_selects_api(&self) -> bool {
         self.explicit_api
+    }
+
+    pub fn provider_enabled(&self) -> bool {
+        self.provider_enabled
     }
 
     pub fn resolve_reasoning(
@@ -1290,6 +1297,7 @@ pub fn draft_model_call_config(
 }
 
 fn model_call_config_from_resolved(
+    registry_identity: std::sync::Arc<()>,
     state: &RegistryState,
     name: &str,
     resolved: Option<ResolvedModel>,
@@ -1325,6 +1333,8 @@ fn model_call_config_from_resolved(
             max_output_tokens: None,
         });
     ModelCallConfig {
+        registry_identity,
+        provider_enabled: provider_entry.is_none_or(|provider| provider.enabled.unwrap_or(true)),
         requested: name.to_owned(),
         resolved,
         api_model,

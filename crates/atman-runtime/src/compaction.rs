@@ -362,8 +362,12 @@ async fn maybe_auto_compact_locked(
     providers: &crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
 ) {
+    if let Err(error) = session.bind_model_registry(providers.models().clone()) {
+        session.emit_compact_warning(model, 0, 0, 0, &error.to_string());
+        return;
+    }
     let forced = session.take_manual_compact_request();
-    let info = crate::model_registry::model_info(model);
+    let info = providers.models().model_info(model);
     let trigger = info.compaction_trigger_threshold();
     let target = budget_context
         .history_budget(&info)
@@ -650,7 +654,7 @@ async fn generate_llm_summary_with_delta(
     providers: &crate::provider::ProviderRegistry,
     on_delta: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
 ) -> Result<String, crate::error::RuntimeError> {
-    let model_config = crate::model_registry::model_call_config(model);
+    let model_config = providers.models().model_call_config(model);
     let provider = providers.resolve_call(&model_config)?.ok_or_else(|| {
         crate::error::RuntimeError::ToolFailed(format!("no provider for {model}"))
     })?;
@@ -1079,7 +1083,7 @@ pub async fn maybe_auto_compact_handle_locked(
     forced: bool,
 ) -> Option<HandleAutoCompactResult> {
     let snapshot = handle.lock().unwrap().clone();
-    let info = crate::model_registry::model_info(model);
+    let info = providers.models().model_info(model);
     let trigger = info.compaction_trigger_threshold();
     let target = budget_context
         .history_budget(&info)
