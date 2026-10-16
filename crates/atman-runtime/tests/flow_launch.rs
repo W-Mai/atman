@@ -313,6 +313,7 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
             entry.address.instance_id.clone(),
             execution().executor,
             authority.clone(),
+            Default::default(),
             NonZeroUsize::new(16).unwrap(),
         )
         .await

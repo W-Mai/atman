@@ -1953,25 +1953,35 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
     assert!(!binding.authority.allowed_tiers[1]);
     assert!(!binding.authority.allowed_tiers[2]);
     assert!(!binding.authority.permission_management);
-    session
-        .bind_entry(
+    let bind = || {
+        session.bind_entry(
             address.instance_id.clone(),
             executor.clone(),
             current.clone(),
+            Default::default(),
             interval,
         )
-        .await
-        .unwrap();
+    };
+    let (first, competing) = tokio::join!(bind(), bind());
+    assert_ne!(first.is_ok(), competing.is_ok());
     assert!(
         session
             .bind_entry(
                 address.instance_id.clone(),
                 executor.clone(),
                 current.clone(),
+                atman_runtime::trust::TrustConfig {
+                    mode: atman_runtime::trust::TrustMode::Reckless,
+                    ..Default::default()
+                },
                 interval
             )
             .await
             .is_err()
+    );
+    assert_eq!(
+        worker.context().trust_config().mode,
+        atman_runtime::trust::TrustConfig::default().mode
     );
     assert_eq!(worker.state().await.unwrap().pauses(), &[key]);
     assert_eq!(worker.snapshot().await.unwrap().pending.len(), 2);
@@ -2026,6 +2036,7 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
             address.instance_id.clone(),
             executor.clone(),
             current,
+            Default::default(),
             interval,
         )
         .await
@@ -2045,7 +2056,13 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
         EffectiveAuthority::root(&Default::default(), true, Some(workspace.join("other")));
     assert!(
         session
-            .bind_entry(address.instance_id.clone(), executor, outside, interval)
+            .bind_entry(
+                address.instance_id.clone(),
+                executor,
+                outside,
+                Default::default(),
+                interval
+            )
             .await
             .is_err()
     );

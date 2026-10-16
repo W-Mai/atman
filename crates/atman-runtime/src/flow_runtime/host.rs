@@ -269,11 +269,23 @@ impl SessionHandle {
         executor: crate::Executor,
         prepare: impl FnMut(&FlowSnapshot) -> io::Result<Option<TurnRequest>> + Send + 'static,
     ) -> io::Result<watch::Receiver<SchedulingStatus>> {
-        self.open_flow(id.clone()).await?;
+        let worker = self.open_flow(id.clone()).await?;
+        let _binding = worker.launch_gate.clone().lock_owned().await;
+        self.install_scheduler(id, executor, Box::new(prepare))
+            .await
+    }
+
+    /// The caller holds this instance's activation lock through preparation and installation.
+    pub(super) async fn install_scheduler(
+        &self,
+        id: FlowInstanceId,
+        executor: crate::Executor,
+        prepare: PrepareTurn,
+    ) -> io::Result<watch::Receiver<SchedulingStatus>> {
         self.request(|reply| CatalogCommand::Schedule {
             id,
             executor: Box::new(executor),
-            prepare: Box::new(prepare),
+            prepare,
             reply,
         })
         .await

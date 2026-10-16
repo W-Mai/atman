@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Retained entry binding** — `SessionHandle::bind_entry` accepts current host trust alongside the executor and authority ceiling.
+
 - **Form submission acknowledgement** — `FormRegistry::submit`, `DeferredFormInbox::record`, and daemon prompt resolution are asynchronous and return storage errors. TUI form submissions and results carry a matching request ID.
 
 - **Daemon prompt transport** — `DaemonPromptResolver::new(&state)` accepts shared daemon state and retains a weak reference without session or sink fields. Prompt ownership is supplied by `ToolCtx::prompt_resolver()` through `PromptResolver::register_in_context` for each invocation.
@@ -119,6 +121,8 @@ All notable changes to atman are documented in this file.
 - **Instance execution** — The executor accepts host-admitted instance bindings with explicit authority and cancellation, isolates instance contexts, preserves identity through inline calls, and rejects reused or mismatched execution bindings.
 
 ### 🐛 Fixes
+
+- **Host scheduler binding** — Concurrent binding and activation share per-instance ownership. A competing binding cannot replace a live scheduler or change its trust; paused and interrupted instances preserve their execution gates.
 
 - **Retained entry activation** — Source bundles resolve project and user namespaces from their recorded session binding during launch, rebinding, and later turns. Concurrent launches of the same instance share one activation. Host status reads combine execution, Goal, and completion under one committed cursor.
 

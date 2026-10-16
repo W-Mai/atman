@@ -228,17 +228,41 @@ impl super::FlowWorker {
 
 impl super::host::SessionHandle {
     /// Explicitly attach the shared scheduler to a recorded entry.
-    /// Current trust remains in the instance context; this does not restore old trust settings.
+    /// Apply current host trust without releasing execution gates or replaying consumed input. A live scheduler cannot be replaced or have its trust changed by a competing binding.
     pub async fn bind_entry(
         &self,
         id: crate::flow_store::FlowInstanceId,
         executor: crate::Executor,
         current: EffectiveAuthority,
+        trust: crate::trust::TrustConfig,
         yield_interval: NonZeroUsize,
     ) -> io::Result<tokio::sync::watch::Receiver<super::scheduler::SchedulingStatus>> {
         let worker = self.open_flow(id.clone()).await?;
+        let _binding = worker.launch_gate.clone().lock_owned().await;
+        if self
+            .scheduling_status(id.clone())
+            .await?
+            .is_some_and(|status| *status.borrow() == super::scheduler::SchedulingStatus::Running)
+        {
+            return Err(invalid("instance already has a host scheduler"));
+        }
+        if !matches!(
+            worker.state().await?.state(),
+            atman_rt::InstanceState::Open(_)
+        ) {
+            return Err(invalid("only an open instance can bind entry scheduling"));
+        }
         let recipe = worker.entry_recipe(current, yield_interval).await?;
-        self.schedule_flow(id, executor, move |snapshot| recipe.prepare(snapshot))
-            .await
+        worker.context().bind_executor(&executor).map_err(invalid)?;
+        worker
+            .context()
+            .update_trust(trust, |_| Ok(()))
+            .map_err(invalid)?;
+        self.install_scheduler(
+            id,
+            executor,
+            Box::new(move |snapshot| recipe.prepare(snapshot)),
+        )
+        .await
     }
 }
