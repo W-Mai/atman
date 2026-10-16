@@ -26,6 +26,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent flow recovery over RPC** — `flow.bind` attaches scheduling to a saved entry using its recorded source and current configuration. Explicit interruption recovery preserves independent pauses and consumed input; opening history does not resume work.
+
 - **Persistent flow execution over RPC** — Daemon clients can launch retained source entries, queue additional typed invocations, and page committed final answers. Matching retries preserve acceptance identities without repeating execution; pauses retain queued input. Status includes the latest typed completion and independently observed scheduler ownership.
 
 - **Persistent session management** — Daemon RPC supports creating and opening session catalogs, paging their flows, selecting the default view, and inspecting or controlling execution by flow address. Controls preserve independent pause sources, reject stale revisions, and retain state across reopening.

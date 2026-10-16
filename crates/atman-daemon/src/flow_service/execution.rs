@@ -1,7 +1,9 @@
 use std::{num::NonZeroUsize, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
-use atman_proto::flows::{InvokeFlowRequest, LaunchFlowRequest, ReadFlowOutputRequest};
+use atman_proto::flows::{
+    FlowRequest, InvokeFlowRequest, LaunchFlowRequest, ReadFlowOutputRequest,
+};
 use atman_runtime::config_hub::ConfigHub;
 use atman_runtime::event::EventSink;
 use atman_runtime::flow_authority::{EffectiveAuthority, contract_allows_shell};
@@ -70,6 +72,74 @@ impl SessionService {
         Ok(executor.clone())
     }
 
+    async fn prepare_entry(
+        &self,
+        state: &Arc<DaemonState>,
+        session: &SessionDescriptor,
+        descriptor: &FlowDescriptor,
+    ) -> Result<(
+        Executor,
+        EffectiveAuthority,
+        atman_runtime::trust::TrustConfig,
+    )> {
+        let hub = config(session)?;
+        let trust = hub.trust_config()?;
+        let program = load_program_from_bundle(
+            &descriptor.entry.bundle,
+            &descriptor.entry.path,
+            &session.source_roots(),
+        )?;
+        let entry = program
+            .entry_flow(&descriptor.entry.name)
+            .and_then(|id| program.flow(&id))
+            .context("entry flow is unavailable")?;
+        let authority = EffectiveAuthority::root(
+            &trust,
+            contract_allows_shell(entry.contract.as_ref()),
+            session
+                .project
+                .as_ref()
+                .map(|project| project.root().to_path_buf()),
+        );
+        let executor = self.executor(state, session).await?;
+        if let Err(errors) = atman_runtime::validate::validate(entry, &executor.tools) {
+            anyhow::bail!(
+                "entry validation failed: {}",
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
+        Ok((executor, authority, trust))
+    }
+
+    pub(super) async fn bind(
+        &self,
+        state: &Arc<DaemonState>,
+        request: FlowRequest,
+    ) -> Result<Value> {
+        let flow = core_address(request.flow);
+        let session = self.session(flow.session_id.0)?;
+        let snapshot = session.snapshot().await?;
+        let worker = self.host.flow(&flow).await?;
+        let descriptor = worker.descriptor().await?;
+        let (executor, authority, trust) = self
+            .prepare_entry(state, &snapshot.catalog.descriptor, &descriptor)
+            .await?;
+        let status = session
+            .bind_entry(
+                flow.instance_id.clone(),
+                executor,
+                authority,
+                trust,
+                YIELD_INTERVAL,
+            )
+            .await?;
+        Ok(json!({"flow": address(&flow), "scheduler": super::scheduling(&status.borrow())}))
+    }
+
     pub(super) async fn launch(
         &self,
         state: &Arc<DaemonState>,
@@ -133,38 +203,9 @@ impl SessionService {
                 entry: loaded,
             }
         };
-        let hub = config(&snapshot.catalog.descriptor)?;
-        let trust = hub.trust_config()?;
-        let program = load_program_from_bundle(
-            &descriptor.entry.bundle,
-            &descriptor.entry.path,
-            &snapshot.catalog.descriptor.source_roots(),
-        )?;
-        let entry = program
-            .entry_flow(&descriptor.entry.name)
-            .and_then(|id| program.flow(&id))
-            .context("entry flow is unavailable")?;
-        let authority = EffectiveAuthority::root(
-            &trust,
-            contract_allows_shell(entry.contract.as_ref()),
-            snapshot
-                .catalog
-                .descriptor
-                .project
-                .as_ref()
-                .map(|project| project.root().to_path_buf()),
-        );
-        let executor = self.executor(state, &snapshot.catalog.descriptor).await?;
-        if let Err(errors) = atman_runtime::validate::validate(entry, &executor.tools) {
-            anyhow::bail!(
-                "entry validation failed: {}",
-                errors
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            );
-        }
+        let (executor, authority, trust) = self
+            .prepare_entry(state, &snapshot.catalog.descriptor, &descriptor)
+            .await?;
         // The creation request identifies the initial invocation in each typed identity domain.
         let input = LaunchInput {
             execution: Some(EntryBinding {

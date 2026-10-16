@@ -48,8 +48,9 @@ The daemon exposes persistent catalogs through the authenticated `/rpc` endpoint
 | `session.flows` | `session_id`, optional `before` instance UUID, `limit` from 1 to 50 (default 20) | Newest-first membership page, next cursor, total, and catalog receipt |
 | `session.select_flow` | `flow: { session_id, instance_id }` | Summary with the selected default view |
 | `flow.get` | `flow` | Atomic execution, Goal, latest completion, and journal cursor; independently observed scheduler status |
-| `flow.control` | `flow`, `expected_revision`, `action: pause / resume / cancel_turn` | Durable commit receipt |
+| `flow.control` | `flow`, `expected_revision`, `action: pause / resume / cancel_turn / recover` | Durable commit receipt |
 | `flow.launch` | `flow`, `request_id`, `expected_catalog_sequence`, absolute `path`, `entry`, optional `arguments` and `invocation` maps | Durable initial input acceptance |
+| `flow.bind` | `flow` | Explicit scheduler binding using retained source and current host configuration |
 | `flow.invoke` | `flow`, `request_id`, optional `arguments` and `invocation` maps | Durable next-turn input acceptance |
 | `flow.output` | `flow`, optional exclusive `after` publication UUID, `limit` from 1 to 50 (default 20) | Committed final answers, next cursor, and `has_more` |
 
@@ -59,7 +60,9 @@ View selection changes only the default binding. Opening, listing, selecting, an
 
 `flow.launch` validates and snapshots the named source entry before creating an instance. The daemon retains scheduling independently of the requesting connection and builds execution services from the session's recorded configuration and project binding. Source changes or deletion do not change later invocations. Matching launch retries return the original acceptance with its current consumption disposition, without rereading source files, repeating execution, releasing pauses, or reinstalling scheduling. Conflicting reuse is rejected. `flow.invoke` queues a typed invocation on that same instance; duplicate requests share acceptance and paused input remains pending. Acceptance certifies durable receipt, not successful execution. Invocation settings are explicitly read by the flow and are not added to conversation history.
 
-`flow.output` reads the same final-answer publications exposed to peer flows. Ordinary entry returns are available as typed completion records through `flow.get` and do not become final answers implicitly. Prompt requests use the existing daemon prompt transport with invocation-owned context. `DaemonPromptResolver::new(&state)` retains a weak state reference, preventing cached execution services from keeping their daemon alive. After reopening, execution scheduling still requires an explicit host `SessionHandle::bind_entry`; catalog reads and matching launch retries do not restore it.
+`flow.output` reads the same final-answer publications exposed to peer flows. Ordinary entry returns are available as typed completion records through `flow.get` and do not become final answers implicitly. Prompt requests use the existing daemon prompt transport with invocation-owned context. `DaemonPromptResolver::new(&state)` retains a weak state reference, preventing cached execution services from keeping their daemon alive.
+
+After reopening, `flow.bind` attaches scheduling through `SessionHandle::bind_entry`. Launching and binding share source, tool, and configuration validation; the recorded configuration source is used even if the new daemon has no launcher configuration. Invalid configuration leaves the instance available for inspection without installing scheduling. A live scheduler rejects replacement. Binding can admit pending input on an idle instance, but preserves all pause keys and interruption state. `flow.control` with `recover` explicitly changes an interrupted instance to idle under its expected revision; it neither releases pauses nor replays the interrupted invocation. Pending input runs only after scheduling is bound and every execution gate permits admission. Use `resume` separately to remove the operator's pause. Catalog reads and matching launch retries perform neither operation.
 
 ## Instance activation
 

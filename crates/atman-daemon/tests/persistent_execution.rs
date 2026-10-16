@@ -60,6 +60,26 @@ fn answer(page: &Value, index: usize) -> String {
     message.text_concat()
 }
 
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+async fn wait_prompt(state: &Arc<DaemonState>) -> atman_proto::PromptId {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(prompt) = state.pending_prompt_ids().first() {
+                return prompt.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn rpc_entries_retain_source_and_identity_across_turns_and_pauses() {
     let dir = tempfile::tempdir().unwrap();
@@ -195,16 +215,7 @@ async fn rpc_entry_waits_for_the_original_daemon_prompt_transport() {
     )
     .await;
     rpc(&state, methods::FLOW_LAUNCH, launch).await;
-    let prompt = tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            if let Some(prompt) = state.pending_prompt_ids().first() {
-                return prompt.clone();
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    let prompt = wait_prompt(&state).await;
     let resolved = rpc(
         &state,
         methods::RESOLVE_PROMPT,
@@ -276,4 +287,94 @@ async fn failed_preparation_and_stale_inventory_do_not_register_executable_flows
         json!([]),
         "ordinary returns must not become final answers"
     );
+}
+
+#[test]
+fn reopening_requires_explicit_binding_and_preserves_paused_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flow, launch, accepted, first, invocation) = runtime().block_on(async {
+        let (state, flow, launch) = setup(&dir, "flow main(label: string) -> string { return final.answer(message: label) }").await;
+        let accepted = rpc(&state, methods::FLOW_LAUNCH, launch.clone()).await;
+        let first = wait_completion(&state, &flow, None).await;
+        rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": first["execution"]["revision"], "action": "pause"})).await;
+        let invocation = json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"label": "second"}});
+        rpc(&state, methods::FLOW_INVOKE, invocation.clone()).await;
+        std::fs::remove_file(dir.path().join("main.at")).unwrap();
+        (flow, launch, accepted, first, invocation)
+    });
+    runtime().block_on(async {
+        // No launcher project or configuration is supplied on reopening.
+        let state = Arc::new(DaemonState::new(dir.path().join("data")));
+        rpc(&state, methods::SESSION_OPEN, json!({"session_id": flow["session_id"]})).await;
+        let request = json!({"flow": flow});
+        let opened = rpc(&state, methods::FLOW_GET, request.clone()).await;
+        assert!(opened["scheduler"].is_null());
+        assert_eq!(opened["execution"]["pause_count"], 1);
+        assert_eq!(opened["last_completion"], first["last_completion"]);
+        std::fs::write(dir.path().join("config/config.toml"), "[invalid").unwrap();
+        let retry = rpc(&state, methods::FLOW_LAUNCH, launch).await;
+        assert_eq!(retry["acceptance"]["message_id"], accepted["acceptance"]["message_id"]);
+        assert_eq!(retry["acceptance"]["receipt"], accepted["acceptance"]["receipt"]);
+        let invalid = dispatch(state.clone(), JsonRpcRequest::new(1, methods::FLOW_BIND, request.clone())).await;
+        assert!(invalid.error.is_some());
+        assert_eq!(rpc(&state, methods::FLOW_GET, request.clone()).await, opened);
+        std::fs::write(dir.path().join("config/config.toml"), "[trust]\nmode = \"calm\"\n").unwrap();
+        let bound = rpc(&state, methods::FLOW_BIND, request.clone()).await;
+        assert_eq!(bound["scheduler"]["status"], "running");
+        let duplicate = dispatch(state.clone(), JsonRpcRequest::new(1, methods::FLOW_BIND, request.clone())).await;
+        assert!(duplicate.error.is_some());
+        let paused = rpc(&state, methods::FLOW_GET, request.clone()).await;
+        assert_eq!(paused["execution"], opened["execution"]);
+        assert_eq!(paused["last_completion"], first["last_completion"]);
+        rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": paused["execution"]["revision"], "action": "resume"})).await;
+        let second = wait_completion(&state, &flow, Some(&first["last_completion"]["lease"]["turn"])).await;
+        let page = rpc(&state, methods::FLOW_OUTPUT, request.clone()).await;
+        assert_eq!(page["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(answer(&page, 1), "second");
+        rpc(&state, methods::FLOW_INVOKE, invocation).await;
+        assert_eq!(rpc(&state, methods::FLOW_GET, request).await["last_completion"], second["last_completion"]);
+    });
+}
+
+#[test]
+fn rebinding_does_not_recover_lost_turns_or_replay_their_consumed_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let flow = runtime().block_on(async {
+        let (state, flow, mut launch) = setup(&dir, r#"flow main(label: string) -> string {
+            when label == "hold" { user_confirm("waiting") }
+            return final.answer(message: label)
+        }"#).await;
+        launch["arguments"]["label"] = json!("hold");
+        rpc(&state, methods::FLOW_LAUNCH, launch).await;
+        wait_prompt(&state).await;
+        let active = rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await;
+        rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": active["execution"]["revision"], "action": "pause"})).await;
+        rpc(&state, methods::FLOW_INVOKE, json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"label": "after recovery"}})).await;
+        flow
+    });
+    runtime().block_on(async {
+        let state = Arc::new(DaemonState::new(dir.path().join("data")));
+        rpc(&state, methods::SESSION_OPEN, json!({"session_id": flow["session_id"]})).await;
+        let request = json!({"flow": flow});
+        let opened = rpc(&state, methods::FLOW_GET, request.clone()).await;
+        assert_eq!(opened["execution"]["state"]["open"]["interrupted"]["reason"], "host_lost");
+        assert_eq!(opened["execution"]["pause_count"], 1);
+        rpc(&state, methods::FLOW_BIND, request.clone()).await;
+        let bound = rpc(&state, methods::FLOW_GET, request.clone()).await;
+        assert_eq!(bound["execution"], opened["execution"]);
+        assert_eq!(bound["last_completion"], opened["last_completion"]);
+        rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": bound["execution"]["revision"], "action": "recover"})).await;
+        let recovered = rpc(&state, methods::FLOW_GET, request.clone()).await;
+        assert_eq!(recovered["execution"]["state"]["open"], "idle");
+        assert_eq!(recovered["execution"]["pause_count"], 1);
+        assert_eq!(recovered["execution"]["can_start_turn"], false);
+        let stale = dispatch(state.clone(), JsonRpcRequest::new(1, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": bound["execution"]["revision"], "action": "recover"}))).await;
+        assert!(stale.error.is_some());
+        rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": recovered["execution"]["revision"], "action": "resume"})).await;
+        wait_completion(&state, &flow, Some(&opened["last_completion"]["lease"]["turn"])).await;
+        let output = rpc(&state, methods::FLOW_OUTPUT, request).await;
+        assert_eq!(output["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(answer(&output, 0), "after recovery");
+        assert!(state.pending_prompt_ids().is_empty(), "lost prompt must not be replayed");
+    });
 }

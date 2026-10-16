@@ -100,6 +100,7 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::FLOW_GET
             | methods::FLOW_CONTROL
             | methods::FLOW_LAUNCH
+            | methods::FLOW_BIND
             | methods::FLOW_INVOKE
             | methods::FLOW_OUTPUT
     )
@@ -133,6 +134,7 @@ enum Request {
     Get(FlowRequest),
     Control(ControlFlowRequest),
     Launch(LaunchFlowRequest),
+    Bind(FlowRequest),
     Invoke(InvokeFlowRequest),
     Output(ReadFlowOutputRequest),
 }
@@ -147,6 +149,7 @@ impl Request {
             methods::FLOW_GET => Self::Get(decode(params)?),
             methods::FLOW_CONTROL => Self::Control(decode(params)?),
             methods::FLOW_LAUNCH => Self::Launch(decode(params)?),
+            methods::FLOW_BIND => Self::Bind(decode(params)?),
             methods::FLOW_INVOKE => Self::Invoke(decode(params)?),
             methods::FLOW_OUTPUT => Self::Output(decode(params)?),
             _ => return Err(JsonRpcError::method_not_found(method)),
@@ -169,7 +172,7 @@ impl Request {
                 }
                 (request.session_id.0, request.before)
             }
-            Self::Select(request) | Self::Get(request) => {
+            Self::Select(request) | Self::Get(request) | Self::Bind(request) => {
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::Control(request) => (request.flow.session_id.0, Some(request.flow.instance_id)),
@@ -222,6 +225,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
     });
     match request {
         Request::Launch(request) => service.launch(state, request).await,
+        Request::Bind(request) => service.bind(state, request).await,
         Request::Invoke(request) => service.invoke(request).await,
         Request::Output(request) => service.output(request).await,
         Request::Create(request) => {
@@ -281,17 +285,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
                 .session(flow.session_id.0)?
                 .scheduling_status(flow.instance_id.clone())
                 .await?;
-            let scheduler = scheduler.map(|status| match &*status.borrow() {
-                atman_runtime::flow_runtime::scheduler::SchedulingStatus::Running => {
-                    json!({"status": "running"})
-                }
-                atman_runtime::flow_runtime::scheduler::SchedulingStatus::Stopped => {
-                    json!({"status": "stopped"})
-                }
-                atman_runtime::flow_runtime::scheduler::SchedulingStatus::Failed(error) => {
-                    json!({"status": "failed", "error": error})
-                }
-            });
+            let scheduler = scheduler.map(|status| scheduling(&status.borrow()));
             Ok(
                 json!({"flow": address(&flow), "execution": execution(&view.execution), "goal": view.goal, "last_completion": view.completion, "cursor": view.cursor, "scheduler": scheduler}),
             )
@@ -302,6 +296,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
                 FlowControl::Pause => PeerControl::Pause,
                 FlowControl::Resume => PeerControl::Resume,
                 FlowControl::CancelTurn => PeerControl::CancelTurn,
+                FlowControl::Recover => PeerControl::Recover,
             };
             // Stable across process restarts, distinct from peer-generated controller keys.
             let user_pause = Uuid::from_bytes(*b"atman-user-pause").into();
@@ -343,4 +338,13 @@ fn address(flow: &FlowRef) -> FlowAddress {
 
 fn execution(state: &atman_rt::FlowInstance<atman_runtime::event::AtmanUuid>) -> Value {
     json!({"revision": state.revision(), "state": state.state(), "pause_count": state.pauses().len(), "can_start_turn": state.can_start_turn()})
+}
+
+fn scheduling(status: &atman_runtime::flow_runtime::scheduler::SchedulingStatus) -> Value {
+    use atman_runtime::flow_runtime::scheduler::SchedulingStatus;
+    match status {
+        SchedulingStatus::Running => json!({"status": "running"}),
+        SchedulingStatus::Stopped => json!({"status": "stopped"}),
+        SchedulingStatus::Failed(error) => json!({"status": "failed", "error": error}),
+    }
 }

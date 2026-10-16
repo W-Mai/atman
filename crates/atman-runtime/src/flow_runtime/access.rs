@@ -26,6 +26,7 @@ pub enum PeerControl {
     Pause,
     Resume,
     CancelTurn,
+    Recover,
 }
 
 /// An opaque host-issued identity for one admitted invocation, not a serializable model argument.
@@ -566,6 +567,7 @@ impl super::FlowWorker {
             let transition = match control {
                 PeerControl::Pause => FlowTransition::ExecutionPaused { key },
                 PeerControl::Resume => FlowTransition::ExecutionResumed { key },
+                PeerControl::Recover => FlowTransition::InterruptionRecovered,
                 PeerControl::CancelTurn => match store.state().state() {
                     InstanceState::Open(InstanceActivity::Active(active)) => {
                         FlowTransition::PhaseChanged {

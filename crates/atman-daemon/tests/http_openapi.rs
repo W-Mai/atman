@@ -56,6 +56,7 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "flow.get",
         "flow.control",
         "flow.launch",
+        "flow.bind",
         "flow.invoke",
         "flow.output",
     ] {

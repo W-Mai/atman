@@ -50,6 +50,7 @@ pub enum FlowControl {
     Pause,
     Resume,
     CancelTurn,
+    Recover,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
