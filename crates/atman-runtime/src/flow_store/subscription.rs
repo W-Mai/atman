@@ -1,4 +1,4 @@
-//! Receiver-owned public answer subscriptions and atomic inbox delivery.
+//! Receiver-owned flow event subscriptions and atomic inbox delivery.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -8,25 +8,26 @@ use std::{
 
 use atman_rt::InstanceState;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use super::completion::CommittedCompletion;
 use super::inbox::{
     AcceptedEnvelope, DeliveryMode, DeliveryRequest, FlowEventRef, Inbox, InboxPayload,
     SenderIdentity,
 };
-use super::publication::PublishedMessage;
 use super::{FlowFact, FlowRef, FlowStore, invalid};
 use crate::event_log::journal::CommitReceipt;
 use crate::message::MessageOrigin;
 
 /// A cursor obtained from an actual source owner, not a caller-selected history offset.
 #[derive(Clone, Debug)]
-pub struct PublicationAnchor {
+pub struct ObservationAnchor {
     source: FlowRef,
     cursor: CommitReceipt,
 }
 
-impl PublicationAnchor {
+impl ObservationAnchor {
     pub fn source(&self) -> &FlowRef {
         &self.source
     }
@@ -37,18 +38,27 @@ impl PublicationAnchor {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-pub enum AnswerFilter {
-    All,
-    Contains(String),
-    ExceptTurn(crate::event::TurnId),
+pub enum FlowEventFilter {
+    FinalAnswers,
+    AnswerContains(String),
+    AnswersExceptTurn(crate::event::TurnId),
+    TurnCompleted { turn: Option<crate::event::TurnId> },
 }
 
-impl AnswerFilter {
-    fn matches(&self, message: &crate::message::Message) -> bool {
-        match self {
-            Self::All => true,
-            Self::Contains(text) => message.text_concat().contains(text),
-            Self::ExceptTurn(turn) => &message.turn_id != turn,
+impl FlowEventFilter {
+    fn matches(&self, event: &ObservedEvent) -> bool {
+        match (self, event) {
+            (Self::FinalAnswers, ObservedEvent::FinalAnswer { .. }) => true,
+            (Self::AnswerContains(text), ObservedEvent::FinalAnswer { message }) => {
+                message.text_concat().contains(text)
+            }
+            (Self::AnswersExceptTurn(turn), ObservedEvent::FinalAnswer { message }) => {
+                &message.turn_id != turn
+            }
+            (Self::TurnCompleted { turn }, ObservedEvent::TurnCompleted { completion }) => turn
+                .as_ref()
+                .is_none_or(|turn| turn == &completion.completion.lease.turn),
+            _ => false,
         }
     }
 }
@@ -61,10 +71,10 @@ pub enum SubscriptionPurpose {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AnswerSubscription {
+pub struct FlowSubscription {
     pub id: Uuid,
     pub source: FlowRef,
-    pub filter: AnswerFilter,
+    pub filter: FlowEventFilter,
     pub once: bool,
     pub purpose: SubscriptionPurpose,
 }
@@ -79,7 +89,7 @@ pub enum SubscriptionStatus {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SubscriptionRecord {
-    pub subscription: AnswerSubscription,
+    pub subscription: FlowSubscription,
     pub started_after: CommitReceipt,
     pub cursor: u64,
     pub status: SubscriptionStatus,
@@ -96,16 +106,16 @@ pub(super) struct ResultRegistration {
     pub receipt: CommitReceipt,
 }
 
-/// Source-authenticated page. Records are public final answers only; private context is absent.
+/// Source-authenticated page of final answers and entry completions; private context is absent.
 #[derive(Clone, Debug)]
-pub struct PublicationPage {
+pub struct FlowEventPage {
     source: FlowRef,
     after: u64,
     through: u64,
-    records: Vec<PublishedMessage>,
+    records: Vec<(CommitReceipt, ObservedEvent)>,
 }
 
-impl PublicationPage {
+impl FlowEventPage {
     pub fn through(&self) -> u64 {
         self.through
     }
@@ -117,11 +127,53 @@ struct SubscriptionMatch {
     purpose: SubscriptionPurpose,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ObservedEvent {
+    FinalAnswer { message: crate::message::Message },
+    TurnCompleted { completion: CommittedCompletion },
+}
+
+impl ObservedEvent {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::FinalAnswer { .. } => "final_answer",
+            Self::TurnCompleted { .. } => "turn_completed",
+        }
+    }
+
+    fn validate_source(&self, source: &FlowEventRef) -> io::Result<()> {
+        let valid = match self {
+            Self::FinalAnswer { message } => message.origin == MessageOrigin::FinalAnswer,
+            Self::TurnCompleted { completion } => {
+                completion.completion.lease.flow == source.flow
+                    && completion.receipt.journal_id == source.flow.instance_id.0.0
+                    && completion.receipt.sequence == source.sequence
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(invalid("observation does not match its source fact"))
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct AnswerNotification {
+struct EventNotification {
     subscriptions: Vec<SubscriptionMatch>,
-    message: crate::message::Message,
+    #[serde(flatten)]
+    event: ObservedEvent,
+}
+
+fn event_request_id(source: &FlowEventRef) -> Uuid {
+    let mut digest = Sha256::new();
+    digest.update(b"atman.flow.observation");
+    digest.update(source.flow.session_id.0.as_bytes());
+    digest.update(source.flow.instance_id.0.0.as_bytes());
+    digest.update(source.sequence.to_be_bytes());
+    digest.update(source.index.to_be_bytes());
+    Uuid::from_bytes(digest.finalize()[..16].try_into().expect("digest prefix"))
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -157,9 +209,9 @@ impl Subscriptions {
                 .observed
                 .get(&record.subscription.source)
                 .is_some_and(|cursor| *cursor > record.cursor)
-            || matches!(&record.subscription.filter, AnswerFilter::Contains(text) if text.is_empty())
+            || matches!(&record.subscription.filter, FlowEventFilter::AnswerContains(text) if text.is_empty())
         {
-            return Err(invalid("invalid or stale answer subscription"));
+            return Err(invalid("invalid or stale flow subscription"));
         }
         Ok(())
     }
@@ -231,7 +283,7 @@ impl Subscriptions {
                 || source.sequence > observation.through
                 || source.sequence <= last_sequence
                 || source.index != 0
-                || event != "final_answer"
+                || envelope.request.request_id != event_request_id(source)
                 || envelope.request.cause.as_ref() != Some(source)
                 || envelope.request.delivery != DeliveryMode::AtBoundary
                 || envelope.request.correlation.is_some()
@@ -239,16 +291,17 @@ impl Subscriptions {
             {
                 return Err(invalid("invalid observation envelope"));
             }
-            let notification: AnswerNotification =
+            let notification: EventNotification =
                 serde_json::from_value(content.clone()).map_err(invalid)?;
-            if notification.message.origin != MessageOrigin::FinalAnswer {
-                return Err(invalid("observation contains non-final output"));
+            notification.event.validate_source(source)?;
+            if event != notification.event.name() {
+                return Err(invalid("observation event type does not match its content"));
             }
             let mut expected = Vec::new();
             for record in &records {
                 if record.cursor < source.sequence
                     && updates[&record.subscription.id] == SubscriptionStatus::Active
-                    && record.subscription.filter.matches(&notification.message)
+                    && record.subscription.filter.matches(&notification.event)
                 {
                     expected.push(SubscriptionMatch {
                         id: record.subscription.id,
@@ -297,7 +350,7 @@ impl FlowStore {
             || record.subscription.purpose != SubscriptionPurpose::SpawnResult
             || !matches!(
                 record.subscription.filter,
-                AnswerFilter::All | AnswerFilter::ExceptTurn(_)
+                FlowEventFilter::FinalAnswers | FlowEventFilter::AnswersExceptTurn(_)
             )
             || record.subscription.once
         {
@@ -311,39 +364,62 @@ impl FlowStore {
             receipt: self.cursor.clone(),
         }))
     }
-    pub fn publication_anchor(&self) -> PublicationAnchor {
-        PublicationAnchor {
+    pub fn observation_anchor(&self) -> ObservationAnchor {
+        ObservationAnchor {
             source: self.descriptor.address.clone(),
             cursor: self.cursor.clone(),
         }
     }
 
     /// Read a bounded page without reopening a journal or observing private branch output.
-    pub fn publications_after(
-        &self,
-        after: u64,
-        limit: NonZeroUsize,
-    ) -> io::Result<PublicationPage> {
+    pub fn events_after(&self, after: u64, limit: NonZeroUsize) -> io::Result<FlowEventPage> {
         if after > self.cursor.sequence {
             return Err(invalid("source cursor is ahead of its journal"));
         }
-        let records: Vec<_> = self
-            .published_messages()
+        let publications = self.published_messages();
+        let mut answers = publications
+            [publications.partition_point(|p| p.receipt.sequence <= after)..]
             .iter()
             .filter(|record| {
-                record.receipt.sequence > after
-                    && record.publication.context_run.is_none()
+                record.publication.context_run.is_none()
                     && record.publication.message.origin == MessageOrigin::FinalAnswer
             })
-            .take(limit.get())
-            .cloned()
-            .collect();
+            .map(|record| {
+                (
+                    record.receipt.clone(),
+                    ObservedEvent::FinalAnswer {
+                        message: record.publication.message.clone(),
+                    },
+                )
+            })
+            .peekable();
+        let completions = self.completions();
+        let mut completions = completions
+            [completions.partition_point(|p| p.receipt.sequence <= after)..]
+            .iter()
+            .map(|record| {
+                (
+                    record.receipt.clone(),
+                    ObservedEvent::TurnCompleted {
+                        completion: record.clone(),
+                    },
+                )
+            })
+            .peekable();
+        let records: Vec<_> = std::iter::from_fn(|| match (answers.peek(), completions.peek()) {
+            (Some((a, _)), Some((b, _))) if a.sequence < b.sequence => answers.next(),
+            (Some(_), None) => answers.next(),
+            (_, Some(_)) => completions.next(),
+            (None, None) => None,
+        })
+        .take(limit.get())
+        .collect();
         // Advance only for observable source facts. Advancing to unrelated commits would make
         // a self-subscription repeatedly observe its own cursor-update transactions.
         let through = records
             .last()
-            .map_or(after, |record| record.receipt.sequence);
-        Ok(PublicationPage {
+            .map_or(after, |(receipt, _)| receipt.sequence);
+        Ok(FlowEventPage {
             source: self.descriptor.address.clone(),
             after,
             through,
@@ -351,15 +427,15 @@ impl FlowStore {
         })
     }
 
-    pub fn answer_subscriptions(&self) -> impl Iterator<Item = &SubscriptionRecord> {
+    pub fn flow_subscriptions(&self) -> impl Iterator<Item = &SubscriptionRecord> {
         self.subscriptions.records.values()
     }
 
     /// The trusted host checks watch authority before registration, then activates a prepared source.
-    pub fn subscribe_answers(
+    pub fn subscribe_events(
         &mut self,
-        subscription: AnswerSubscription,
-        anchor: &PublicationAnchor,
+        subscription: FlowSubscription,
+        anchor: &ObservationAnchor,
     ) -> io::Result<CommitReceipt> {
         if subscription.source != anchor.source {
             return Err(invalid("subscription anchor belongs to another source"));
@@ -387,7 +463,7 @@ impl FlowStore {
         self.subscriptions.validate_registration(&record)?;
         let receipt = self
             .journal
-            .commit(&[FlowFact::AnswerSubscribed(Box::new(record.clone()))])?;
+            .commit(&[FlowFact::FlowSubscribed(Box::new(record.clone()))])?;
         self.subscriptions
             .records
             .insert(record.subscription.id, record);
@@ -395,7 +471,7 @@ impl FlowStore {
         Ok(receipt)
     }
 
-    pub fn unsubscribe_answers(&mut self, id: Uuid) -> io::Result<CommitReceipt> {
+    pub fn unsubscribe_events(&mut self, id: Uuid) -> io::Result<CommitReceipt> {
         let record = self
             .subscriptions
             .records
@@ -404,7 +480,7 @@ impl FlowStore {
         if record.status != SubscriptionStatus::Active {
             return Ok(self.cursor.clone());
         }
-        let receipt = self.journal.commit(&[FlowFact::AnswerUnsubscribed(id)])?;
+        let receipt = self.journal.commit(&[FlowFact::FlowUnsubscribed(id)])?;
         self.subscriptions.cancel(id)?;
         self.cursor = receipt.clone();
         Ok(receipt)
@@ -414,12 +490,12 @@ impl FlowStore {
     ///
     /// Register or cancel before this command to determine participation. No active turn is needed;
     /// execution pauses retain these inputs in the common inbox without running the recipient.
-    pub fn observe_answers(&mut self, page: &PublicationPage) -> io::Result<CommitReceipt> {
+    pub fn observe_events(&mut self, page: &FlowEventPage) -> io::Result<CommitReceipt> {
         if matches!(
             self.state.state(),
             InstanceState::Closing { .. } | InstanceState::Closed
         ) {
-            return Err(invalid("recipient cannot observe new answers"));
+            return Err(invalid("recipient cannot observe new flow events"));
         }
         let records: Vec<_> = self
             .subscriptions
@@ -441,22 +517,19 @@ impl FlowStore {
             return Ok(self.cursor.clone());
         }
         if records.iter().any(|record| record.cursor < page.after) {
-            return Err(invalid("source page skips unobserved answers"));
+            return Err(invalid("source page skips unobserved flow events"));
         }
         let mut updates: BTreeMap<_, _> = records
             .iter()
             .map(|record| (record.subscription.id, SubscriptionStatus::Active))
             .collect();
         let mut envelopes = Vec::new();
-        for publication in &page.records {
+        for (receipt, event) in &page.records {
             let mut matches = Vec::new();
             for record in &records {
-                if record.cursor < publication.receipt.sequence
+                if record.cursor < receipt.sequence
                     && updates[&record.subscription.id] == SubscriptionStatus::Active
-                    && record
-                        .subscription
-                        .filter
-                        .matches(&publication.publication.message)
+                    && record.subscription.filter.matches(event)
                 {
                     if record.subscription.once {
                         updates.insert(record.subscription.id, SubscriptionStatus::Matched);
@@ -472,18 +545,30 @@ impl FlowStore {
             }
             let source = FlowEventRef {
                 flow: page.source.clone(),
-                sequence: publication.receipt.sequence,
+                sequence: receipt.sequence,
                 index: 0,
             };
             // All matching subscriptions contribute reasons to one input for this source fact.
             envelopes.push(AcceptedEnvelope {
-                id: Uuid::now_v7(), accepted_at: chrono::Utc::now(),
+                id: Uuid::now_v7(),
+                accepted_at: chrono::Utc::now(),
                 request: DeliveryRequest {
-                    request_id: publication.publication.id,
-                    sender: SenderIdentity::Flow(page.source.clone()), recipient: self.descriptor.address.clone(),
-                    delivery: DeliveryMode::AtBoundary, cause: Some(source.clone()), correlation: None, scope: None,
-                    payload: InboxPayload::FlowEvent { source, event: "final_answer".into(),
-                        content: serde_json::json!({ "subscriptions": matches, "message": publication.publication.message }) },
+                    request_id: event_request_id(&source),
+                    sender: SenderIdentity::Flow(page.source.clone()),
+                    recipient: self.descriptor.address.clone(),
+                    delivery: DeliveryMode::AtBoundary,
+                    cause: Some(source.clone()),
+                    correlation: None,
+                    scope: None,
+                    payload: InboxPayload::FlowEvent {
+                        source,
+                        event: event.name().into(),
+                        content: serde_json::to_value(EventNotification {
+                            subscriptions: matches,
+                            event: event.clone(),
+                        })
+                        .map_err(invalid)?,
+                    },
                 },
             });
         }
@@ -497,7 +582,7 @@ impl FlowStore {
             .validate(&observation, &self.inbox, &self.descriptor.address)?;
         let receipt = self
             .journal
-            .commit(&[FlowFact::AnswersObserved(Box::new(observation.clone()))])?;
+            .commit(&[FlowFact::EventsObserved(Box::new(observation.clone()))])?;
         self.subscriptions
             .apply(&observation, &mut self.inbox, &receipt);
         self.cursor = receipt.clone();

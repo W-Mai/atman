@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::inbox::{Acceptance, AcceptedEnvelope, DeliveryRequest, Inbox, InboxPayload};
 use super::subscription::{
-    AnswerFilter, ResultRegistration, ResultSubscriptionProof, SubscriptionPurpose,
+    FlowEventFilter, ResultRegistration, ResultSubscriptionProof, SubscriptionPurpose,
     SubscriptionStatus,
 };
 use super::{FlowDescriptor, FlowFact, FlowRef, FlowStore, invalid};
@@ -23,11 +23,11 @@ pub struct ResultRoute {
 }
 
 impl ResultRoute {
-    pub fn filter(&self) -> AnswerFilter {
+    pub fn filter(&self) -> FlowEventFilter {
         self.synchronous_turn
             .clone()
-            .map(AnswerFilter::ExceptTurn)
-            .unwrap_or(AnswerFilter::All)
+            .map(FlowEventFilter::AnswersExceptTurn)
+            .unwrap_or(FlowEventFilter::FinalAnswers)
     }
 }
 

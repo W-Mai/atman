@@ -4,7 +4,7 @@ use atman_rt::{RunId, TurnId, TurnOutcome};
 use atman_runtime::flow_store::inbox::{InboxDisposition, InboxPayload, InputContent};
 use atman_runtime::flow_store::publication::MessagePublication;
 use atman_runtime::flow_store::subscription::{
-    AnswerFilter, AnswerSubscription, SubscriptionPurpose, SubscriptionStatus,
+    FlowEventFilter, FlowSubscription, SubscriptionPurpose, SubscriptionStatus,
 };
 use atman_runtime::flow_store::{
     EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowStore, FlowTransition,
@@ -77,18 +77,119 @@ fn answer(store: &mut FlowStore, text: &str, isolated: bool) {
     );
 }
 
-fn subscription(
-    source: &FlowStore,
-    purpose: SubscriptionPurpose,
-    once: bool,
-) -> AnswerSubscription {
-    AnswerSubscription {
+fn subscription(source: &FlowStore, purpose: SubscriptionPurpose, once: bool) -> FlowSubscription {
+    FlowSubscription {
         id: Uuid::new_v4(),
         source: source.descriptor().address.clone(),
-        filter: AnswerFilter::All,
+        filter: FlowEventFilter::FinalAnswers,
         once,
         purpose,
     }
+}
+
+#[test]
+fn completion_filters_replay_one_fact_without_fabricating_final_answers() {
+    use atman_rt::{Interruption, TurnPhase};
+    use atman_runtime::flow_store::completion::{InvocationResult, StoredValue};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let id = Uuid::new_v4();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            id,
+            title: "Completion subscriptions".into(),
+            project_root: None,
+        })
+        .unwrap();
+    let mut source = session.create_flow(descriptor(id)).unwrap();
+    let recipient_info = descriptor(id);
+    let mut recipient = session.create_flow(recipient_info.clone()).unwrap();
+    transition(&mut source, FlowTransition::Activated);
+    transition(&mut recipient, FlowTransition::Activated);
+    let lease = source
+        .state()
+        .clone()
+        .begin_turn(TurnId::now(), RunId::now())
+        .unwrap();
+    let anchor = source.observation_anchor();
+    let mut exact = subscription(&source, SubscriptionPurpose::Watcher, true);
+    exact.filter = FlowEventFilter::TurnCompleted {
+        turn: Some(lease.turn.clone()),
+    };
+    let mut all = subscription(&source, SubscriptionPurpose::Watcher, false);
+    all.filter = FlowEventFilter::TurnCompleted { turn: None };
+    for sub in [
+        exact.clone(),
+        all,
+        subscription(&source, SubscriptionPurpose::Watcher, false),
+    ] {
+        recipient.subscribe_events(sub, &anchor).unwrap();
+    }
+    transition(
+        &mut source,
+        FlowTransition::TurnStarted {
+            turn: lease.turn.clone(),
+            run: lease.run.clone(),
+        },
+    );
+    transition(
+        &mut source,
+        FlowTransition::PhaseChanged {
+            lease: lease.clone(),
+            phase: TurnPhase::Cancelling,
+        },
+    );
+    let completion = source
+        .finish_turn(lease, InvocationResult::Returned(StoredValue::Int(42)))
+        .unwrap();
+    assert_eq!(
+        completion.completion.outcome,
+        TurnOutcome::Interrupted(Interruption::Cancelled)
+    );
+    assert!(source.published_messages().is_empty());
+    let page = source
+        .events_after(anchor.cursor().sequence, NonZeroUsize::new(1).unwrap())
+        .unwrap();
+    let receipt = recipient.observe_events(&page).unwrap();
+    let item = recipient.pending_inputs().next().unwrap().clone();
+    let InboxPayload::FlowEvent { event, content, .. } = &item.request.payload else {
+        panic!("missing completion")
+    };
+    assert_eq!(event, "turn_completed");
+    assert_eq!(content["subscriptions"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        content["completion"],
+        serde_json::to_value(&completion).unwrap()
+    );
+    assert!(!content.as_object().unwrap().contains_key("message"));
+    drop(recipient);
+    let mut recipient = session
+        .open_flow(&recipient_info.address.instance_id)
+        .unwrap();
+    assert_eq!(recipient.observe_events(&page).unwrap(), receipt);
+    assert_eq!(recipient.pending_inputs().count(), 1);
+    assert_eq!(recipient.pending_inputs().next().unwrap(), &item);
+    assert_eq!(
+        recipient
+            .flow_subscriptions()
+            .find(|s| s.subscription.id == exact.id)
+            .unwrap()
+            .status,
+        SubscriptionStatus::Matched
+    );
+    transition(&mut source, FlowTransition::InterruptionRecovered);
+    answer(&mut source, "visible answer", false);
+    let next = source
+        .events_after(page.through(), NonZeroUsize::new(2).unwrap())
+        .unwrap();
+    recipient.observe_events(&next).unwrap();
+    let inputs: Vec<_> = recipient.pending_inputs().collect();
+    assert_eq!(inputs.len(), 3);
+    let InboxPayload::FlowEvent { content, .. } = &inputs[2].request.payload else {
+        panic!("missing completion")
+    };
+    assert_eq!(content["subscriptions"].as_array().unwrap().len(), 1);
+    assert_eq!(content["completion"]["result"]["kind"], "unobserved");
 }
 
 #[test]
@@ -113,12 +214,12 @@ fn synchronous_results_skip_only_the_initial_turn_and_preserve_other_subscribers
         .clone()
         .begin_turn(TurnId::now(), RunId::now())
         .unwrap();
-    let anchor = source.publication_anchor();
+    let anchor = source.observation_anchor();
     let mut result = subscription(&source, SubscriptionPurpose::SpawnResult, false);
-    result.filter = AnswerFilter::ExceptTurn(lease.turn.clone());
+    result.filter = FlowEventFilter::AnswersExceptTurn(lease.turn.clone());
     let watcher = subscription(&source, SubscriptionPurpose::Watcher, false);
     for sub in [&result, &watcher] {
-        recipient.subscribe_answers(sub.clone(), &anchor).unwrap();
+        recipient.subscribe_events(sub.clone(), &anchor).unwrap();
     }
     recipient.result_subscription_proof(result.id).unwrap();
     transition(
@@ -149,9 +250,9 @@ fn synchronous_results_skip_only_the_initial_turn_and_preserve_other_subscribers
         },
     );
     let page = source
-        .publications_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
+        .events_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
         .unwrap();
-    recipient.observe_answers(&page).unwrap();
+    recipient.observe_events(&page).unwrap();
     assert_eq!(recipient.pending_inputs().count(), 2);
     for message in recipient.pending_inputs() {
         let InboxPayload::FlowEvent { content, .. } = &message.request.payload else {
@@ -164,13 +265,13 @@ fn synchronous_results_skip_only_the_initial_turn_and_preserve_other_subscribers
     let mut recipient = session
         .open_flow(&recipient_info.address.instance_id)
         .unwrap();
-    recipient.observe_answers(&page).unwrap();
+    recipient.observe_events(&page).unwrap();
     assert_eq!(recipient.pending_inputs().count(), 2);
     answer(&mut source, "same answer", false);
     let next = source
-        .publications_after(page.through(), NonZeroUsize::new(10).unwrap())
+        .events_after(page.through(), NonZeroUsize::new(10).unwrap())
         .unwrap();
-    recipient.observe_answers(&next).unwrap();
+    recipient.observe_events(&next).unwrap();
     let last = recipient.pending_inputs().last().unwrap();
     let InboxPayload::FlowEvent { content, .. } = &last.request.payload else {
         panic!("missing answer")
@@ -195,18 +296,16 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
     let recipient_info = descriptor(session_id);
     let mut recipient = session.create_flow(recipient_info.clone()).unwrap();
     transition(&mut recipient, FlowTransition::Activated);
-    let anchor = source.publication_anchor();
+    let anchor = source.observation_anchor();
     let result = subscription(&source, SubscriptionPurpose::SpawnResult, false);
     let mut watcher = subscription(&source, SubscriptionPurpose::Watcher, true);
-    watcher.filter = AnswerFilter::Contains("ready".into());
+    watcher.filter = FlowEventFilter::AnswerContains("ready".into());
     for sub in [&result, &watcher] {
-        recipient.subscribe_answers(sub.clone(), &anchor).unwrap();
+        recipient.subscribe_events(sub.clone(), &anchor).unwrap();
     }
     let registered = recipient.cursor().clone();
     assert_eq!(
-        recipient
-            .subscribe_answers(result.clone(), &anchor)
-            .unwrap(),
+        recipient.subscribe_events(result.clone(), &anchor).unwrap(),
         registered
     );
     transition(&mut source, FlowTransition::Activated);
@@ -217,10 +316,17 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
     );
     answer(&mut source, "private ready", true);
     answer(&mut source, "ready", false);
+    // The isolated answer is private, but its entry completion is still an observable fact.
+    // A page with no matching answer advances once and does not lose the following answer.
     let page = source
-        .publications_after(anchor.cursor().sequence, NonZeroUsize::new(1).unwrap())
+        .events_after(anchor.cursor().sequence, NonZeroUsize::new(1).unwrap())
         .unwrap();
-    let observed = recipient.observe_answers(&page).unwrap();
+    recipient.observe_events(&page).unwrap();
+    assert_eq!(recipient.pending_inputs().count(), 0);
+    let page = source
+        .events_after(page.through(), NonZeroUsize::new(1).unwrap())
+        .unwrap();
+    let observed = recipient.observe_events(&page).unwrap();
     let pending = recipient.pending_inputs().cloned().collect::<Vec<_>>();
     assert_eq!(pending.len(), 1);
     let InboxPayload::FlowEvent {
@@ -237,16 +343,16 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
     assert_eq!(recipient.inbox_entries()[0].acceptance.receipt, observed);
     assert!(
         recipient
-            .answer_subscriptions()
+            .flow_subscriptions()
             .all(|sub| sub.cursor == page.through())
     );
-    assert_eq!(recipient.observe_answers(&page).unwrap(), observed);
+    assert_eq!(recipient.observe_events(&page).unwrap(), observed);
     let mut changed = result.clone();
     changed.once = true;
-    assert!(recipient.subscribe_answers(changed, &anchor).is_err());
+    assert!(recipient.subscribe_events(changed, &anchor).is_err());
     assert!(
         recipient
-            .subscribe_answers(
+            .subscribe_events(
                 subscription(&source, SubscriptionPurpose::Watcher, false),
                 &anchor
             )
@@ -265,7 +371,7 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
             .collect::<Vec<_>>(),
         [item]
     );
-    assert_eq!(recipient.observe_answers(&page).unwrap(), observed);
+    assert_eq!(recipient.observe_events(&page).unwrap(), observed);
     transition(
         &mut recipient,
         FlowTransition::ExecutionResumed { key: pause },
@@ -301,9 +407,9 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
     );
     answer(&mut source, "ready again", false);
     let page = source
-        .publications_after(page.through(), NonZeroUsize::new(5).unwrap())
+        .events_after(page.through(), NonZeroUsize::new(5).unwrap())
         .unwrap();
-    recipient.observe_answers(&page).unwrap();
+    recipient.observe_events(&page).unwrap();
     let InboxPayload::FlowEvent { content, .. } =
         &recipient.pending_inputs().next().unwrap().request.payload
     else {
@@ -312,7 +418,7 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
     assert_eq!(content["subscriptions"].as_array().unwrap().len(), 1);
     assert!(
         recipient
-            .answer_subscriptions()
+            .flow_subscriptions()
             .any(|record| record.subscription.id == watcher.id
                 && record.status == SubscriptionStatus::Matched)
     );
@@ -343,47 +449,47 @@ fn cancellation_close_and_source_pages_cannot_skip_or_reactivate_subscriptions()
     let mut source = session.create_flow(descriptor(id)).unwrap();
     let mut recipient = session.create_flow(descriptor(id)).unwrap();
     transition(&mut recipient, FlowTransition::Activated);
-    let anchor = source.publication_anchor();
+    let anchor = source.observation_anchor();
     let sub = subscription(&source, SubscriptionPurpose::Watcher, false);
-    recipient.subscribe_answers(sub.clone(), &anchor).unwrap();
+    recipient.subscribe_events(sub.clone(), &anchor).unwrap();
     transition(&mut source, FlowTransition::Activated);
     answer(&mut source, "one", false);
     let page = source
-        .publications_after(anchor.cursor().sequence, NonZeroUsize::new(1).unwrap())
+        .events_after(anchor.cursor().sequence, NonZeroUsize::new(1).unwrap())
         .unwrap();
     answer(&mut source, "two", false);
     let skipped = source
-        .publications_after(page.through(), NonZeroUsize::new(1).unwrap())
+        .events_after(page.through(), NonZeroUsize::new(1).unwrap())
         .unwrap();
     let before = recipient.cursor().clone();
-    assert!(recipient.observe_answers(&skipped).is_err());
+    assert!(recipient.observe_events(&skipped).is_err());
     assert_eq!(recipient.cursor(), &before);
-    let cancelled = recipient.unsubscribe_answers(sub.id).unwrap();
-    assert_eq!(recipient.observe_answers(&page).unwrap(), cancelled);
+    let cancelled = recipient.unsubscribe_events(sub.id).unwrap();
+    assert_eq!(recipient.observe_events(&page).unwrap(), cancelled);
     assert_eq!(
-        recipient.subscribe_answers(sub.clone(), &anchor).unwrap(),
+        recipient.subscribe_events(sub.clone(), &anchor).unwrap(),
         cancelled
     );
     assert_eq!(
-        recipient.answer_subscriptions().next().unwrap().status,
+        recipient.flow_subscriptions().next().unwrap().status,
         SubscriptionStatus::Cancelled
     );
     let replacement = subscription(&source, SubscriptionPurpose::Watcher, false);
     recipient
-        .subscribe_answers(replacement, &source.publication_anchor())
+        .subscribe_events(replacement, &source.observation_anchor())
         .unwrap();
     answer(&mut source, "three", false);
     let page = source
-        .publications_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
+        .events_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
         .unwrap();
-    recipient.observe_answers(&page).unwrap();
+    recipient.observe_events(&page).unwrap();
     assert_eq!(recipient.pending_inputs().count(), 1);
     transition(&mut recipient, FlowTransition::CloseRequested);
-    assert!(recipient.observe_answers(&page).is_err());
+    assert!(recipient.observe_events(&page).is_err());
     assert_eq!(recipient.pending_inputs().count(), 0);
     assert!(
         recipient
-            .answer_subscriptions()
+            .flow_subscriptions()
             .all(|record| record.status == SubscriptionStatus::Cancelled)
     );
     let address = recipient.descriptor().address.clone();
@@ -391,7 +497,7 @@ fn cancellation_close_and_source_pages_cannot_skip_or_reactivate_subscriptions()
     let recipient = session.open_flow(&address.instance_id).unwrap();
     assert!(
         recipient
-            .answer_subscriptions()
+            .flow_subscriptions()
             .all(|record| record.status == SubscriptionStatus::Cancelled)
     );
     assert_eq!(recipient.inbox_entries().len(), 1);
@@ -412,9 +518,9 @@ fn torn_observation_does_not_advance_cursor_without_its_input() {
     let mut source = session.create_flow(descriptor(id)).unwrap();
     let mut recipient = session.create_flow(descriptor(id)).unwrap();
     transition(&mut recipient, FlowTransition::Activated);
-    let anchor = source.publication_anchor();
+    let anchor = source.observation_anchor();
     recipient
-        .subscribe_answers(
+        .subscribe_events(
             subscription(&source, SubscriptionPurpose::Watcher, false),
             &anchor,
         )
@@ -422,11 +528,11 @@ fn torn_observation_does_not_advance_cursor_without_its_input() {
     transition(&mut source, FlowTransition::Activated);
     answer(&mut source, "answer", false);
     let page = source
-        .publications_after(anchor.cursor().sequence, NonZeroUsize::new(8).unwrap())
+        .events_after(anchor.cursor().sequence, NonZeroUsize::new(8).unwrap())
         .unwrap();
     let path = recipient.dir().join("events.jsonl");
     let before = std::fs::read(&path).unwrap();
-    recipient.observe_answers(&page).unwrap();
+    recipient.observe_events(&page).unwrap();
     let complete = std::fs::read(&path).unwrap();
     let address = recipient.descriptor().address.clone();
     drop(recipient);
@@ -442,11 +548,11 @@ fn torn_observation_does_not_advance_cursor_without_its_input() {
     assert!(recipient.recovered_tail.is_some());
     assert!(recipient.inbox_entries().is_empty());
     assert_eq!(
-        recipient.answer_subscriptions().next().unwrap().cursor,
+        recipient.flow_subscriptions().next().unwrap().cursor,
         anchor.cursor().sequence
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
-    recipient.observe_answers(&page).unwrap();
+    recipient.observe_events(&page).unwrap();
     assert_eq!(recipient.pending_inputs().count(), 1);
 }
 
@@ -464,21 +570,21 @@ fn self_subscription_does_not_turn_its_own_cursor_commits_into_new_work() {
         .unwrap();
     let mut flow = session.create_flow(descriptor(id)).unwrap();
     transition(&mut flow, FlowTransition::Activated);
-    let anchor = flow.publication_anchor();
-    flow.subscribe_answers(
+    let anchor = flow.observation_anchor();
+    flow.subscribe_events(
         subscription(&flow, SubscriptionPurpose::Watcher, false),
         &anchor,
     )
     .unwrap();
     answer(&mut flow, "one", false);
     let page = flow
-        .publications_after(anchor.cursor().sequence, NonZeroUsize::new(8).unwrap())
+        .events_after(anchor.cursor().sequence, NonZeroUsize::new(8).unwrap())
         .unwrap();
-    let committed = flow.observe_answers(&page).unwrap();
+    let committed = flow.observe_events(&page).unwrap();
     let empty = flow
-        .publications_after(page.through(), NonZeroUsize::new(8).unwrap())
+        .events_after(page.through(), NonZeroUsize::new(8).unwrap())
         .unwrap();
     assert_eq!(empty.through(), page.through());
-    assert_eq!(flow.observe_answers(&empty).unwrap(), committed);
+    assert_eq!(flow.observe_events(&empty).unwrap(), committed);
     assert_eq!(flow.pending_inputs().count(), 1);
 }

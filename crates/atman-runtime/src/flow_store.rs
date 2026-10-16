@@ -126,9 +126,9 @@ enum FlowFact {
     },
     SendQueued(Box<outbox::SendIntent>),
     MessagePublished(Box<publication::MessagePublication>),
-    AnswerSubscribed(Box<subscription::SubscriptionRecord>),
-    AnswerUnsubscribed(Uuid),
-    AnswersObserved(Box<subscription::Observation>),
+    FlowSubscribed(Box<subscription::SubscriptionRecord>),
+    FlowUnsubscribed(Uuid),
+    EventsObserved(Box<subscription::Observation>),
     DeliveryConfirmed {
         request_id: Uuid,
         delivery: outbox::DeliveryReceipt,
@@ -167,7 +167,7 @@ impl FlowFact {
         if facts.iter().any(|fact| {
             matches!(
                 fact,
-                Self::AnswerSubscribed(_) | Self::AnswerUnsubscribed(_) | Self::AnswersObserved(_)
+                Self::FlowSubscribed(_) | Self::FlowUnsubscribed(_) | Self::EventsObserved(_)
             )
         }) {
             return if facts.len() == 1 {
@@ -644,14 +644,14 @@ impl FlowStore {
                             publications.validate(state, &publication)?;
                             publications.apply(*publication, receipt.clone());
                         }
-                        (Some((_, state, _)), FlowFact::AnswerSubscribed(record)) => {
+                        (Some((_, state, _)), FlowFact::FlowSubscribed(record)) => {
                             if !state.accepts_input() {
                                 return Err(invalid("subscription recipient is unavailable"));
                             }
                             subscriptions.register(*record)?;
                         }
-                        (Some(_), FlowFact::AnswerUnsubscribed(id)) => subscriptions.cancel(id)?,
-                        (Some((_, state, inbox)), FlowFact::AnswersObserved(observation)) => {
+                        (Some(_), FlowFact::FlowUnsubscribed(id)) => subscriptions.cancel(id)?,
+                        (Some((_, state, inbox)), FlowFact::EventsObserved(observation)) => {
                             if !state.accepts_input() {
                                 return Err(invalid("observation recipient is unavailable"));
                             }

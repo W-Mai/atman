@@ -9,7 +9,7 @@ use atman_runtime::flow_store::inbox::{
 };
 use atman_runtime::flow_store::launch::{LaunchInput, ResultRoute};
 use atman_runtime::flow_store::subscription::{
-    AnswerFilter, AnswerSubscription, SubscriptionPurpose,
+    FlowEventFilter, FlowSubscription, SubscriptionPurpose,
 };
 use atman_runtime::flow_store::{
     EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowTransition, RuntimeStore,
@@ -154,15 +154,15 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     assert!(source.pending_inputs().next().is_none());
     let route = input.result_route.as_ref().unwrap();
     recipient
-        .subscribe_answers(
-            AnswerSubscription {
+        .subscribe_events(
+            FlowSubscription {
                 id: route.subscription,
                 source: source_info.address.clone(),
-                filter: AnswerFilter::All,
+                filter: FlowEventFilter::FinalAnswers,
                 once: false,
                 purpose: SubscriptionPurpose::SpawnResult,
             },
-            &source.publication_anchor(),
+            &source.observation_anchor(),
         )
         .unwrap();
     let proof = recipient
@@ -386,7 +386,7 @@ async fn failed_activation_stays_prepared_and_abandoned_retry_finishes_without_n
         &InstanceState::Prepared
     );
     assert!(source.snapshot().await.unwrap().pending.is_empty());
-    let registered = recipient.answer_subscriptions().await.unwrap();
+    let registered = recipient.flow_subscriptions().await.unwrap();
     assert_eq!(registered.len(), 1);
     let registered_cursor = registered[0].started_after.clone();
     let (entered, notified) = tokio::sync::oneshot::channel();
@@ -420,7 +420,7 @@ async fn failed_activation_stays_prepared_and_abandoned_retry_finishes_without_n
     assert_eq!(activated.pending.len(), 1);
     assert_ne!(activated.state.state(), &InstanceState::Prepared);
     assert_eq!(
-        recipient.answer_subscriptions().await.unwrap()[0].started_after,
+        recipient.flow_subscriptions().await.unwrap()[0].started_after,
         registered_cursor
     );
     let stored = source.launch_record().await.unwrap().unwrap();

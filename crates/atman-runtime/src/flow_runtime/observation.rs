@@ -1,4 +1,4 @@
-//! Host-owned public answer observation, independent of recipient execution.
+//! Host-owned flow event observation, independent of recipient execution.
 
 use std::{collections::HashMap, io, num::NonZeroUsize};
 
@@ -24,8 +24,8 @@ pub struct ObservationIssue {
 }
 
 impl FlowWorker {
-    pub async fn answer_subscriptions(&self) -> io::Result<Vec<SubscriptionRecord>> {
-        self.request(|store| Ok(store.answer_subscriptions().cloned().collect()))
+    pub async fn flow_subscriptions(&self) -> io::Result<Vec<SubscriptionRecord>> {
+        self.request(|store| Ok(store.flow_subscriptions().cloned().collect()))
             .await
     }
 
@@ -55,7 +55,7 @@ impl RuntimeHost {
         {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "answer observation is outside the current access grants",
+                "flow observation is outside the current access grants",
             ));
         }
         Ok(())
@@ -81,7 +81,7 @@ async fn observe(recipient: FlowWorker, host: WeakRuntimeHost) {
         directory_changes.borrow_and_update();
         recipient_changes.borrow_and_update();
         retries.borrow_and_update();
-        let Ok(records) = recipient.answer_subscriptions().await else {
+        let Ok(records) = recipient.flow_subscriptions().await else {
             return;
         };
         let mut positions: HashMap<FlowRef, u64> = HashMap::new();
@@ -155,7 +155,7 @@ async fn scan(
             owner
                 .upgrade()?
                 .authorize_observation(&target, store.state().address())?;
-            store.publications_after(after, NonZeroUsize::new(64).unwrap())
+            store.events_after(after, NonZeroUsize::new(64).unwrap())
         })
         .await?;
     if page.through() == after {
@@ -167,7 +167,7 @@ async fn scan(
             owner
                 .upgrade()?
                 .authorize_observation(store.state().address(), &source)?;
-            store.observe_answers(&page)
+            store.observe_events(&page)
         })
         .await?;
     Ok(())

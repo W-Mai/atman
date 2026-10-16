@@ -5,7 +5,7 @@ use std::{io, sync::Arc};
 use super::scheduler::{CompletedTurn, PrepareTurn};
 use super::{FlowWorker, host::RuntimeHost};
 use crate::flow_store::launch::{LaunchInput, LaunchRecord};
-use crate::flow_store::subscription::{AnswerSubscription, SubscriptionPurpose};
+use crate::flow_store::subscription::{FlowSubscription, SubscriptionPurpose};
 use crate::flow_store::{FlowDescriptor, invalid};
 
 pub struct LaunchedFlow {
@@ -108,13 +108,13 @@ impl RuntimeHost {
                         if store.state().state() != &atman_rt::InstanceState::Prepared {
                             return Err(invalid("instance is no longer prepared for launch"));
                         }
-                        Ok(store.publication_anchor())
+                        Ok(store.observation_anchor())
                     })
                     .await?;
                 let proof = if let Some(route) = &input.result_route {
                     host.authorize_observation(&route.recipient, &descriptor.address)?;
                     let recipient = host.flow(&route.recipient).await?;
-                    let subscription = AnswerSubscription {
+                    let subscription = FlowSubscription {
                         id: route.subscription,
                         source: descriptor.address.clone(),
                         filter: route.filter(),
@@ -136,7 +136,7 @@ impl RuntimeHost {
                                 // A retry after registration keeps the original anchor even if unrelated source
                                 // commits advanced the current journal. Registration remains idempotent.
                                 let existing = store
-                                    .answer_subscriptions()
+                                    .flow_subscriptions()
                                     .find(|r| r.subscription.id == subscription.id)
                                     .cloned();
                                 if let Some(record) = existing {
@@ -146,7 +146,7 @@ impl RuntimeHost {
                                         ));
                                     }
                                 } else {
-                                    store.subscribe_answers(subscription.clone(), &anchor)?;
+                                    store.subscribe_events(subscription.clone(), &anchor)?;
                                 }
                                 store.result_subscription_proof(subscription.id)
                             })

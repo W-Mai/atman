@@ -16,7 +16,7 @@ use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::access::{FlowAction, SessionAccess};
 use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity};
 use crate::flow_store::publication::PublishedMessage;
-use crate::flow_store::subscription::{AnswerSubscription, SubscriptionRecord};
+use crate::flow_store::subscription::{FlowSubscription, SubscriptionRecord};
 use crate::flow_store::{FlowInstanceId, FlowRef, FlowTransition, invalid};
 use crate::message::{Message, MessageOrigin};
 
@@ -272,9 +272,9 @@ impl FlowClient {
 
     /// Register before returning. The subscription outlives this invocation and keeps its original
     /// source position on retry; current watch grants are rechecked for every subsequent delivery.
-    pub async fn watch_answers(
+    pub async fn watch_events(
         &self,
-        subscription: AnswerSubscription,
+        subscription: FlowSubscription,
     ) -> io::Result<SubscriptionRecord> {
         self.authenticate()?;
         let recipient = self.host.flow(self.source()).await?;
@@ -297,7 +297,7 @@ impl FlowClient {
             .await?
             .request(move |store| {
                 client.authorize(store.state().address(), FlowAction::Watch)?;
-                Ok(store.publication_anchor())
+                Ok(store.observation_anchor())
             })
             .await?;
         let client = self.clone();
@@ -309,7 +309,7 @@ impl FlowClient {
                     return Ok(record);
                 }
                 client.authorize(&subscription.source, FlowAction::Watch)?;
-                store.subscribe_answers(subscription.clone(), &anchor)?;
+                store.subscribe_events(subscription.clone(), &anchor)?;
                 existing_subscription(store, &subscription)?
                     .ok_or_else(|| invalid("subscription was not committed"))
             })
@@ -317,7 +317,7 @@ impl FlowClient {
     }
 
     /// Cancel owned observation even if access to its source has since been revoked.
-    pub async fn unwatch_answers(&self, id: Uuid) -> io::Result<CommitReceipt> {
+    pub async fn unwatch_events(&self, id: Uuid) -> io::Result<CommitReceipt> {
         self.authenticate()?;
         let client = self.clone();
         self.host
@@ -325,7 +325,7 @@ impl FlowClient {
             .await?
             .request(move |store| {
                 client.authenticate()?;
-                store.unsubscribe_answers(id)
+                store.unsubscribe_events(id)
             })
             .await
     }
@@ -401,10 +401,10 @@ impl FlowClient {
 
 fn existing_subscription(
     store: &crate::flow_store::FlowStore,
-    requested: &AnswerSubscription,
+    requested: &FlowSubscription,
 ) -> io::Result<Option<SubscriptionRecord>> {
     let existing = store
-        .answer_subscriptions()
+        .flow_subscriptions()
         .find(|record| record.subscription.id == requested.id);
     match existing {
         Some(record) if record.subscription != *requested => Err(invalid(

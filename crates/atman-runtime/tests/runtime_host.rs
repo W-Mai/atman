@@ -1798,19 +1798,106 @@ async fn wait_inputs(worker: &FlowWorker, count: usize) -> FlowSnapshot {
     .expect("observation did not deliver expected inputs")
 }
 
-fn answer_watch(
-    source: &FlowWorker,
-) -> atman_runtime::flow_store::subscription::AnswerSubscription {
+fn answer_watch(source: &FlowWorker) -> atman_runtime::flow_store::subscription::FlowSubscription {
     use atman_runtime::flow_store::subscription::{
-        AnswerFilter, AnswerSubscription, SubscriptionPurpose,
+        FlowEventFilter, FlowSubscription, SubscriptionPurpose,
     };
-    AnswerSubscription {
+    FlowSubscription {
         id: Uuid::new_v4(),
         source: source.address().clone(),
-        filter: AnswerFilter::All,
+        filter: FlowEventFilter::FinalAnswers,
         once: false,
         purpose: SubscriptionPurpose::Watcher,
     }
+}
+
+#[tokio::test]
+async fn completion_observation_shares_answer_delivery_and_retains_paused_inputs_after_reopen() {
+    use atman_runtime::flow_store::subscription::FlowEventFilter;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let recipient = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let source = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&recipient, FlowTransition::Activated).await;
+    let lease = start(&recipient).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    let answer = answer_watch(&source);
+    let mut completion = answer_watch(&source);
+    completion.filter = FlowEventFilter::TurnCompleted { turn: None };
+    let mut once = completion.clone();
+    once.id = Uuid::new_v4();
+    once.once = true;
+    client.watch_events(answer).await.unwrap();
+    client.watch_events(completion).await.unwrap();
+    client.watch_events(once).await.unwrap();
+    change(
+        &recipient,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    let pause = Uuid::new_v4().into();
+    change(&recipient, FlowTransition::ExecutionPaused { key: pause }).await;
+    change(&source, FlowTransition::Activated).await;
+    let completed = invoke(&source, Executor::new()).await;
+    let accepted = wait_inputs(&recipient, 2).await;
+    assert_eq!(accepted.state.pauses(), &[pause]);
+    let InboxPayload::FlowEvent {
+        source: answer_ref,
+        event,
+        ..
+    } = &accepted.pending[0].request.payload
+    else {
+        panic!("missing answer")
+    };
+    assert_eq!(event, "final_answer");
+    let InboxPayload::FlowEvent {
+        source: completion_ref,
+        event,
+        content,
+    } = &accepted.pending[1].request.payload
+    else {
+        panic!("missing completion")
+    };
+    assert_eq!(event, "turn_completed");
+    assert!(answer_ref.sequence < completion_ref.sequence);
+    assert_eq!(content["subscriptions"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        content["completion"]["receipt"],
+        serde_json::to_value(&completed.receipt).unwrap()
+    );
+    assert_eq!(content["completion"]["result"]["kind"], "returned");
+    let originals: Vec<_> = accepted.pending.iter().map(|e| e.id).collect();
+    let address = recipient.address().clone();
+    drop(client);
+    drop(recipient.shutdown().await.unwrap());
+    invoke(&source, Executor::new()).await.result.unwrap();
+    let reopened = host.flow(&address).await.unwrap();
+    let recovered = wait_inputs(&reopened, 4).await;
+    assert_eq!(
+        recovered.pending[..2]
+            .iter()
+            .map(|e| e.id)
+            .collect::<Vec<_>>(),
+        originals
+    );
+    let InboxPayload::FlowEvent { content, .. } = &recovered.pending[3].request.payload else {
+        panic!("missing completion")
+    };
+    assert_eq!(content["subscriptions"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        recovered.pending[1].request.request_id,
+        recovered.pending[3].request.request_id
+    );
+    change(&reopened, FlowTransition::ExecutionResumed { key: pause }).await;
+    assert_eq!(reopened.snapshot().await.unwrap().pending.len(), 4);
 }
 
 #[tokio::test]
@@ -1829,22 +1916,22 @@ async fn owned_observation_survives_turn_end_pause_and_reopen_without_duplicate_
     let lease = start(&a).await;
     let client = host.bind_invocation(lease.clone()).await.unwrap();
     // Register against Prepared sources; a creator can safely activate only after acknowledgement.
-    let result = atman_runtime::flow_store::subscription::AnswerSubscription {
+    let result = atman_runtime::flow_store::subscription::FlowSubscription {
         purpose: SubscriptionPurpose::SpawnResult,
         ..answer_watch(&b)
     };
-    let watcher = atman_runtime::flow_store::subscription::AnswerSubscription {
+    let watcher = atman_runtime::flow_store::subscription::FlowSubscription {
         once: true,
         ..answer_watch(&b)
     };
     let (registered, duplicate) = tokio::join!(
-        client.watch_answers(result.clone()),
-        client.watch_answers(result.clone())
+        client.watch_events(result.clone()),
+        client.watch_events(result.clone())
     );
     assert_eq!(registered.unwrap(), duplicate.unwrap());
-    client.watch_answers(watcher.clone()).await.unwrap();
+    client.watch_events(watcher.clone()).await.unwrap();
     let self_watch = answer_watch(&a);
-    client.watch_answers(self_watch.clone()).await.unwrap();
+    client.watch_events(self_watch.clone()).await.unwrap();
     change(
         &a,
         FlowTransition::TurnFinished {
@@ -1865,7 +1952,7 @@ async fn owned_observation_survives_turn_end_pause_and_reopen_without_duplicate_
     assert_eq!(content["subscriptions"].as_array().unwrap().len(), 2);
     let original = accepted.pending[0].id;
     assert!(
-        a.answer_subscriptions()
+        a.flow_subscriptions()
             .await
             .unwrap()
             .iter()
@@ -1886,10 +1973,10 @@ async fn owned_observation_survives_turn_end_pause_and_reopen_without_duplicate_
     assert_eq!(content["subscriptions"].as_array().unwrap().len(), 1);
     change(&a, FlowTransition::ExecutionResumed { key: pause }).await;
     let client = host.bind_invocation(start(&a).await).await.unwrap();
-    client.unwatch_answers(result.id).await.unwrap();
+    client.unwatch_events(result.id).await.unwrap();
     // Retrying registration must retain cancellation, even when a newer source anchor is available.
     assert_eq!(
-        client.watch_answers(result).await.unwrap().status,
+        client.watch_events(result).await.unwrap().status,
         SubscriptionStatus::Cancelled
     );
     let lease = match a.state().await.unwrap().state() {
@@ -1957,7 +2044,7 @@ async fn cross_session_observation_retains_cursor_on_revocation_and_recovers_aft
     let subscription = answer_watch(&b);
     assert_eq!(
         client
-            .watch_answers(subscription.clone())
+            .watch_events(subscription.clone())
             .await
             .unwrap_err()
             .kind(),
@@ -1973,7 +2060,7 @@ async fn cross_session_observation_retains_cursor_on_revocation_and_recovers_aft
         .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
         .await
         .unwrap();
-    client.watch_answers(subscription.clone()).await.unwrap();
+    client.watch_events(subscription.clone()).await.unwrap();
     change(
         &a,
         FlowTransition::TurnFinished {
@@ -2137,7 +2224,7 @@ async fn catalog_owned_schedulers_run_subscribed_inputs_after_callers_and_views_
     change(&a, FlowTransition::Activated).await;
     let lease = start(&a).await;
     let client = host.bind_invocation(lease.clone()).await.unwrap();
-    client.watch_answers(answer_watch(&b)).await.unwrap();
+    client.watch_events(answer_watch(&b)).await.unwrap();
     drop(client);
     change(
         &a,
