@@ -25,6 +25,10 @@ use crate::DaemonState;
 pub(crate) mod catalog;
 pub(crate) mod events;
 mod execution;
+pub(crate) mod goal;
+
+// Transport authentication identifies this operator; callers cannot supply sender provenance.
+const OPERATOR: Uuid = Uuid::from_bytes(*b"atman-operator!!");
 
 type CatalogSlot = Arc<OnceCell<SessionHandle>>;
 

@@ -1044,6 +1044,7 @@ fn goal_facts_recover_exact_revisions_without_changing_execution_or_inbox() {
     change(&mut flow, FlowTransition::Activated);
     let user = SenderIdentity::User(Uuid::new_v4());
     let request = |flow: &FlowStore, edit| GoalRequest {
+        start_turn: false,
         id: Uuid::new_v4(),
         sender: user.clone(),
         expected: flow.goal().map(GoalVersion::from),
@@ -1173,6 +1174,148 @@ fn goal_facts_recover_exact_revisions_without_changing_execution_or_inbox() {
 }
 
 #[test]
+fn explicit_goal_resume_atomically_records_one_internal_next_turn_input() {
+    use atman_runtime::flow_store::goal::{GoalRequest, GoalVersion};
+    use atman_runtime::memory::goal::{GoalActor, GoalEdit, GoalPauseReason, GoalStatus};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let user = SenderIdentity::User(Uuid::new_v4());
+    let request = |flow: &FlowStore, edit, start_turn| GoalRequest {
+        id: Uuid::new_v4(),
+        sender: user.clone(),
+        expected: flow.goal().map(GoalVersion::from),
+        edit,
+        start_turn,
+    };
+    flow.edit_goal(
+        request(
+            &flow,
+            GoalEdit::Create {
+                text: "retained objective".into(),
+            },
+            false,
+        ),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let pause = GoalEdit::Pause {
+        actor: GoalActor::User,
+        reason: GoalPauseReason::UserRequested,
+        summary: "hold".into(),
+    };
+    flow.edit_goal(request(&flow, pause.clone(), false), |_| Ok(()))
+        .unwrap();
+    let lease = start(&mut flow);
+    let resume = request(
+        &flow,
+        GoalEdit::Resume {
+            actor: GoalActor::User,
+        },
+        true,
+    );
+    let mut forged = resume.clone();
+    forged.sender = SenderIdentity::Flow(description.address.clone());
+    assert!(flow.edit_goal(forged, |_| Ok(())).is_err());
+    assert_eq!(flow.goal().unwrap().status, GoalStatus::Paused);
+    let resumed = flow.edit_goal(resume.clone(), |_| Ok(())).unwrap();
+    let envelope = resumed.update.input.as_ref().unwrap();
+    assert_eq!(flow.inbox_entries()[0].acceptance.receipt, resumed.receipt);
+    assert_eq!(flow.pending_inputs().count(), 1);
+    assert!(
+        flow.reserve_context_input(&lease, |_| true)
+            .unwrap()
+            .is_none()
+    );
+    let mut forged = envelope.request.clone();
+    forged.request_id = Uuid::new_v4();
+    assert!(flow.accept_input(forged, |_| Ok(())).is_err());
+    let projected =
+        atman_runtime::flow_runtime::input::context_message(envelope, &lease.turn).unwrap();
+    assert_eq!(
+        projected.origin,
+        atman_runtime::message::MessageOrigin::Internal
+    );
+    assert_eq!(projected.role, atman_runtime::message::MessageRole::User);
+    assert!(
+        flow.edit_goal(
+            request(
+                &flow,
+                GoalEdit::Resume {
+                    actor: GoalActor::User
+                },
+                true
+            ),
+            |_| Ok(())
+        )
+        .is_err()
+    );
+    // An interrupted invocation does not discard the user's accepted next-turn control.
+    change(
+        &mut flow,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Interrupted(Interruption::Cancelled),
+        },
+    );
+    drop(flow);
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(flow.pending_inputs().next(), Some(envelope));
+    assert!(!flow.state().can_start_turn());
+    assert_eq!(
+        flow.edit_goal(resume.clone(), |_| panic!("retry authorization"))
+            .unwrap(),
+        resumed
+    );
+    // A later pause supersedes the unread resume without changing its original receipt.
+    flow.edit_goal(request(&flow, pause, false), |_| Ok(()))
+        .unwrap();
+    assert_eq!(flow.pending_inputs().count(), 0);
+    assert!(matches!(
+        flow.inbox_entries()[0].acceptance.disposition,
+        InboxDisposition::Cancelled { .. }
+    ));
+    assert_eq!(
+        flow.edit_goal(resume, |_| panic!("retry authorization"))
+            .unwrap(),
+        resumed
+    );
+    assert_eq!(flow.goal().unwrap().status, GoalStatus::Paused);
+    let cursor = flow.cursor().clone();
+    let journal = flow.dir().join("events.jsonl");
+    let prefix = std::fs::metadata(&journal).unwrap().len();
+    flow.edit_goal(
+        request(
+            &flow,
+            GoalEdit::Resume {
+                actor: GoalActor::User,
+            },
+            true,
+        ),
+        |_| Ok(()),
+    )
+    .unwrap();
+    drop(flow);
+    let length = std::fs::metadata(&journal).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&journal)
+        .unwrap()
+        .set_len(length - 1)
+        .unwrap();
+    let flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert!(flow.recovered_tail.is_some());
+    assert_eq!(flow.cursor(), &cursor);
+    assert_eq!(std::fs::metadata(&journal).unwrap().len(), prefix);
+    assert_eq!(flow.goal().unwrap().status, GoalStatus::Paused);
+    assert_eq!(flow.pending_inputs().count(), 0);
+}
+
+#[test]
 fn goal_continuations_share_inbox_receipts_and_recover_without_restarting_interrupted_work() {
     use atman_runtime::flow_store::{
         completion::{InvocationResult, StoredValue},
@@ -1208,6 +1351,7 @@ fn goal_continuations_share_inbox_receipts_and_recover_without_restarting_interr
         let goal = flow
             .edit_goal(
                 GoalRequest {
+                    start_turn: false,
                     id: Uuid::new_v4(),
                     sender: SenderIdentity::User(Uuid::new_v4()),
                     expected: None,
@@ -1298,6 +1442,7 @@ fn goal_continuations_share_inbox_receipts_and_recover_without_restarting_interr
                 };
                 flow.edit_goal(
                     GoalRequest {
+                        start_turn: false,
                         id: Uuid::new_v4(),
                         sender: SenderIdentity::User(Uuid::new_v4()),
                         expected: Some(version.clone()),

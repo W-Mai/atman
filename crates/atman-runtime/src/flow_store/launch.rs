@@ -92,6 +92,7 @@ impl Activation {
             .as_ref()
             .map(|text| super::goal::GoalUpdate {
                 request: super::goal::GoalRequest {
+                    start_turn: false,
                     id: self.input.request.request_id,
                     sender: self.input.request.sender.clone(),
                     expected: None,
@@ -99,6 +100,7 @@ impl Activation {
                 },
                 new_goal_id: self.id,
                 at: self.accepted_at,
+                input: None,
             })
     }
 

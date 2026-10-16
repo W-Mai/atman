@@ -6,7 +6,11 @@ use atman_rt::{FlowInstance, InstanceState};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{FlowFact, FlowStore, inbox::SenderIdentity, invalid};
+use super::{
+    FlowFact, FlowStore,
+    inbox::{AcceptedEnvelope, DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity},
+    invalid,
+};
 use crate::{
     event::AtmanUuid,
     event_log::journal::CommitReceipt,
@@ -36,13 +40,56 @@ pub struct GoalRequest {
     /// None explicitly expects no current objective.
     pub expected: Option<GoalVersion>,
     pub edit: GoalEdit,
+    /// An explicit user resume also submits one next-turn input in the same commit.
+    pub start_turn: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct GoalUpdate {
     pub request: GoalRequest,
     pub new_goal_id: Uuid,
     pub at: chrono::DateTime<chrono::Utc>,
+    pub input: Option<AcceptedEnvelope>,
+}
+
+impl GoalUpdate {
+    fn resume_input(
+        &self,
+        state: &FlowInstance<AtmanUuid>,
+        goal: Option<&GoalRecord>,
+    ) -> io::Result<Option<AcceptedEnvelope>> {
+        if !self.request.start_turn {
+            return Ok(None);
+        }
+        if !matches!(self.request.sender, SenderIdentity::User(_))
+            || self.request.edit
+                != (GoalEdit::Resume {
+                    actor: crate::memory::goal::GoalActor::User,
+                })
+        {
+            return Err(invalid(
+                "starting a goal turn requires an explicit user resume",
+            ));
+        }
+        let goal = goal.ok_or_else(|| invalid("goal resume requires an objective"))?;
+        Ok(Some(AcceptedEnvelope {
+            id: self.new_goal_id,
+            accepted_at: self.at,
+            request: DeliveryRequest {
+                request_id: self.request.id,
+                sender: self.request.sender.clone(),
+                recipient: state.address().clone(),
+                delivery: DeliveryMode::NextTurn,
+                cause: None,
+                correlation: None,
+                scope: None,
+                payload: InboxPayload::GoalResume {
+                    goal: GoalVersion::from(goal),
+                    objective: goal.objective.clone(),
+                },
+            },
+        }))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -81,6 +128,18 @@ impl Goals {
         state: &FlowInstance<AtmanUuid>,
         update: &GoalUpdate,
     ) -> io::Result<Option<GoalRecord>> {
+        let record = self.prepare_record(state, update)?;
+        if update.input != update.resume_input(state, record.as_ref())? {
+            return Err(invalid("goal update has no matching resume input"));
+        }
+        Ok(record)
+    }
+
+    fn prepare_record(
+        &self,
+        state: &FlowInstance<AtmanUuid>,
+        update: &GoalUpdate,
+    ) -> io::Result<Option<GoalRecord>> {
         let request = &update.request;
         if !matches!(state.state(), InstanceState::Open(_))
             || request.id.is_nil()
@@ -89,6 +148,16 @@ impl Goals {
             || request.expected != self.current.as_ref().map(GoalVersion::from)
         {
             return Err(invalid("stale or invalid goal update"));
+        }
+        if request.start_turn
+            && !self
+                .current
+                .as_ref()
+                .is_some_and(|goal| goal.status == crate::memory::goal::GoalStatus::Paused)
+        {
+            return Err(invalid(
+                "an explicit goal resume requires a paused objective",
+            ));
         }
         let mut record = self.current.clone();
         request.edit.apply(
@@ -142,16 +211,24 @@ impl FlowStore {
             return Ok(record.clone());
         }
         authorize_new(&request)?;
-        let update = GoalUpdate {
+        let mut update = GoalUpdate {
             request,
             new_goal_id: Uuid::now_v7(),
             at: chrono::Utc::now(),
+            input: None,
         };
-        let goal = self.goals.prepare(&self.state, &update)?;
+        let goal = self.goals.prepare_record(&self.state, &update)?;
+        update.input = update.resume_input(&self.state, goal.as_ref())?;
+        if let Some(input) = &update.input {
+            self.inbox.validate(input)?;
+        }
         let receipt = self
             .journal
             .commit(&[FlowFact::GoalUpdated(Box::new(update.clone()))])?;
         self.inbox.goal_changed(goal.as_ref(), &receipt);
+        if let Some(input) = &update.input {
+            self.inbox.apply(input.clone(), receipt.clone());
+        }
         let record = self.goals.apply(update, goal, receipt.clone());
         self.cursor = receipt;
         Ok(record)

@@ -421,6 +421,170 @@ async fn initial_goal_is_visible_to_the_first_turn_and_retries_do_not_restore_it
 }
 
 #[tokio::test]
+async fn persistent_goal_controls_resume_once_without_bypassing_execution_or_replaying_user_input()
+{
+    let dir = tempfile::tempdir().unwrap();
+    let (state, flow, mut launch) = setup(&dir, r#"flow main(user_message: string, label: string) -> string {
+        contract { invocation { user_message: user_message } }
+        snapshot = memory.goal.get()
+        memory.goal.pause(goal_id: snapshot.goal.id, expected_revision: snapshot.goal.revision, reason: "completed", summary: "finished")
+        return final.answer(message: label)
+    }"#).await;
+    launch["arguments"]["user_message"] = json!("hello");
+    launch["user"] = json!({"text": "hello", "images": []});
+    launch["initial_goal"] = json!("Explicit objective");
+    rpc(&state, methods::FLOW_LAUNCH, launch).await;
+    let first = wait_completion(&state, &flow, None).await;
+    let default_goal = rpc(
+        &state,
+        methods::GOAL_GET,
+        json!({"session_id": flow["session_id"]}),
+    )
+    .await;
+    assert_eq!(default_goal["flow"], flow);
+    assert_eq!(default_goal["goal"], first["goal"]);
+    let request = |goal: &Value| {
+        json!({
+            "session_id": flow["session_id"], "instance_id": flow["instance_id"],
+            "request_id": Uuid::now_v7(), "goal_id": goal["id"], "expected_revision": goal["revision"],
+        })
+    };
+    let resume = request(&first["goal"]);
+    let denied = dispatch_as(
+        state.clone(),
+        JsonRpcRequest::new(1, methods::GOAL_RESUME, resume.clone()),
+        "another-client",
+    )
+    .await;
+    assert!(denied.error.unwrap().message.contains("permission denied"));
+    let mut unbound = resume.clone();
+    unbound.as_object_mut().unwrap().remove("instance_id");
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::GOAL_RESUME, unbound)
+        )
+        .await
+        .error
+        .is_some()
+    );
+    // Pausing execution does not change the objective; resuming the objective does not remove that gate.
+    rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "action": "pause", "expected_revision": first["execution"]["revision"]})).await;
+    let accepted = rpc(&state, methods::GOAL_RESUME, resume.clone()).await;
+    assert_eq!(accepted["goal"]["status"], "active");
+    assert_eq!(accepted["execution"]["pause_count"], 1);
+    assert_eq!(accepted["execution"]["can_start_turn"], false);
+    assert_eq!(
+        accepted["committed"]["update"]["input"]["request"]["payload"]["kind"],
+        "goal_resume"
+    );
+    assert_eq!(
+        rpc(&state, methods::GOAL_RESUME, resume.clone()).await["committed"],
+        accepted["committed"]
+    );
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::GOAL_RESUME, request(&accepted["goal"]))
+        )
+        .await
+        .error
+        .is_some()
+    );
+    state.shutdown().await.unwrap();
+
+    let reopened = Arc::new(DaemonState::new(dir.path().join("data")));
+    rpc(
+        &reopened,
+        methods::SESSION_OPEN,
+        json!({"session_id": flow["session_id"]}),
+    )
+    .await;
+    let restored = rpc(&reopened, methods::GOAL_GET, flow.clone()).await;
+    assert_eq!(restored["goal"], accepted["goal"]);
+    assert_eq!(restored["execution"]["pause_count"], 1);
+    assert_eq!(
+        rpc(&reopened, methods::GOAL_RESUME, resume.clone()).await["committed"],
+        accepted["committed"]
+    );
+    rpc(&reopened, methods::FLOW_BIND, json!({"flow": flow})).await;
+    let bound = rpc(&reopened, methods::FLOW_GET, json!({"flow": flow})).await;
+    assert_eq!(bound["last_completion"], first["last_completion"]);
+    rpc(&reopened, methods::FLOW_CONTROL, json!({"flow": flow, "action": "resume", "expected_revision": bound["execution"]["revision"]})).await;
+    let second = wait_completion(
+        &reopened,
+        &flow,
+        Some(&first["last_completion"]["lease"]["turn"]),
+    )
+    .await;
+    assert_eq!(second["goal"]["status"], "paused");
+    assert_eq!(second["goal"]["revision"], 4);
+    assert_eq!(
+        rpc(&reopened, methods::GOAL_RESUME, resume.clone()).await["committed"],
+        accepted["committed"]
+    );
+    let page = rpc(&reopened, methods::FLOW_OUTPUT, json!({"flow": flow})).await;
+    assert_eq!(page["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(answer(&page, 0), "first");
+    assert_eq!(answer(&page, 1), "first");
+    let mut stale = resume;
+    stale["request_id"] = json!(Uuid::now_v7());
+    assert!(
+        dispatch(
+            reopened.clone(),
+            JsonRpcRequest::new(1, methods::GOAL_RESUME, stale)
+        )
+        .await
+        .error
+        .is_some()
+    );
+    // Mutations use the same CAS path; editing and clearing never restart the entry.
+    let mut edit = request(&second["goal"]);
+    edit["text"] = json!("Edited objective");
+    let edited = rpc(&reopened, methods::GOAL_SET, edit).await;
+    assert_eq!(edited["goal"]["status"], "paused");
+    let cleared = rpc(&reopened, methods::GOAL_CLEAR, request(&edited["goal"])).await;
+    assert!(cleared["goal"].is_null());
+    reopened.shutdown().await.unwrap();
+    let root = atman_runtime::flow_store::RuntimeStore::open(&dir.path().join("data")).unwrap();
+    let session = root
+        .open_session(serde_json::from_value(flow["session_id"].clone()).unwrap())
+        .unwrap();
+    let address: atman_runtime::flow_store::FlowRef = serde_json::from_value(flow).unwrap();
+    let stored = session.open_flow(&address.instance_id).unwrap();
+    assert_eq!(stored.completions().len(), 2);
+    assert_eq!(stored.pending_inputs().count(), 0);
+    let contexts = stored.context_messages();
+    let users = contexts
+        .iter()
+        .filter(|message| message.role == atman_runtime::message::MessageRole::User)
+        .collect::<Vec<_>>();
+    assert_eq!(users.len(), 2);
+    assert_eq!(users[0].text_concat(), "hello");
+    assert_eq!(
+        users[1].origin,
+        atman_runtime::message::MessageOrigin::Internal
+    );
+    assert!(users[1].text_concat().contains("goal_resume"));
+    let atman_runtime::flow_store::inbox::InputContent::InvocationInput {
+        arguments,
+        invocation,
+        ..
+    } = &stored.last_invocation_input().unwrap().input.content
+    else {
+        panic!("resume must have a committed invocation");
+    };
+    assert_eq!(arguments["label"], json!("first"));
+    assert!(
+        arguments["user_message"]
+            .as_str()
+            .unwrap()
+            .contains("goal_resume")
+    );
+    assert_eq!(invocation["effort"], json!("high"));
+}
+
+#[tokio::test]
 async fn failed_preparation_and_stale_inventory_do_not_register_executable_flows() {
     let dir = tempfile::tempdir().unwrap();
     let (state, flow, mut launch) =

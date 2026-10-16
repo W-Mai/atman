@@ -201,6 +201,12 @@ pub mod methods {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct GoalRequest {
     pub session_id: SessionId,
+    /// Required for persistent mutations; reads may omit it to select the session's default view.
+    #[serde(default)]
+    pub instance_id: Option<uuid::Uuid>,
+    /// Required for persistent mutations. Retries reuse the same identity and payload.
+    #[serde(default)]
+    pub request_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub target_handle: Option<String>,
     #[serde(default)]

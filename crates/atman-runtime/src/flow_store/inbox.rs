@@ -52,6 +52,11 @@ pub struct UserContent {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum InboxPayload {
+    /// Explicit user control, recorded as internal context rather than a new human message.
+    GoalResume {
+        goal: super::goal::GoalVersion,
+        objective: String,
+    },
     /// An entry-authored next turn, conditional on its successful completion and goal version.
     GoalContinuation {
         source: TurnLease<AtmanUuid>,
@@ -128,6 +133,15 @@ impl DeliveryRequest {
             };
         }
         let valid = match (&self.sender, &self.payload) {
+            (SenderIdentity::User(_), InboxPayload::GoalResume { goal, objective }) => {
+                self.delivery == DeliveryMode::NextTurn
+                    && self.correlation.is_none()
+                    && self.scope.is_none()
+                    && self.cause.is_none()
+                    && goal.revision > 0
+                    && !goal.id.is_empty()
+                    && !objective.trim().is_empty()
+            }
             (SenderIdentity::Host(_), InboxPayload::FormReply { answer }) => {
                 self.delivery == DeliveryMode::AtBoundary
                     && self.correlation.is_none()

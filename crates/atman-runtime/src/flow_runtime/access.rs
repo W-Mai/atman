@@ -352,6 +352,7 @@ impl FlowClient {
             .await?
             .edit_goal(
                 crate::flow_store::goal::GoalRequest {
+                    start_turn: false,
                     id: request_id,
                     sender: SenderIdentity::Flow(self.source().clone()),
                     expected,

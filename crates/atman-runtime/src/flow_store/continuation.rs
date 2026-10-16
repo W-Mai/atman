@@ -38,6 +38,11 @@ pub(super) fn validate_request(
     state: &FlowInstance<AtmanUuid>,
     current: Option<&GoalRecord>,
 ) -> io::Result<()> {
+    if matches!(request.payload, InboxPayload::GoalResume { .. }) {
+        return Err(invalid(
+            "goal resume input must be committed with its goal update",
+        ));
+    }
     let InboxPayload::GoalContinuation { source, goal, text } = &request.payload else {
         return Ok(());
     };
@@ -58,7 +63,7 @@ pub(super) fn validate_request(
 impl Inbox {
     pub(super) fn goal_changed(&mut self, current: Option<&GoalRecord>, receipt: &CommitReceipt) {
         self.cancel_matching(receipt, |envelope| {
-            matches!(&envelope.request.payload, InboxPayload::GoalContinuation { goal, .. }
+            matches!(&envelope.request.payload, InboxPayload::GoalContinuation { goal, .. } | InboxPayload::GoalResume { goal, .. }
                 if !current.is_some_and(|record| record.status == GoalStatus::Active && GoalVersion::from(record) == *goal))
         });
     }

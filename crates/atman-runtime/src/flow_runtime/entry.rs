@@ -132,7 +132,9 @@ impl EntryRecipe {
             message.request.scope.is_none()
                 && (matches!(
                     message.request.payload,
-                    InboxPayload::Invocation { .. } | InboxPayload::GoalContinuation { .. }
+                    InboxPayload::Invocation { .. }
+                        | InboxPayload::GoalContinuation { .. }
+                        | InboxPayload::GoalResume { .. }
                 ) || self.parameter.is_some())
         };
         let ordinary = |message: &&crate::flow_store::inbox::AcceptedEnvelope| {
@@ -165,6 +167,15 @@ impl EntryRecipe {
         let mut context = Vec::new();
         let mut messages = Vec::new();
         let (mut arguments, invocation) = match &first.request.payload {
+            InboxPayload::GoalResume { .. } => {
+                messages.push(first.id);
+                context.push(crate::flow_runtime::input::context_message(first, &turn)?);
+                snapshot
+                    .last_invocation
+                    .as_ref()
+                    .map(|admitted| (admitted.arguments.clone(), admitted.invocation.clone()))
+                    .unwrap_or_else(|| (self.arguments.clone(), self.invocation.clone()))
+            }
             InboxPayload::GoalContinuation { source, .. } => {
                 let admitted = snapshot
                     .last_invocation
@@ -196,7 +207,10 @@ impl EntryRecipe {
                     invocation.extend(requested.clone());
                 }
                 for message in snapshot.pending.iter().filter(ordinary) {
-                    if matches!(message.request.payload, InboxPayload::Invocation { .. }) {
+                    if matches!(
+                        message.request.payload,
+                        InboxPayload::Invocation { .. } | InboxPayload::GoalResume { .. }
+                    ) {
                         break;
                     }
                     if let InboxPayload::UserSubmission {

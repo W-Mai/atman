@@ -18,13 +18,10 @@ use atman_runtime::flow_store::{
 use atman_runtime::source_program::{load_program, load_program_from_bundle};
 use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, Executor};
 use serde_json::{Value, json};
-use uuid::Uuid;
 
-use super::{SessionService, address, core_address};
+use super::{OPERATOR, SessionService, address, core_address};
 use crate::{DaemonState, prompt_bridge::DaemonPromptResolver};
 
-// Transport authentication identifies this operator; callers cannot supply sender provenance.
-const OPERATOR: Uuid = Uuid::from_bytes(*b"atman-operator!!");
 const YIELD_INTERVAL: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 
 impl SessionService {

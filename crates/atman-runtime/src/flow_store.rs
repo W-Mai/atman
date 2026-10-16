@@ -991,7 +991,13 @@ impl FlowStore {
                         }
                         (Some((_, state, inbox)), FlowFact::GoalUpdated(update)) => {
                             let record = goals.prepare(state, &update)?;
+                            if let Some(input) = &update.input {
+                                inbox.validate(input)?;
+                            }
                             inbox.goal_changed(record.as_ref(), &receipt);
+                            if let Some(input) = &update.input {
+                                inbox.apply(input.clone(), receipt.clone());
+                            }
                             goals.apply(*update, record, receipt.clone());
                         }
                         (Some((_, state, _)), FlowFact::PlanningUpdated(update)) => {

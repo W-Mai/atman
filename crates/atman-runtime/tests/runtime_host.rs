@@ -55,6 +55,7 @@ async fn host_shutdown_unwinds_paused_execution_without_closing_instances_or_los
         let goal = worker
             .edit_goal(
                 GoalRequest {
+                    start_turn: false,
                     id: Uuid::now_v7(),
                     sender: SenderIdentity::User(Uuid::now_v7()),
                     expected: None,
@@ -2325,6 +2326,7 @@ async fn goal_tools_persist_for_peers_without_freezing_execution_or_inheriting_c
     let user_pause = child
         .edit_goal(
             GoalRequest {
+                start_turn: false,
                 id: Uuid::new_v4(),
                 sender: SenderIdentity::User(Uuid::new_v4()),
                 expected: child
@@ -3141,6 +3143,7 @@ async fn continuation_admission_prioritizes_new_input_and_declines_changed_goals
             worker
                 .edit_goal(
                     GoalRequest {
+                        start_turn: false,
                         id: Uuid::new_v4(),
                         sender: SenderIdentity::User(Uuid::new_v4()),
                         expected: Some(GoalVersion::from(&goal)),

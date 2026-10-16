@@ -376,6 +376,13 @@ pub async fn dispatch_as(
                     return JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string()));
                 }
             };
+            if flow_service::goal::handles(&state, &p) {
+                return match flow_service::goal::dispatch(state, req.method, p, principal_id).await
+                {
+                    Ok(value) => JsonRpcResponse::ok(id, value),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                };
+            }
             let Some(session) = state.authorized_live_session(&p.session_id, principal_id) else {
                 return JsonRpcResponse::err(
                     id,
