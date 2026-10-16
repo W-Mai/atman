@@ -1,11 +1,11 @@
 //! Product invocation policy for host-owned persistent flow creation.
 
-use std::{collections::BTreeMap, io};
+use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
 use super::*;
-use crate::flow_runtime::{FlowSnapshot, execution::TurnRequest, launch::LaunchExecution};
+use crate::flow_runtime::{entry::EntryRecipe, launch::LaunchExecution};
 use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity};
 use crate::flow_store::launch::{LaunchInput, ResultRoute, SynchronousReply};
 use crate::flow_store::{EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef};
@@ -132,7 +132,7 @@ pub(super) async fn spawn(
             }),
         }),
     };
-    let recipe = Recipe {
+    let recipe = EntryRecipe {
         creation,
         first_turn: first_turn.clone(),
         first_run,
@@ -219,104 +219,6 @@ fn executor(parent: &ToolCtx) -> Result<crate::Executor, RuntimeError> {
         source_dir: None,
         tool_ctx: context,
     })
-}
-
-struct Recipe {
-    creation: Uuid,
-    first_turn: TurnId,
-    first_run: FlowRunId,
-    arguments: BTreeMap<String, serde_json::Value>,
-    invocation: BTreeMap<String, serde_json::Value>,
-    parameter: Option<String>,
-    authority: crate::flow_authority::EffectiveAuthority,
-    yield_interval: std::num::NonZeroUsize,
-}
-
-impl Recipe {
-    fn prepare(&self, snapshot: &FlowSnapshot) -> io::Result<Option<TurnRequest>> {
-        let eligible = |message: &&crate::flow_store::inbox::AcceptedEnvelope| {
-            message.request.scope.is_none()
-                && (matches!(message.request.payload, InboxPayload::Invocation { .. })
-                    || self.parameter.is_some())
-        };
-        let Some(first) = snapshot.pending.iter().find(eligible) else {
-            return Ok(None);
-        };
-        let initial = first.request.request_id == self.creation;
-        let turn = if initial {
-            self.first_turn.clone()
-        } else {
-            TurnId::now()
-        };
-        let run = if initial {
-            self.first_run.clone()
-        } else {
-            FlowRunId::now()
-        };
-        let mut context = Vec::new();
-        let mut messages = Vec::new();
-        let (mut arguments, invocation) = match &first.request.payload {
-            InboxPayload::Invocation {
-                arguments,
-                invocation,
-            } => {
-                messages.push(first.id);
-                context.push(crate::flow_runtime::input::context_message(first, &turn)?);
-                (arguments.clone(), invocation.clone())
-            }
-            _ => {
-                let mut invocation = self.invocation.clone();
-                if let InboxPayload::UserSubmission {
-                    invocation: requested,
-                    ..
-                } = &first.request.payload
-                {
-                    invocation.extend(requested.clone());
-                }
-                for message in snapshot.pending.iter().filter(eligible) {
-                    if matches!(message.request.payload, InboxPayload::Invocation { .. }) {
-                        break;
-                    }
-                    if let InboxPayload::UserSubmission {
-                        invocation: requested,
-                        ..
-                    } = &message.request.payload
-                        && requested
-                            .iter()
-                            .any(|(key, value)| invocation.get(key) != Some(value))
-                    {
-                        break;
-                    }
-                    messages.push(message.id);
-                    context.push(crate::flow_runtime::input::context_message(message, &turn)?);
-                }
-                (self.arguments.clone(), invocation)
-            }
-        };
-        if !matches!(first.request.payload, InboxPayload::Invocation { .. }) {
-            arguments.insert(
-                self.parameter
-                    .clone()
-                    .expect("validated text input mapping"),
-                context
-                    .iter()
-                    .map(Message::text_concat)
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
-                    .into(),
-            );
-        }
-        Ok(Some(TurnRequest {
-            turn,
-            run,
-            messages,
-            arguments,
-            invocation,
-            context,
-            authority: self.authority.clone(),
-            yield_interval: self.yield_interval,
-        }))
-    }
 }
 
 fn failed(error: impl std::fmt::Display) -> RuntimeError {

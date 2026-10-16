@@ -104,6 +104,11 @@ pub fn context_message(
     envelope: &AcceptedEnvelope,
     turn: &atman_rt::TurnId<AtmanUuid>,
 ) -> io::Result<Message> {
+    if let InboxPayload::GoalContinuation { text, .. } = &envelope.request.payload {
+        let mut message = Message::user_text(turn.clone(), text.clone());
+        message.origin = MessageOrigin::Internal;
+        return Ok(message);
+    }
     if let InboxPayload::Invocation { arguments, .. } = &envelope.request.payload {
         let mut message = Message::user_text(
             turn.clone(),

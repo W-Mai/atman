@@ -12,6 +12,7 @@ use crate::value::ValueJson;
 use crate::value::{AtmanPayload, Value};
 
 mod instance_goal;
+pub use instance_goal::MemoryGoalSchedule;
 
 pub struct MemoryGoalGet {
     pub store: Arc<GoalStore>,

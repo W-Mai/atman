@@ -329,6 +329,319 @@ async fn goal_tools_persist_for_peers_without_freezing_execution_or_inheriting_c
     assert_eq!(child.state().await.unwrap(), execution);
 }
 
+fn goal_executor(dir: &std::path::Path) -> Executor {
+    use atman_runtime::{memory::goal::GoalStore, tools::memory::*};
+    let executor = Executor::new();
+    let store = Arc::new(GoalStore::at(dir));
+    executor.tools.register(Arc::new(MemoryGoalGet {
+        store: store.clone(),
+    }));
+    executor.tools.register(Arc::new(MemoryGoalSet { store }));
+    executor
+        .tools
+        .register(Arc::new(MemoryGoalControl { resume: false }));
+    executor.tools.register(Arc::new(MemoryGoalSchedule));
+    executor
+}
+
+#[tokio::test]
+async fn entry_authored_continuation_uses_the_same_scheduler_for_direct_and_spawned_flows() {
+    use atman_runtime::{ValueJson, flow_runtime::entry::EntryRecipe, memory::goal::GoalStatus};
+    let source = r#"
+        flow main(input: string, label: string) -> string {
+            contract { invocation { user_message: input, goal: true } }
+            when input == "ready" { return final.answer(message: "ready") }
+            goal = memory.goal.get()
+            when goal.goal {
+                paused = memory.goal.pause(goal_id: goal.goal.id, expected_revision: goal.goal.revision, reason: "completed", summary: "two turns delivered")
+                declined = memory.goal.schedule(goal_id: paused.goal.id, expected_revision: paused.goal.revision, message: "must not run")
+                when declined.accepted { return "unexpected proposal" }
+                when env("effort") != "high" { return "lost invocation" }
+                return final.answer(message: label + ": " + input)
+            }
+            goal = memory.goal.set(text: "finish in two turns")
+            answer = final.answer(message: "first answer")
+            first = memory.goal.schedule(goal_id: goal.goal.id, expected_revision: goal.goal.revision, message: "continue objective")
+            again = memory.goal.schedule(goal_id: goal.goal.id, expected_revision: goal.goal.revision, message: "continue objective")
+            when first.acceptance.message_id != again.acceptance.message_id { return "duplicate proposal" }
+            return answer
+        }
+    "#;
+    for (spawned, mapped) in [(false, true), (true, true), (true, false)] {
+        let source = if mapped {
+            source.to_string()
+        } else {
+            source.replace("user_message: input, ", "")
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(dir.path()).unwrap();
+        let host = RuntimeHost::default();
+        let info = session_descriptor();
+        let session = host
+            .attach_session(root.create_session(info.clone()).unwrap())
+            .unwrap();
+        let executor = goal_executor(&dir.path().join("legacy"));
+        let (worker, scheduler) = if spawned {
+            let path = dir.path().join("worker.at");
+            std::fs::write(&path, &source).unwrap();
+            let target = serde_json::to_string(&format!("{}@main", path.display())).unwrap();
+            let launcher = session.create_flow(program_descriptor(info.id, format!(r#"
+                flow main() -> any {{
+                    inventory = flow.instances()
+                    return flow.spawn(flow: {target}, spawn_token: inventory.spawn_token, arguments: {{input: "ready", label: "initial"}})
+                }}
+            "#))).await.unwrap();
+            change(&launcher, FlowTransition::Activated).await;
+            let result = invoke_with_env(
+                &launcher,
+                executor,
+                [("effort".into(), "low".into())].into(),
+            )
+            .await
+            .result
+            .unwrap()
+            .to_json()
+            .unwrap();
+            let address = serde_json::from_value(result["address"].clone()).unwrap();
+            (host.flow(&address).await.unwrap(), None)
+        } else {
+            let descriptor = program_descriptor(info.id, source);
+            let worker = session.create_flow(descriptor.clone()).await.unwrap();
+            worker
+                .context()
+                .update_trust(
+                    atman_runtime::trust::TrustConfig {
+                        mode: atman_runtime::trust::TrustMode::Reckless,
+                        ..Default::default()
+                    },
+                    |_| Ok(()),
+                )
+                .unwrap();
+            change(&worker, FlowTransition::Activated).await;
+            let recipe = EntryRecipe {
+                creation: descriptor.creation_request,
+                first_turn: TurnId::now(),
+                first_run: RunId::now(),
+                arguments: [
+                    ("input".into(), "ready".into()),
+                    ("label".into(), "initial".into()),
+                ]
+                .into(),
+                invocation: [("effort".into(), "low".into())].into(),
+                parameter: mapped.then(|| "input".into()),
+                authority: EffectiveAuthority::root(&Default::default(), false, None),
+                yield_interval: NonZeroUsize::new(16).unwrap(),
+            };
+            worker
+                .accept_input(
+                    DeliveryRequest {
+                        request_id: descriptor.creation_request,
+                        sender: SenderIdentity::User(Uuid::new_v4()),
+                        recipient: worker.address().clone(),
+                        delivery: DeliveryMode::NextTurn,
+                        cause: None,
+                        correlation: None,
+                        scope: None,
+                        payload: InboxPayload::Invocation {
+                            arguments: recipe.arguments.clone(),
+                            invocation: recipe.invocation.clone(),
+                        },
+                    },
+                    |_| Ok(()),
+                )
+                .await
+                .unwrap();
+            let scheduler = worker
+                .schedule(executor, move |snapshot| recipe.prepare(snapshot))
+                .unwrap();
+            (worker, Some(scheduler))
+        };
+        wait_answers(&worker, 1).await;
+        let mut submission = peer_request(worker.address(), worker.address());
+        submission.sender = SenderIdentity::User(Uuid::new_v4());
+        submission.delivery = DeliveryMode::NextTurn;
+        submission.payload = InboxPayload::Invocation {
+            arguments: [
+                ("input".into(), "start".into()),
+                ("label".into(), "carried".into()),
+            ]
+            .into(),
+            invocation: [("effort".into(), "high".into())].into(),
+        };
+        worker.accept_input(submission, |_| Ok(())).await.unwrap();
+        wait_answers(&worker, 3).await;
+        assert_eq!(
+            worker.goal().await.unwrap().goal.unwrap().status,
+            GoalStatus::Paused
+        );
+        assert!(worker.snapshot().await.unwrap().pending.is_empty());
+        let context = worker.context();
+        let messages = context.messages().to_vec();
+        let continuation: Vec<_> = messages
+            .iter()
+            .filter(|message| message.text_concat() == "continue objective")
+            .collect();
+        assert_eq!(continuation.len(), 1);
+        assert_eq!(continuation[0].origin, MessageOrigin::Internal);
+        let expected = if mapped {
+            "carried: continue objective"
+        } else {
+            "carried: start"
+        };
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.origin == MessageOrigin::FinalAnswer
+                    && message.text_concat() == expected)
+        );
+        if let Some(scheduler) = scheduler {
+            scheduler.stop().await.unwrap();
+        } else {
+            session
+                .stop_scheduling(worker.address().instance_id.clone())
+                .await
+                .unwrap();
+        }
+        let address = worker.address().clone();
+        drop(worker.shutdown().await.unwrap());
+        let reopened = host.flow(&address).await.unwrap();
+        let admitted = reopened.snapshot().await.unwrap().last_invocation.unwrap();
+        assert_eq!(admitted.arguments["label"], "carried");
+        assert_eq!(admitted.invocation["effort"], "high");
+    }
+}
+
+#[tokio::test]
+async fn continuation_admission_prioritizes_new_input_and_declines_changed_goals() {
+    use atman_runtime::{
+        Value, ValueJson,
+        flow_store::goal::{GoalRequest, GoalVersion},
+        memory::goal::{GoalActor, GoalEdit, GoalPauseReason},
+        tool::{Tier, ToolDefinition},
+    };
+    for before_proposal in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker.at");
+        let barrier = "await_release()";
+        let (before, after) = if before_proposal {
+            (barrier, "")
+        } else {
+            ("", barrier)
+        };
+        std::fs::write(&path, format!(r#"
+            flow main(input: string) -> string {{
+                contract {{ invocation {{ user_message: input, goal: true }} }}
+                goal = memory.goal.get()
+                when goal.goal {{
+                    memory.goal.pause(goal_id: goal.goal.id, expected_revision: goal.goal.revision, reason: "completed", summary: "input handled")
+                    return final.answer(message: "done: " + input)
+                }}
+                goal = memory.goal.set(text: "objective")
+                {before}
+                memory.goal.schedule(goal_id: goal.goal.id, expected_revision: goal.goal.revision, message: "old continuation")
+                {after}
+                return final.answer(message: "first answer")
+            }}
+        "#)).unwrap();
+        let target = serde_json::to_string(&format!("{}@main", path.display())).unwrap();
+        let root = RuntimeStore::open(dir.path()).unwrap();
+        let host = RuntimeHost::default();
+        let info = session_descriptor();
+        let session = host
+            .attach_session(root.create_session(info.clone()).unwrap())
+            .unwrap();
+        let launcher = session.create_flow(program_descriptor(info.id, format!(r#"
+            flow main() -> any {{
+                inventory = flow.instances()
+                return flow.spawn(flow: {target}, spawn_token: inventory.spawn_token, arguments: {{input: "start"}})
+            }}
+        "#))).await.unwrap();
+        change(&launcher, FlowTransition::Activated).await;
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let executor = goal_executor(&dir.path().join("legacy"));
+        let (gate_entered, gate_release) = (entered.clone(), release.clone());
+        executor
+            .tools
+            .register_fn(
+                ToolDefinition::new("await_release", Tier::Zero),
+                move |_, _| {
+                    let (entered, release) = (gate_entered.clone(), gate_release.clone());
+                    async move {
+                        entered.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                        Ok(Value::Unit)
+                    }
+                },
+            )
+            .unwrap();
+        let result = invoke(&launcher, executor)
+            .await
+            .result
+            .unwrap()
+            .to_json()
+            .unwrap();
+        let address = serde_json::from_value(result["address"].clone()).unwrap();
+        let worker = host.flow(&address).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), entered.acquire())
+            .await
+            .unwrap_or_else(|error| panic!("barrier: {error}"))
+            .unwrap()
+            .forget();
+        let key = Uuid::new_v4().into();
+        if before_proposal {
+            let goal = worker.goal().await.unwrap().goal.unwrap();
+            worker
+                .edit_goal(
+                    GoalRequest {
+                        id: Uuid::new_v4(),
+                        sender: SenderIdentity::User(Uuid::new_v4()),
+                        expected: Some(GoalVersion::from(&goal)),
+                        edit: GoalEdit::Pause {
+                            actor: GoalActor::User,
+                            reason: GoalPauseReason::UserRequested,
+                            summary: "hold goal".into(),
+                        },
+                    },
+                    |_| Ok(()),
+                )
+                .await
+                .unwrap();
+        } else {
+            change(&worker, FlowTransition::ExecutionPaused { key }).await;
+            let mut request = peer_request(launcher.address(), worker.address());
+            request.sender = SenderIdentity::User(Uuid::new_v4());
+            request.delivery = DeliveryMode::NextTurn;
+            request.payload = InboxPayload::Interjection {
+                text: "urgent request".into(),
+            };
+            worker.accept_input(request, |_| Ok(())).await.unwrap();
+            assert_eq!(worker.snapshot().await.unwrap().pending.len(), 2);
+        }
+        release.add_permits(1);
+        if !before_proposal {
+            change(&worker, FlowTransition::ExecutionResumed { key }).await;
+        }
+        wait_answers(&worker, if before_proposal { 1 } else { 2 }).await;
+        assert!(worker.snapshot().await.unwrap().pending.is_empty());
+        let context = worker.context();
+        assert!(
+            !context
+                .messages()
+                .iter()
+                .any(|message| message.text_concat() == "old continuation")
+        );
+        if !before_proposal {
+            assert!(
+                context
+                    .messages()
+                    .iter()
+                    .any(|message| message.text_concat() == "done: urgent request")
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn entry_results_survive_worker_reopen_and_are_read_through_the_shared_tool() {
     use atman_runtime::{
@@ -2733,7 +3046,7 @@ async fn cross_session_observation_retains_cursor_on_revocation_and_recovers_aft
 
 async fn wait_answers(worker: &FlowWorker, count: usize) {
     let mut commits = worker.subscribe_commits();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             commits.borrow_and_update();
             let snapshot = worker.snapshot().await.unwrap();
@@ -2751,8 +3064,13 @@ async fn wait_answers(worker: &FlowWorker, count: usize) {
             commits.changed().await.unwrap();
         }
     })
-    .await
-    .expect("scheduled answer was not delivered");
+    .await;
+    assert!(
+        result.is_ok(),
+        "scheduled answer missing: {:?}; {:?}",
+        worker.snapshot().await,
+        worker.completion(None).await
+    );
 }
 
 #[tokio::test]

@@ -266,12 +266,17 @@ pub(super) struct Inbox {
     messages: HashMap<Uuid, usize>,
     pending: PendingBatch<Uuid>,
     inputs: Vec<InputRecord>,
+    last_invocation: Option<usize>,
     pub(super) waiters: ReplyWaiters,
 }
 
 impl Inbox {
     pub fn inputs(&self) -> &[InputRecord] {
         &self.inputs
+    }
+
+    pub fn last_invocation(&self) -> Option<&InputRecord> {
+        self.last_invocation.map(|index| &self.inputs[index])
     }
 
     pub fn reserve(
@@ -481,6 +486,7 @@ impl Inbox {
                     InboxPayload::GoalContinuation { .. }
                 )
             });
+            self.last_invocation = Some(self.inputs.len());
         }
         self.inputs.push(InputRecord {
             input,

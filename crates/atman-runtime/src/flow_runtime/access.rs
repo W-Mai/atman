@@ -62,6 +62,25 @@ impl RuntimeHost {
 }
 
 impl FlowClient {
+    /// Submit an entry policy's suggestion for this instance's next turn.
+    pub async fn schedule_goal(
+        &self,
+        goal: crate::flow_store::goal::GoalVersion,
+        text: String,
+    ) -> io::Result<Option<crate::flow_store::inbox::Acceptance>> {
+        self.authorize(self.source(), FlowAction::ManageGoal)?;
+        let client = self.clone();
+        self.host
+            .flow(self.source())
+            .await?
+            .request(move |store| {
+                store.schedule_goal(client.lease.clone(), goal, text, |_| {
+                    client.authorize(client.source(), FlowAction::ManageGoal)
+                })
+            })
+            .await
+    }
+
     pub async fn read_goal(&self, target: FlowRef) -> io::Result<super::goal::GoalView> {
         self.authorize_goal_read(&target)?;
         let client = self.clone();

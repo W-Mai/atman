@@ -5,6 +5,55 @@ use crate::flow_store::goal::GoalVersion;
 use crate::memory::goal::GoalEdit;
 use crate::tools::agent_ctrl::instance::{self, Target};
 
+pub struct MemoryGoalSchedule;
+
+impl Tool for MemoryGoalSchedule {
+    fn name(&self) -> &str {
+        "memory.goal.schedule"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Propose this persistent flow's next turn from an explicit entry policy. Requires the current active goal version. Ordinary input takes priority; a changed goal declines the proposal. This does not deliver a final answer or resume execution.",
+        )
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "goal_id": { "type": "string" },
+                "expected_revision": { "type": "integer", "minimum": 1 },
+                "message": { "type": "string", "description": "Instructions for the next turn, recorded as internal runtime input." }
+            },
+            "required": ["goal_id", "expected_revision", "message"],
+            "additionalProperties": false
+        })
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let client = ctx.flow_client().ok_or_else(|| {
+                goal_error("scheduling requires a persistent instance host binding")
+            })?;
+            let (id, revision) = goal_expected(&args, true)?.expect("required goal version");
+            let acceptance = client
+                .schedule_goal(
+                    GoalVersion {
+                        id: id.into(),
+                        revision,
+                    },
+                    required_string(&args, "message")?,
+                )
+                .await
+                .map_err(goal_error)?;
+            Ok(Value::from_json(
+                serde_json::json!({ "accepted": acceptance.is_some(), "acceptance": acceptance }),
+            ))
+        })
+    }
+}
+
 pub(super) fn target<'a>(
     args: &ToolArgs,
     ctx: &'a ToolCtx,

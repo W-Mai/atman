@@ -18,6 +18,11 @@ impl FlowStore {
         self.inbox.inputs()
     }
 
+    /// The last admitted entry configuration, reconstructed by the same live/replay path.
+    pub fn last_invocation_input(&self) -> Option<&InputRecord> {
+        self.inbox.last_invocation()
+    }
+
     /// The host selects inputs compatible with the current invocation at an explicit safe point.
     pub fn reserve_context_input(
         &mut self,

@@ -37,6 +37,29 @@ Persistent peers have equal goal ownership. `target_handle` can address any peer
 
 Recovery preserves the recorded goal identity, revision, timestamps, status, and summary. The live context and goal subscribers update only after durable commitment. The instance journal is the sole goal record; no legacy `goal.json` is written. These APIs provide durable goal state; automatic objective continuation requires an entry policy and scheduler binding. The existing CLI and daemon retain the managed-session behavior described below until their host binding changes.
 
+`memory.goal.schedule(goal_id, expected_revision, message)` lets a persistent entry explicitly propose its next turn. It returns `{accepted, acceptance}`; an accepted receipt includes the current inbox disposition, so a matching retry does not imply another execution. A changed or paused goal returns `accepted: false` without failing the entry. Invalid identity, permissions, and storage failures remain errors. The tool requires a persistent host binding and does not resume execution or publish a reply.
+
+An entry can deliver its answer and then apply its continuation policy before returning:
+
+```at
+flow deliver(reply: any) -> string {
+    answer = final.answer(message: reply)
+    state = memory.goal.get()
+    when state.goal {
+        when state.goal.status == "active" {
+            memory.goal.schedule(
+                goal_id: state.goal.id,
+                expected_revision: state.goal.revision,
+                message: "Continue the recorded objective from the current context.",
+            )
+        }
+    }
+    return answer
+}
+```
+
+The entry calls this helper with `deliver(reply).await`. Final publication does not bypass the remaining entry code; successful entry return releases the turn for scheduling. The shared `EntryRecipe` adapter gives ordinary pending input priority over a continuation. A continuation inherits the exact arguments and invocation configuration of its source turn, records its text with internal origin and user protocol role, and updates the declared user-message parameter when one exists. It can also run an entry without that parameter mapping. Future unrelated user submissions do not inherit a continuation's invocation overrides.
+
 ## Execution boundaries
 
 Watcher registration validates its target before adding an active watch. Before returning success, it establishes the source subscription and captures the terminal screen baseline; subsequent screen updates remain available even before the background consumer is first polled. Unwatch stops future results from that registration; notifications already queued remain available. Watcher completion and notification enqueue share one state lock, and changes wake every waiter, including hosts waiting for all watches to finish. Model pickup, background turns, and explicit `wait_for_watcher` compete for the same FIFO queue. A reserved batch remains queued until history accepts it; failed preparation releases it, while model failures after pickup leave it recorded in context. Acknowledged user pauses defer new notifications while allowing the current response to finish. Cancelling a child flow stops its owned watchers.

@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Explicit goal scheduling** — Persistent entries can propose another turn with `memory.goal.schedule`. Direct and spawned flows share input preparation, ordinary input takes priority, and continuations retain their source turn's arguments and invocation settings.
+
 - **Durable goal continuation requests** — Explicit continuation proposals use the shared inbox, retain stable receipts, and wait for successful turn completion. Goal changes and interrupted execution invalidate stale proposals; admitted input supersedes unselected proposals without discarding other messages.
 
 - **Persistent flow goals** — Goal records share each instance journal and survive reopening with exact identities and revisions. Peer edits require explicit grants, retries return committed receipts, and goal changes remain independent of execution pauses and inbox contents.

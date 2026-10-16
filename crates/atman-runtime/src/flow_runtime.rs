@@ -2,6 +2,7 @@
 
 pub mod access;
 pub(crate) mod context;
+pub mod entry;
 pub mod execution;
 pub mod goal;
 pub mod host;
@@ -32,6 +33,7 @@ pub struct FlowSnapshot {
     pub state: FlowInstance<AtmanUuid>,
     pub cursor: CommitReceipt,
     pub pending: Vec<crate::flow_store::inbox::AcceptedEnvelope>,
+    pub last_invocation: Option<entry::AdmittedInvocation>,
 }
 
 enum Command {
@@ -214,6 +216,21 @@ impl FlowWorker {
                 state: store.state().clone(),
                 cursor: store.cursor().clone(),
                 pending: store.pending_inputs().cloned().collect(),
+                last_invocation: store.last_invocation_input().map(|record| {
+                    let crate::flow_store::inbox::InputContent::InvocationInput {
+                        arguments,
+                        invocation,
+                        ..
+                    } = &record.input.content
+                    else {
+                        unreachable!("invocation index points to invocation input")
+                    };
+                    entry::AdmittedInvocation {
+                        lease: record.input.lease.clone(),
+                        arguments: arguments.clone(),
+                        invocation: invocation.clone(),
+                    }
+                }),
             })
         })
         .await
