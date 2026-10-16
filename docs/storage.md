@@ -155,7 +155,17 @@ The host compiles the recorded source bundle, commits invocation input, and cons
 
 Inline calls share the instance context. Fanout calls retain isolated invocation contexts: their publications remain in the owning instance journal with `context_run`, and recovery does not merge them into the shared conversation. Message scheduling claims use the instance address rather than serializing every flow in a session.
 
-Worker binding covers message publication, model-window checkpoints, and persistent spawn execution. Legacy watcher/child notification migration and resource ownership still require host integration. The CLI and daemon retain their existing storage and dispatch until that integration is complete.
+Worker binding covers message publication, model-window checkpoints, persistent spawn execution, and process resources. Legacy watcher/child notification migration and product scheduling still require host integration. The CLI and daemon retain their existing storage and dispatch until that integration is complete.
+
+### Flow process resources
+
+Each persistent `FlowWorker` owns an `InstanceResources` group containing its `BgRegistry`, `TermRegistry`, and `TaskRegistry`. Bound executor invocations use that group across turns; inline calls share it, and persistent peers use their own worker's group. Handles and task operations cannot access a sibling's registry, even within the same session. Instance invocations without storage do not inherit a runtime's process registries implicitly.
+
+Background processes use the resource owner's cancellation lifetime. Completing or cancelling a turn and pausing execution do not close that group. Explicit process/task termination still stops the selected process. `CloseRequested` commits before closing process admission and requesting cleanup; the worker publishes the state and acknowledgement only after admission is closed. A terminal created concurrently with closure is terminated before it can be registered. `Closed` rejects unfinished process cleanup.
+
+`FlowWorker::shutdown` drains accepted storage commands, stops process resources, waits for their output readers to finish, and returns the journal. Retained context or resource readers do not keep those processes alive. Unexpected owner loss requests cleanup without inventing a durable terminal state. Reopening creates empty live registries and does not recreate processes from history.
+
+Process logs, attachments, and large tool output use the owning `FlowStore` directory under `sessions/<session>/flows/<flow>`. Legacy Plan/Todo refresh entry points leave journal-backed projections intact. Legacy invocations retain their existing turn cancellation behavior and process registration APIs.
 
 ## Owned instance turns
 

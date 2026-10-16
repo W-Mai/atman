@@ -318,6 +318,17 @@ impl Executor {
                     .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
             }
         }
+        let mut executor = self.clone();
+        if let Some(binding) = &invocation.instance {
+            if let Some(storage) = &binding.storage {
+                storage.bind_resources(&mut executor.tool_ctx);
+            } else {
+                executor.tool_ctx.bg_registry = None;
+                executor.tool_ctx.term_registry = None;
+                executor.tool_ctx.task_registry = None;
+            }
+        }
+        let executor = &executor;
         let flows = program.flatten_flows();
         if let Some(session) = &invocation.session
             && program
@@ -348,22 +359,23 @@ impl Executor {
                     let flow = program
                         .flow(&id)
                         .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{current}`")))?;
-                    self.run_flow(
-                        flow,
-                        current_args,
-                        flows,
-                        invocation,
-                        run_id,
-                        FlowSource {
-                            linked_program: Some(program),
-                            module: Some(id.module),
-                            dir: program
-                                .source_dir(&id)
-                                .map(std::path::Path::to_path_buf)
-                                .or_else(|| self.source_dir.clone()),
-                        },
-                    )
-                    .await
+                    executor
+                        .run_flow(
+                            flow,
+                            current_args,
+                            flows,
+                            invocation,
+                            run_id,
+                            FlowSource {
+                                linked_program: Some(program),
+                                module: Some(id.module),
+                                dir: program
+                                    .source_dir(&id)
+                                    .map(std::path::Path::to_path_buf)
+                                    .or_else(|| self.source_dir.clone()),
+                            },
+                        )
+                        .await
                 }
             },
             |error| match error {
@@ -480,10 +492,7 @@ impl Executor {
             tr.register_flow_with_run_id(
                 task_label,
                 run_id.0.to_string(),
-                self.tool_ctx
-                    .session_id
-                    .clone()
-                    .unwrap_or_else(|| "anon".into()),
+                session_id.clone(),
                 flow_cancel.clone(),
                 None,
                 run_id.clone(),

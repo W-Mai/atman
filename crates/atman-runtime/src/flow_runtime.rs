@@ -11,6 +11,7 @@ pub mod launch;
 pub mod observation;
 pub mod planning;
 pub mod reply;
+pub mod resources;
 pub mod scheduler;
 pub mod send;
 
@@ -54,6 +55,7 @@ pub struct FlowWorker {
     host: Option<host::WeakRuntimeHost>,
     address: FlowRef,
     context: Arc<Session>,
+    resources: Arc<resources::InstanceResources>,
     commands: mpsc::Sender<Command>,
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
     commits: watch::Receiver<CommitReceipt>,
@@ -76,7 +78,7 @@ impl FlowWorker {
         host: Option<host::WeakRuntimeHost>,
     ) -> io::Result<Self> {
         let (store, context) = tokio::task::spawn_blocking(move || {
-            let context = Arc::new(Session::restore_instance_context(
+            let mut context = Session::restore_instance_context(
                 store.descriptor().address.clone(),
                 store.session_descriptor().configuration.clone(),
                 store.session_descriptor().project.clone(),
@@ -87,13 +89,22 @@ impl FlowWorker {
                     .last()
                     .map(|saved| saved.checkpoint.messages.as_slice()),
                 store.goal().cloned(),
-            ));
+            );
+            context.bind_instance_directory(store.dir());
+            let context = Arc::new(context);
             context.project_instance_planning(store.planning());
             (store, context)
         })
         .await
         .map_err(io::Error::other)?;
         let address = store.descriptor().address.clone();
+        let resources = Arc::new(resources::InstanceResources::default());
+        if matches!(
+            store.state().state(),
+            atman_rt::InstanceState::Closing { .. } | atman_rt::InstanceState::Closed
+        ) {
+            resources.close();
+        }
         let (state_tx, state) = watch::channel(store.state().clone());
         let (commits_tx, commits) = watch::channel(store.cursor().clone());
         let (commands, mut receiver) = mpsc::channel::<Command>(64);
@@ -101,6 +112,7 @@ impl FlowWorker {
             commands.downgrade(),
             Arc::downgrade(&context),
         ));
+        let resource_owner = resources::ResourceOwner(resources.clone());
         tokio::spawn(async move {
             let mut store = store;
             let mut stopped = None;
@@ -132,8 +144,15 @@ impl FlowWorker {
                 // One journal owner at a time, with no session-wide lock across disk or execution.
                 let state_tx = state_tx.clone();
                 let commits_tx = commits_tx.clone();
+                let resources = resource_owner.0.clone();
                 match tokio::task::spawn_blocking(move || {
                     let acknowledge = command(&mut store);
+                    if matches!(
+                        store.state().state(),
+                        atman_rt::InstanceState::Closing { .. } | atman_rt::InstanceState::Closed
+                    ) {
+                        resources.close();
+                    }
                     state_tx.send_if_modified(|snapshot| {
                         if snapshot == store.state() {
                             return false;
@@ -157,6 +176,7 @@ impl FlowWorker {
                     Err(_) => return,
                 }
             }
+            resource_owner.0.shutdown().await;
             if let Some(reply) = stopped {
                 let _ = reply.send(store);
             }
@@ -165,6 +185,7 @@ impl FlowWorker {
             host,
             address,
             context,
+            resources,
             commands,
             state,
             commits,
@@ -190,6 +211,14 @@ impl FlowWorker {
 
     pub fn context(&self) -> Arc<Session> {
         self.context.clone()
+    }
+
+    pub fn resources(&self) -> &Arc<resources::InstanceResources> {
+        &self.resources
+    }
+
+    pub(crate) fn bind_resources(&self, ctx: &mut ToolCtx) {
+        self.resources.bind(ctx);
     }
 
     pub(super) async fn request<T: Send + 'static>(
@@ -259,8 +288,14 @@ impl FlowWorker {
         revision: u64,
         transition: FlowTransition,
     ) -> io::Result<CommitReceipt> {
-        self.request(move |store| store.transition(revision, transition))
-            .await
+        let resources = self.resources.clone();
+        self.request(move |store| {
+            if matches!(transition, FlowTransition::Closed) && !resources.is_stopped() {
+                return Err(invalid("flow process resources are still stopping"));
+            }
+            store.transition(revision, transition)
+        })
+        .await
     }
 
     pub(crate) async fn validate_execution(&self, lease: TurnLease<AtmanUuid>) -> io::Result<()> {

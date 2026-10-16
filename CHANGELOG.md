@@ -20,6 +20,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Flow process ownership** — Persistent flows keep independent bash, terminal, and task registries across turns. Process logs and large output use each flow's directory. Closing an owner rejects late spawns and drains processes before storage handoff; sibling flows and retained history stay available.
+
 - **Runtime MCP services** — CLI, daemon, and embedded runtimes share connection ownership across their flows. Session views subscribe without retaining connections. Reload cancels superseded initialization and refresh tasks, removes revoked adapters, and rejects stale catalog updates. Status and readiness tools work without a session view; explicit waits fail when their server is removed.
 
 - **Owned MCP connections** — Stdio connections retain their working directory across reconnects. Explicit shutdown cancels pending calls and sampling tasks without reconnecting, and failed or abandoned initialization releases subprocesses. Stderr draining prevents a verbose server from blocking its protocol output.

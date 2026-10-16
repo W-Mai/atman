@@ -1582,6 +1582,12 @@ impl Session {
         );
     }
 
+    pub(crate) fn bind_instance_directory(&mut self, directory: &Path) {
+        self.dir = directory.to_path_buf();
+        self.output_store =
+            std::sync::Arc::new(crate::tools::tool_output::OutputStore::at(directory));
+    }
+
     pub(crate) fn project_instance_goal(&self, record: Option<crate::memory::goal::GoalRecord>) {
         assert!(self.flow_instance.is_some(), "instance goal projection");
         self.watch
@@ -2242,10 +2248,10 @@ impl Session {
     }
 
     pub async fn refresh_plans_from_store_async(&self) {
-        if self.dir.as_os_str().is_empty() {
+        let Some(directory) = self.legacy_memory_directory() else {
             return;
-        }
-        let store = crate::memory::plan::PlanStore::at(&self.dir);
+        };
+        let store = crate::memory::plan::PlanStore::at(directory);
         match store.list().await {
             Ok(list) => {
                 let _ = self.watch.plans.send(list);
@@ -2262,10 +2268,10 @@ impl Session {
     }
 
     pub fn refresh_todos_from_store(&self) {
-        if self.dir.as_os_str().is_empty() {
+        let Some(directory) = self.legacy_memory_directory() else {
             return;
-        }
-        let store = crate::memory::todo::TodoStore::at(&self.dir);
+        };
+        let store = crate::memory::todo::TodoStore::at(directory);
         match tokio::task::block_in_place(|| {
             tokio::runtime::Handle::try_current()
                 .ok()
@@ -2287,10 +2293,10 @@ impl Session {
     }
 
     pub async fn refresh_todos_from_store_async(&self) {
-        if self.dir.as_os_str().is_empty() {
+        let Some(directory) = self.legacy_memory_directory() else {
             return;
-        }
-        let store = crate::memory::todo::TodoStore::at(&self.dir);
+        };
+        let store = crate::memory::todo::TodoStore::at(directory);
         match store.list().await {
             Ok(list) => {
                 let _ = self.watch.todos.send(list);
@@ -2304,6 +2310,10 @@ impl Session {
                 );
             }
         }
+    }
+
+    fn legacy_memory_directory(&self) -> Option<&Path> {
+        (self.flow_instance.is_none() && !self.dir.as_os_str().is_empty()).then_some(&self.dir)
     }
 
     pub fn sink(&self) -> &EventSink {

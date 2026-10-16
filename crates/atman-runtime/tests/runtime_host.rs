@@ -26,6 +26,196 @@ fn session_descriptor() -> SessionDescriptor {
 }
 
 #[tokio::test]
+async fn process_resources_belong_to_flow_instances_across_turns_and_storage_handoff() {
+    use atman_runtime::task_registry::{TaskFilter, TaskKind};
+    use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let config = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
+    let mut info = session_descriptor();
+    info.configuration = atman_runtime::flow_store::SessionConfiguration::Atman(config.source());
+    info.project = Some(
+        atman_runtime::storage::ProjectContext::resolve(&config, project.path(), dir.path())
+            .unwrap(),
+    );
+    let runtime = AtmanRuntime::build(AtmanRuntimeOptions {
+        events: atman_runtime::event::EventSink::new(),
+        mock: false,
+        config,
+        project: info.project.clone(),
+        home_dir: None,
+        workspace_generation: "instance-processes".into(),
+    })
+    .await
+    .unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let source = r#"
+        flow main() -> any {
+            contract { capabilities { shell: true } }
+            when env("action") == "inspect" {
+                return [bash.status(handle: env("background")), term.capture(handle: env("terminal")), task.list()]
+            }
+            background = bash.spawn(cmd: "printf process-ready; exec sleep 60", timeout_ms: 0)
+            terminal = term.spawn(cmd: "printf terminal-ready; exec sleep 60")
+            return [background, terminal, task.list()]
+        }
+    "#;
+    let first = FlowWorker::start(
+        session
+            .create_flow(program_descriptor(info.id, source.into()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let second = FlowWorker::start(
+        session
+            .create_flow(program_descriptor(info.id, source.into()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    change(&first, FlowTransition::Activated).await;
+    change(&second, FlowTransition::Activated).await;
+    let first_result = invoke(&first, runtime.executor.clone())
+        .await
+        .result
+        .unwrap()
+        .to_json()
+        .unwrap();
+    let second_result = invoke(&second, runtime.executor.clone())
+        .await
+        .result
+        .unwrap()
+        .to_json()
+        .unwrap();
+    let background = first_result[0]["handle"].as_str().unwrap();
+    let terminal = first_result[1]["handle"].as_str().unwrap();
+    assert!(
+        std::path::Path::new(first_result[0]["log_path"].as_str().unwrap())
+            .starts_with(first.context().dir())
+    );
+    assert_ne!(first.context().dir(), second.context().dir());
+    assert!(
+        first
+            .context()
+            .dir()
+            .ends_with(first.address().instance_id.to_string())
+    );
+    assert_eq!(first_result[2].as_array().unwrap().len(), 3);
+    assert_eq!(second_result[2].as_array().unwrap().len(), 3);
+    assert!(
+        runtime
+            .executor
+            .tool_ctx
+            .task_registry
+            .as_ref()
+            .unwrap()
+            .list(&TaskFilter::all())
+            .is_empty()
+    );
+    assert!(
+        second
+            .resources()
+            .background()
+            .lookup(background, &info.id.to_string())
+            .is_err()
+    );
+    assert!(
+        second
+            .resources()
+            .terminals()
+            .lookup(terminal, &info.id.to_string())
+            .is_err()
+    );
+
+    let pause = Uuid::now_v7().into();
+    change(&first, FlowTransition::ExecutionPaused { key: pause }).await;
+    assert!(matches!(
+        *first
+            .resources()
+            .background()
+            .lookup(background, &info.id.to_string())
+            .unwrap()
+            .status
+            .lock()
+            .unwrap(),
+        atman_runtime::tools::bash_bg::BgStatus::Running { .. }
+    ));
+    change(&first, FlowTransition::ExecutionResumed { key: pause }).await;
+    let inspect = [
+        ("action".into(), "inspect".into()),
+        ("background".into(), background.into()),
+        ("terminal".into(), terminal.into()),
+    ]
+    .into();
+    let resumed = invoke_with_env(&first, runtime.executor.clone(), inspect)
+        .await
+        .result
+        .unwrap()
+        .to_json()
+        .unwrap();
+    assert_eq!(resumed[0]["status"], "running");
+    assert!(resumed[1].to_string().contains("terminal-ready"));
+    assert_eq!(resumed[2].as_array().unwrap().len(), 3);
+
+    let context = first.context();
+    let resources = first.resources().clone();
+    change(&first, FlowTransition::CloseRequested).await;
+    let store = tokio::time::timeout(Duration::from_secs(10), first.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        resources
+            .tasks()
+            .list(&TaskFilter::all())
+            .iter()
+            .all(|task| task.status.is_terminal())
+    );
+    assert!(
+        std::fs::read_to_string(first_result[0]["log_path"].as_str().unwrap())
+            .unwrap()
+            .contains("process-ready")
+    );
+    assert_eq!(context.dir(), store.dir());
+    let restored = FlowWorker::start(store).await.unwrap();
+    change(&restored, FlowTransition::Closed).await;
+    assert!(
+        restored
+            .resources()
+            .tasks()
+            .list(&TaskFilter::all())
+            .is_empty()
+    );
+    assert!(
+        second
+            .resources()
+            .tasks()
+            .list(&TaskFilter::all())
+            .iter()
+            .filter(|task| task.kind != TaskKind::Flow)
+            .all(|task| !task.status.is_terminal())
+    );
+    let second_resources = second.resources().clone();
+    // Storage ownership ends execution resources even when readers retain their projections.
+    let _second_context = second.context();
+    tokio::time::timeout(Duration::from_secs(10), second.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        second_resources
+            .tasks()
+            .list(&TaskFilter::all())
+            .iter()
+            .all(|task| task.status.is_terminal())
+    );
+    restored.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn peer_flows_share_runtime_mcp_without_owning_connections() {
     use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};
     let dir = tempfile::tempdir().unwrap();
@@ -598,6 +788,10 @@ async fn invoke_with_env(
         .unwrap();
     let mut request = prepare(&worker.snapshot().await.unwrap()).unwrap().unwrap();
     request.authority.shell = true;
+    request.authority.workspace_root = executor
+        .tool_ctx
+        .project()
+        .map(|project| project.root().to_path_buf());
     request.invocation = invocation;
     let ticket = worker.start_turn(executor, request).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), ticket.wait())
@@ -939,6 +1133,9 @@ async fn planning_tools_follow_the_invocation_across_inline_spawn_and_reopen() {
         child.context().plan_system_prompt().await.as_deref(),
         Some(expected_prompt.as_str())
     );
+    child.context().refresh_plans_from_store_async().await;
+    child.context().refresh_todos_from_store_async().await;
+    child.context().refresh_todos_from_store();
     assert_eq!(*child.context().subscribe_todos().borrow(), snapshot.todos);
     assert_eq!(*child.context().subscribe_plans().borrow(), snapshot.plans);
     let address = child.address().clone();

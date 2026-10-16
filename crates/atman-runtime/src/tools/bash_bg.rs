@@ -212,13 +212,9 @@ enum StreamKind {
     Stderr,
 }
 
-pub(crate) enum BgControl {
-    Kill,
-}
-
 pub struct BgEntry {
     pub session_id: String,
-    pub(crate) control_tx: mpsc::Sender<BgControl>,
+    pub(crate) cancel: CancellationToken,
     pub status: Arc<Mutex<BgStatus>>,
     pub output: Arc<Mutex<BgOutput>>,
     pub log_path: std::path::PathBuf,
@@ -282,6 +278,8 @@ impl crate::sandbox::BackgroundLauncher for DirectBackgroundLauncher {
 pub struct BgRegistry {
     entries: Mutex<HashMap<String, Arc<BgEntry>>>,
     task_registry: Option<TaskRegistry>,
+    lifetime: Option<CancellationToken>,
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl BgRegistry {
@@ -294,10 +292,24 @@ impl BgRegistry {
         self
     }
 
+    pub(crate) fn with_lifetime(mut self, lifetime: CancellationToken) -> Self {
+        self.lifetime = Some(lifetime);
+        self
+    }
+
+    pub fn close(&self) {
+        let entries = self.entries.lock().unwrap();
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        for entry in entries.values() {
+            entry.cancel.cancel();
+        }
+    }
+
     pub fn kill_all(&self) {
         let entries = self.entries.lock().unwrap();
         for (_, entry) in entries.iter() {
-            let _ = entry.control_tx.try_send(BgControl::Kill);
+            entry.cancel.cancel();
         }
     }
 
@@ -309,6 +321,12 @@ impl BgRegistry {
         max_output_bytes: u64,
         ctx: &ToolCtx,
     ) -> Result<Value, RuntimeError> {
+        let mut entries = self.entries.lock().unwrap();
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(RuntimeError::ToolFailed(
+                "bash.spawn: resource owner is closed".into(),
+            ));
+        }
         let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".to_string());
         let local_id = uuid::Uuid::now_v7().as_u64_pair().0;
         let handle = BgHandle {
@@ -333,7 +351,6 @@ impl BgRegistry {
             None => Some(Duration::from_millis(DEFAULT_SPAWN_TIMEOUT_MS)),
         };
 
-        let (control_tx, control_rx) = mpsc::channel::<BgControl>(8);
         let spawn_result = match launcher.launch() {
             Ok(result) => result,
             Err(error) => {
@@ -349,8 +366,7 @@ impl BgRegistry {
             started_at: now_ms(),
         }));
         let output = Arc::new(Mutex::new(BgOutput::default()));
-        let cancel = ctx.cancel.clone();
-        let task_cancel = cancel.child_token();
+        let task_cancel = self.lifetime.as_ref().unwrap_or(&ctx.cancel).child_token();
 
         let task_id = self.task_registry.as_ref().map(|tr| {
             tr.register(
@@ -371,16 +387,14 @@ impl BgRegistry {
 
         let entry = Arc::new(BgEntry {
             session_id: session_id.clone(),
-            control_tx,
+            cancel: task_cancel.clone(),
             status: status.clone(),
             output: output.clone(),
             log_path: log_path.clone(),
             task_id: task_id.clone(),
         });
-        {
-            let mut entries = self.entries.lock().unwrap();
-            entries.insert(handle_str.clone(), entry.clone());
-        }
+        entries.insert(handle_str.clone(), entry.clone());
+        drop(entries);
 
         let status_for_task = status.clone();
         let log_path_for_return = log_path.clone();
@@ -400,7 +414,6 @@ impl BgRegistry {
                 log_file,
                 status_for_task,
                 output,
-                control_rx,
                 task_cancel,
                 stream_tx,
                 handle_for_task,
@@ -638,7 +651,7 @@ impl BgRegistry {
 
     pub fn kill(&self, handle_str: &str, session_id: &str) -> Result<Value, RuntimeError> {
         let entry = self.lookup(handle_str, session_id)?;
-        let _ = entry.control_tx.try_send(BgControl::Kill);
+        entry.cancel.cancel();
         let st = entry.status.lock().unwrap().clone();
         Ok(Value::Struct(vec![
             ("handle".into(), Value::Str(handle_str.into())),
@@ -723,7 +736,7 @@ impl BgRegistry {
 
 impl Drop for BgRegistry {
     fn drop(&mut self) {
-        self.kill_all();
+        self.close();
     }
 }
 
@@ -736,7 +749,6 @@ async fn run_bg_process(
     log_file: File,
     status: Arc<Mutex<BgStatus>>,
     output: Arc<Mutex<BgOutput>>,
-    mut control_rx: mpsc::Receiver<BgControl>,
     cancel: CancellationToken,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     handle_for_stream: String,
@@ -783,12 +795,6 @@ async fn run_bg_process(
     let exit_reason = tokio::select! {
         biased;
         _ = cancel.cancelled() => ExitReason::Cancelled,
-        ctrl = control_rx.recv() => {
-            match ctrl {
-                Some(BgControl::Kill) => ExitReason::Kill,
-                None => ExitReason::Natural,
-            }
-        }
         _ = async {
             if let Some(t) = timeout {
                 tokio::time::sleep(t).await;
@@ -815,14 +821,6 @@ async fn run_bg_process(
                 ended_at,
             }
         }
-        ExitReason::Kill => {
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
-            BgStatus::Killed {
-                started_at,
-                ended_at,
-            }
-        }
         ExitReason::Cancelled => {
             let _ = child.start_kill();
             let _ = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
@@ -837,14 +835,6 @@ async fn run_bg_process(
                 error: "wait failed".into(),
                 started_at,
                 ended_at,
-            }
-        }
-        ExitReason::Natural => {
-            let s = child.wait().await;
-            BgStatus::Exited {
-                exit_code: s.ok().and_then(|s| s.code()).unwrap_or(-1),
-                started_at,
-                ended_at: now_ms(),
             }
         }
     };
@@ -1009,9 +999,7 @@ async fn read_stream<R: AsyncRead + Unpin>(mut reader: R, ctx: ReadStreamCtx) {
 enum ExitReason {
     Exited(std::io::Result<std::process::ExitStatus>),
     Timeout,
-    Kill,
     Cancelled,
-    Natural,
 }
 
 fn now_ms() -> i64 {
@@ -1451,7 +1439,7 @@ mod tests {
         use futures::{FutureExt, StreamExt};
         let entry = Arc::new(BgEntry {
             session_id: "watch-test".into(),
-            control_tx: mpsc::channel(1).0,
+            cancel: CancellationToken::new(),
             status: Arc::new(Mutex::new(BgStatus::Running {
                 pid: 0,
                 started_at: 0,
@@ -2087,6 +2075,79 @@ mod tests {
         assert!(error.to_string().contains("create session_dir"));
         assert_eq!(launch_calls.load(Ordering::SeqCst), 0);
         assert_eq!(background_entries(&registry, &session_path), 0);
+    }
+
+    #[test]
+    fn closed_owner_rejects_background_launch_before_external_effects() {
+        let registry = Arc::new(BgRegistry::new());
+        let dir = TempDir::new().unwrap();
+        let launch_calls = Arc::new(AtomicUsize::new(0));
+        let launcher = Box::new(CountingFailingLauncher {
+            launch_calls: launch_calls.clone(),
+            provisional_logs_seen: Arc::new(AtomicUsize::new(0)),
+            session_dir: dir.path().to_path_buf(),
+            failure: LauncherFailure::Runtime,
+        });
+        let ctx = ctx_with_registry(registry.clone(), dir.path());
+        registry.close();
+        let error = registry
+            .spawn(launcher, "ignored".into(), None, 1024, &ctx)
+            .unwrap_err();
+        assert!(error.to_string().contains("owner is closed"));
+        assert_eq!(launch_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(background_log_count(dir.path()), 0);
+    }
+
+    #[tokio::test]
+    async fn background_cancellation_follows_its_declared_owner() {
+        for persistent in [true, false] {
+            let tasks = TaskRegistry::new();
+            let mut registry = BgRegistry::new().with_task_registry(tasks.clone());
+            if persistent {
+                registry = registry.with_lifetime(CancellationToken::new());
+            }
+            let registry = Arc::new(registry);
+            let dir = TempDir::new().unwrap();
+            let ctx = ctx_with_registry(registry.clone(), dir.path());
+            ctx.cancel.cancel();
+            let mut command = tokio::process::Command::new("sh");
+            command.args(["-c", "exec sleep 60"]);
+            let spawned = registry
+                .spawn(
+                    Box::new(DirectBackgroundLauncher { command }),
+                    "sleep".into(),
+                    None,
+                    1024,
+                    &ctx,
+                )
+                .unwrap();
+            let Value::Struct(fields) = spawned else {
+                panic!("missing spawn result")
+            };
+            let Value::Str(handle) = &fields.iter().find(|(key, _)| key == "handle").unwrap().1
+            else {
+                panic!("missing handle")
+            };
+            let entry = registry.lookup(handle, "test-session").unwrap();
+            assert_eq!(entry.cancel.is_cancelled(), !persistent);
+            let mut changes = tasks.subscribe();
+            registry.close();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while tasks
+                    .list(&crate::task_registry::TaskFilter::all())
+                    .iter()
+                    .any(|task| !task.status.is_terminal())
+                {
+                    changes.recv().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            assert!(matches!(
+                *entry.status.lock().unwrap(),
+                BgStatus::Killed { .. }
+            ));
+        }
     }
 
     #[test]

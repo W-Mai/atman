@@ -300,6 +300,8 @@ impl TermEntry {
 pub struct TermRegistry {
     entries: Mutex<HashMap<String, Arc<TermEntry>>>,
     task_registry: Option<crate::task_registry::TaskRegistry>,
+    lifetime: Option<tokio_util::sync::CancellationToken>,
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl TermRegistry {
@@ -312,6 +314,22 @@ impl TermRegistry {
         self
     }
 
+    pub(crate) fn with_lifetime(mut self, lifetime: tokio_util::sync::CancellationToken) -> Self {
+        self.lifetime = Some(lifetime);
+        self
+    }
+
+    pub fn close(&self) {
+        let entries = {
+            let entries = self.entries.lock().expect("entries poisoned");
+            self.closed.store(true, Ordering::Release);
+            entries.values().cloned().collect::<Vec<_>>()
+        };
+        for entry in entries {
+            entry.stop();
+        }
+    }
+
     pub fn next_handle(&self, session_id: &str) -> TermHandle {
         let local_id = uuid::Uuid::now_v7().as_u64_pair().0;
         TermHandle {
@@ -321,11 +339,13 @@ impl TermRegistry {
     }
 
     pub fn insert(&self, entry: Arc<TermEntry>) {
-        let key = entry.handle.to_string();
-        self.entries
-            .lock()
-            .expect("entries poisoned")
-            .insert(key, entry);
+        let mut entries = self.entries.lock().expect("entries poisoned");
+        if self.closed.load(Ordering::Acquire) {
+            drop(entries);
+            entry.stop();
+        } else {
+            entries.insert(entry.handle.to_string(), entry);
+        }
     }
 
     pub fn get(&self, handle_str: &str) -> Option<Arc<TermEntry>> {
@@ -462,6 +482,20 @@ impl TermRegistry {
             profile,
         } = pty_result;
 
+        let mut entries = self.entries.lock().expect("entries poisoned");
+        if self.closed.load(Ordering::Acquire) {
+            drop(entries);
+            crate::sandbox::terminate_pty_child(child.as_mut());
+            return Err(RuntimeError::ToolFailed(
+                "term.spawn: resource owner is closed".into(),
+            ));
+        }
+        let cancel = self
+            .lifetime
+            .as_ref()
+            .map(|lifetime| lifetime.child_token())
+            .unwrap_or(cancel);
+
         if let Err(error) = std::fs::create_dir_all(&session_dir) {
             crate::sandbox::terminate_pty_child(child.as_mut());
             return Err(RuntimeError::ToolFailed(format!(
@@ -555,14 +589,14 @@ impl TermRegistry {
         });
         *entry.reader_task.lock().expect("reader_task poisoned") = Some(join);
 
-        self.insert(entry.clone());
+        entries.insert(handle_str, entry.clone());
         Ok((handle, entry))
     }
 }
 
 impl Drop for TermRegistry {
     fn drop(&mut self) {
-        self.kill_all();
+        self.close();
     }
 }
 
@@ -2423,6 +2457,48 @@ mod tests {
             .map(|cell| cell.chars.as_str())
             .collect::<String>();
         assert!(first_row.contains("completed output"));
+    }
+
+    #[test]
+    fn closed_owner_terminates_late_pty_without_registering_it() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = crate::sandbox::TempProfile::create("late terminal").unwrap();
+        let (pty, kills, waits, profile_path) = recording_pty_result(profile);
+        let tasks = crate::task_registry::TaskRegistry::new();
+        let registry = Arc::new(TermRegistry::new().with_task_registry(tasks.clone()));
+        registry.close();
+        let result = registry.spawn_entry(
+            24,
+            80,
+            "closed".into(),
+            root.path().join("logs"),
+            pty,
+            None,
+            "late terminal".into(),
+            "sh".into(),
+            None,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+            None,
+            None,
+        );
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("owner is closed")
+        );
+        assert_eq!(kills.load(Ordering::SeqCst), 1);
+        assert_eq!(waits.load(Ordering::SeqCst), 1);
+        assert!(!profile_path.exists());
+        assert!(!root.path().join("logs").exists());
+        assert!(
+            tasks
+                .list(&crate::task_registry::TaskFilter::all())
+                .is_empty()
+        );
+        assert!(registry.list("closed").is_empty());
     }
 
     #[tokio::test]
