@@ -918,7 +918,7 @@ impl Tool for AgentSpawn {
              A flow may declare `contract { invocation { user_message: param } }` to seed its child message context. \
              Use flow.status/flow.output/flow.kill to manage async sub-agents by handle. \
              In a persistent instance, both modes create a retained peer; async=false waits for its first turn only. \
-             Later text input requires the declared invocation user_message mapping. Persistent instances require workspace=none. \
+             Later text input requires the declared invocation user_message mapping. Workspace references persist across turns until the instance is closed. \
              Pass only parameters declared by flow.describe. Missing params use flow-defined defaults.",
         )
     }

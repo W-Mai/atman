@@ -33,6 +33,7 @@ pub struct InstanceInvocation {
     storage: Option<crate::flow_runtime::FlowWorker>,
     options: Option<atman_rt::VmRunOptions>,
     session_start: bool,
+    workspace: Option<crate::git_workspace::WorkspaceBinding>,
     started: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -49,6 +50,7 @@ impl InstanceInvocation {
             storage: None,
             options: None,
             session_start: false,
+            workspace: None,
             started: Default::default(),
         }
     }
@@ -65,6 +67,14 @@ impl InstanceInvocation {
         }
         self.storage = Some(storage);
         Ok(self)
+    }
+
+    pub(crate) fn with_workspace(
+        mut self,
+        workspace: Option<crate::git_workspace::WorkspaceBinding>,
+    ) -> Self {
+        self.workspace = workspace;
+        self
     }
 
     fn claim(&self) -> Result<(), RuntimeError> {
@@ -329,6 +339,7 @@ impl Executor {
         if let Some(binding) = &invocation.instance {
             if let Some(storage) = &binding.storage {
                 storage.bind_resources(&mut executor.tool_ctx);
+                executor.tool_ctx.workspace = binding.workspace.clone();
                 executor.events = storage.execution_sink(binding.lease.clone(), &self.events);
             } else {
                 executor.tool_ctx.bg_registry = None;
@@ -347,12 +358,17 @@ impl Executor {
             let binding = invocation.instance.as_ref().expect("persistent invocation");
             let session = invocation.session.as_ref().expect("persistent context");
             let entry_id = binding.lease.flow.instance_id.to_string();
-            let entry = session.flow_registry.create_entry(
+            let entry = session.flow_registry.create_entry_with_workspace(
                 entry_id.clone(),
                 session.goal().unwrap_or_else(|| flow_name.to_owned()),
                 String::new(),
                 binding.lease.run.clone(),
+                binding.workspace.clone(),
             );
+            if binding.workspace.is_some() {
+                *entry.workspace_state.lock().unwrap() =
+                    Some(crate::git_workspace::WorkspaceState::Bound);
+            }
             if program
                 .entry_flow(flow_name)
                 .and_then(|id| program.flow(&id))

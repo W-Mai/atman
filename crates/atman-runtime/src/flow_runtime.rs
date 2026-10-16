@@ -393,6 +393,18 @@ impl FlowWorker {
             if matches!(transition, FlowTransition::Closed) && !resources.is_stopped() {
                 return Err(invalid("flow process resources are still stopping"));
             }
+            if matches!(transition, FlowTransition::Closed) {
+                if store.state().revision() != revision {
+                    return Err(invalid("stale flow state revision"));
+                }
+                let mut candidate = store.state().clone();
+                candidate.finish_close().map_err(invalid)?;
+                if store.state().state() != &atman_rt::InstanceState::Closed
+                    && let Some(workspace) = store.workspace_request()
+                {
+                    workspace.release(store.state().address())?;
+                }
+            }
             store.transition(revision, transition)
         })
         .await

@@ -20,6 +20,7 @@ pub mod subscription;
 pub mod trace;
 pub mod view;
 pub mod waiter;
+pub mod workspace;
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -212,6 +213,7 @@ enum FlowFact {
     ExecutionEvents(Vec<trace::ExecutionEvent>),
     Created(Box<FlowDescriptor>),
     Activated(Box<launch::Activation>),
+    WorkspaceRequested(Box<workspace::WorkspaceRequest>),
     Transition(FlowTransition),
     TurnCompleted(Box<completion::Completion>),
     EnvelopeAccepted(Box<AcceptedEnvelope>),
@@ -278,11 +280,16 @@ impl FlowJournal {
 
 impl FlowFact {
     fn validate_batch(facts: &[Self]) -> io::Result<()> {
-        if facts
-            .iter()
-            .any(|fact| matches!(fact, Self::Created(_) | Self::LegacyRecords(_)))
-        {
-            return if matches!(facts, [Self::Created(_)] | [Self::LegacyRecords(_)]) {
+        if facts.iter().any(|fact| {
+            matches!(
+                fact,
+                Self::Created(_) | Self::LegacyRecords(_) | Self::WorkspaceRequested(_)
+            )
+        }) {
+            return if matches!(
+                facts,
+                [Self::Created(_)] | [Self::LegacyRecords(_)] | [Self::WorkspaceRequested(_)]
+            ) {
                 Ok(())
             } else {
                 Err(invalid(
@@ -828,6 +835,7 @@ pub struct FlowStore {
     subscriptions: subscription::Subscriptions,
     process_watches: process_watch::ProcessWatches,
     activation: Option<launch::Activation>,
+    workspace: Option<workspace::WorkspaceRequest>,
     completions: completion::Completions,
     checkpoints: context::Checkpoints,
     goals: goal::Goals,
@@ -875,6 +883,7 @@ impl FlowStore {
             subscriptions: subscription::Subscriptions::default(),
             process_watches: process_watch::ProcessWatches::default(),
             activation: None,
+            workspace: None,
             completions: Default::default(),
             checkpoints: Default::default(),
             goals: Default::default(),
@@ -894,6 +903,7 @@ impl FlowStore {
         let mut subscriptions = subscription::Subscriptions::default();
         let mut process_watches = process_watch::ProcessWatches::default();
         let mut activation = None;
+        let mut workspace = None;
         let mut closed = None;
         let mut completions = completion::Completions::default();
         let mut checkpoints = context::Checkpoints::default();
@@ -945,7 +955,16 @@ impl FlowStore {
                                 process_watches.close();
                             }
                         }
+                        (Some((_, state, _)), FlowFact::WorkspaceRequested(request)) => {
+                            request.replay(state, workspace.as_ref())?;
+                            workspace = Some(*request);
+                        }
                         (Some((descriptor, state, inbox)), FlowFact::Activated(record)) => {
+                            if record.input.workspace != workspace {
+                                return Err(invalid(
+                                    "activation workspace does not match its recorded request",
+                                ));
+                            }
                             if activation.is_some() {
                                 return Err(invalid("duplicate instance activation"));
                             }
@@ -1139,6 +1158,7 @@ impl FlowStore {
             subscriptions,
             process_watches,
             activation,
+            workspace,
             completions,
             checkpoints,
             goals,
@@ -1269,7 +1289,7 @@ impl FlowStore {
 
     fn refresh_projection(&mut self) {
         // Source bodies remain in the creation fact; metadata contains only the entry reference.
-        let value = serde_json::json!({ "address": self.descriptor.address, "content": self.descriptor.content.summary(), "history": self.history, "creation_request": self.descriptor.creation_request, "created_by": self.descriptor.created_by, "state": self.state.state(), "revision": self.state.revision(), "pauses": self.state.pauses() });
+        let value = serde_json::json!({ "address": self.descriptor.address, "content": self.descriptor.content.summary(), "history": self.history, "creation_request": self.descriptor.creation_request, "created_by": self.descriptor.created_by, "state": self.state.state(), "revision": self.state.revision(), "pauses": self.state.pauses(), "workspace": self.workspace });
         self.projection_error =
             write_projection(&self.dir.join("flow.json"), &self.cursor, &value).err();
     }

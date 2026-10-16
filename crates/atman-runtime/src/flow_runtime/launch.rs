@@ -168,7 +168,9 @@ impl RuntimeHost {
                 authorize(&descriptor, &input)?;
                 None
             };
-            let execution = prepare_execution()?;
+            let execution = tokio::task::spawn_blocking(prepare_execution)
+                .await
+                .map_err(io::Error::other)??;
             let worker = match existing {
                 Some(worker) => worker,
                 None => session.create_flow_at(descriptor.clone(), catalog).await?,
@@ -189,6 +191,23 @@ impl RuntimeHost {
             let mut controller = None;
             let attempt = async {
                 authorize(&descriptor, &input)?;
+                if let Some(workspace) = input.workspace.clone() {
+                    let authorize = authorize.clone();
+                    let creation = descriptor.clone();
+                    let requested = input.clone();
+                    worker
+                        .request(move |store| {
+                            authorize(&creation, &requested)?;
+                            if store.state().state() != &atman_rt::InstanceState::Prepared {
+                                return Err(invalid(
+                                    "only a prepared instance can acquire launch resources",
+                                ));
+                            }
+                            store.request_workspace(workspace.clone())?;
+                            workspace.acquire(store.state().address())
+                        })
+                        .await?;
+                }
                 if let Some(execution) = execution {
                     // The launch owns scheduling until activation commits. Failed activation
                     // releases it before returning, so a Prepared instance remains retryable.
@@ -368,6 +387,7 @@ mod tests {
             .into(),
         };
         let input = LaunchInput {
+            workspace: None,
             initial_goal: None,
             execution: None,
             request: DeliveryRequest {

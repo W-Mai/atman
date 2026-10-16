@@ -113,6 +113,17 @@ impl FlowWorker {
             if request.messages.is_empty() {
                 return Err(invalid("a turn requires selected pending input"));
             }
+            let workspace = if let Some(workspace) = store.workspace_request() {
+                workspace.validate_live(store.state().address())?;
+                if request.authority.workspace_root.as_ref() != Some(&workspace.binding.path) {
+                    return Err(invalid(
+                        "execution authority does not match its workspace resource",
+                    ));
+                }
+                Some(workspace.binding.clone())
+            } else {
+                None
+            };
             worker.context().bind_executor(&executor).map_err(invalid)?;
             let entry = store.descriptor().entry()?;
             let program = crate::source_program::load_program_from_bundle(
@@ -161,6 +172,7 @@ impl FlowWorker {
             );
             let binding =
                 InstanceInvocation::new(lease.clone(), request.authority, CancellationToken::new())
+                    .with_workspace(workspace)
                     .with_session_start(
                         store.last_invocation_input().is_none()
                             && store.launch_record().is_some_and(|record| {

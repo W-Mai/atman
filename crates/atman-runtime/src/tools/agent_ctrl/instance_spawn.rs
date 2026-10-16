@@ -22,11 +22,7 @@ pub(super) async fn spawn(
     let client = ctx
         .flow_client()
         .ok_or_else(|| failed("instance has no peer host binding"))?;
-    if workspace_policy(&args)? != WorkspacePolicy::None {
-        return Err(failed(
-            "persistent workspace allocation requires an instance resource binding",
-        ));
-    }
+    let policy = workspace_policy(&args)?;
     let reference = extract_flow(&args)?.unwrap_or_else(|| "subagent.at".into());
     let version = extract_flow_version(&args)?;
     let prepared = prepare_flow_agent(&reference, version.as_deref(), ctx).await?;
@@ -45,13 +41,6 @@ pub(super) async fn spawn(
         .flow_identity
         .as_ref()
         .ok_or_else(|| failed("trusted identity is unavailable"))?;
-    let authority = identity
-        .effective_authority
-        .inherited_child(
-            crate::flow_authority::contract_allows_shell(prepared.flow.contract.as_ref()),
-            crate::flow_authority::ChildWorkspaceAuthority::Inherit,
-        )
-        .map_err(failed)?;
     let yield_interval = ctx
         .vm_run_options
         .and_then(|options| options.yield_interval())
@@ -63,6 +52,45 @@ pub(super) async fn spawn(
         session_id: client.source().session_id,
         instance_id: FlowInstanceId::now(),
     };
+    let workspace = if policy == WorkspacePolicy::None {
+        ctx.workspace
+            .clone()
+            .map(|binding| crate::flow_store::workspace::WorkspaceRequest {
+                binding,
+                source: crate::flow_store::workspace::WorkspaceSource::Share {
+                    sponsor: client.source().clone(),
+                },
+            })
+    } else {
+        let service = ctx
+            .flow_workspace_service
+            .clone()
+            .ok_or_else(|| failed("workspace service is unavailable"))?;
+        let owner = address.clone();
+        let root = identity.effective_authority.workspace_root.clone();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                service.prepare_instance(policy, &owner, root.as_deref())
+            })
+            .await
+            .map_err(failed)?
+            .map_err(failed)?,
+        )
+    };
+    let authority = identity
+        .effective_authority
+        .inherited_child(
+            crate::flow_authority::contract_allows_shell(prepared.flow.contract.as_ref()),
+            workspace
+                .as_ref()
+                .map(|workspace| {
+                    crate::flow_authority::ChildWorkspaceAuthority::TrustedDelegation(
+                        workspace.binding.path.clone(),
+                    )
+                })
+                .unwrap_or(crate::flow_authority::ChildWorkspaceAuthority::Inherit),
+        )
+        .map_err(failed)?;
     let inherited = should_inherit_context(&args);
     let mut history = if inherited {
         ctx.session_messages_handle
@@ -108,6 +136,7 @@ pub(super) async fn spawn(
         )
     };
     let input = LaunchInput {
+        workspace,
         initial_goal: None,
         execution: Some(EntryBinding {
             session_start: false,
@@ -148,7 +177,7 @@ pub(super) async fn spawn(
             EntryExecution {
                 executor,
                 catalog,
-                authority,
+                authority: identity.effective_authority.clone(),
                 yield_interval,
                 trust: ctx.trust.clone().unwrap_or_default(),
             },

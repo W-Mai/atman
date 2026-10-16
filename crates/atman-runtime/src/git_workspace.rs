@@ -181,6 +181,10 @@ pub struct WorkspaceManager {
 }
 
 impl WorkspaceManager {
+    pub(crate) fn locate(cwd: &Path, external_root: Option<&Path>) -> Result<Self, WorkspaceError> {
+        Self::resolve(cwd, external_root).map(|(manager, _, _)| manager)
+    }
+
     pub fn at(cwd: &Path, external_root: Option<&Path>) -> Result<Self, WorkspaceError> {
         let (manager, common, is_bare) = Self::resolve(cwd, external_root)?;
         fs::create_dir_all(&manager.managed_root)?;

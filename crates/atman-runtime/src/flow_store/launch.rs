@@ -55,6 +55,7 @@ impl ResultRoute {
 /// Trusted host input, separate from the authority to execute it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LaunchInput {
+    pub workspace: Option<super::workspace::WorkspaceRequest>,
     pub request: DeliveryRequest,
     /// Explicit initial objective, committed with activation before any turn can start.
     pub initial_goal: Option<String>,
@@ -231,6 +232,11 @@ impl FlowStore {
                     "launch input conflicts with the committed activation",
                 ))
             };
+        }
+        if input.workspace != self.workspace {
+            return Err(invalid(
+                "activation workspace does not match its recorded request",
+            ));
         }
         let activation = Activation {
             input,

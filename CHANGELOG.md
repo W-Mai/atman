@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent workspace execution** — Peer spawning supports isolated and shared worktrees across turns and host restarts. Allocation intent is journaled before Git effects; entry admission validates ownership, and explicit instance closure releases its reference after execution stops.
+
 - **Shared workspace references** — Multiple persistent instances can retain one managed worktree. Releasing its creator preserves other references; only the final release performs cleanup.
 
 - **Workspace ownership** — Managed worktrees support persistent instance references, validated restoration, and explicit owner release. Host restarts and generic cleanup preserve referenced worktrees; dirty and retained data survive release.

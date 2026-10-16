@@ -206,6 +206,7 @@ impl SessionService {
             .await?;
         // The creation request identifies the initial invocation in each typed identity domain.
         let input = LaunchInput {
+            workspace: None,
             initial_goal: request.initial_goal,
             execution: Some(EntryBinding {
                 session_start: false,

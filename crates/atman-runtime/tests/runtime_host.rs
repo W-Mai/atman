@@ -2958,6 +2958,7 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
         .launch_flow(
             descriptor.clone(),
             LaunchInput {
+                workspace: None,
                 initial_goal: None,
                 request: DeliveryRequest {
                     request_id: descriptor.creation_request,
@@ -3688,6 +3689,381 @@ async fn persistent_spawn_runs_real_entries_and_retains_sync_and_async_instances
             .iter()
             .any(|message| message.origin == MessageOrigin::FinalAnswer)
     );
+}
+
+#[tokio::test]
+async fn persistent_workspaces_share_across_peers_turns_and_host_restarts() {
+    use atman_runtime::git_workspace::{WorkspaceManager, WorkspaceState};
+    use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};
+    let data = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.path().join("base.txt"), "base").unwrap();
+    git(&["add", "base.txt"]);
+    git(&["commit", "-q", "-m", "base"]);
+    let child_path = data.path().join("child.at");
+    let leaf = serde_json::to_string(&format!("{}@leaf", child_path.display())).unwrap();
+    std::fs::write(
+        &child_path,
+        format!(
+            r#"
+        flow leaf(input: string = "start") -> string {{
+            contract {{ invocation {{ user_message: input }} }}
+            contents = fs.read(path: "shared.txt")
+            return contents
+        }}
+        flow child() -> string {{
+            fs.write(path: "shared.txt", content: "preserved")
+            inventory = flow.instances()
+            return flow.spawn(flow: {leaf}, spawn_token: inventory.spawn_token, async: false)
+        }}
+    "#
+        ),
+    )
+    .unwrap();
+    let reference = serde_json::to_string(&format!("{}@child", child_path.display())).unwrap();
+    let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(data.path().join("config"));
+    let mut info = session_descriptor();
+    info.project = Some(
+        atman_runtime::storage::ProjectContext::resolve(&hub, repo.path(), data.path()).unwrap(),
+    );
+    info.configuration = atman_runtime::flow_store::SessionConfiguration::Atman(hub.source());
+    let runtime = AtmanRuntime::build(AtmanRuntimeOptions {
+        events: Default::default(),
+        mock: false,
+        config: hub,
+        project: info.project.clone(),
+        home_dir: None,
+        workspace_generation: "workspaces".into(),
+    })
+    .await
+    .unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let parent = session.create_flow(program_descriptor(info.id, format!(r#"
+        flow main() -> string {{
+            inventory = flow.instances()
+            return flow.spawn(flow: {reference}, spawn_token: inventory.spawn_token, async: false, workspace: "auto")
+        }}
+    "#))).await.unwrap();
+    change(&parent, FlowTransition::Activated).await;
+    let completion = invoke(&parent, runtime.executor.clone()).await;
+    assert_eq!(completion.result.unwrap().to_json().unwrap(), "preserved");
+    assert!(!repo.path().join("shared.txt").exists());
+    let mut child = None;
+    let mut leaf = None;
+    for item in session.snapshot().await.unwrap().catalog.flows {
+        let worker = session.open_flow(item.id).await.unwrap();
+        let descriptor = worker.descriptor().await.unwrap();
+        if descriptor.created_by.as_ref() == Some(parent.address()) {
+            child = Some(worker);
+        } else if descriptor.created_by.is_some() {
+            leaf = Some(worker);
+        }
+    }
+    let child = child.unwrap();
+    let leaf = leaf.unwrap();
+    let request = child
+        .launch_record()
+        .await
+        .unwrap()
+        .unwrap()
+        .input
+        .workspace
+        .unwrap();
+    let binding = request.binding;
+    assert_eq!(
+        leaf.launch_record()
+            .await
+            .unwrap()
+            .unwrap()
+            .input
+            .workspace
+            .unwrap()
+            .binding,
+        binding
+    );
+    let manager = WorkspaceManager::open_existing(repo.path(), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        manager.get(&binding.workspace_id).unwrap().instances.len(),
+        2
+    );
+    assert_eq!(
+        manager
+            .get(&binding.workspace_id)
+            .unwrap()
+            .lifecycle_state(),
+        WorkspaceState::Bound
+    );
+    change(&child, FlowTransition::CloseRequested).await;
+    change(&child, FlowTransition::Closed).await;
+    assert!(binding.path.join("shared.txt").exists());
+    manager.validate_instance(&binding, leaf.address()).unwrap();
+    let leaf_address = leaf.address().clone();
+    let child_address = child.address().clone();
+    host.shutdown().await.unwrap();
+    std::fs::remove_file(child_path).unwrap();
+    manager.validate_instance(&binding, &leaf_address).unwrap();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.open_session(info.id).unwrap())
+        .unwrap();
+    let leaf = session.open_flow(leaf_address.instance_id).await.unwrap();
+    let previous = leaf.completion(None).await.unwrap().unwrap();
+    let trust = atman_runtime::trust::TrustConfig {
+        mode: atman_runtime::trust::TrustMode::Reckless,
+        ..Default::default()
+    };
+    let authority = EffectiveAuthority::root(
+        &trust,
+        true,
+        info.project.as_ref().map(|project| project.root().into()),
+    );
+    session
+        .bind_entry(
+            leaf.address().instance_id.clone(),
+            runtime.executor.clone(),
+            authority,
+            trust,
+            NonZeroUsize::new(64).unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut input = peer_request(&child_address, leaf.address());
+    input.sender = SenderIdentity::User(Uuid::new_v4());
+    let mut commits = leaf.subscribe_commits();
+    leaf.accept_input(input, |_| Ok(())).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if leaf
+                .completion(None)
+                .await
+                .unwrap()
+                .is_some_and(|current| current.receipt != previous.receipt)
+            {
+                break;
+            }
+            commits.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(binding.path.join("shared.txt")).unwrap(),
+        "preserved"
+    );
+    assert_eq!(
+        leaf.completion(None)
+            .await
+            .unwrap()
+            .unwrap()
+            .completion
+            .result,
+        atman_runtime::flow_store::completion::InvocationResult::Returned(
+            atman_runtime::flow_store::completion::StoredValue::String("preserved".into())
+        )
+    );
+    change(&leaf, FlowTransition::CloseRequested).await;
+    change(&leaf, FlowTransition::Closed).await;
+    let record = manager.get(&binding.workspace_id).unwrap();
+    assert!(!record.is_instance_bound());
+    assert_eq!(record.lifecycle_state(), WorkspaceState::Dirty);
+    assert!(binding.path.join("shared.txt").exists());
+    host.shutdown().await.unwrap();
+    let session = root.open_session(info.id).unwrap();
+    let restored = session.open_flow(&leaf.address().instance_id).unwrap();
+    assert_eq!(restored.state().state(), &InstanceState::Closed);
+    assert_eq!(restored.workspace_request().unwrap().binding, binding);
+}
+
+#[tokio::test]
+async fn persistent_workspace_failed_launch_keeps_intent_and_close_retries_do_not_reallocate() {
+    use atman_runtime::flow_store::launch::LaunchInput;
+    use atman_runtime::flow_workspace::FlowWorkspaceService;
+    use atman_runtime::git_workspace::WorkspacePolicy;
+    let data = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    git(&["commit", "--allow-empty", "-q", "-m", "base"]);
+    let info = session_descriptor();
+    let descriptor = flow_descriptor(info.id);
+    let service = FlowWorkspaceService::new(repo.path(), None, "intent-test").unwrap();
+    let workspace = service
+        .prepare_instance(WorkspacePolicy::Auto, &descriptor.address, None)
+        .unwrap();
+    assert!(
+        !repo.path().join(".atman").exists(),
+        "planning must not allocate storage"
+    );
+    let path = workspace.binding.path.clone();
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("sentinel"), "preserve").unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let mut request = peer_request(&descriptor.address, &descriptor.address);
+    request.request_id = descriptor.creation_request;
+    request.delivery = DeliveryMode::NextTurn;
+    request.sender = SenderIdentity::User(Uuid::new_v4());
+    request.payload = InboxPayload::Invocation {
+        user: None,
+        arguments: Default::default(),
+        invocation: Default::default(),
+    };
+    let input = LaunchInput {
+        workspace: Some(workspace.clone()),
+        request,
+        initial_goal: None,
+        inherited_context: vec![],
+        result_route: None,
+        execution: None,
+    };
+    assert!(
+        host.launch_flow(descriptor.clone(), input.clone(), |_, _| Ok(()))
+            .await
+            .is_err()
+    );
+    let worker = session
+        .open_flow(descriptor.address.instance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        worker.state().await.unwrap().state(),
+        &InstanceState::Prepared
+    );
+    assert!(worker.launch_record().await.unwrap().is_none());
+    assert_eq!(
+        std::fs::read_to_string(path.join("sentinel")).unwrap(),
+        "preserve"
+    );
+    let updates = worker
+        .read_updates(None, NonZeroUsize::new(64).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        updates
+            .batches
+            .iter()
+            .flat_map(|batch| &batch.facts)
+            .any(|update| matches!(
+                update,
+                atman_runtime::flow_store::view::FlowUpdate::WorkspaceRequested(_)
+            ))
+    );
+    change(&worker, FlowTransition::CloseRequested).await;
+    let revision = worker.state().await.unwrap().revision();
+    assert!(
+        worker
+            .transition(revision, FlowTransition::Closed)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("sentinel")).unwrap(),
+        "preserve"
+    );
+    host.shutdown().await.unwrap();
+    std::fs::remove_file(path.join("sentinel")).unwrap();
+    std::fs::remove_dir(&path).unwrap();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.open_session(info.id).unwrap())
+        .unwrap();
+    let worker = session
+        .open_flow(descriptor.address.instance_id.clone())
+        .await
+        .unwrap();
+    assert!(!path.exists());
+    change(&worker, FlowTransition::Closed).await;
+    assert!(
+        host.launch_flow(descriptor.clone(), input.clone(), |_, _| Ok(()))
+            .await
+            .is_err()
+    );
+    assert!(
+        !path.exists(),
+        "retry of a closed prepared instance must not acquire resources"
+    );
+    let clean = flow_descriptor(info.id);
+    let clean_workspace = service
+        .prepare_instance(WorkspacePolicy::Auto, &clean.address, None)
+        .unwrap();
+    let clean_path = clean_workspace.binding.path.clone();
+    let mut clean_input = input;
+    clean_input.workspace = Some(clean_workspace);
+    clean_input.request.request_id = clean.creation_request;
+    clean_input.request.recipient = clean.address.clone();
+    let clean_worker = host
+        .launch_flow(clean, clean_input, |_, _| Ok(()))
+        .await
+        .unwrap()
+        .worker;
+    let revision = clean_worker.state().await.unwrap().revision();
+    assert!(
+        clean_worker
+            .transition(revision, FlowTransition::Closed)
+            .await
+            .is_err()
+    );
+    assert!(
+        clean_path.exists(),
+        "invalid close must not release the resource"
+    );
+    change(&clean_worker, FlowTransition::CloseRequested).await;
+    assert!(
+        clean_worker
+            .transition(revision, FlowTransition::Closed)
+            .await
+            .is_err()
+    );
+    assert!(
+        clean_path.exists(),
+        "stale close must not release the resource"
+    );
+    change(&clean_worker, FlowTransition::Closed).await;
+    assert!(!clean_path.exists());
+    host.shutdown().await.unwrap();
+    let session = root.open_session(info.id).unwrap();
+    let recorded = session.open_flow(&descriptor.address.instance_id).unwrap();
+    assert_eq!(recorded.workspace_request(), Some(&workspace));
+    assert_eq!(recorded.state().state(), &InstanceState::Closed);
 }
 
 #[tokio::test]

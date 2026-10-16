@@ -51,6 +51,7 @@ fn initial(info: &FlowDescriptor, recipient: &FlowRef) -> LaunchInput {
     let mut previous_answer = Message::assistant_text(TurnId::now(), "inherited answer");
     previous_answer.origin = MessageOrigin::FinalAnswer;
     LaunchInput {
+        workspace: None,
         initial_goal: None,
         execution: None,
         request: DeliveryRequest {

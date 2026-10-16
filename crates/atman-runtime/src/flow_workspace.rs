@@ -1,5 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use crate::flow_store::{
+    FlowRef,
+    workspace::{WorkspaceRequest, WorkspaceSource},
+};
 use crate::git::GitCli;
 use crate::git_workspace::{
     WorkspaceBinding, WorkspaceError, WorkspaceFinalizeOutcome, WorkspaceManager, WorkspacePolicy,
@@ -64,6 +68,43 @@ impl FlowWorkspaceService {
         Ok(Some(record.binding()))
     }
 
+    /// Prepare immutable allocation metadata without creating a worktree or registry record.
+    pub fn prepare_instance(
+        &self,
+        policy: WorkspacePolicy,
+        owner: &FlowRef,
+        parent_execution_root: Option<&Path>,
+    ) -> Result<WorkspaceRequest, WorkspaceError> {
+        if policy == WorkspacePolicy::None {
+            return Err(WorkspaceError::Invalid(
+                "allocation requires auto or retain".into(),
+            ));
+        }
+        let manager =
+            WorkspaceManager::locate(&self.repository_cwd, self.external_root.as_deref())?;
+        let execution_root = parent_execution_root.unwrap_or(&self.repository_cwd);
+        let execution_manager =
+            WorkspaceManager::locate(execution_root, self.external_root.as_deref())?;
+        if manager.repository_root() != execution_manager.repository_root() {
+            return Err(WorkspaceError::Invalid(
+                "parent execution root belongs to a different repository".into(),
+            ));
+        }
+        let id = workspace_id(&owner.instance_id.to_string());
+        Ok(WorkspaceRequest {
+            binding: WorkspaceBinding {
+                path: manager.managed_root().join(&id),
+                workspace_id: id,
+                repository_root: manager.repository_root().into(),
+                branch: None,
+            },
+            source: WorkspaceSource::Allocate {
+                base: GitCli::at(execution_root).head_oid()?,
+                retained: policy == WorkspacePolicy::Retain,
+            },
+        })
+    }
+
     pub fn finalize(
         &self,
         binding: &WorkspaceBinding,
@@ -92,6 +133,139 @@ impl FlowWorkspaceService {
 
     fn manager(&self) -> Result<WorkspaceManager, WorkspaceError> {
         WorkspaceManager::at(&self.repository_cwd, self.external_root.as_deref())
+    }
+}
+
+impl WorkspaceRequest {
+    fn manager(&self, create: bool) -> Result<WorkspaceManager, WorkspaceError> {
+        let root = self
+            .binding
+            .path
+            .parent()
+            .and_then(|path| path.parent())
+            .and_then(|path| path.parent())
+            .ok_or_else(|| WorkspaceError::Invalid("invalid workspace storage root".into()))?;
+        let manager = WorkspaceManager::locate(&self.binding.repository_root, Some(root))?;
+        if manager.repository_root() != self.binding.repository_root
+            || manager.managed_root().join(&self.binding.workspace_id) != self.binding.path
+        {
+            return Err(WorkspaceError::Invalid(
+                "workspace storage binding mismatch".into(),
+            ));
+        }
+        if create {
+            WorkspaceManager::at(&self.binding.repository_root, Some(root))
+        } else {
+            Ok(manager)
+        }
+    }
+
+    pub(crate) fn constrain_authority(
+        &self,
+        owner: &FlowRef,
+        current: &crate::flow_authority::EffectiveAuthority,
+        requested: &crate::flow_authority::EffectiveAuthority,
+        shell: bool,
+    ) -> std::io::Result<crate::flow_authority::EffectiveAuthority> {
+        use crate::flow_authority::ChildWorkspaceAuthority;
+        use crate::flow_store::invalid;
+        self.validate(owner)?;
+        let manager = self.manager(false).map_err(invalid)?;
+        let root = current
+            .workspace_root
+            .as_deref()
+            .ok_or_else(|| invalid("workspace allocation requires project authority"))?;
+        let external = manager
+            .managed_root()
+            .parent()
+            .and_then(|path| path.parent());
+        let authorized = WorkspaceManager::locate(root, external).map_err(invalid)?;
+        if authorized.repository_root() != manager.repository_root()
+            || requested.workspace_root.as_ref() != Some(&self.binding.path)
+        {
+            return Err(invalid(
+                "workspace request exceeds the bound repository authority",
+            ));
+        }
+        if matches!(self.source, WorkspaceSource::Share { .. })
+            && !self
+                .binding
+                .path
+                .starts_with(crate::fs_access::canonicalize_stable(root))
+        {
+            return Err(invalid(
+                "shared workspace exceeds current directory authority",
+            ));
+        }
+        current
+            .inherited_child(
+                shell,
+                ChildWorkspaceAuthority::TrustedDelegation(self.binding.path.clone()),
+            )
+            .and_then(|ceiling| {
+                ceiling.for_child(requested, shell, Some(self.binding.path.clone()))
+            })
+            .map_err(invalid)
+    }
+
+    pub(crate) fn acquire(&self, owner: &FlowRef) -> std::io::Result<()> {
+        use crate::flow_store::invalid;
+        self.validate(owner)?;
+        let manager = self.manager(true).map_err(invalid)?;
+        match &self.source {
+            WorkspaceSource::Allocate { base, retained } => {
+                manager
+                    .create_instance(
+                        &self.binding.workspace_id,
+                        owner,
+                        &uuid::Uuid::new_v4().to_string(),
+                        *retained,
+                        base,
+                    )
+                    .map_err(invalid)?;
+            }
+            WorkspaceSource::Share { sponsor } => {
+                manager
+                    .share_instance(&self.binding, sponsor, owner)
+                    .map_err(invalid)?;
+            }
+        }
+        self.validate_live(owner)
+    }
+
+    pub(crate) fn validate_live(&self, owner: &FlowRef) -> std::io::Result<()> {
+        self.validate(owner)?;
+        self.manager(false)
+            .and_then(|manager| manager.validate_instance(&self.binding, owner))
+            .map_err(crate::flow_store::invalid)?;
+        Ok(())
+    }
+
+    pub(crate) fn release(&self, owner: &FlowRef) -> std::io::Result<()> {
+        use crate::flow_store::invalid;
+        self.validate(owner)?;
+        let manager = self.manager(false).map_err(invalid)?;
+        let Some(record) = manager
+            .list()
+            .map_err(invalid)?
+            .into_iter()
+            .find(|record| record.id == self.binding.workspace_id)
+        else {
+            return Ok(());
+        };
+        if record.binding() != self.binding {
+            return Err(invalid("workspace release binding mismatch"));
+        }
+        if record
+            .instances
+            .iter()
+            .any(|reference| &reference.owner == owner)
+        {
+            manager
+                .release_instance(&self.binding.workspace_id, owner)
+                .map_err(invalid)?;
+        }
+        Ok(())
     }
 }
 

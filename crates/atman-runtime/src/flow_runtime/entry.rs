@@ -108,13 +108,22 @@ impl EntryRecipe {
         let parameter = crate::validate::invocation_message_parameter(flow)
             .map_err(invalid)?
             .map(str::to_owned);
-        let authority = current
-            .for_child(
+        let shell = crate::flow_authority::contract_allows_shell(flow.contract.as_ref());
+        let authority = match &input.workspace {
+            Some(workspace) => workspace.constrain_authority(
+                &descriptor.address,
+                current,
                 &binding.authority,
-                crate::flow_authority::contract_allows_shell(flow.contract.as_ref()),
-                binding.authority.workspace_root.clone(),
-            )
-            .map_err(invalid)?;
+                shell,
+            )?,
+            None => current
+                .for_child(
+                    &binding.authority,
+                    shell,
+                    binding.authority.workspace_root.clone(),
+                )
+                .map_err(invalid)?,
+        };
         Ok(Self {
             creation: descriptor.creation_request,
             first_turn: binding.first_turn.clone(),
@@ -266,6 +275,9 @@ impl super::FlowWorker {
             let launch = store
                 .launch_record()
                 .ok_or_else(|| invalid("instance has no committed launch input"))?;
+            if let Some(workspace) = store.workspace_request() {
+                workspace.validate_live(store.state().address())?;
+            }
             EntryRecipe::from_launch(
                 store.session_descriptor(),
                 store.descriptor(),
