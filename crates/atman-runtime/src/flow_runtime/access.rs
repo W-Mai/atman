@@ -62,6 +62,46 @@ impl RuntimeHost {
 }
 
 impl FlowClient {
+    pub async fn read_planning(
+        &self,
+        target: FlowRef,
+    ) -> io::Result<crate::flow_store::planning::PlanningSnapshot> {
+        self.authorize(&target, FlowAction::ReadContext)?;
+        let client = self.clone();
+        self.host
+            .flow(&target)
+            .await?
+            .request(move |store| {
+                client.authorize(store.state().address(), FlowAction::ReadContext)?;
+                Ok(store.planning().clone())
+            })
+            .await
+    }
+
+    /// Tool actions edit only their own instance, under the admitted turn's live identity.
+    pub async fn edit_planning(
+        &self,
+        request_id: Uuid,
+        expected_revision: Option<u64>,
+        edit: crate::flow_store::planning::PlanningEdit,
+    ) -> io::Result<crate::flow_store::planning::CommittedPlanningUpdate> {
+        self.authenticate()?;
+        let client = self.clone();
+        self.host
+            .flow(self.source())
+            .await?
+            .edit_planning(
+                crate::flow_store::planning::PlanningRequest {
+                    id: request_id,
+                    sender: SenderIdentity::Flow(self.source().clone()),
+                    expected_revision,
+                    edit,
+                },
+                move |_| client.authenticate(),
+            )
+            .await
+    }
+
     /// Submit an entry policy's suggestion for this instance's next turn.
     pub async fn schedule_goal(
         &self,

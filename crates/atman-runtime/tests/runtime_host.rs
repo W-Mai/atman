@@ -329,6 +329,221 @@ async fn goal_tools_persist_for_peers_without_freezing_execution_or_inheriting_c
     assert_eq!(child.state().await.unwrap(), execution);
 }
 
+#[tokio::test]
+async fn planning_tools_follow_the_invocation_across_inline_spawn_and_reopen() {
+    use atman_runtime::{
+        ValueJson,
+        memory::{ConfessionStore, GoalStore, PlanStore, TodoStore},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let helper = r#"
+        flow prepare(label: string) -> any {
+            plan.write(id: "route", title: label, steps: ["read", "write"])
+            plan.tick(step_index: 0)
+            id = memory.todo.set(where: label, why: "isolation", how: "execute", expected_result: "saved")
+            memory.todo.done(id: id)
+            discarded = memory.todo.set(where: "temporary", why: "cancel", how: "delete", expected_result: "absent")
+            memory.todo.cancel(id: discarded)
+            memory.todo.delete(id: discarded)
+            return [plan.read(), memory.todo.list()]
+        }
+    "#;
+    let child_path = dir.path().join("planning.at");
+    std::fs::write(
+        &child_path,
+        format!(
+            r#"
+        flow child() -> any {{
+            initial = plan.read()
+            result = prepare("child").await
+            final.answer(message: "child planning saved")
+            return [initial, result]
+        }}
+        {helper}
+    "#
+        ),
+    )
+    .unwrap();
+    let reference = serde_json::to_string(&format!("{}@child", child_path.display())).unwrap();
+    let source = format!(
+        r#"
+        flow main() -> any {{
+            contract {{ capabilities {{ shell: true }} }}
+            before = prepare("parent").await
+            inventory = flow.instances()
+            child = flow.spawn(flow: {reference}, spawn_token: inventory.spawn_token, async: false)
+            final.answer(message: "parent planning saved")
+            return [before, child, [plan.read(), memory.todo.list()]]
+        }}
+        {helper}
+    "#
+    );
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let parent = session
+        .create_flow(program_descriptor(info.id, source))
+        .await
+        .unwrap();
+    change(&parent, FlowTransition::Activated).await;
+    let fallback = dir.path().join("unrelated-session");
+    let plans = Arc::new(PlanStore::at(&fallback));
+    plans
+        .upsert(atman_runtime::memory::Plan::new(
+            "legacy",
+            "must stay isolated",
+            vec!["old".into()],
+        ))
+        .await
+        .unwrap();
+    let legacy_plans = plans.list().await.unwrap();
+    let todos = Arc::new(TodoStore::at(&fallback));
+    let executor = Executor::new();
+    atman_runtime::tools::register_memory(
+        &executor.tools,
+        todos.clone(),
+        Arc::new(ConfessionStore::at(&fallback)),
+        Arc::new(GoalStore::at(&fallback)),
+        plans.clone(),
+    );
+    let result = invoke(&parent, executor)
+        .await
+        .result
+        .unwrap()
+        .to_json()
+        .unwrap();
+    assert_eq!(
+        result[0], result[2],
+        "child updates cannot replace the parent's plan/todos"
+    );
+    assert_eq!(
+        result[1][0], "",
+        "child must start with its own empty planning state"
+    );
+    assert_eq!(result[0][1][0]["where"], "parent");
+    assert_eq!(result[1][1][1][0]["where"], "child");
+    assert_ne!(result[0][1][0]["id"], result[1][1][1][0]["id"]);
+    assert_eq!(plans.list().await.unwrap(), legacy_plans);
+    assert!(!todos.path().exists());
+    let catalog = session.snapshot().await.unwrap();
+    let child_id = catalog
+        .catalog
+        .flows
+        .iter()
+        .find(|entry| entry.id != parent.address().instance_id)
+        .unwrap()
+        .id
+        .clone();
+    let child = session.open_flow(child_id).await.unwrap();
+    let snapshot = child.planning().await.unwrap();
+    assert_eq!(snapshot.todos.len(), 1);
+    assert_eq!(snapshot.plans[0].title, "child");
+    assert_eq!(snapshot.plans[0].progress(), (1, 2));
+    let expected_prompt = atman_runtime::tools::plan::render_plan(&snapshot.plans[0]);
+    assert_eq!(
+        child.context().plan_system_prompt().await.as_deref(),
+        Some(expected_prompt.as_str())
+    );
+    assert_eq!(*child.context().subscribe_todos().borrow(), snapshot.todos);
+    assert_eq!(*child.context().subscribe_plans().borrow(), snapshot.plans);
+    let address = child.address().clone();
+    drop(child.shutdown().await.unwrap());
+    let reopened = host.flow(&address).await.unwrap();
+    assert_eq!(reopened.planning().await.unwrap(), snapshot);
+    assert_eq!(
+        reopened.context().plan_system_prompt().await.as_deref(),
+        Some(expected_prompt.as_str())
+    );
+    assert_eq!(
+        *reopened.context().subscribe_todos().borrow(),
+        snapshot.todos
+    );
+    assert_eq!(
+        *reopened.context().subscribe_plans().borrow(),
+        snapshot.plans
+    );
+    assert!(reopened.state().await.unwrap().can_start_turn());
+    let unbound = atman_runtime::tool::ToolCtx::new().with_session_runtime(reopened.context());
+    use atman_runtime::tool::Tool;
+    assert!(
+        atman_runtime::tools::plan::PlanWrite {
+            store: plans.clone()
+        }
+        .call(
+            atman_runtime::tool::ToolArgs {
+                named: [
+                    (
+                        "title".into(),
+                        atman_runtime::Value::Str("must not fall back".into())
+                    ),
+                    ("steps".into(), atman_runtime::Value::List(vec![]))
+                ]
+                .into(),
+                ..Default::default()
+            },
+            &unbound
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(plans.list().await.unwrap(), legacy_plans);
+    let lease = start(&parent).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    assert!(
+        client.read_planning(address).await.is_err(),
+        "creating a peer grants no context access"
+    );
+    assert_eq!(
+        client
+            .read_planning(parent.address().clone())
+            .await
+            .unwrap()
+            .plans[0]
+            .title,
+        "parent"
+    );
+    let key = Uuid::new_v4().into();
+    change(&parent, FlowTransition::ExecutionPaused { key }).await;
+    assert!(
+        client
+            .edit_planning(
+                Uuid::new_v4(),
+                None,
+                atman_runtime::flow_store::planning::PlanningEdit::DeleteTodo {
+                    id: snapshot.todos[0].id.clone()
+                }
+            )
+            .await
+            .is_err(),
+        "execution pause blocks new tool effects"
+    );
+    change(&parent, FlowTransition::ExecutionResumed { key }).await;
+    change(
+        &parent,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    assert!(
+        client
+            .edit_planning(
+                Uuid::new_v4(),
+                None,
+                atman_runtime::flow_store::planning::PlanningEdit::DeleteTodo {
+                    id: snapshot.todos[0].id.clone()
+                }
+            )
+            .await
+            .is_err(),
+        "expired invocations cannot mutate planning"
+    );
+}
+
 fn goal_executor(dir: &std::path::Path) -> Executor {
     use atman_runtime::{memory::goal::GoalStore, tools::memory::*};
     let executor = Executor::new();

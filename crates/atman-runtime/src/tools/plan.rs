@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::error::RuntimeError;
+use crate::flow_store::planning::{PlanningEdit, PlanningOutcome};
 use crate::memory::plan::{Plan, PlanStore};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
@@ -46,7 +47,7 @@ impl Tool for PlanWrite {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let title = required_string(&args, "title")?;
             let steps = required_string_list(&args, "steps")?;
@@ -54,11 +55,20 @@ impl Tool for PlanWrite {
                 Some(Value::Str(s)) if !s.is_empty() => s.clone(),
                 _ => slug_from_title(&title),
             };
-            let plan = Plan::new(id.clone(), title, steps);
-            self.store
-                .upsert(plan)
-                .await
-                .map_err(|e| RuntimeError::ToolFailed(format!("plan.write: {e}")))?;
+            if ctx
+                .edit_planning(PlanningEdit::WritePlan {
+                    id: id.clone(),
+                    title: title.clone(),
+                    steps: steps.clone(),
+                })
+                .await?
+                .is_none()
+            {
+                self.store
+                    .upsert(Plan::new(id.clone(), title, steps))
+                    .await
+                    .map_err(|e| RuntimeError::ToolFailed(format!("plan.write: {e}")))?;
+            }
             Ok(Value::Str(id))
         })
     }
@@ -95,19 +105,32 @@ impl Tool for PlanRead {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let plan = match args.named("id") {
-                Some(Value::Str(s)) if !s.is_empty() => self
-                    .store
-                    .get(s)
+            let plan = if let Some(client) = ctx.planning_client()? {
+                let snapshot = client
+                    .read_planning(client.source().clone())
                     .await
-                    .map_err(|e| RuntimeError::ToolFailed(format!("plan.read: {e}")))?,
-                _ => self
-                    .store
-                    .latest()
-                    .await
-                    .map_err(|e| RuntimeError::ToolFailed(format!("plan.read: {e}")))?,
+                    .map_err(|error| RuntimeError::ToolFailed(format!("plan.read: {error}")))?;
+                snapshot
+                    .plan(match args.named("id") {
+                        Some(Value::Str(id)) if !id.is_empty() => Some(id),
+                        _ => None,
+                    })
+                    .cloned()
+            } else {
+                match args.named("id") {
+                    Some(Value::Str(s)) if !s.is_empty() => self
+                        .store
+                        .get(s)
+                        .await
+                        .map_err(|e| RuntimeError::ToolFailed(format!("plan.read: {e}")))?,
+                    _ => self
+                        .store
+                        .latest()
+                        .await
+                        .map_err(|e| RuntimeError::ToolFailed(format!("plan.read: {e}")))?,
+                }
             };
             let Some(plan) = plan else {
                 return Ok(Value::Str(String::new()));
@@ -149,9 +172,24 @@ impl Tool for PlanTick {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let step_index = required_usize(&args, "step_index")?;
+            let id = match args.named("id") {
+                Some(Value::Str(id)) if !id.is_empty() => Some(id.clone()),
+                _ => None,
+            };
+            if let Some(outcome) = ctx
+                .edit_planning(PlanningEdit::TickPlan { id, step_index })
+                .await?
+            {
+                let PlanningOutcome::Plan(plan) = outcome else {
+                    return Err(RuntimeError::ToolFailed(
+                        "planning returned an invalid plan result".into(),
+                    ));
+                };
+                return Ok(Value::Str(render_plan(&plan)));
+            }
             let plan_id = match args.named("id") {
                 Some(Value::Str(s)) if !s.is_empty() => s.clone(),
                 _ => match self

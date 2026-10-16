@@ -1566,6 +1566,27 @@ impl Session {
         self.flow_instance.as_ref()
     }
 
+    pub(crate) fn project_instance_planning(
+        &self,
+        state: &crate::flow_store::planning::PlanningSnapshot,
+    ) {
+        assert!(self.flow_instance.is_some(), "instance planning projection");
+        self.watch.todos.send_if_modified(|todos| {
+            if *todos == state.todos {
+                return false;
+            }
+            *todos = state.todos.clone();
+            true
+        });
+        self.watch.plans.send_if_modified(|plans| {
+            if *plans == state.plans {
+                return false;
+            }
+            *plans = state.plans.clone();
+            true
+        });
+    }
+
     pub fn project_index(&self) -> Option<std::sync::Arc<crate::index::AnchorIndex>> {
         self.project_index.clone()
     }
@@ -1720,6 +1741,15 @@ impl Session {
     }
 
     pub async fn plan_system_prompt(&self) -> Option<String> {
+        if self.flow_instance.is_some() {
+            return self
+                .watch
+                .plans
+                .borrow()
+                .iter()
+                .max_by_key(|plan| plan.updated_at)
+                .map(crate::tools::plan::render_plan);
+        }
         let store = crate::memory::plan::PlanStore::at(&self.dir);
         let plan = store.latest().await.ok().flatten()?;
         Some(crate::tools::plan::render_plan(&plan))

@@ -9,6 +9,7 @@ pub mod host;
 pub mod input;
 pub mod launch;
 pub mod observation;
+pub mod planning;
 pub mod reply;
 pub mod scheduler;
 pub mod send;
@@ -85,6 +86,7 @@ impl FlowWorker {
                     .map(|saved| saved.checkpoint.messages.as_slice()),
                 store.goal().cloned(),
             ));
+            context.project_instance_planning(store.planning());
             (store, context)
         })
         .await
@@ -559,6 +561,58 @@ mod tests {
         assert_eq!(context.goal(), None);
         assert_eq!(*goals.borrow(), None);
         assert_eq!(context.goal_control.record(), None);
+        let request = crate::flow_store::planning::PlanningRequest {
+            id: Uuid::new_v4(),
+            sender: crate::flow_store::inbox::SenderIdentity::User(Uuid::new_v4()),
+            expected_revision: Some(0),
+            edit: crate::flow_store::planning::PlanningEdit::WritePlan {
+                id: "route".into(),
+                title: "durable plan".into(),
+                steps: vec!["finish".into()],
+            },
+        };
+        let mut plans = context.subscribe_plans();
+        let planning_writer = worker.clone();
+        let abandoned_plan = request.clone();
+        cancel_queued(&worker, async move {
+            planning_writer
+                .edit_planning(abandoned_plan, |_| Ok(()))
+                .await
+        })
+        .await;
+        assert!(plans.has_changed().unwrap());
+        assert_eq!(plans.borrow_and_update()[0].title, "durable plan");
+        worker
+            .edit_planning(request.clone(), |_| unreachable!())
+            .await
+            .unwrap();
+        assert!(
+            !plans.has_changed().unwrap(),
+            "retry does not emit another projection"
+        );
+        let mut tick = request.clone();
+        tick.id = Uuid::new_v4();
+        tick.expected_revision = Some(1);
+        tick.edit = crate::flow_store::planning::PlanningEdit::TickPlan {
+            id: None,
+            step_index: 0,
+        };
+        worker
+            .edit_planning(tick.clone(), |_| Err(std::io::Error::other("denied")))
+            .await
+            .unwrap_err();
+        assert!(!plans.has_changed().unwrap());
+        worker.edit_planning(tick, |_| Ok(())).await.unwrap();
+        assert!(plans.borrow_and_update()[0].steps[0].done);
+        worker
+            .edit_planning(request, |_| unreachable!())
+            .await
+            .unwrap();
+        assert!(!plans.has_changed().unwrap());
+        assert!(
+            plans.borrow()[0].steps[0].done,
+            "old receipt cannot roll back live planning"
+        );
         let mut cancelled = publication;
         cancelled.id = Uuid::new_v4();
         worker

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::RuntimeError;
 use crate::memory::{MemoryId, append_jsonl, read_jsonl};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
     Pending,
@@ -14,7 +14,7 @@ pub enum TodoStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Todo {
     pub id: MemoryId,
     #[serde(rename = "where")]
@@ -31,6 +31,20 @@ pub enum TodoEntry {
     Add(Todo),
     Update { id: MemoryId, status: TodoStatus },
     Delete { id: MemoryId },
+}
+
+impl TodoEntry {
+    pub(crate) fn apply(self, items: &mut Vec<Todo>) {
+        match self {
+            Self::Add(todo) => items.push(todo),
+            Self::Update { id, status } => {
+                if let Some(existing) = items.iter_mut().find(|todo| todo.id == id) {
+                    existing.status = status;
+                }
+            }
+            Self::Delete { id } => items.retain(|todo| todo.id != id),
+        }
+    }
 }
 
 pub struct TodoStore {
@@ -89,17 +103,7 @@ impl TodoStore {
         let entries: Vec<TodoEntry> = read_jsonl(&self.path).await?;
         let mut items: Vec<Todo> = Vec::new();
         for entry in entries {
-            match entry {
-                TodoEntry::Add(todo) => items.push(todo),
-                TodoEntry::Update { id, status } => {
-                    if let Some(existing) = items.iter_mut().find(|t| t.id == id) {
-                        existing.status = status;
-                    }
-                }
-                TodoEntry::Delete { id } => {
-                    items.retain(|t| t.id != id);
-                }
-            }
+            entry.apply(&mut items);
         }
         Ok(items)
     }

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::error::RuntimeError;
+use crate::flow_store::planning::{PlanningEdit, PlanningOutcome};
 use crate::memory::MemoryId;
 use crate::memory::confession::{Confession, ConfessionStore};
 use crate::memory::goal::GoalStore;
@@ -898,12 +899,28 @@ impl Tool for MemoryTodoSet {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let where_ = required_string(&args, "where")?;
             let why = required_string(&args, "why")?;
             let how = required_string(&args, "how")?;
             let expected_result = required_string(&args, "expected_result")?;
+            if let Some(outcome) = ctx
+                .edit_planning(PlanningEdit::AddTodo {
+                    where_: where_.clone(),
+                    why: why.clone(),
+                    how: how.clone(),
+                    expected_result: expected_result.clone(),
+                })
+                .await?
+            {
+                let PlanningOutcome::Todo(id) = outcome else {
+                    return Err(RuntimeError::ToolFailed(
+                        "planning returned an invalid todo result".into(),
+                    ));
+                };
+                return Ok(Value::Str(id.to_string()));
+            }
             let todo = Todo {
                 id: MemoryId::now(),
                 where_,
@@ -949,7 +966,7 @@ impl Tool for MemoryTodoDone {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let id = required_string(&args, "id")?;
             let uuid = uuid::Uuid::parse_str(&id).map_err(|e| {
@@ -957,9 +974,18 @@ impl Tool for MemoryTodoDone {
                     "bad todo id: {e}. The id must be the UUID returned by memory.todo.set."
                 ))
             })?;
-            self.store
-                .set_status(&MemoryId(uuid), TodoStatus::Done)
-                .await?;
+            if ctx
+                .edit_planning(PlanningEdit::SetTodoStatus {
+                    id: MemoryId(uuid),
+                    status: TodoStatus::Done,
+                })
+                .await?
+                .is_none()
+            {
+                self.store
+                    .set_status(&MemoryId(uuid), TodoStatus::Done)
+                    .await?;
+            }
             Ok(Value::Str("ok".into()))
         })
     }
@@ -996,7 +1022,7 @@ impl Tool for MemoryTodoCancel {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let id = required_string(&args, "id")?;
             let uuid = uuid::Uuid::parse_str(&id).map_err(|e| {
@@ -1004,9 +1030,18 @@ impl Tool for MemoryTodoCancel {
                     "bad todo id: {e}. The id must be the UUID returned by memory.todo.set."
                 ))
             })?;
-            self.store
-                .set_status(&MemoryId(uuid), TodoStatus::Cancelled)
-                .await?;
+            if ctx
+                .edit_planning(PlanningEdit::SetTodoStatus {
+                    id: MemoryId(uuid),
+                    status: TodoStatus::Cancelled,
+                })
+                .await?
+                .is_none()
+            {
+                self.store
+                    .set_status(&MemoryId(uuid), TodoStatus::Cancelled)
+                    .await?;
+            }
             Ok(Value::Str("ok".into()))
         })
     }
@@ -1043,7 +1078,7 @@ impl Tool for MemoryTodoDelete {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let id = required_string(&args, "id")?;
             let uuid = uuid::Uuid::parse_str(&id).map_err(|e| {
@@ -1051,7 +1086,13 @@ impl Tool for MemoryTodoDelete {
                     "bad todo id: {e}. The id must be the UUID returned by memory.todo.set."
                 ))
             })?;
-            self.store.delete(&MemoryId(uuid)).await?;
+            if ctx
+                .edit_planning(PlanningEdit::DeleteTodo { id: MemoryId(uuid) })
+                .await?
+                .is_none()
+            {
+                self.store.delete(&MemoryId(uuid)).await?;
+            }
             Ok(Value::Str("ok".into()))
         })
     }
@@ -1072,7 +1113,7 @@ impl Tool for MemoryTodoList {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "List all todos in the current session. Returns an array of \
+            "List all todos in this flow. Returns an array of \
              {id, where, why, how, expected_result, status}. \
              status is one of: pending, done, cancelled. \
              Call this to check concrete work items before starting or resuming a \
@@ -1084,9 +1125,18 @@ impl Tool for MemoryTodoList {
         serde_json::json!({"type": "object"})
     }
 
-    fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let todos = self.store.list().await?;
+            let todos = match ctx.planning_client()? {
+                Some(client) => {
+                    client
+                        .read_planning(client.source().clone())
+                        .await
+                        .map_err(|error| RuntimeError::ToolFailed(format!("todo.list: {error}")))?
+                        .todos
+                }
+                None => self.store.list().await?,
+            };
             let items: Vec<Value> = todos
                 .into_iter()
                 .map(|t| {

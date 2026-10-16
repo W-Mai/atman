@@ -19,6 +19,119 @@ use uuid::Uuid;
 
 mod common;
 
+#[test]
+fn planning_commits_replay_exactly_and_reconcile_retries_without_rolling_back_state() {
+    use atman_runtime::flow_store::planning::{PlanningEdit, PlanningOutcome, PlanningRequest};
+    use atman_runtime::memory::todo::TodoStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut flow = session.create_flow(descriptor(info.id)).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let state = flow.state().clone();
+    let sender = SenderIdentity::User(Uuid::new_v4());
+    let request = |edit| PlanningRequest {
+        id: Uuid::new_v4(),
+        sender: sender.clone(),
+        expected_revision: None,
+        edit,
+    };
+    let add = request(PlanningEdit::AddTodo {
+        where_: "src".into(),
+        why: "verify isolation".into(),
+        how: "shared tool registry".into(),
+        expected_result: "independent records".into(),
+    });
+    let accepted = flow.edit_planning(add.clone(), |_| Ok(())).unwrap();
+    let PlanningOutcome::Todo(id) = &accepted.outcome else {
+        panic!("todo id");
+    };
+    let done = request(PlanningEdit::SetTodoStatus {
+        id: id.clone(),
+        status: TodoStatus::Done,
+    });
+    flow.edit_planning(done, |_| Ok(())).unwrap();
+    let write = |title: &str| {
+        request(PlanningEdit::WritePlan {
+            id: "route".into(),
+            title: title.into(),
+            steps: vec!["verify".into(), "deliver".into()],
+        })
+    };
+    let first_plan = flow.edit_planning(write("original"), |_| Ok(())).unwrap();
+    let PlanningOutcome::Plan(first_plan) = first_plan.outcome else {
+        panic!("plan");
+    };
+    flow.edit_planning(write("updated"), |_| Ok(())).unwrap();
+    let tick = request(PlanningEdit::TickPlan {
+        id: None,
+        step_index: 0,
+    });
+    flow.edit_planning(tick.clone(), |_| Ok(())).unwrap();
+    let expected = flow.planning().clone();
+    assert_eq!(expected.todos[0].status, TodoStatus::Done);
+    assert_eq!(expected.plans[0].created_at, first_plan.created_at);
+    assert_eq!(expected.plans[0].progress(), (1, 2));
+    assert_eq!(expected.revision, 5);
+    assert_eq!(flow.state(), &state, "planning is not execution control");
+    let cursor = flow.cursor().clone();
+    assert_eq!(
+        flow.edit_planning(add.clone(), |_| panic!("retry authorization"))
+            .unwrap(),
+        accepted
+    );
+    assert_eq!(flow.planning(), &expected);
+    let mut conflict = add.clone();
+    conflict.edit = PlanningEdit::DeleteTodo { id: id.clone() };
+    assert!(flow.edit_planning(conflict, |_| Ok(())).is_err());
+    let mut stale = write("stale");
+    stale.expected_revision = Some(0);
+    assert!(flow.edit_planning(stale, |_| Ok(())).is_err());
+    assert!(
+        flow.edit_planning(
+            request(PlanningEdit::TickPlan {
+                id: None,
+                step_index: 8
+            }),
+            |_| Ok(())
+        )
+        .is_err()
+    );
+    assert_eq!(flow.cursor(), &cursor);
+    let address = flow.descriptor().address.clone();
+    let log = flow.dir().join("events.jsonl");
+    flow.edit_planning(request(PlanningEdit::DeleteTodo { id: id.clone() }), |_| {
+        Ok(())
+    })
+    .unwrap();
+    drop(flow);
+    // A partially written final batch must not delete the acknowledged todo.
+    let length = std::fs::metadata(&log).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&log)
+        .unwrap()
+        .set_len(length - 1)
+        .unwrap();
+    let mut flow = session.open_flow(&address.instance_id).unwrap();
+    assert!(flow.recovered_tail.is_some());
+    assert_eq!(flow.planning(), &expected);
+    assert_eq!(
+        flow.edit_planning(add.clone(), |_| panic!("reopened retry"))
+            .unwrap(),
+        accepted
+    );
+    change(&mut flow, FlowTransition::CloseRequested);
+    change(&mut flow, FlowTransition::Closed);
+    assert_eq!(
+        flow.edit_planning(add, |_| panic!("closed retry")).unwrap(),
+        accepted
+    );
+    assert!(flow.edit_planning(write("closed"), |_| Ok(())).is_err());
+    assert_eq!(flow.planning(), &expected);
+}
+
 fn turn_request(
     message: Uuid,
     argument: i64,

@@ -27,7 +27,15 @@ pub struct Plan {
 
 impl Plan {
     pub fn new(id: impl Into<String>, title: impl Into<String>, steps: Vec<String>) -> Self {
-        let now = Utc::now();
+        Self::new_at(id, title, steps, Utc::now())
+    }
+
+    pub(crate) fn new_at(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        steps: Vec<String>,
+        now: DateTime<Utc>,
+    ) -> Self {
         Self {
             id: id.into(),
             title: title.into(),
@@ -54,13 +62,41 @@ impl Plan {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
-enum PlanEntry {
+pub(crate) enum PlanEntry {
     Upsert(Plan),
     Tick {
         plan_id: String,
         step_index: usize,
         at: DateTime<Utc>,
     },
+}
+
+impl PlanEntry {
+    pub(crate) fn apply(self, plans: &mut Vec<Plan>) {
+        match self {
+            Self::Upsert(mut plan) => {
+                if let Some(index) = plans.iter().position(|old| old.id == plan.id) {
+                    plan.created_at = plans[index].created_at;
+                    plans[index] = plan;
+                } else {
+                    plans.push(plan);
+                }
+            }
+            Self::Tick {
+                plan_id,
+                step_index,
+                at,
+            } => {
+                if let Some(plan) = plans.iter_mut().find(|plan| plan.id == plan_id)
+                    && let Some(step) = plan.steps.iter_mut().find(|step| step.index == step_index)
+                {
+                    step.done = true;
+                    step.done_at = Some(at);
+                    plan.updated_at = at;
+                }
+            }
+        }
+    }
 }
 
 pub struct PlanStore {
@@ -115,30 +151,7 @@ impl PlanStore {
         let entries: Vec<PlanEntry> = read_jsonl(&self.path).await?;
         let mut plans: Vec<Plan> = Vec::new();
         for entry in entries {
-            match entry {
-                PlanEntry::Upsert(mut p) => {
-                    if let Some(idx) = plans.iter().position(|x| x.id == p.id) {
-                        let old = &plans[idx];
-                        p.created_at = old.created_at;
-                        plans[idx] = p;
-                    } else {
-                        plans.push(p);
-                    }
-                }
-                PlanEntry::Tick {
-                    plan_id,
-                    step_index,
-                    at,
-                } => {
-                    if let Some(p) = plans.iter_mut().find(|p| p.id == plan_id)
-                        && let Some(step) = p.steps.iter_mut().find(|s| s.index == step_index)
-                    {
-                        step.done = true;
-                        step.done_at = Some(at);
-                        p.updated_at = at;
-                    }
-                }
-            }
+            entry.apply(&mut plans);
         }
         Ok(plans)
     }

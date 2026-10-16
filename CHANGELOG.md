@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Instance plans and todos** — Planning tools use the calling flow's journal and live projection, including inline calls and spawned peers. Writes retain stable retry receipts, reopening restores exact records, and plan updates stay separate from execution control and unrelated session files.
+
 - **Recoverable entry bindings** — Persistent flow launches retain initial invocation identities and authority ceilings. Hosts can explicitly rebind the shared scheduler after reopening without resuming paused or interrupted execution, and current authority can only narrow recorded permissions.
 
 - **Explicit goal scheduling** — Persistent entries can propose another turn with `memory.goal.schedule`. Direct and spawned flows share input preparation, ordinary input takes priority, and continuations retain their source turn's arguments and invocation settings.
