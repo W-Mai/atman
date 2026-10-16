@@ -7,6 +7,44 @@ use uuid::Uuid;
 use crate::SessionId;
 use std::collections::BTreeMap;
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagementAction {
+    Discover,
+    ReadOutput,
+    ReadContext,
+    Send,
+    Watch,
+    Control,
+    ManageGoal,
+    Delegate,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(tag = "kind", content = "target", rename_all = "snake_case")]
+pub enum ManagementTarget {
+    Flow(FlowAddress),
+    Session(SessionId),
+    AllSessions,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct ManagementGrant {
+    pub id: Uuid,
+    /// Registered instance in the selected management Session.
+    pub instance_id: Uuid,
+    pub target: ManagementTarget,
+    pub actions: std::collections::BTreeSet<ManagementAction>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct SelectManagementRequest {
+    pub request_id: Uuid,
+    pub expected: FlowCursor,
+    pub session_id: SessionId,
+    pub grants: Vec<ManagementGrant>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct FlowAddress {
     pub session_id: SessionId,
@@ -107,7 +145,7 @@ pub struct ReadFlowOutputRequest {
     pub limit: usize,
 }
 
-/// Exclusive position of a complete flow commit. The server validates its journal identity and digest against retained history.
+/// Exclusive position of a complete journal commit. The server validates its identity and digest against retained history.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct FlowCursor {
     pub journal_id: Uuid,

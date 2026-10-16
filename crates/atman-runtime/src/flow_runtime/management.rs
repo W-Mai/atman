@@ -4,12 +4,13 @@ use std::{io, sync::Arc};
 
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot, watch};
+use uuid::Uuid;
 
 use super::{RuntimeHost, SessionHandle, WeakRuntimeHost};
 use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::{
     FlowRef, SessionConfiguration,
-    access::FlowAction,
+    access::{FlowAction, FlowGrant},
     invalid,
     profile::{ProfileSnapshot, ProfileStore, ReplaceManagement},
 };
@@ -28,16 +29,15 @@ pub struct ProfileHandle {
     host: WeakRuntimeHost,
 }
 
+type ProfileEdit = Box<dyn FnOnce(&mut ProfileStore) -> io::Result<CommitReceipt> + Send>;
+
 enum Command {
     Snapshot(oneshot::Sender<io::Result<ProfileView>>),
     Bootstrap(
         SessionConfiguration,
         oneshot::Sender<io::Result<ProfileView>>,
     ),
-    Replace(
-        Box<ReplaceManagement>,
-        oneshot::Sender<io::Result<CommitReceipt>>,
-    ),
+    Edit(ProfileEdit, oneshot::Sender<io::Result<CommitReceipt>>),
     Shutdown(oneshot::Sender<io::Result<()>>),
 }
 
@@ -150,8 +150,24 @@ impl ProfileHandle {
     }
 
     pub async fn replace(&self, request: ReplaceManagement) -> io::Result<CommitReceipt> {
-        self.request(|reply| Command::Replace(Box::new(request), reply))
+        self.request(|reply| Command::Edit(Box::new(move |store| store.replace(request)), reply))
             .await
+    }
+
+    pub async fn select(
+        &self,
+        request_id: Uuid,
+        expected: CommitReceipt,
+        session_id: Uuid,
+        grants: Vec<FlowGrant>,
+    ) -> io::Result<CommitReceipt> {
+        self.request(|reply| {
+            Command::Edit(
+                Box::new(move |store| store.select(request_id, expected, session_id, grants)),
+                reply,
+            )
+        })
+        .await
     }
 
     pub(super) async fn shutdown(&self) -> io::Result<()> {
@@ -232,12 +248,12 @@ async fn serve(
                 store = returned;
                 let _ = reply.send(result);
             }
-            Command::Replace(request, reply) => {
+            Command::Edit(edit, reply) => {
                 let published = state.clone();
                 let owner = host.clone();
                 let Ok((returned, result)) = tokio::task::spawn_blocking(move || {
                     let before = store.snapshot().cursor.clone();
-                    let result = store.replace(*request);
+                    let result = edit(&mut store);
                     let error = if store.write_failed() {
                         Some("profile write failed; reopen to reconcile the journal".into())
                     } else if result.is_ok() && before != store.snapshot().cursor {

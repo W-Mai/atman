@@ -12,7 +12,7 @@ use atman_rt::FlowInstanceId;
 use atman_runtime::flow_runtime::{
     FlowWorker,
     access::PeerControl,
-    host::{HostServices, RuntimeHost, SessionHandle},
+    host::{HostServices, ProfileHandle, RuntimeHost, SessionHandle},
 };
 use atman_runtime::flow_store::{FlowRef, RuntimeStore, SessionDescriptor};
 use serde::de::DeserializeOwned;
@@ -27,6 +27,7 @@ pub(crate) mod events;
 mod execution;
 pub(crate) use execution::launch_run;
 pub(crate) mod goal;
+mod management;
 
 // Transport authentication identifies this operator; callers cannot supply sender provenance.
 const OPERATOR: Uuid = Uuid::from_bytes(*b"atman-operator!!");
@@ -39,6 +40,7 @@ pub(crate) struct SessionService {
     _permission_clients: Arc<atman_runtime::permission::PermissionClients>,
     catalogs: Mutex<HashMap<Uuid, CatalogSlot>>,
     executors: Mutex<HashMap<Uuid, Arc<OnceCell<atman_runtime::Executor>>>>,
+    profile: OnceCell<Result<ProfileHandle, String>>,
 }
 
 impl SessionService {
@@ -53,11 +55,14 @@ impl SessionService {
             _permission_clients: permission_clients,
             catalogs: Default::default(),
             executors: Default::default(),
+            profile: Default::default(),
         }
     }
 
     async fn attach(&self, id: Uuid, create: Option<SessionDescriptor>) -> Result<SessionHandle> {
         anyhow::ensure!(!id.is_nil(), "session identity must not be nil");
+        // Unavailable management authority must not prevent unrelated work. Initialization reports its diagnostic once and management endpoints return the error.
+        let _ = self.profile().await;
         let slot = self.catalogs.lock().unwrap().entry(id).or_default().clone();
         let handle = slot
             .get_or_try_init(|| async {
@@ -107,7 +112,10 @@ impl SessionService {
 pub(crate) fn handles(method: &str) -> bool {
     matches!(
         method,
-        methods::SESSION_CREATE
+        methods::MANAGEMENT_GET
+            | methods::MANAGEMENT_OPEN
+            | methods::MANAGEMENT_SELECT
+            | methods::SESSION_CREATE
             | methods::SESSION_OPEN
             | methods::SESSION_FLOWS
             | methods::SESSION_SELECT_FLOW
@@ -260,6 +268,9 @@ pub(crate) async fn worker(
 }
 
 enum Request {
+    ManagementGet,
+    ManagementOpen,
+    ManagementSelect(SelectManagementRequest),
     Create(CreateSessionRequest),
     Open(SessionRequest),
     List(ListFlowsRequest),
@@ -276,6 +287,18 @@ enum Request {
 impl Request {
     fn parse(method: &str, params: Value) -> Result<Self, JsonRpcError> {
         let request = match method {
+            methods::MANAGEMENT_GET | methods::MANAGEMENT_OPEN => {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Empty {}
+                let _: Empty = decode(params)?;
+                return Ok(if method == methods::MANAGEMENT_GET {
+                    Self::ManagementGet
+                } else {
+                    Self::ManagementOpen
+                });
+            }
+            methods::MANAGEMENT_SELECT => Self::ManagementSelect(decode(params)?),
             methods::SESSION_CREATE => Self::Create(decode(params)?),
             methods::SESSION_OPEN => Self::Open(decode(params)?),
             methods::SESSION_FLOWS => Self::List(decode(params)?),
@@ -290,6 +313,18 @@ impl Request {
             _ => return Err(JsonRpcError::method_not_found(method)),
         };
         let (session, instance) = match &request {
+            Self::ManagementGet | Self::ManagementOpen => unreachable!(),
+            Self::ManagementSelect(request) => {
+                if request.request_id.is_nil()
+                    || request.expected.journal_id.is_nil()
+                    || request.expected.sequence == 0
+                {
+                    return Err(JsonRpcError::invalid_params(
+                        "management selection requires request identity and profile receipt",
+                    ));
+                }
+                (request.session_id.0, None)
+            }
             Self::Create(request) => {
                 if request.title.trim().is_empty() {
                     return Err(JsonRpcError::invalid_params(
@@ -387,6 +422,11 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
     anyhow::ensure!(!state.is_stopping(), "daemon is stopping");
     let service = service(state);
     match request {
+        Request::ManagementGet => Ok(serde_json::to_value(
+            service.profile().await?.snapshot().await?,
+        )?),
+        Request::ManagementOpen => service.open_management(state).await,
+        Request::ManagementSelect(request) => service.select_management(request).await,
         Request::Launch(request) => service.launch(state, request).await,
         Request::Bind(request) => service.bind(state, request).await,
         Request::Invoke(request) => service.invoke(request).await,

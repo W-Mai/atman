@@ -169,6 +169,9 @@ impl JsonRpcError {
 }
 
 pub mod methods {
+    pub const MANAGEMENT_GET: &str = "management.get";
+    pub const MANAGEMENT_OPEN: &str = "management.open";
+    pub const MANAGEMENT_SELECT: &str = "management.select";
     pub const SESSION_CREATE: &str = "session.create";
     pub const SESSION_OPEN: &str = "session.open";
     pub const SESSION_FLOWS: &str = "session.flows";

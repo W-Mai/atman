@@ -296,6 +296,33 @@ impl ProfileStore {
         self.commit(Fact::ManagementReplaced(request))
     }
 
+    /// Resolve a selected Session through its retained catalog. Retries retain the original descriptor even if that Session later becomes unavailable.
+    pub fn select(
+        &mut self,
+        request_id: Uuid,
+        expected: CommitReceipt,
+        session_id: Uuid,
+        grants: Vec<FlowGrant>,
+    ) -> io::Result<CommitReceipt> {
+        let session = if let Some((recorded, _)) = self.projection.requests.get(&request_id) {
+            if recorded.binding.session.id != session_id {
+                return Err(invalid(
+                    "management request identity conflicts with recorded content",
+                ));
+            }
+            recorded.binding.session.clone()
+        } else {
+            RuntimeStore::inspect_session(self.runtime.root.parent().unwrap(), session_id)?
+                .projection
+                .descriptor
+        };
+        self.replace(ReplaceManagement {
+            request_id,
+            expected,
+            binding: ManagementBinding { session, grants },
+        })
+    }
+
     fn inspect_binding(&self, binding: &ManagementBinding) -> io::Result<()> {
         binding.validate()?;
         let catalog =

@@ -85,6 +85,9 @@ Persistent listings include titles, flow counts, and recorded project paths; `sh
 
 | Method | Parameters | Result |
 | --- | --- | --- |
+| `management.get` | Empty object | Profile identity, current management binding and grants, receipt, and availability diagnostic |
+| `management.open` | Empty object | Idempotently bootstrapped management profile and opened Session summary; no flow execution |
+| `management.select` | `request_id`, `expected` profile receipt, `session_id`, `grants` | Original committed receipt and current profile view |
 | `session.create` | `session_id`, nonempty `title`, optional `project_root` | Session summary and catalog receipt |
 | `session.open` | `session_id` | Recorded session summary and catalog receipt |
 | `session.flows` | `session_id`, optional `before` instance UUID, `limit` from 1 to 50 (default 20) | Newest-first membership page, next cursor, total, and catalog receipt |
@@ -354,6 +357,10 @@ Input policy, instance directory ownership, management authorization, and CLI/da
 `replace` requires a request UUID, the current profile receipt, and a binding whose grantees are registered in that Session. Binding and grants change atomically. Identical retries return the original receipt even after subsequent replacements; conflicting reuse and stale new requests fail. Replacing management does not close either Session or delete history. The store is a trusted-host primitive; frontends must authenticate management commands before calling it.
 
 `RuntimeHost::attach_profile` takes ownership through a serialized `ProfileHandle`. Initial validation completes before management grants become usable. `snapshot` exposes the committed profile and any availability error; an invalid binding can be explicitly replaced without starting work. Accepted bootstrap and replacement operations survive a disconnected waiter. Storage writes run on the blocking pool, and an idle profile owner does not occupy a thread. Host shutdown releases profile ownership after stopping its attached execution owners.
+
+The authenticated daemon operator uses `management.get`, `management.open`, and `management.select`. Opening creates an ordinary projectless Session on first use and opens the recorded container thereafter; it creates no flows and starts no model. Selection records the binding and grants without activating the selected Session. Each grant supplies an `id`, an `instance_id` registered in that Session, a `target` (`flow`, `session`, or `all_sessions`), and explicit `actions` (`discover`, `read_output`, `read_context`, `send`, `watch`, `control`, `manage_goal`, `delegate`). The host resolves the selected Session descriptor; callers cannot replace its configuration through this request. `expected` is the profile's `{ journal_id, sequence, digest }` receipt. Retries return their original receipt and the current profile view, including when an older selected Session is no longer available.
+
+Daemon Session attachment loads profile grants before admitting execution. A corrupt or unavailable profile disables management authority and remains visible through the management endpoint; unrelated Session execution remains available. Damaged profile identity or journal files require repair and host restart, while a missing management Session can be explicitly replaced using the retained profile receipt. Closing an RPC connection or completing a management flow does not shut down the daemon or other Sessions.
 
 Flow clients and event observers consult the same current management grants in addition to their Session grants. Replacement wakes observers to recheck authority. Revocation prevents new reads, controls, subscriptions, and delivery admission while retaining previously accepted input and subscription cursors. Renewed authority can continue from those cursors. Pausing the manager affects its own execution; other Sessions keep running. Closing, selecting, or naming a flow never assigns management authority. An uncertain profile write disables its grants until storage is reopened and reconciled.
 

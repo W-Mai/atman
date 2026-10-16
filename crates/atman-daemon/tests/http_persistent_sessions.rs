@@ -43,6 +43,37 @@ async fn rpc(app: &Router, method: &str, params: Value) -> Value {
     response["result"].clone()
 }
 
+#[tokio::test]
+async fn management_rpc_requires_authentication_and_exposes_the_shared_profile_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::new(dir.path().to_path_buf()));
+    let app = router(Arc::new(HttpState {
+        daemon: state.clone(),
+        auth_token: "secret".into(),
+    }));
+    let (status, _) = http_rpc(&app, "invalid", methods::MANAGEMENT_OPEN, json!({})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(!dir.path().join("runtime-v1").exists());
+    let opened = rpc(&app, methods::MANAGEMENT_OPEN, json!({})).await;
+    let current = rpc(&app, methods::MANAGEMENT_GET, json!({})).await;
+    assert_eq!(current["profile"], opened["profile"]);
+    let selected = rpc(
+        &app,
+        methods::MANAGEMENT_SELECT,
+        json!({
+            "request_id":Uuid::new_v4(), "expected": current["profile"]["cursor"],
+            "session_id": current["profile"]["management"]["session"]["id"], "grants":[],
+        }),
+    )
+    .await;
+    assert!(selected["current"]["unavailable"].is_null());
+    assert_eq!(
+        rpc(&app, methods::MANAGEMENT_OPEN, json!({})).await["session"]["flow_count"],
+        0
+    );
+    state.shutdown().await.unwrap();
+}
+
 async fn completed(app: &Router, flow: &Value, previous: Option<&Value>) -> Value {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {

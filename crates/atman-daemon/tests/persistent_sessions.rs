@@ -40,6 +40,242 @@ fn descriptor(session: Uuid) -> FlowDescriptor {
 }
 
 #[tokio::test]
+async fn management_open_is_idempotent_and_restores_without_starting_flows() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::new(dir.path().to_path_buf()));
+    let view = rpc(&state, methods::MANAGEMENT_GET, json!({})).await;
+    assert!(view["profile"]["management"].is_null());
+    assert!(RuntimeStore::session_ids(dir.path()).unwrap().is_empty());
+    let (first, second) = tokio::join!(
+        rpc(&state, methods::MANAGEMENT_OPEN, json!({})),
+        rpc(&state, methods::MANAGEMENT_OPEN, json!({}))
+    );
+    assert_eq!(first, second);
+    assert_eq!(
+        first["profile"]["profile_id"],
+        view["profile"]["profile_id"]
+    );
+    assert_eq!(first["session"]["flow_count"], 0);
+    assert!(first["session"]["default_flow"].is_null());
+    assert_eq!(first["profile"]["management"]["grants"], json!([]));
+    state.shutdown().await.unwrap();
+    let restarted = Arc::new(DaemonState::new(dir.path().to_path_buf()));
+    assert_eq!(
+        rpc(&restarted, methods::MANAGEMENT_OPEN, json!({})).await,
+        first
+    );
+    assert_eq!(RuntimeStore::session_ids(dir.path()).unwrap().len(), 1);
+    restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn management_selection_preserves_receipts_across_replacement_restart_and_missing_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let target = Uuid::new_v4();
+    let mut catalog = root
+        .create_session(SessionDescriptor {
+            id: target,
+            project: None,
+            configuration: Default::default(),
+            title: "Controller".into(),
+        })
+        .unwrap();
+    let flow = descriptor(target);
+    catalog.create_flow(flow.clone()).unwrap();
+    drop(catalog);
+    let state = Arc::new(DaemonState::new(dir.path().to_path_buf()));
+    let initial = rpc(&state, methods::MANAGEMENT_OPEN, json!({})).await;
+    let request = json!({
+        "request_id": Uuid::new_v4(), "expected": initial["profile"]["cursor"], "session_id": target,
+        "grants": [{"id": Uuid::new_v4(), "instance_id": flow.address.instance_id, "target": {"kind": "all_sessions"}, "actions": ["discover", "watch"]}],
+    });
+    let selected = rpc(&state, methods::MANAGEMENT_SELECT, request.clone()).await;
+    assert_eq!(
+        selected["current"]["profile"]["management"]["session"]["id"],
+        json!(target)
+    );
+    assert_eq!(
+        selected["current"]["profile"]["management"]["grants"][0]["grantee"],
+        json!(flow.address)
+    );
+    let restored = rpc(
+        &state,
+        methods::MANAGEMENT_SELECT,
+        json!({
+            "request_id": Uuid::new_v4(), "expected": selected["receipt"],
+            "session_id": initial["profile"]["management"]["session"]["id"], "grants": [],
+        }),
+    )
+    .await;
+    let retry = rpc(&state, methods::MANAGEMENT_SELECT, request.clone()).await;
+    assert_eq!(retry["receipt"], selected["receipt"]);
+    assert_eq!(retry["current"], restored["current"]);
+    let mut stale = request.clone();
+    stale["request_id"] = json!(Uuid::new_v4());
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::MANAGEMENT_SELECT, stale)
+        )
+        .await
+        .error
+        .is_some()
+    );
+    state.shutdown().await.unwrap();
+    // Retrying an acknowledged request must not require reopening its old target.
+    std::fs::remove_dir_all(root.root().join("sessions").join(target.to_string())).unwrap();
+    let state = Arc::new(DaemonState::new(dir.path().to_path_buf()));
+    assert_eq!(
+        rpc(&state, methods::MANAGEMENT_SELECT, request.clone()).await,
+        retry
+    );
+    let mut conflict = request;
+    conflict["grants"] = json!([]);
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::MANAGEMENT_SELECT, conflict)
+        )
+        .await
+        .error
+        .is_some()
+    );
+    state.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_management_binding_is_reported_and_can_be_replaced_explicitly() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::new(dir.path().to_path_buf()));
+    let initial = rpc(&state, methods::MANAGEMENT_OPEN, json!({})).await;
+    let old = initial["profile"]["management"]["session"]["id"]
+        .as_str()
+        .unwrap();
+    state.shutdown().await.unwrap();
+    std::fs::remove_dir_all(dir.path().join("runtime-v1/sessions").join(old)).unwrap();
+    let state = Arc::new(DaemonState::new(dir.path().to_path_buf()));
+    let view = rpc(&state, methods::MANAGEMENT_GET, json!({})).await;
+    assert!(view["unavailable"].is_string());
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::MANAGEMENT_OPEN, json!({}))
+        )
+        .await
+        .error
+        .is_some()
+    );
+    assert!(RuntimeStore::session_ids(dir.path()).unwrap().is_empty());
+    let target = Uuid::new_v4();
+    rpc(
+        &state,
+        methods::SESSION_CREATE,
+        json!({"session_id":target,"title":"Repair"}),
+    )
+    .await;
+    rpc(&state, methods::MANAGEMENT_SELECT, json!({"request_id":Uuid::new_v4(),"expected":view["profile"]["cursor"],"session_id":target,"grants":[]})).await;
+    let fixed = rpc(&state, methods::MANAGEMENT_OPEN, json!({})).await;
+    assert!(fixed["unavailable"].is_null());
+    assert_eq!(
+        fixed["profile"]["management"]["session"]["id"],
+        json!(target)
+    );
+    assert_eq!(fixed["session"]["flow_count"], 0);
+    state.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn management_transport_authentication_precedes_profile_creation() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::new(dir.path().to_path_buf()));
+    for method in [
+        methods::MANAGEMENT_GET,
+        methods::MANAGEMENT_OPEN,
+        methods::MANAGEMENT_SELECT,
+    ] {
+        assert!(
+            dispatch_as(
+                state.clone(),
+                JsonRpcRequest::new(1, method, json!({})),
+                "untrusted-flow"
+            )
+            .await
+            .error
+            .is_some()
+        );
+    }
+    assert!(!dir.path().join("runtime-v1").exists());
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(
+                1,
+                methods::MANAGEMENT_OPEN,
+                json!({"session_id":Uuid::new_v4()})
+            )
+        )
+        .await
+        .error
+        .is_some()
+    );
+    assert!(!dir.path().join("runtime-v1").exists());
+    state.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn broken_profile_does_not_fail_unrelated_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    drop(atman_runtime::flow_store::profile::ProfileStore::open(&root).unwrap());
+    std::fs::write(root.root().join("host/identity.json"), "broken").unwrap();
+    let state = Arc::new(DaemonState::new(dir.path().to_path_buf()));
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::MANAGEMENT_GET, json!({}))
+        )
+        .await
+        .error
+        .is_some()
+    );
+    let id = Uuid::new_v4();
+    let session = rpc(
+        &state,
+        methods::SESSION_CREATE,
+        json!({"session_id":id,"title":"Work"}),
+    )
+    .await;
+    let source = dir.path().join("work.at");
+    std::fs::write(
+        &source,
+        "flow main() -> string { return final.answer(message: \"independent\") }",
+    )
+    .unwrap();
+    let address = json!({"session_id":id,"instance_id":Uuid::new_v4()});
+    rpc(&state, methods::FLOW_LAUNCH, json!({
+        "flow":address,"request_id":Uuid::new_v4(),"expected_catalog_sequence":session["catalog"]["sequence"],
+        "path":source,"entry":"main"
+    })).await;
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let view = rpc(&state, methods::FLOW_GET, json!({"flow":address})).await;
+            if !view["last_completion"].is_null() {
+                assert_eq!(
+                    view["last_completion"]["result"]["kind"], "returned",
+                    "{view}"
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    state.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn persistent_management_shares_catalog_pages_and_independent_pause_controls() {
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();

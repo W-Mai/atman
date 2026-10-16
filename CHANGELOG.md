@@ -44,6 +44,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Management Session API** — Authenticated daemon methods inspect, open, and replace the persistent management binding. Opening starts no model; unavailable management storage does not prevent unrelated Session execution.
+
 - **Management flow authority** — Host-owned profile grants apply to peer operations and event observation, with immediate revocation checks, retained subscription cursors, and independent Session execution.
 
 - **Management profile storage** — Durable profile identity and management Session binding with explicit flow grants, recoverable bootstrap, revision-checked replacement, and stable retry receipts.
