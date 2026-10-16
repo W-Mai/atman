@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Memory tool construction** — Goal, Todo, and Plan tool structs accept `Option<Arc<Store>>` for explicit legacy storage. Their defaults use invocation context without creating file stores; `tools::register_memory` retains its existing signature.
+
 - **Runtime project binding** — `AtmanRuntimeOptions::project` accepts an optional `ProjectContext` instead of a project path. Persistent session descriptors record the same project and storage binding explicitly.
 
 - **Runtime configuration input** — `AtmanRuntimeOptions::config` takes a `ConfigHub` instead of an optional configuration directory, preserving explicit authentication sources during construction and restoration.
@@ -15,6 +17,8 @@ All notable changes to atman are documented in this file.
 - **Embedded provider lifecycle construction** — `ProviderLifecycle::new` returns `Result`, and executor attachment returns `ProviderLifecycleError`. Provider connections must use `ProviderRegistry::with_models(hub.models().clone())`; mismatched configuration scopes are rejected.
 
 ### ✨ Features
+
+- **Runtime memory tools** — Runtime construction registers Goal, Plan, Todo, and history tools without requiring legacy session stores. Persistent calls resolve the current instance, and missing host bindings fail before accessing legacy state. Inline calls retain the current owner; spawned flows keep independent records across reopening.
 
 - **Project-bound flow execution** — Persistent flows verify project resources before scheduling or consuming input. CLI and daemon memory setup reuse the selected storage binding. Projectless runtimes load only explicit global rules, reject implicit working directories, and keep sandbox profiles tied to each operation's working directory.
 

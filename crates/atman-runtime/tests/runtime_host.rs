@@ -399,10 +399,10 @@ async fn goal_tools_persist_for_peers_without_freezing_execution_or_inheriting_c
     let fallback = Arc::new(GoalStore::at(dir.path().join("unused-legacy")));
     let executor = Executor::new();
     executor.tools.register(Arc::new(MemoryGoalGet {
-        store: fallback.clone(),
+        store: Some(fallback.clone()),
     }));
     executor.tools.register(Arc::new(MemoryGoalSet {
-        store: fallback.clone(),
+        store: Some(fallback.clone()),
     }));
     executor
         .tools
@@ -566,13 +566,22 @@ async fn goal_tools_persist_for_peers_without_freezing_execution_or_inheriting_c
 
 #[tokio::test]
 async fn planning_tools_follow_the_invocation_across_inline_spawn_and_reopen() {
-    use atman_runtime::{
-        ValueJson,
-        memory::{ConfessionStore, GoalStore, PlanStore, TodoStore},
-    };
+    use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};
     let dir = tempfile::tempdir().unwrap();
+    let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
+    let runtime = AtmanRuntime::build(AtmanRuntimeOptions {
+        events: atman_runtime::event::EventSink::new(),
+        mock: false,
+        config: hub.clone(),
+        project: None,
+        home_dir: None,
+        workspace_generation: "flow-memory".into(),
+    })
+    .await
+    .unwrap();
     let helper = r#"
         flow prepare(label: string) -> any {
+            memory.goal.set(text: label)
             plan.write(id: "route", title: label, steps: ["read", "write"])
             plan.tick(step_index: 0)
             id = memory.todo.set(where: label, why: "isolation", how: "execute", expected_result: "saved")
@@ -615,7 +624,8 @@ async fn planning_tools_follow_the_invocation_across_inline_spawn_and_reopen() {
     );
     let root = RuntimeStore::open(dir.path()).unwrap();
     let host = RuntimeHost::default();
-    let info = session_descriptor();
+    let mut info = session_descriptor();
+    info.configuration = atman_runtime::flow_store::SessionConfiguration::Atman(hub.source());
     let session = host
         .attach_session(root.create_session(info.clone()).unwrap())
         .unwrap();
@@ -624,27 +634,7 @@ async fn planning_tools_follow_the_invocation_across_inline_spawn_and_reopen() {
         .await
         .unwrap();
     change(&parent, FlowTransition::Activated).await;
-    let fallback = dir.path().join("unrelated-session");
-    let plans = Arc::new(PlanStore::at(&fallback));
-    plans
-        .upsert(atman_runtime::memory::Plan::new(
-            "legacy",
-            "must stay isolated",
-            vec!["old".into()],
-        ))
-        .await
-        .unwrap();
-    let legacy_plans = plans.list().await.unwrap();
-    let todos = Arc::new(TodoStore::at(&fallback));
-    let executor = Executor::new();
-    atman_runtime::tools::register_memory(
-        &executor.tools,
-        todos.clone(),
-        Arc::new(ConfessionStore::at(&fallback)),
-        Arc::new(GoalStore::at(&fallback)),
-        plans.clone(),
-    );
-    let result = invoke(&parent, executor)
+    let result = invoke(&parent, runtime.executor.clone())
         .await
         .result
         .unwrap()
@@ -661,8 +651,6 @@ async fn planning_tools_follow_the_invocation_across_inline_spawn_and_reopen() {
     assert_eq!(result[0][1][0]["where"], "parent");
     assert_eq!(result[1][1][1][0]["where"], "child");
     assert_ne!(result[0][1][0]["id"], result[1][1][1][0]["id"]);
-    assert_eq!(plans.list().await.unwrap(), legacy_plans);
-    assert!(!todos.path().exists());
     let catalog = session.snapshot().await.unwrap();
     let child_id = catalog
         .catalog
@@ -674,6 +662,12 @@ async fn planning_tools_follow_the_invocation_across_inline_spawn_and_reopen() {
         .clone();
     let child = session.open_flow(child_id).await.unwrap();
     let snapshot = child.planning().await.unwrap();
+    let child_goal = child.goal().await.unwrap().goal.unwrap();
+    assert_eq!(child_goal.objective, "child");
+    assert_eq!(
+        parent.goal().await.unwrap().goal.unwrap().objective,
+        "parent"
+    );
     assert_eq!(snapshot.todos.len(), 1);
     assert_eq!(snapshot.plans[0].title, "child");
     assert_eq!(snapshot.plans[0].progress(), (1, 2));
@@ -688,6 +682,7 @@ async fn planning_tools_follow_the_invocation_across_inline_spawn_and_reopen() {
     drop(child.shutdown().await.unwrap());
     let reopened = host.flow(&address).await.unwrap();
     assert_eq!(reopened.planning().await.unwrap(), snapshot);
+    assert_eq!(reopened.goal().await.unwrap().goal, Some(child_goal));
     assert_eq!(
         reopened.context().plan_system_prompt().await.as_deref(),
         Some(expected_prompt.as_str())
@@ -702,29 +697,20 @@ async fn planning_tools_follow_the_invocation_across_inline_spawn_and_reopen() {
     );
     assert!(reopened.state().await.unwrap().can_start_turn());
     let unbound = atman_runtime::tool::ToolCtx::new().with_session_runtime(reopened.context());
-    use atman_runtime::tool::Tool;
-    assert!(
-        atman_runtime::tools::plan::PlanWrite {
-            store: plans.clone()
-        }
-        .call(
-            atman_runtime::tool::ToolArgs {
-                named: [
-                    (
-                        "title".into(),
-                        atman_runtime::Value::Str("must not fall back".into())
-                    ),
-                    ("steps".into(), atman_runtime::Value::List(vec![]))
-                ]
-                .into(),
-                ..Default::default()
-            },
-            &unbound
-        )
-        .await
-        .is_err()
-    );
-    assert_eq!(plans.list().await.unwrap(), legacy_plans);
+    for name in ["memory.goal.get", "memory.todo.list", "plan.read"] {
+        let tool = runtime.executor.tools.get(name).unwrap();
+        let error = tool.call(Default::default(), &unbound).await.unwrap_err();
+        assert!(
+            error.to_string().contains("host binding"),
+            "{name}: {error}"
+        );
+        assert!(
+            tool.call(Default::default(), &Default::default())
+                .await
+                .is_err(),
+            "{name} must not synthesize a legacy memory store"
+        );
+    }
     let lease = start(&parent).await;
     let client = host.bind_invocation(lease.clone()).await.unwrap();
     assert!(
@@ -784,9 +770,11 @@ fn goal_executor(dir: &std::path::Path) -> Executor {
     let executor = Executor::new();
     let store = Arc::new(GoalStore::at(dir));
     executor.tools.register(Arc::new(MemoryGoalGet {
-        store: store.clone(),
+        store: Some(store.clone()),
     }));
-    executor.tools.register(Arc::new(MemoryGoalSet { store }));
+    executor
+        .tools
+        .register(Arc::new(MemoryGoalSet { store: Some(store) }));
     executor
         .tools
         .register(Arc::new(MemoryGoalControl { resume: false }));

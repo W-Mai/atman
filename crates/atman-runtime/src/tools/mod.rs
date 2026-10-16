@@ -230,6 +230,26 @@ pub fn register_memory(
     goal_store: Arc<crate::memory::goal::GoalStore>,
     plan_store: Arc<crate::memory::plan::PlanStore>,
 ) {
+    register_flow_memory_with_stores(reg, Some(todo_store), Some(goal_store), Some(plan_store));
+    reg.register(Arc::new(memory::MemoryConfess {
+        store: confession_store.clone(),
+    }));
+    reg.register(Arc::new(memory::MemoryFetchConfessions {
+        store: confession_store,
+    }));
+}
+
+/// Register invocation-owned goals, planning, and history without legacy file stores.
+pub fn register_flow_memory(reg: &ToolRegistry) {
+    register_flow_memory_with_stores(reg, None, None, None);
+}
+
+fn register_flow_memory_with_stores(
+    reg: &ToolRegistry,
+    todo_store: Option<Arc<crate::memory::todo::TodoStore>>,
+    goal_store: Option<Arc<crate::memory::goal::GoalStore>>,
+    plan_store: Option<Arc<crate::memory::plan::PlanStore>>,
+) {
     reg.register(Arc::new(memory::MemoryTodoSet {
         store: todo_store.clone(),
     }));
@@ -243,12 +263,6 @@ pub fn register_memory(
         store: todo_store.clone(),
     }));
     reg.register(Arc::new(memory::MemoryTodoList { store: todo_store }));
-    reg.register(Arc::new(memory::MemoryConfess {
-        store: confession_store.clone(),
-    }));
-    reg.register(Arc::new(memory::MemoryFetchConfessions {
-        store: confession_store,
-    }));
     reg.register(Arc::new(memory::MemoryGoalGet {
         store: goal_store.clone(),
     }));
@@ -270,6 +284,14 @@ pub fn register_memory(
         store: plan_store.clone(),
     }));
     reg.register(Arc::new(plan::PlanTick { store: plan_store }));
+}
+
+fn legacy_memory_store<T>(store: &Option<Arc<T>>) -> Result<&T, crate::RuntimeError> {
+    store.as_deref().ok_or_else(|| {
+        crate::RuntimeError::ToolFailed(
+            "memory requires an admitted flow invocation or an explicit legacy store".into(),
+        )
+    })
 }
 
 pub fn register_spec_memory(reg: &ToolRegistry, spec_store: Arc<crate::memory::spec::SpecStore>) {

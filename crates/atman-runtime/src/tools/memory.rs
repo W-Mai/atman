@@ -15,8 +15,9 @@ use crate::value::{AtmanPayload, Value};
 mod instance_goal;
 pub use instance_goal::MemoryGoalSchedule;
 
+#[derive(Default)]
 pub struct MemoryGoalGet {
-    pub store: Arc<GoalStore>,
+    pub store: Option<Arc<GoalStore>>,
 }
 
 impl Tool for MemoryGoalGet {
@@ -48,7 +49,9 @@ impl Tool for MemoryGoalGet {
             }
             Ok(Value::from_json(
                 serde_json::to_value(crate::goal::GoalSnapshot {
-                    goal: self.store.load().map_err(goal_error)?,
+                    goal: super::legacy_memory_store(&self.store)?
+                        .load()
+                        .map_err(goal_error)?,
                     execution: crate::goal::GoalExecution::Idle,
                     paused_by: None,
                     running_operations: 0,
@@ -59,8 +62,9 @@ impl Tool for MemoryGoalGet {
     }
 }
 
+#[derive(Default)]
 pub struct MemoryGoalSet {
-    pub store: Arc<GoalStore>,
+    pub store: Option<Arc<GoalStore>>,
 }
 
 impl Tool for MemoryGoalSet {
@@ -108,12 +112,14 @@ impl Tool for MemoryGoalSet {
                 }
                 return goal_value(&control);
             }
-            self.store
+            super::legacy_memory_store(&self.store)?
                 .set(&text)
                 .map_err(|e| RuntimeError::ToolFailed(format!("goal.set: {e}")))?;
             Ok(Value::from_json(
                 serde_json::to_value(crate::goal::GoalSnapshot {
-                    goal: self.store.load().map_err(goal_error)?,
+                    goal: super::legacy_memory_store(&self.store)?
+                        .load()
+                        .map_err(goal_error)?,
                     execution: crate::goal::GoalExecution::Idle,
                     paused_by: None,
                     running_operations: 0,
@@ -810,8 +816,9 @@ impl Tool for MemoryRecentTurns {
     }
 }
 
+#[derive(Default)]
 pub struct MemoryGoalClear {
-    pub store: Arc<GoalStore>,
+    pub store: Option<Arc<GoalStore>>,
 }
 
 impl Tool for MemoryGoalClear {
@@ -847,7 +854,7 @@ impl Tool for MemoryGoalClear {
                 session.goal_control.clear().map_err(goal_error)?;
                 return Ok(Value::Unit);
             }
-            self.store
+            super::legacy_memory_store(&self.store)?
                 .clear()
                 .map_err(|e| RuntimeError::ToolFailed(format!("goal.clear: {e}")))?;
             Ok(Value::Unit)
@@ -855,8 +862,9 @@ impl Tool for MemoryGoalClear {
     }
 }
 
+#[derive(Default)]
 pub struct MemoryTodoSet {
-    pub store: Arc<TodoStore>,
+    pub store: Option<Arc<TodoStore>>,
 }
 
 impl Tool for MemoryTodoSet {
@@ -929,14 +937,15 @@ impl Tool for MemoryTodoSet {
                 expected_result,
                 status: TodoStatus::Pending,
             };
-            let id = self.store.add(todo).await?;
+            let id = super::legacy_memory_store(&self.store)?.add(todo).await?;
             Ok(Value::Str(id.to_string()))
         })
     }
 }
 
+#[derive(Default)]
 pub struct MemoryTodoDone {
-    pub store: Arc<TodoStore>,
+    pub store: Option<Arc<TodoStore>>,
 }
 
 impl Tool for MemoryTodoDone {
@@ -982,7 +991,7 @@ impl Tool for MemoryTodoDone {
                 .await?
                 .is_none()
             {
-                self.store
+                super::legacy_memory_store(&self.store)?
                     .set_status(&MemoryId(uuid), TodoStatus::Done)
                     .await?;
             }
@@ -991,8 +1000,9 @@ impl Tool for MemoryTodoDone {
     }
 }
 
+#[derive(Default)]
 pub struct MemoryTodoCancel {
-    pub store: Arc<TodoStore>,
+    pub store: Option<Arc<TodoStore>>,
 }
 
 impl Tool for MemoryTodoCancel {
@@ -1038,7 +1048,7 @@ impl Tool for MemoryTodoCancel {
                 .await?
                 .is_none()
             {
-                self.store
+                super::legacy_memory_store(&self.store)?
                     .set_status(&MemoryId(uuid), TodoStatus::Cancelled)
                     .await?;
             }
@@ -1047,8 +1057,9 @@ impl Tool for MemoryTodoCancel {
     }
 }
 
+#[derive(Default)]
 pub struct MemoryTodoDelete {
-    pub store: Arc<TodoStore>,
+    pub store: Option<Arc<TodoStore>>,
 }
 
 impl Tool for MemoryTodoDelete {
@@ -1091,15 +1102,18 @@ impl Tool for MemoryTodoDelete {
                 .await?
                 .is_none()
             {
-                self.store.delete(&MemoryId(uuid)).await?;
+                super::legacy_memory_store(&self.store)?
+                    .delete(&MemoryId(uuid))
+                    .await?;
             }
             Ok(Value::Str("ok".into()))
         })
     }
 }
 
+#[derive(Default)]
 pub struct MemoryTodoList {
-    pub store: Arc<TodoStore>,
+    pub store: Option<Arc<TodoStore>>,
 }
 
 impl Tool for MemoryTodoList {
@@ -1127,7 +1141,7 @@ impl Tool for MemoryTodoList {
 
     fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let todos = match ctx.planning_client()? {
+            let todos = match ctx.instance_client()? {
                 Some(client) => {
                     client
                         .read_planning(client.source().clone())
@@ -1135,7 +1149,7 @@ impl Tool for MemoryTodoList {
                         .map_err(|error| RuntimeError::ToolFailed(format!("todo.list: {error}")))?
                         .todos
                 }
-                None => self.store.list().await?,
+                None => super::legacy_memory_store(&self.store)?.list().await?,
             };
             let items: Vec<Value> = todos
                 .into_iter()

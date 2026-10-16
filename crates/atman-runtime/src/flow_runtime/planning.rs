@@ -30,36 +30,11 @@ impl FlowWorker {
 }
 
 impl crate::tool::ToolCtx {
-    pub(crate) fn planning_client(
-        &self,
-    ) -> Result<Option<&super::access::FlowClient>, crate::RuntimeError> {
-        let address = self
-            .flow_identity
-            .as_ref()
-            .and_then(|identity| identity.instance.as_ref())
-            .or_else(|| {
-                self.session_runtime
-                    .as_ref()
-                    .and_then(|session| session.flow_instance())
-            });
-        let Some(address) = address else {
-            return Ok(None);
-        };
-        self.flow_client()
-            .filter(|client| client.source() == address)
-            .map(Some)
-            .ok_or_else(|| {
-                crate::RuntimeError::ToolFailed(
-                    "planning requires this instance's host binding".into(),
-                )
-            })
-    }
-
     pub(crate) async fn edit_planning(
         &self,
         edit: crate::flow_store::planning::PlanningEdit,
     ) -> Result<Option<crate::flow_store::planning::PlanningOutcome>, crate::RuntimeError> {
-        let Some(client) = self.planning_client()? else {
+        let Some(client) = self.instance_client()? else {
             return Ok(None);
         };
         client

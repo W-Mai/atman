@@ -378,6 +378,31 @@ impl ToolCtx {
         self.peer_client.as_ref()
     }
 
+    pub(crate) fn instance_client(
+        &self,
+    ) -> Result<Option<&crate::flow_runtime::access::FlowClient>, crate::RuntimeError> {
+        let address = self
+            .flow_identity
+            .as_ref()
+            .and_then(|identity| identity.instance.as_ref())
+            .or_else(|| {
+                self.session_runtime
+                    .as_ref()
+                    .and_then(|session| session.flow_instance())
+            });
+        let Some(address) = address else {
+            return Ok(None);
+        };
+        self.flow_client()
+            .filter(|client| client.source() == address)
+            .map(Some)
+            .ok_or_else(|| {
+                crate::RuntimeError::ToolFailed(
+                    "operation requires this instance's host binding".into(),
+                )
+            })
+    }
+
     pub(crate) fn result_inbox(&self) -> Option<Arc<crate::agent_results::ResultInbox>> {
         self.child_results
             .clone()

@@ -53,6 +53,7 @@ impl AtmanRuntime {
         }
         let rule_fetch = build_rule_fetch(project_root, opts.home_dir.as_deref()).await;
         tools::register_tier_zero_with_rules(&executor.tools, rule_fetch);
+        tools::register_flow_memory(&executor.tools);
         tools::register_git_ops(&executor.tools);
         tools::register_watch(&executor.tools);
         let task_registry = crate::TaskRegistry::new();

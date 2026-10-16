@@ -20,16 +20,9 @@ pub(in crate::tools) fn resolve<'a>(
     handle: &str,
     ctx: &'a ToolCtx,
 ) -> Result<Option<Target<'a>>, RuntimeError> {
-    if ctx
-        .flow_identity
-        .as_ref()
-        .is_none_or(|identity| identity.instance.is_none())
-    {
+    let Some(client) = ctx.instance_client()? else {
         return Ok(None);
-    }
-    let client = ctx
-        .flow_client()
-        .ok_or_else(|| failed("instance has no peer host binding"))?;
+    };
     let (session, instance) = match handle.split_once('/') {
         Some((session, instance)) => (Uuid::parse_str(session).map_err(failed)?, instance),
         None => (client.source().session_id.0, handle),

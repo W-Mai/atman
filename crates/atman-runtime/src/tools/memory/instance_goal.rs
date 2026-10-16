@@ -58,13 +58,10 @@ pub(super) fn target<'a>(
     args: &ToolArgs,
     ctx: &'a ToolCtx,
 ) -> Result<Option<Target<'a>>, RuntimeError> {
-    let Some(address) = ctx
-        .flow_identity
-        .as_ref()
-        .and_then(|identity| identity.instance.as_ref())
-    else {
+    let Some(client) = ctx.instance_client()? else {
         return Ok(None);
     };
+    let address = client.source();
     let handle = match args.named("target_handle") {
         None => address.instance_id.to_string(),
         Some(Value::Str(handle)) => handle.clone(),

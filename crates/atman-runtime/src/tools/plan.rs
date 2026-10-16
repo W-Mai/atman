@@ -6,8 +6,9 @@ use crate::memory::plan::{Plan, PlanStore};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
+#[derive(Default)]
 pub struct PlanWrite {
-    pub store: Arc<PlanStore>,
+    pub store: Option<Arc<PlanStore>>,
 }
 
 impl Tool for PlanWrite {
@@ -64,7 +65,7 @@ impl Tool for PlanWrite {
                 .await?
                 .is_none()
             {
-                self.store
+                super::legacy_memory_store(&self.store)?
                     .upsert(Plan::new(id.clone(), title, steps))
                     .await
                     .map_err(|e| RuntimeError::ToolFailed(format!("plan.write: {e}")))?;
@@ -74,8 +75,9 @@ impl Tool for PlanWrite {
     }
 }
 
+#[derive(Default)]
 pub struct PlanRead {
-    pub store: Arc<PlanStore>,
+    pub store: Option<Arc<PlanStore>>,
 }
 
 impl Tool for PlanRead {
@@ -107,7 +109,7 @@ impl Tool for PlanRead {
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let plan = if let Some(client) = ctx.planning_client()? {
+            let plan = if let Some(client) = ctx.instance_client()? {
                 let snapshot = client
                     .read_planning(client.source().clone())
                     .await
@@ -120,13 +122,13 @@ impl Tool for PlanRead {
                     .cloned()
             } else {
                 match args.named("id") {
-                    Some(Value::Str(s)) if !s.is_empty() => self
-                        .store
-                        .get(s)
-                        .await
-                        .map_err(|e| RuntimeError::ToolFailed(format!("plan.read: {e}")))?,
-                    _ => self
-                        .store
+                    Some(Value::Str(s)) if !s.is_empty() => {
+                        super::legacy_memory_store(&self.store)?
+                            .get(s)
+                            .await
+                            .map_err(|e| RuntimeError::ToolFailed(format!("plan.read: {e}")))?
+                    }
+                    _ => super::legacy_memory_store(&self.store)?
                         .latest()
                         .await
                         .map_err(|e| RuntimeError::ToolFailed(format!("plan.read: {e}")))?,
@@ -140,8 +142,9 @@ impl Tool for PlanRead {
     }
 }
 
+#[derive(Default)]
 pub struct PlanTick {
-    pub store: Arc<PlanStore>,
+    pub store: Option<Arc<PlanStore>>,
 }
 
 impl Tool for PlanTick {
@@ -192,8 +195,7 @@ impl Tool for PlanTick {
             }
             let plan_id = match args.named("id") {
                 Some(Value::Str(s)) if !s.is_empty() => s.clone(),
-                _ => match self
-                    .store
+                _ => match super::legacy_memory_store(&self.store)?
                     .latest()
                     .await
                     .map_err(|e| RuntimeError::ToolFailed(format!("plan.tick: {e}")))?
@@ -206,12 +208,11 @@ impl Tool for PlanTick {
                     }
                 },
             };
-            self.store
+            super::legacy_memory_store(&self.store)?
                 .tick(&plan_id, step_index)
                 .await
                 .map_err(|e| RuntimeError::ToolFailed(format!("plan.tick: {e}")))?;
-            let plan = self
-                .store
+            let plan = super::legacy_memory_store(&self.store)?
                 .get(&plan_id)
                 .await
                 .map_err(|e| RuntimeError::ToolFailed(format!("plan.tick: {e}")))?
