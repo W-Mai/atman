@@ -4505,7 +4505,15 @@ fn switch_smart_model(
     session: &atman_runtime::Session,
     requested_model: &str,
 ) -> Result<String, String> {
-    let info = atman_runtime::model_registry::model_info(requested_model);
+    if !std::sync::Arc::ptr_eq(hub.models(), providers.models()) {
+        return Err(
+            "configuration and provider connections belong to different model scopes".into(),
+        );
+    }
+    session
+        .bind_model_registry(providers.models().clone())
+        .map_err(|error| error.to_string())?;
+    let info = providers.models().model_info(requested_model);
     if info.context_budget == 0 {
         return Err("model or provider is disabled".into());
     }
@@ -9712,8 +9720,9 @@ mod tests {
         let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(config.path());
         let lifecycle = atman_runtime::provider_lifecycle::ProviderLifecycle::new(
             hub.clone(),
-            atman_runtime::provider::ProviderRegistry::new(),
-        );
+            atman_runtime::provider::ProviderRegistry::with_models(hub.models().clone()),
+        )
+        .unwrap();
         hub.add_auth_provider(atman_runtime::auth_store::StoredProvider {
             id: "unsupported".into(),
             name: "Unsupported".into(),
@@ -9785,8 +9794,9 @@ mod tests {
         let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(config.path());
         let lifecycle = atman_runtime::provider_lifecycle::ProviderLifecycle::new(
             hub.clone(),
-            atman_runtime::provider::ProviderRegistry::new(),
-        );
+            atman_runtime::provider::ProviderRegistry::with_models(hub.models().clone()),
+        )
+        .unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -9896,7 +9906,8 @@ mod tests {
         hub.add_alias("cheap", "smart").unwrap();
         let session = Session::open_ephemeral();
         session.set_current_model("old");
-        let providers = atman_runtime::provider::ProviderRegistry::new();
+        let providers =
+            atman_runtime::provider::ProviderRegistry::with_models(hub.models().clone());
 
         let before = hub.read_config_toml().unwrap();
         assert!(switch_smart_model(&hub, &providers, &session, "new").is_err());
@@ -9918,7 +9929,7 @@ mod tests {
             switch_smart_model(&hub, &providers, &session, "new").unwrap(),
             "new"
         );
-        assert_eq!(atman_runtime::model_registry::resolve_alias("smart"), "new");
+        assert_eq!(hub.models().resolve_alias("smart"), "new");
         assert_eq!(session.last_model(), "new");
 
         let before = hub.read_config_toml().unwrap();

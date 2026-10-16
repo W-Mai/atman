@@ -102,6 +102,141 @@ fn executor(label: &str, api: OpenAiApi, budget: u64) -> (Executor, RecordingPro
 }
 
 #[tokio::test]
+async fn runtime_builds_bind_requests_to_the_selected_config_source() {
+    use atman_runtime::config_hub::ConfigHub;
+    use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions};
+
+    let project = tempfile::tempdir().unwrap();
+    let left_dir = tempfile::tempdir().unwrap();
+    let right_dir = tempfile::tempdir().unwrap();
+    let left_hub = ConfigHub::from_config_dir(left_dir.path());
+    let right_hub = ConfigHub::from_config_dir(right_dir.path());
+    for (hub, label, api, budget) in [
+        (&left_hub, "left", "responses", 40_000),
+        (&right_hub, "right", "chat-completions", 400_000),
+    ] {
+        std::fs::write(
+            hub.config_toml_path(),
+            format!(
+                r#"
+[providers.gateway]
+kind = "openai-compat"
+api_key = "test-key"
+base_url = "https://gateway.example/v1"
+api = "{api}"
+[models.primary]
+model = "vendor/{label}"
+provider = "gateway"
+context_budget = {budget}
+[alias.smart]
+model = "primary"
+"#
+            ),
+        )
+        .unwrap();
+    }
+    let options = |hub: &ConfigHub| AtmanRuntimeOptions {
+        events: atman_runtime::event::EventSink::new(),
+        mock: false,
+        config_dir: Some(hub.config_dir().to_path_buf()),
+        project_root: project.path().to_path_buf(),
+        home_dir: None,
+        workspace_generation: "scoped-runtime".into(),
+    };
+    let (left, right) = tokio::join!(
+        AtmanRuntime::build(options(&left_hub)),
+        AtmanRuntime::build(options(&right_hub))
+    );
+    let left = left.unwrap();
+    let right = right.unwrap();
+    assert!(Arc::ptr_eq(
+        left.executor.providers.models(),
+        left_hub.models()
+    ));
+    assert!(Arc::ptr_eq(
+        right.executor.providers.models(),
+        right_hub.models()
+    ));
+    assert!(!Arc::ptr_eq(
+        left.executor.providers.models(),
+        right.executor.providers.models()
+    ));
+    let source =
+        parse_file(r#"flow main() { return llm.call(model: "smart", prompt: "hi") }"#).unwrap();
+    for (runtime, model, api, budget) in [
+        (&left, "vendor/left", OpenAiApi::Responses, 40_000),
+        (&right, "vendor/right", OpenAiApi::ChatCompletions, 400_000),
+    ] {
+        assert!(
+            runtime
+                .executor
+                .providers
+                .try_resolve("smart")
+                .unwrap()
+                .is_some()
+        );
+        let recorder = RecordingProvider {
+            api: None,
+            requests: Default::default(),
+            mock: Arc::new(MockProvider::new("gateway").with_fallback(Value::Str("ok".into()))),
+        };
+        runtime
+            .executor
+            .providers
+            .register(Arc::new(recorder.clone()));
+        let context = Arc::new(Session::open_ephemeral());
+        runtime
+            .executor
+            .run_in_turn(&source, "main", vec![], None, Some(context.clone()))
+            .await
+            .unwrap();
+        let requests = recorder.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!((requests[0].0, requests[0].1.model.as_str()), (api, model));
+        context.set_current_model("smart");
+        context.refresh_window_snapshot();
+        assert_eq!(context.subscribe_context().borrow().window_budget, budget);
+    }
+    // Rebuilding one host preserves ownership; a different source cannot change its model or adapters.
+    let peer = AtmanRuntime::build(options(&left_hub)).await.unwrap();
+    assert!(Arc::ptr_eq(
+        peer.executor.providers.models(),
+        left.executor.providers.models()
+    ));
+    let text = right_hub.read_config_toml().unwrap().replace(
+        "api = \"chat-completions\"",
+        "api = \"responses\"\nenabled = false",
+    );
+    std::fs::write(right_hub.config_toml_path(), text).unwrap();
+    right_hub.reload().unwrap();
+    assert!(
+        right
+            .executor
+            .providers
+            .try_resolve("smart")
+            .unwrap()
+            .is_none()
+    );
+    assert!(!right.executor.providers.contains("config:gateway"));
+    assert!(left.executor.providers.contains("config:gateway"));
+    assert!(peer.executor.providers.contains("config:gateway"));
+    assert_eq!(
+        left_hub
+            .models()
+            .model_call_config("smart")
+            .info
+            .context_budget,
+        40_000
+    );
+    // Mock mode adds its model without replacing this scope's configuration.
+    let mut mock_options = options(&left_hub);
+    mock_options.mock = true;
+    let mock = AtmanRuntime::build(mock_options).await.unwrap();
+    assert!(mock.executor.providers.contains("mock"));
+    assert_eq!(left_hub.models().resolve_alias("smart"), "primary");
+}
+
+#[tokio::test]
 async fn scoped_execution_keeps_aliases_protocols_context_and_compaction_together() {
     let (left, left_provider) = executor("left", OpenAiApi::Responses, 40_000);
     let (right, right_provider) = executor("right", OpenAiApi::ChatCompletions, 400_000);

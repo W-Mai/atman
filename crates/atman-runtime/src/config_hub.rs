@@ -1,11 +1,13 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use crate::model_registry::ModelConfigUpdate;
+
+mod model_scope;
 
 static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static AUTH_WRITE_LOCK: Mutex<()> = Mutex::new(());
@@ -187,6 +189,7 @@ pub struct ConfigHub {
     config_dir: PathBuf,
     daemon_config_path: Option<PathBuf>,
     auth_path: PathBuf,
+    models: Arc<crate::model_registry::ModelRegistry>,
 }
 
 impl ConfigHub {
@@ -197,13 +200,12 @@ impl ConfigHub {
     }
 
     pub fn from_config_dir(dir: impl Into<PathBuf>) -> Self {
-        let config_dir = dir.into();
-        let auth_path = config_dir.join("auth.json");
-        Self {
-            config_dir,
-            daemon_config_path: None,
-            auth_path,
-        }
+        Self::from_auth_path(dir.into().join("auth.json"))
+    }
+
+    /// Model directory shared by this configuration and authentication source pair.
+    pub fn models(&self) -> &Arc<crate::model_registry::ModelRegistry> {
+        &self.models
     }
 
     pub fn config_dir(&self) -> &Path {
@@ -363,14 +365,16 @@ impl ConfigHub {
 
     pub fn from_auth_path(path: impl Into<PathBuf>) -> Self {
         let auth_path = path.into();
-        let config_dir = auth_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
+        let config_dir = crate::fs_access::canonicalize_stable(
+            auth_path.parent().unwrap_or_else(|| Path::new(".")),
+        );
+        let auth_path = config_dir.join(auth_path.file_name().unwrap_or_default());
+        let models = model_scope::models(config_dir.join("config.toml"), auth_path.clone());
         Self {
             config_dir,
             daemon_config_path: None,
             auth_path,
+            models,
         }
     }
 
@@ -1754,10 +1758,7 @@ impl ConfigHub {
         let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
         let _file_lock = self.lock_config_file()?;
         let text = self.read_config_toml()?;
-        let prepared = crate::model_registry::prepare_config_text(&text)
-            .map_err(|error| ConfigError::Invalid(error.to_string()))?;
-        let snapshot = prepared.snapshot();
-        crate::model_registry::commit_prepared_config(prepared);
+        let snapshot = model_scope::publish(self, &text, || Ok(()))?;
         Ok(apply(snapshot))
     }
 
@@ -1910,10 +1911,7 @@ impl ConfigHub {
         };
         let result = mutate(&mut doc)?;
         let new_text = doc.to_string();
-        let prepared = crate::model_registry::prepare_config_text(&new_text)
-            .map_err(|error| ConfigError::Invalid(error.to_string()))?;
-        self.write_config_toml(&new_text)?;
-        crate::model_registry::commit_prepared_config(prepared);
+        model_scope::publish(self, &new_text, || self.write_config_toml(&new_text))?;
         let after_commit = after_commit(&result);
         Ok((result, after_commit))
     }
@@ -2492,7 +2490,9 @@ mod tests {
 
         finished_rx.recv().unwrap().unwrap();
         reload.join().unwrap();
-        let projected = crate::model_registry::all_provider_entries()
+        let projected = hub
+            .models()
+            .all_provider_entries()
             .into_iter()
             .find(|(name, _)| name == "gateway")
             .map(|(_, entry)| entry)
@@ -2777,9 +2777,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        crate::model_registry::set_provider_config(current);
-
         let (_dir, hub) = temp_hub();
+        hub.models().replace_config(current).unwrap();
         let invalid = "[models.broken]\nmodel = \"api/broken\"\ncontext_budget = \"large\"\n";
         write_config(&hub, invalid);
         let before = std::fs::read(hub.config_toml_path()).unwrap();
@@ -2788,8 +2787,8 @@ mod tests {
 
         assert!(error.to_string().contains("parse config.toml"));
         assert_eq!(std::fs::read(hub.config_toml_path()).unwrap(), before);
-        assert!(crate::model_registry::model_entry("current").is_some());
-        assert!(crate::model_registry::model_entry("broken").is_none());
+        assert!(hub.models().model_entry("current").is_some());
+        assert!(hub.models().model_entry("broken").is_none());
         crate::model_registry::set_provider_config(Default::default());
     }
 

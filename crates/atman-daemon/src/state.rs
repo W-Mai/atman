@@ -80,16 +80,22 @@ impl DaemonState {
     ) -> Result<atman_runtime::ProviderLifecycle> {
         let hub = crate::bootstrap::resolve_config_hub(config_dir)?;
         let key = hub.config_dir().to_path_buf();
-        let mut lifecycles = self.provider_lifecycles.lock().unwrap();
-        Ok(lifecycles
+        if let Some(lifecycle) = self.provider_lifecycles.lock().unwrap().get(&key).cloned() {
+            return Ok(lifecycle);
+        }
+        let providers =
+            atman_runtime::provider::ProviderRegistry::with_models(hub.models().clone());
+        let lifecycle = atman_runtime::ProviderLifecycle::new(hub, providers)?;
+        let selected = self
+            .provider_lifecycles
+            .lock()
+            .unwrap()
             .entry(key)
-            .or_insert_with(|| {
-                atman_runtime::ProviderLifecycle::new(
-                    hub,
-                    atman_runtime::provider::ProviderRegistry::new(),
-                )
-            })
-            .clone())
+            .or_insert_with(|| lifecycle.clone())
+            .clone();
+        // Concurrent constructors share the source coordinator; discard unused adapters outside the map lock.
+        drop(lifecycle);
+        Ok(selected)
     }
 
     pub fn data_dir(&self) -> &Path {

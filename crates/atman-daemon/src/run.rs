@@ -999,7 +999,8 @@ mod tests {
                         .contains(PROVIDER_ID)
                 );
                 assert!(
-                    atman_runtime::model_registry::model_entry("launcher@OAuth:gpt-launcher")
+                    hub.models()
+                        .model_entry("launcher@OAuth:gpt-launcher")
                         .is_none()
                 );
                 state
@@ -1023,14 +1024,15 @@ mod tests {
         )
         .unwrap();
 
+        let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
         reload_model_config(Some(dir.path()));
-        let configured = atman_runtime::model_registry::model_info("daemon-reload");
+        let configured = hub.models().model_info("daemon-reload");
         assert_eq!(configured.name, "daemon-reload");
         assert_eq!(configured.context_budget, 4242);
 
         std::fs::write(&config_path, "[models\n").unwrap();
         reload_model_config(Some(dir.path()));
-        let preserved = atman_runtime::model_registry::model_info("daemon-reload");
+        let preserved = hub.models().model_info("daemon-reload");
         assert_eq!(preserved.name, "daemon-reload");
         assert_eq!(preserved.context_budget, 4242);
     }

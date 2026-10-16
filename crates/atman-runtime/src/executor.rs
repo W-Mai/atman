@@ -102,10 +102,6 @@ pub struct Executor {
     pub source_dir: Option<std::path::PathBuf>,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("executor already has a provider lifecycle")]
-pub struct ProviderLifecycleAlreadyAttached;
-
 impl Executor {
     pub fn new() -> Self {
         let tools = ToolRegistry::new();
@@ -136,10 +132,8 @@ impl Executor {
     pub fn attach_provider_lifecycle(
         &mut self,
         hub: crate::config_hub::ConfigHub,
-    ) -> Result<ProviderLifecycle, ProviderLifecycleAlreadyAttached> {
-        self.providers
-            .attach_provider_lifecycle(hub)
-            .ok_or(ProviderLifecycleAlreadyAttached)
+    ) -> Result<ProviderLifecycle, crate::provider_lifecycle::ProviderLifecycleError> {
+        self.providers.attach_provider_lifecycle(hub)
     }
 
     pub fn provider_lifecycle(&self) -> Option<ProviderLifecycle> {
@@ -741,10 +735,10 @@ mod tests {
     #[test]
     fn attached_provider_lifecycle_uses_and_retains_the_executor_registry() {
         let dir = tempfile::tempdir().unwrap();
+        let hub = crate::config_hub::ConfigHub::from_config_dir(dir.path());
         let mut executor = Executor::new();
-        let lifecycle = executor
-            .attach_provider_lifecycle(crate::config_hub::ConfigHub::from_config_dir(dir.path()))
-            .unwrap();
+        executor.providers = ProviderRegistry::with_models(hub.models().clone());
+        let lifecycle = executor.attach_provider_lifecycle(hub).unwrap();
 
         assert!(
             lifecycle
@@ -763,16 +757,16 @@ mod tests {
     fn provider_lifecycle_rejects_repeated_attachment() {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
+        let hub = crate::config_hub::ConfigHub::from_config_dir(first.path());
         let mut executor = Executor::new();
-        executor
-            .attach_provider_lifecycle(crate::config_hub::ConfigHub::from_config_dir(first.path()))
-            .unwrap();
+        executor.providers = ProviderRegistry::with_models(hub.models().clone());
+        executor.attach_provider_lifecycle(hub).unwrap();
 
         assert!(matches!(
             executor.attach_provider_lifecycle(crate::config_hub::ConfigHub::from_config_dir(
                 second.path()
             )),
-            Err(ProviderLifecycleAlreadyAttached)
+            Err(crate::provider_lifecycle::ProviderLifecycleError::AlreadyAttached)
         ));
     }
 

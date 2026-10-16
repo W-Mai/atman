@@ -120,9 +120,7 @@ pub use context_plan::{
 pub use cost::{CostSummary, summarize_by_model, summarize_by_provider, total};
 pub use error::RuntimeError;
 pub use event::{Event, EventSink, FlowStatus, LlmCallStatus, NodeEvent, Observable};
-pub use executor::{
-    Executor, InstanceInvocation, ProviderLifecycleAlreadyAttached, RootInvocation,
-};
+pub use executor::{Executor, InstanceInvocation, RootInvocation};
 pub use hunk::{ApplyError, EditProposal, Hunk, HunkLine};
 pub use injection::{Injection, InjectionId, InjectionSource, InjectionState};
 pub use invocation_env::InvocationEnv;

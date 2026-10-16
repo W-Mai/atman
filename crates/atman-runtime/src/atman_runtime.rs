@@ -30,7 +30,13 @@ pub struct AtmanRuntime {
 
 impl AtmanRuntime {
     pub async fn build(opts: AtmanRuntimeOptions) -> Result<Self> {
+        let auth_hub = match opts.config_dir.as_deref() {
+            Some(dir) => ConfigHub::from_config_dir(dir),
+            None => ConfigHub::global().context("resolve config hub")?,
+        };
         let mut executor = Executor::with_events(opts.events);
+        executor.providers =
+            crate::provider::ProviderRegistry::with_models(auth_hub.models().clone());
         let workspace_service = crate::flow_workspace::FlowWorkspaceService::new(
             &opts.project_root,
             None,
@@ -74,14 +80,7 @@ impl AtmanRuntime {
         let web_config = load_web_config(opts.config_dir.as_deref());
         tools::register_web(&executor.tools, web_config.fetch);
         tools::register_web_search(&executor.tools, &web_config.search);
-        let auth_hub = match opts.config_dir.as_deref() {
-            Some(dir) => ConfigHub::from_config_dir(dir),
-            None => ConfigHub::global().context("resolve config hub")?,
-        };
         let lifecycle = executor.attach_provider_lifecycle(auth_hub)?;
-        lifecycle
-            .reload_config_providers()
-            .context("load model and provider configuration")?;
         let provider_catalog_refresh_plan = lifecycle.prepare_auth_runtime().await?;
         if let Some(sandbox) =
             build_sandbox(&opts.project_root, opts.config_dir.as_deref()).context("sandbox init")?
@@ -92,21 +91,14 @@ impl AtmanRuntime {
             executor.providers.register(Arc::new(
                 MockProvider::new("mock").with_fallback(Value::Str("[mock response]".into())),
             ));
-            use crate::model_registry::{ModelConfig, ModelEntry};
-            let mut models = std::collections::HashMap::new();
-            models.insert(
+            executor.providers.models().register_model_entries(vec![(
                 "mock".into(),
-                ModelEntry {
+                crate::model_registry::ModelEntry {
                     model: "mock".into(),
                     context_budget: Some(200_000),
                     ..Default::default()
                 },
-            );
-            crate::model_registry::set_model_config(ModelConfig {
-                models,
-                providers: std::collections::HashMap::new(),
-                aliases: std::collections::HashMap::new(),
-            });
+            )]);
         }
         Ok(Self {
             executor,

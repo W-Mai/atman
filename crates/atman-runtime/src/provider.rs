@@ -899,20 +899,33 @@ impl ProviderRegistry {
     pub(crate) fn attach_provider_lifecycle(
         &self,
         hub: crate::config_hub::ConfigHub,
-    ) -> Option<crate::provider_lifecycle::ProviderLifecycle> {
+    ) -> Result<
+        crate::provider_lifecycle::ProviderLifecycle,
+        crate::provider_lifecycle::ProviderLifecycleError,
+    > {
+        use crate::provider_lifecycle::{ProviderLifecycle, ProviderLifecycleError};
+        if self
+            .lifecycle_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return Err(ProviderLifecycleError::AlreadyAttached);
+        }
+        let (lifecycle, replaced) = ProviderLifecycle::new_deferred(hub, self.clone())?;
         let mut owner = self
             .lifecycle_owner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if owner.is_some() {
-            return None;
+            drop(owner);
+            drop(replaced);
+            return Err(ProviderLifecycleError::AlreadyAttached);
         }
-        let (lifecycle, replaced) =
-            crate::provider_lifecycle::ProviderLifecycle::new_deferred(hub, self.clone());
         *owner = Some(lifecycle.owner());
         drop(owner);
         drop(replaced);
-        Some(lifecycle)
+        Ok(lifecycle)
     }
 
     pub(crate) fn provider_lifecycle(
@@ -1148,8 +1161,11 @@ mod tests {
         let _catalog_cleanup = CatalogCleanup;
         let config = tempfile::tempdir().unwrap();
         let hub = crate::config_hub::ConfigHub::from_config_dir(config.path());
-        let root =
-            crate::provider_lifecycle::ProviderLifecycle::new(hub.clone(), ProviderRegistry::new());
+        let root = crate::provider_lifecycle::ProviderLifecycle::new(
+            hub.clone(),
+            ProviderRegistry::with_models(hub.models().clone()),
+        )
+        .unwrap();
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1175,7 +1191,7 @@ mod tests {
             ))
             .unwrap();
 
-        let target = ProviderRegistry::new();
+        let target = ProviderRegistry::with_models(hub.models().clone());
         let owner_was_unlocked = Arc::new(AtomicBool::new(false));
         target.register(Arc::new(OwnerLockProbeProvider {
             name: PROVIDER_ID.into(),

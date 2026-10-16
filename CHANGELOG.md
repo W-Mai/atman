@@ -6,7 +6,13 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ⚠️ Breaking Changes
+
+- **Embedded provider lifecycle construction** — `ProviderLifecycle::new` returns `Result`, and executor attachment returns `ProviderLifecycleError`. Provider connections must use `ProviderRegistry::with_models(hub.models().clone())`; mismatched configuration scopes are rejected.
+
 ### ✨ Features
+
+- **Configuration-bound model scopes** — Runtime construction binds provider connections and model catalogs to the selected configuration and authentication sources. Shared configuration refreshes validate all active projections before publication, while separate authentication stores retain isolated catalogs and connection lifecycles.
 
 - **Scoped provider requests** — Provider registries bind model resolution to their directory across LLM calls, extraction, compaction, sampling, and connection checks. Sessions retain the same directory for context and budgets, and mismatched request or session bindings fail before execution.
 

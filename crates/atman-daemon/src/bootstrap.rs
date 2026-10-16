@@ -469,7 +469,11 @@ enabled = true
 
                 assert!(outcome.executor.providers.contains("config:selected"));
                 assert!(!outcome.executor.providers.contains("config:stale"));
-                let provider_names = atman_runtime::model_registry::all_provider_entries()
+                let provider_names = outcome
+                    .executor
+                    .providers
+                    .models()
+                    .all_provider_entries()
                     .into_iter()
                     .map(|(name, _)| name)
                     .collect::<Vec<_>>();

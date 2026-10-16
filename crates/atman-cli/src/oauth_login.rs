@@ -108,16 +108,6 @@ mod tests {
     };
     use atman_runtime::tool::BoxFut;
 
-    struct CatalogCleanup(Option<String>);
-
-    impl Drop for CatalogCleanup {
-        fn drop(&mut self) {
-            if let Some(provider_id) = self.0.take() {
-                atman_runtime::model_registry::remove_provider_catalog(&provider_id);
-            }
-        }
-    }
-
     struct TestOAuthProvider {
         id: String,
         discovery_fails: bool,
@@ -213,10 +203,12 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let config = tempfile::tempdir().unwrap();
+        let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(config.path());
         let lifecycle = ProviderLifecycle::new(
-            atman_runtime::config_hub::ConfigHub::from_config_dir(config.path()),
-            atman_runtime::provider::ProviderRegistry::new(),
-        );
+            hub.clone(),
+            atman_runtime::provider::ProviderRegistry::with_models(hub.models().clone()),
+        )
+        .unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -228,7 +220,6 @@ mod tests {
                 tokens("access"),
             ))
             .unwrap();
-        let mut cleanup = CatalogCleanup(Some(provider.id.clone()));
 
         assert_eq!(
             provider.kind,
@@ -241,7 +232,6 @@ mod tests {
         assert!(stored.providers[0].model_cache.is_some());
 
         lifecycle.remove_provider(&provider.id).unwrap();
-        cleanup.0 = None;
     }
 
     #[test]
@@ -250,11 +240,13 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let config = tempfile::tempdir().unwrap();
+        let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(config.path());
         let lifecycle = ProviderLifecycle::new(
-            atman_runtime::config_hub::ConfigHub::from_config_dir(config.path()),
-            atman_runtime::provider::ProviderRegistry::new(),
-        );
-        let revision = atman_runtime::model_registry::model_catalog_revision();
+            hub.clone(),
+            atman_runtime::provider::ProviderRegistry::with_models(hub.models().clone()),
+        )
+        .unwrap();
+        let revision = hub.models().model_catalog_revision();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -276,10 +268,7 @@ mod tests {
                 .providers
                 .is_empty()
         );
-        assert_eq!(
-            atman_runtime::model_registry::model_catalog_revision(),
-            revision
-        );
+        assert_eq!(hub.models().model_catalog_revision(), revision);
     }
 
     #[test]

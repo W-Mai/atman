@@ -1,5 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use anyhow::Context;
@@ -12,8 +12,7 @@ use crate::config_hub::{
 };
 use crate::model_registry::{
     CatalogDelta, CatalogError, PreparedProviderCatalog, ProviderDescriptor,
-    commit_prepared_provider_catalog, prepare_provider_catalog, provider_catalog_namespace,
-    remove_provider_catalog, shortest_unique_provider_id,
+    commit_prepared_provider_catalog, shortest_unique_provider_id,
 };
 use crate::provider::{
     ModelDiscoveryError, Provider, ProviderRegistry, ReasoningWireProfile, WeakProviderRegistry,
@@ -22,6 +21,10 @@ use crate::provider::{
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProviderLifecycleError {
+    #[error("provider connections and configuration belong to different model scopes")]
+    ScopeMismatch,
+    #[error("provider lifecycle is already attached")]
+    AlreadyAttached,
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
@@ -178,18 +181,35 @@ static CONFIG_PROVIDER_COORDINATORS: LazyLock<
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 impl ProviderLifecycle {
-    pub fn new(hub: ConfigHub, providers: ProviderRegistry) -> Self {
-        let (lifecycle, replaced) = Self::new_deferred(hub, providers);
+    pub fn new(
+        hub: ConfigHub,
+        providers: ProviderRegistry,
+    ) -> Result<Self, ProviderLifecycleError> {
+        let (lifecycle, replaced) = Self::new_deferred(hub, providers)?;
         drop(replaced);
-        lifecycle
+        Ok(lifecycle)
+    }
+
+    fn validate_scope(
+        hub: &ConfigHub,
+        providers: &ProviderRegistry,
+    ) -> Result<(), ProviderLifecycleError> {
+        if !Arc::ptr_eq(hub.models(), providers.models()) {
+            return Err(ProviderLifecycleError::ScopeMismatch);
+        }
+        Ok(())
     }
 
     pub(crate) fn new_deferred(
         hub: ConfigHub,
         providers: ProviderRegistry,
-    ) -> (Self, Vec<Arc<dyn Provider>>) {
+    ) -> Result<(Self, Vec<Arc<dyn Provider>>), ProviderLifecycleError> {
+        Self::validate_scope(&hub, &providers)?;
         let state = shared_lifecycle_state(&hub);
         let config_state = shared_config_provider_state(&hub);
+        // Retain the coordinator while loading so its initial provider snapshot survives.
+        // No lifecycle owner or connection lock may be held during reconciliation or drops.
+        hub.reload()?;
         let mut replaced = Vec::new();
         {
             let mut shared = state
@@ -240,7 +260,7 @@ impl ProviderLifecycle {
                 shared.registries.push(providers.downgrade());
             }
         }
-        (
+        Ok((
             Self {
                 hub,
                 providers,
@@ -248,7 +268,7 @@ impl ProviderLifecycle {
                 config_state,
             },
             replaced,
-        )
+        ))
     }
 
     pub fn config_hub(&self) -> &ConfigHub {
@@ -397,7 +417,10 @@ impl ProviderLifecycle {
         expected_provider_ids.sort();
         store.providers.push(provider_record.clone());
         let descriptor = self.provider_descriptor(&provider_record, &store.providers)?;
-        let prepared = prepare_provider_catalog(descriptor, models)?;
+        let prepared = self
+            .hub
+            .models()
+            .prepare_provider_catalog(descriptor, models)?;
         let namespace = prepared.namespace().to_string();
         let provider_kind = provider_record.kind.clone();
         let (commit, applied) = self
@@ -600,7 +623,7 @@ impl ProviderLifecycle {
             Ok(Some(runtime)) => runtime,
             Ok(None) => {
                 Self::bump_generation(&mut state, provider_id);
-                let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+                let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
                 drop(state);
                 return (
                     Err(ProviderLifecycleError::ProviderNotFound {
@@ -611,14 +634,14 @@ impl ProviderLifecycle {
             }
             Err(error) => {
                 Self::bump_generation(&mut state, provider_id);
-                let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+                let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
                 drop(state);
                 return (Err(error.into()), removed);
             }
         };
         if !runtime.provider.enabled {
             Self::bump_generation(&mut state, provider_id);
-            let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+            let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
             drop(state);
             return (
                 Err(ProviderLifecycleError::ProviderDisabled {
@@ -629,7 +652,7 @@ impl ProviderLifecycle {
         }
         let Some(live) = state.live_providers.get(provider_id) else {
             Self::bump_generation(&mut state, provider_id);
-            let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+            let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
             drop(state);
             return (
                 Err(ProviderLifecycleError::LiveProviderMissing {
@@ -640,7 +663,7 @@ impl ProviderLifecycle {
         };
         if live.kind != runtime.provider.kind {
             Self::bump_generation(&mut state, provider_id);
-            let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+            let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
             drop(state);
             return (
                 Err(ProviderLifecycleError::Stale {
@@ -700,12 +723,16 @@ impl ProviderLifecycle {
             Ok(descriptor) => descriptor,
             Err(error) => return (Err(error), Vec::new()),
         };
-        let prepared = match prepare_provider_catalog(descriptor, models) {
+        let prepared = match self
+            .hub
+            .models()
+            .prepare_provider_catalog(descriptor, models)
+        {
             Ok(prepared) => prepared,
             Err(error) => return (Err(error.into()), Vec::new()),
         };
         let namespace = prepared.namespace().to_string();
-        let revision = crate::model_registry::model_catalog_revision();
+        let revision = self.hub.models().model_catalog_revision();
         let expected_provider_ids = attempt
             .runtime
             .model_namespace
@@ -719,7 +746,7 @@ impl ProviderLifecycle {
             expected_provider_ids,
             || {
                 let delta = commit_prepared_provider_catalog(prepared);
-                let changed = crate::model_registry::model_catalog_revision() != revision;
+                let changed = self.hub.models().model_catalog_revision() != revision;
                 (delta, changed)
             },
         );
@@ -737,7 +764,7 @@ impl ProviderLifecycle {
             }
             AuthProviderRuntimeCommit::Missing => {
                 Self::bump_generation(&mut state, provider_id);
-                let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+                let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
                 drop(state);
                 (
                     Err(ProviderLifecycleError::ProviderNotFound {
@@ -748,7 +775,7 @@ impl ProviderLifecycle {
             }
             AuthProviderRuntimeCommit::Disabled => {
                 Self::bump_generation(&mut state, provider_id);
-                let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+                let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
                 drop(state);
                 (
                     Err(ProviderLifecycleError::ProviderDisabled {
@@ -843,7 +870,11 @@ impl ProviderLifecycle {
                 );
             }
         };
-        let prepared = match prepare_provider_catalog(descriptor, models) {
+        let prepared = match self
+            .hub
+            .models()
+            .prepare_provider_catalog(descriptor, models)
+        {
             Ok(prepared) => prepared,
             Err(error) => {
                 drop(state);
@@ -991,7 +1022,7 @@ impl ProviderLifecycle {
             }
         };
         Self::bump_generation(&mut state, provider_id);
-        let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+        let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
         deferred.extend(removed);
         drop(state);
         (Err(error), deferred)
@@ -1082,7 +1113,7 @@ impl ProviderLifecycle {
                     Self::bump_generation(&mut state, &provider_id);
                     let removal = Self::remove_live_provider(&mut state, &provider_id);
                     removed_providers.extend(removal.removed);
-                    remove_provider_catalog(&provider_id);
+                    self.hub.models().remove_provider_catalog(&provider_id);
                 }
                 drop(state);
                 drop(removed_providers);
@@ -1097,7 +1128,7 @@ impl ProviderLifecycle {
                 let change = ProviderStateChange {
                     auth_changed: false,
                     live_changed: removal.changed,
-                    catalog_changed: remove_provider_catalog(&provider_id),
+                    catalog_changed: self.hub.models().remove_provider_catalog(&provider_id),
                 };
                 (provider_id, change)
             })
@@ -1119,7 +1150,7 @@ impl ProviderLifecycle {
             Ok(Some(auth_changed)) => auth_changed,
             Ok(None) => {
                 Self::bump_generation(&mut state, provider_id);
-                let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+                let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
                 drop(state);
                 drop(removed);
                 return Err(ProviderLifecycleError::ProviderNotFound {
@@ -1128,15 +1159,14 @@ impl ProviderLifecycle {
             }
             Err(error) => {
                 Self::bump_generation(&mut state, provider_id);
-                let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+                let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
                 drop(state);
                 drop(removed);
                 return Err(error.into());
             }
         };
         Self::bump_generation(&mut state, provider_id);
-        let (change, removed) =
-            Self::remove_runtime_provider(&mut state, provider_id, auth_changed);
+        let (change, removed) = self.remove_runtime_provider(&mut state, provider_id, auth_changed);
         drop(state);
         drop(removed);
         Ok(change)
@@ -1151,15 +1181,14 @@ impl ProviderLifecycle {
             Ok(auth_changed) => auth_changed,
             Err(error) => {
                 Self::bump_generation(&mut state, provider_id);
-                let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+                let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
                 drop(state);
                 drop(removed);
                 return Err(error.into());
             }
         };
         Self::bump_generation(&mut state, provider_id);
-        let (change, removed) =
-            Self::remove_runtime_provider(&mut state, provider_id, auth_changed);
+        let (change, removed) = self.remove_runtime_provider(&mut state, provider_id, auth_changed);
         drop(state);
         drop(removed);
         Ok(change)
@@ -1183,7 +1212,7 @@ impl ProviderLifecycle {
             Ok(Some(runtime)) => runtime,
             Ok(None) => {
                 Self::bump_generation(&mut state, provider_id);
-                let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+                let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
                 drop(state);
                 return (
                     Err(ProviderLifecycleError::ProviderNotFound {
@@ -1194,7 +1223,7 @@ impl ProviderLifecycle {
             }
             Err(error) => {
                 Self::bump_generation(&mut state, provider_id);
-                let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+                let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
                 drop(state);
                 return (Err(error.into()), removed);
             }
@@ -1202,7 +1231,7 @@ impl ProviderLifecycle {
         let provider = runtime.provider;
         if provider.kind != expected_kind {
             Self::bump_generation(&mut state, provider_id);
-            let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+            let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
             drop(state);
             return (
                 Err(ProviderLifecycleError::Stale {
@@ -1240,7 +1269,7 @@ impl ProviderLifecycle {
                 Err(error) => error.into(),
             };
             Self::bump_generation(&mut state, provider_id);
-            let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+            let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
             drop(state);
             return (Err(error), removed);
         }
@@ -1252,7 +1281,10 @@ impl ProviderLifecycle {
                     runtime.model_namespace.as_deref(),
                 )
                 .and_then(|descriptor| {
-                    prepare_provider_catalog(descriptor, models).map_err(Into::into)
+                    self.hub
+                        .models()
+                        .prepare_provider_catalog(descriptor, models)
+                        .map_err(Into::into)
                 })
                 .map(Some),
             None => Ok(None),
@@ -1261,7 +1293,7 @@ impl ProviderLifecycle {
             Ok(prepared) => prepared,
             Err(error) => {
                 Self::bump_generation(&mut state, provider_id);
-                let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+                let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
                 drop(state);
                 return (Err(error), removed);
             }
@@ -1277,7 +1309,7 @@ impl ProviderLifecycle {
             .unwrap_or_else(|| live_provider.clone());
         let catalog_revision = prepared
             .is_some()
-            .then(crate::model_registry::model_catalog_revision);
+            .then(|| self.hub.models().model_catalog_revision());
         let expected_provider_ids = runtime
             .model_namespace
             .is_none()
@@ -1299,11 +1331,11 @@ impl ProviderLifecycle {
                     Some(prepared) => {
                         let catalog = commit_prepared_provider_catalog(prepared);
                         let changed = catalog_revision.is_some_and(|revision| {
-                            crate::model_registry::model_catalog_revision() != revision
+                            self.hub.models().model_catalog_revision() != revision
                         });
                         (Some(catalog), changed)
                     }
-                    None => (None, remove_provider_catalog(provider_id)),
+                    None => (None, self.hub.models().remove_provider_catalog(provider_id)),
                 };
                 (catalog, catalog_changed, registration)
             },
@@ -1312,7 +1344,7 @@ impl ProviderLifecycle {
             Ok(commit) => commit,
             Err(error) => {
                 Self::bump_generation(&mut state, provider_id);
-                let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+                let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
                 drop(state);
                 return (Err(error.into()), removed);
             }
@@ -1340,7 +1372,7 @@ impl ProviderLifecycle {
             }
             AuthProviderRuntimeCommit::Missing => {
                 Self::bump_generation(&mut state, provider_id);
-                let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+                let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
                 drop(state);
                 (
                     Err(ProviderLifecycleError::ProviderNotFound {
@@ -1351,7 +1383,7 @@ impl ProviderLifecycle {
             }
             AuthProviderRuntimeCommit::Disabled => {
                 Self::bump_generation(&mut state, provider_id);
-                let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+                let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
                 drop(state);
                 (
                     Err(ProviderLifecycleError::ProviderDisabled {
@@ -1362,7 +1394,7 @@ impl ProviderLifecycle {
             }
             AuthProviderRuntimeCommit::Changed => {
                 Self::bump_generation(&mut state, provider_id);
-                let (_, removed) = Self::remove_runtime_provider(&mut state, provider_id, false);
+                let (_, removed) = self.remove_runtime_provider(&mut state, provider_id, false);
                 drop(state);
                 (
                     Err(ProviderLifecycleError::Stale {
@@ -1393,7 +1425,7 @@ impl ProviderLifecycle {
         provider_ids: &[String],
         persisted_namespace: Option<&str>,
     ) -> Result<ProviderDescriptor, ProviderLifecycleError> {
-        let in_memory_namespace = provider_catalog_namespace(&provider.id);
+        let in_memory_namespace = self.hub.models().provider_catalog_namespace(&provider.id);
         if let (Some(current), Some(persisted)) = (&in_memory_namespace, persisted_namespace)
             && current != persisted
         {
@@ -1585,6 +1617,7 @@ impl ProviderLifecycle {
     }
 
     fn remove_runtime_provider(
+        &self,
         state: &mut LifecycleState,
         provider_id: &str,
         auth_changed: bool,
@@ -1594,7 +1627,7 @@ impl ProviderLifecycle {
             ProviderStateChange {
                 auth_changed,
                 live_changed: removal.changed,
-                catalog_changed: remove_provider_catalog(provider_id),
+                catalog_changed: self.hub.models().remove_provider_catalog(provider_id),
             },
             removal.removed,
         )
@@ -1720,7 +1753,7 @@ fn wire_profile_for_kind(kind: &ProviderKind) -> ReasoningWireProfile {
 }
 
 fn shared_lifecycle_state(hub: &ConfigHub) -> Arc<Mutex<LifecycleState>> {
-    let key = coordinator_key(hub.auth_path());
+    let key = hub.auth_path().to_path_buf();
     let mut coordinators = LIFECYCLE_COORDINATORS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1734,7 +1767,7 @@ fn shared_lifecycle_state(hub: &ConfigHub) -> Arc<Mutex<LifecycleState>> {
 }
 
 fn shared_config_provider_state(hub: &ConfigHub) -> Arc<Mutex<ConfigProviderLifecycleState>> {
-    let key = coordinator_key(&hub.config_toml_path());
+    let key = hub.config_toml_path();
     let mut coordinators = CONFIG_PROVIDER_COORDINATORS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1745,21 +1778,6 @@ fn shared_config_provider_state(hub: &ConfigHub) -> Arc<Mutex<ConfigProviderLife
     let state = Arc::new(Mutex::new(ConfigProviderLifecycleState::default()));
     coordinators.insert(key, Arc::downgrade(&state));
     state
-}
-
-fn coordinator_key(path: &Path) -> PathBuf {
-    if let Some(parent) = path.parent()
-        && let Ok(parent) = std::fs::canonicalize(parent)
-        && let Some(file_name) = path.file_name()
-    {
-        return parent.join(file_name);
-    }
-    if path.is_absolute() {
-        return path.to_path_buf();
-    }
-    std::env::current_dir()
-        .map(|current| current.join(path))
-        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 impl ProviderLifecycle {
@@ -1889,7 +1907,11 @@ mod tests {
         )
         .unwrap();
 
-        let lifecycle = ProviderLifecycle::new(hub.clone(), ProviderRegistry::new());
+        let lifecycle = ProviderLifecycle::new(
+            hub.clone(),
+            ProviderRegistry::with_models(hub.models().clone()),
+        )
+        .unwrap();
         let current = lifecycle
             .reload_cached_codex_provider_after_conflict(PROVIDER_ID, true)
             .unwrap()
@@ -2094,10 +2116,12 @@ mod tests {
 
     fn fixture(id: &str) -> (tempfile::TempDir, ProviderLifecycle, Arc<TestProvider>) {
         let dir = tempfile::tempdir().unwrap();
+        let hub = ConfigHub::from_config_dir(dir.path());
         let lifecycle = ProviderLifecycle::new(
-            ConfigHub::from_config_dir(dir.path()),
-            ProviderRegistry::new(),
-        );
+            hub.clone(),
+            ProviderRegistry::with_models(hub.models().clone()),
+        )
+        .unwrap();
         let provider = Arc::new(TestProvider::new(id, vec![model("initial")]));
         (dir, lifecycle, provider)
     }
@@ -2110,23 +2134,109 @@ mod tests {
     }
 
     #[test]
+    fn identical_auth_provider_ids_remain_scoped_across_shared_config() {
+        test_runtime().block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let first = ConfigHub::from_auth_path(dir.path().join("first.json"));
+            let second = ConfigHub::from_auth_path(dir.path().join("second.json"));
+            let left = ProviderLifecycle::new(
+                first.clone(),
+                ProviderRegistry::with_models(first.models().clone()),
+            )
+            .unwrap();
+            let right = ProviderLifecycle::new(
+                second.clone(),
+                ProviderRegistry::with_models(second.models().clone()),
+            )
+            .unwrap();
+            left.install_provider(
+                provider_record("same-id"),
+                Arc::new(TestProvider::new("same-id", vec![model("left")])),
+            )
+            .await
+            .unwrap();
+            right
+                .install_provider(
+                    provider_record("same-id"),
+                    Arc::new(TestProvider::new("same-id", vec![model("right")])),
+                )
+                .await
+                .unwrap();
+            let namespace = first
+                .models()
+                .provider_catalog_namespace("same-id")
+                .unwrap();
+            assert!(
+                first
+                    .models()
+                    .model_entry(&format!("{namespace}:left"))
+                    .is_some()
+            );
+            assert!(
+                first
+                    .models()
+                    .model_entry(&format!("{namespace}:right"))
+                    .is_none()
+            );
+            assert!(
+                second
+                    .models()
+                    .model_entry(&format!("{namespace}:right"))
+                    .is_some()
+            );
+            first.add_alias("smart", "configured").unwrap();
+            assert_eq!(second.models().resolve_alias("smart"), "configured");
+            let peer_hub = ConfigHub::from_auth_path(dir.path().join("first.json"));
+            let peer = ProviderLifecycle::new(
+                peer_hub.clone(),
+                ProviderRegistry::with_models(peer_hub.models().clone()),
+            )
+            .unwrap();
+            assert!(Arc::ptr_eq(first.models(), peer_hub.models()));
+            assert!(peer.providers.contains("same-id"));
+            let right_revision = second.models().model_catalog_revision();
+            left.remove_provider("same-id").unwrap();
+            assert!(!peer.providers.contains("same-id"));
+            assert!(right.providers.contains("same-id"));
+            assert_eq!(second.models().model_catalog_revision(), right_revision);
+            assert_eq!(second.load_auth().unwrap().providers.len(), 1);
+            assert!(
+                second
+                    .models()
+                    .model_entry(&format!("{namespace}:right"))
+                    .is_some()
+            );
+        });
+    }
+
+    #[test]
+    fn mismatched_scope_is_rejected_before_any_configuration_side_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("absent");
+        let hub = ConfigHub::from_config_dir(&root);
+        let foreign =
+            ProviderRegistry::with_models(Arc::new(crate::model_registry::ModelRegistry::new()));
+        assert!(matches!(
+            ProviderLifecycle::new(hub.clone(), foreign.clone()),
+            Err(ProviderLifecycleError::ScopeMismatch)
+        ));
+        assert!(matches!(
+            foreign.attach_provider_lifecycle(hub.clone()),
+            Err(ProviderLifecycleError::ScopeMismatch)
+        ));
+        assert!(!root.exists());
+        let own = ProviderRegistry::with_models(hub.models().clone());
+        own.attach_provider_lifecycle(hub).unwrap();
+        assert!(own.provider_lifecycle().is_some());
+        assert!(foreign.provider_lifecycle().is_none());
+    }
+
+    #[test]
     fn concurrent_config_provider_updates_leave_config_and_live_registries_in_sync() {
-        struct ConfigReset;
-
-        impl Drop for ConfigReset {
-            fn drop(&mut self) {
-                crate::model_registry::set_provider_config(Default::default());
-            }
-        }
-
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _reset = ConfigReset;
         let dir = tempfile::tempdir().unwrap();
         let hub = ConfigHub::from_config_dir(dir.path());
-        let registry = ProviderRegistry::new();
-        let lifecycle = ProviderLifecycle::new(hub.clone(), registry.clone());
+        let registry = ProviderRegistry::with_models(hub.models().clone());
+        let lifecycle = ProviderLifecycle::new(hub.clone(), registry.clone()).unwrap();
         lifecycle
             .create_config_provider(ProviderConfigUpdate {
                 name: "gateway",
@@ -2143,8 +2253,8 @@ mod tests {
             })
             .unwrap();
 
-        let peer_registry = ProviderRegistry::new();
-        let _peer = ProviderLifecycle::new(hub.clone(), peer_registry.clone());
+        let peer_registry = ProviderRegistry::with_models(hub.models().clone());
+        let _peer = ProviderLifecycle::new(hub.clone(), peer_registry.clone()).unwrap();
         let writers = 16;
         let barrier = Arc::new(std::sync::Barrier::new(writers));
         let handles = (0..writers)
@@ -2176,14 +2286,16 @@ mod tests {
             handle.join().unwrap();
         }
         let committed = hub.model_config().unwrap().unwrap().providers["gateway"].clone();
-        let global = crate::model_registry::all_provider_entries()
+        let projected = hub
+            .models()
+            .all_provider_entries()
             .into_iter()
             .find(|(name, _)| name == "gateway")
             .map(|(_, entry)| entry)
             .unwrap();
-        assert_eq!(global.api_key, committed.api_key);
-        assert_eq!(global.max_tokens, committed.max_tokens);
-        assert_eq!(global.enabled, committed.enabled);
+        assert_eq!(projected.api_key, committed.api_key);
+        assert_eq!(projected.max_tokens, committed.max_tokens);
+        assert_eq!(projected.enabled, committed.enabled);
         let available = crate::config_provider::config_provider_availability(&committed)
             == crate::config_provider::ConfigProviderAvailability::Available;
         assert_eq!(registry.contains("config:gateway"), available);
@@ -2192,18 +2304,6 @@ mod tests {
 
     #[test]
     fn public_config_mutations_sync_existing_and_new_registries() {
-        struct ConfigReset;
-
-        impl Drop for ConfigReset {
-            fn drop(&mut self) {
-                crate::model_registry::set_provider_config(Default::default());
-            }
-        }
-
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _reset = ConfigReset;
         let dir = tempfile::tempdir().unwrap();
         let hub = ConfigHub::from_config_dir(dir.path());
         let active = ProviderConfigUpdate {
@@ -2220,8 +2320,8 @@ mod tests {
             enabled: true,
         };
         hub.upsert_provider(active).unwrap();
-        let registry = ProviderRegistry::new();
-        let lifecycle = ProviderLifecycle::new(hub.clone(), registry.clone());
+        let registry = ProviderRegistry::with_models(hub.models().clone());
+        let lifecycle = ProviderLifecycle::new(hub.clone(), registry.clone()).unwrap();
         lifecycle.reload_config_providers().unwrap();
         assert!(registry.contains("config:gateway"));
 
@@ -2231,15 +2331,17 @@ mod tests {
         })
         .unwrap();
         assert!(!registry.contains("config:gateway"));
-        let before_attach_registry = ProviderRegistry::new();
-        let _before_attach = ProviderLifecycle::new(hub.clone(), before_attach_registry.clone());
+        let before_attach_registry = ProviderRegistry::with_models(hub.models().clone());
+        let _before_attach =
+            ProviderLifecycle::new(hub.clone(), before_attach_registry.clone()).unwrap();
         assert!(!before_attach_registry.contains("config:gateway"));
 
         hub.upsert_provider(active).unwrap();
         assert!(registry.contains("config:gateway"));
         assert!(before_attach_registry.contains("config:gateway"));
-        let after_attach_registry = ProviderRegistry::new();
-        let _after_attach = ProviderLifecycle::new(hub.clone(), after_attach_registry.clone());
+        let after_attach_registry = ProviderRegistry::with_models(hub.models().clone());
+        let _after_attach =
+            ProviderLifecycle::new(hub.clone(), after_attach_registry.clone()).unwrap();
         assert!(after_attach_registry.contains("config:gateway"));
 
         std::fs::write(
@@ -2251,32 +2353,20 @@ mod tests {
         assert!(!registry.contains("config:gateway"));
         assert!(!before_attach_registry.contains("config:gateway"));
         assert!(!after_attach_registry.contains("config:gateway"));
-        let reloaded_registry = ProviderRegistry::new();
-        let _reloaded = ProviderLifecycle::new(hub.clone(), reloaded_registry.clone());
+        let reloaded_registry = ProviderRegistry::with_models(hub.models().clone());
+        let _reloaded = ProviderLifecycle::new(hub.clone(), reloaded_registry.clone()).unwrap();
         assert!(!reloaded_registry.contains("config:gateway"));
     }
 
     #[test]
     fn public_config_mutations_fan_out_across_distinct_auth_stores() {
-        struct ConfigReset;
-
-        impl Drop for ConfigReset {
-            fn drop(&mut self) {
-                crate::model_registry::set_provider_config(Default::default());
-            }
-        }
-
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _reset = ConfigReset;
         let dir = tempfile::tempdir().unwrap();
         let hub_a = ConfigHub::from_auth_path(dir.path().join("auth-a.json"));
         let hub_b = ConfigHub::from_auth_path(dir.path().join("auth-b.json"));
-        let registry_a = ProviderRegistry::new();
-        let registry_b = ProviderRegistry::new();
-        let lifecycle_a = ProviderLifecycle::new(hub_a.clone(), registry_a.clone());
-        let lifecycle_b = ProviderLifecycle::new(hub_b.clone(), registry_b.clone());
+        let registry_a = ProviderRegistry::with_models(hub_a.models().clone());
+        let registry_b = ProviderRegistry::with_models(hub_b.models().clone());
+        let lifecycle_a = ProviderLifecycle::new(hub_a.clone(), registry_a.clone()).unwrap();
+        let lifecycle_b = ProviderLifecycle::new(hub_b.clone(), registry_b.clone()).unwrap();
 
         assert!(!Arc::ptr_eq(&lifecycle_a.state, &lifecycle_b.state));
         assert!(Arc::ptr_eq(
@@ -2310,8 +2400,8 @@ mod tests {
         assert!(!registry_a.contains("config:gateway"));
         assert!(!registry_b.contains("config:gateway"));
 
-        let registry_c = ProviderRegistry::new();
-        let lifecycle_c = ProviderLifecycle::new(hub_a.clone(), registry_c.clone());
+        let registry_c = ProviderRegistry::with_models(hub_a.models().clone());
+        let lifecycle_c = ProviderLifecycle::new(hub_a.clone(), registry_c.clone()).unwrap();
         assert!(Arc::ptr_eq(
             &lifecycle_a.config_state,
             &lifecycle_c.config_state
@@ -2321,25 +2411,13 @@ mod tests {
 
     #[test]
     fn public_config_reload_fans_out_across_distinct_auth_stores() {
-        struct ConfigReset;
-
-        impl Drop for ConfigReset {
-            fn drop(&mut self) {
-                crate::model_registry::set_provider_config(Default::default());
-            }
-        }
-
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _reset = ConfigReset;
         let dir = tempfile::tempdir().unwrap();
         let hub_a = ConfigHub::from_auth_path(dir.path().join("auth-a.json"));
         let hub_b = ConfigHub::from_auth_path(dir.path().join("auth-b.json"));
-        let registry_a = ProviderRegistry::new();
-        let registry_b = ProviderRegistry::new();
-        let _lifecycle_a = ProviderLifecycle::new(hub_a.clone(), registry_a.clone());
-        let _lifecycle_b = ProviderLifecycle::new(hub_b.clone(), registry_b.clone());
+        let registry_a = ProviderRegistry::with_models(hub_a.models().clone());
+        let registry_b = ProviderRegistry::with_models(hub_b.models().clone());
+        let _lifecycle_a = ProviderLifecycle::new(hub_a.clone(), registry_a.clone()).unwrap();
+        let _lifecycle_b = ProviderLifecycle::new(hub_b.clone(), registry_b.clone()).unwrap();
 
         std::fs::write(
             hub_a.config_toml_path(),
@@ -2359,7 +2437,9 @@ mod tests {
         assert!(!registry_a.contains("config:gateway"));
         assert!(!registry_b.contains("config:gateway"));
 
-        let projected = crate::model_registry::all_provider_entries()
+        let projected = hub_b
+            .models()
+            .all_provider_entries()
             .into_iter()
             .find(|(name, _)| name == "gateway")
             .map(|(_, entry)| entry)
@@ -2370,12 +2450,12 @@ mod tests {
 
     #[test]
     fn install_commits_auth_live_provider_and_catalog_together() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-install");
-            remove_provider_catalog("lifecycle-install");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-install");
 
             let delta = lifecycle
                 .install_provider(provider_record("lifecycle-install"), provider)
@@ -2388,19 +2468,25 @@ mod tests {
                 lifecycle.hub.load_auth().unwrap().providers[0].id,
                 "lifecycle-install"
             );
-            assert!(provider_catalog_namespace("lifecycle-install").is_some());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .provider_catalog_namespace("lifecycle-install")
+                    .is_some()
+            );
             lifecycle.remove_provider("lifecycle-install").unwrap();
         });
     }
 
     #[test]
     fn pre_discovered_install_does_not_run_discovery() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-pre-discovered");
-            remove_provider_catalog("lifecycle-pre-discovered");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-pre-discovered");
             provider.fail_once(ModelDiscoveryError::Transport("unused".into()));
 
             lifecycle
@@ -2418,7 +2504,13 @@ mod tests {
                 .load_auth_model_namespace("lifecycle-pre-discovered")
                 .unwrap()
                 .unwrap();
-            assert!(crate::model_registry::model_entry(&format!("{namespace}:provided")).is_some());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .model_entry(&format!("{namespace}:provided"))
+                    .is_some()
+            );
             assert!(matches!(
                 lifecycle.refresh_models("lifecycle-pre-discovered").await,
                 Err(ProviderLifecycleError::Discovery(
@@ -2433,12 +2525,12 @@ mod tests {
 
     #[test]
     fn cached_restore_is_offline_and_reuses_the_shared_provider() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-restore");
-            remove_provider_catalog("lifecycle-restore");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-restore");
             seed_legacy_cached_provider(&lifecycle, "lifecycle-restore", true);
             provider.fail_once(ModelDiscoveryError::Transport("offline".into()));
 
@@ -2456,20 +2548,27 @@ mod tests {
                 .load_auth_model_namespace("lifecycle-restore")
                 .unwrap()
                 .unwrap();
-            assert!(crate::model_registry::model_entry(&format!("{namespace}:cached")).is_some());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .model_entry(&format!("{namespace}:cached"))
+                    .is_some()
+            );
             let expected: Arc<dyn Provider> = provider.clone();
             assert!(Arc::ptr_eq(
                 &lifecycle.providers.get("lifecycle-restore").unwrap(),
                 &expected
             ));
 
-            let peer_registry = ProviderRegistry::new();
-            let peer = ProviderLifecycle::new(lifecycle.hub.clone(), peer_registry.clone());
+            let peer_registry = ProviderRegistry::with_models(lifecycle.hub.models().clone());
+            let peer =
+                ProviderLifecycle::new(lifecycle.hub.clone(), peer_registry.clone()).unwrap();
             let replacement = Arc::new(TestProvider::new(
                 "lifecycle-restore",
                 vec![model("replacement")],
             ));
-            let before_revision = crate::model_registry::model_catalog_revision();
+            let before_revision = lifecycle.hub.models().model_catalog_revision();
             let second = peer
                 .restore_provider(
                     "lifecycle-restore",
@@ -2482,7 +2581,7 @@ mod tests {
             assert_eq!(replacement.discovery_calls(), 0);
             assert_eq!(second.state, ProviderStateChange::default());
             assert_eq!(
-                crate::model_registry::model_catalog_revision(),
+                lifecycle.hub.models().model_catalog_revision(),
                 before_revision
             );
             assert!(Arc::ptr_eq(
@@ -2502,12 +2601,12 @@ mod tests {
 
     #[test]
     fn catalog_refresh_plan_contains_restored_live_providers() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("catalog-refresh-plan");
-            remove_provider_catalog("catalog-refresh-plan");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("catalog-refresh-plan");
             seed_legacy_cached_provider(&lifecycle, "catalog-refresh-plan", true);
             lifecycle
                 .hub
@@ -2552,14 +2651,11 @@ mod tests {
 
     #[test]
     fn catalog_refresh_plan_revalidates_external_provider_mutations() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             for mutation in ["remove", "disable", "kind"] {
                 let provider_id = format!("catalog-plan-{mutation}");
                 let (_dir, lifecycle, provider) = fixture(&provider_id);
-                remove_provider_catalog(&provider_id);
+                lifecycle.hub.models().remove_provider_catalog(&provider_id);
                 seed_legacy_cached_provider(&lifecycle, &provider_id, true);
                 lifecycle
                     .restore_provider(&provider_id, ProviderKind::Codex, provider)
@@ -2603,7 +2699,13 @@ mod tests {
                     _ => unreachable!(),
                 }
                 assert!(!lifecycle.providers.contains(&provider_id));
-                assert!(provider_catalog_namespace(&provider_id).is_none());
+                assert!(
+                    lifecycle
+                        .hub
+                        .models()
+                        .provider_catalog_namespace(&provider_id)
+                        .is_none()
+                );
                 if mutation != "remove" {
                     lifecycle.remove_provider(&provider_id).unwrap();
                 }
@@ -2613,12 +2715,12 @@ mod tests {
 
     #[test]
     fn fresh_external_cache_is_hydrated_when_plan_observes_fresh_storage() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("catalog-refresh-external-cache");
-            remove_provider_catalog("catalog-refresh-external-cache");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("catalog-refresh-external-cache");
             seed_legacy_cached_provider(&lifecycle, "catalog-refresh-external-cache", true);
             lifecycle
                 .restore_provider(
@@ -2648,7 +2750,10 @@ mod tests {
             );
             let registry_key = format!("{namespace}:cached");
             assert!(
-                crate::model_registry::model_entry(&registry_key)
+                lifecycle
+                    .hub
+                    .models()
+                    .model_entry(&registry_key)
                     .unwrap()
                     .reasoning_efforts
                     .is_empty()
@@ -2664,7 +2769,10 @@ mod tests {
             ));
             assert_eq!(provider.discovery_calls(), 0);
             assert_eq!(
-                crate::model_registry::model_entry(&registry_key)
+                lifecycle
+                    .hub
+                    .models()
+                    .model_entry(&registry_key)
                     .unwrap()
                     .reasoning_efforts,
                 vec![ReasoningEffort::High]
@@ -2678,12 +2786,12 @@ mod tests {
 
     #[test]
     fn stale_network_commit_hydrates_the_external_cache_winner() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("catalog-refresh-external-winner");
-            remove_provider_catalog("catalog-refresh-external-winner");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("catalog-refresh-external-winner");
             seed_legacy_cached_provider(&lifecycle, "catalog-refresh-external-winner", true);
             lifecycle
                 .restore_provider(
@@ -2725,9 +2833,18 @@ mod tests {
                     if delta.added == 1 && delta.removed == 1 && delta.total == 1
             ));
             assert_eq!(provider.discovery_calls(), 1);
-            assert!(crate::model_registry::model_entry(&format!("{namespace}:loser")).is_none());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .model_entry(&format!("{namespace}:loser"))
+                    .is_none()
+            );
             assert_eq!(
-                crate::model_registry::model_entry(&format!("{namespace}:winner"))
+                lifecycle
+                    .hub
+                    .models()
+                    .model_entry(&format!("{namespace}:winner"))
                     .unwrap()
                     .reasoning_efforts,
                 vec![ReasoningEffort::High]
@@ -2750,12 +2867,12 @@ mod tests {
 
     #[test]
     fn failed_network_discovery_hydrates_the_external_cache_winner() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("catalog-refresh-error-winner");
-            remove_provider_catalog("catalog-refresh-error-winner");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("catalog-refresh-error-winner");
             seed_legacy_cached_provider(&lifecycle, "catalog-refresh-error-winner", true);
             lifecycle
                 .restore_provider(
@@ -2797,7 +2914,10 @@ mod tests {
             ));
             assert_eq!(provider.discovery_calls(), 1);
             assert_eq!(
-                crate::model_registry::model_entry(&format!("{namespace}:winner"))
+                lifecycle
+                    .hub
+                    .models()
+                    .model_entry(&format!("{namespace}:winner"))
                     .unwrap()
                     .reasoning_efforts,
                 vec![ReasoningEffort::High]
@@ -2811,16 +2931,13 @@ mod tests {
 
     #[test]
     fn cache_hydration_cas_remove_and_disable_prune_local_runtime() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             for (provider_id, remove) in [
                 ("catalog-hydrate-removed", true),
                 ("catalog-hydrate-disabled", false),
             ] {
                 let (_dir, lifecycle, provider) = fixture(provider_id);
-                remove_provider_catalog(provider_id);
+                lifecycle.hub.models().remove_provider_catalog(provider_id);
                 seed_cached_provider(&lifecycle, provider_id, true, &[model("cached")]);
                 let expected_live: Arc<dyn Provider> = provider.clone();
                 lifecycle
@@ -2863,20 +2980,23 @@ mod tests {
                     ));
                 }
                 assert!(!lifecycle.providers.contains(provider_id));
-                assert!(provider_catalog_namespace(provider_id).is_none());
+                assert!(
+                    lifecycle
+                        .hub
+                        .models()
+                        .provider_catalog_namespace(provider_id)
+                        .is_none()
+                );
             }
         });
     }
 
     #[test]
     fn cache_hydration_cas_kind_change_is_reconciled_fail_closed() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let provider_id = "catalog-hydrate-kind-change";
             let (_dir, lifecycle, provider) = fixture(provider_id);
-            remove_provider_catalog(provider_id);
+            lifecycle.hub.models().remove_provider_catalog(provider_id);
             seed_cached_provider(&lifecycle, provider_id, true, &[model("cached")]);
             lifecycle
                 .restore_provider(provider_id, ProviderKind::Codex, provider.clone())
@@ -2908,19 +3028,25 @@ mod tests {
             drop(deferred);
             assert!(matches!(result, Err(ProviderLifecycleError::Stale { .. })));
             assert!(!lifecycle.providers.contains(provider_id));
-            assert!(provider_catalog_namespace(provider_id).is_none());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .provider_catalog_namespace(provider_id)
+                    .is_none()
+            );
             lifecycle.remove_provider(provider_id).unwrap();
         });
     }
 
     #[test]
     fn background_refresh_is_deduplicated_without_blocking_runtime_restore() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("catalog-refresh-background");
-            remove_provider_catalog("catalog-refresh-background");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("catalog-refresh-background");
             seed_legacy_cached_provider(&lifecycle, "catalog-refresh-background", true);
             lifecycle
                 .restore_provider(
@@ -2986,12 +3112,12 @@ mod tests {
 
     #[test]
     fn concurrent_background_refresh_returns_already_in_flight() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("catalog-refresh-failure");
-            remove_provider_catalog("catalog-refresh-failure");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("catalog-refresh-failure");
             seed_legacy_cached_provider(&lifecycle, "catalog-refresh-failure", true);
             lifecycle
                 .restore_provider(
@@ -3036,12 +3162,12 @@ mod tests {
 
     #[test]
     fn enabling_a_cached_provider_is_atomic_and_offline() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-enable");
-            remove_provider_catalog("lifecycle-enable");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-enable");
             let namespace =
                 seed_cached_provider(&lifecycle, "lifecycle-enable", false, &[model("cached")]);
             provider.fail_once(ModelDiscoveryError::Transport("unused".into()));
@@ -3062,19 +3188,25 @@ mod tests {
             );
             assert!(lifecycle.hub.load_auth().unwrap().providers[0].enabled);
             assert!(lifecycle.providers.contains("lifecycle-enable"));
-            assert!(crate::model_registry::model_entry(&format!("{namespace}:cached")).is_some());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .model_entry(&format!("{namespace}:cached"))
+                    .is_some()
+            );
             lifecycle.remove_provider("lifecycle-enable").unwrap();
         });
     }
 
     #[test]
     fn disabled_restore_ignores_an_invalid_cached_catalog() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-disabled-cache");
-            remove_provider_catalog("lifecycle-disabled-cache");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-disabled-cache");
             let mut record = provider_record("lifecycle-disabled-cache");
             record.enabled = false;
             record.model_cache = Some(crate::auth_store::ModelCache {
@@ -3107,7 +3239,13 @@ mod tests {
             ));
             assert_eq!(provider.discovery_calls(), 0);
             assert!(!lifecycle.providers.contains("lifecycle-disabled-cache"));
-            assert!(provider_catalog_namespace("lifecycle-disabled-cache").is_none());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .provider_catalog_namespace("lifecycle-disabled-cache")
+                    .is_none()
+            );
             lifecycle
                 .remove_provider("lifecycle-disabled-cache")
                 .unwrap();
@@ -3116,12 +3254,12 @@ mod tests {
 
     #[test]
     fn restoring_without_cache_removes_the_stale_catalog() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-empty-cache");
-            remove_provider_catalog("lifecycle-empty-cache");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-empty-cache");
             lifecycle
                 .install_provider(provider_record("lifecycle-empty-cache"), provider.clone())
                 .await
@@ -3153,25 +3291,30 @@ mod tests {
             assert!(outcome.state.catalog_changed);
             assert!(outcome.catalog.is_none());
             assert!(lifecycle.providers.contains("lifecycle-empty-cache"));
-            assert!(provider_catalog_namespace("lifecycle-empty-cache").is_none());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .provider_catalog_namespace("lifecycle-empty-cache")
+                    .is_none()
+            );
             lifecycle.remove_provider("lifecycle-empty-cache").unwrap();
         });
     }
 
     #[test]
     fn reconcile_prunes_external_disable_remove_and_kind_change() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let dir = tempfile::tempdir().unwrap();
+            let hub = ConfigHub::from_config_dir(dir.path());
             let lifecycle = ProviderLifecycle::new(
-                ConfigHub::from_config_dir(dir.path()),
-                ProviderRegistry::new(),
-            );
+                hub.clone(),
+                ProviderRegistry::with_models(hub.models().clone()),
+            )
+            .unwrap();
             let ids = ["lifecycle-disabled", "lifecycle-removed", "lifecycle-kind"];
             for id in ids {
-                remove_provider_catalog(id);
+                lifecycle.hub.models().remove_provider_catalog(id);
                 lifecycle
                     .install_provider(
                         provider_record(id),
@@ -3180,8 +3323,9 @@ mod tests {
                     .await
                     .unwrap();
             }
-            let peer_registry = ProviderRegistry::new();
-            let _peer = ProviderLifecycle::new(lifecycle.hub.clone(), peer_registry.clone());
+            let peer_registry = ProviderRegistry::with_models(hub.models().clone());
+            let _peer =
+                ProviderLifecycle::new(lifecycle.hub.clone(), peer_registry.clone()).unwrap();
 
             lifecycle
                 .hub
@@ -3210,7 +3354,13 @@ mod tests {
             for id in ids {
                 assert!(!lifecycle.providers.contains(id));
                 assert!(!peer_registry.contains(id));
-                assert!(provider_catalog_namespace(id).is_none());
+                assert!(
+                    lifecycle
+                        .hub
+                        .models()
+                        .provider_catalog_namespace(id)
+                        .is_none()
+                );
             }
             let store = lifecycle.hub.load_auth().unwrap();
             assert_eq!(store.providers.len(), 2);
@@ -3238,12 +3388,12 @@ mod tests {
 
     #[test]
     fn reconcile_auth_parse_error_prunes_live_runtime() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-reconcile-invalid");
-            remove_provider_catalog("lifecycle-reconcile-invalid");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-reconcile-invalid");
             lifecycle
                 .install_provider(provider_record("lifecycle-reconcile-invalid"), provider)
                 .await
@@ -3255,22 +3405,25 @@ mod tests {
                 Err(ProviderLifecycleError::Config(_))
             ));
             assert!(!lifecycle.providers.contains("lifecycle-reconcile-invalid"));
-            assert!(provider_catalog_namespace("lifecycle-reconcile-invalid").is_none());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .provider_catalog_namespace("lifecycle-reconcile-invalid")
+                    .is_none()
+            );
         });
     }
 
     #[test]
     fn provider_mutation_auth_errors_fail_closed() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             for (id, remove) in [
                 ("lifecycle-disable-invalid", false),
                 ("lifecycle-remove-invalid", true),
             ] {
                 let (_dir, lifecycle, provider) = fixture(id);
-                remove_provider_catalog(id);
+                lifecycle.hub.models().remove_provider_catalog(id);
                 lifecycle
                     .install_provider(provider_record(id), provider)
                     .await
@@ -3284,19 +3437,25 @@ mod tests {
                 };
                 assert!(matches!(result, Err(ProviderLifecycleError::Config(_))));
                 assert!(!lifecycle.providers.contains(id));
-                assert!(provider_catalog_namespace(id).is_none());
+                assert!(
+                    lifecycle
+                        .hub
+                        .models()
+                        .provider_catalog_namespace(id)
+                        .is_none()
+                );
             }
         });
     }
 
     #[test]
     fn kind_change_after_construction_fails_closed() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-kind-race");
-            remove_provider_catalog("lifecycle-kind-race");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-kind-race");
             seed_cached_provider(&lifecycle, "lifecycle-kind-race", true, &[model("cached")]);
             lifecycle
                 .restore_provider("lifecycle-kind-race", ProviderKind::Codex, provider)
@@ -3325,19 +3484,25 @@ mod tests {
                 Err(ProviderLifecycleError::Stale { id }) if id == "lifecycle-kind-race"
             ));
             assert!(!lifecycle.providers.contains("lifecycle-kind-race"));
-            assert!(provider_catalog_namespace("lifecycle-kind-race").is_none());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .provider_catalog_namespace("lifecycle-kind-race")
+                    .is_none()
+            );
             lifecycle.remove_provider("lifecycle-kind-race").unwrap();
         });
     }
 
     #[test]
     fn invalid_cached_catalog_fails_closed() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-invalid-cache");
-            remove_provider_catalog("lifecycle-invalid-cache");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-invalid-cache");
             seed_cached_provider(
                 &lifecycle,
                 "lifecycle-invalid-cache",
@@ -3392,7 +3557,13 @@ mod tests {
                     if model == "duplicate"
             ));
             assert!(!lifecycle.providers.contains("lifecycle-invalid-cache"));
-            assert!(provider_catalog_namespace("lifecycle-invalid-cache").is_none());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .provider_catalog_namespace("lifecycle-invalid-cache")
+                    .is_none()
+            );
             assert!(dropped.load(Ordering::SeqCst));
             lifecycle
                 .remove_provider("lifecycle-invalid-cache")
@@ -3402,12 +3573,12 @@ mod tests {
 
     #[test]
     fn refresh_cancellation_releases_the_operation_before_provider_drop() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-refresh-cancel");
-            remove_provider_catalog("lifecycle-refresh-cancel");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-refresh-cancel");
             lifecycle
                 .install_provider(
                     provider_record("lifecycle-refresh-cancel"),
@@ -3521,12 +3692,12 @@ mod tests {
 
     #[test]
     fn provider_drop_runs_after_lifecycle_locks_are_released() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-drop");
-            remove_provider_catalog("lifecycle-drop");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-drop");
             lifecycle
                 .install_provider(provider_record("lifecycle-drop"), provider.clone())
                 .await
@@ -3555,19 +3726,19 @@ mod tests {
 
     #[test]
     fn failed_refresh_preserves_cache_and_catalog_revision() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-failure");
-            remove_provider_catalog("lifecycle-failure");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-failure");
             lifecycle
                 .install_provider(provider_record("lifecycle-failure"), provider.clone())
                 .await
                 .unwrap();
             let auth_path = lifecycle.hub.config_dir().join("auth.json");
             let before_auth = std::fs::read(&auth_path).unwrap();
-            let before_revision = crate::model_registry::model_catalog_revision();
+            let before_revision = lifecycle.hub.models().model_catalog_revision();
             provider.fail_once(ModelDiscoveryError::Transport("offline".into()));
 
             assert!(matches!(
@@ -3578,7 +3749,7 @@ mod tests {
             ));
             assert_eq!(std::fs::read(auth_path).unwrap(), before_auth);
             assert_eq!(
-                crate::model_registry::model_catalog_revision(),
+                lifecycle.hub.models().model_catalog_revision(),
                 before_revision
             );
             lifecycle.remove_provider("lifecycle-failure").unwrap();
@@ -3587,12 +3758,12 @@ mod tests {
 
     #[test]
     fn refresh_auth_parse_error_prunes_live_runtime() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-refresh-invalid-auth");
-            remove_provider_catalog("lifecycle-refresh-invalid-auth");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-refresh-invalid-auth");
             lifecycle
                 .install_provider(
                     provider_record("lifecycle-refresh-invalid-auth"),
@@ -3616,24 +3787,31 @@ mod tests {
                     .providers
                     .contains("lifecycle-refresh-invalid-auth")
             );
-            assert!(provider_catalog_namespace("lifecycle-refresh-invalid-auth").is_none());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .provider_catalog_namespace("lifecycle-refresh-invalid-auth")
+                    .is_none()
+            );
         });
     }
 
     #[test]
     fn disable_invalidates_in_flight_refresh_without_resurrection() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-race");
-            remove_provider_catalog("lifecycle-race");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-race");
             lifecycle
                 .install_provider(provider_record("lifecycle-race"), provider.clone())
                 .await
                 .unwrap();
-            let peer_registry = ProviderRegistry::new();
-            let peer = ProviderLifecycle::new(lifecycle.hub.clone(), peer_registry.clone());
+            let peer_registry = ProviderRegistry::with_models(lifecycle.hub.models().clone());
+            let peer =
+                ProviderLifecycle::new(lifecycle.hub.clone(), peer_registry.clone()).unwrap();
             assert!(Arc::ptr_eq(&lifecycle.state, &peer.state));
             assert!(peer_registry.contains("lifecycle-race"));
             provider.set_models(vec![model("replacement")]);
@@ -3653,7 +3831,13 @@ mod tests {
             ));
             assert!(!lifecycle.providers.contains("lifecycle-race"));
             assert!(!peer_registry.contains("lifecycle-race"));
-            assert!(provider_catalog_namespace("lifecycle-race").is_none());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .provider_catalog_namespace("lifecycle-race")
+                    .is_none()
+            );
             let stored = lifecycle.hub.load_auth().unwrap().providers.remove(0);
             assert!(!stored.enabled);
             assert_eq!(stored.model_cache.unwrap().models[0].slug, "initial");
@@ -3663,18 +3847,19 @@ mod tests {
 
     #[test]
     fn independent_lifecycles_serialize_refreshes_for_the_same_auth_store() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-shared-gate");
-            remove_provider_catalog("lifecycle-shared-gate");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-shared-gate");
             lifecycle
                 .install_provider(provider_record("lifecycle-shared-gate"), provider.clone())
                 .await
                 .unwrap();
-            let peer_registry = ProviderRegistry::new();
-            let peer = ProviderLifecycle::new(lifecycle.hub.clone(), peer_registry.clone());
+            let peer_registry = ProviderRegistry::with_models(lifecycle.hub.models().clone());
+            let peer =
+                ProviderLifecycle::new(lifecycle.hub.clone(), peer_registry.clone()).unwrap();
             assert!(Arc::ptr_eq(&lifecycle.state, &peer.state));
             assert!(peer_registry.contains("lifecycle-shared-gate"));
 
@@ -3702,20 +3887,32 @@ mod tests {
                 .load_auth_model_namespace("lifecycle-shared-gate")
                 .unwrap()
                 .unwrap();
-            assert!(crate::model_registry::model_entry(&format!("{namespace}:fresh")).is_some());
-            assert!(crate::model_registry::model_entry(&format!("{namespace}:slow")).is_none());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .model_entry(&format!("{namespace}:fresh"))
+                    .is_some()
+            );
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .model_entry(&format!("{namespace}:slow"))
+                    .is_none()
+            );
             lifecycle.remove_provider("lifecycle-shared-gate").unwrap();
         });
     }
 
     #[test]
     fn external_cache_aba_hydrates_the_authoritative_catalog() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-cache-cas");
-            remove_provider_catalog("lifecycle-cache-cas");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-cache-cas");
             lifecycle
                 .install_provider(provider_record("lifecycle-cache-cas"), provider.clone())
                 .await
@@ -3778,20 +3975,32 @@ mod tests {
 
             let stored = lifecycle.hub.load_auth().unwrap().providers.remove(0);
             assert_eq!(stored.model_cache.unwrap().models[0].slug, "initial");
-            assert!(crate::model_registry::model_entry(&format!("{namespace}:initial")).is_some());
-            assert!(crate::model_registry::model_entry(&format!("{namespace}:slow")).is_none());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .model_entry(&format!("{namespace}:initial"))
+                    .is_some()
+            );
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .model_entry(&format!("{namespace}:slow"))
+                    .is_none()
+            );
             lifecycle.remove_provider("lifecycle-cache-cas").unwrap();
         });
     }
 
     #[test]
     fn external_enable_aba_preserves_the_authoritative_cache() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-enable-aba");
-            remove_provider_catalog("lifecycle-enable-aba");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-enable-aba");
             lifecycle
                 .install_provider(provider_record("lifecycle-enable-aba"), provider.clone())
                 .await
@@ -3832,12 +4041,12 @@ mod tests {
 
     #[test]
     fn external_kind_change_during_refresh_prunes_the_old_runtime() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-refresh-kind");
-            remove_provider_catalog("lifecycle-refresh-kind");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-refresh-kind");
             lifecycle
                 .install_provider(provider_record("lifecycle-refresh-kind"), provider.clone())
                 .await
@@ -3865,19 +4074,25 @@ mod tests {
                 Err(ProviderLifecycleError::Stale { id }) if id == "lifecycle-refresh-kind"
             ));
             assert!(!lifecycle.providers.contains("lifecycle-refresh-kind"));
-            assert!(provider_catalog_namespace("lifecycle-refresh-kind").is_none());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .provider_catalog_namespace("lifecycle-refresh-kind")
+                    .is_none()
+            );
             lifecycle.remove_provider("lifecycle-refresh-kind").unwrap();
         });
     }
 
     #[test]
     fn discovery_failure_observes_an_external_disable() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-refresh-disabled");
-            remove_provider_catalog("lifecycle-refresh-disabled");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-refresh-disabled");
             lifecycle
                 .install_provider(
                     provider_record("lifecycle-refresh-disabled"),
@@ -3899,7 +4114,13 @@ mod tests {
                 Err(ProviderLifecycleError::Stale { id }) if id == "lifecycle-refresh-disabled"
             ));
             assert!(!lifecycle.providers.contains("lifecycle-refresh-disabled"));
-            assert!(provider_catalog_namespace("lifecycle-refresh-disabled").is_none());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .provider_catalog_namespace("lifecycle-refresh-disabled")
+                    .is_none()
+            );
             lifecycle
                 .remove_provider("lifecycle-refresh-disabled")
                 .unwrap();
@@ -3908,12 +4129,12 @@ mod tests {
 
     #[test]
     fn namespace_mismatch_during_refresh_fails_closed() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-refresh-namespace");
-            remove_provider_catalog("lifecycle-refresh-namespace");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-refresh-namespace");
             lifecycle
                 .install_provider(
                     provider_record("lifecycle-refresh-namespace"),
@@ -3921,17 +4142,23 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            remove_provider_catalog("lifecycle-refresh-namespace");
-            crate::model_registry::replace_provider_catalog(
-                ProviderDescriptor {
-                    provider_key: "lifecycle-refresh-namespace".into(),
-                    provider_name: "Account".into(),
-                    namespace: "unexpected@account".into(),
-                    wire_profile: ReasoningWireProfile::CodexResponses,
-                },
-                &[model("replacement")],
-            )
-            .unwrap();
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-refresh-namespace");
+            lifecycle
+                .hub
+                .models()
+                .replace_provider_catalog(
+                    ProviderDescriptor {
+                        provider_key: "lifecycle-refresh-namespace".into(),
+                        provider_name: "Account".into(),
+                        namespace: "unexpected@account".into(),
+                        wire_profile: ReasoningWireProfile::CodexResponses,
+                    },
+                    &[model("replacement")],
+                )
+                .unwrap();
 
             assert!(matches!(
                 lifecycle
@@ -3942,7 +4169,13 @@ mod tests {
                 ))
             ));
             assert!(!lifecycle.providers.contains("lifecycle-refresh-namespace"));
-            assert!(provider_catalog_namespace("lifecycle-refresh-namespace").is_none());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .provider_catalog_namespace("lifecycle-refresh-namespace")
+                    .is_none()
+            );
             lifecycle
                 .remove_provider("lifecycle-refresh-namespace")
                 .unwrap();
@@ -3951,23 +4184,12 @@ mod tests {
 
     #[test]
     fn registry_key_conflict_during_refresh_preserves_last_good_catalog() {
-        struct ConfigReset;
-
-        impl Drop for ConfigReset {
-            fn drop(&mut self) {
-                crate::model_registry::set_provider_config(
-                    crate::model_registry::ProviderConfig::default(),
-                );
-            }
-        }
-
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _config_reset = ConfigReset;
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-refresh-registry-key");
-            remove_provider_catalog("lifecycle-refresh-registry-key");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-refresh-registry-key");
             lifecycle
                 .hub
                 .add_auth_provider_with_model_cache_details(
@@ -3994,8 +4216,8 @@ mod tests {
                     ..Default::default()
                 },
             );
-            crate::model_registry::set_provider_config(config);
-            let before_revision = crate::model_registry::model_catalog_revision();
+            lifecycle.hub.models().replace_config(config).unwrap();
+            let before_revision = lifecycle.hub.models().model_catalog_revision();
             provider.set_models(vec![model("gpt-4o")]);
 
             assert!(matches!(
@@ -4011,9 +4233,15 @@ mod tests {
                     .providers
                     .contains("lifecycle-refresh-registry-key")
             );
-            assert!(crate::model_registry::model_entry("stable:initial").is_some());
+            assert!(
+                lifecycle
+                    .hub
+                    .models()
+                    .model_entry("stable:initial")
+                    .is_some()
+            );
             assert_eq!(
-                crate::model_registry::model_catalog_revision(),
+                lifecycle.hub.models().model_catalog_revision(),
                 before_revision
             );
             lifecycle
@@ -4024,12 +4252,12 @@ mod tests {
 
     #[test]
     fn credential_rotation_during_discovery_does_not_invalidate_catalog_refresh() {
-        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_runtime().block_on(async {
             let (_dir, lifecycle, provider) = fixture("lifecycle-token-refresh");
-            remove_provider_catalog("lifecycle-token-refresh");
+            lifecycle
+                .hub
+                .models()
+                .remove_provider_catalog("lifecycle-token-refresh");
             lifecycle
                 .install_provider(provider_record("lifecycle-token-refresh"), provider.clone())
                 .await

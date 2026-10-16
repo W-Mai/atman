@@ -527,10 +527,6 @@ impl PreparedConfigLayer<'_> {
     }
 }
 
-pub(crate) fn prepare_config_text(text: &str) -> anyhow::Result<PreparedConfigLayer<'static>> {
-    DEFAULT_REGISTRY.prepare_config_text(text)
-}
-
 pub(crate) fn commit_prepared_config(prepared: PreparedConfigLayer<'_>) {
     let PreparedConfigLayer {
         registry,
@@ -663,10 +659,6 @@ pub fn commit_prepared_provider_catalog(prepared: PreparedProviderCatalog<'_>) -
 
 pub fn remove_provider_catalog(provider_key: &str) -> bool {
     DEFAULT_REGISTRY.remove_provider_catalog(provider_key)
-}
-
-pub(crate) fn provider_catalog_namespace(provider_key: &str) -> Option<String> {
-    DEFAULT_REGISTRY.provider_catalog_namespace(provider_key)
 }
 
 pub fn model_catalog_revision() -> u64 {
@@ -1969,7 +1961,7 @@ pub fn read_config_toml_pub() -> Option<String> {
 
 #[cfg(test)]
 pub(crate) fn reload_from_text(text: &str) -> anyhow::Result<()> {
-    let prepared = prepare_config_text(text)?;
+    let prepared = DEFAULT_REGISTRY.prepare_config_text(text)?;
     commit_prepared_config(prepared);
     Ok(())
 }
@@ -2726,7 +2718,7 @@ model = "reasoning"
             "[providers.other]\nkind='anthropic'\n[models.test]\nmodel='x'\nprovider='other'\napi='responses'",
             "[providers.other]\nkind='openai-compat'\nbase_url='https://gateway.example/v1/responses'",
         ] {
-            assert!(prepare_config_text(config).is_err());
+            assert!(DEFAULT_REGISTRY.prepare_config_text(config).is_err());
         }
         assert!(parse_config("[providers.other]\nkind='openai-compat'\napi='auto'").is_none());
     }
@@ -2753,7 +2745,11 @@ api = "responses"
 
         let removed_provider =
             config.replace("https://api.openai.com/v1", "https://gateway.example/v1");
-        assert!(prepare_config_text(&removed_provider).is_err());
+        assert!(
+            DEFAULT_REGISTRY
+                .prepare_config_text(&removed_provider)
+                .is_err()
+        );
     }
 
     #[test]
