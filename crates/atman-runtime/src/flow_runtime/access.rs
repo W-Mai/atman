@@ -210,7 +210,7 @@ impl FlowClient {
         &self,
         descriptor: crate::flow_store::FlowDescriptor,
         input: crate::flow_store::launch::LaunchInput,
-        execution: super::launch::LaunchExecution,
+        execution: super::launch::EntryExecution,
     ) -> io::Result<super::launch::LaunchedFlow> {
         self.authorize(self.source(), FlowAction::Send)?;
         if descriptor.address.session_id != self.source().session_id
@@ -225,12 +225,9 @@ impl FlowClient {
         }
         let client = self.clone();
         self.host
-            .launch_owned(
-                descriptor,
-                input,
-                move |_, _| client.authorize(client.source(), FlowAction::Send),
-                Some(execution),
-            )
+            .launch_entry(descriptor, input, execution, move |_, _| {
+                client.authorize(client.source(), FlowAction::Send)
+            })
             .await
     }
 

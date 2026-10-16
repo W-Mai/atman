@@ -20,6 +20,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Retained host entry launches** — Direct host launches and peer spawning share entry preparation, activation, and catalog-owned scheduling. Matching retries preserve acceptance receipts without resuming paused work or reinstalling stopped controllers.
+
 - **Flow process ownership** — Persistent flows keep independent bash, terminal, and task registries across turns. Process logs and large output use each flow's directory. Closing an owner rejects late spawns and drains processes before storage handoff; sibling flows and retained history stay available.
 
 - **Runtime MCP services** — CLI, daemon, and embedded runtimes share connection ownership across their flows. Session views subscribe without retaining connections. Reload cancels superseded initialization and refresh tasks, removes revoked adapters, and rejects stale catalog updates. Status and readiness tools work without a session view; explicit waits fail when their server is removed.

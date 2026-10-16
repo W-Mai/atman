@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use super::*;
-use crate::flow_runtime::{entry::EntryRecipe, launch::LaunchExecution};
+use crate::flow_runtime::launch::EntryExecution;
 use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity};
 use crate::flow_store::launch::{EntryBinding, LaunchInput, ResultRoute, SynchronousReply};
 use crate::flow_store::{EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef};
@@ -136,19 +136,17 @@ pub(super) async fn spawn(
             }),
         }),
     };
-    let recipe = EntryRecipe::from_launch(&descriptor, &input, &authority, yield_interval)
-        .map_err(failed)?;
     let executor = executor(ctx)?;
     let launched = client
         .spawn(
             descriptor,
             input,
-            LaunchExecution {
+            EntryExecution {
                 executor,
                 catalog,
+                authority,
+                yield_interval,
                 trust: ctx.trust.clone().unwrap_or_default(),
-                prepare: Box::new(move |snapshot| recipe.prepare(snapshot)),
-                completed: Box::new(|_| {}),
             },
         )
         .await

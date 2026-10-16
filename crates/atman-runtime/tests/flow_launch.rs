@@ -128,6 +128,195 @@ async fn wait_answer(recipient: &FlowWorker) -> FlowSnapshot {
     .unwrap()
 }
 
+#[tokio::test]
+async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_work() {
+    use atman_runtime::flow_runtime::launch::EntryExecution;
+    use atman_runtime::flow_store::launch::EntryBinding;
+
+    async fn delivered(worker: &FlowWorker, expected: &str) {
+        let mut changes = worker.subscribe_commits();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                changes.borrow_and_update();
+                if worker.state().await.unwrap().can_start_turn()
+                    && worker.context().messages().iter().any(|message| {
+                        message.origin == MessageOrigin::FinalAnswer
+                            && message.text_concat() == expected
+                    })
+                {
+                    return;
+                }
+                changes.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_info();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let mut entry = descriptor(info.id);
+    entry.entry.bundle.sources.insert(
+        "entry:main.at".into(),
+        r#"
+        flow main(label: string, amount: int) -> string {
+            contract { invocation { user_message: label } }
+            when amount != 42 { return final.answer(message: "wrong arguments") }
+            when env("effort") != "high" { return final.answer(message: "wrong invocation") }
+            return final.answer(message: label)
+        }
+    "#
+        .into(),
+    );
+    let authority = EffectiveAuthority::root(&Default::default(), false, None);
+    let mut input = initial(&entry, &entry.address);
+    input.request.sender = SenderIdentity::User(Uuid::new_v4());
+    input.result_route = None;
+    input.execution = Some(EntryBinding {
+        first_turn: TurnId::now(),
+        first_run: RunId::now(),
+        authority: authority.clone(),
+    });
+    let catalog = session.snapshot().await.unwrap().cursor;
+    let execution = || EntryExecution {
+        executor: Executor::new(),
+        authority: authority.clone(),
+        trust: atman_runtime::trust::TrustConfig::default(),
+        yield_interval: NonZeroUsize::new(16).unwrap(),
+        catalog: catalog.clone(),
+    };
+    let mut invalid = input.clone();
+    invalid.execution = None;
+    assert!(
+        host.launch_entry(entry.clone(), invalid, execution(), |_, _| Ok(()))
+            .await
+            .is_err()
+    );
+    assert!(session.snapshot().await.unwrap().catalog.flows.is_empty());
+    let launched = host
+        .launch_entry(entry.clone(), input.clone(), execution(), |_, _| Ok(()))
+        .await
+        .unwrap();
+    let receipt = launched.record.acceptance.clone();
+    let worker = launched.worker.clone();
+    drop(launched);
+    delivered(&worker, "first answer").await;
+    assert!(
+        session
+            .scheduling_status(entry.address.instance_id.clone())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        worker
+            .completion(None)
+            .await
+            .unwrap()
+            .unwrap()
+            .completion
+            .lease
+            .turn,
+        input.execution.as_ref().unwrap().first_turn
+    );
+
+    let pause = Uuid::new_v4().into();
+    change(&worker, FlowTransition::ExecutionPaused { key: pause }).await;
+    let next_input = |text: &str| DeliveryRequest {
+        request_id: Uuid::new_v4(),
+        sender: SenderIdentity::User(Uuid::new_v4()),
+        recipient: entry.address.clone(),
+        delivery: DeliveryMode::NextTurn,
+        cause: None,
+        correlation: None,
+        scope: None,
+        payload: InboxPayload::Interjection { text: text.into() },
+    };
+    host.deliver(next_input("after pause"), |_| Ok(()))
+        .await
+        .unwrap();
+    let paused = worker.snapshot().await.unwrap();
+    assert_eq!(paused.pending.len(), 1);
+    let retry = host
+        .launch_entry(entry.clone(), input.clone(), execution(), |_, _| {
+            panic!("retry has no new effect")
+        })
+        .await
+        .unwrap();
+    assert_eq!(retry.record.acceptance.message_id, receipt.message_id);
+    assert_eq!(retry.record.acceptance.receipt, receipt.receipt);
+    assert!(matches!(
+        retry.record.acceptance.disposition,
+        InboxDisposition::InputCommitted { .. }
+    ));
+    assert_eq!(worker.snapshot().await.unwrap().state, paused.state);
+    change(&worker, FlowTransition::ExecutionResumed { key: pause }).await;
+    delivered(&worker, "after pause").await;
+
+    session
+        .stop_scheduling(entry.address.instance_id.clone())
+        .await
+        .unwrap();
+    host.deliver(next_input("after explicit bind"), |_| Ok(()))
+        .await
+        .unwrap();
+    host.launch_entry(entry.clone(), input, execution(), |_, _| {
+        panic!("retry has no new effect")
+    })
+    .await
+    .unwrap();
+    assert!(
+        session
+            .scheduling_status(entry.address.instance_id.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(worker.snapshot().await.unwrap().pending.len(), 1);
+    session
+        .bind_entry(
+            entry.address.instance_id.clone(),
+            Executor::new(),
+            authority.clone(),
+            NonZeroUsize::new(16).unwrap(),
+        )
+        .await
+        .unwrap();
+    delivered(&worker, "after explicit bind").await;
+    session
+        .stop_scheduling(entry.address.instance_id)
+        .await
+        .unwrap();
+    worker.shutdown().await.unwrap();
+
+    // Receipt recovery does not acquire execution authority or rebind a controller.
+    let other = descriptor(info.id);
+    let mut input = initial(&other, &other.address);
+    input.result_route = None;
+    input.execution = Some(EntryBinding {
+        first_turn: TurnId::now(),
+        first_run: RunId::now(),
+        authority: EffectiveAuthority::root(&Default::default(), false, Some(dir.path().into())),
+    });
+    let accepted = host
+        .launch_flow(other.clone(), input.clone(), |_, _| Ok(()))
+        .await
+        .unwrap();
+    let retried = host
+        .launch_entry(other, input, execution(), |_, _| {
+            panic!("receipt lookup requires no new authority")
+        })
+        .await
+        .unwrap();
+    assert_eq!(retried.record.acceptance, accepted.record.acceptance);
+    accepted.worker.shutdown().await.unwrap();
+}
+
 #[test]
 fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retries() {
     let dir = tempfile::tempdir().unwrap();

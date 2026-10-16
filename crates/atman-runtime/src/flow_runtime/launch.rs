@@ -13,12 +13,20 @@ pub struct LaunchedFlow {
     pub record: LaunchRecord,
 }
 
+/// Trusted host settings for a retained entry, independent of who requested its creation. The catalog cursor protects creation; authority only narrows the recorded entry ceiling.
+pub struct EntryExecution {
+    pub executor: crate::Executor,
+    pub authority: crate::flow_authority::EffectiveAuthority,
+    pub trust: crate::trust::TrustConfig,
+    pub yield_interval: std::num::NonZeroUsize,
+    pub catalog: crate::event_log::journal::CommitReceipt,
+}
+
 pub(crate) struct LaunchExecution {
     pub executor: crate::Executor,
     pub prepare: PrepareTurn,
     pub completed: CompletedTurn,
     pub trust: crate::trust::TrustConfig,
-    pub catalog: crate::event_log::journal::CommitReceipt,
 }
 
 impl FlowWorker {
@@ -28,6 +36,41 @@ impl FlowWorker {
 }
 
 impl RuntimeHost {
+    /// Launch and retain scheduling through the same owner path used by peer flow creation.
+    ///
+    /// Authenticate the sender before calling. The authorization callback is rechecked at each new-effect boundary. Invalid entry bindings fail before catalog mutation. A matching retry only returns the committed activation; it does not resume paused work or restart a stopped scheduler. Use `SessionHandle::bind_entry` to explicitly restore scheduling.
+    pub async fn launch_entry(
+        &self,
+        descriptor: FlowDescriptor,
+        input: LaunchInput,
+        execution: EntryExecution,
+        authorize_new: impl Fn(&FlowDescriptor, &LaunchInput) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<LaunchedFlow> {
+        let creation = descriptor.clone();
+        let requested = input.clone();
+        self.launch_owned(
+            descriptor,
+            input,
+            authorize_new,
+            Some(execution.catalog),
+            move || {
+                let recipe = super::entry::EntryRecipe::from_launch(
+                    &creation,
+                    &requested,
+                    &execution.authority,
+                    execution.yield_interval,
+                )?;
+                Ok(Some(LaunchExecution {
+                    executor: execution.executor,
+                    prepare: Box::new(move |snapshot| recipe.prepare(snapshot)),
+                    completed: Box::new(|_| {}),
+                    trust: execution.trust,
+                }))
+            },
+        )
+        .await
+    }
+
     /// Trusted host operation. Authenticate the caller, sender, source access, and inherited context
     /// before entry. The callback authorizes new effects at each owner boundary. Matching committed
     /// retries return the original receipt even after consumption, pause, or close.
@@ -40,7 +83,7 @@ impl RuntimeHost {
         input: LaunchInput,
         authorize_new: impl Fn(&FlowDescriptor, &LaunchInput) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<LaunchedFlow> {
-        self.launch_owned(descriptor, input, authorize_new, None)
+        self.launch_owned(descriptor, input, authorize_new, None, || Ok(None))
             .await
     }
 
@@ -49,7 +92,8 @@ impl RuntimeHost {
         descriptor: FlowDescriptor,
         input: LaunchInput,
         authorize_new: impl Fn(&FlowDescriptor, &LaunchInput) -> io::Result<()> + Send + Sync + 'static,
-        execution: Option<LaunchExecution>,
+        catalog: Option<crate::event_log::journal::CommitReceipt>,
+        prepare_execution: impl FnOnce() -> io::Result<Option<LaunchExecution>> + Send + 'static,
     ) -> io::Result<LaunchedFlow> {
         let host = self.clone();
         let authorize = Arc::new(authorize_new);
@@ -68,15 +112,30 @@ impl RuntimeHost {
                 .flows
                 .iter()
                 .any(|flow| flow.id == descriptor.address.instance_id);
-            if !existing {
+            let existing = if existing {
+                let worker = session
+                    .create_flow_at(descriptor.clone(), catalog.clone())
+                    .await?;
+                if let Some(record) = worker.launch_record().await? {
+                    return if record.input == input {
+                        Ok(LaunchedFlow { worker, record })
+                    } else {
+                        Err(invalid(
+                            "launch input conflicts with the committed activation",
+                        ))
+                    };
+                }
+                Some(worker)
+            } else {
                 authorize(&descriptor, &input)?;
-            }
-            let worker = session
-                .create_flow_at(
-                    descriptor.clone(),
-                    execution.as_ref().map(|binding| binding.catalog.clone()),
-                )
-                .await?;
+                None
+            };
+            let execution = prepare_execution()?;
+            let worker = match existing {
+                Some(worker) => worker,
+                None => session.create_flow_at(descriptor.clone(), catalog).await?,
+            };
+            // Creation can race with another accepted attempt. Reconcile again before new effects.
             if let Some(record) = worker.launch_record().await? {
                 return if record.input == input {
                     Ok(LaunchedFlow { worker, record })
@@ -287,7 +346,6 @@ mod tests {
         let execution = |completed: CompletedTurn| LaunchExecution {
             executor: crate::Executor::new(),
             trust: Default::default(),
-            catalog: catalog.clone(),
             completed,
             prepare: Box::new(|snapshot| {
                 Ok(snapshot.pending.first().map(|input| TurnRequest {
@@ -321,9 +379,10 @@ mod tests {
                         Ok(())
                     }
                 },
-                Some(execution(Box::new(|_| panic!(
+                Some(catalog.clone()),
+                move || Ok(Some(execution(Box::new(|_| panic!(
                     "unactivated entry executed"
-                ))))
+                )))))
             )
             .await
             .is_err()
@@ -347,9 +406,12 @@ mod tests {
             descriptor.clone(),
             input,
             |_, _| Ok(()),
-            Some(execution(Box::new(move |completion| {
-                sent.take().unwrap().send(completion).ok();
-            }))),
+            Some(catalog),
+            move || {
+                Ok(Some(execution(Box::new(move |completion| {
+                    sent.take().unwrap().send(completion).ok();
+                }))))
+            },
         )
         .await
         .unwrap();
