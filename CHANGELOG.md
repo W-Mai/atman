@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **TUI control transport** — `TuiHandle` and panel interactions use `ControlSender`. Flow-bound commands capture the destination, view revision, request ID, and reply mailbox before entering the host queue. Existing session hosts use `ControlSender::channel()`.
+
 - **TUI document type** — `flow_view::FlowDocument` replaces `app::OutputStore` as the tracked transcript container. Main and floating flow views hold a `FlowViewModel` with shared document revisions, tool disclosure operations, and detail lookup. Native transcript synchronization preserves item identity, scopes tool results to their producing invocation, and keeps final-answer fold boundaries within each turn.
 
 - **TUI state snapshots** — `FlowViewModel::sync_view` updates conversation and durable instance state together. State-only changes preserve document layout; stale snapshots are unavailable after transcript-only advances or document replacement.

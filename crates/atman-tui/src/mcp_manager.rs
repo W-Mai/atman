@@ -758,7 +758,7 @@ impl McpEditor {
         &mut self,
         event: &crossterm::event::MouseEvent,
         app: &mut crate::app::AppState,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) {
         use crate::keys::KeyAction;
         use crate::wm::modal::ModalOverlay;
@@ -1107,7 +1107,7 @@ impl crate::wm::modal::ModalOverlay for McpEditor {
         &mut self,
         action: &crate::keys::KeyAction,
         app: &mut crate::app::AppState,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) -> Option<crate::wm::modal::ModalAction> {
         use crate::keys::KeyAction;
         match action {
@@ -1381,7 +1381,7 @@ mod tests {
         let mut editor = McpEditor::default();
         editor.open_add();
         let mut app = crate::app::AppState::new("session".into(), None);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         editor.handle_key(&KeyAction::Submit, &mut app, Some(&tx));
         assert!(editor.open);
         assert_eq!(editor.error.as_deref(), Some("name is required"));

@@ -2145,7 +2145,7 @@ async fn cmd_repl_once(
                 },
             );
         }
-        let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<atman_tui::TuiControl>();
+        let (ctrl_tx, mut ctrl_rx) = atman_tui::ControlSender::channel();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<atman_tui::TuiCommand>();
         let cmd_tx_for_models = cmd_tx.clone();
         let session_for_ctrl = std::sync::Arc::clone(&session);
@@ -6068,7 +6068,7 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
         return Ok(());
     }
     let session = std::sync::Arc::new(Session::open_ephemeral());
-    let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::unbounded_channel::<atman_tui::TuiControl>();
+    let (ctrl_tx, mut ctrl_rx) = atman_tui::ControlSender::channel();
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<atman_tui::TuiCommand>();
     let mut handle = atman_tui::TuiHandle::from_session(session.clone());
     handle.control_tx = Some(ctrl_tx);

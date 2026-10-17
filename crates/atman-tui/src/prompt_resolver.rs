@@ -26,7 +26,7 @@ mod tests {
         let mut modal = crate::form_modal::FormModal::default();
         modal.attach(forms.list_pending().remove(0));
         let mut app = crate::app::AppState::default();
-        let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (control_tx, mut control_rx) = crate::ControlSender::channel();
         modal.handle_key(&crate::keys::KeyAction::Submit, &mut app, Some(&control_tx));
         modal.handle_key(&crate::keys::KeyAction::Submit, &mut app, Some(&control_tx));
         let crate::TuiControl::FormSubmit {

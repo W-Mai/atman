@@ -322,7 +322,7 @@ impl ProviderManager {
     pub fn handle_mouse(
         &mut self,
         me: &crossterm::event::MouseEvent,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
         use crossterm::event::{MouseButton, MouseEventKind};
         let point = (me.column, me.row);
@@ -769,7 +769,7 @@ impl ProviderManager {
     pub fn handle_key(
         &mut self,
         action: &KeyAction,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
         if self.has_pending_mutation() {
             if matches!(action, KeyAction::Escape) {
@@ -1073,7 +1073,7 @@ impl ProviderManager {
     fn dispatch(
         &mut self,
         action: ProviderAction,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
         if self.has_pending_mutation() {
             if matches!(action, ProviderAction::Hide | ProviderAction::Back) {
@@ -1321,10 +1321,7 @@ impl ProviderManager {
         .then_some(result)
     }
 
-    fn toggle_enabled(
-        &mut self,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    fn toggle_enabled(&mut self, control_tx: Option<&crate::ControlSender>) {
         let p = self.providers.get(self.selected).cloned();
         if let Some(p) = p {
             match p.source {
@@ -1409,10 +1406,7 @@ impl ProviderManager {
             .collect()
     }
 
-    fn execute_confirm(
-        &mut self,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    fn execute_confirm(&mut self, control_tx: Option<&crate::ControlSender>) {
         let Some(id) = self.confirm_provider_id.clone() else {
             return;
         };
@@ -1436,10 +1430,7 @@ impl ProviderManager {
         }
     }
 
-    fn refresh_selected(
-        &mut self,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    fn refresh_selected(&mut self, control_tx: Option<&crate::ControlSender>) {
         if let Some(ProviderEntry {
             source: ProviderSource::AuthStore { id },
             ..
@@ -1462,7 +1453,7 @@ impl ProviderManager {
     pub(crate) fn begin_mutation(
         &mut self,
         action: crate::ProviderMutation,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&crate::ControlSender>,
     ) -> ProviderDispatchOutcome {
         if self.has_pending_mutation() {
             return ProviderDispatchOutcome::Busy;
@@ -1615,10 +1606,7 @@ impl ProviderManager {
         }
     }
 
-    fn test_selected(
-        &mut self,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    fn test_selected(&mut self, control_tx: Option<&crate::ControlSender>) {
         let p = self.providers.get(self.selected).cloned();
         if let Some(p) = p {
             if matches!(p.source, ProviderSource::Config) {
@@ -1738,10 +1726,7 @@ impl ProviderManager {
         self.initial_draft = Some(self.draft());
     }
 
-    fn test_form(
-        &mut self,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    fn test_form(&mut self, control_tx: Option<&crate::ControlSender>) {
         let name = self.name_editor.buf().trim().to_string();
         if name.is_empty() {
             self.local_error("Enter a provider name before testing the connection.");
@@ -1780,7 +1765,7 @@ impl ProviderManager {
         &mut self,
         name: String,
         entry: atman_runtime::model_registry::ProviderEntry,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&crate::ControlSender>,
     ) -> ProviderDispatchOutcome {
         if self.has_pending_mutation() {
             return ProviderDispatchOutcome::Busy;
@@ -1849,7 +1834,7 @@ impl ProviderManager {
     fn handle_add_key(
         &mut self,
         action: &KeyAction,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
         if self.in_form {
             let mut fields: Vec<_> = self
@@ -2004,10 +1989,7 @@ impl ProviderManager {
         None
     }
 
-    fn commit_form(
-        &mut self,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) -> Option<ModalAction> {
+    fn commit_form(&mut self, control_tx: Option<&crate::ControlSender>) -> Option<ModalAction> {
         let create = self.editing_provider.is_none();
         let name = self
             .editing_provider
@@ -2050,10 +2032,7 @@ impl ProviderManager {
         None
     }
 
-    fn commit_add(
-        &mut self,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    fn commit_add(&mut self, control_tx: Option<&crate::ControlSender>) {
         let name = self.name_editor.buf().trim().to_string();
         if name.is_empty() {
             self.local_error("Enter a connection name before starting login.");
@@ -2162,7 +2141,7 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
         &mut self,
         action: &KeyAction,
         _app: &mut crate::app::AppState,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
         self.handle_key(action, tx).or(Some(ModalAction::Consumed))
     }
@@ -2222,7 +2201,7 @@ mod tests {
     use super::*;
     #[test]
     fn empty_search_cannot_dispatch_actions_for_a_hidden_provider() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager {
             open: true,
             providers: vec![ProviderEntry {
@@ -2357,7 +2336,7 @@ mod tests {
 
     #[test]
     fn provider_sources_control_actions_and_enter_only_opens_details() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         for source in [
             ProviderSource::Config,
             ProviderSource::AuthStore {
@@ -2392,7 +2371,7 @@ mod tests {
 
     #[test]
     fn discard_and_remove_default_to_preserving_data() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager::default();
         populate_config_form(&mut manager, Some("gateway"));
         manager.api_key_editor.insert_str("-changed");
@@ -2427,7 +2406,7 @@ mod tests {
 
     #[test]
     fn tests_bind_to_request_and_draft_and_survive_hide() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager::default();
         populate_config_form(&mut manager, None);
         manager.test_form(Some(&tx));
@@ -2485,7 +2464,7 @@ mod tests {
         );
         manager.open_edit("gateway");
         manager.provider_type_editor.replace_with("anthropic");
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         manager.commit_form(Some(&tx));
         assert!(matches!(
             receive_mutation(&mut rx).action,
@@ -2694,7 +2673,7 @@ mod tests {
 
     #[test]
     fn config_form_waits_for_matching_ack_and_preserves_failed_input() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager::default();
         populate_config_form(&mut manager, None);
         manager.base_url_editor.replace_with("");
@@ -2753,7 +2732,7 @@ mod tests {
 
     #[test]
     fn provider_test_dispatch_uses_the_complete_draft_and_truthful_feedback() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager::default();
         populate_config_form(&mut manager, None);
         manager.api_key_editor.replace_with("");
@@ -2795,7 +2774,7 @@ mod tests {
             .reasoning_format_editor
             .replace_with("thinking-toggle");
 
-        let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (closed_tx, closed_rx) = crate::ControlSender::channel();
         drop(closed_rx);
         manager.test_form(Some(&closed_tx));
         assert_eq!(
@@ -2814,7 +2793,7 @@ mod tests {
 
     #[test]
     fn config_form_survives_an_unavailable_dispatch() {
-        let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (closed_tx, closed_rx) = crate::ControlSender::channel();
         drop(closed_rx);
         let mut manager = ProviderManager::default();
         populate_config_form(&mut manager, None);
@@ -2856,7 +2835,7 @@ mod tests {
         );
         atman_runtime::model_registry::set_provider_config(config);
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager {
             providers: vec![ProviderEntry {
                 source: ProviderSource::Config,
@@ -2892,7 +2871,7 @@ mod tests {
 
     #[test]
     fn pending_mutation_blocks_mouse_provider_tests() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager::default();
         populate_config_form(&mut manager, None);
         manager.test_btn_rect = Some(Rect::new(4, 3, 6, 1));
@@ -2923,7 +2902,7 @@ mod tests {
 
     #[test]
     fn mouse_provider_test_records_started_only_after_a_successful_send() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager::default();
         populate_config_form(&mut manager, None);
         manager.test_btn_rect = Some(Rect::new(4, 3, 6, 1));
@@ -3100,7 +3079,7 @@ mod tests {
             );
             assert_eq!(manager.hovered_field, Some(usize::MAX));
             manager.form_field = 7;
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, mut rx) = crate::ControlSender::channel();
             manager.handle_mouse(
                 &MouseEvent {
                     kind: MouseEventKind::Down(MouseButton::Left),
@@ -3119,7 +3098,7 @@ mod tests {
 
     #[test]
     fn config_edit_requires_explicit_save_and_failure_keeps_form() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager::default();
         populate_config_form(&mut manager, Some("gateway"));
 
@@ -3147,7 +3126,7 @@ mod tests {
 
     #[test]
     fn config_edit_keeps_name_and_hidden_max_tokens() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager::default();
         populate_config_form(&mut manager, Some("gateway"));
         manager.form_max_tokens = Some(16_384);
@@ -3185,10 +3164,7 @@ mod tests {
         }
     }
 
-    fn begin_codex_login(
-        manager: &mut ProviderManager,
-        tx: &tokio::sync::mpsc::UnboundedSender<crate::TuiControl>,
-    ) -> String {
+    fn begin_codex_login(manager: &mut ProviderManager, tx: &crate::ControlSender) -> String {
         manager.open_add();
         manager.kind_selected = manager
             .add_options
@@ -3211,7 +3187,7 @@ mod tests {
 
     #[test]
     fn oauth_login_waits_for_the_matching_success_before_showing_details() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager::default();
         let name = begin_codex_login(&mut manager, &tx);
         let request = receive_mutation(&mut rx);
@@ -3238,7 +3214,7 @@ mod tests {
 
     #[test]
     fn oauth_login_failure_keeps_the_form_open_for_retry() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager::default();
         begin_codex_login(&mut manager, &tx);
         let request = receive_mutation(&mut rx);
@@ -3258,7 +3234,7 @@ mod tests {
 
     #[test]
     fn pending_mutation_can_be_hidden_without_losing_its_result() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager::default();
         let name = begin_codex_login(&mut manager, &tx);
         let request = receive_mutation(&mut rx);
@@ -3282,7 +3258,7 @@ mod tests {
 
     #[test]
     fn stale_and_mismatched_provider_results_cannot_complete_a_request() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager::default();
         let name = begin_codex_login(&mut manager, &tx);
         let request = receive_mutation(&mut rx);
@@ -3339,7 +3315,7 @@ mod tests {
 
     #[test]
     fn auth_actions_emit_typed_mutations_without_optimistic_state_changes() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager {
             providers: vec![ProviderEntry {
                 source: ProviderSource::AuthStore {
@@ -3421,7 +3397,7 @@ mod tests {
         );
         atman_runtime::model_registry::set_provider_config(config);
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager {
             providers: vec![ProviderEntry {
                 source: ProviderSource::Config,
@@ -3467,7 +3443,7 @@ mod tests {
             Some(ProviderFeedback::DispatchUnavailable)
         );
 
-        let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (closed_tx, closed_rx) = crate::ControlSender::channel();
         drop(closed_rx);
         assert_eq!(
             manager.begin_mutation(
@@ -3497,7 +3473,7 @@ mod tests {
             Some(ProviderFeedback::DispatchUnavailable)
         );
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         assert_eq!(
             manager.begin_mutation(
                 crate::ProviderMutation::Refresh {

@@ -109,7 +109,7 @@ impl AliasManager {
     pub fn handle_mouse(
         &mut self,
         event: &crossterm::event::MouseEvent,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&crate::ControlSender>,
     ) {
         use crossterm::event::{MouseButton, MouseEventKind};
         let point = (event.column, event.row);
@@ -387,11 +387,7 @@ impl AliasManager {
             .find(|model| model.slug == target)
     }
 
-    pub fn handle_key(
-        &mut self,
-        action: &KeyAction,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    pub fn handle_key(&mut self, action: &KeyAction, control_tx: Option<&crate::ControlSender>) {
         if let Some(alias) = self.confirm_delete.clone() {
             match action {
                 KeyAction::Submit | KeyAction::Char('y') | KeyAction::Char('Y') => {
@@ -588,10 +584,7 @@ impl AliasManager {
         }
     }
 
-    fn commit_alias(
-        &mut self,
-        _control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    fn commit_alias(&mut self, _control_tx: Option<&crate::ControlSender>) {
         let alias = self.editor.buf().trim().to_string();
         if alias.is_empty() {
             return;
@@ -1167,7 +1160,7 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
         &mut self,
         action: &crate::keys::KeyAction,
         _app: &mut crate::app::AppState,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
         self.handle_key(action, tx);
         Some(ModalAction::Consumed)

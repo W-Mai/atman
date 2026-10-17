@@ -386,7 +386,7 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
         &mut self,
         action: &crate::keys::KeyAction,
         app: &mut crate::app::AppState,
-        _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        _tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
         match action {
             KeyAction::Escape => self.close(),

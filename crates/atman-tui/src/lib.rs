@@ -16,6 +16,8 @@ pub mod boot_animation;
 pub mod clipboard;
 pub mod compact_review_modal;
 pub mod completion;
+pub mod control;
+pub use control::ControlSender;
 mod directional_selector;
 pub mod flow_view;
 pub mod form_modal;
@@ -532,7 +534,7 @@ pub struct TuiHandle {
     pub submit_tx: Option<mpsc::UnboundedSender<TuiSubmission>>,
     pub note_rx: Option<mpsc::UnboundedReceiver<TuiNote>>,
     pub shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
-    pub control_tx: Option<mpsc::UnboundedSender<TuiControl>>,
+    pub control_tx: Option<crate::ControlSender>,
     pub cmd_rx: Option<mpsc::UnboundedReceiver<TuiCommand>>,
     pub initial_items: Vec<app::OutputItem>,
     pub goal_rx: Option<tokio::sync::watch::Receiver<Option<String>>>,

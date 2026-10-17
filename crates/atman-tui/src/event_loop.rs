@@ -2235,7 +2235,7 @@ pub(crate) async fn wait_trust_change(
 fn handle_startup_session_mouse(
     app: &mut AppState,
     event: &crossterm::event::MouseEvent,
-    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    control_tx: Option<&crate::ControlSender>,
 ) -> bool {
     if app.startup_intro.is_some()
         || !matches!(app.items.first(), Some(app::OutputItem::StartupCard { .. }))
@@ -2391,7 +2391,7 @@ pub(crate) async fn poll_update_check(
 fn handle_goal_card_mouse(
     ui: &mut crate::ui_state::UiState,
     event: &crossterm::event::MouseEvent,
-    tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    tx: Option<&crate::ControlSender>,
 ) -> bool {
     let point = (event.column, event.row);
     let blocked = ui.wm.any_modal_open()
@@ -4255,7 +4255,7 @@ mod tests {
     fn startup_session_four_rows_single_click_selects_and_double_click_switches() {
         for row in 20..24 {
             let mut app = startup_app();
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, mut rx) = crate::ControlSender::channel();
             let click = startup_mouse(MouseEventKind::Down(MouseButton::Left), row);
 
             assert!(handle_startup_session_mouse(&mut app, &click, Some(&tx)));
@@ -4372,7 +4372,7 @@ mod tests {
         app: &mut UiState,
         action: crate::ProviderMutation,
     ) -> crate::ProviderMutationRequest {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         assert_eq!(
             app.wm
                 .modals

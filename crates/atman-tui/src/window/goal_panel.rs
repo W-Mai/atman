@@ -671,7 +671,7 @@ mod tests {
                         ..
                     }]
                 ));
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let (tx, mut rx) = crate::ControlSender::channel();
                 crate::wm::WindowManager::default().apply_commands(
                     &mut crate::app::AppState::new("goal-test".into(), None),
                     commands,

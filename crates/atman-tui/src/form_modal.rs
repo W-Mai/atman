@@ -336,11 +336,7 @@ impl FormModal {
         }
     }
 
-    fn dispatch_submission(
-        &mut self,
-        outcome: SubmitOutcome,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    fn dispatch_submission(&mut self, outcome: SubmitOutcome, tx: Option<&crate::ControlSender>) {
         if let SubmitOutcome::Submit {
             request_id,
             form_id,
@@ -365,11 +361,7 @@ impl FormModal {
         }
     }
 
-    pub fn handle_mouse(
-        &mut self,
-        event: &MouseEvent,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    pub fn handle_mouse(&mut self, event: &MouseEvent, tx: Option<&crate::ControlSender>) {
         if !self.open || self.is_submitting() {
             return;
         }
@@ -754,7 +746,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         &mut self,
         action: &KeyAction,
         _app: &mut crate::app::AppState,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
         if !self.open {
             return None;
@@ -1436,7 +1428,7 @@ mod tests {
         modal.attach_test(mk_questions(vec![FormKind::Confirm {
             prompt: "Implement?".into(),
         }]));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 4,

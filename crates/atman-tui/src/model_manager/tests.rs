@@ -105,7 +105,7 @@ fn provider_groups_survive_search_scope_paging_and_empty_catalogs() {
         manager.sync_browser();
         assert_eq!(manager.current_provider(), "empty-provider");
         assert!(manager.current_model().is_none());
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         manager.handle_key(&KeyAction::Delete, Some(&tx));
         manager.handle_key(&KeyAction::Char('a'), Some(&tx));
         assert!(rx.try_recv().is_err());
@@ -182,7 +182,7 @@ fn identity_controls_scope_search_and_write_capabilities() {
     manager.sync_browser();
     assert_eq!(manager.filtered_model_count(), 9);
     assert!(!manager.current_editable());
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::ControlSender::channel();
     manager.handle_key(&KeyAction::Char('e'), Some(&tx));
     manager.handle_key(&KeyAction::Delete, Some(&tx));
     assert!(!manager.show_form);
@@ -256,7 +256,7 @@ fn escape_never_saves_and_dirty_confirmation_defaults_to_keep_editing() {
     let mut manager = fixture();
     manager.open_form();
     manager.name_editor.replace_with("fixture-model");
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::ControlSender::channel();
     manager.handle_key(&KeyAction::Submit, Some(&tx));
     assert!(rx.try_recv().is_err());
     manager.handle_key(&KeyAction::Escape, Some(&tx));
@@ -289,7 +289,7 @@ fn only_explicit_stop_cancels_a_test_and_results_belong_to_the_draft() {
     let mut manager = fixture();
     manager.open_form();
     manager.name_editor.replace_with("fixture-model");
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::ControlSender::channel();
     manager.test_model(Some(&tx));
     let crate::TuiControl::TestModel(request) = rx.try_recv().unwrap() else {
         panic!("expected model test");
@@ -312,7 +312,7 @@ fn only_explicit_stop_cancels_a_test_and_results_belong_to_the_draft() {
 #[test]
 fn delete_confirmation_is_safe_by_default_and_blocks_alias_references() {
     let mut manager = fixture();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::ControlSender::channel();
     manager.handle_key(&KeyAction::Delete, Some(&tx));
     assert!(manager.confirm_delete.is_some());
     manager.handle_key(&KeyAction::Submit, Some(&tx));
@@ -378,7 +378,7 @@ fn form_cursor_actions_and_selector_hits_use_rendered_geometry() {
         assert_eq!(manager.thinking_editor.buf(), "budget:8192");
         assert!(manager.has_text_focus());
         render(&mut manager, width, 24);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         manager.handle_mouse(&click(manager.save_rect.unwrap()), Some(&tx));
         assert!(matches!(
             rx.try_recv(),
@@ -425,7 +425,7 @@ fn hidden_enabled_and_api_values_survive_save() {
     manager.name_editor.replace_with("fixture-model");
     manager.form_enabled = false;
     manager.form_api = Some(atman_runtime::provider::OpenAiApi::Responses);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::ControlSender::channel();
     manager.handle_key(&KeyAction::Save, Some(&tx));
     let crate::TuiControl::MutateModel(request) = rx.try_recv().unwrap() else {
         panic!("expected save");
@@ -453,7 +453,7 @@ fn disabled_model_editor_uses_configuration_budget_not_runtime_availability() {
     manager.load_edit_entry(&model, "gateway".into(), &entry);
     assert_eq!(manager.context_budget_editor.buf(), "128000");
     assert!(!manager.form_enabled);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::ControlSender::channel();
     manager.handle_key(&KeyAction::Save, Some(&tx));
     let crate::TuiControl::MutateModel(request) = rx.try_recv().unwrap() else {
         panic!("expected save");

@@ -8,7 +8,6 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear};
-use tokio::sync::mpsc;
 
 use atman_runtime::TaskSnapshot;
 
@@ -172,7 +171,7 @@ impl WindowManager {
         &mut self,
         text: &str,
         app: &mut crate::app::AppState,
-        control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&crate::ControlSender>,
     ) -> bool {
         self.sync_modals();
         if app.modal_notification.is_some() {
@@ -623,7 +622,7 @@ impl WindowManager {
         &mut self,
         action: &crate::keys::KeyAction,
         app: &mut crate::app::AppState,
-        control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&crate::ControlSender>,
     ) -> (bool, Vec<WmCommand>) {
         self.sync_modals();
         if app.modal_notification.is_some() {
@@ -724,7 +723,7 @@ impl WindowManager {
         &mut self,
         input: &str,
         app: &mut crate::app::AppState,
-        control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&crate::ControlSender>,
     ) -> bool {
         let Some(command) = input.trim().strip_prefix(':').map(str::trim) else {
             return false;
@@ -757,7 +756,7 @@ impl WindowManager {
         &mut self,
         id: crate::palette::PaletteEntryId,
         app: &mut crate::app::AppState,
-        control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&crate::ControlSender>,
     ) -> Vec<WmCommand> {
         use crate::palette::PaletteEntryId;
         match id {
@@ -969,7 +968,7 @@ impl WindowManager {
         &mut self,
         event: &MouseEvent,
         app: &mut crate::app::AppState,
-        control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&crate::ControlSender>,
     ) -> (bool, Vec<WmCommand>) {
         self.sync_modals();
         if app.modal_notification.is_some() {
@@ -1102,7 +1101,7 @@ impl WindowManager {
         &mut self,
         app: &mut crate::app::AppState,
         commands: Vec<WmCommand>,
-        control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&crate::ControlSender>,
     ) {
         for command in commands {
             match command {
@@ -1521,7 +1520,7 @@ mod tests {
     fn transcript_commands_and_arguments_remain_runtime_owned() {
         let mut wm = WindowManager::default();
         let mut app = crate::app::AppState::default();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         for command in [
             ":copy last-message",
             ":copy last-tool",
@@ -1632,7 +1631,7 @@ mod tests {
             row: 3,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         assert!(wm.dispatch_mouse(&click, &mut app, Some(&tx)).0);
         assert!(wm.dispatch_mouse(&click, &mut app, Some(&tx)).0);
         assert!(rx.try_recv().is_err());

@@ -425,7 +425,7 @@ pub(crate) fn is_approval_key(action: &KeyAction) -> bool {
 pub(crate) fn handle_approval_key(
     action: &KeyAction,
     app: &mut AppState,
-    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    control_tx: Option<&crate::ControlSender>,
 ) -> bool {
     let Some(tx) = control_tx else {
         return false;
@@ -728,7 +728,7 @@ pub(crate) fn handle_approval_key(
 pub(crate) fn dispatch_approval_click(
     click: crate::approval_bar::ApprovalClick,
     app: &mut AppState,
-    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    control_tx: Option<&crate::ControlSender>,
 ) {
     use crate::approval_bar::ApprovalClick;
     match click {
@@ -767,7 +767,7 @@ pub(crate) fn dispatch_approval_click(
 pub(crate) fn handle_mcp_panel_key(
     action: &KeyAction,
     app: &mut UiState,
-    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    control_tx: Option<&crate::ControlSender>,
 ) -> bool {
     if app.modal_notification.is_some() || app.wm.modals.any_open() {
         return false;
@@ -940,7 +940,7 @@ pub(crate) fn handle_mcp_panel_key(
     false
 }
 
-fn ensure_mcp_tab_data(app: &mut UiState, control_tx: Option<&mpsc::UnboundedSender<TuiControl>>) {
+fn ensure_mcp_tab_data(app: &mut UiState, control_tx: Option<&crate::ControlSender>) {
     let Some(tx) = control_tx else {
         return;
     };
@@ -974,7 +974,7 @@ pub(crate) fn handle_key(
     editor: &mut InputEditor,
     interrupt_prompt: &mut Option<std::time::Instant>,
     submit_tx: Option<&mpsc::UnboundedSender<crate::TuiSubmission>>,
-    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    control_tx: Option<&crate::ControlSender>,
 ) {
     match action {
         crate::keys::KeyAction::CyclePanelForward => {
@@ -1379,12 +1379,12 @@ pub(crate) fn handle_key(
                         presentation,
                     };
                     let failed = if let Some(tx) = control_tx {
-                        tx.send(TuiControl::Submit(submission)).err().and_then(
-                            |error| match error.0 {
+                        tx.send(TuiControl::Submit(submission))
+                            .err()
+                            .and_then(|error| match *error.0 {
                                 TuiControl::Submit(submission) => Some(submission),
                                 _ => None,
-                            },
-                        )
+                            })
                     } else {
                         submit_tx
                             .and_then(|tx| tx.send(submission).err())
@@ -1676,7 +1676,7 @@ pub(crate) fn dispatch_submission_queue_action(
     app: &mut AppState,
     index: usize,
     action: crate::submission_queue::QueueAction,
-    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    control_tx: Option<&crate::ControlSender>,
 ) {
     let Some(submission) = app.queued_submissions.get(index).cloned() else {
         return;
@@ -1746,7 +1746,7 @@ pub(crate) fn dispatch_submission_queue_action(
 fn handle_submission_queue_key(
     action: &KeyAction,
     app: &mut AppState,
-    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    control_tx: Option<&crate::ControlSender>,
 ) {
     if let Some(edit) = app.queued_submission_edit.as_mut() {
         match action {
@@ -1844,7 +1844,7 @@ fn handle_submission_queue_key(
 // first, then the banner/sessions fade out and input docks bottom.
 pub(crate) fn request_session_switch(
     app: &mut AppState,
-    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    control_tx: Option<&crate::ControlSender>,
     sid: String,
 ) {
     let intro = match app.items.first() {
@@ -1880,7 +1880,7 @@ pub(crate) fn request_session_switch(
 
 pub(crate) fn request_project_session_switch(
     app: &mut AppState,
-    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    control_tx: Option<&crate::ControlSender>,
     sid: String,
     project_root: std::path::PathBuf,
 ) {
@@ -1931,7 +1931,7 @@ mod tests {
             "MCP",
             ratatui::layout::Rect::new(0, 0, 80, 30),
         );
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         assert!(handle_mcp_panel_key(
             &KeyAction::Submit,
             &mut state,
@@ -2004,7 +2004,7 @@ mod tests {
         state: &mut crate::UiState,
         editor: &mut InputEditor,
         action: KeyAction,
-        control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+        control_tx: Option<&crate::ControlSender>,
     ) {
         let mut interrupt_prompt = None;
         handle_key(
@@ -2021,7 +2021,7 @@ mod tests {
     fn startup_input_keeps_digits_until_recent_is_focused() {
         let mut state = startup_state();
         let mut editor = InputEditor::default();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
 
         press_startup_key(&mut state, &mut editor, KeyAction::Char('2'), Some(&tx));
 
@@ -2052,7 +2052,7 @@ mod tests {
     fn startup_recent_focus_selects_before_enter_switches() {
         let mut state = startup_state();
         let mut editor = InputEditor::default();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
 
         press_startup_key(&mut state, &mut editor, KeyAction::BackTab, Some(&tx));
         assert_eq!(state.app.startup_focus, crate::app::StartupFocus::Recent);
@@ -2120,7 +2120,7 @@ mod tests {
             editor.replace_with(partial);
             state.app.refresh_popup(editor.buf());
             assert!(state.app.popup.is_open());
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, mut rx) = crate::ControlSender::channel();
 
             press_startup_key(&mut state, &mut editor, KeyAction::Submit, Some(&tx));
 
@@ -2136,7 +2136,7 @@ mod tests {
         let mut editor = InputEditor::default();
         editor.replace_with(":pan");
         state.app.refresh_popup(editor.buf());
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let count = state.items.len();
 
         press_startup_key(&mut state, &mut editor, KeyAction::Submit, Some(&tx));
@@ -2181,7 +2181,7 @@ mod tests {
                     editor.reconcile_images(&session.pending_images());
                 }
                 assert!(editor.buf().contains("[image 1]"));
-                let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+                let (control_tx, mut control_rx) = crate::ControlSender::channel();
                 let (submit_tx, mut submit_rx) = mpsc::unbounded_channel();
                 let mut interrupt = Some(std::time::Instant::now());
                 handle_key(
@@ -2328,7 +2328,7 @@ mod tests {
         let mut editor = InputEditor::default();
         editor.insert_str("do not submit yet");
         let (submit_tx, mut submit_rx) = mpsc::unbounded_channel();
-        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let (control_tx, _control_rx) = crate::ControlSender::channel();
         let mut interrupt_prompt = None;
 
         let (escape_consumed, commands) =
@@ -2372,7 +2372,7 @@ mod tests {
         let mut editor = InputEditor::default();
         editor.insert_str("run after mode update");
         let (submit_tx, mut submit_rx) = mpsc::unbounded_channel();
-        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let (control_tx, mut control_rx) = crate::ControlSender::channel();
         let mut interrupt_prompt = None;
 
         handle_key(
@@ -2397,7 +2397,7 @@ mod tests {
         state.app.pending_quote = Some("quoted line".into());
         let mut editor = InputEditor::default();
         editor.insert_str("follow up");
-        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let (control_tx, mut control_rx) = crate::ControlSender::channel();
         let mut interrupt_prompt = None;
 
         handle_key(
@@ -2421,7 +2421,7 @@ mod tests {
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
         state.app.pending_quote = Some("quoted line".into());
         let mut editor = InputEditor::default();
-        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let (control_tx, mut control_rx) = crate::ControlSender::channel();
         let mut interrupt_prompt = None;
 
         handle_key(
@@ -2443,7 +2443,7 @@ mod tests {
     fn trust_update_precedes_the_following_submission() {
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
         let (submit_tx, mut submit_rx) = mpsc::unbounded_channel();
-        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let (control_tx, mut control_rx) = crate::ControlSender::channel();
         state.wm.modals.open_trust_mode_picker(&mut state.app);
         state.app.picker_selected = atman_runtime::trust::TrustMode::all()
             .iter()
@@ -2699,7 +2699,7 @@ mod tests {
         app.pending_permissions
             .insert(second.request_id.clone(), second.clone());
         let selected = app.pending_permissions.values().next().unwrap().clone();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let transcript_len = app.items.len();
 
         assert!(handle_approval_key(
@@ -2759,7 +2759,7 @@ mod tests {
         state.app.queued_submissions = session.queued_submissions();
         let mut editor = InputEditor::default();
         let mut interrupt_prompt = None;
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
 
         handle_key(
             KeyAction::BackTab,
@@ -2809,7 +2809,7 @@ mod tests {
         state.app.submission_focus = true;
         let mut editor = InputEditor::default();
         let mut interrupt_prompt = None;
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
 
         handle_key(
             KeyAction::Backspace,

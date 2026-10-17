@@ -1,6 +1,5 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use tokio::sync::mpsc;
 
 use super::component::HitRegion;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -196,7 +195,7 @@ pub trait ModalOverlay {
         &mut self,
         action: &crate::keys::KeyAction,
         app: &mut crate::app::AppState,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction>;
     fn cursor_position(&self) -> Option<(u16, u16)>;
     fn title(&self) -> ratatui::text::Line<'static>;
@@ -213,7 +212,7 @@ impl ModalManager {
         kind: ModalKind,
         text: &str,
         _app: &mut crate::app::AppState,
-        _tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        _tx: Option<&crate::ControlSender>,
     ) {
         match kind {
             ModalKind::Palette => self.palette.handle_paste(text),
@@ -274,7 +273,7 @@ impl ModalManager {
         kind: ModalKind,
         action: &crate::keys::KeyAction,
         app: &mut crate::app::AppState,
-        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) -> (bool, Option<ModalAction>) {
         match kind {
             ModalKind::ModelPicker => {
@@ -387,7 +386,7 @@ impl ModalManager {
     fn dispatch_model_switch(
         &mut self,
         app: &mut crate::app::AppState,
-        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) {
         if let Some(request) = self.model_picker.take_switch_request() {
             let dispatched = tx.is_some_and(|tx| {
@@ -414,7 +413,7 @@ impl ModalManager {
         &mut self,
         event: &crossterm::event::MouseEvent,
         app: &mut crate::app::AppState,
-        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) {
         self.model_picker.handle_mouse(event);
         self.dispatch_model_switch(app, tx);
@@ -471,7 +470,7 @@ impl ModalManager {
         &mut self,
         event: &crossterm::event::MouseEvent,
         app: &mut crate::app::AppState,
-        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) {
         let action = self.provider_manager.handle_mouse(event, tx);
         self.dispatch_manager_action(action);
@@ -481,7 +480,7 @@ impl ModalManager {
     pub(super) fn handle_model_mouse(
         &mut self,
         event: &crossterm::event::MouseEvent,
-        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) {
         let action = self.model_manager.handle_mouse(event, tx);
         self.dispatch_manager_action(action);
@@ -503,7 +502,7 @@ impl ModalManager {
     pub(super) fn handle_alias_mouse(
         &mut self,
         event: &crossterm::event::MouseEvent,
-        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) {
         self.alias_manager.handle_mouse(event, tx);
         self.sync_model_alias_references();
@@ -1159,7 +1158,7 @@ impl ModalManager {
         kind: ModalKind,
         event: &crossterm::event::MouseEvent,
         app: &mut crate::app::AppState,
-        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) {
         use crate::keys::KeyAction;
         use crossterm::event::{MouseButton, MouseEventKind};
@@ -1197,7 +1196,7 @@ impl ModalManager {
         &mut self,
         action: &crate::keys::KeyAction,
         app: &mut crate::app::AppState,
-        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) {
         let modes = atman_runtime::trust::TrustMode::all();
         let max = modes.len();
@@ -1371,7 +1370,7 @@ mod tests {
                 };
                 assert!(wm.dispatch_mouse(&mouse, &mut app, None).0);
                 assert!(wm.modals.picker_hover == Some(PickerAction::Select(selected)));
-                let (tx, mut rx) = mpsc::unbounded_channel();
+                let (tx, mut rx) = crate::ControlSender::channel();
                 mouse.kind = MouseEventKind::Down(MouseButton::Left);
                 assert!(wm.dispatch_mouse(&mouse, &mut app, Some(&tx)).0);
                 if kind == ModalKind::ThemePicker {
@@ -1550,7 +1549,7 @@ mod tests {
             ..Default::default()
         };
         manager.provider_manager.open();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = crate::ControlSender::channel();
         assert_eq!(
             manager.provider_manager.begin_mutation(
                 crate::ProviderMutation::Refresh {

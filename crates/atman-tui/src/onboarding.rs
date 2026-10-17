@@ -344,7 +344,7 @@ impl crate::wm::modal::ModalOverlay for OnboardingState {
         &mut self,
         action: &crate::keys::KeyAction,
         _app: &mut crate::app::AppState,
-        _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        _tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
         self.handle_key(action);
         Some(ModalAction::Consumed)

@@ -6,7 +6,6 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::{Block, Paragraph, Wrap};
-use tokio::sync::mpsc;
 
 use atman_runtime::memory::MemoryId;
 use atman_runtime::memory::confession::{ConfessionChange, ConfessionFields, ConfessionView};
@@ -102,7 +101,7 @@ struct ArchiveConfirm {
 
 pub struct KnowledgePanelContent {
     state: Arc<Mutex<KnowledgeState>>,
-    control_tx: Option<mpsc::UnboundedSender<TuiControl>>,
+    control_tx: Option<crate::ControlSender>,
     tab: usize,
     selected: usize,
     scroll: u32,
@@ -135,7 +134,7 @@ pub struct KnowledgePanelContent {
 impl KnowledgePanelContent {
     pub fn new(
         state: Arc<Mutex<KnowledgeState>>,
-        control_tx: Option<mpsc::UnboundedSender<TuiControl>>,
+        control_tx: Option<crate::ControlSender>,
     ) -> Self {
         Self {
             state,
@@ -1816,7 +1815,7 @@ mod tests {
             confessions: vec![view.clone()],
             ..Default::default()
         }));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut panel = KnowledgePanelContent::new(state.clone(), Some(tx));
         panel.action("Edit");
         let mut scroll = 0;
@@ -2158,7 +2157,7 @@ mod tests {
     #[test]
     fn organization_request_can_be_cancelled_without_reusing_its_id() {
         let state = Arc::new(Mutex::new(KnowledgeState::default()));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut panel = KnowledgePanelContent::new(state.clone(), Some(tx));
         panel.action("Organize");
         assert!(matches!(
@@ -2187,7 +2186,7 @@ mod tests {
             }],
             ..Default::default()
         }));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut panel = KnowledgePanelContent::new(state.clone(), Some(tx));
         panel.tab = 2;
         panel.search.insert_str("initial");
@@ -2211,7 +2210,7 @@ mod tests {
             confessions: vec![view],
             ..Default::default()
         }));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let mut panel = KnowledgePanelContent::new(state.clone(), Some(tx));
         panel.action("Archive");
         assert!(panel.archive_confirm.is_some());

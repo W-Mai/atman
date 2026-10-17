@@ -6,8 +6,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 
-use tokio::sync::mpsc;
-
 use crate::key_handler::{enumerate_session_rows, request_session_switch};
 use crate::keys::KeyAction;
 use crate::{SessionPickerRow, TuiControl};
@@ -653,7 +651,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         &mut self,
         action: &crate::keys::KeyAction,
         app: &mut crate::app::AppState,
-        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
         if self.rename_mode {
             match action {
@@ -935,7 +933,7 @@ mod tests {
         let mut switcher = SessionSwitcher::default();
         switcher.open_with(vec![current], SessionScope::Project);
         let mut app = crate::app::AppState::new("current".into(), None);
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
 
         switcher.handle_key(&KeyAction::Submit, &mut app, Some(&tx));
         assert!(rx.try_recv().is_err());

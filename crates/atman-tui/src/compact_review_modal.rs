@@ -88,7 +88,7 @@ impl CompactReviewModal {
         &mut self,
         event: &crossterm::event::MouseEvent,
         app: &mut crate::app::AppState,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) {
         use crate::wm::modal::ModalOverlay;
         use crossterm::event::{MouseButton, MouseEventKind};
@@ -351,7 +351,7 @@ impl crate::wm::modal::ModalOverlay for CompactReviewModal {
         &mut self,
         action: &KeyAction,
         _app: &mut crate::app::AppState,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
         match self.mode {
             CompactReviewMode::Viewing => match action {
@@ -542,7 +542,7 @@ mod tests {
         }
 
         let area = Rect::new(2, 1, 80, 18);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::ControlSender::channel();
         let click = |rect: Rect| MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: rect.x,

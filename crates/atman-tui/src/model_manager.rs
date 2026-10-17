@@ -204,7 +204,7 @@ impl ModelManager {
     pub fn handle_mouse(
         &mut self,
         event: &crossterm::event::MouseEvent,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
         use crossterm::event::{MouseButton, MouseEventKind};
         let point = (event.column, event.row);
@@ -343,7 +343,7 @@ impl ModelManager {
     fn begin_mutation(
         &mut self,
         action: crate::ModelMutation,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&crate::ControlSender>,
     ) -> bool {
         if self.pending.is_some() {
             return false;
@@ -758,11 +758,7 @@ impl ModelManager {
         actions
     }
 
-    fn dispatch(
-        &mut self,
-        action: Action,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    fn dispatch(&mut self, action: Action, tx: Option<&crate::ControlSender>) {
         if self.inputs_locked()
             && !matches!(
                 action,
@@ -929,10 +925,7 @@ impl ModelManager {
         }
     }
 
-    fn test_model(
-        &mut self,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    fn test_model(&mut self, control_tx: Option<&crate::ControlSender>) {
         if self.inputs_locked() {
             return;
         }
@@ -1091,11 +1084,7 @@ impl ModelManager {
         self.clear_geometry();
     }
 
-    pub fn handle_key(
-        &mut self,
-        action: &KeyAction,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    pub fn handle_key(&mut self, action: &KeyAction, tx: Option<&crate::ControlSender>) {
         if self.inputs_locked() {
             match action {
                 KeyAction::Escape => self.close(),
@@ -1235,11 +1224,7 @@ impl ModelManager {
         }
     }
 
-    fn dispatch_shortcut(
-        &mut self,
-        key: &KeyAction,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    fn dispatch_shortcut(&mut self, key: &KeyAction, tx: Option<&crate::ControlSender>) {
         match key {
             KeyAction::Char('/') => self.focus = Focus::Search,
             KeyAction::Char('n') => self.dispatch(Action::Add, tx),
@@ -1302,11 +1287,7 @@ impl ModelManager {
         }
     }
 
-    fn handle_form_key(
-        &mut self,
-        action: &KeyAction,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    fn handle_form_key(&mut self, action: &KeyAction, control_tx: Option<&crate::ControlSender>) {
         if self.inputs_locked() {
             return;
         }
@@ -1421,10 +1402,7 @@ impl ModelManager {
         }
     }
 
-    fn commit_form(
-        &mut self,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    fn commit_form(&mut self, control_tx: Option<&crate::ControlSender>) {
         let name = self.name_editor.buf().trim().to_string();
         if name.is_empty() {
             self.test_result = Some(("Model name is required".into(), false));
@@ -1509,7 +1487,7 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
         &mut self,
         action: &crate::keys::KeyAction,
         _app: &mut crate::app::AppState,
-        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
         self.handle_key(action, tx);
         self.take_modal_action()
