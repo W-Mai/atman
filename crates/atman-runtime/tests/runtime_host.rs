@@ -1247,6 +1247,160 @@ async fn late_form_replies_use_the_instance_inbox_and_commit_before_transport_ac
 }
 
 #[tokio::test]
+async fn consistent_views_bound_catch_up_and_preserve_cancelled_observation() {
+    use atman_runtime::{
+        flow_store::{
+            goal::GoalRequest,
+            planning::{PlanningEdit, PlanningRequest},
+        },
+        memory::goal::GoalEdit,
+        projection::flow::FlowRecord,
+    };
+    use futures::FutureExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let worker = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let mut reader = worker
+        .subscribe_view(NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
+    assert!(reader.view().is_none());
+    let created = worker.status().await.unwrap().cursor;
+    change(&worker, FlowTransition::Activated).await;
+    worker
+        .edit_goal(
+            GoalRequest {
+                id: Uuid::new_v4(),
+                sender: SenderIdentity::User(Uuid::new_v4()),
+                expected: None,
+                edit: GoalEdit::Set {
+                    text: "Inspect persistent views".into(),
+                    replace_completed: false,
+                },
+                start_turn: false,
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    worker
+        .edit_planning(
+            PlanningRequest {
+                id: Uuid::new_v4(),
+                sender: SenderIdentity::User(Uuid::new_v4()),
+                expected_revision: None,
+                edit: PlanningEdit::WritePlan {
+                    id: "review".into(),
+                    title: "Review".into(),
+                    steps: vec!["Inspect".into()],
+                },
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    invoke(&worker, Executor::new()).await.result.unwrap();
+    let request = DeliveryRequest {
+        request_id: Uuid::new_v4(),
+        sender: SenderIdentity::User(Uuid::new_v4()),
+        recipient: worker.address().clone(),
+        delivery: DeliveryMode::NextTurn,
+        cause: None,
+        correlation: None,
+        scope: None,
+        payload: InboxPayload::Interjection {
+            text: "Keep unread".into(),
+        },
+    };
+    worker.accept_input(request, |_| Ok(())).await.unwrap();
+    let tip = worker.status().await.unwrap().cursor;
+    // Registration captures state before first poll; later publications cannot leak into it.
+    let initial = reader.next().await.unwrap();
+    assert_eq!(initial.transcript().cursor(), Some(&created));
+    assert_eq!(initial.snapshot().status.cursor, created);
+    assert!(initial.snapshot().status.goal.is_none());
+    assert!(initial.snapshot().planning.plans.is_empty());
+    assert!(initial.transcript().entries().is_empty());
+
+    // Observe a ready notification, then cancel while the owner is serving its snapshot.
+    assert!(reader.next().now_or_never().is_none());
+    // No new writes are needed to finish the interrupted read.
+    let view = tokio::time::timeout(Duration::from_secs(5), reader.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.transcript().cursor(), Some(&tip));
+    assert_eq!(view.snapshot().status.cursor, tip);
+    assert_eq!(
+        view.snapshot().status.goal.as_ref().unwrap().objective,
+        "Inspect persistent views"
+    );
+    assert_eq!(view.snapshot().planning.plans.len(), 1);
+    assert_eq!(view.snapshot().pending.len(), 1);
+    let entries = view.transcript().entries().len();
+    assert_eq!(
+        view.transcript()
+            .entries()
+            .iter()
+            .filter(|entry| matches!(&entry.record,
+        FlowRecord::Publication(value) if value.message.origin == MessageOrigin::FinalAnswer))
+            .count(),
+        1
+    );
+    assert!(
+        !view
+            .transcript()
+            .entries()
+            .iter()
+            .flat_map(|entry| entry.record.shared_messages())
+            .any(|message| message.text_concat() == "Keep unread")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(40), reader.next())
+            .await
+            .is_err()
+    );
+    let refreshed = reader.refresh().await.unwrap();
+    assert_eq!(refreshed.transcript().entries().len(), entries);
+    assert_eq!(refreshed.snapshot().status.cursor, tip);
+    assert_eq!(
+        worker.snapshot().await.unwrap().pending.len(),
+        1,
+        "reading must not claim inbox content"
+    );
+
+    let key = Uuid::new_v4().into();
+    change(&worker, FlowTransition::ExecutionPaused { key }).await;
+    let view = reader.next().await.unwrap();
+    assert_eq!(view.snapshot().status.execution.pauses().len(), 1);
+    assert_eq!(
+        view.snapshot().status.goal.as_ref().unwrap().status,
+        atman_runtime::memory::goal::GoalStatus::Active
+    );
+    let paused = view.snapshot().status.cursor.clone();
+    drop(reader);
+    assert_eq!(worker.status().await.unwrap().cursor, paused);
+    let address = worker.address().clone();
+    drop(worker.shutdown().await.unwrap());
+    let restored = session.open_flow(address.instance_id).await.unwrap();
+    let mut replay = restored
+        .subscribe_view(NonZeroUsize::new(2).unwrap())
+        .await
+        .unwrap();
+    let view = replay.next().await.unwrap();
+    assert_eq!(view.snapshot().status.cursor, paused);
+    assert_eq!(view.transcript().entries().len(), entries);
+    assert_eq!(view.snapshot().pending.len(), 1);
+    assert_eq!(view.snapshot().planning.plans.len(), 1);
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn view_pages_and_live_updates_share_commit_order_across_turns_pause_and_reopen() {
     use atman_runtime::flow_store::view::FlowUpdate;
     use futures::StreamExt;

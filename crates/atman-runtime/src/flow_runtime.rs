@@ -20,6 +20,7 @@ pub mod scheduler;
 pub mod send;
 mod trace;
 mod view;
+pub use view::{FlowView, FlowViewReader, FlowViewSnapshot};
 
 use std::{io, sync::Arc};
 
@@ -51,6 +52,17 @@ pub struct InstanceStatus {
     pub goal: Option<crate::memory::goal::GoalRecord>,
     pub completion: Option<crate::flow_store::completion::CommittedCompletion>,
     pub cursor: CommitReceipt,
+}
+
+impl InstanceStatus {
+    fn from_store(store: &FlowStore) -> Self {
+        Self {
+            execution: store.state().clone(),
+            goal: store.goal().cloned(),
+            completion: store.completion(None).cloned(),
+            cursor: store.cursor().clone(),
+        }
+    }
 }
 
 enum Command {
@@ -334,15 +346,8 @@ impl FlowWorker {
     }
 
     pub async fn status(&self) -> io::Result<InstanceStatus> {
-        self.request(|store| {
-            Ok(InstanceStatus {
-                execution: store.state().clone(),
-                goal: store.goal().cloned(),
-                completion: store.completion(None).cloned(),
-                cursor: store.cursor().clone(),
-            })
-        })
-        .await
+        self.request(|store| Ok(InstanceStatus::from_store(store)))
+            .await
     }
 
     pub fn subscribe_state(&self) -> watch::Receiver<FlowInstance<AtmanUuid>> {

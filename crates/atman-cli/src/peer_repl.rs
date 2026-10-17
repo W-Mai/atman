@@ -12,10 +12,9 @@ use atman_runtime::{
     AtmanRuntime, AtmanRuntimeOptions, Executor,
     config_hub::ConfigHub,
     event::EventSink,
-    event_log::journal::CommittedBatch,
     flow_authority::{EffectiveAuthority, contract_allows_shell},
     flow_runtime::{
-        FlowWorker,
+        FlowView, FlowViewReader, FlowWorker,
         access::PeerControl,
         host::{HostServices, RuntimeHost, SessionHandle},
     },
@@ -24,14 +23,12 @@ use atman_runtime::{
         goal::{GoalRequest, GoalVersion},
         inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity, UserContent},
         profile::ProfileStore,
-        view::FlowUpdate,
     },
     memory::goal::{GoalActor, GoalEdit, GoalPauseReason},
     permission::{DecisionAuthority, PermissionAction, PermissionClients, PermissionRequestId},
-    projection::flow::{FlowRecord, FlowTranscript},
+    projection::flow::FlowRecord,
     source_program::load_program_from_bundle,
 };
-use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -195,7 +192,7 @@ impl Attachment {
             .context("session has no default flow")?;
         let mut focus = self.session.open_flow(default).await?;
         // Subscribe before any scheduler can publish. The journal closes catch-up/live races.
-        let mut updates = focus.subscribe_updates(None, PAGE).await?;
+        let mut focused_view = TerminalView::new(&focus).await?;
         for row in catalog.catalog.flows {
             let result = async {
                 let worker = self.session.open_flow(row.id.clone()).await?;
@@ -224,30 +221,20 @@ impl Attachment {
                 focus.address().instance_id
             ),
         );
-        let mut transcripts = HashMap::<FlowInstanceId, FlowTranscript>::new();
+        let mut views = HashMap::<FlowInstanceId, TerminalView>::new();
         let mut draining = false;
         let mut drain = std::pin::pin!(self.host.wait_quiescent());
         loop {
             tokio::select! {
-                page = updates.next() => {
-                    let page = page.context("flow update stream closed")??;
-                    let transcript = transcripts.entry(focus.address().instance_id.clone())
-                        .or_insert_with(|| FlowTranscript::new(focus.address().clone()));
-                    for batch in page.batches {
-                        render_batch(&mut printer, transcript, batch)?;
-                    }
+                view = focused_view.reader.next() => {
+                    render_view(&mut printer, &mut focused_view.rendered, view?);
                 }
                 Some(prompt) = prompts.recv() => crate::render_note(&mut printer, prompt),
                 result = &mut drain, if draining => {
                     result?;
                     // Commit observation may still be queued when host execution becomes idle.
-                    let transcript = transcripts.entry(focus.address().instance_id.clone())
-                        .or_insert_with(|| FlowTranscript::new(focus.address().clone()));
-                    loop {
-                        let page = focus.read_updates(transcript.cursor().cloned(), PAGE).await?;
-                        for batch in page.batches { render_batch(&mut printer, transcript, batch)?; }
-                        if !page.has_more { break; }
-                    }
+                    let view = focused_view.reader.refresh().await?;
+                    render_view(&mut printer, &mut focused_view.rendered, view);
                     break;
                 }
                 input = input_rx.recv(), if !draining => {
@@ -263,10 +250,14 @@ impl Attachment {
                     if let Some(prefix) = line.strip_prefix(":focus ") {
                         match self.select(prefix.trim()).await {
                             Ok(worker) => {
-                                let after = transcripts.get(&worker.address().instance_id).and_then(FlowTranscript::cursor).cloned();
-                                let feed = worker.subscribe_updates(after, PAGE).await?;
-                                focus = worker;
-                                updates = feed;
+                                if worker.address() != focus.address() {
+                                    let selected = match views.remove(&worker.address().instance_id) {
+                                        Some(view) => view,
+                                        None => TerminalView::new(&worker).await?,
+                                    };
+                                    views.insert(focus.address().instance_id.clone(), std::mem::replace(&mut focused_view, selected));
+                                    focus = worker;
+                                }
                                 crate::render_note(&mut printer, format!("Flow {}", focus.address().instance_id));
                             }
                             Err(error) => crate::render_note(&mut printer, error.to_string()),
@@ -382,16 +373,30 @@ impl Attachment {
     }
 }
 
-fn render_batch(
+struct TerminalView {
+    reader: FlowViewReader,
+    rendered: usize,
+}
+
+impl TerminalView {
+    async fn new(worker: &FlowWorker) -> Result<Self> {
+        Ok(Self {
+            reader: worker.subscribe_view(PAGE).await?,
+            rendered: 0,
+        })
+    }
+}
+
+fn render_view(
     printer: &mut Option<crate::ExternalPrinter>,
-    transcript: &mut FlowTranscript,
-    batch: CommittedBatch<FlowUpdate>,
-) -> Result<()> {
-    let appended = transcript.apply(batch)?;
-    for entry in &transcript.entries()[appended] {
+    rendered: &mut usize,
+    view: &FlowView,
+) {
+    let entries = view.transcript().entries();
+    for entry in &entries[*rendered..] {
         render_record(printer, &entry.record);
     }
-    Ok(())
+    *rendered = entries.len();
 }
 
 fn render_record(printer: &mut Option<crate::ExternalPrinter>, record: &FlowRecord) {

@@ -46,6 +46,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Consistent flow views** — Persistent conversation readers expose execution, Goal, plans, and pending input at the same committed position as the transcript. Paged catch-up retains progress across cancellation and preserves later writes for subsequent updates.
+
 - **Instance workflow projections** — Committed transcripts expose an execution graph for each admitted turn. Recorded timestamps, scoped tool outcomes, late diagnostics, and permission updates retain their original turn; completed turns stay terminal during replay.
 
 - **Persistent transcript projection** — Instance-scoped documents retain stable record identities and separate input, publication, execution, compaction, and completion facts. Terminal history and live updates share atomic batch application and receipt deduplication.
