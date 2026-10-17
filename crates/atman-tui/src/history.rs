@@ -507,172 +507,30 @@ fn flatten_transcript_impl(
                     *ts,
                 );
             }
-            TranscriptEntry::FlowStart {
-                run_id,
-                flow_name,
-                parent_run_id,
-                parent_node_id,
-                spawned: _,
-                ts,
-            } => {
-                if spawned_set.contains(run_id.as_str()) {
-                    continue;
-                }
-                if parent_run_id.is_none() {
-                    current_workflow_idx = None;
-                }
-                let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
-                apply_workflow(
-                    &mut out,
-                    panel_idx,
-                    &StreamFrame::FlowStart {
-                        run_id: run_id.clone(),
-                        flow_name: flow_name.clone(),
-                        parent_run_id: parent_run_id.clone(),
-                        parent_node_id: parent_node_id.clone(),
-                    },
-                    *ts,
-                );
-            }
-            TranscriptEntry::FlowNodeStart {
-                run_id,
-                node_id,
-                kind,
-                label,
-                parent_node_id,
-                ts,
-            } => {
-                if spawned_set.contains(run_id.as_str()) {
-                    continue;
-                }
-                let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
-                apply_workflow(
-                    &mut out,
-                    panel_idx,
-                    &StreamFrame::FlowNodeStart {
-                        run_id: run_id.clone(),
-                        node_id: node_id.clone(),
-                        kind: kind.clone(),
-                        label: label.clone(),
-                        parent_node_id: parent_node_id.clone(),
-                    },
-                    *ts,
-                );
-            }
-            TranscriptEntry::FlowNodeEnd {
-                run_id,
-                node_id,
-                status,
-                output_preview,
-                ts,
-            } => {
-                if spawned_set.contains(run_id.as_str()) {
-                    continue;
-                }
-                let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
-                apply_workflow(
-                    &mut out,
-                    panel_idx,
-                    &StreamFrame::FlowNodeEnd {
-                        run_id: run_id.clone(),
-                        node_id: node_id.clone(),
-                        status: status.clone(),
-                        output_preview: output_preview.clone(),
-                        parent_node_id: None,
-                    },
-                    *ts,
-                );
-            }
-            TranscriptEntry::ToolNode {
-                run_id,
-                parent_node_id,
-                tool_use_id,
-                tool_name,
-                args_preview,
-                call_intent,
-                ts,
-            } => {
-                if spawned_set.contains(run_id.as_str()) {
-                    continue;
-                }
-                let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
-                apply_workflow(
-                    &mut out,
-                    panel_idx,
-                    &StreamFrame::ToolNode {
-                        run_id: run_id.clone(),
-                        parent_node_id: parent_node_id.clone(),
-                        tool_use_id: tool_use_id.clone(),
-                        tool: tool_name.clone(),
-                        args_preview: args_preview.clone(),
-                        call_intent: call_intent.clone(),
-                    },
-                    *ts,
-                );
-            }
-            TranscriptEntry::FlowDone {
-                run_id,
-                ok,
-                cancelled,
-                ts,
-            } => {
-                if spawned_set.contains(run_id.as_str()) {
-                    continue;
-                }
-                let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
-                apply_workflow(
-                    &mut out,
-                    panel_idx,
-                    &StreamFrame::FlowDone {
-                        run_id: run_id.clone(),
-                        flow_name: String::new(),
-                        ok: *ok,
-                        cancelled: *cancelled,
-                        suicide: false,
-                    },
-                    *ts,
-                );
-            }
-            TranscriptEntry::LlmCall {
-                model,
-                provider,
-                context_call_purpose,
-                context_call_scope,
-                usage,
-                wallclock_ms,
-                ttft_ms,
-                tokens_per_second,
-                run_id,
-                node_id,
-                ts,
-            } => {
-                if run_id
-                    .as_ref()
-                    .is_some_and(|r| spawned_set.contains(&r.0.to_string()))
+            TranscriptEntry::FlowStart { .. }
+            | TranscriptEntry::FlowNodeStart { .. }
+            | TranscriptEntry::FlowNodeEnd { .. }
+            | TranscriptEntry::ToolNode { .. }
+            | TranscriptEntry::FlowDone { .. }
+            | TranscriptEntry::LlmCall { .. } => {
+                if entry_run_id
+                    .as_deref()
+                    .is_some_and(|run| spawned_set.contains(run))
                 {
                     continue;
                 }
+                if matches!(
+                    entry,
+                    TranscriptEntry::FlowStart {
+                        parent_run_id: None,
+                        ..
+                    }
+                ) {
+                    current_workflow_idx = None;
+                }
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
-                apply_workflow(
-                    &mut out,
-                    panel_idx,
-                    &StreamFrame::LlmCallStats {
-                        model: model.clone(),
-                        provider: provider.clone(),
-                        context_call_purpose: *context_call_purpose,
-                        context_call_scope: *context_call_scope,
-                        input_tokens: usage.input,
-                        output_tokens: usage.output,
-                        cache_read: usage.cached_input,
-                        cache_write: usage.cache_write,
-                        ttft_ms: ttft_ms.unwrap_or(0),
-                        tokens_per_second: tokens_per_second.unwrap_or(0.0),
-                        wallclock_ms: *wallclock_ms,
-                        run_id: run_id.as_ref().map(|r| r.0.to_string()),
-                        node_id: node_id.clone(),
-                    },
-                    *ts,
-                );
+                let (frame, ts) = workflow_frame(entry).expect("workflow entry");
+                apply_workflow(&mut out, panel_idx, &frame, ts);
             }
             TranscriptEntry::PermissionRequest {
                 identity,
@@ -773,141 +631,18 @@ fn flatten_transcript_impl(
                         workflow_graph.apply_permission_group(payload, *resolved);
                         continue;
                     }
-                    _ => {}
-                }
-                let (frame, ts) = match entry {
-                    TranscriptEntry::FlowStart {
-                        run_id,
-                        flow_name,
-                        parent_run_id,
-                        parent_node_id,
-                        ts,
-                        ..
-                    } => (
-                        StreamFrame::FlowStart {
-                            run_id: run_id.clone(),
-                            flow_name: flow_name.clone(),
-                            parent_run_id: parent_run_id.clone(),
-                            parent_node_id: parent_node_id.clone(),
-                        },
-                        *ts,
-                    ),
-                    TranscriptEntry::FlowNodeStart {
-                        run_id,
-                        node_id,
-                        kind,
-                        label,
-                        parent_node_id,
-                        ts,
-                    } => (
-                        StreamFrame::FlowNodeStart {
-                            run_id: run_id.clone(),
-                            node_id: node_id.clone(),
-                            kind: kind.clone(),
-                            label: label.clone(),
-                            parent_node_id: parent_node_id.clone(),
-                        },
-                        *ts,
-                    ),
-                    TranscriptEntry::FlowNodeEnd {
-                        run_id,
-                        node_id,
-                        status,
-                        output_preview,
-                        ts,
-                    } => (
-                        StreamFrame::FlowNodeEnd {
-                            run_id: run_id.clone(),
-                            node_id: node_id.clone(),
-                            status: status.clone(),
-                            output_preview: output_preview.clone(),
-                            parent_node_id: None,
-                        },
-                        *ts,
-                    ),
-                    TranscriptEntry::ToolNode {
-                        run_id,
-                        parent_node_id,
-                        tool_use_id,
-                        tool_name,
-                        args_preview,
-                        call_intent,
-                        ts,
-                    } => (
-                        StreamFrame::ToolNode {
-                            run_id: run_id.clone(),
-                            parent_node_id: parent_node_id.clone(),
-                            tool_use_id: tool_use_id.clone(),
-                            tool: tool_name.clone(),
-                            args_preview: args_preview.clone(),
-                            call_intent: call_intent.clone(),
-                        },
-                        *ts,
-                    ),
-                    TranscriptEntry::FlowDone {
-                        run_id,
-                        ok,
-                        cancelled,
-                        ts,
-                    } => (
-                        StreamFrame::FlowDone {
-                            run_id: run_id.clone(),
-                            flow_name: String::new(),
-                            ok: *ok,
-                            cancelled: *cancelled,
-                            suicide: false,
-                        },
-                        *ts,
-                    ),
-                    TranscriptEntry::LlmCall {
-                        model,
-                        provider,
-                        context_call_purpose,
-                        context_call_scope,
-                        usage,
-                        wallclock_ms,
-                        ttft_ms,
-                        tokens_per_second,
-                        run_id,
-                        node_id,
-                        ts,
-                    } => (
-                        StreamFrame::LlmCallStats {
-                            model: model.clone(),
-                            provider: provider.clone(),
-                            context_call_purpose: *context_call_purpose,
-                            context_call_scope: *context_call_scope,
-                            input_tokens: usage.input,
-                            output_tokens: usage.output,
-                            cache_read: usage.cached_input,
-                            cache_write: usage.cache_write,
-                            ttft_ms: ttft_ms.unwrap_or(0),
-                            tokens_per_second: tokens_per_second.unwrap_or(0.0),
-                            wallclock_ms: *wallclock_ms,
-                            run_id: run_id.as_ref().map(|r| r.0.to_string()),
-                            node_id: node_id.clone(),
-                        },
-                        *ts,
-                    ),
                     TranscriptEntry::Message {
                         message,
-                        flow_run_id: Some(frid),
+                        flow_run_id: Some(run_id),
                         ..
                     } => {
-                        let frame = match message.role {
-                            MessageRole::Assistant => StreamFrame::AssistantMsg {
-                                flow_run_id: Some(frid.clone()),
-                                message: message.clone(),
-                            },
-                            MessageRole::Tool => StreamFrame::ToolResultMsg {
-                                flow_run_id: Some(frid.clone()),
-                                message: message.clone(),
-                            },
-                            _ => continue,
-                        };
-                        (frame, None)
+                        apply_message_to_workflow(workflow_graph, message, Some(run_id));
+                        continue;
                     }
-                    _ => continue,
+                    _ => {}
+                }
+                let Some((frame, ts)) = workflow_frame(entry) else {
+                    continue;
                 };
                 workflow_graph.apply_stream_frame_at(&frame, ts);
             }
@@ -941,6 +676,128 @@ fn flatten_transcript_impl(
     }
     dedup_by_handle(&mut out);
     out
+}
+
+// Both transcript destinations retain the same workflow payload and recorded timestamp.
+fn workflow_frame(
+    entry: &TranscriptEntry,
+) -> Option<(StreamFrame, Option<chrono::DateTime<chrono::Utc>>)> {
+    Some(match entry {
+        TranscriptEntry::FlowStart {
+            run_id,
+            flow_name,
+            parent_run_id,
+            parent_node_id,
+            ts,
+            ..
+        } => (
+            StreamFrame::FlowStart {
+                run_id: run_id.clone(),
+                flow_name: flow_name.clone(),
+                parent_run_id: parent_run_id.clone(),
+                parent_node_id: parent_node_id.clone(),
+            },
+            *ts,
+        ),
+        TranscriptEntry::FlowNodeStart {
+            run_id,
+            node_id,
+            kind,
+            label,
+            parent_node_id,
+            ts,
+        } => (
+            StreamFrame::FlowNodeStart {
+                run_id: run_id.clone(),
+                node_id: node_id.clone(),
+                kind: kind.clone(),
+                label: label.clone(),
+                parent_node_id: parent_node_id.clone(),
+            },
+            *ts,
+        ),
+        TranscriptEntry::FlowNodeEnd {
+            run_id,
+            node_id,
+            status,
+            output_preview,
+            ts,
+        } => (
+            StreamFrame::FlowNodeEnd {
+                run_id: run_id.clone(),
+                node_id: node_id.clone(),
+                status: status.clone(),
+                output_preview: output_preview.clone(),
+                parent_node_id: None,
+            },
+            *ts,
+        ),
+        TranscriptEntry::ToolNode {
+            run_id,
+            parent_node_id,
+            tool_use_id,
+            tool_name,
+            args_preview,
+            call_intent,
+            ts,
+        } => (
+            StreamFrame::ToolNode {
+                run_id: run_id.clone(),
+                parent_node_id: parent_node_id.clone(),
+                tool_use_id: tool_use_id.clone(),
+                tool: tool_name.clone(),
+                args_preview: args_preview.clone(),
+                call_intent: call_intent.clone(),
+            },
+            *ts,
+        ),
+        TranscriptEntry::FlowDone {
+            run_id,
+            ok,
+            cancelled,
+            ts,
+        } => (
+            StreamFrame::FlowDone {
+                run_id: run_id.clone(),
+                flow_name: String::new(),
+                ok: *ok,
+                cancelled: *cancelled,
+                suicide: false,
+            },
+            *ts,
+        ),
+        TranscriptEntry::LlmCall {
+            model,
+            provider,
+            context_call_purpose,
+            context_call_scope,
+            usage,
+            wallclock_ms,
+            ttft_ms,
+            tokens_per_second,
+            run_id,
+            node_id,
+            ts,
+        } => (
+            StreamFrame::LlmCallStats {
+                model: model.clone(),
+                provider: provider.clone(),
+                context_call_purpose: *context_call_purpose,
+                context_call_scope: *context_call_scope,
+                input_tokens: usage.input,
+                output_tokens: usage.output,
+                cache_read: usage.cached_input,
+                cache_write: usage.cache_write,
+                ttft_ms: ttft_ms.unwrap_or(0),
+                tokens_per_second: tokens_per_second.unwrap_or(0.0),
+                wallclock_ms: *wallclock_ms,
+                run_id: run_id.as_ref().map(|r| r.0.to_string()),
+                node_id: node_id.clone(),
+            },
+            *ts,
+        ),
+        _ => return None,
+    })
 }
 
 /// Remove earlier Terminal/Bash items that share a handle with a later one.
@@ -1638,6 +1495,110 @@ mod tests {
     use atman_runtime::event::FlowNodeStatus;
     type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
     type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
+
+    #[test]
+    fn workflow_replay_retains_the_same_records_in_main_and_floating_views() {
+        let turn = TurnId::now();
+        let run = FlowRunId::now();
+        let run_id = run.0.to_string();
+        let start = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let end = start + chrono::Duration::seconds(7);
+        let mut entries = vec![
+            TranscriptEntry::FlowStart {
+                run_id: run_id.clone(),
+                flow_name: "worker".into(),
+                parent_run_id: Some("creator".into()),
+                parent_node_id: Some("spawn".into()),
+                spawned: false,
+                ts: Some(start),
+            },
+            TranscriptEntry::FlowNodeStart {
+                run_id: run_id.clone(),
+                node_id: "call".into(),
+                kind: atman_runtime::nodegraph::NodeKind::ToolCall {
+                    path: "llm.call".into(),
+                },
+                label: "llm.call".into(),
+                parent_node_id: None,
+                ts: Some(start),
+            },
+            TranscriptEntry::ToolNode {
+                run_id: run_id.clone(),
+                parent_node_id: "call".into(),
+                tool_use_id: "read".into(),
+                tool_name: "fs.read".into(),
+                args_preview: "notes.txt".into(),
+                call_intent: None,
+                ts: Some(start),
+            },
+            TranscriptEntry::LlmCall {
+                model: "model".into(),
+                provider: "provider".into(),
+                context_call_purpose: Default::default(),
+                context_call_scope: Default::default(),
+                usage: atman_runtime::provider::TokenUsage {
+                    input: 17,
+                    output: 5,
+                    ..Default::default()
+                },
+                wallclock_ms: 7000,
+                ttft_ms: Some(100),
+                tokens_per_second: Some(2.0),
+                run_id: Some(run),
+                node_id: Some("call".into()),
+                ts: Some(end),
+            },
+            TranscriptEntry::Message {
+                message: Message::assistant_text(turn, "Read complete"),
+                flow_run_id: Some(run_id.clone()),
+                presentation: None,
+            },
+            TranscriptEntry::FlowNodeEnd {
+                run_id: run_id.clone(),
+                node_id: "call".into(),
+                status: FlowNodeStatus::Ok,
+                output_preview: Some("Read complete".into()),
+                ts: Some(end),
+            },
+            TranscriptEntry::FlowDone {
+                run_id,
+                ok: true,
+                cancelled: false,
+                ts: Some(end),
+            },
+        ];
+        let main = flatten_transcript(&entries);
+        let TranscriptEntry::FlowStart { spawned, .. } = &mut entries[0] else {
+            unreachable!()
+        };
+        *spawned = true;
+        let floating = flatten_transcript(&entries);
+        let main = main
+            .iter()
+            .find_map(|item| match item {
+                OutputItem::WorkflowPanel { graph, .. } => Some(graph),
+                _ => None,
+            })
+            .unwrap();
+        let floating = floating
+            .iter()
+            .find_map(|item| match item {
+                OutputItem::SubAgentActivity { workflow_graph, .. } => Some(workflow_graph),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(main.root, floating.root);
+        assert_eq!(main.root[0].started_at, Some(start));
+        assert_eq!(main.root[0].ended_at, Some(end));
+        assert_eq!(
+            main.root[0].children[0]
+                .llm_stats
+                .as_ref()
+                .unwrap()
+                .input_tokens,
+            17
+        );
+    }
 
     #[test]
     fn final_answer_history_inserts_a_fold_boundary_marker() {

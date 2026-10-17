@@ -210,7 +210,7 @@ Panel commands use the same actions as the palette and remain available during a
 
 Tool-call purposes become the primary labels in output blocks, workflow nodes, approval rows, sub-agent panels, task windows, and the Tasks activity area. The tool name and source handle remain visible as secondary technical metadata. Expanded Bash and Terminal output blocks and their floating task panels also show the original spawn command for auditing. The managed agent writes these dynamic labels in the current user's language when practical. The Tasks activity area shows running leaves, so a dispatcher is hidden while its concrete parallel tool calls are active.
 
-Main and floating flow views use the same tool-output expansion rules and detail targets. Each view retains its own expansion state. Floating message updates preserve tool expansion by call identity; resizing or expanding an item does not rebuild its source messages.
+Main and floating flow views use the same tool-output expansion rules, detail targets, and workflow replay conversion. Replayed node timestamps, model usage, and tool results retain their recorded values in either view. Each view retains its own expansion state. Floating message updates preserve tool expansion by call identity; resizing or expanding an item does not rebuild its source messages.
 
 Click a Flow task's sidebar cross once to stop it. The task window’s close button also stops the flow. Pressing `Esc` only closes the floating window and leaves the task running. Bash and Terminal crosses retain two-click confirmation. A stopping task stays visible until execution exits, then moves out of the active list while its details remain available in History.
 
