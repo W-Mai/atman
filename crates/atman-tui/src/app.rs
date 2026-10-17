@@ -262,55 +262,6 @@ fn llm_disclosure_key(run_id: Option<&str>) -> String {
     run_id.unwrap_or(ROOT_LLM_DISCLOSURE).to_owned()
 }
 
-#[derive(Debug, Clone)]
-struct WorkFoldState {
-    start_id: u64,
-    end_id: u64,
-    member_count: usize,
-    completed_steps: usize,
-    total_steps: usize,
-    title: String,
-    stats: String,
-    from_visible: f32,
-    target_visible: f32,
-    started_at: Instant,
-    duration: Duration,
-}
-
-impl WorkFoldState {
-    fn visibility(&self, now: Instant) -> f32 {
-        if self.duration.is_zero() {
-            return self.target_visible;
-        }
-        let progress = (now.saturating_duration_since(self.started_at).as_secs_f32()
-            / self.duration.as_secs_f32())
-        .clamp(0.0, 1.0);
-        let eased = 1.0 - (1.0 - progress).powi(3);
-        (self.from_visible + (self.target_visible - self.from_visible) * eased)
-            .clamp(0.0, self.member_count as f32)
-    }
-
-    fn is_expanded(&self) -> bool {
-        self.target_visible > 0.0
-    }
-
-    fn is_animating(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.started_at) < self.duration
-            && (self.from_visible - self.target_visible).abs() > f32::EPSILON
-    }
-
-    fn toggle(&mut self, now: Instant) {
-        let current = self.visibility(now);
-        self.from_visible = current;
-        self.target_visible = if self.is_expanded() {
-            0.0
-        } else {
-            self.member_count as f32
-        };
-        self.started_at = now;
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 enum FinalAnswerPhase {
     Preview,
@@ -946,7 +897,6 @@ pub struct AppState {
     pub top_level_run_ids: std::collections::HashSet<String>,
     pub sub_agent_run_ids: std::collections::HashMap<String, SubAgentRoute>,
     llm_disclosures: std::collections::HashMap<String, LlmDisclosureState>,
-    work_folds: Vec<WorkFoldState>,
     work_start_after_id: u64,
     work_fold_scroll_anchor: Option<(u64, u32)>,
     final_answer_drafts: std::collections::HashMap<String, FinalAnswerDraftState>,
@@ -1231,7 +1181,7 @@ impl AppState {
 
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
         self.llm_disclosures.clear();
-        self.work_folds.clear();
+        self.items.work_folds.clear();
         self.work_fold_scroll_anchor = None;
         self.final_answer_drafts.clear();
         self.final_answer_drafts_completed = false;
@@ -1937,9 +1887,7 @@ impl AppState {
     }
 
     pub fn has_active_animation(&self) -> bool {
-        let now = Instant::now();
         self.items.has_active_animation()
-            || self.work_folds.iter().any(|fold| fold.is_animating(now))
     }
 
     pub fn hit_test(&self, col: u16, row: u16) -> Option<usize> {
@@ -2959,7 +2907,8 @@ impl AppState {
             .collect::<HashSet<_>>();
         self.final_answer_drafts.clear();
         self.final_answer_drafts_completed = false;
-        self.work_folds
+        self.items
+            .work_folds
             .retain(|fold| !fold_ids.contains(&fold.start_id));
         let mut indices = assistant_ids
             .into_iter()
@@ -3007,105 +2956,6 @@ impl AppState {
             .map_or(turn_start, |index| turn_start + index + 1)
     }
 
-    fn upsert_work_fold(
-        &mut self,
-        work: std::ops::Range<usize>,
-        summary: Option<&str>,
-        restored: bool,
-    ) -> Option<u64> {
-        let start_index = work.start;
-        let end_index = work.end.checked_sub(1)?;
-        if start_index > end_index {
-            return None;
-        }
-        let start_id = self.item_id(start_index)?;
-        let end_id = self.item_id(end_index)?;
-        if let Some(fold) = self
-            .work_folds
-            .iter_mut()
-            .find(|fold| fold.start_id == start_id && fold.end_id == end_id)
-        {
-            if let Some(summary) = summary {
-                fold.title = summary.to_owned();
-            }
-            return Some(start_id);
-        }
-        let member_count = end_index - start_index + 1;
-        let (completed_steps, total_steps, title, stats) =
-            self.work_fold_metadata(start_index, end_index, summary);
-        let duration_ms = (400 + member_count as u64 * 40).clamp(400, 700);
-        self.work_folds.push(WorkFoldState {
-            start_id,
-            end_id,
-            member_count,
-            completed_steps,
-            total_steps,
-            title,
-            stats,
-            from_visible: if restored { 0.0 } else { member_count as f32 },
-            target_visible: 0.0,
-            started_at: Instant::now(),
-            duration: if restored {
-                Duration::ZERO
-            } else {
-                Duration::from_millis(duration_ms)
-            },
-        });
-        Some(start_id)
-    }
-
-    fn work_fold_metadata(
-        &self,
-        start_index: usize,
-        end_index: usize,
-        summary: Option<&str>,
-    ) -> (usize, usize, String, String) {
-        let mut call_ids = HashSet::new();
-        let mut intents = Vec::new();
-        let mut files = HashSet::new();
-        let mut insertions = 0usize;
-        let mut deletions = 0usize;
-        for item in &self.items[start_index..=end_index] {
-            let OutputItem::ToolDispatch { calls } = item else {
-                continue;
-            };
-            for call in calls {
-                call_ids.insert(call.id.clone());
-                if !call.intent.trim().is_empty()
-                    && call.intent != call.tool
-                    && !intents.iter().any(|intent| intent == &call.intent)
-                    && intents.len() < 3
-                {
-                    intents.push(call.intent.clone());
-                }
-                if let Some((path, metrics)) = &call.applied_edit {
-                    files.insert(path.clone());
-                    insertions = insertions.saturating_add(metrics.insertions);
-                    deletions = deletions.saturating_add(metrics.deletions);
-                }
-            }
-        }
-        let title = atman_runtime::message::ToolCallIntent::new(summary.unwrap_or_default())
-            .map(|summary| summary.as_str().to_owned())
-            .unwrap_or_else(|| {
-                if intents.is_empty() {
-                    "Completed internal work.".to_owned()
-                } else {
-                    intents.join(" · ")
-                }
-            });
-        let total_steps = call_ids.len().max(1);
-        let file_count = files.len();
-        let mut stats = Vec::new();
-        if file_count > 0 {
-            stats.push(format!("{file_count} files"));
-        }
-        if insertions > 0 || deletions > 0 {
-            stats.push(format!("+{insertions} −{deletions}"));
-        }
-        (total_steps, total_steps, title, stats.join(" · "))
-    }
-
     fn commit_final_answer_message(&mut self, message: &Message) {
         let text = message.text_concat();
         let summary = atman_runtime::tools::final_answer::summary(message);
@@ -3134,7 +2984,7 @@ impl AppState {
         let start = update
             .work_start
             .unwrap_or_else(|| self.current_work_start(update.work_end));
-        let fold_id = self.upsert_work_fold(
+        let fold_id = self.items.upsert_work_fold(
             start..update.work_end,
             update.summary,
             matches!(update.phase, FinalAnswerPhase::Restored),
@@ -3330,62 +3180,19 @@ impl AppState {
     }
 
     pub fn toggle_work_fold(&mut self, group_key: &str) -> bool {
-        let Some(id) = group_key
-            .strip_prefix(crate::output::WORK_FOLD_REGION_PREFIX)
-            .and_then(|value| value.parse::<u64>().ok())
-        else {
-            return false;
-        };
-        let Some(fold) = self.work_folds.iter_mut().find(|fold| fold.start_id == id) else {
-            return false;
-        };
-        fold.toggle(Instant::now());
-        true
+        self.items.toggle_work_fold(group_key)
     }
 
     pub fn toggle_latest_work_fold(&mut self) -> bool {
-        let Some(fold) = self.work_folds.last_mut() else {
-            return false;
-        };
-        fold.toggle(Instant::now());
-        true
+        self.items.toggle_latest_work_fold()
     }
 
     pub(crate) fn work_fold_projections(&self) -> Vec<crate::output::WorkFoldProjection> {
-        let now = Instant::now();
-        self.work_folds
-            .iter()
-            .filter_map(|fold| {
-                let start_index = self.items.index_by_id(fold.start_id)?;
-                let end_index = self.items.index_by_id(fold.end_id)?;
-                let visibility = fold.visibility(now);
-                let visible_members = visibility.ceil() as usize;
-                let fraction = visibility.fract();
-                Some(crate::output::WorkFoldProjection {
-                    key: fold.start_id,
-                    start_index,
-                    end_index,
-                    visible_members,
-                    total_members: fold.member_count,
-                    boundary_member: (fraction > f32::EPSILON)
-                        .then(|| visible_members.saturating_sub(1)),
-                    boundary_level: (fraction * 3.0).ceil().clamp(1.0, 3.0) as u8,
-                    completed_steps: fold.completed_steps,
-                    total_steps: fold.total_steps,
-                    expanded: fold.is_expanded(),
-                    animating: fold.is_animating(now),
-                    hovered: self.hovered_output_node.as_ref().is_some_and(|(_, key)| {
-                        key == &format!(
-                            "{}{}",
-                            crate::output::WORK_FOLD_REGION_PREFIX,
-                            fold.start_id
-                        )
-                    }),
-                    title: fold.title.clone(),
-                    stats: fold.stats.clone(),
-                })
-            })
-            .collect()
+        self.items.work_fold_projections(
+            self.hovered_output_node
+                .as_ref()
+                .map(|(_, key)| key.as_str()),
+        )
     }
 
     pub(crate) fn work_fold_scroll_anchor(&self, key: u64) -> Option<u32> {
@@ -3644,7 +3451,7 @@ impl AppState {
             StreamFrame::TurnStarted { .. } => {
                 self.work_start_after_id = self.items.next_id;
                 let now = Instant::now();
-                for fold in &mut self.work_folds {
+                for fold in &mut self.items.work_folds {
                     fold.from_visible = fold.target_visible;
                     fold.started_at = now.checked_sub(fold.duration).unwrap_or(now);
                 }
@@ -3803,7 +3610,8 @@ impl AppState {
                         .collect::<HashSet<_>>();
                     self.final_answer_drafts.clear();
                     self.final_answer_drafts_completed = false;
-                    self.work_folds
+                    self.items
+                        .work_folds
                         .retain(|fold| !fold_ids.contains(&fold.start_id));
                 }
                 while self.items.last().is_some_and(|item| {
@@ -5112,7 +4920,7 @@ mod tests {
                     if md == "# Result\n\nReturned **content**."
             ));
         }
-        assert!(live.work_folds.is_empty());
+        assert!(live.items.work_folds.is_empty());
     }
 
     #[test]
@@ -5152,8 +4960,11 @@ mod tests {
             run_id: None,
         });
 
-        assert_eq!(app.work_folds.len(), 1);
-        assert_eq!(app.work_folds[0].title, "Validated the renderer and tests.");
+        assert_eq!(app.items.work_folds.len(), 1);
+        assert_eq!(
+            app.items.work_folds[0].title,
+            "Validated the renderer and tests."
+        );
         assert!(matches!(
             app.items.last(),
             Some(OutputItem::AssistantMd { md, streaming: true, .. }) if md == "Hello 😀"
@@ -5164,11 +4975,11 @@ mod tests {
                 if calls.iter().any(|call| call.tool == atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL)
         )));
 
-        let duration = app.work_folds[0].duration;
-        app.work_folds[0].started_at = Instant::now().checked_sub(duration).unwrap();
+        let duration = app.items.work_folds[0].duration;
+        app.items.work_folds[0].started_at = Instant::now().checked_sub(duration).unwrap();
         assert_eq!(app.work_fold_projections()[0].visible_members, 0);
         assert!(app.toggle_latest_work_fold());
-        app.work_folds[0].started_at = Instant::now().checked_sub(duration).unwrap();
+        app.items.work_folds[0].started_at = Instant::now().checked_sub(duration).unwrap();
         assert_eq!(app.work_fold_projections()[0].visible_members, 1);
     }
 
@@ -5238,7 +5049,7 @@ mod tests {
         let mut replay = AppState::new("replay".into(), None)
             .with_initial_items(crate::history::flatten_transcript(&entries));
         for app in [&mut live, &mut replay] {
-            assert_eq!(app.work_folds.len(), 2);
+            assert_eq!(app.items.work_folds.len(), 2);
             let folds = app.work_fold_projections();
             assert!(folds[0].end_index < folds[1].start_index);
             assert_ne!(folds[0].key, folds[1].key);
@@ -5354,8 +5165,8 @@ mod tests {
                 app.cancel_running_activities();
                 app.discard_completed_final_answer_draft();
             }
-            assert_eq!(app.work_folds.len(), 1);
-            let fold = &mut app.work_folds[0];
+            assert_eq!(app.items.work_folds.len(), 1);
+            let fold = &mut app.items.work_folds[0];
             fold.started_at = Instant::now().checked_sub(fold.duration).unwrap();
             let fold = app.work_fold_projections().remove(0);
             assert!(
@@ -5417,7 +5228,7 @@ mod tests {
         ] {
             app.apply_stream_frame(frame);
             assert_eq!(app.final_answer_drafts.len(), 1);
-            assert_eq!(app.work_folds.len(), 1);
+            assert_eq!(app.items.work_folds.len(), 1);
         }
     }
 
@@ -5445,7 +5256,7 @@ mod tests {
                 total_tokens: 1,
                 run_id: None,
             });
-            assert!(app.work_folds.is_empty());
+            assert!(app.items.work_folds.is_empty());
             let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
             let mut message = Message::assistant_text(turn_id.clone(), "Hello.");
             message.origin = atman_runtime::message::MessageOrigin::FinalAnswer;
@@ -5456,8 +5267,8 @@ mod tests {
             app.apply_stream_frame(StreamFrame::TurnEnded {
                 turn_id: turn_id.to_string(),
             });
-            assert_eq!(app.work_folds.len(), 1);
-            let fold = &mut app.work_folds[0];
+            assert_eq!(app.items.work_folds.len(), 1);
+            let fold = &mut app.items.work_folds[0];
             assert_eq!(fold.end_id, work_end);
             assert_eq!(fold.title, "Hello.");
             fold.started_at = Instant::now().checked_sub(fold.duration).unwrap();
@@ -5481,8 +5292,8 @@ mod tests {
                 flow_run_id: None,
                 message,
             });
-            assert_eq!(app.work_folds.len(), 1);
-            assert_eq!(app.work_folds[0].title, "Hello.");
+            assert_eq!(app.items.work_folds.len(), 1);
+            assert_eq!(app.items.work_folds[0].title, "Hello.");
         }
     }
 
@@ -5616,11 +5427,11 @@ mod tests {
             arguments_delta: "{\"message\":\"partial\"}".into(),
             run_id: None,
         });
-        assert_eq!(app.work_folds.len(), 2);
+        assert_eq!(app.items.work_folds.len(), 2);
 
         app.apply_stream_frame(StreamFrame::LlmRetry);
 
-        assert_eq!(app.work_folds.len(), 1);
+        assert_eq!(app.items.work_folds.len(), 1);
         assert!(app.final_answer_drafts.is_empty());
         assert!(matches!(
             &app.items[3],
@@ -5670,7 +5481,7 @@ mod tests {
 
         assert!(app.final_answer_drafts.is_empty());
         assert!(!app.final_answer_drafts_completed);
-        assert!(app.work_folds.is_empty());
+        assert!(app.items.work_folds.is_empty());
         assert!(
             !app.items.iter().any(
                 |item| matches!(item, OutputItem::AssistantMd { md, .. } if md == "premature")
@@ -5726,8 +5537,8 @@ mod tests {
 
         assert!(app.final_answer_drafts.is_empty());
         assert!(!app.final_answer_drafts_completed);
-        assert_eq!(app.work_folds.len(), 1);
-        assert_eq!(app.work_folds[0].title, "Finished the work.");
+        assert_eq!(app.items.work_folds.len(), 1);
+        assert_eq!(app.items.work_folds[0].title, "Finished the work.");
         assert!(matches!(
             app.items.last(),
             Some(OutputItem::AssistantMd { md, streaming: false, .. }) if md == "Done."
@@ -5765,7 +5576,7 @@ mod tests {
 
         assert!(app.final_answer_drafts.is_empty());
         assert!(!app.final_answer_drafts_completed);
-        assert_eq!(app.work_folds.len(), 1);
+        assert_eq!(app.items.work_folds.len(), 1);
         assert!(matches!(
             app.items.last(),
             Some(OutputItem::AssistantMd { md, streaming: false, .. }) if md == "Done."

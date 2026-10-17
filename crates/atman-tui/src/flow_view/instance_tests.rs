@@ -295,6 +295,27 @@ fn native_views_share_committed_history_but_keep_disclosure_and_scoped_results()
     assert!(!main.sync(&source, None).unwrap());
     assert_eq!(main.revision_clock(), revision);
     assert_eq!(main.len(), floating.len());
+    assert_eq!(
+        main.work_fold_projections(None),
+        floating.work_fold_projections(None)
+    );
+    assert_eq!(main.work_fold_projections(None).len(), 2);
+    assert!(
+        main.work_fold_projections(None)
+            .iter()
+            .all(|fold| fold.total_steps == 2)
+    );
+    assert!(main.toggle_latest_work_fold());
+    assert!(main.work_fold_projections(None).last().unwrap().expanded);
+    assert!(
+        !floating
+            .work_fold_projections(None)
+            .last()
+            .unwrap()
+            .expanded
+    );
+    assert!(!main.sync(&source, None).unwrap());
+    assert!(main.work_fold_projections(None).last().unwrap().expanded);
     for index in 0..main.len() {
         assert_eq!(main.source_record(index), floating.source_record(index));
     }

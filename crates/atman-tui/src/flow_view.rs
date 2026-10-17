@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::app::{OutputItem, OutputRevision};
 
+mod fold;
 mod instance;
 pub use instance::FlowViewModel;
 

@@ -208,6 +208,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Floating flow work summaries** — Final replies use shared work-fold state, layout, and controls. Mouse and keyboard toggles retain their state across message updates. Repeated tool IDs in separate dispatch blocks count as separate steps.
+
 - **Flow discovery** — Reading an unloaded flow no longer acquires its writer or interrupts a recorded turn. Inspection preserves incomplete tails and metadata caches while sharing recovery validation.
 
 - **Committed workspace data** — Automatic workspace cleanup retains checkouts whose HEAD differs from their allocation commit, including clean detached worktrees.

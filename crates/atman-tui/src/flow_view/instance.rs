@@ -50,7 +50,9 @@ struct InstanceDocument {
 /// Native instance updates are derived from a shared `FlowTranscript`. Synchronization appends new records and changes only affected items; it neither consumes input nor controls execution. Existing session renderers use the same document storage and interactions.
 #[derive(Default)]
 pub struct FlowViewModel {
-    document: FlowDocument,
+    pub(super) document: FlowDocument,
+    pub(crate) work_folds: Vec<super::fold::WorkFoldState>,
+    pub(super) legacy_fold_bindings: HashMap<(atman_rt::TurnId<AtmanUuid>, usize), u64>,
     flow: Option<FlowRef>,
     instance: InstanceDocument,
 }
@@ -78,6 +80,14 @@ impl From<Vec<OutputItem>> for FlowViewModel {
 }
 
 impl FlowViewModel {
+    pub fn has_active_animation(&self) -> bool {
+        self.document.has_active_animation()
+            || self
+                .work_folds
+                .iter()
+                .any(|fold| fold.is_animating(Instant::now()))
+    }
+
     pub fn flow(&self) -> Option<&FlowRef> {
         self.flow.as_ref()
     }
@@ -127,6 +137,7 @@ impl FlowViewModel {
             return Ok(false);
         }
         let revision = self.document.revision_clock();
+        let document_start = self.document.len();
         for entry in &source.entries()[self.instance.entries..] {
             match &entry.record {
                 FlowRecord::Input(input) => {
@@ -227,6 +238,24 @@ impl FlowViewModel {
             }
             view.graph_revision = Some(turn.workflow().revision());
             view.completion = completion;
+        }
+        let markers = self.document[document_start..]
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, item)| {
+                if let OutputItem::WorkFoldMarker {
+                    start_index: Some(start),
+                    summary,
+                } = item
+                {
+                    Some((*start, document_start + offset, summary.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for (start, end, summary) in markers {
+            self.upsert_work_fold(start..end, summary.as_deref(), true);
         }
         self.flow = Some(source.flow().clone());
         self.instance.entries = source.entries().len();

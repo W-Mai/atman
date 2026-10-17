@@ -16,7 +16,7 @@ use crate::wm::component::{
     EventCtx, HitRegion, HitTarget, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
 
-use crate::flow_view::{FlowDocument, FlowViewModel, ToolDisclosureAction};
+use crate::flow_view::{FlowViewModel, ToolDisclosureAction};
 
 #[derive(Default)]
 pub(crate) struct FlowInteraction {
@@ -94,7 +94,9 @@ impl FlowPanelContent {
                 }
             }
             HitTarget::DocumentNode(index, path) => {
-                if path.starts_with(WORKING_GROUP_REGION_PREFIX) {
+                if path.starts_with(WORK_FOLD_REGION_PREFIX) {
+                    self.document.toggle_work_fold(&path);
+                } else if path.starts_with(WORKING_GROUP_REGION_PREFIX) {
                     if !self.interaction.expanded_groups.remove(&path) {
                         self.interaction.expanded_groups.insert(path);
                     }
@@ -487,7 +489,7 @@ pub(crate) fn render_sub_agent_panel(
     item_revision: crate::app::OutputRevision,
     interaction_revision: u64,
     render_cache: &mut Option<PanelRenderCache>,
-    document: &mut FlowDocument,
+    document: &mut FlowViewModel,
     output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
 ) {
     if render_cache.as_ref().is_some_and(|cache| {
@@ -585,8 +587,24 @@ pub(crate) fn render_sub_agent_panel(
         hovered_thinking_idx: None,
         hovered_output_node: None,
     };
-    let (doc_lines, _, mut document_regions, _) =
-        crate::output::build_lines_with_ranges(document, area.width, &render_ctx);
+    let mut layout = crate::output::LayoutCache::default();
+    layout.set_work_folds(document.work_fold_projections(None));
+    let metrics = layout.update_dirty(
+        crate::output::LayoutKey {
+            width: area.width,
+            theme: crate::theme::current_mode(),
+        },
+        document,
+        &render_ctx,
+        crate::output::LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: u32::MAX,
+            follow_tail_rows: None,
+        },
+    );
+    let document_slice = layout.visible_slice(0, metrics.total_rows, render_frame);
+    let doc_lines = document_slice.lines;
+    let mut document_regions = document_slice.regions;
     let doc_offset = lines.len() as u32;
     for region in &mut document_regions {
         region.start_row += doc_offset;
@@ -866,6 +884,47 @@ mod tests {
                 .unwrap()
                 .contains("node")
         );
+        let detail = tasks.get_mut("child").unwrap();
+        let OutputItem::SubAgentActivity { messages, .. } = &mut detail.item else {
+            panic!()
+        };
+        let mut answer = Message::assistant_text(messages[0].turn_id.clone(), "Done.");
+        answer.origin = atman_runtime::message::MessageOrigin::FinalAnswer;
+        messages.push(answer);
+        let restored_main = crate::app::AppState::new("session".into(), None)
+            .with_initial_items(crate::history::flatten_messages(messages));
+        detail.revision += 1;
+        panel.scroll = 0;
+        draw(&mut panel, &mut terminal, &tasks);
+        let main_fold = restored_main.work_fold_projections().remove(0);
+        let floating_fold = panel.document.work_fold_projections(None).remove(0);
+        assert_eq!(main_fold.title, floating_fold.title);
+        assert_eq!(main_fold.total_steps, floating_fold.total_steps);
+        assert_eq!(main_fold.visible_members, floating_fold.visible_members);
+        let hit = panel.interaction.hits.iter().find(|hit| matches!(&hit.target,
+            HitTarget::DocumentNode(_, key) if key.starts_with(crate::output::WORK_FOLD_REGION_PREFIX))).unwrap();
+        let click = WmEvent::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: hit.rect.x,
+            row: hit.rect.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(matches!(
+            panel.handle_event(&click, &mut event_ctx),
+            WmEventResult::Consumed(_)
+        ));
+        assert!(panel.document.work_fold_projections(None)[0].expanded);
+        tasks.get_mut("child").unwrap().revision += 1;
+        draw(&mut panel, &mut terminal, &tasks);
+        assert!(panel.document.work_fold_projections(None)[0].expanded);
+        panel.interaction.focused = panel.interaction.hits.iter().position(|hit| matches!(&hit.target,
+            HitTarget::DocumentNode(_, key) if key.starts_with(crate::output::WORK_FOLD_REGION_PREFIX)));
+        assert!(panel.interaction.focused.is_some());
+        assert!(matches!(
+            panel.handle_event(&WmEvent::Key(KeyAction::Submit), &mut event_ctx),
+            WmEventResult::Consumed(_)
+        ));
+        assert!(!panel.document.work_fold_projections(None)[0].expanded);
     }
 
     use crate::app::OutputItem;
@@ -875,7 +934,7 @@ mod tests {
 
     #[test]
     fn document_restoration_tracks_content_not_layout() {
-        let mut document = super::FlowDocument::default();
+        let mut document = super::FlowViewModel::default();
         let turn = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
         let mut revision = crate::app::OutputRevision {
             id: 1,
@@ -982,7 +1041,7 @@ mod tests {
         let mut scroll = 0;
         let mut hitmap = Vec::new();
         let mut cache = None;
-        let mut document = super::FlowDocument::default();
+        let mut document = super::FlowViewModel::default();
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         terminal
             .draw(|frame| {
