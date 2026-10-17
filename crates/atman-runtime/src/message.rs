@@ -201,6 +201,10 @@ pub enum MessagePart {
     FinalAnswerSummary {
         text: String,
     },
+    /// Display metadata retained with the input, excluded from model protocol content.
+    InputPresentation {
+        presentation: crate::user_input::UserInputPresentation,
+    },
     Image {
         source: ImageSource,
     },
@@ -249,6 +253,26 @@ pub enum ImageData {
 }
 
 impl Message {
+    /// Return display metadata only when it represents the actual human input text.
+    pub fn input_presentation(&self) -> Option<&crate::user_input::UserInputPresentation> {
+        if self.role != MessageRole::User
+            || !matches!(
+                self.origin,
+                MessageOrigin::User | MessageOrigin::Interjection
+            )
+        {
+            return None;
+        }
+        self.parts.iter().find_map(|part| match part {
+            MessagePart::InputPresentation { presentation }
+                if presentation.model_text() == self.text_concat() =>
+            {
+                Some(presentation)
+            }
+            _ => None,
+        })
+    }
+
     pub fn context_record(turn_id: TurnId, record: crate::context_plan::ContextRecord) -> Self {
         Self {
             role: MessageRole::System,
@@ -526,6 +550,75 @@ pub(crate) fn parse_legacy_compact_summary_text(text: &str) -> Option<(String, u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_presentation_roundtrips_without_changing_model_protocols_or_budget() {
+        use crate::provider::LlmRequest;
+        use crate::user_input::{QuoteSnapshot, UserInputPresentation};
+        let presentation = UserInputPresentation {
+            prompt: "Explain this".into(),
+            quote: Some(QuoteSnapshot {
+                text: "selected text".into(),
+            }),
+        };
+        let mut request = LlmRequest {
+            model: "model".into(),
+            messages: vec![Message::user_text(TurnId::now(), presentation.model_text())],
+            system: None,
+            input: crate::value::Value::Unit,
+            schema: None,
+            cache_prompt: true,
+            prompt_cache_key: Some("stable".into()),
+            tools: vec![],
+            reasoning: Default::default(),
+            stall_timeout_secs: 0,
+        };
+        let bodies = |request: &LlmRequest| {
+            [
+                crate::providers::openai::OpenAiProvider::new("example", "test")
+                    .wire_body_bytes(request, true),
+                crate::providers::anthropic::AnthropicProvider::new("example", "test")
+                    .wire_body_bytes(request, true),
+                serde_json::to_vec(
+                    &crate::providers::responses::build_body(
+                        request,
+                        &ResponsesRoute {
+                            provider: "example".into(),
+                            endpoint: "https://gateway.example/v1".into(),
+                            model: "model".into(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            ]
+        };
+        let before = bodies(&request);
+        let tokens = crate::compaction::estimate_tokens_for_message(&request.messages[0]);
+        request.messages[0]
+            .parts
+            .push(MessagePart::InputPresentation {
+                presentation: presentation.clone(),
+            });
+        let encoded = serde_json::to_vec(&request.messages[0]).unwrap();
+        request.messages[0] = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            request.messages[0].input_presentation(),
+            Some(&presentation)
+        );
+        assert_eq!(
+            crate::compaction::estimate_tokens_for_message(&request.messages[0]),
+            tokens
+        );
+        assert_eq!(bodies(&request), before);
+        request.messages[0].origin = MessageOrigin::Internal;
+        assert!(request.messages[0].input_presentation().is_none());
+        request.messages[0].origin = MessageOrigin::User;
+        request.messages[0].parts[0] = MessagePart::Text {
+            text: "different content".into(),
+        };
+        assert!(request.messages[0].input_presentation().is_none());
+    }
 
     #[test]
     fn user_text_roundtrips_via_serde_json() {

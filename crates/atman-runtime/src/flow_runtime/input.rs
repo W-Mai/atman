@@ -206,6 +206,11 @@ pub fn context_message(
             ));
         }
         let mut message = Message::user_text(turn.clone(), content.text.clone());
+        if let Some(presentation) = &content.presentation {
+            message.parts.push(MessagePart::InputPresentation {
+                presentation: presentation.clone(),
+            });
+        }
         message.parts.extend(
             content
                 .images

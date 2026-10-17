@@ -175,7 +175,9 @@ fn build_wire_message(
     let last_idx = m.parts.len().saturating_sub(1);
     for (i, part) in m.parts.iter().enumerate() {
         let block = match part {
-            MessagePart::FinalAnswerSummary { .. } | MessagePart::ResponsesState { .. } => continue,
+            MessagePart::FinalAnswerSummary { .. }
+            | MessagePart::InputPresentation { .. }
+            | MessagePart::ResponsesState { .. } => continue,
             MessagePart::ContextRecord(record) => ContentPart::Text {
                 text: record.render_for_model(),
                 cache_control: if apply_cache_control && i == last_idx {

@@ -208,6 +208,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Persistent input quotes** — Human input retains its prompt and quote metadata through committed messages and transcript restoration. Display metadata does not change model request bodies or token estimates.
+
 - **Floating flow work summaries** — Final replies use shared work-fold state, layout, and controls. Mouse and keyboard toggles retain their state across message updates. Repeated tool IDs in separate dispatch blocks count as separate steps.
 
 - **Flow discovery** — Reading an unloaded flow no longer acquires its writer or interrupts a recorded turn. Inspection preserves incomplete tails and metadata caches while sharing recovery validation.

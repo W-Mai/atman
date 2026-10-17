@@ -905,6 +905,7 @@ pub(crate) fn flatten_message_with_output_store(
     output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
     presentation: Option<atman_runtime::user_input::UserInputPresentation>,
 ) {
+    let presentation = presentation.or_else(|| msg.input_presentation().cloned());
     match msg.role {
         MessageRole::User => {
             let text = msg.text_concat();

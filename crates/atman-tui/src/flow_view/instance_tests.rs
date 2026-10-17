@@ -127,6 +127,12 @@ fn native_views_share_committed_history_but_keep_disclosure_and_scoped_results()
     let mut first_end = 0;
     let mut sequence = 0;
     let at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+    let presentation = atman_runtime::user_input::UserInputPresentation {
+        prompt: "hi".into(),
+        quote: Some(atman_runtime::user_input::QuoteSnapshot {
+            text: "selected text".into(),
+        }),
+    };
     for turn in 0..2 {
         let lease = start(&mut store);
         store
@@ -139,8 +145,19 @@ fn native_views_share_committed_history_but_keep_disclosure_and_scoped_results()
                     cause: None,
                     correlation: None,
                     scope: None,
-                    payload: InboxPayload::Interjection {
-                        text: "input".into(),
+                    payload: if turn == 0 {
+                        InboxPayload::UserSubmission {
+                            content: atman_runtime::flow_store::inbox::UserContent {
+                                text: presentation.model_text(),
+                                images: vec![],
+                                presentation: Some(presentation.clone()),
+                            },
+                            invocation: Default::default(),
+                        }
+                    } else {
+                        InboxPayload::Interjection {
+                            text: "continue existing goal".into(),
+                        }
                     },
                 },
                 |_| Ok(()),
@@ -150,14 +167,11 @@ fn native_views_share_committed_history_but_keep_disclosure_and_scoped_results()
             .reserve_context_input(&lease, |_| true)
             .unwrap()
             .unwrap();
-        let mut input = Message::user_text(
-            lease.turn.clone(),
-            if turn == 0 {
-                "hi"
-            } else {
-                "continue existing goal"
-            },
-        );
+        let mut input = atman_runtime::flow_runtime::input::context_message(
+            store.pending_inputs().next().unwrap(),
+            &lease.turn,
+        )
+        .unwrap();
         if turn == 1 {
             input.origin = MessageOrigin::Internal;
         }
@@ -292,6 +306,9 @@ fn native_views_share_committed_history_but_keep_disclosure_and_scoped_results()
         2
     );
     let revision = main.revision_clock();
+    assert!(
+        matches!(&main[0], OutputItem::UserTurn { presentation: Some(value), .. } if value == &presentation)
+    );
     assert!(!main.sync(&source, None).unwrap());
     assert_eq!(main.revision_clock(), revision);
     assert_eq!(main.len(), floating.len());
