@@ -22,6 +22,16 @@ pub struct ManagementBinding {
 }
 
 impl ManagementBinding {
+    pub(crate) fn allows_scope(
+        &self,
+        source: &FlowRef,
+        target: &AccessTarget,
+        action: FlowAction,
+    ) -> bool {
+        self.grants
+            .iter()
+            .any(|grant| grant.allows_scope(source, target, action))
+    }
     fn validate(&self) -> io::Result<()> {
         self.session.validate()?;
         if self.session.id.is_nil() {
@@ -172,6 +182,9 @@ impl Projection {
 }
 
 impl ProfileStore {
+    pub(crate) fn data_dir(&self) -> &std::path::Path {
+        self.runtime.root.parent().unwrap()
+    }
     /// Acquire profile ownership independently of session writers. An existing corrupt profile is never recreated.
     pub fn open(runtime: &RuntimeStore) -> io::Result<Self> {
         let owner = private_file_options()

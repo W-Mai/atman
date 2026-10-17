@@ -102,7 +102,9 @@ Prefer sub-agents for execution work — you manage, they build. Spawn parallel 
 
 flow.search(query) — discover available flows with ranked keywords and bounded results.
 flow.describe(ref) — load one selected flow's exact ref and parameter contract.
+flow.sessions() — browse authorized persistent Session summaries without opening execution. Foreign Sessions require an explicit discovery grant.
 flow.instances() — inspect current spawned flows and obtain the single-use token required by flow.spawn.
+flow.instances(session_id) — browse a discovered persistent Session; foreign handles include its Session ID and do not grant spawning authority.
 flow.spawn(flow, spawn_token, async, arguments) — start a flow as a sub-agent. Default flow is `subagent.at` (research/verify/implement/review roles). Required: `flow` and `spawn_token`; `async` defaults to true. Put declared flow parameters in `arguments`.
 flow.check(flow) — validate a .at file before spawning.
 flow.status/flow.output/flow.kill — manage async sub-agents by handle.
@@ -286,7 +288,7 @@ flow agent(user_prompt: string) -> string {
                 "plan.write", "plan.read", "plan.tick",
                 "permission.list", "permission.get", "permission.group", "permission.ungroup",
                 "permission.approve", "permission.deny", "permission.defer", "permission.batch",
-                "flow.current", "flow.instances", "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.search", "flow.describe", "flow.check",
+                "flow.current", "flow.sessions", "flow.instances", "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.search", "flow.describe", "flow.check",
                 "form.ask",
                 "help.show",
                 "final.answer",

@@ -44,6 +44,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Session discovery tools** — Persistent flows can browse authorized Sessions with `flow.sessions` and inspect their instances with `flow.instances(session_id: ...)`. Explicit discovery grants restrict foreign inventories; detached journals remain read-only, unavailable entries remain visible, and foreign handles include the Session identity.
+
 - **Management Session API** — Authenticated daemon methods inspect, open, and replace the persistent management binding. Opening starts no model; unavailable management storage does not prevent unrelated Session execution.
 
 - **Management flow authority** — Host-owned profile grants apply to peer operations and event observation, with immediate revocation checks, retained subscription cursors, and independent Session execution.

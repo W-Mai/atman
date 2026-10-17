@@ -1,6 +1,7 @@
 //! Per-instance serialized storage work without blocking asynchronous executor threads.
 
 pub mod access;
+pub mod catalog;
 pub(crate) mod context;
 pub mod entry;
 pub mod execution;

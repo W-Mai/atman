@@ -34,11 +34,13 @@ pub enum AccessTarget {
 }
 
 impl AccessTarget {
-    fn contains(&self, target: &FlowRef) -> bool {
-        match self {
-            Self::Flow(flow) => flow == target,
-            Self::Session(session) => *session == target.session_id.0,
-            Self::AllSessions => true,
+    fn covers(&self, target: &Self) -> bool {
+        match (self, target) {
+            (Self::AllSessions, _) => true,
+            (Self::Session(left), Self::Session(right)) => left == right,
+            (Self::Session(session), Self::Flow(flow)) => *session == flow.session_id.0,
+            (Self::Flow(left), Self::Flow(right)) => left == right,
+            _ => false,
         }
     }
 }
@@ -52,8 +54,16 @@ pub struct FlowGrant {
 }
 
 impl FlowGrant {
+    pub(crate) fn allows_scope(
+        &self,
+        source: &FlowRef,
+        target: &AccessTarget,
+        action: FlowAction,
+    ) -> bool {
+        self.grantee == *source && self.target.covers(target) && self.actions.contains(&action)
+    }
     pub(crate) fn allows(&self, source: &FlowRef, target: &FlowRef, action: FlowAction) -> bool {
-        self.grantee == *source && self.target.contains(target) && self.actions.contains(&action)
+        self.allows_scope(source, &AccessTarget::Flow(target.clone()), action)
     }
 }
 
@@ -69,6 +79,24 @@ pub struct SessionAccess {
 }
 
 impl SessionAccess {
+    pub(crate) fn allows_scope(
+        &self,
+        source: &FlowRef,
+        target: &AccessTarget,
+        action: FlowAction,
+    ) -> bool {
+        if let AccessTarget::Flow(flow) = target {
+            return self.allows(source, flow, action);
+        }
+        if matches!(target, AccessTarget::Session(id) if *id == source.session_id.0)
+            && action == FlowAction::Discover
+        {
+            return true;
+        }
+        self.grants
+            .values()
+            .any(|record| !record.revoked && record.grant.allows_scope(source, target, action))
+    }
     pub fn grants(&self) -> impl Iterator<Item = &GrantRecord> {
         self.grants.values()
     }

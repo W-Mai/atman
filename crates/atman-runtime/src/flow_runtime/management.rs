@@ -10,7 +10,7 @@ use super::{RuntimeHost, SessionHandle, WeakRuntimeHost};
 use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::{
     FlowRef, SessionConfiguration,
-    access::{FlowAction, FlowGrant},
+    access::{AccessTarget, FlowAction, FlowGrant},
     invalid,
     profile::{ProfileSnapshot, ProfileStore, ReplaceManagement},
 };
@@ -24,6 +24,7 @@ pub struct ProfileView {
 
 #[derive(Clone)]
 pub struct ProfileHandle {
+    data_dir: std::path::PathBuf,
     commands: mpsc::Sender<Command>,
     state: watch::Receiver<ProfileView>,
     host: WeakRuntimeHost,
@@ -67,6 +68,7 @@ impl RuntimeHost {
             unavailable: Some("profile validation is pending".into()),
         });
         let handle = ProfileHandle {
+            data_dir: store.data_dir().to_path_buf(),
             commands,
             state: published,
             host: WeakRuntimeHost(Arc::downgrade(&self.directory)),
@@ -88,6 +90,16 @@ impl RuntimeHost {
         target: &FlowRef,
         action: FlowAction,
     ) -> bool {
+        self.allows_scope(session, source, &AccessTarget::Flow(target.clone()), action)
+    }
+
+    pub(crate) fn allows_scope(
+        &self,
+        session: &SessionHandle,
+        source: &FlowRef,
+        target: &AccessTarget,
+        action: FlowAction,
+    ) -> bool {
         if session.is_stopped() {
             return false;
         }
@@ -95,7 +107,7 @@ impl RuntimeHost {
             .access
             .read()
             .unwrap()
-            .allows(source, target, action)
+            .allows_scope(source, target, action)
         {
             return true;
         }
@@ -112,8 +124,19 @@ impl RuntimeHost {
                         .profile
                         .management
                         .as_ref()
-                        .is_some_and(|binding| binding.allows(source, target, action))
+                        .is_some_and(|binding| binding.allows_scope(source, target, action))
             })
+    }
+
+    pub fn session_catalog(&self) -> super::super::catalog::SessionCatalog {
+        let data = self
+            .directory
+            .profile
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|profile| profile.data_dir.clone());
+        super::super::catalog::SessionCatalog::new(Some(self.clone()), data)
     }
 }
 

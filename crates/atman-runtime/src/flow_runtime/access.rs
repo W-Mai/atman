@@ -13,7 +13,7 @@ use uuid::Uuid;
 use super::{host::RuntimeHost, send::SendAttempt};
 use crate::event::AtmanUuid;
 use crate::event_log::journal::CommitReceipt;
-use crate::flow_store::access::{FlowAction, SessionAccess};
+use crate::flow_store::access::{AccessTarget, FlowAction, SessionAccess};
 use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity};
 use crate::flow_store::publication::PublishedMessage;
 use crate::flow_store::subscription::{FlowEventFilter, FlowSubscription, SubscriptionRecord};
@@ -92,55 +92,69 @@ impl super::host::SessionHandle {
         limit: usize,
         authorize: impl Fn(&FlowRef) -> io::Result<()>,
     ) -> io::Result<InstancePage> {
-        if !(1..=50).contains(&limit) {
-            return Err(invalid("instance page limit must be between 1 and 50"));
-        }
-        let snapshot = self.snapshot().await?;
-        let registrations = &snapshot.catalog.flows;
-        let end = match before {
-            Some(id) => registrations
-                .iter()
-                .position(|entry| entry.id == id)
-                .ok_or_else(|| invalid("instance page cursor is not in this session"))?,
-            None => registrations.len(),
-        };
-        let start = end.saturating_sub(limit);
-        let mut instances = Vec::with_capacity(end - start);
-        for registration in registrations[start..end].iter().rev() {
-            let address = FlowRef {
-                session_id: self.id().into(),
-                instance_id: registration.id.clone(),
-            };
-            authorize(&address)?;
-            let summary = self.describe_flow(registration.id.clone()).await;
-            // An expired caller must not turn a failed authorization into an unavailable row.
-            authorize(&address)?;
-            let (entry, state, unavailable, loaded, trailing_bytes) = match summary {
-                Ok(view) => (
-                    Some(view.entry),
-                    Some(view.state),
-                    None,
-                    view.loaded,
-                    Some(view.trailing_bytes),
-                ),
-                Err(error) => (None, None, Some(error.to_string()), false, None),
-            };
-            instances.push(InstanceSummary {
-                address,
-                entry,
-                state,
-                unavailable,
-                loaded,
-                trailing_bytes,
-            });
-        }
-        Ok(InstancePage {
-            next: (start > 0).then(|| registrations[start].id.clone()),
-            instances,
-            total: registrations.len(),
-            catalog: snapshot.cursor,
+        instance_page(self.snapshot().await?, before, limit, authorize, |id| {
+            self.describe_flow(id)
         })
+        .await
     }
+}
+
+pub(crate) async fn instance_page<
+    Fut: std::future::Future<Output = io::Result<InstanceObservation>>,
+>(
+    snapshot: super::host::SessionSnapshot,
+    before: Option<FlowInstanceId>,
+    limit: usize,
+    authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    observe: impl Fn(FlowInstanceId) -> Fut,
+) -> io::Result<InstancePage> {
+    if !(1..=50).contains(&limit) {
+        return Err(invalid("instance page limit must be between 1 and 50"));
+    }
+    let registrations = &snapshot.catalog.flows;
+    let end = match before {
+        Some(id) => registrations
+            .iter()
+            .position(|entry| entry.id == id)
+            .ok_or_else(|| invalid("instance page cursor is not in this session"))?,
+        None => registrations.len(),
+    };
+    let start = end.saturating_sub(limit);
+    let mut instances = Vec::with_capacity(end - start);
+    for registration in registrations[start..end].iter().rev() {
+        let address = FlowRef {
+            session_id: snapshot.catalog.descriptor.id.into(),
+            instance_id: registration.id.clone(),
+        };
+        authorize(&address)?;
+        let summary = observe(registration.id.clone()).await;
+        // An expired caller must not turn a failed authorization into an unavailable row.
+        authorize(&address)?;
+        let (entry, state, unavailable, loaded, trailing_bytes) = match summary {
+            Ok(view) => (
+                Some(view.entry),
+                Some(view.state),
+                None,
+                view.loaded,
+                Some(view.trailing_bytes),
+            ),
+            Err(error) => (None, None, Some(error.to_string()), false, None),
+        };
+        instances.push(InstanceSummary {
+            address,
+            entry,
+            state,
+            unavailable,
+            loaded,
+            trailing_bytes,
+        });
+    }
+    Ok(InstancePage {
+        next: (start > 0).then(|| registrations[start].id.clone()),
+        instances,
+        total: registrations.len(),
+        catalog: snapshot.cursor,
+    })
 }
 
 impl FlowClient {
@@ -485,10 +499,7 @@ impl FlowClient {
     }
 
     fn authorize_delivery(&self, target: &FlowRef, action: FlowAction) -> io::Result<()> {
-        let session = self.host.session(self.lease.flow.session_id.0)?;
-        if session.is_stopped() || !Arc::ptr_eq(&session.access, &self.access) {
-            return Err(denied("source access owner is unavailable or replaced"));
-        }
+        let session = self.source_session()?;
         if self
             .host
             .allows_access(&session, &self.lease.flow, target, action)
@@ -497,6 +508,69 @@ impl FlowClient {
         } else {
             Err(denied("flow action is outside the current access grants"))
         }
+    }
+
+    fn source_session(&self) -> io::Result<super::host::SessionHandle> {
+        let session = self.host.session(self.lease.flow.session_id.0)?;
+        if session.is_stopped() || !Arc::ptr_eq(&session.access, &self.access) {
+            return Err(denied("source access owner is unavailable or replaced"));
+        }
+        Ok(session)
+    }
+
+    fn discovers_session(&self, id: Uuid) -> io::Result<bool> {
+        self.authenticate()?;
+        Ok(self.host.allows_scope(
+            &self.source_session()?,
+            self.source(),
+            &AccessTarget::Session(id),
+            FlowAction::Discover,
+        ))
+    }
+
+    /// Page authorized Session metadata, including detached catalogs. Only Session-wide discovery grants permit browsing a foreign container.
+    pub async fn sessions(
+        &self,
+        before: Option<Uuid>,
+        limit: usize,
+    ) -> io::Result<super::catalog::SessionPage> {
+        self.authenticate()?;
+        if !(1..=50).contains(&limit) {
+            return Err(invalid("session page limit must be between 1 and 50"));
+        }
+        let catalog = self.host.session_catalog();
+        let mut visible = Vec::new();
+        for id in catalog.ids().await? {
+            if self.discovers_session(id)? {
+                visible.push(id);
+            }
+        }
+        let eligible: Vec<_> = visible
+            .iter()
+            .rev()
+            .copied()
+            .filter(|id| before.is_none_or(|before| *id < before))
+            .collect();
+        let mut sessions = Vec::new();
+        for &id in eligible.iter().take(limit) {
+            let row = match catalog.overview(id).await {
+                Ok(view) => view.summary,
+                Err(error) => super::catalog::SessionSummary::unavailable(id, error),
+            };
+            sessions.push(row);
+        }
+        // Revocation or a stale invocation cannot leak either previously sampled rows or counts.
+        for &id in &visible {
+            if !self.discovers_session(id)? {
+                return Err(denied("session discovery authority changed"));
+            }
+        }
+        self.authenticate()?;
+        Ok(super::catalog::SessionPage {
+            next: (eligible.len() > limit).then(|| eligible[limit - 1]),
+            total: visible.len(),
+            sessions,
+        })
     }
 
     pub async fn inspect(&self, target: FlowRef) -> io::Result<FlowInstance<AtmanUuid>> {
@@ -518,15 +592,31 @@ impl FlowClient {
         before: Option<FlowInstanceId>,
         limit: usize,
     ) -> io::Result<InstancePage> {
-        self.authorize(self.source(), FlowAction::Discover)?;
+        self.instances_in(self.source().session_id.0, before, limit)
+            .await
+    }
+
+    pub async fn instances_in(
+        &self,
+        session: Uuid,
+        before: Option<FlowInstanceId>,
+        limit: usize,
+    ) -> io::Result<InstancePage> {
+        if !self.discovers_session(session)? {
+            return Err(denied(
+                "session discovery is outside the current access grants",
+            ));
+        }
         let page = self
             .host
-            .session(self.source().session_id.0)?
-            .instances(before, limit, |target| {
+            .session_catalog()
+            .instances(session, before, limit, |target| {
                 self.authorize(target, FlowAction::Discover)
             })
             .await?;
-        self.authorize(self.source(), FlowAction::Discover)?;
+        if !self.discovers_session(session)? {
+            return Err(denied("session discovery authority changed"));
+        }
         Ok(page)
     }
 

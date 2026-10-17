@@ -11,6 +11,7 @@ const DEFAULT_SEARCH_LIMIT: usize = 10;
 const MAX_SEARCH_LIMIT: usize = 50;
 
 pub struct FlowList;
+pub struct FlowSessions;
 pub struct FlowInstances;
 pub struct FlowCurrent;
 pub struct FlowSearch;
@@ -236,6 +237,57 @@ impl Tool for FlowList {
     }
 }
 
+impl Tool for FlowSessions {
+    fn name(&self) -> &str {
+        "flow.sessions"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Page Session metadata authorized for this persistent flow. Includes detached and unavailable Sessions without starting execution. Results contain no conversation or goal bodies. Use a returned session_id with flow.instances to browse its flows; foreign Sessions require explicit Session-wide Discover authority.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "before": {"type": "string", "description": "The next_cursor returned by the previous page; Sessions are ordered by descending UUID."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50}
+            },
+            "additionalProperties": false
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let failed = |error: &str| RuntimeError::ToolFailed(format!("flow.sessions: {error}"));
+            let client = ctx
+                .instance_client()?
+                .ok_or_else(|| failed("requires a persistent flow invocation"))?;
+            let before = optional_string_arg(&args, "before", "flow.sessions")?
+                .as_deref()
+                .map(uuid::Uuid::parse_str)
+                .transpose()
+                .map_err(|_| failed("invalid session page cursor"))?;
+            let limit = limit_arg(&args, "flow.sessions", MAX_SEARCH_LIMIT)?;
+            let page = client
+                .sessions(before, limit)
+                .await
+                .map_err(|error| failed(&error.to_string()))?;
+            Ok(Value::from_json(serde_json::json!({
+                "sessions": page.sessions,
+                "next_cursor": page.next,
+                "total": page.total,
+            })))
+        })
+    }
+}
+
 impl Tool for FlowInstances {
     fn name(&self) -> &str {
         "flow.instances"
@@ -247,7 +299,8 @@ impl Tool for FlowInstances {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "List flow instances in the current session, newest first, and return a single-use spawn_token. \
+            "List flow instances by newest registration. Defaults to the current session and returns a single-use spawn_token only for that session. \
+             An optional session_id browses another persistent Session with explicit Discover authority; foreign handles include the Session ID. \
              Persistent sessions include idle, prepared, interrupted, and closed instances. \
              Use next_cursor as before to read older instances. Inspect existing work before spawning; listing does not grant execution control.",
         )
@@ -257,6 +310,7 @@ impl Tool for FlowInstances {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "session_id": {"type": "string", "description": "Optional persistent Session UUID from flow.sessions; defaults to this flow's Session."},
                 "before": {"type": "string", "description": "The next_cursor returned by the previous page."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50}
             },
@@ -269,9 +323,11 @@ impl Tool for FlowInstances {
             let failed = |error: &str| RuntimeError::ToolFailed(format!("flow.instances: {error}"));
             let before = optional_string_arg(&args, "before", "flow.instances")?;
             let limit = limit_arg(&args, "flow.instances", MAX_SEARCH_LIMIT)?;
-            let registry = ctx.flow_registry.as_ref().ok_or_else(|| {
-                RuntimeError::ToolFailed("flow.instances: no flow registry available".into())
-            })?;
+            let session = optional_string_arg(&args, "session_id", "flow.instances")?
+                .as_deref()
+                .map(uuid::Uuid::parse_str)
+                .transpose()
+                .map_err(|_| failed("invalid Session ID"))?;
             let identity = ctx.flow_identity.as_ref().ok_or_else(|| {
                 RuntimeError::ToolFailed(
                     "flow.instances: trusted caller flow identity is unavailable".into(),
@@ -287,15 +343,21 @@ impl Tool for FlowInstances {
                     .transpose()
                     .map_err(|_| failed("invalid instance page cursor"))?
                     .map(|id| crate::flow_store::FlowInstanceId::new(id.into()));
+                let session = session.unwrap_or(client.source().session_id.0);
+                let foreign = session != client.source().session_id.0;
                 let page = client
-                    .instances(cursor, limit)
+                    .instances_in(session, cursor, limit)
                     .await
                     .map_err(|error| failed(&error.to_string()))?;
                 let instances: Vec<_> = page
                     .instances
                     .into_iter()
                     .map(|item| {
-                        let handle = item.address.instance_id.to_string();
+                        let handle = if foreign {
+                            format!("{}/{}", item.address.session_id.0, item.address.instance_id)
+                        } else {
+                            item.address.instance_id.to_string()
+                        };
                         let mut value = item
                             .state
                             .as_ref()
@@ -320,14 +382,34 @@ impl Tool for FlowInstances {
                         value
                     })
                     .collect();
+                let spawn_token = if foreign {
+                    None
+                } else {
+                    Some(
+                        ctx.flow_registry
+                            .as_ref()
+                            .ok_or_else(|| failed("no flow registry available"))?
+                            .issue_instance_spawn_permit(identity, page.catalog.clone()),
+                    )
+                };
                 return Ok(Value::from_json(serde_json::json!({
+                    "session_id": session,
                     "instances": instances,
-                    "spawn_token": registry.issue_instance_spawn_permit(identity, page.catalog.clone()),
+                    "spawn_token": spawn_token,
                     "next_cursor": page.next.map(|id| id.to_string()),
                     "total": page.total,
                     "catalog_revision": page.catalog,
                 })));
             }
+            if session.is_some() {
+                return Err(failed(
+                    "cross-session discovery requires a persistent flow invocation",
+                ));
+            }
+            let registry = ctx
+                .flow_registry
+                .as_ref()
+                .ok_or_else(|| failed("no flow registry available"))?;
             let (instances, token) = registry.inspect_for_spawn(identity);
             let end = match before.as_deref() {
                 Some(handle) => instances

@@ -26,6 +26,212 @@ fn session_descriptor() -> SessionDescriptor {
 }
 
 #[tokio::test]
+async fn session_discovery_requires_container_authority_and_preserves_detached_execution() {
+    use atman_runtime::flow_store::{
+        access::{AccessTarget, FlowAction, FlowGrant},
+        profile::ProfileStore,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let profile = host
+        .attach_profile(ProfileStore::open(&root).unwrap())
+        .unwrap();
+    assert!(profile.snapshot().await.unwrap().unavailable.is_none());
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let caller = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&caller, FlowTransition::Activated).await;
+    let lease = start(&caller).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    let remote_info = session_descriptor();
+    let mut detached = root.create_session(remote_info.clone()).unwrap();
+    let mut target = detached
+        .create_flow(flow_descriptor(remote_info.id))
+        .unwrap();
+    target
+        .transition(target.state().revision(), FlowTransition::Activated)
+        .unwrap();
+    target
+        .transition(
+            target.state().revision(),
+            FlowTransition::TurnStarted {
+                turn: TurnId::now(),
+                run: RunId::now(),
+            },
+        )
+        .unwrap();
+    let flow_log = target.dir().join("events.jsonl");
+    let flow_bytes = std::fs::read(&flow_log).unwrap();
+    let hidden = root.create_session(session_descriptor()).unwrap();
+    std::fs::write(hidden.dir().join("events.jsonl"), b"corrupt\n").unwrap();
+    let single = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: caller.address().clone(),
+        target: AccessTarget::Flow(target.state().address().clone()),
+        actions: [FlowAction::Discover].into(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, single)
+        .await
+        .unwrap();
+    let own = client.sessions(None, 50).await.unwrap();
+    assert_eq!(own.total, 1);
+    assert_eq!(own.sessions[0].session_id, info.id);
+    assert!(client.instances_in(remote_info.id, None, 50).await.is_err());
+    let grant = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: caller.address().clone(),
+        target: AccessTarget::Session(remote_info.id),
+        actions: [FlowAction::Discover].into(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
+        .await
+        .unwrap();
+    let first = client.sessions(None, 1).await.unwrap();
+    let second = client.sessions(first.next, 1).await.unwrap();
+    assert_eq!(first.total, 2);
+    assert_eq!(second.total, 2);
+    assert!(first.sessions[0].session_id > second.sessions[0].session_id);
+    assert!(second.next.is_none());
+    let page = client.instances_in(remote_info.id, None, 1).await.unwrap();
+    assert_eq!(page.total, 1);
+    assert!(!page.instances[0].loaded);
+    assert_eq!(page.instances[0].state.as_ref(), Some(target.state()));
+    assert_eq!(std::fs::read(&flow_log).unwrap(), flow_bytes);
+    assert!(host.session(remote_info.id).is_err());
+    assert!(client.sessions(None, 0).await.is_err());
+    assert!(client.sessions(None, 51).await.is_err());
+    let key = Uuid::new_v4().into();
+    change(&caller, FlowTransition::ExecutionPaused { key }).await;
+    assert!(client.sessions(None, 50).await.is_err());
+    assert!(client.instances_in(remote_info.id, None, 1).await.is_err());
+    change(&caller, FlowTransition::ExecutionResumed { key }).await;
+    assert_eq!(client.sessions(None, 50).await.unwrap().total, 2);
+    session
+        .revoke_access(session.snapshot().await.unwrap().cursor, grant.id)
+        .await
+        .unwrap();
+    assert_eq!(client.sessions(None, 50).await.unwrap().total, 1);
+    assert!(client.instances_in(remote_info.id, None, 1).await.is_err());
+    change(
+        &caller,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    assert!(client.sessions(None, 50).await.is_err());
+}
+
+#[tokio::test]
+async fn session_discovery_tools_share_management_grants_and_return_qualified_handles() {
+    use atman_runtime::ValueJson;
+    use atman_runtime::flow_store::{
+        access::{AccessTarget, FlowAction, FlowGrant},
+        profile::{ManagementBinding, ProfileStore, ReplaceManagement},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let mut store = ProfileStore::open(&root).unwrap();
+    let info = store
+        .bootstrap(Default::default())
+        .unwrap()
+        .management
+        .unwrap()
+        .session;
+    let host = RuntimeHost::default();
+    let profile = host.attach_profile(store).unwrap();
+    let session = host
+        .attach_session(root.open_session(info.id).unwrap())
+        .unwrap();
+    let remote_info = session_descriptor();
+    let mut remote = root.create_session(remote_info.clone()).unwrap();
+    let target = remote.create_flow(flow_descriptor(remote_info.id)).unwrap();
+    let address = target.state().address().clone();
+    let bytes = std::fs::read(target.dir().join("events.jsonl")).unwrap();
+    let damaged = root.create_session(session_descriptor()).unwrap();
+    std::fs::write(damaged.dir().join("events.jsonl"), b"corrupt\n").unwrap();
+    let source = format!(
+        r#"
+        flow main() -> any {{
+            sessions = flow.sessions()
+            remote = flow.instances(session_id: "{}")
+            local = flow.instances()
+            return [sessions, remote, local]
+        }}
+    "#,
+        remote_info.id
+    );
+    let caller = session
+        .create_flow(program_descriptor(info.id, source))
+        .await
+        .unwrap();
+    let request = ReplaceManagement {
+        request_id: Uuid::new_v4(),
+        expected: profile.snapshot().await.unwrap().profile.cursor,
+        binding: ManagementBinding {
+            session: info,
+            grants: vec![FlowGrant {
+                id: Uuid::new_v4(),
+                grantee: caller.address().clone(),
+                target: AccessTarget::AllSessions,
+                actions: [FlowAction::Discover].into(),
+            }],
+        },
+    };
+    profile.replace(request).await.unwrap();
+    change(&caller, FlowTransition::Activated).await;
+    let result = invoke(&caller, Executor::new())
+        .await
+        .result
+        .unwrap()
+        .to_json()
+        .unwrap();
+    assert_eq!(result[0]["total"], 3);
+    let rows = result[0]["sessions"].as_array().unwrap();
+    assert!(rows.iter().any(|row| row["status"] == "unavailable"));
+    assert!(rows.iter().any(|row| row["status"] == "running"));
+    assert!(rows.iter().any(|row| row["status"] == "detached"));
+    assert!(
+        rows.iter()
+            .all(|row| row.get("goal").is_none() && row.get("configuration").is_none())
+    );
+    assert_eq!(result[1]["session_id"], remote_info.id.to_string());
+    let handle = result[1]["instances"][0]["handle"].as_str().unwrap();
+    let lease = start(&caller).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    assert_eq!(client.resolve_address(handle).unwrap(), address);
+    assert_eq!(result[1]["instances"][0]["status"], "detached");
+    assert_eq!(result[1]["instances"][0]["recorded_status"], "prepared");
+    assert!(result[1]["spawn_token"].is_null());
+    assert!(
+        result[2]["spawn_token"]
+            .as_str()
+            .unwrap()
+            .starts_with("spawn_")
+    );
+    assert_eq!(
+        std::fs::read(target.dir().join("events.jsonl")).unwrap(),
+        bytes
+    );
+    assert!(host.session(remote_info.id).is_err());
+    change(
+        &caller,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn management_authority_is_explicit_revocable_and_shared_with_observers() {
     use atman_runtime::flow_store::{
         access::{AccessTarget, FlowAction, FlowGrant},

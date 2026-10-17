@@ -1,0 +1,244 @@
+//! Shared session and instance discovery without opening execution owners.
+
+use std::{io, path::PathBuf, sync::Arc};
+
+use atman_rt::{InstanceActivity, InstanceState};
+use serde::Serialize;
+use uuid::Uuid;
+
+use super::{
+    access::{InstanceObservation, InstancePage, instance_page},
+    host::{RuntimeHost, SessionHandle, SessionObservation, SessionSnapshot},
+};
+use crate::{
+    event_log::journal::CommitReceipt,
+    flow_store::{FlowInstanceId, FlowRef, RuntimeStore, SessionProjection, invalid},
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogStatus {
+    Running,
+    Idle,
+    Closed,
+    Detached,
+    Unavailable,
+}
+
+/// Discoverable metadata; conversation, goal bodies, and configuration are excluded.
+#[derive(Debug, Serialize)]
+pub struct SessionSummary {
+    pub session_id: Uuid,
+    pub title: Option<String>,
+    pub project_root: Option<PathBuf>,
+    pub status: CatalogStatus,
+    pub flow_count: Option<usize>,
+    pub default_flow: Option<FlowInstanceId>,
+    pub loaded_flows: Option<usize>,
+    pub catalog: Option<CommitReceipt>,
+    pub trailing_bytes: Option<u64>,
+    pub unavailable: Option<String>,
+}
+
+/// Trusted operator overview. Peer discovery exposes only `summary`.
+pub struct SessionOverview {
+    pub summary: SessionSummary,
+    pub default_goal: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionPage {
+    pub sessions: Vec<SessionSummary>,
+    pub next: Option<Uuid>,
+    pub total: usize,
+}
+
+#[derive(Clone)]
+pub struct SessionCatalog {
+    host: Option<RuntimeHost>,
+    data_dir: Option<PathBuf>,
+}
+
+impl SessionCatalog {
+    /// Host-only source selection. A missing data directory restricts discovery to attached owners.
+    pub fn new(host: Option<RuntimeHost>, data_dir: Option<PathBuf>) -> Self {
+        Self { host, data_dir }
+    }
+
+    pub async fn ids(&self) -> io::Result<Vec<Uuid>> {
+        let mut ids = match self.data_dir.clone() {
+            Some(data) => tokio::task::spawn_blocking(move || RuntimeStore::session_ids(&data))
+                .await
+                .map_err(io::Error::other)??,
+            None => Vec::new(),
+        };
+        if let Some(host) = &self.host {
+            ids.extend(host.sessions());
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    fn attached(&self, id: Uuid) -> io::Result<Option<SessionHandle>> {
+        match self.host.as_ref().map(|host| host.session(id)) {
+            Some(Ok(session)) => Ok(Some(session)),
+            Some(Err(error)) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(None),
+        }
+    }
+
+    async fn recorded(&self, id: Uuid) -> io::Result<crate::flow_store::SessionInspection> {
+        let data = self.data_dir.clone().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "session is not attached and no catalog directory is bound",
+            )
+        })?;
+        tokio::task::spawn_blocking(move || RuntimeStore::inspect_session(&data, id))
+            .await
+            .map_err(io::Error::other)?
+    }
+
+    pub async fn overview(&self, id: Uuid) -> io::Result<SessionOverview> {
+        if let Some(session) = self.attached(id)? {
+            return Ok(SessionOverview::live(session.observe().await?));
+        }
+        let read = self.recorded(id).await;
+        // Prefer an owner which attached during disk inspection.
+        if let Some(session) = self.attached(id)? {
+            return Ok(SessionOverview::live(session.observe().await?));
+        }
+        let read = read?;
+        Ok(SessionOverview {
+            summary: SessionSummary::recorded(
+                &read.projection,
+                read.journal
+                    .cursor
+                    .ok_or_else(|| invalid("session journal has no creation"))?,
+                Some(read.journal.trailing_bytes),
+            ),
+            default_goal: None,
+        })
+    }
+
+    pub async fn instances(
+        &self,
+        id: Uuid,
+        before: Option<FlowInstanceId>,
+        limit: usize,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<InstancePage> {
+        if let Some(session) = self.attached(id)? {
+            return session.instances(before, limit, authorize).await;
+        }
+        let read = self.recorded(id).await;
+        if let Some(session) = self.attached(id)? {
+            return session.instances(before, limit, authorize).await;
+        }
+        let read = Arc::new(read?);
+        let snapshot = SessionSnapshot {
+            catalog: read.projection.clone(),
+            cursor: read
+                .journal
+                .cursor
+                .clone()
+                .ok_or_else(|| invalid("session journal has no creation"))?,
+        };
+        instance_page(snapshot, before, limit, authorize, move |instance| {
+            let read = read.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    read.inspect_flow(&instance)
+                        .map(|flow| InstanceObservation {
+                            entry: flow.descriptor.content.title().into(),
+                            state: flow.state,
+                            loaded: false,
+                            trailing_bytes: flow.journal.trailing_bytes,
+                        })
+                })
+                .await
+                .map_err(io::Error::other)?
+            }
+        })
+        .await
+    }
+}
+
+impl SessionOverview {
+    fn live(view: SessionObservation) -> Self {
+        let mut summary =
+            SessionSummary::recorded(&view.snapshot.catalog, view.snapshot.cursor, None);
+        summary.status = if view.loaded.iter().any(|flow| {
+            matches!(
+                flow.execution.state(),
+                InstanceState::Open(InstanceActivity::Active(_))
+                    | InstanceState::Closing { active: Some(_) }
+            )
+        }) {
+            CatalogStatus::Running
+        } else if view.loaded.len() < view.snapshot.catalog.flows.len() {
+            CatalogStatus::Detached
+        } else if !view.loaded.is_empty()
+            && view
+                .loaded
+                .iter()
+                .all(|flow| matches!(flow.execution.state(), InstanceState::Closed))
+        {
+            CatalogStatus::Closed
+        } else {
+            CatalogStatus::Idle
+        };
+        summary.loaded_flows = Some(view.loaded.len());
+        let default_goal = view.loaded.iter().find_map(|flow| {
+            (view.snapshot.catalog.default_flow.as_ref()
+                == Some(&flow.execution.address().instance_id))
+            .then(|| flow.goal.as_ref().map(|goal| goal.objective.clone()))
+            .flatten()
+        });
+        Self {
+            summary,
+            default_goal,
+        }
+    }
+}
+
+impl SessionSummary {
+    fn recorded(
+        catalog: &SessionProjection,
+        cursor: CommitReceipt,
+        trailing_bytes: Option<u64>,
+    ) -> Self {
+        Self {
+            session_id: catalog.descriptor.id,
+            title: Some(catalog.descriptor.title.clone()),
+            project_root: catalog
+                .descriptor
+                .project
+                .as_ref()
+                .map(|project| project.root().to_owned()),
+            status: CatalogStatus::Detached,
+            flow_count: Some(catalog.flows.len()),
+            default_flow: catalog.default_flow.clone(),
+            loaded_flows: None,
+            catalog: Some(cursor),
+            trailing_bytes,
+            unavailable: None,
+        }
+    }
+
+    pub fn unavailable(id: Uuid, error: impl std::fmt::Display) -> Self {
+        Self {
+            session_id: id,
+            title: None,
+            project_root: None,
+            status: CatalogStatus::Unavailable,
+            flow_count: None,
+            default_flow: None,
+            loaded_flows: None,
+            catalog: None,
+            trailing_bytes: None,
+            unavailable: Some(error.to_string()),
+        }
+    }
+}
