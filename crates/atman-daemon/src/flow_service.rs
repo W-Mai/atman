@@ -470,6 +470,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
             let instances = page.instances.into_iter().map(|row| json!({
                 "flow": address(&row.address), "entry": row.entry,
                 "execution": row.state.as_ref().map(execution), "unavailable": row.unavailable,
+                "loaded": row.loaded, "trailing_bytes": row.trailing_bytes,
             })).collect::<Vec<_>>();
             Ok(
                 json!({"instances": instances, "next": page.next, "total": page.total, "catalog": page.catalog}),

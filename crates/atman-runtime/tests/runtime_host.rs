@@ -4946,8 +4946,10 @@ async fn instance_discovery_preserves_unavailable_rows_and_stable_pages_without_
     assert_eq!(page.total, 3);
     assert_eq!(page.instances[0].address, *a.address());
     assert_eq!(page.instances[1].address, *unavailable.address());
-    assert!(page.instances[1].state.is_none());
-    assert!(page.instances[1].unavailable.is_some());
+    assert_eq!(page.instances[1].state.as_ref(), Some(store.state()));
+    assert!(page.instances[1].unavailable.is_none());
+    assert!(!page.instances[1].loaded);
+    assert!(page.instances[0].loaded);
     assert_eq!(page.next.as_ref(), Some(&unavailable.address().instance_id));
     let inserted = session.create_flow(flow_descriptor(info.id)).await.unwrap();
     let next = client.instances(page.next, 2).await.unwrap();
@@ -4977,16 +4979,26 @@ async fn instance_discovery_preserves_unavailable_rows_and_stable_pages_without_
     assert!(row.unavailable.is_none());
     assert!(matches!(
         row.state.as_ref().unwrap().state(),
-        InstanceState::Open(InstanceActivity::Interrupted { .. })
+        InstanceState::Open(InstanceActivity::Active(_))
     ));
+    assert!(!row.loaded);
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(journal_path)
+        .open(&journal_path)
         .unwrap();
     fs2::FileExt::try_lock_exclusive(&file)
         .expect("discovery must release an inactive journal, not retain a context worker");
     fs2::FileExt::unlock(&file).unwrap();
+    std::fs::write(&journal_path, b"corrupt\n").unwrap();
+    let page = client.instances(None, 4).await.unwrap();
+    let damaged = page
+        .instances
+        .iter()
+        .find(|item| item.address == *unavailable.address())
+        .unwrap();
+    assert!(damaged.state.is_none());
+    assert!(damaged.unavailable.is_some());
     change(
         &a,
         FlowTransition::TurnFinished {
@@ -5561,6 +5573,17 @@ async fn directory_reopens_only_after_writer_handoff_and_recovers_unknown_execut
     .await;
     let context = worker.context();
     let store = worker.shutdown().await.unwrap();
+    let journal = store.dir().join("events.jsonl");
+    let before = std::fs::read(&journal).unwrap();
+    let recorded = store.state().clone();
+    assert_eq!(
+        session
+            .describe_flow(description.address.instance_id.clone())
+            .await
+            .unwrap()
+            .state,
+        recorded
+    );
     assert!(
         session
             .open_flow(description.address.instance_id.clone())
@@ -5568,6 +5591,15 @@ async fn directory_reopens_only_after_writer_handoff_and_recovers_unknown_execut
             .is_err()
     );
     drop(store);
+    assert_eq!(
+        session
+            .describe_flow(description.address.instance_id.clone())
+            .await
+            .unwrap()
+            .state,
+        recorded
+    );
+    assert_eq!(std::fs::read(&journal).unwrap(), before);
     let reopened = host.flow(&description.address).await.unwrap();
     assert!(!Arc::ptr_eq(&context, &reopened.context()));
     assert!(matches!(

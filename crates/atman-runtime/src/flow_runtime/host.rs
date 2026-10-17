@@ -6,7 +6,6 @@ use std::{
     sync::{Arc, Mutex, RwLock, Weak},
 };
 
-use atman_rt::FlowInstance;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
@@ -17,10 +16,10 @@ pub use management::{ProfileHandle, ProfileView};
 
 use super::{
     FlowSnapshot, FlowWorker,
+    access::InstanceObservation,
     execution::TurnRequest,
     scheduler::{FlowScheduler, PrepareTurn, SchedulingStatus},
 };
-use crate::event::AtmanUuid;
 use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::access::{FlowGrant, SessionAccess};
 use crate::flow_store::inbox::{Acceptance, DeliveryRequest};
@@ -298,7 +297,7 @@ enum CatalogCommand {
     Shutdown(oneshot::Sender<io::Result<()>>),
     Describe {
         id: FlowInstanceId,
-        reply: oneshot::Sender<io::Result<(String, FlowInstance<AtmanUuid>)>>,
+        reply: oneshot::Sender<io::Result<InstanceObservation>>,
     },
     Schedule {
         id: FlowInstanceId,
@@ -510,11 +509,8 @@ impl SessionHandle {
         .await
     }
 
-    /// Read a registered instance without retaining its conversation or installing observers. Live writers provide their current state; inactive journals recover under catalog ownership.
-    pub async fn describe_flow(
-        &self,
-        id: FlowInstanceId,
-    ) -> io::Result<(String, FlowInstance<AtmanUuid>)> {
+    /// Read a registered instance without retaining its conversation or installing observers. Live writers provide acknowledged state; inactive journals are inspected without recovery or mutation.
+    pub async fn describe_flow(&self, id: FlowInstanceId) -> io::Result<InstanceObservation> {
         let existing = self
             .flows
             .lock()
@@ -525,10 +521,12 @@ impl SessionHandle {
         if let Some(worker) = existing {
             return worker
                 .request(|store| {
-                    Ok((
-                        store.descriptor().content.title().to_owned(),
-                        store.state().clone(),
-                    ))
+                    Ok(InstanceObservation {
+                        entry: store.descriptor().content.title().to_owned(),
+                        state: store.state().clone(),
+                        loaded: true,
+                        trailing_bytes: 0,
+                    })
                 })
                 .await;
         }
@@ -609,19 +607,21 @@ async fn serve_catalog(
                 let result = if let Some(worker) = existing {
                     worker
                         .request(|store| {
-                            Ok((
-                                store.descriptor().content.title().to_owned(),
-                                store.state().clone(),
-                            ))
+                            Ok(InstanceObservation {
+                                entry: store.descriptor().content.title().to_owned(),
+                                state: store.state().clone(),
+                                loaded: true,
+                                trailing_bytes: 0,
+                            })
                         })
                         .await
                 } else {
                     let returned = tokio::task::spawn_blocking(move || {
-                        let result = store.open_flow(&id).map(|flow| {
-                            (
-                                flow.descriptor().content.title().to_owned(),
-                                flow.state().clone(),
-                            )
+                        let result = store.inspect_flow(&id).map(|flow| InstanceObservation {
+                            entry: flow.descriptor.content.title().to_owned(),
+                            state: flow.state,
+                            loaded: false,
+                            trailing_bytes: flow.journal.trailing_bytes,
                         });
                         (store, result)
                     })

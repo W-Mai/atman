@@ -17,6 +17,7 @@ pub mod planning;
 pub mod process_watch;
 pub mod profile;
 pub mod publication;
+mod replay;
 pub mod subscription;
 pub mod trace;
 pub mod view;
@@ -512,6 +513,53 @@ pub struct SessionInspection {
     pub journal: crate::event_log::journal::JournalInspection,
 }
 
+/// Recorded flow facts without execution ownership, recovery, or cache writes. An active recorded turn is not evidence of a currently running owner.
+#[derive(Debug)]
+pub struct FlowInspection {
+    pub descriptor: FlowDescriptor,
+    pub state: FlowInstance<AtmanUuid>,
+    pub journal: crate::event_log::journal::JournalInspection,
+}
+
+impl SessionInspection {
+    pub fn inspect_flow(&self, id: &FlowInstanceId) -> io::Result<FlowInspection> {
+        inspect_registered_flow(&self.dir, &self.projection, id)
+    }
+}
+
+fn inspect_registered_flow(
+    dir: &Path,
+    catalog: &SessionProjection,
+    id: &FlowInstanceId,
+) -> io::Result<FlowInspection> {
+    let registration = catalog
+        .flows
+        .iter()
+        .find(|flow| &flow.id == id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "flow is not registered"))?;
+    let address = FlowRef {
+        session_id: catalog.descriptor.id.into(),
+        instance_id: id.clone(),
+    };
+    let mut replay = replay::FlowReplay::default();
+    let journal = Journal::inspect(
+        &dir.join("flows").join(id.to_string()).join("events.jsonl"),
+        id.0.0,
+        |receipt, facts| replay.apply(&address, receipt, facts),
+    )?;
+    let (descriptor, state, _) = replay
+        .projection
+        .ok_or_else(|| invalid("flow creation was not committed"))?;
+    if descriptor.creation_request != registration.creation_request {
+        return Err(invalid("flow creation does not match session registration"));
+    }
+    Ok(FlowInspection {
+        descriptor,
+        state,
+        journal,
+    })
+}
+
 /// The namespace never overlaps published flat session logs.
 pub struct RuntimeStore {
     root: PathBuf,
@@ -773,6 +821,11 @@ impl SessionStore {
         Ok(store)
     }
 
+    /// Inspect retained facts without opening a flow writer or recovering interrupted execution.
+    pub fn inspect_flow(&self, id: &FlowInstanceId) -> io::Result<FlowInspection> {
+        inspect_registered_flow(&self.dir, &self.projection, id)
+    }
+
     fn restore_flow(&self, id: &FlowInstanceId) -> io::Result<FlowStore> {
         let registration = self
             .projection
@@ -898,248 +951,29 @@ impl FlowStore {
     }
 
     fn open(dir: &Path, owner: Arc<SessionOwner>, address: &FlowRef) -> io::Result<Self> {
-        let mut projection: Option<(FlowDescriptor, FlowInstance<AtmanUuid>, Inbox)> = None;
-        let mut outbox = outbox::Outbox::default();
-        let mut publications = publication::Publications::default();
-        let mut subscriptions = subscription::Subscriptions::default();
-        let mut process_watches = process_watch::ProcessWatches::default();
-        let mut activation = None;
-        let mut workspace = None;
-        let mut closed = None;
-        let mut completions = completion::Completions::default();
-        let mut checkpoints = context::Checkpoints::default();
-        let mut goals = goal::Goals::default();
-        let mut planning = planning::Planning::default();
-        let mut trace = trace::ExecutionTrace::default();
-        let mut history = history::HistoryProgress::default();
-        let mut cursor = None;
+        let mut replay = replay::FlowReplay::default();
         let (journal, recovered_tail) = Journal::open(
             &dir.join("events.jsonl"),
             address.instance_id.0.0,
-            |receipt, facts| {
-                FlowFact::validate_batch(&facts)?;
-                if let Some((descriptor, _, _)) = &projection {
-                    FlowJournal::validate(
-                        matches!(descriptor.content, FlowContent::History(_)),
-                        &facts,
-                    )?;
-                }
-                for fact in facts {
-                    match (&mut projection, fact) {
-                        (None, FlowFact::Created(descriptor)) if &descriptor.address == address => {
-                            let state = descriptor.content.initial_state(address.clone())?;
-                            projection = Some((*descriptor, state, Inbox::default()));
-                        }
-                        (Some((descriptor, _, _)), FlowFact::LegacyRecords(records)) => {
-                            let FlowContent::History(archive) = &descriptor.content else {
-                                return Err(invalid("legacy records require a history-only flow"));
-                            };
-                            history = history.advance(archive, &records)?;
-                        }
-                        (Some((_, state, inbox)), FlowFact::Transition(mut transition)) => {
-                            let original = transition.clone();
-                            let revision = state.revision();
-                            transition.apply(state)?;
-                            if original != transition || revision == state.revision() {
-                                return Err(invalid("noncanonical flow transition"));
-                            }
-                            inbox.state_changed(state, &receipt);
-                            if matches!(state.state(), InstanceState::Closed) {
-                                closed = Some(receipt.clone());
-                            }
-                            if matches!(
-                                state.state(),
-                                InstanceState::Closing { .. } | InstanceState::Closed
-                            ) {
-                                inbox.close(&receipt);
-                                subscriptions.close();
-                                process_watches.close();
-                            }
-                        }
-                        (Some((_, state, _)), FlowFact::WorkspaceRequested(request)) => {
-                            request.replay(state, workspace.as_ref())?;
-                            workspace = Some(*request);
-                        }
-                        (Some((descriptor, state, inbox)), FlowFact::Activated(record)) => {
-                            if record.input.workspace != workspace {
-                                return Err(invalid(
-                                    "activation workspace does not match its recorded request",
-                                ));
-                            }
-                            if activation.is_some() {
-                                return Err(invalid("duplicate instance activation"));
-                            }
-                            *state = record.validate(
-                                descriptor,
-                                state,
-                                inbox,
-                                cursor
-                                    .as_ref()
-                                    .ok_or_else(|| invalid("activation precedes creation"))?,
-                            )?;
-                            inbox.state_changed(state, &receipt);
-                            record.apply(inbox, &receipt);
-                            activation = Some(*record);
-                        }
-                        (Some((_, state, inbox)), FlowFact::TurnCompleted(completion)) => {
-                            inbox.turn_completed(&completion, &receipt);
-                            completions.replay(state, *completion, receipt.clone())?;
-                            inbox.state_changed(state, &receipt);
-                        }
-                        (Some((_, state, inbox)), FlowFact::EnvelopeAccepted(envelope)) => {
-                            if !state.accepts_input() || &envelope.request.recipient != address {
-                                return Err(invalid("acceptance fact targets an unavailable flow"));
-                            }
-                            inbox.validate(&envelope)?;
-                            continuation::validate_request(
-                                &envelope.request,
-                                state,
-                                goals.current(),
-                            )?;
-                            inbox.apply(*envelope, receipt.clone());
-                        }
-                        (Some((_, state, inbox)), FlowFact::InputCommitted(input)) => {
-                            inbox.replay_input(state, *input, receipt.clone())?;
-                        }
-                        (Some((_, state, _)), FlowFact::MessagePublished(publication)) => {
-                            publications.validate(state, &publication)?;
-                            publications.apply(*publication, receipt.clone());
-                        }
-                        (Some((_, state, _)), FlowFact::ExecutionEvents(events)) => {
-                            trace.validate(&events, state, &completions)?;
-                            trace.apply(events, receipt.clone());
-                        }
-                        (Some((_, state, inbox)), FlowFact::GoalUpdated(update)) => {
-                            let record = goals.prepare(state, &update)?;
-                            if let Some(input) = &update.input {
-                                inbox.validate(input)?;
-                            }
-                            inbox.goal_changed(record.as_ref(), &receipt);
-                            if let Some(input) = &update.input {
-                                inbox.apply(input.clone(), receipt.clone());
-                            }
-                            goals.apply(*update, record, receipt.clone());
-                        }
-                        (Some((_, state, _)), FlowFact::PlanningUpdated(update)) => {
-                            let (next, result) = planning.prepare(state, &update)?;
-                            planning.apply(*update, next, result, receipt.clone());
-                        }
-                        (Some((_, state, inbox)), FlowFact::ContextCheckpoint(checkpoint)) => {
-                            let window = publication::context_window(
-                                inbox,
-                                &publications,
-                                activation.as_ref(),
-                                checkpoints.latest(),
-                            );
-                            checkpoints.validate(state, &checkpoint, &window)?;
-                            checkpoints.apply(*checkpoint, receipt.clone());
-                        }
-                        (Some((_, state, inbox)), FlowFact::FlowSubscribed(record)) => {
-                            if !state.accepts_input()
-                                || process_watches.contains(record.subscription.id)
-                            {
-                                return Err(invalid("subscription recipient is unavailable"));
-                            }
-                            subscription::Subscriptions::validate_reply(&record, inbox, address)?;
-                            subscriptions.register(*record)?;
-                        }
-                        (Some((_, _, inbox)), FlowFact::FlowUnsubscribed(id)) => {
-                            subscriptions.cancel(id, inbox, &receipt)?
-                        }
-                        (Some((_, state, inbox)), FlowFact::EventsObserved(observation)) => {
-                            if !state.accepts_input() {
-                                return Err(invalid("observation recipient is unavailable"));
-                            }
-                            subscriptions.validate(&observation, inbox, address)?;
-                            subscriptions.apply(&observation, inbox, &receipt);
-                        }
-                        (Some((_, state, inbox)), FlowFact::FlowWatchesExpired(expiry)) => {
-                            if !state.accepts_input() {
-                                return Err(invalid("flow expiry recipient is unavailable"));
-                            }
-                            subscriptions.validate_expiry(&expiry, inbox, address)?;
-                            subscriptions.apply_expiry(*expiry, inbox, &receipt);
-                        }
-                        (Some((_, state, _)), FlowFact::ProcessWatchRegistered(record)) => {
-                            if !state.accepts_input() || subscriptions.contains(record.watch.id) {
-                                return Err(invalid("process watch recipient is unavailable"));
-                            }
-                            process_watches.register(*record)?;
-                        }
-                        (Some(_), FlowFact::ProcessWatchCancelled(id)) => {
-                            process_watches.cancel(id)?
-                        }
-                        (Some((_, state, inbox)), FlowFact::ProcessObserved(observation)) => {
-                            if !state.accepts_input() {
-                                return Err(invalid(
-                                    "process observation recipient is unavailable",
-                                ));
-                            }
-                            process_watches.validate(&observation, inbox, address)?;
-                            process_watches.apply(*observation, inbox, &receipt);
-                        }
-                        (Some((_, state, inbox)), FlowFact::ProcessWatchesExpired(expiry)) => {
-                            if !state.accepts_input() {
-                                return Err(invalid("process expiry recipient is unavailable"));
-                            }
-                            process_watches.validate_expiry(&expiry, inbox, address)?;
-                            process_watches.apply_expiry(*expiry, inbox, &receipt);
-                        }
-                        (Some((_, state, inbox)), FlowFact::SendQueued(intent)) => {
-                            outbox.validate(state, &intent)?;
-                            if let Some(reply) = &intent.reply {
-                                let record =
-                                    inbox.waiters.get(reply.correlation).ok_or_else(|| {
-                                        invalid("send reply waiter is not registered")
-                                    })?;
-                                if record.waiter != *reply
-                                    || record.status != waiter::ReplyStatus::Pending
-                                {
-                                    return Err(invalid("send reply waiter is no longer pending"));
-                                }
-                            }
-                            outbox.apply(*intent, receipt.clone());
-                        }
-                        (
-                            Some(_),
-                            FlowFact::DeliveryConfirmed {
-                                request_id,
-                                delivery,
-                            },
-                        ) => {
-                            outbox.validate_confirmation(request_id, &delivery)?;
-                            outbox.confirm(request_id, delivery, receipt.clone());
-                        }
-                        (Some((_, state, inbox)), FlowFact::ReplyWaiterRegistered(waiter)) => {
-                            inbox.validate_waiter(state, &waiter)?;
-                            inbox.invalidate();
-                            inbox.waiters.register(*waiter, receipt.clone());
-                        }
-                        (
-                            Some((_, _, inbox)),
-                            FlowFact::ReplyWaiterCancelled { lease, correlation },
-                        ) => {
-                            let record = inbox
-                                .waiters
-                                .get(correlation)
-                                .ok_or_else(|| invalid("reply waiter does not exist"))?;
-                            if record.waiter.lease != lease
-                                || record.status != waiter::ReplyStatus::Pending
-                            {
-                                return Err(invalid("reply waiter cancellation is stale"));
-                            }
-                            inbox.invalidate();
-                            inbox.waiters.cancel(correlation, receipt.clone());
-                        }
-                        _ => {
-                            return Err(invalid("missing, duplicate, or mismatched flow creation"));
-                        }
-                    }
-                }
-                cursor = Some(receipt);
-                Ok(())
-            },
+            |receipt, facts| replay.apply(address, receipt, facts),
         )?;
+        let replay::FlowReplay {
+            projection,
+            outbox,
+            publications,
+            subscriptions,
+            process_watches,
+            activation,
+            workspace,
+            closed,
+            completions,
+            checkpoints,
+            goals,
+            planning,
+            trace,
+            history,
+            cursor,
+        } = replay;
         let (descriptor, state, inbox) =
             projection.ok_or_else(|| invalid("flow creation was not committed"))?;
         let journal = FlowJournal {

@@ -128,6 +128,14 @@ fn catalog_inspection_ignores_cache_and_never_recovers_an_active_flow_or_creates
     std::fs::write(&cache, "invalid disposable cache").unwrap();
     assert_eq!(RuntimeStore::session_ids(&data).unwrap(), [id]);
     let read = RuntimeStore::inspect_session(&data, id).unwrap();
+    let inspected_flow = read.inspect_flow(&address.instance_id).unwrap();
+    assert_eq!(inspected_flow.state, *flow.state());
+    assert_eq!(inspected_flow.descriptor, *flow.descriptor());
+    assert_eq!(inspected_flow.journal.cursor.as_ref(), Some(flow.cursor()));
+    assert_eq!(
+        owner.inspect_flow(&address.instance_id).unwrap().state,
+        *flow.state()
+    );
     assert_eq!(read.projection.descriptor.title, "Recorded title");
     assert_eq!(
         read.projection.default_flow,
@@ -158,6 +166,24 @@ fn catalog_inspection_ignores_cache_and_never_recovers_an_active_flow_or_creates
     );
     drop(flow);
     drop(owner);
-    RuntimeStore::inspect_session(&data, id).unwrap();
+    let read = RuntimeStore::inspect_session(&data, id).unwrap();
+    assert_eq!(
+        read.inspect_flow(&address.instance_id).unwrap().state,
+        inspected_flow.state
+    );
     assert_eq!(std::fs::read(&log).unwrap(), bytes);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .unwrap()
+        .write_all(b"{partial")
+        .unwrap();
+    let partial = std::fs::read(&log).unwrap();
+    let inspection = read.inspect_flow(&address.instance_id).unwrap();
+    assert_eq!(inspection.state, inspected_flow.state);
+    assert_eq!(inspection.journal.trailing_bytes, 8);
+    assert_eq!(std::fs::read(&log).unwrap(), partial);
+    std::fs::write(&log, b"corrupt\n").unwrap();
+    assert!(read.inspect_flow(&address.instance_id).is_err());
+    assert_eq!(std::fs::read(&log).unwrap(), b"corrupt\n");
 }

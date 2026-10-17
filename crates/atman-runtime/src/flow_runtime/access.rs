@@ -65,6 +65,15 @@ pub struct InstanceSummary {
     pub state: Option<FlowInstance<AtmanUuid>>,
     /// A registered instance remains discoverable when its journal cannot be opened.
     pub unavailable: Option<String>,
+    pub loaded: bool,
+    pub trailing_bytes: Option<u64>,
+}
+
+pub struct InstanceObservation {
+    pub entry: String,
+    pub state: FlowInstance<AtmanUuid>,
+    pub loaded: bool,
+    pub trailing_bytes: u64,
 }
 
 impl RuntimeHost {
@@ -106,15 +115,23 @@ impl super::host::SessionHandle {
             let summary = self.describe_flow(registration.id.clone()).await;
             // An expired caller must not turn a failed authorization into an unavailable row.
             authorize(&address)?;
-            let (entry, state, unavailable) = match summary {
-                Ok((entry, state)) => (Some(entry), Some(state), None),
-                Err(error) => (None, None, Some(error.to_string())),
+            let (entry, state, unavailable, loaded, trailing_bytes) = match summary {
+                Ok(view) => (
+                    Some(view.entry),
+                    Some(view.state),
+                    None,
+                    view.loaded,
+                    Some(view.trailing_bytes),
+                ),
+                Err(error) => (None, None, Some(error.to_string()), false, None),
             };
             instances.push(InstanceSummary {
                 address,
                 entry,
                 state,
                 unavailable,
+                loaded,
+                trailing_bytes,
             });
         }
         Ok(InstancePage {

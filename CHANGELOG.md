@@ -198,6 +198,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Flow discovery** — Reading an unloaded flow no longer acquires its writer or interrupts a recorded turn. Inspection preserves incomplete tails and metadata caches while sharing recovery validation.
+
 - **Committed workspace data** — Automatic workspace cleanup retains checkouts whose HEAD differs from their allocation commit, including clean detached worktrees.
 
 - **Daemon transport ownership** — Token-authenticated HTTP and the owner-only Unix socket share the local operator identity, allowing persistent flow RPC and session event access through either transport.

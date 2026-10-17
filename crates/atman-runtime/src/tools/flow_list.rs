@@ -308,6 +308,12 @@ impl Tool for FlowInstances {
                                 })
                             });
                         value["entry"] = serde_json::json!(item.entry);
+                        value["loaded"] = item.loaded.into();
+                        value["trailing_bytes"] = serde_json::json!(item.trailing_bytes);
+                        if !item.loaded && item.state.is_some() {
+                            value["recorded_status"] = value["status"].clone();
+                            value["status"] = "detached".into();
+                        }
                         if let Some(error) = item.unavailable {
                             value["error"] = serde_json::json!(error);
                         }
