@@ -12,6 +12,7 @@ use atman_runtime::{
     AtmanRuntime, AtmanRuntimeOptions, Executor,
     config_hub::ConfigHub,
     event::EventSink,
+    event_log::journal::CommittedBatch,
     flow_authority::{EffectiveAuthority, contract_allows_shell},
     flow_runtime::{
         FlowWorker,
@@ -27,6 +28,7 @@ use atman_runtime::{
     },
     memory::goal::{GoalActor, GoalEdit, GoalPauseReason},
     permission::{DecisionAuthority, PermissionAction, PermissionClients, PermissionRequestId},
+    projection::flow::{FlowRecord, FlowTranscript},
     source_program::load_program_from_bundle,
 };
 use futures::StreamExt;
@@ -222,28 +224,29 @@ impl Attachment {
                 focus.address().instance_id
             ),
         );
-        let mut cursors = HashMap::<FlowInstanceId, _>::new();
+        let mut transcripts = HashMap::<FlowInstanceId, FlowTranscript>::new();
         let mut draining = false;
         let mut drain = std::pin::pin!(self.host.wait_quiescent());
         loop {
             tokio::select! {
                 page = updates.next() => {
                     let page = page.context("flow update stream closed")??;
+                    let transcript = transcripts.entry(focus.address().instance_id.clone())
+                        .or_insert_with(|| FlowTranscript::new(focus.address().clone()));
                     for batch in page.batches {
-                        for update in batch.facts { render_update(&mut printer, update); }
-                        cursors.insert(focus.address().instance_id.clone(), batch.receipt);
+                        render_batch(&mut printer, transcript, batch)?;
                     }
                 }
                 Some(prompt) = prompts.recv() => crate::render_note(&mut printer, prompt),
                 result = &mut drain, if draining => {
                     result?;
                     // Commit observation may still be queued when host execution becomes idle.
-                    let mut after = cursors.get(&focus.address().instance_id).cloned();
+                    let transcript = transcripts.entry(focus.address().instance_id.clone())
+                        .or_insert_with(|| FlowTranscript::new(focus.address().clone()));
                     loop {
-                        let page = focus.read_updates(after, PAGE).await?;
-                        for batch in page.batches { for update in batch.facts { render_update(&mut printer, update); } }
+                        let page = focus.read_updates(transcript.cursor().cloned(), PAGE).await?;
+                        for batch in page.batches { render_batch(&mut printer, transcript, batch)?; }
                         if !page.has_more { break; }
-                        after = page.next;
                     }
                     break;
                 }
@@ -260,7 +263,8 @@ impl Attachment {
                     if let Some(prefix) = line.strip_prefix(":focus ") {
                         match self.select(prefix.trim()).await {
                             Ok(worker) => {
-                                let feed = worker.subscribe_updates(cursors.get(&worker.address().instance_id).cloned(), PAGE).await?;
+                                let after = transcripts.get(&worker.address().instance_id).and_then(FlowTranscript::cursor).cloned();
+                                let feed = worker.subscribe_updates(after, PAGE).await?;
                                 focus = worker;
                                 updates = feed;
                                 crate::render_note(&mut printer, format!("Flow {}", focus.address().instance_id));
@@ -378,37 +382,47 @@ impl Attachment {
     }
 }
 
-fn render_update(printer: &mut Option<crate::ExternalPrinter>, update: FlowUpdate) {
-    match update {
-        FlowUpdate::MessagePublished(publication)
+fn render_batch(
+    printer: &mut Option<crate::ExternalPrinter>,
+    transcript: &mut FlowTranscript,
+    batch: CommittedBatch<FlowUpdate>,
+) -> Result<()> {
+    let appended = transcript.apply(batch)?;
+    for entry in &transcript.entries()[appended] {
+        render_record(printer, &entry.record);
+    }
+    Ok(())
+}
+
+fn render_record(printer: &mut Option<crate::ExternalPrinter>, record: &FlowRecord) {
+    match record {
+        FlowRecord::Publication(publication)
             if publication.context_run.is_none()
                 && publication.message.is_visible_assistant_reply() =>
         {
             crate::emit(printer, format!("{}\n", publication.message.text_concat()));
         }
-        FlowUpdate::TurnCompleted(completion) => {
+        FlowRecord::Completion(completion) => {
             if let atman_runtime::flow_store::completion::InvocationResult::Failed(error) =
-                completion.result
+                &completion.result
             {
                 crate::render_note(printer, format!("Turn failed: {error}"));
             }
         }
-        FlowUpdate::ExecutionEvents(events) => {
-            for event in events {
-                if let atman_runtime::event::Event::PermissionRequestCreated { payload } =
-                    event.event
-                {
-                    crate::render_note(
-                        printer,
-                        format!(
-                            "Permission record: {} · {}\nUse :pending to inspect current requests, then :approve/:deny <flow-prefix> <request-id>",
-                            payload.tool,
-                            payload
-                                .request_id
-                                .map_or_else(|| "policy decision".into(), |id| id.to_string()),
-                        ),
-                    );
-                }
+        FlowRecord::Execution(event) => {
+            if let atman_runtime::event::Event::PermissionRequestCreated { payload } = &event.event
+            {
+                crate::render_note(
+                    printer,
+                    format!(
+                        "Permission record: {} · {}\nUse :pending to inspect current requests, then :approve/:deny <flow-prefix> <request-id>",
+                        payload.tool,
+                        payload
+                            .request_id
+                            .as_ref()
+                            .map_or_else(|| "policy decision".into(), |id| id.to_string()),
+                    ),
+                );
             }
         }
         _ => {}

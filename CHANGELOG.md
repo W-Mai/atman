@@ -46,6 +46,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent transcript projection** — Instance-scoped documents retain stable record identities and separate input, publication, execution, compaction, and completion facts. Terminal history and live updates share atomic batch application and receipt deduplication.
+
 - **Persistent terminal sessions** — Plain-terminal `--continue` attaches retained flow entries to the shared scheduler. Flow focus, queued input, explicit invocation, execution controls, Goal controls, prompts, and permission decisions address persistent instances. Committed replies survive restart; switching focus leaves other flows running.
 
 - **Session discovery tools** — Persistent flows can browse authorized Sessions with `flow.sessions` and inspect their instances with `flow.instances(session_id: ...)`. Explicit discovery grants restrict foreign inventories; detached journals remain read-only, unavailable entries remain visible, and foreign handles include the Session identity.

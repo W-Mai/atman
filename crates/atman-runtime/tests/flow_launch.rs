@@ -699,6 +699,36 @@ async fn host_launch_registers_before_execution_and_restores_parameters_context_
         1
     );
     assert!(history.iter().all(|m| !m.text_concat().contains("effort")));
+    let mut transcript =
+        atman_runtime::projection::flow::FlowTranscript::new(source.address().clone());
+    loop {
+        let page = source
+            .read_updates(transcript.cursor().cloned(), NonZeroUsize::new(2).unwrap())
+            .await
+            .unwrap();
+        for batch in page.batches {
+            transcript.apply(batch).unwrap();
+        }
+        if !page.has_more {
+            break;
+        }
+    }
+    let conversation = transcript
+        .entries()
+        .iter()
+        .flat_map(|entry| entry.record.shared_messages())
+        .collect::<Vec<_>>();
+    assert_eq!(conversation.len(), 2);
+    assert_eq!(conversation[0].origin, MessageOrigin::Internal);
+    assert_eq!(
+        conversation
+            .iter()
+            .filter(|message| message.is_visible_assistant_reply())
+            .map(|message| message.text_concat())
+            .collect::<Vec<_>>(),
+        ["first answer"]
+    );
+    assert!(transcript.entries().iter().any(|entry| matches!(&entry.record, atman_runtime::projection::flow::FlowRecord::Execution(event) if event.scope.flow() == source.address())));
     assert_eq!(
         history
             .iter()

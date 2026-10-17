@@ -69,6 +69,26 @@ fn archives_reopen_raw_history_without_an_executable_entry_or_original_source() 
     drop(session);
     let session = store.open_session(id).unwrap();
     let mut flow = session.open_flow(&descriptor.address.instance_id).unwrap();
+    let mut transcript =
+        atman_runtime::projection::flow::FlowTranscript::new(descriptor.address.clone());
+    let full = flow
+        .read_updates(None, NonZeroUsize::new(10).unwrap())
+        .unwrap();
+    for batch in full.batches {
+        transcript.apply(batch).unwrap();
+    }
+    let preserved = transcript
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.record {
+            atman_runtime::projection::flow::FlowRecord::Legacy(record) => {
+                Some(record.bytes().unwrap())
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(preserved, raw[..records[0].source.bytes as usize]);
     assert_eq!(flow.history_progress().records, 1);
     flow.append_legacy_history(records[1..].to_vec()).unwrap();
     assert_eq!(flow.history_progress().records, 3);
@@ -84,6 +104,22 @@ fn archives_reopen_raw_history_without_an_executable_entry_or_original_source() 
         .read_updates(Some(&created), NonZeroUsize::new(10).unwrap())
         .unwrap();
     assert_eq!(page.batches.len(), 2);
+    for batch in &page.batches {
+        transcript.apply(batch.clone()).unwrap();
+    }
+    let preserved = transcript
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.record {
+            atman_runtime::projection::flow::FlowRecord::Legacy(record) => {
+                Some(record.bytes().unwrap())
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(preserved, raw);
+    assert_eq!(transcript.cursor(), Some(&complete));
     let restored = page
         .batches
         .into_iter()

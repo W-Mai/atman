@@ -861,6 +861,178 @@ fn start(flow: &mut FlowStore) -> TurnLease<AtmanUuid> {
 }
 
 #[test]
+fn transcript_projection_preserves_committed_provenance_and_rejects_partial_or_foreign_batches() {
+    use atman_runtime::{
+        event_log::journal::{CommitReceipt, CommittedBatch},
+        flow_store::{
+            completion::{InvocationResult, StoredValue},
+            context::{ContextCheckpoint, context_digest},
+            publication::MessagePublication,
+            view::FlowUpdate,
+        },
+        message::MessageOrigin,
+        projection::flow::{FlowRecord, FlowTranscript},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let mut session = root.create_session(session_descriptor()).unwrap();
+    let info = descriptor(session.projection().descriptor.id);
+    let mut flow = session.create_flow(info.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let sender = SenderIdentity::User(Uuid::new_v4());
+    let accepted = flow
+        .accept_input(delivery(&info.address, sender.clone(), "request"), |_| {
+            Ok(())
+        })
+        .unwrap();
+    let batch = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    let lease = batch.lease().clone();
+    flow.commit_input(
+        &batch,
+        InputContent::InvocationInput {
+            arguments: BTreeMap::new(),
+            invocation: BTreeMap::new(),
+            messages: vec![Message::user_text(lease.turn.clone(), "request")],
+        },
+    )
+    .unwrap();
+    let pending = flow
+        .accept_input(delivery(&info.address, sender, "pending"), |_| Ok(()))
+        .unwrap();
+    let mut message = Message::assistant_text(lease.turn.clone(), "answer");
+    message.origin = MessageOrigin::FinalAnswer;
+    let publication = MessagePublication {
+        id: Uuid::new_v4(),
+        lease: lease.clone(),
+        run: lease.run.clone(),
+        context_run: None,
+        message,
+    };
+    flow.publish_message(publication.clone()).unwrap();
+    let mut isolated = publication.clone();
+    isolated.id = Uuid::new_v4();
+    isolated.run = RunId::now();
+    isolated.context_run = Some(isolated.run.clone());
+    isolated.message = Message::assistant_text(lease.turn.clone(), "isolated");
+    flow.publish_message(isolated).unwrap();
+    let window = flow.context_messages();
+    flow.checkpoint_context(ContextCheckpoint {
+        id: Uuid::new_v4(),
+        expected: context_digest(&window).unwrap(),
+        messages: vec![Message::user_text(lease.turn.clone(), "summary")],
+        summary: "summary".into(),
+        range: 0..window.len(),
+        count: window.len(),
+        before_tokens: 20,
+        after_tokens: 5,
+    })
+    .unwrap();
+    flow.finish_turn(
+        lease,
+        InvocationResult::Returned(StoredValue::String("result".into())),
+    )
+    .unwrap();
+    let cursor = flow.cursor().clone();
+    let state = flow.state().clone();
+    let mut projected = FlowTranscript::new(info.address.clone());
+    let mut batches = Vec::new();
+    loop {
+        let page = flow
+            .read_updates(projected.cursor(), std::num::NonZeroUsize::new(2).unwrap())
+            .unwrap();
+        for batch in page.batches {
+            batches.push(batch.clone());
+            projected.apply(batch.clone()).unwrap();
+            let count = projected.entries().len();
+            assert_eq!(projected.apply(batch).unwrap(), count..count);
+        }
+        if !page.has_more {
+            break;
+        }
+    }
+    assert_eq!(projected.cursor(), Some(&cursor));
+    assert_eq!(
+        projected
+            .entries()
+            .iter()
+            .flat_map(|entry| entry.record.shared_messages())
+            .map(Message::text_concat)
+            .collect::<Vec<_>>(),
+        ["request", "answer"]
+    );
+    assert!(
+        projected
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.record, FlowRecord::Checkpoint(_)))
+    );
+    assert!(projected.entries().iter().any(|entry| matches!(&entry.record, FlowRecord::Publication(value) if value.context_run.is_some())));
+    assert_eq!(flow.state(), &state);
+    assert_eq!(
+        flow.pending_inputs()
+            .map(|envelope| envelope.id)
+            .collect::<Vec<_>>(),
+        [pending.message_id]
+    );
+    assert_ne!(accepted.message_id, pending.message_id);
+
+    let count = projected.entries().len();
+    let mut conflicting = batches[0].clone();
+    conflicting.receipt.digest.push('0');
+    assert!(projected.apply(conflicting).is_err());
+    let mut gap = batches.last().unwrap().clone();
+    gap.receipt.sequence += 2;
+    assert!(projected.apply(gap).is_err());
+    let mut foreign = publication.clone();
+    foreign.lease.flow.session_id = Uuid::new_v4().into();
+    assert!(
+        projected
+            .apply(CommittedBatch {
+                receipt: CommitReceipt {
+                    sequence: cursor.sequence + 1,
+                    ..cursor.clone()
+                },
+                facts: vec![
+                    FlowUpdate::MessagePublished(Box::new(publication)),
+                    FlowUpdate::MessagePublished(Box::new(foreign))
+                ],
+            })
+            .is_err()
+    );
+    assert_eq!(projected.cursor(), Some(&cursor));
+    assert_eq!(projected.entries().len(), count);
+    let mut rebuilt = FlowTranscript::new(info.address.clone());
+    for batch in batches {
+        rebuilt.apply(batch).unwrap();
+    }
+    assert_eq!(
+        rebuilt
+            .entries()
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        projected
+            .entries()
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>()
+    );
+    let mut other_flow = info.address;
+    other_flow.instance_id = FlowInstanceId::now();
+    assert!(
+        FlowTranscript::new(other_flow)
+            .apply(CommittedBatch {
+                receipt: cursor,
+                facts: vec![]
+            })
+            .is_err()
+    );
+}
+
+#[test]
 fn completion_and_terminal_state_commit_together_and_recover_without_fabricating_results() {
     use atman_runtime::flow_store::completion::{InvocationResult, StoredValue};
     let dir = tempfile::tempdir().unwrap();
