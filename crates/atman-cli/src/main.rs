@@ -22,6 +22,7 @@ mod repl_completer;
 mod session_catalog;
 mod suggest;
 mod sync;
+mod tui_panels;
 mod upgrade;
 
 #[derive(Parser, Debug)]
@@ -2151,53 +2152,17 @@ async fn cmd_repl_once(
         let session_for_ctrl_term_registry = executor.tool_ctx.term_registry.clone();
         let switch_target_for_ctrl = switch_target.clone();
         let providers_for_ctrl = executor.providers.clone();
-        let provider_lifecycle_for_ctrl = executor
-            .provider_lifecycle()
-            .context("provider lifecycle unavailable")?;
         let data_root_for_ctrl = root.clone();
         let executor_for_ctrl = executor.clone();
-        let knowledge_store_for_ctrl = session
-            .meta()
-            .and_then(|meta| meta.project_root)
-            .and_then(|project_root| {
-                atman_runtime::storage::resolve_project_scope_for(&project_root).ok()
-            })
-            .map(|scope| {
-                let mut store =
-                    atman_runtime::memory::ConfessionStore::at(scope.join("confessions"));
-                if let Some(index) = &executor.tool_ctx.project_index {
-                    store = store.with_index(index.clone());
-                }
-                if let Some(redactor) =
-                    atman_daemon::bootstrap::build_redactor(crate::config_dir().ok().as_deref())
-                {
-                    store = store.with_redactor(redactor);
-                }
-                std::sync::Arc::new(store)
-            });
+        let mut panels = tui_panels::PanelServices::new(
+            session.clone(),
+            executor.clone(),
+            cmd_tx.clone(),
+            provider_catalog_refresh_plan,
+        )?;
         let reporter_for_ctrl = reporter.clone();
         let ctrl_task = tokio::spawn(async move {
-            let mut provider_mutations = tokio::task::JoinSet::new();
-            let mut organization_task: Option<tokio::task::JoinHandle<()>> = None;
-            let mut provider_catalog_refreshes = tokio::task::JoinSet::new();
             let mut trust_update_error: Option<String> = None;
-            for provider_id in provider_catalog_refresh_plan {
-                let lifecycle = provider_lifecycle_for_ctrl.clone();
-                provider_catalog_refreshes.spawn(async move {
-                    let result = match lifecycle.refresh_models_if_stale(&provider_id).await {
-                        Ok(outcome) => Ok(outcome),
-                        Err(
-                            atman_runtime::ProviderLifecycleError::ProviderNotFound { .. }
-                            | atman_runtime::ProviderLifecycleError::ProviderDisabled { .. }
-                            | atman_runtime::ProviderLifecycleError::Stale { .. },
-                        ) => Ok(
-                            atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome::NotNeeded,
-                        ),
-                        Err(error) => Err(error.to_string()),
-                    };
-                    (provider_id, result)
-                });
-            }
             loop {
                 let msg = tokio::select! {
                     message = ctrl_rx.recv() => {
@@ -2206,58 +2171,23 @@ async fn cmd_repl_once(
                         };
                         message
                     }
-                    completed = provider_mutations.join_next(), if !provider_mutations.is_empty() => {
-                        match completed {
-                            Some(Ok((request, result))) => {
-                                let _ = cmd_tx_for_models.send(
-                                    atman_tui::TuiCommand::ProviderMutationResult {
-                                        request,
-                                        result,
-                                    },
-                                );
+                    completed = panels.next_completion(), if panels.has_pending_work() => {
+                        if let Err(error) = completed {
+                            session_for_ctrl.cancel_flow();
+                            if let Some(tx) = sh_tx_for_ctrl.lock().unwrap().take() {
+                                let _ = tx.send(());
                             }
-                            Some(Err(error)) => {
-                                session_for_ctrl.cancel_flow();
-                                if let Some(tx) = sh_tx_for_ctrl.lock().unwrap().take() {
-                                    let _ = tx.send(());
-                                }
-                                provider_mutations.shutdown().await;
-                                provider_catalog_refreshes.shutdown().await;
-                                if error.is_panic() {
-                                    std::panic::resume_unwind(error.into_panic());
-                                }
-                                panic!("provider mutation task failed: {error}");
+                            panels.shutdown().await;
+                            if error.is_panic() {
+                                std::panic::resume_unwind(error.into_panic());
                             }
-                            None => {}
+                            panic!("panel service task failed: {error}");
                         }
                         continue;
                     }
-                    completed = provider_catalog_refreshes.join_next(), if !provider_catalog_refreshes.is_empty() => {
-                        match completed {
-                            Some(Ok((provider_id, result))) => {
-                                let _ = cmd_tx_for_models.send(
-                                    atman_tui::TuiCommand::ProviderCatalogRefreshResult {
-                                        provider_id,
-                                        result,
-                                    },
-                                );
-                            }
-                            Some(Err(error)) => {
-                                session_for_ctrl.cancel_flow();
-                                if let Some(tx) = sh_tx_for_ctrl.lock().unwrap().take() {
-                                    let _ = tx.send(());
-                                }
-                                provider_mutations.shutdown().await;
-                                provider_catalog_refreshes.shutdown().await;
-                                if error.is_panic() {
-                                    std::panic::resume_unwind(error.into_panic());
-                                }
-                                panic!("provider catalog refresh task failed: {error}");
-                            }
-                            None => {}
-                        }
-                        continue;
-                    }
+                };
+                let Some(msg) = panels.dispatch(msg).await else {
+                    continue;
                 };
                 match msg {
                     atman_tui::TuiControl::Submit(submission) => {
@@ -2608,369 +2538,12 @@ async fn cmd_repl_once(
                             cmd_tx_for_models.clone(),
                         );
                     }
-                    atman_tui::TuiControl::MutateProvider(request) => {
-                        let lifecycle = provider_lifecycle_for_ctrl.clone();
-                        let action = request.action.clone();
-                        spawn_provider_mutation_task(
-                            &mut provider_mutations,
-                            request,
-                            async move { execute_provider_mutation(&lifecycle, action).await },
-                        );
-                    }
-                    atman_tui::TuiControl::MutateModel(request) => {
-                        let result = execute_model_mutation(&request.action)
-                            .map_err(|error| error.to_string());
-                        let _ = cmd_tx_for_models
-                            .send(atman_tui::TuiCommand::ModelMutationResult { request, result });
-                    }
-                    atman_tui::TuiControl::OpenAliasManager { .. } => {
-                        // handled internally in the TUI — no-op here
-                    }
-                    atman_tui::TuiControl::OnboardingInit => {
-                        if let Ok(dir) = config_dir() {
-                            let _ = crate::init::init_config_dir_with_mode(&dir, None);
-                        }
-                    }
-                    atman_tui::TuiControl::SwitchModel { request_id, model } => {
-                        let result = atman_runtime::config_hub::ConfigHub::global()
-                            .map_err(|error| error.to_string())
-                            .and_then(|hub| {
-                                switch_smart_model(
-                                    &hub,
-                                    &providers_for_ctrl,
-                                    &session_for_ctrl,
-                                    &model,
-                                )
-                            });
-                        let _ = cmd_tx_for_models.send(atman_tui::TuiCommand::ModelSwitchResult {
-                            request_id,
-                            model,
-                            result,
-                        });
-                    }
-                    atman_tui::TuiControl::TestProviderConnection(request) => {
-                        let tx = cmd_tx_for_models.clone();
-                        tokio::spawn(async move {
-                            let (message, ok) =
-                                test_provider_endpoint(&request.name, &request.entry).await;
-                            let result = if ok { Ok(message) } else { Err(message) };
-                            let _ = tx.send(atman_tui::TuiCommand::ProviderTestResult {
-                                request_id: request.request_id,
-                                result,
-                            });
-                        });
-                    }
-                    atman_tui::TuiControl::TestModel(request) => {
-                        let tx = cmd_tx_for_models.clone();
-                        let providers = providers_for_ctrl.clone();
-                        tokio::spawn(async move {
-                            let result = test_model_endpoint(&providers, &request).await;
-                            let _ = tx.send(atman_tui::TuiCommand::ModelTestResult {
-                                request_id: request.request_id,
-                                result,
-                            });
-                        });
-                    }
                     atman_tui::TuiControl::TermResize { handle, rows, cols } => {
                         if let Some(tr) = &session_for_ctrl_term_registry {
                             if let Ok(entry) =
                                 tr.lookup(&handle, &session_for_ctrl.id().to_string())
                             {
                                 let _ = entry.resize(rows, cols);
-                            }
-                        }
-                    }
-                    atman_tui::TuiControl::McpTest { name } => {
-                        let tx = cmd_tx_for_models.clone();
-                        let name = name.clone();
-                        tokio::spawn(async move {
-                            let configs = load_mcp_configs();
-                            let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
-                                let _ = tx.send(atman_tui::TuiCommand::McpTestResult {
-                                    name,
-                                    message: "not found in config".into(),
-                                    ok: false,
-                                });
-                                return;
-                            };
-                            let probe = atman_runtime::ToolRegistry::new();
-                            let results =
-                                atman_runtime::mcp::register_from_configs(&probe, &[cfg]).await;
-                            let (msg, ok) = match &results[0] {
-                                Ok(s) => (format!("{} tools discovered", s.tool_count), true),
-                                Err(e) => (e.error.to_string(), false),
-                            };
-                            let _ = tx.send(atman_tui::TuiCommand::McpTestResult {
-                                name,
-                                message: msg,
-                                ok,
-                            });
-                        });
-                    }
-                    atman_tui::TuiControl::McpListResources { name } => {
-                        let tx = cmd_tx_for_models.clone();
-                        let name = name.clone();
-                        tokio::spawn(async move {
-                            let configs = load_mcp_configs();
-                            let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
-                                let _ = tx.send(atman_tui::TuiCommand::McpResourcesResult {
-                                    name,
-                                    resources: Vec::new(),
-                                });
-                                return;
-                            };
-                            let client = atman_runtime::mcp::McpClient::connect_config(&cfg).await;
-                            let resources = match client {
-                                Ok(c) => c.list_resources().await.unwrap_or_default(),
-                                Err(_) => Vec::new(),
-                            };
-                            let _ = tx.send(atman_tui::TuiCommand::McpResourcesResult {
-                                name,
-                                resources,
-                            });
-                        });
-                    }
-                    atman_tui::TuiControl::McpListPrompts { name } => {
-                        let tx = cmd_tx_for_models.clone();
-                        let name = name.clone();
-                        tokio::spawn(async move {
-                            let configs = load_mcp_configs();
-                            let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
-                                let _ = tx.send(atman_tui::TuiCommand::McpPromptsResult {
-                                    name,
-                                    prompts: Vec::new(),
-                                });
-                                return;
-                            };
-                            let client = atman_runtime::mcp::McpClient::connect_config(&cfg).await;
-                            let prompts = match client {
-                                Ok(c) => c.list_prompts().await.unwrap_or_default(),
-                                Err(_) => Vec::new(),
-                            };
-                            let _ =
-                                tx.send(atman_tui::TuiCommand::McpPromptsResult { name, prompts });
-                        });
-                    }
-                    atman_tui::TuiControl::McpReload => {
-                        if let Some(service) = executor_for_ctrl.tool_ctx.mcp_service() {
-                            match service.reload() {
-                                Ok(()) => {
-                                    let _ =
-                                        cmd_tx_for_models.send(atman_tui::TuiCommand::McpReloaded);
-                                }
-                                Err(error) => {
-                                    atman_runtime::notify!(error, "MCP reload failed: {error}")
-                                }
-                            }
-                        }
-                    }
-                    atman_tui::TuiControl::ListKnowledge => {
-                        let result = match &knowledge_store_for_ctrl {
-                            Some(store) => {
-                                let confessions =
-                                    store.list_with_meta(false).await.map_err(|e| e.to_string());
-                                let rules = loaded_rule_views(&executor_for_ctrl)
-                                    .await
-                                    .map_err(|e| e.to_string());
-                                confessions.and_then(|rows| rules.map(|rules| (rows, rules)))
-                            }
-                            None => Err("Project scope is unavailable".into()),
-                        };
-                        let _ =
-                            cmd_tx_for_models.send(atman_tui::TuiCommand::KnowledgeResult(result));
-                    }
-                    atman_tui::TuiControl::ReloadRules => {
-                        let result = match (
-                            session_for_ctrl.meta().and_then(|meta| meta.project_root),
-                            std::env::var_os("HOME"),
-                        ) {
-                            (Some(project_root), Some(home)) => {
-                                let rules = if std::env::var_os("ATMAN_DISABLE_MIGRATION").is_some()
-                                {
-                                    Vec::new()
-                                } else {
-                                    atman_runtime::migration::scan_migrated_rules(
-                                        &project_root,
-                                        &PathBuf::from(home),
-                                    )
-                                };
-                                let fetch = atman_runtime::tools::memory_stubs::RuleFetch::new();
-                                fetch.set_migrated(rules).await;
-                                executor_for_ctrl.tools.register(Arc::new(fetch));
-                                let confessions = match &knowledge_store_for_ctrl {
-                                    Some(store) => {
-                                        store.list_with_meta(false).await.map_err(|e| e.to_string())
-                                    }
-                                    None => Err("Project scope is unavailable".into()),
-                                };
-                                let rules = loaded_rule_views(&executor_for_ctrl)
-                                    .await
-                                    .map_err(|e| e.to_string());
-                                confessions.and_then(|rows| rules.map(|rules| (rows, rules)))
-                            }
-                            _ => Err("Project root or home directory is unavailable".into()),
-                        };
-                        let _ =
-                            cmd_tx_for_models.send(atman_tui::TuiCommand::KnowledgeResult(result));
-                    }
-                    atman_tui::TuiControl::GetConfessionHistory(id) => {
-                        let result = match &knowledge_store_for_ctrl {
-                            Some(store) => store.history(&id).await.map_err(|e| e.to_string()),
-                            None => Err("Project scope is unavailable".into()),
-                        };
-                        let _ = cmd_tx_for_models
-                            .send(atman_tui::TuiCommand::ConfessionHistoryResult { id, result });
-                    }
-                    atman_tui::TuiControl::ReviseConfession {
-                        id,
-                        base_revision,
-                        fields,
-                    } => {
-                        let saved_id = id.clone();
-                        let result = match &knowledge_store_for_ctrl {
-                            Some(store) => store
-                                .revise(id, base_revision, fields)
-                                .await
-                                .map(|_| ())
-                                .map_err(|e| e.to_string()),
-                            None => Err("Project scope is unavailable".into()),
-                        };
-                        match result {
-                            Ok(()) => {
-                                if let Some(store) = &knowledge_store_for_ctrl {
-                                    let rows = store
-                                        .list_with_meta(false)
-                                        .await
-                                        .map_err(|e| e.to_string());
-                                    let rules = loaded_rule_views(&executor_for_ctrl)
-                                        .await
-                                        .map_err(|e| e.to_string());
-                                    let _ = cmd_tx_for_models.send(
-                                        atman_tui::TuiCommand::KnowledgeResult(
-                                            rows.and_then(|rows| rules.map(|rules| (rows, rules))),
-                                        ),
-                                    );
-                                    let _ = cmd_tx_for_models
-                                        .send(atman_tui::TuiCommand::ConfessionSaved(saved_id));
-                                }
-                            }
-                            Err(error) => {
-                                let _ = cmd_tx_for_models.send(
-                                    atman_tui::TuiCommand::ConfessionSaveFailed {
-                                        id: saved_id,
-                                        error,
-                                    },
-                                );
-                            }
-                        }
-                    }
-                    atman_tui::TuiControl::ArchiveConfession { id, base_revision } => {
-                        let result = match &knowledge_store_for_ctrl {
-                            Some(store) => store
-                                .archive(id, base_revision, "Archived by user".into())
-                                .await
-                                .map(|_| ())
-                                .map_err(|error| error.to_string()),
-                            None => Err("Project scope is unavailable".into()),
-                        };
-                        match result {
-                            Ok(()) => {
-                                if let Some(store) = &knowledge_store_for_ctrl {
-                                    let rows = store
-                                        .list_with_meta(false)
-                                        .await
-                                        .map_err(|error| error.to_string());
-                                    let rules = loaded_rule_views(&executor_for_ctrl)
-                                        .await
-                                        .map_err(|error| error.to_string());
-                                    let _ = cmd_tx_for_models.send(
-                                        atman_tui::TuiCommand::KnowledgeResult(
-                                            rows.and_then(|rows| rules.map(|rules| (rows, rules))),
-                                        ),
-                                    );
-                                }
-                                let _ = cmd_tx_for_models
-                                    .send(atman_tui::TuiCommand::ConfessionArchived);
-                            }
-                            Err(error) => {
-                                let _ = cmd_tx_for_models
-                                    .send(atman_tui::TuiCommand::ConfessionArchiveFailed(error));
-                            }
-                        }
-                    }
-                    atman_tui::TuiControl::SuggestOrganization { request_id } => {
-                        if let Some(task) = organization_task.take() {
-                            task.abort();
-                        }
-                        let store = knowledge_store_for_ctrl.clone();
-                        let executor = executor_for_ctrl.clone();
-                        let session = session_for_ctrl.clone();
-                        let tx = cmd_tx_for_models.clone();
-                        organization_task = Some(tokio::spawn(async move {
-                            let result = match store {
-                                Some(store) => {
-                                    let progress_tx = tx.clone();
-                                    suggest_confession_organization(
-                                        &executor,
-                                        &session,
-                                        &store,
-                                        move |completed, total| {
-                                            let _ = progress_tx.send(
-                                                atman_tui::TuiCommand::OrganizationProgress {
-                                                    request_id,
-                                                    completed,
-                                                    total,
-                                                },
-                                            );
-                                        },
-                                    )
-                                    .await
-                                    .map_err(|e| e.to_string())
-                                }
-                                None => Err("Project scope is unavailable".into()),
-                            };
-                            let _ = tx.send(atman_tui::TuiCommand::OrganizationResult {
-                                request_id,
-                                result,
-                            });
-                        }));
-                    }
-                    atman_tui::TuiControl::CancelOrganization => {
-                        if let Some(task) = organization_task.take() {
-                            task.abort();
-                        }
-                    }
-                    atman_tui::TuiControl::OrganizeConfessions(changes) => {
-                        let result = match &knowledge_store_for_ctrl {
-                            Some(store) => store
-                                .organize(changes)
-                                .await
-                                .map(|_| ())
-                                .map_err(|e| e.to_string()),
-                            None => Err("Project scope is unavailable".into()),
-                        };
-                        match result {
-                            Ok(()) => {
-                                if let Some(store) = &knowledge_store_for_ctrl {
-                                    let rows = store
-                                        .list_with_meta(false)
-                                        .await
-                                        .map_err(|e| e.to_string());
-                                    let rules = loaded_rule_views(&executor_for_ctrl)
-                                        .await
-                                        .map_err(|e| e.to_string());
-                                    let _ = cmd_tx_for_models.send(
-                                        atman_tui::TuiCommand::KnowledgeResult(
-                                            rows.and_then(|rows| rules.map(|rules| (rows, rules))),
-                                        ),
-                                    );
-                                    let _ = cmd_tx_for_models
-                                        .send(atman_tui::TuiCommand::OrganizationApplied);
-                                }
-                            }
-                            Err(error) => {
-                                let _ = cmd_tx_for_models
-                                    .send(atman_tui::TuiCommand::OrganizationApplyFailed(error));
                             }
                         }
                     }
@@ -2982,11 +2555,7 @@ async fn cmd_repl_once(
                     }
                 }
             }
-            if let Some(task) = organization_task.take() {
-                task.abort();
-            }
-            provider_mutations.shutdown().await;
-            provider_catalog_refreshes.shutdown().await;
+            panels.shutdown().await;
         });
         let session_meta =
             atman_runtime::session_meta::SessionMeta::load(session.dir()).unwrap_or_default();
