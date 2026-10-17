@@ -1586,6 +1586,13 @@ fn parse_compaction_summary(msg: &Message) -> Option<OutputItem> {
 }
 
 pub fn flatten_messages(messages: &[Message]) -> Vec<OutputItem> {
+    flatten_messages_with_output_store(messages, None)
+}
+
+pub(crate) fn flatten_messages_with_output_store(
+    messages: &[Message],
+    output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
+) -> Vec<OutputItem> {
     let tool_map = messages
         .iter()
         .flat_map(|message| &message.parts)
@@ -1607,7 +1614,7 @@ pub fn flatten_messages(messages: &[Message]) -> Vec<OutputItem> {
         .collect::<HashMap<_, _>>();
     let mut out: Vec<OutputItem> = Vec::new();
     for msg in messages {
-        flatten_message(msg, &mut out, &tool_map);
+        flatten_message_with_output_store(msg, &mut out, &tool_map, output_store, None);
     }
     dedup_by_handle(&mut out);
     out

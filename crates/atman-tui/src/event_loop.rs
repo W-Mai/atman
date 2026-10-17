@@ -3272,7 +3272,7 @@ mod tests {
 
     #[test]
     fn visual_points_match_direct_hits_for_wide_prose_and_code() {
-        let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {
+        let items = app::FlowDocument::from(vec![app::OutputItem::AssistantMd {
             md: "汉🙂 **bold**\n\n```rust\nlet name = \"汉🙂\";\n```".into(),
             streaming: false,
             retried: false,
@@ -3335,7 +3335,7 @@ mod tests {
 
     #[test]
     fn pending_drag_scrolls_from_the_visible_edge_then_uses_the_new_projection() {
-        let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {
+        let items = app::FlowDocument::from(vec![app::OutputItem::AssistantMd {
             md: (0..80)
                 .map(|line| format!("paragraph {line}"))
                 .collect::<Vec<_>>()
@@ -3452,7 +3452,7 @@ mod tests {
 
     #[test]
     fn transcript_mouse_selection_reaches_copy_handler() {
-        let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {
+        let items = app::FlowDocument::from(vec![app::OutputItem::AssistantMd {
             md: "ordinary assistant prose".into(),
             streaming: false,
             retried: false,
@@ -3524,7 +3524,7 @@ mod tests {
             ("```rust\nfn main() {}\n```\n", "```rust\nfn main() {}\n```"),
         ];
         for (markdown, expected) in cases {
-            let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {
+            let items = app::FlowDocument::from(vec![app::OutputItem::AssistantMd {
                 md: markdown.into(),
                 streaming: false,
                 retried: false,
@@ -3588,7 +3588,7 @@ mod tests {
     #[test]
     fn transcript_mouse_selection_copies_code_when_dragged_from_prose() {
         let markdown = "Before text\n\n```rust\nfn main() {}\n```\n\nAfter text\n";
-        let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {
+        let items = app::FlowDocument::from(vec![app::OutputItem::AssistantMd {
             md: markdown.into(),
             streaming: false,
             retried: false,
@@ -3670,7 +3670,7 @@ mod tests {
     #[test]
     fn transcript_mouse_selection_keeps_middle_code_between_prose_endpoints() {
         let markdown = "Before text\n\n```rust\nfn main() {}\n```\n\nAfter text\n";
-        let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {
+        let items = app::FlowDocument::from(vec![app::OutputItem::AssistantMd {
             md: markdown.into(),
             streaming: false,
             retried: false,
@@ -3744,7 +3744,7 @@ mod tests {
     #[test]
     fn transcript_mouse_selection_keeps_code_when_prose_starts_mid_fragment() {
         let markdown = "Before text\n\n```rust\nfn main() {}\n```\n";
-        let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {
+        let items = app::FlowDocument::from(vec![app::OutputItem::AssistantMd {
             md: markdown.into(),
             streaming: false,
             retried: false,
@@ -3826,7 +3826,7 @@ mod tests {
 
     #[test]
     fn transcript_mouse_selection_copies_code_across_items() {
-        let items = app::OutputStore::from(vec![
+        let items = app::FlowDocument::from(vec![
             app::OutputItem::AssistantMd {
                 md: "Before text".into(),
                 streaming: false,
@@ -3990,7 +3990,7 @@ mod tests {
 
     #[test]
     fn bash_output_mouse_selection_reaches_copy_handler() {
-        let items = app::OutputStore::from(vec![app::OutputItem::Bash {
+        let items = app::FlowDocument::from(vec![app::OutputItem::Bash {
             handle: "bash-1".into(),
             title: Some("command".into()),
             command: Some("printf output".into()),
@@ -4057,7 +4057,7 @@ mod tests {
 
     #[test]
     fn thinking_mouse_selection_reaches_copy_handler() {
-        let items = app::OutputStore::from(vec![app::OutputItem::Thinking {
+        let items = app::FlowDocument::from(vec![app::OutputItem::Thinking {
             text: "reasoning details".into(),
             done: true,
             disclosure: app::Disclosure::Full,
@@ -4143,7 +4143,7 @@ mod tests {
 
     #[test]
     fn collapsed_thinking_click_expands_without_selection_atoms() {
-        let items = app::OutputStore::from(vec![app::OutputItem::Thinking {
+        let items = app::FlowDocument::from(vec![app::OutputItem::Thinking {
             text: "reasoning details".into(),
             done: true,
             disclosure: app::Disclosure::Summary,
@@ -4198,7 +4198,7 @@ mod tests {
 
     #[test]
     fn user_turn_mouse_selection_reaches_copy_handler() {
-        let items = app::OutputStore::from(vec![app::OutputItem::UserTurn {
+        let items = app::FlowDocument::from(vec![app::OutputItem::UserTurn {
             text: "你好呀".into(),
             presentation: None,
         }]);

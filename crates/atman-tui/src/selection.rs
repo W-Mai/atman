@@ -853,8 +853,7 @@ pub struct VisibleSurface {
 
 /// Semantic copy projection for the current viewport.
 ///
-/// `structure_revision` is the owning `OutputStore` structure revision, so a stale projection is
-/// detectable without a second identity or revision authority.
+/// `structure_revision` is the owning `FlowDocument` structure revision, so a stale projection is detectable without a second identity or revision authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VisualSelectionPoint {
     pub point: SemanticPoint,

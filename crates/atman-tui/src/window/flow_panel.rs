@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -16,12 +16,7 @@ use crate::wm::component::{
     EventCtx, HitRegion, HitTarget, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
 
-/// Message restoration is independent of viewport and disclosure changes.
-#[derive(Default)]
-pub(crate) struct FlowDocument {
-    revision: Option<(u64, u64)>,
-    items: Vec<OutputItem>,
-}
+use crate::flow_view::{FlowDocument, ToolDisclosureAction};
 
 #[derive(Default)]
 pub(crate) struct FlowInteraction {
@@ -69,79 +64,6 @@ fn panel_hit_regions(
         .collect()
 }
 
-impl FlowDocument {
-    fn restore(
-        &mut self,
-        revision: crate::app::OutputRevision,
-        messages: &[Message],
-        output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
-    ) {
-        let key = (revision.id, revision.semantic);
-        if self.revision == Some(key) {
-            return;
-        }
-        let mut tool_map: HashMap<String, crate::history::ToolDisplayMeta> = HashMap::new();
-        for msg in messages {
-            if matches!(msg.role, atman_runtime::message::MessageRole::Assistant) {
-                for part in &msg.parts {
-                    if let atman_runtime::message::MessagePart::ToolUse {
-                        id,
-                        name,
-                        input,
-                        intent,
-                    } = part
-                    {
-                        tool_map.insert(
-                            id.clone(),
-                            crate::history::ToolDisplayMeta::from_tool_use(
-                                name,
-                                input,
-                                intent.as_ref(),
-                            ),
-                        );
-                    }
-                }
-            }
-        }
-        let mut items: Vec<OutputItem> = Vec::new();
-        for msg in messages {
-            crate::history::flatten_message_with_output_store(
-                msg,
-                &mut items,
-                &tool_map,
-                output_store,
-                None,
-            );
-        }
-        crate::history::dedup_by_handle(&mut items);
-
-        let disclosures: HashMap<_, _> = self
-            .items
-            .iter()
-            .filter_map(|item| {
-                if let OutputItem::ToolDispatch { calls } = item {
-                    Some(calls)
-                } else {
-                    None
-                }
-            })
-            .flatten()
-            .map(|call| (call.id.as_str(), call.disclosure))
-            .collect();
-        for item in &mut items {
-            if let OutputItem::ToolDispatch { calls } = item {
-                for call in calls {
-                    if let Some(disclosure) = disclosures.get(call.id.as_str()) {
-                        call.disclosure = *disclosure;
-                    }
-                }
-            }
-        }
-        self.items = items;
-        self.revision = Some(key);
-    }
-}
-
 pub struct FlowPanelContent {
     pub(crate) document: FlowDocument,
     pub(crate) interaction: FlowInteraction,
@@ -176,37 +98,39 @@ impl FlowPanelContent {
                     if !self.interaction.expanded_groups.remove(&path) {
                         self.interaction.expanded_groups.insert(path);
                     }
-                } else if let Some(OutputItem::ToolDispatch { calls }) =
-                    self.document.items.get_mut(index)
-                {
+                } else {
                     let content = path.strip_prefix(TOOL_CALL_REGION_PREFIX);
                     let detail = path.strip_prefix(TOOL_DETAIL_REGION_PREFIX);
                     let fullscreen = path
                         .strip_prefix(TOOL_FULLSCREEN_REGION_PREFIX)
                         .or_else(|| path.strip_prefix(TOOL_DETAIL_FULLSCREEN_REGION_PREFIX));
-                    if let Some(call) = calls
-                        .iter_mut()
-                        .find(|call| Some(call.id.as_str()) == content.or(detail).or(fullscreen))
-                    {
-                        if fullscreen.is_some() {
-                            if let Some(output) = call.detail.as_deref() {
-                                if let Some(handle) = output.handle() {
-                                    return vec![crate::wm::WmCommand::OpenTaskPanel {
-                                        handle: handle.to_owned(),
-                                        maximized: true,
-                                    }];
-                                }
-                                return vec![crate::wm::WmCommand::OpenOutputSnapshot {
-                                    id: format!("{}:{}", self.handle, call.id),
-                                    item: Box::new(output.clone()),
+                    if let Some(id) = fullscreen {
+                        if let Some(output) = self.document.tool_detail(index, id) {
+                            if let Some(handle) = output.handle() {
+                                return vec![crate::wm::WmCommand::OpenTaskPanel {
+                                    handle: handle.to_owned(),
+                                    maximized: true,
                                 }];
                             }
-                        } else if content.is_some() {
-                            call.disclosure = toggle_tool_call_content_disclosure(call);
-                        } else {
-                            call.disclosure =
-                                toggle_tool_call_detail_disclosure(call, self.interaction.width);
+                            return vec![crate::wm::WmCommand::OpenOutputSnapshot {
+                                id: format!("{}:{}", self.handle, id),
+                                item: Box::new(output.clone()),
+                            }];
                         }
+                    } else if let Some(id) = content {
+                        self.document.toggle_tool_disclosure(
+                            index,
+                            id,
+                            ToolDisclosureAction::Content,
+                        );
+                    } else if let Some(id) = detail {
+                        self.document.toggle_tool_disclosure(
+                            index,
+                            id,
+                            ToolDisclosureAction::Detail {
+                                width: self.interaction.width,
+                            },
+                        );
                     }
                 }
             }
@@ -651,7 +575,7 @@ pub(crate) fn render_sub_agent_panel(
     // Section 3: Sub-document flow — use flatten_message for proper OutputItem
     // types (Bash/DiffPreview/Terminal with collapse support), identical to
     // the main transcript rendering.
-    document.restore(item_revision, messages, output_store);
+    document.restore_messages(item_revision, messages, output_store);
 
     let render_ctx = crate::output::RenderCtx {
         expanded_tools,
@@ -662,7 +586,7 @@ pub(crate) fn render_sub_agent_panel(
         hovered_output_node: None,
     };
     let (doc_lines, _, mut document_regions, _) =
-        crate::output::build_lines_with_ranges(&document.items, area.width, &render_ctx);
+        crate::output::build_lines_with_ranges(document, area.width, &render_ctx);
     let doc_offset = lines.len() as u32;
     for region in &mut document_regions {
         region.start_row += doc_offset;
@@ -748,6 +672,10 @@ mod tests {
             content: serde_json::json!({"handle":"process", "output": "line\n".repeat(40)})
                 .to_string(),
         }];
+        let messages = vec![call, result];
+        let mut main = crate::app::AppState::new("session".into(), None)
+            .with_initial_items(crate::history::flatten_messages(&messages));
+        main.last_transcript_rect = Some(ratatui::layout::Rect::new(3, 2, 70, 45));
         let mut tasks = HashMap::from([(
             "child".into(),
             crate::app::DetachedTaskDetail {
@@ -761,7 +689,7 @@ mod tests {
                     output: String::new(),
                     iteration: 1,
                     expanded: false,
-                    messages: vec![call, result],
+                    messages,
                     workflow_graph: WorkflowProjection::new(turn),
                     expanded_nodes: HashSet::new(),
                     workflow_expanded: true,
@@ -832,7 +760,9 @@ mod tests {
         };
         draw(&mut panel, &mut terminal, &tasks);
         assert!(panel.selection_projection.is_some());
-        let restored = panel.document.items.as_ptr();
+        let restored = panel.document.as_ptr();
+        let main_source = main.items.revisions()[0];
+        let floating_source = panel.document.revisions()[0];
         for prefix in [
             crate::output::WORKING_GROUP_REGION_PREFIX,
             crate::output::TOOL_CALL_REGION_PREFIX,
@@ -857,15 +787,39 @@ mod tests {
                 WmEventResult::Consumed(_)
             ));
             draw(&mut panel, &mut terminal, &tasks);
-            assert_eq!(restored, panel.document.items.as_ptr());
+            assert_eq!(restored, panel.document.as_ptr());
+            if prefix == crate::output::TOOL_CALL_REGION_PREFIX {
+                main.toggle_tool_call_content(0, "call");
+            } else if prefix == crate::output::TOOL_DETAIL_REGION_PREFIX {
+                main.toggle_tool_call_detail(0, "call");
+            } else {
+                continue;
+            }
+            let OutputItem::ToolDispatch { calls: main_calls } = &main.items[0] else {
+                panic!()
+            };
+            let OutputItem::ToolDispatch { calls: panel_calls } = &panel.document[0] else {
+                panic!()
+            };
+            assert_eq!(main_calls[0].disclosure, panel_calls[0].disclosure);
+            for (document, source) in [
+                (&main.items, main_source),
+                (&panel.document, floating_source),
+            ] {
+                let revision = document.revisions()[0];
+                assert_eq!(revision.id, source.id);
+                assert_eq!(revision.semantic, source.semantic);
+                assert_eq!(revision.source_generation, source.source_generation);
+                assert_ne!(revision.layout, source.layout);
+            }
         }
-        let OutputItem::ToolDispatch { calls } = &panel.document.items[0] else {
+        let OutputItem::ToolDispatch { calls } = &panel.document[0] else {
             panic!()
         };
         assert_eq!(calls[0].disclosure, crate::app::Disclosure::Full);
         tasks.get_mut("child").unwrap().revision += 1;
         draw(&mut panel, &mut terminal, &tasks);
-        let OutputItem::ToolDispatch { calls } = &panel.document.items[0] else {
+        let OutputItem::ToolDispatch { calls } = &panel.document[0] else {
             panic!()
         };
         assert_eq!(calls[0].disclosure, crate::app::Disclosure::Full);
@@ -899,6 +853,10 @@ mod tests {
         assert!(
             matches!(commands.as_slice(), [crate::wm::WmCommand::OpenTaskPanel { handle, maximized: true }] if handle == "process")
         );
+        assert_eq!(
+            main.tool_call_detail_handle(0, "call").as_deref(),
+            Some("process")
+        );
         panel.activate(HitTarget::WorkflowNode(usize::MAX, "node".into()));
         assert!(
             panel
@@ -926,14 +884,14 @@ mod tests {
             ..Default::default()
         };
         let messages = vec![atman_runtime::message::Message::user_text(turn, "first")];
-        document.restore(revision, &messages, None);
-        let items = document.items.as_ptr();
+        document.restore_messages(revision, &messages, None);
+        let items = document.as_ptr();
         revision.layout += 1;
-        document.restore(revision, &messages, None);
-        assert_eq!(items, document.items.as_ptr());
+        document.restore_messages(revision, &messages, None);
+        assert_eq!(items, document.as_ptr());
         revision.semantic += 1;
-        document.restore(revision, &[], None);
-        assert!(document.items.is_empty());
+        document.restore_messages(revision, &[], None);
+        assert!(document.is_empty());
     }
 
     #[test]

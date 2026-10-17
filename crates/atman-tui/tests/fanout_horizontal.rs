@@ -2,7 +2,7 @@ type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
 use atman_runtime::workflow::{
     NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
 };
-use atman_tui::app::{AppState, OutputItem, OutputStore};
+use atman_tui::app::{AppState, FlowDocument, OutputItem};
 use atman_tui::output::{
     LayoutCache, LayoutKey, LayoutRequest, RenderCtx, build_lines_with_ranges,
 };
@@ -319,7 +319,7 @@ fn layout_cache_still_composes_valid_regions() {
         width: 200,
         theme: atman_tui::theme::current_mode(),
     };
-    let items = OutputStore::from(vec![item]);
+    let items = FlowDocument::from(vec![item]);
     let metrics = cache.update_dirty(
         key,
         &items,

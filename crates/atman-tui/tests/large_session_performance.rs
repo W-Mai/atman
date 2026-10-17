@@ -17,7 +17,7 @@ use atman_runtime::workflow::{
     NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
     WorkflowPermissionIdentity, WorkflowPermissionRequest, WorkflowPermissionState,
 };
-use atman_tui::app::{NoteLevel, OutputItem, OutputStore};
+use atman_tui::app::{FlowDocument, NoteLevel, OutputItem};
 use atman_tui::output::{LayoutCache, LayoutKey, LayoutRequest, RenderCtx};
 
 struct LayoutBaseline {
@@ -28,7 +28,7 @@ struct LayoutBaseline {
 }
 
 fn measure_layout(items: &[OutputItem]) -> LayoutBaseline {
-    let items = OutputStore::from(items.to_vec());
+    let items = FlowDocument::from(items.to_vec());
     let expanded_tools = HashSet::new();
     let mut cache = LayoutCache::default();
     let mut ctx = RenderCtx {
@@ -238,7 +238,7 @@ fn incident_session_animation_stays_within_frame_budget() {
     let item_count = output.len();
     assert!(item_count > 0);
 
-    let items = OutputStore::from(output);
+    let items = FlowDocument::from(output);
     let expanded_tools = HashSet::new();
     let mut cache = LayoutCache::default();
     let mut ctx = RenderCtx {

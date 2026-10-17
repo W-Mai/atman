@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::{
-    Disclosure, FsDetail, FsSearchHit, NoteLevel, OutputItem, OutputStore, ToolCallStatus,
+    Disclosure, FlowDocument, FsDetail, FsSearchHit, NoteLevel, OutputItem, ToolCallStatus,
     ToolCallView,
 };
 
@@ -728,7 +728,7 @@ impl LayoutCache {
     pub fn update_dirty(
         &mut self,
         key: LayoutKey,
-        items: &OutputStore,
+        items: &FlowDocument,
         ctx: &RenderCtx<'_>,
         request: LayoutRequest,
     ) -> LayoutMetrics {
@@ -8727,7 +8727,7 @@ mod tests {
 
     #[test]
     fn collapsed_work_fold_keeps_five_row_header_and_hides_members() {
-        let items = OutputStore::from(vec![
+        let items = FlowDocument::from(vec![
             OutputItem::UserTurn {
                 text: "build it".into(),
                 presentation: None,
@@ -8887,7 +8887,7 @@ mod tests {
 
     #[test]
     fn expanding_an_old_fold_rehydrates_content_behind_its_retained_header() {
-        let items = OutputStore::from(
+        let items = FlowDocument::from(
             (0..70)
                 .map(|index| OutputItem::Thinking {
                     text: format!("thought {index}"),
@@ -8953,7 +8953,7 @@ mod tests {
     #[test]
     fn expanded_work_fold_frames_member_content_and_closes_the_boundary() {
         let now = Instant::now();
-        let items = OutputStore::from(vec![
+        let items = FlowDocument::from(vec![
             OutputItem::Thinking {
                 text: "nested work".into(),
                 done: true,
@@ -9303,7 +9303,7 @@ mod tests {
     #[test]
     fn visible_slice_does_not_reinspect_workflow_permissions() {
         const PERMISSIONS: usize = 4_096;
-        let items = OutputStore::from(vec![workflow_with_permissions(PERMISSIONS)]);
+        let items = FlowDocument::from(vec![workflow_with_permissions(PERMISSIONS)]);
         let expanded_tools = std::collections::HashSet::new();
         let ctx = RenderCtx {
             expanded_tools: &expanded_tools,
@@ -9371,7 +9371,7 @@ mod tests {
             disclosure: Disclosure::Summary,
             retried: false,
         });
-        let items = OutputStore::from(values);
+        let items = FlowDocument::from(values);
         let mut cache = LayoutCache::default();
         let request = LayoutRequest {
             scroll_offset: 0,
@@ -9415,7 +9415,7 @@ mod tests {
         let mut raw_graph = graph.clone().into_graph();
         raw_graph.root[0].started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(65));
         *graph = raw_graph.into();
-        let items = OutputStore::from(vec![item]);
+        let items = FlowDocument::from(vec![item]);
         let mut cache = LayoutCache::default();
         let request = LayoutRequest {
             scroll_offset: 0,
@@ -9465,7 +9465,7 @@ mod tests {
             permission_groups: Default::default(),
             resolved_permission_groups: Default::default(),
         };
-        let items = OutputStore::from(vec![OutputItem::WorkflowPanel {
+        let items = FlowDocument::from(vec![OutputItem::WorkflowPanel {
             turn_index: 0,
             graph: graph.into(),
             expanded_nodes: HashSet::new(),
@@ -9503,7 +9503,7 @@ mod tests {
 
     #[test]
     fn unchanged_layout_update_and_slice_do_not_render_items() {
-        let items = OutputStore::from(vec![
+        let items = FlowDocument::from(vec![
             OutputItem::SystemNote {
                 text: "one".into(),
                 level: NoteLevel::Info,
@@ -9612,7 +9612,7 @@ mod tests {
         let output = (0..4_096)
             .map(|index| format!("line {index:04} 你好 {}\n", "x".repeat(index % 19)))
             .collect::<String>();
-        let items = OutputStore::from(vec![OutputItem::Bash {
+        let items = FlowDocument::from(vec![OutputItem::Bash {
             handle: "bg_large".into(),
             title: Some("inspect output".into()),
             command: Some("printf 'large output'".into()),
@@ -9665,7 +9665,7 @@ mod tests {
 
     #[test]
     fn evicted_bash_projection_rebuilds_equivalently_when_revisited() {
-        let items = OutputStore::from(
+        let items = FlowDocument::from(
             (0..200)
                 .map(|index| OutputItem::Bash {
                     handle: format!("bg_{index}"),
@@ -10171,7 +10171,7 @@ mod tests {
 
     #[test]
     fn rendered_line_retention_is_bounded() {
-        let items = OutputStore::from(
+        let items = FlowDocument::from(
             (0..1_000)
                 .map(|idx| OutputItem::SystemNote {
                     text: format!("note-{idx}"),
@@ -10198,7 +10198,7 @@ mod tests {
 
     #[test]
     fn width_and_theme_changes_force_full_layout_invalidation() {
-        let items = OutputStore::from(vec![
+        let items = FlowDocument::from(vec![
             OutputItem::SystemNote {
                 text: "one".into(),
                 level: NoteLevel::Info,
@@ -10277,7 +10277,7 @@ mod tests {
 
     #[test]
     fn visible_assistant_prose_projection_hits_and_copies() {
-        let items = OutputStore::from(vec![OutputItem::AssistantMd {
+        let items = FlowDocument::from(vec![OutputItem::AssistantMd {
             md: "ordinary assistant prose".into(),
             streaming: false,
             retried: false,
@@ -11705,7 +11705,7 @@ mod tests {
             ended_at: None,
             cancelled: false,
         };
-        let store = OutputStore::from(vec![panel(graph.clone())]);
+        let store = FlowDocument::from(vec![panel(graph.clone())]);
         let revision = store.revisions()[0];
         let mut cache = LayoutCache::default();
         cache.entries.resize(1, ItemCacheEntry::default());
@@ -12484,7 +12484,7 @@ mod tests {
                 .unwrap()
         }
 
-        let items = OutputStore::from(vec![OutputItem::ToolDispatch {
+        let items = FlowDocument::from(vec![OutputItem::ToolDispatch {
             calls: vec![ToolCallView {
                 id: "read-1".into(),
                 tool: "fs.read".into(),
@@ -12578,7 +12578,7 @@ mod tests {
             started_at: Instant::now(),
             ended_at: Some(Instant::now()),
         };
-        let items = OutputStore::from(vec![
+        let items = FlowDocument::from(vec![
             OutputItem::ToolDispatch { calls: vec![call] },
             OutputItem::AssistantMd {
                 md: "继续输出".into(),

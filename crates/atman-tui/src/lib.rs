@@ -17,6 +17,7 @@ pub mod clipboard;
 pub mod compact_review_modal;
 pub mod completion;
 mod directional_selector;
+pub mod flow_view;
 pub mod form_modal;
 pub mod highlight;
 pub mod history;
