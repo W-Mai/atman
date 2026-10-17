@@ -10,6 +10,8 @@ All notable changes to atman are documented in this file.
 
 - **TUI document type** — `flow_view::FlowDocument` replaces `app::OutputStore` as the tracked transcript container. Main and floating flow views hold a `FlowViewModel` with shared document revisions, tool disclosure operations, and detail lookup. Native transcript synchronization preserves item identity, scopes tool results to their producing invocation, and keeps final-answer fold boundaries within each turn.
 
+- **TUI state snapshots** — `FlowViewModel::sync_view` updates conversation and durable instance state together. State-only changes preserve document layout; stale snapshots are unavailable after transcript-only advances or document replacement.
+
 - **Daemon run storage** — `run_flow` and `goal.run` create persistent flow instances through the shared scheduler. Run responses include `instance_id`; completed turns leave instances idle and addressable. Entry flows explicitly schedule Goal continuation.
 
 - **Daemon execution targeting** — Goal reads, approvals, and event streams resolve the default persistent flow. Run cancellation verifies the active invocation identity and caller; `DaemonState::cancel_run` is asynchronous and returns errors explicitly.

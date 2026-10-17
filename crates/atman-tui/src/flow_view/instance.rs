@@ -4,6 +4,7 @@ use std::{
     collections::HashMap,
     io,
     ops::{Deref, DerefMut},
+    sync::Arc,
     time::Instant,
 };
 
@@ -11,6 +12,7 @@ use atman_rt::TurnLease;
 use atman_runtime::{
     event::AtmanUuid,
     event_log::journal::CommitReceipt,
+    flow_runtime::{FlowView, FlowViewSnapshot},
     flow_store::{
         FlowRef, completion::InvocationResult, trace::ExecutionScope, view::FlowContentSummary,
     },
@@ -55,6 +57,7 @@ pub struct FlowViewModel {
     pub(super) legacy_fold_bindings: HashMap<(atman_rt::TurnId<AtmanUuid>, usize), u64>,
     flow: Option<FlowRef>,
     instance: InstanceDocument,
+    snapshot: Option<Arc<FlowViewSnapshot>>,
 }
 
 impl Deref for FlowViewModel {
@@ -94,6 +97,28 @@ impl FlowViewModel {
 
     pub fn cursor(&self) -> Option<&CommitReceipt> {
         self.instance.cursor.as_ref()
+    }
+
+    /// Durable state belonging to the displayed document. Transcript-only updates and external structural edits invalidate an older state snapshot.
+    pub fn snapshot(&self) -> Option<&Arc<FlowViewSnapshot>> {
+        self.snapshot.as_ref().filter(|snapshot| {
+            Some(&snapshot.status.cursor) == self.cursor()
+                && self.instance.structure_revision == self.document.structure_revision()
+        })
+    }
+
+    /// Publish conversation and state together. A state-only update refreshes controls without rebuilding document layout; separate views share the immutable snapshot and retain their own disclosure state.
+    pub fn sync_view(
+        &mut self,
+        view: &FlowView,
+        output_store: Option<&OutputStore>,
+    ) -> io::Result<bool> {
+        let changed = self
+            .snapshot()
+            .is_none_or(|snapshot| snapshot.status.cursor != view.snapshot().status.cursor);
+        let document_changed = self.sync(view.transcript(), output_store)?;
+        self.snapshot = Some(view.snapshot().clone());
+        Ok(changed || document_changed)
     }
 
     pub fn source_record(&self, index: usize) -> Option<FlowRecordId> {
@@ -261,6 +286,13 @@ impl FlowViewModel {
         self.instance.entries = source.entries().len();
         self.instance.cursor = source.cursor().cloned();
         self.instance.structure_revision = self.document.structure_revision();
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| Some(&snapshot.status.cursor) != self.cursor())
+        {
+            self.snapshot = None;
+        }
         Ok(revision != self.document.revision_clock())
     }
 }

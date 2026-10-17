@@ -81,8 +81,8 @@ fn call_status(view: &FlowViewModel, index: usize) -> ToolCallStatus {
     calls[0].status
 }
 
-#[test]
-fn native_views_share_committed_history_but_keep_disclosure_and_scoped_results() {
+#[tokio::test]
+async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_results() {
     let directory = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(directory.path()).unwrap();
     let session_id = Uuid::now_v7();
@@ -367,6 +367,141 @@ fn native_views_share_committed_history_but_keep_disclosure_and_scoped_results()
     replay.replace(vec![OutputItem::Divider]);
     assert!(replay.sync(&source, None).is_err());
     assert_eq!(replay.len(), 1);
+
+    use atman_runtime::{
+        flow_runtime::FlowWorker,
+        flow_store::{
+            goal::GoalRequest,
+            planning::{PlanningEdit, PlanningRequest},
+        },
+        memory::goal::GoalEdit,
+    };
+    let worker = FlowWorker::start(store).await.unwrap();
+    let mut reader = worker
+        .subscribe_view(NonZeroUsize::new(2).unwrap())
+        .await
+        .unwrap();
+    let view = reader.next().await.unwrap();
+    assert!(main.sync_view(view, None).unwrap());
+    assert!(floating.sync_view(view, None).unwrap());
+    assert!(std::sync::Arc::ptr_eq(
+        main.snapshot().unwrap(),
+        floating.snapshot().unwrap()
+    ));
+    assert_eq!(main.revision_clock(), revision);
+    assert!(main.work_fold_projections(None).last().unwrap().expanded);
+    assert!(
+        !floating
+            .work_fold_projections(None)
+            .last()
+            .unwrap()
+            .expanded
+    );
+    assert!(!main.sync_view(view, None).unwrap());
+
+    worker
+        .edit_goal(
+            GoalRequest {
+                id: Uuid::now_v7(),
+                sender: SenderIdentity::User(Uuid::new_v4()),
+                expected: None,
+                edit: GoalEdit::Set {
+                    text: "Review current output".into(),
+                    replace_completed: false,
+                },
+                start_turn: false,
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    worker
+        .edit_planning(
+            PlanningRequest {
+                id: Uuid::now_v7(),
+                sender: SenderIdentity::User(Uuid::new_v4()),
+                expected_revision: None,
+                edit: PlanningEdit::WritePlan {
+                    id: "review".into(),
+                    title: "Review".into(),
+                    steps: vec!["Inspect".into()],
+                },
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    worker
+        .accept_input(
+            DeliveryRequest {
+                request_id: Uuid::now_v7(),
+                sender: SenderIdentity::User(Uuid::new_v4()),
+                recipient: worker.address().clone(),
+                delivery: DeliveryMode::NextTurn,
+                cause: None,
+                scope: None,
+                correlation: None,
+                payload: InboxPayload::Interjection {
+                    text: "Pending input".into(),
+                },
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let view = reader.next().await.unwrap();
+    assert!(main.sync_view(view, None).unwrap());
+    assert!(floating.sync_view(view, None).unwrap());
+    assert_eq!(
+        main.revision_clock(),
+        revision,
+        "state-only updates must retain document layout"
+    );
+    assert_eq!(main.cursor(), Some(&main.snapshot().unwrap().status.cursor));
+    assert!(std::sync::Arc::ptr_eq(
+        main.snapshot().unwrap(),
+        floating.snapshot().unwrap()
+    ));
+    assert_eq!(
+        main.snapshot()
+            .unwrap()
+            .status
+            .goal
+            .as_ref()
+            .unwrap()
+            .objective,
+        "Review current output"
+    );
+    assert_eq!(main.snapshot().unwrap().planning.plans.len(), 1);
+    assert_eq!(main.snapshot().unwrap().pending.len(), 1);
+    let cursor = main.cursor().cloned();
+    assert!(main.sync(&source, None).is_err());
+    assert_eq!(main.cursor(), cursor.as_ref());
+    assert_eq!(main.snapshot().unwrap().status.cursor, cursor.unwrap());
+
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::ExecutionPaused {
+                key: Uuid::now_v7().into(),
+            },
+        )
+        .await
+        .unwrap();
+    let view = reader.next().await.unwrap();
+    main.sync(view.transcript(), None).unwrap();
+    assert!(
+        main.snapshot().is_none(),
+        "document-only advance must not retain stale control state"
+    );
+    assert!(main.sync_view(view, None).unwrap());
+    assert_eq!(main.snapshot().unwrap().status.execution.pauses().len(), 1);
+    floating.replace(vec![OutputItem::Divider]);
+    assert!(floating.snapshot().is_none());
+    assert!(floating.sync_view(view, None).is_err());
+    assert!(main.snapshot().is_some());
+    drop(reader);
+    worker.shutdown().await.unwrap();
 }
 
 #[test]

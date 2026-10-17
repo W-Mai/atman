@@ -1,4 +1,4 @@
-use std::{io, num::NonZeroUsize};
+use std::{io, num::NonZeroUsize, sync::Arc};
 
 use futures::{StreamExt, stream::BoxStream};
 use tokio::sync::watch;
@@ -21,7 +21,7 @@ pub struct FlowViewSnapshot {
 /// Conversation and state from the same committed boundary, shared by all kinds of flow views.
 pub struct FlowView {
     transcript: FlowTranscript,
-    snapshot: Option<FlowViewSnapshot>,
+    snapshot: Option<Arc<FlowViewSnapshot>>,
 }
 
 impl FlowView {
@@ -29,7 +29,7 @@ impl FlowView {
         &self.transcript
     }
 
-    pub fn snapshot(&self) -> &FlowViewSnapshot {
+    pub fn snapshot(&self) -> &Arc<FlowViewSnapshot> {
         // Readers expose the view only after both sides reach the captured cursor.
         self.snapshot.as_ref().expect("committed view snapshot")
     }
@@ -41,7 +41,7 @@ pub struct FlowViewReader {
     commits: watch::Receiver<CommitReceipt>,
     limit: NonZeroUsize,
     view: FlowView,
-    target: Option<FlowViewSnapshot>,
+    target: Option<Arc<FlowViewSnapshot>>,
     capture_pending: bool,
 }
 
@@ -64,7 +64,7 @@ impl FlowViewReader {
                     self.capture_pending = true;
                 }
                 self.commits.borrow_and_update();
-                self.target = Some(self.worker.view_snapshot().await?);
+                self.target = Some(Arc::new(self.worker.view_snapshot().await?));
                 self.capture_pending = false;
             }
             if self.view().is_some_and(|view| {
@@ -82,7 +82,7 @@ impl FlowViewReader {
     pub async fn refresh(&mut self) -> io::Result<&FlowView> {
         self.capture_pending = true;
         self.commits.borrow_and_update();
-        self.target = Some(self.worker.view_snapshot().await?);
+        self.target = Some(Arc::new(self.worker.view_snapshot().await?));
         self.capture_pending = false;
         self.catch_up().await?;
         Ok(&self.view)
@@ -166,7 +166,7 @@ impl FlowWorker {
                 transcript: FlowTranscript::new(self.address().clone()),
                 snapshot: None,
             },
-            target: Some(target),
+            target: Some(Arc::new(target)),
             capture_pending: false,
         })
     }
