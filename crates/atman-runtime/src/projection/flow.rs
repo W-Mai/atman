@@ -98,6 +98,16 @@ impl FlowTranscript {
         self.receipts.last()
     }
 
+    /// Check that an earlier view cursor belongs to this exact committed history.
+    pub fn contains_cursor(&self, cursor: &CommitReceipt) -> bool {
+        cursor
+            .sequence
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| self.receipts.get(index))
+            == Some(cursor)
+    }
+
     pub fn entries(&self) -> &[FlowTranscriptEntry] {
         &self.entries
     }

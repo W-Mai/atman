@@ -4,6 +4,12 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::app::{OutputItem, OutputRevision};
 
+mod instance;
+pub use instance::FlowViewModel;
+
+#[cfg(test)]
+mod instance_tests;
+
 #[derive(Clone, Copy)]
 pub(crate) enum ToolDisclosureAction {
     Content,

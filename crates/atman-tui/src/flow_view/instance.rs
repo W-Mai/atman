@@ -1,0 +1,380 @@
+//! Incremental document binding for persistent instances.
+
+use std::{
+    collections::HashMap,
+    io,
+    ops::{Deref, DerefMut},
+    time::Instant,
+};
+
+use atman_rt::TurnLease;
+use atman_runtime::{
+    event::AtmanUuid,
+    event_log::journal::CommitReceipt,
+    flow_store::{
+        FlowRef, completion::InvocationResult, trace::ExecutionScope, view::FlowContentSummary,
+    },
+    message::{Message, MessagePart, MessageRole},
+    projection::flow::{FlowRecord, FlowRecordId, FlowTranscript},
+    tools::tool_output::OutputStore,
+};
+
+use super::{FlowDocument, OutputMutation};
+use crate::{
+    app::{NoteLevel, OutputItem, ToolCallStatus},
+    history::ToolDisplayMeta,
+};
+
+type FlowRunId = atman_rt::RunId<AtmanUuid>;
+
+#[derive(Default)]
+struct TurnView {
+    work_start: usize,
+    panel: Option<usize>,
+    graph_revision: Option<u64>,
+    completion: Option<FlowRecordId>,
+}
+
+#[derive(Default)]
+struct InstanceDocument {
+    cursor: Option<CommitReceipt>,
+    structure_revision: u64,
+    entries: usize,
+    turns: HashMap<u64, TurnView>,
+    calls: HashMap<(u64, FlowRunId, String), (usize, ToolDisplayMeta)>,
+    records: HashMap<u64, FlowRecordId>,
+}
+
+/// A document and its local disclosure state, independent of whether it is displayed in the main view or a window.
+///
+/// Native instance updates are derived from a shared `FlowTranscript`. Synchronization appends new records and changes only affected items; it neither consumes input nor controls execution. Existing session renderers use the same document storage and interactions.
+#[derive(Default)]
+pub struct FlowViewModel {
+    document: FlowDocument,
+    flow: Option<FlowRef>,
+    instance: InstanceDocument,
+}
+
+impl Deref for FlowViewModel {
+    type Target = FlowDocument;
+    fn deref(&self) -> &Self::Target {
+        &self.document
+    }
+}
+
+impl DerefMut for FlowViewModel {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.document
+    }
+}
+
+impl From<Vec<OutputItem>> for FlowViewModel {
+    fn from(items: Vec<OutputItem>) -> Self {
+        Self {
+            document: items.into(),
+            ..Self::default()
+        }
+    }
+}
+
+impl FlowViewModel {
+    pub fn flow(&self) -> Option<&FlowRef> {
+        self.flow.as_ref()
+    }
+
+    pub fn cursor(&self) -> Option<&CommitReceipt> {
+        self.instance.cursor.as_ref()
+    }
+
+    pub fn source_record(&self, index: usize) -> Option<FlowRecordId> {
+        self.document
+            .revisions()
+            .get(index)
+            .and_then(|revision| self.instance.records.get(&revision.id))
+            .copied()
+    }
+
+    /// Synchronize one complete committed source boundary. A different flow or a replaced history requires an explicit new view binding.
+    pub fn sync(
+        &mut self,
+        source: &FlowTranscript,
+        output_store: Option<&OutputStore>,
+    ) -> io::Result<bool> {
+        if self.flow.as_ref().is_some_and(|flow| flow != source.flow())
+            || self
+                .instance
+                .cursor
+                .as_ref()
+                .is_some_and(|cursor| !source.contains_cursor(cursor))
+            || self.instance.entries > source.entries().len()
+            || (self.flow.is_none() && !self.document.is_empty())
+            || (self.flow.is_some()
+                && self.instance.structure_revision != self.document.structure_revision())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "flow view binding does not match the source history",
+            ));
+        }
+        if matches!(source.content(), Some(FlowContentSummary::History(_))) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "archived records require the legacy history reader",
+            ));
+        }
+        if source.cursor() == self.instance.cursor.as_ref() {
+            self.flow = Some(source.flow().clone());
+            return Ok(false);
+        }
+        let revision = self.document.revision_clock();
+        for entry in &source.entries()[self.instance.entries..] {
+            match &entry.record {
+                FlowRecord::Input(input) => {
+                    let first = !self.instance.turns.contains_key(&input.lease.epoch);
+                    for message in entry.record.shared_messages() {
+                        self.instance.message(
+                            &mut self.document,
+                            &input.lease,
+                            &input.lease.run,
+                            entry.id,
+                            message,
+                            output_store,
+                        );
+                    }
+                    if first {
+                        self.instance
+                            .turns
+                            .entry(input.lease.epoch)
+                            .or_default()
+                            .work_start = self.document.len();
+                    }
+                }
+                FlowRecord::Publication(publication) if publication.context_run.is_none() => {
+                    self.instance
+                        .ensure_turn(&mut self.document, &publication.lease, entry.id);
+                    self.instance.message(
+                        &mut self.document,
+                        &publication.lease,
+                        &publication.run,
+                        entry.id,
+                        &publication.message,
+                        output_store,
+                    );
+                }
+                FlowRecord::Execution(event) => {
+                    if let ExecutionScope::Invocation(lease) = &event.scope {
+                        self.instance
+                            .ensure_turn(&mut self.document, lease, entry.id);
+                    }
+                }
+                FlowRecord::Completion(completion) => {
+                    self.instance
+                        .ensure_turn(&mut self.document, &completion.lease, entry.id);
+                    self.instance
+                        .finish_calls(&mut self.document, completion.lease.epoch);
+                    if let InvocationResult::Failed(error) = &completion.result {
+                        self.instance.push(
+                            &mut self.document,
+                            entry.id,
+                            OutputItem::SystemNote {
+                                text: format!("Turn failed: {error}"),
+                                level: NoteLevel::Error,
+                            },
+                        );
+                    }
+                    self.instance
+                        .push(&mut self.document, entry.id, OutputItem::Divider);
+                }
+                _ => {}
+            }
+        }
+        for turn in source.turns() {
+            let Some(view) = self.instance.turns.get_mut(&turn.lease().epoch) else {
+                continue;
+            };
+            let completion = turn.completion().map(|end| end.record);
+            if view.graph_revision == Some(turn.workflow().revision())
+                && view.completion == completion
+            {
+                continue;
+            }
+            if let Some(index) = view.panel {
+                self.document
+                    .mutate(index, OutputMutation::Semantic, |item| {
+                        let OutputItem::WorkflowPanel {
+                            graph,
+                            ended_at,
+                            started_at,
+                            cancelled,
+                            ..
+                        } = item
+                        else {
+                            return false;
+                        };
+                        *graph = turn.workflow().clone();
+                        // These instants only control animation; graph durations use recorded UTC times.
+                        *ended_at = completion.map(|_| *started_at);
+                        *cancelled = turn.completion().is_some_and(|end| {
+                            matches!(
+                                end.outcome,
+                                atman_rt::TurnOutcome::Interrupted(
+                                    atman_rt::Interruption::Cancelled
+                                )
+                            )
+                        });
+                        true
+                    });
+            }
+            view.graph_revision = Some(turn.workflow().revision());
+            view.completion = completion;
+        }
+        self.flow = Some(source.flow().clone());
+        self.instance.entries = source.entries().len();
+        self.instance.cursor = source.cursor().cloned();
+        self.instance.structure_revision = self.document.structure_revision();
+        Ok(revision != self.document.revision_clock())
+    }
+}
+
+impl InstanceDocument {
+    fn push(&mut self, document: &mut FlowDocument, record: FlowRecordId, item: OutputItem) {
+        document.push(item);
+        self.records
+            .insert(document.revisions().last().unwrap().id, record);
+    }
+
+    fn ensure_turn(
+        &mut self,
+        document: &mut FlowDocument,
+        lease: &TurnLease<AtmanUuid>,
+        record: FlowRecordId,
+    ) {
+        let view = self.turns.entry(lease.epoch).or_insert_with(|| TurnView {
+            work_start: document.len(),
+            ..TurnView::default()
+        });
+        if view.panel.is_none() {
+            view.panel = Some(document.len());
+            let turn_index = self.turns.len();
+            self.push(
+                document,
+                record,
+                OutputItem::WorkflowPanel {
+                    turn_index,
+                    graph: atman_runtime::projection::workflow::WorkflowProjection::new(
+                        lease.turn.clone(),
+                    ),
+                    expanded_nodes: Default::default(),
+                    panel_expanded: false,
+                    started_at: Instant::now(),
+                    ended_at: None,
+                    cancelled: false,
+                },
+            );
+        }
+    }
+
+    fn message(
+        &mut self,
+        document: &mut FlowDocument,
+        lease: &TurnLease<AtmanUuid>,
+        run: &FlowRunId,
+        record: FlowRecordId,
+        message: &Message,
+        output_store: Option<&OutputStore>,
+    ) {
+        if message.role == MessageRole::Tool {
+            for part in &message.parts {
+                let MessagePart::ToolResult { tool_use_id, .. } = part else {
+                    continue;
+                };
+                let Some((index, meta)) =
+                    self.calls
+                        .get(&(lease.epoch, run.clone(), tool_use_id.clone()))
+                else {
+                    continue;
+                };
+                let Some(item) = document.get(*index) else {
+                    continue;
+                };
+                let mut items = vec![item.clone()];
+                let single = Message {
+                    role: message.role,
+                    origin: message.origin,
+                    turn_id: message.turn_id.clone(),
+                    parts: vec![part.clone()],
+                };
+                crate::history::flatten_message_with_output_store(
+                    &single,
+                    &mut items,
+                    &HashMap::from([(tool_use_id.clone(), meta.clone())]),
+                    output_store,
+                    None,
+                );
+                let updated = items.remove(0);
+                document.mutate(*index, OutputMutation::Semantic, |item| {
+                    *item = updated;
+                    true
+                });
+            }
+            return;
+        }
+        let mut items = Vec::new();
+        crate::history::flatten_message_with_output_store(
+            message,
+            &mut items,
+            &HashMap::new(),
+            output_store,
+            None,
+        );
+        let mut final_answer = false;
+        for mut item in items {
+            if let OutputItem::WorkFoldMarker { start_index, .. } = &mut item {
+                *start_index = self.turns.get(&lease.epoch).map(|turn| turn.work_start);
+                final_answer = true;
+            }
+            if let OutputItem::ToolDispatch { calls } = &item {
+                for call in calls {
+                    let intent = atman_runtime::message::ToolCallIntent::new(&call.intent);
+                    self.calls.insert(
+                        (lease.epoch, run.clone(), call.id.clone()),
+                        (
+                            document.len(),
+                            ToolDisplayMeta::from_tool_use(
+                                &call.tool,
+                                &call.input,
+                                intent.as_ref(),
+                            ),
+                        ),
+                    );
+                }
+            }
+            self.push(document, record, item);
+        }
+        if final_answer && let Some(turn) = self.turns.get_mut(&lease.epoch) {
+            turn.work_start = document.len();
+        }
+    }
+
+    fn finish_calls(&self, document: &mut FlowDocument, epoch: u64) {
+        for ((owner, _, id), (index, _)) in &self.calls {
+            if *owner != epoch {
+                continue;
+            }
+            document.mutate(*index, OutputMutation::Semantic, |item| {
+                let OutputItem::ToolDispatch { calls } = item else {
+                    return false;
+                };
+                let Some(call) = calls
+                    .iter_mut()
+                    .find(|call| call.id == *id && call.status == ToolCallStatus::Running)
+                else {
+                    return false;
+                };
+                call.status = ToolCallStatus::Error;
+                call.ended_at = Some(call.started_at);
+                true
+            });
+        }
+    }
+}

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-pub use crate::flow_view::FlowDocument;
+pub use crate::flow_view::{FlowDocument, FlowViewModel};
 use crate::flow_view::{OutputMutation, ToolDisclosureAction};
 use std::time::{Duration, Instant};
 
@@ -825,7 +825,7 @@ pub struct QueuedSubmissionEdit {
 pub struct AppState {
     pub knowledge_state:
         std::sync::Arc<std::sync::Mutex<crate::window::knowledge_panel::KnowledgeState>>,
-    pub items: FlowDocument,
+    pub items: FlowViewModel,
     pub input: String,
     pub input_reasoning: Option<atman_runtime::provider::ReasoningSelection>,
     pub scroll_offset: u32,

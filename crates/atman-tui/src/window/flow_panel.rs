@@ -16,7 +16,7 @@ use crate::wm::component::{
     EventCtx, HitRegion, HitTarget, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
 
-use crate::flow_view::{FlowDocument, ToolDisclosureAction};
+use crate::flow_view::{FlowDocument, FlowViewModel, ToolDisclosureAction};
 
 #[derive(Default)]
 pub(crate) struct FlowInteraction {
@@ -65,7 +65,7 @@ fn panel_hit_regions(
 }
 
 pub struct FlowPanelContent {
-    pub(crate) document: FlowDocument,
+    pub(crate) document: FlowViewModel,
     pub(crate) interaction: FlowInteraction,
     pub(crate) goal_entry: Option<std::sync::Arc<atman_runtime::tools::agent_ctrl::FlowEntry>>,
     pub(crate) goal_rect: Rect,
