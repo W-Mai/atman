@@ -17,6 +17,7 @@ mod init;
 mod mcp_templates;
 mod migrate_source;
 mod oauth_login;
+mod peer_repl;
 mod repl_completer;
 mod session_catalog;
 mod suggest;
@@ -1743,6 +1744,15 @@ async fn boot_first_session(
 }
 
 async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
+    if !tui_mode_requested()
+        && let Some(sid) = &resume_sid
+    {
+        let root = data_dir()?;
+        let sid = resolve_session_prefix(&root, sid)?;
+        if let Some(recorded) = session_catalog::inspect(&root, &sid)? {
+            return peer_repl::run(&root, recorded.projection.descriptor.id).await;
+        }
+    }
     // Hold the terminal guard across every session switch so the
     // alternate screen stays alive between one cmd_repl_once and the
     // next. Without this, each SwitchSession would call
@@ -4680,7 +4690,7 @@ fn spawn_stdin_reader(
     printer_tx: tokio::sync::oneshot::Sender<Option<ExternalPrinter>>,
 ) {
     let non_interactive = std::env::var("ATMAN_REPL_NON_INTERACTIVE").is_ok();
-    tokio::task::spawn_blocking(move || {
+    std::thread::spawn(move || {
         if non_interactive {
             let _ = printer_tx.send(None);
             use std::io::BufRead;
@@ -8594,7 +8604,11 @@ fn resolve_session_prefix(root: &std::path::Path, sid: &str) -> Result<String> {
         return Ok(sid.to_string());
     }
     let sessions = root.join("sessions");
-    let mut matches: Vec<String> = Vec::new();
+    let mut matches: Vec<String> = atman_runtime::flow_store::RuntimeStore::session_ids(root)?
+        .into_iter()
+        .map(|id| id.to_string())
+        .filter(|id| id.starts_with(sid))
+        .collect();
     if sessions.exists() {
         if let Ok(entries) = std::fs::read_dir(&sessions) {
             for entry in entries.flatten() {
@@ -8605,6 +8619,8 @@ fn resolve_session_prefix(root: &std::path::Path, sid: &str) -> Result<String> {
             }
         }
     }
+    matches.sort();
+    matches.dedup();
     match matches.len() {
         0 => bail!("no session found matching prefix `{sid}`"),
         1 => Ok(matches[0].clone()),

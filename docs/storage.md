@@ -38,6 +38,25 @@ Migration work stays under `runtime-v1/.migrations/<destination>/work` until eve
 
 ## Session and flow storage
 
+### Plain-terminal attachment
+
+`ATMAN_NO_TUI=1 atman --continue <session-id-or-prefix>` attaches an existing persistent Session to `RuntimeHost`. Open executable entries bind their retained source and current trust configuration to the common scheduler. Binding preserves execution pauses and interruption gates; an unavailable entry is reported independently. The terminal reads committed `FlowUpdate` batches for replies and completion failures, retaining a separate cursor for each selected flow.
+
+| Command | Behavior |
+|---------|----------|
+| `:flows`, `:focus <flow-prefix>`, `:status` | Inspect instances and change the local input/output focus; the stored default remains unchanged |
+| Plain text | Queue authenticated user content for a new turn through the declared `invocation.user_message` mapping |
+| `:insert <text>` | Submit an interjection for a running turn's next eligible context boundary, or a later turn when idle |
+| `:invoke <JSON object>` | Queue explicit entry arguments without guessing a text parameter |
+| `:pause`, `:resume` | Add or remove the user's execution pause; other controllers and Goal status remain independent |
+| `:recover`, `:cancel`, `:close` | Recover an interruption gate, cancel the active turn, or explicitly close the instance |
+| `:goal`, `:goal set <text>`, `:goal pause`, `:goal resume`, `:goal clear` | Read or edit the focused objective; explicit Goal resume atomically queues a turn without clearing execution pauses |
+| `:pending`, `:reply <prompt-id> <JSON answer>` | Inspect pending interactions and answer an invocation-bound prompt |
+| `:approve <flow-prefix> <request-id>`, `:deny <flow-prefix> <request-id>` | Resolve a pending permission request for the specified instance |
+| `:quit` | Stop this host attachment without closing persistent instances |
+
+EOF disconnects prompt and approval endpoints, then waits for runnable work to finish. Pending input behind a pause remains stored. A prompt that needs an unavailable endpoint fails explicitly. After an interrupted invocation, use `:recover` to release its interruption gate; execution resume and Goal resume do not substitute for recovery. Entries without a text mapping reject plain text and interjections before acceptance and accept `:invoke` instead. Prompt answers use the requested interaction's JSON response type; a text `form.ask` accepts `{"Submitted":{"answers":[{"kind":"text_entered","text":"answer"}]}}`.
+
 `flow_store::RuntimeStore::open(data_dir)` uses the isolated `runtime-v1` namespace. A `SessionStore` owns its container journal and an exclusive execution lease. Each `FlowStore` retains that lease while owning its independent journal. Another session owner cannot open the same container while any of those handles remain alive.
 
 ```text
