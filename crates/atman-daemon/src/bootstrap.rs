@@ -198,20 +198,6 @@ enabled = true
     fn runtime_build_restores_oauth_provider_from_selected_config_dir() {
         const PROVIDER_ID: &str = "selected-config-oauth";
 
-        struct CatalogCleanup;
-
-        impl Drop for CatalogCleanup {
-            fn drop(&mut self) {
-                atman_runtime::model_registry::remove_provider_catalog(PROVIDER_ID);
-            }
-        }
-
-        let _registry_lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        atman_runtime::model_registry::remove_provider_catalog(PROVIDER_ID);
-        let _catalog_cleanup = CatalogCleanup;
-
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -274,9 +260,13 @@ enabled = true
                         .unwrap()
                         .config_hub()
                         .config_dir(),
-                    config.path()
+                    config.path().canonicalize().unwrap()
                 );
-                let model = atman_runtime::model_registry::all_model_entries()
+                let model = outcome
+                    .executor
+                    .providers
+                    .models()
+                    .all_model_entries()
                     .into_iter()
                     .find_map(|(name, entry)| {
                         (entry.provider.as_deref() == Some(PROVIDER_ID)).then_some(name)
