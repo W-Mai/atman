@@ -4,6 +4,9 @@ use std::{io, ops::Range};
 
 use serde::{Deserialize, Serialize};
 
+use super::flow_workflow::FlowWorkflows;
+pub use super::flow_workflow::{FlowTurnEnd, FlowTurnProjection};
+
 use crate::{
     event_log::journal::{CommitReceipt, CommittedBatch},
     flow_store::{
@@ -69,6 +72,7 @@ pub struct FlowTranscript {
     content: Option<FlowContentSummary>,
     receipts: Vec<CommitReceipt>,
     entries: Vec<FlowTranscriptEntry>,
+    workflows: FlowWorkflows,
 }
 
 impl FlowTranscript {
@@ -78,6 +82,7 @@ impl FlowTranscript {
             content: None,
             receipts: Vec::new(),
             entries: Vec::new(),
+            workflows: FlowWorkflows::default(),
         }
     }
 
@@ -95,6 +100,10 @@ impl FlowTranscript {
 
     pub fn entries(&self) -> &[FlowTranscriptEntry] {
         &self.entries
+    }
+
+    pub fn turns(&self) -> impl DoubleEndedIterator<Item = &FlowTurnProjection> {
+        self.workflows.turns()
     }
 
     /// Append one validated batch and return its new entry range. Cursor advancement and all entries become visible together.
@@ -184,6 +193,10 @@ impl FlowTranscript {
                 _ => {}
             }
         }
+        for entry in &self.entries[start..] {
+            self.workflows.observe(entry);
+        }
+        self.workflows.finish_batch();
         self.receipts.push(batch.receipt);
         Ok(start..self.entries.len())
     }

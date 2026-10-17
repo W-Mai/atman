@@ -243,13 +243,53 @@ impl WorkflowProjection {
     ) -> ProjectionDelta {
         let mut pending = PendingDelta::default();
         for event in events {
-            pending.merge(self.apply_event_inner(event));
+            pending.merge(self.apply_event_inner(event, Utc::now(), false));
         }
         self.commit(pending)
     }
 
     pub fn apply_event(&mut self, event: &Event) -> ProjectionDelta {
-        let pending = self.apply_event_inner(event);
+        let pending = self.apply_event_inner(event, Utc::now(), false);
+        self.commit(pending)
+    }
+
+    /// Apply a record already scoped to this instance and turn, retaining its timestamp. An external creator is not a missing local parent.
+    pub fn apply_recorded_event(&mut self, event: &Event, at: DateTime<Utc>) -> ProjectionDelta {
+        let pending = self.apply_event_inner(event, at, true);
+        self.commit(pending)
+    }
+
+    /// Publish tool outcomes without inventing a timestamp for a message that has none.
+    pub fn apply_published_message(
+        &mut self,
+        run: &crate::event::FlowRunId,
+        message: &crate::message::Message,
+    ) -> ProjectionDelta {
+        let pending = self.apply_tool_results(Some(&run.0.to_string()), message, None);
+        self.commit(pending)
+    }
+
+    /// Close unfinished nodes at the recorded invocation boundary, retaining already finished results and times.
+    pub fn finish_invocation(
+        &mut self,
+        outcome: atman_rt::TurnOutcome,
+        at: DateTime<Utc>,
+    ) -> ProjectionDelta {
+        let status = match outcome {
+            atman_rt::TurnOutcome::Completed => NodeStatus::Ok,
+            atman_rt::TurnOutcome::Interrupted(atman_rt::Interruption::Cancelled) => {
+                NodeStatus::Cancelled
+            }
+            atman_rt::TurnOutcome::Interrupted(_) => NodeStatus::Err,
+        };
+        let mut pending = PendingDelta::default();
+        for node in &mut self.graph.root {
+            cascade_terminate(node, status, at);
+            if self.summary.sync_subtree(node, true) {
+                pending.mark(&node.id);
+            }
+        }
+        pending.merge(self.interrupt_permissions("invocation ended"));
         self.commit(pending)
     }
 
@@ -267,27 +307,26 @@ impl WorkflowProjection {
     }
 
     pub fn interrupt_pending_permissions(&mut self) -> ProjectionDelta {
+        let pending = self.interrupt_permissions("interrupted at end of persisted history");
+        self.commit(pending)
+    }
+
+    fn interrupt_permissions(&mut self, reason: &str) -> PendingDelta {
         let pending_identities = self.permissions.pending_identities();
-        if pending_identities.is_empty() {
-            return ProjectionDelta {
-                revision: self.revision,
-                ..ProjectionDelta::default()
-            };
-        }
         let mut pending = PendingDelta::default();
         for identity in pending_identities {
             let Some(request) = self.graph.permission_requests.get(&identity).cloned() else {
                 continue;
             };
             let mut payload = request.payload;
-            payload.reason = Some("interrupted at end of persisted history".into());
+            payload.reason = Some(reason.into());
             pending.merge(self.apply_permission_transition(
                 identity,
                 payload,
                 WorkflowPermissionState::Interrupted,
             ));
         }
-        self.commit(pending)
+        pending
     }
 
     pub fn apply_permission_request(
@@ -343,7 +382,12 @@ impl WorkflowProjection {
         self.commit(pending)
     }
 
-    fn apply_event_inner(&mut self, event: &Event) -> PendingDelta {
+    fn apply_event_inner(
+        &mut self,
+        event: &Event,
+        at: DateTime<Utc>,
+        instance_scoped: bool,
+    ) -> PendingDelta {
         match event {
             Event::FlowStart {
                 run_id,
@@ -356,8 +400,8 @@ impl WorkflowProjection {
                 flow_name.clone(),
                 parent_run_id.as_ref().map(|id| id.0.to_string()),
                 parent_node_id.clone(),
-                Utc::now(),
-                false,
+                at,
+                instance_scoped,
             ),
             Event::FlowEnd { run_id, status, .. } => {
                 let status = match status {
@@ -365,7 +409,7 @@ impl WorkflowProjection {
                     FlowStatus::Errored { .. } => NodeStatus::Err,
                     FlowStatus::Cancelled => NodeStatus::Cancelled,
                 };
-                self.finish_node(&run_id.0.to_string(), status, None, Utc::now(), false)
+                self.finish_node(&run_id.0.to_string(), status, None, at, instance_scoped)
             }
             Event::FlowNodeStart {
                 run_id,
@@ -380,7 +424,7 @@ impl WorkflowProjection {
                 kind,
                 label,
                 parent_node_id.as_deref(),
-                Utc::now(),
+                at,
             ),
             Event::FlowNodeEnd {
                 run_id,
@@ -398,7 +442,7 @@ impl WorkflowProjection {
                     &scope_id(&run_id.0.to_string(), node_id),
                     status,
                     output_preview.as_deref(),
-                    Utc::now(),
+                    at,
                     false,
                 )
             }
@@ -453,7 +497,7 @@ impl WorkflowProjection {
                 tool_name,
                 args_preview,
                 call_intent.clone(),
-                Utc::now(),
+                at,
             ),
             Event::ToolResultMsg {
                 flow_run_id,
@@ -462,7 +506,7 @@ impl WorkflowProjection {
             } => self.apply_tool_results(
                 flow_run_id.as_ref().map(|id| id.0.to_string()).as_deref(),
                 message,
-                Utc::now(),
+                Some(at),
             ),
             Event::ToolPendingApproval {
                 run_id,
@@ -640,7 +684,7 @@ impl WorkflowProjection {
             ),
             StreamFrame::ToolUseDone {
                 id, ok, preview, ..
-            } => self.finish_tool(None, id, *ok, preview, now, false),
+            } => self.finish_tool(None, id, *ok, preview, Some(now), false),
             StreamFrame::FlowDone {
                 run_id,
                 ok,
@@ -659,7 +703,7 @@ impl WorkflowProjection {
             StreamFrame::ToolResultMsg {
                 flow_run_id,
                 message,
-            } => self.apply_tool_results(flow_run_id.as_deref(), message, now),
+            } => self.apply_tool_results(flow_run_id.as_deref(), message, Some(now)),
             StreamFrame::ToolPendingApproval {
                 run_id,
                 tool_use_id,
@@ -945,7 +989,7 @@ impl WorkflowProjection {
         &mut self,
         run_id: Option<&str>,
         message: &crate::message::Message,
-        now: DateTime<Utc>,
+        now: Option<DateTime<Utc>>,
     ) -> PendingDelta {
         let mut delta = PendingDelta::default();
         for part in &message.parts {
@@ -968,7 +1012,7 @@ impl WorkflowProjection {
         tool_use_id: &str,
         ok: bool,
         preview: &str,
-        now: DateTime<Utc>,
+        now: Option<DateTime<Utc>>,
         set_kind_preview: bool,
     ) -> PendingDelta {
         let path = match run_id {
@@ -991,11 +1035,12 @@ impl WorkflowProjection {
             preview.to_string()
         };
         let status = if ok { NodeStatus::Ok } else { NodeStatus::Err };
+        let ended_at = now.or(node.ended_at);
         let changed = node.status != status
-            || node.ended_at != Some(now)
+            || node.ended_at != ended_at
             || node.output_preview.as_deref() != Some(content.as_str());
         node.status = status;
-        node.ended_at = Some(now);
+        node.ended_at = ended_at;
         node.output_preview = Some(content.clone());
         if set_kind_preview
             && let WorkflowNodeKind::ToolCall { result_preview, .. } = &mut node.kind
@@ -1411,6 +1456,220 @@ mod tests {
             revision: 1,
             at,
         }
+    }
+
+    #[test]
+    fn instance_permission_updates_keep_turn_ownership_and_early_groups() {
+        use crate::flow_store::{
+            FlowInstanceId, FlowRef,
+            completion::{Completion, InvocationResult, StoredValue},
+            trace::{ExecutionEvent, ExecutionScope},
+        };
+        use crate::projection::{
+            flow::{FlowRecord, FlowRecordId, FlowTranscriptEntry},
+            flow_workflow::FlowWorkflows,
+        };
+        let flow = FlowRef {
+            session_id: uuid::Uuid::new_v4().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let first = atman_rt::TurnLease {
+            flow: flow.clone(),
+            turn: TurnId::now(),
+            run: FlowRunId::now(),
+            epoch: 1,
+        };
+        let second = atman_rt::TurnLease {
+            flow: flow.clone(),
+            turn: TurnId::now(),
+            run: FlowRunId::now(),
+            epoch: 2,
+        };
+        let at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let group_id = PermissionGroupId::now();
+        let mut one = permission_payload(PermissionRequestId::now(), &first.run, "one", at);
+        let mut two = permission_payload(PermissionRequestId::now(), &second.run, "two", at);
+        one.group_ids.push(group_id.clone());
+        two.group_ids.push(group_id.clone());
+        let mut group = permission_group(
+            group_id.clone(),
+            &first.run,
+            vec![
+                one.request_id.clone().unwrap(),
+                two.request_id.clone().unwrap(),
+            ],
+            at,
+        );
+        group.owner = PermissionGroupAuditOwner::User {
+            session_id: flow.session_id.to_string(),
+        };
+        let mut projection = FlowWorkflows::default();
+        let mut sequence = 0;
+        let mut event = |projection: &mut FlowWorkflows, scope, event| {
+            sequence += 1;
+            projection.observe(&FlowTranscriptEntry {
+                id: FlowRecordId {
+                    commit: sequence,
+                    fact: 0,
+                    item: 0,
+                },
+                record: FlowRecord::Execution(Box::new(ExecutionEvent {
+                    scope,
+                    sequence,
+                    timestamp: at,
+                    event,
+                })),
+            });
+            projection.finish_batch();
+        };
+        event(
+            &mut projection,
+            ExecutionScope::Instance(flow.clone()),
+            Event::PermissionGroupCreated {
+                payload: group.clone(),
+            },
+        );
+        for (lease, payload) in [(&first, &one), (&second, &two)] {
+            event(
+                &mut projection,
+                ExecutionScope::Invocation(lease.clone()),
+                Event::FlowStart {
+                    run_id: lease.run.clone(),
+                    flow_name: "worker".into(),
+                    parent_run_id: None,
+                    parent_node_id: None,
+                    spawned: false,
+                },
+            );
+            event(
+                &mut projection,
+                ExecutionScope::Instance(flow.clone()),
+                Event::PermissionRequestCreated {
+                    payload: payload.clone(),
+                },
+            );
+        }
+        for turn in projection.turns() {
+            assert!(turn.workflow().permission_groups.contains_key(&group_id));
+            assert_eq!(turn.workflow().permission_requests.len(), 1);
+        }
+        projection.observe(&FlowTranscriptEntry {
+            id: FlowRecordId {
+                commit: 99,
+                fact: 0,
+                item: 0,
+            },
+            record: FlowRecord::Completion(Box::new(Completion {
+                lease: first.clone(),
+                finished_at: at,
+                outcome: atman_rt::TurnOutcome::Completed,
+                result: InvocationResult::Returned(StoredValue::Unit),
+            })),
+        });
+        projection.finish_batch();
+        one.revision += 1;
+        event(
+            &mut projection,
+            ExecutionScope::Instance(flow.clone()),
+            Event::PermissionRequestApproved {
+                payload: one.clone(),
+            },
+        );
+        assert_eq!(
+            projection
+                .turns()
+                .next()
+                .unwrap()
+                .workflow()
+                .permission_requests
+                .values()
+                .next()
+                .unwrap()
+                .state,
+            WorkflowPermissionState::Approved
+        );
+        assert_eq!(
+            projection
+                .turns()
+                .next_back()
+                .unwrap()
+                .workflow()
+                .permission_requests
+                .values()
+                .next()
+                .unwrap()
+                .state,
+            WorkflowPermissionState::Pending
+        );
+        assert_eq!(
+            projection.turns().next().unwrap().workflow().root[0].status,
+            NodeStatus::Ok
+        );
+        assert_eq!(
+            projection.turns().next_back().unwrap().workflow().root[0].status,
+            NodeStatus::Running
+        );
+        event(
+            &mut projection,
+            ExecutionScope::Instance(flow.clone()),
+            Event::PermissionGroupResolved { payload: group },
+        );
+        assert!(projection.turns().all(|turn| {
+            turn.workflow()
+                .resolved_permission_groups
+                .contains(&group_id)
+        }));
+        let reused = atman_rt::TurnLease {
+            turn: TurnId::now(),
+            epoch: 3,
+            ..first.clone()
+        };
+        event(
+            &mut projection,
+            ExecutionScope::Invocation(reused.clone()),
+            Event::FlowStart {
+                run_id: reused.run.clone(),
+                flow_name: "worker".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+            },
+        );
+        one.revision += 1;
+        event(
+            &mut projection,
+            ExecutionScope::Instance(flow.clone()),
+            Event::PermissionRequestDenied { payload: one },
+        );
+        event(
+            &mut projection,
+            ExecutionScope::Instance(flow),
+            Event::PermissionRequestCreated {
+                payload: permission_payload(PermissionRequestId::now(), &reused.run, "unknown", at),
+            },
+        );
+        assert_eq!(
+            projection
+                .turns()
+                .next()
+                .unwrap()
+                .workflow()
+                .permission_requests
+                .values()
+                .next()
+                .unwrap()
+                .state,
+            WorkflowPermissionState::Denied
+        );
+        assert!(
+            projection
+                .turns()
+                .next_back()
+                .unwrap()
+                .workflow()
+                .permission_requests
+                .is_empty()
+        );
     }
 
     fn without_timestamps(mut graph: WorkflowGraph) -> WorkflowGraph {

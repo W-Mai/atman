@@ -46,6 +46,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Instance workflow projections** — Committed transcripts expose an execution graph for each admitted turn. Recorded timestamps, scoped tool outcomes, late diagnostics, and permission updates retain their original turn; completed turns stay terminal during replay.
+
 - **Persistent transcript projection** — Instance-scoped documents retain stable record identities and separate input, publication, execution, compaction, and completion facts. Terminal history and live updates share atomic batch application and receipt deduplication.
 
 - **Persistent terminal sessions** — Plain-terminal `--continue` attaches retained flow entries to the shared scheduler. Flow focus, queued input, explicit invocation, execution controls, Goal controls, prompts, and permission decisions address persistent instances. Committed replies survive restart; switching focus leaves other flows running.

@@ -729,6 +729,28 @@ async fn host_launch_registers_before_execution_and_restores_parameters_context_
         ["first answer"]
     );
     assert!(transcript.entries().iter().any(|entry| matches!(&entry.record, atman_runtime::projection::flow::FlowRecord::Execution(event) if event.scope.flow() == source.address())));
+    assert_eq!(transcript.turns().count(), 1);
+    let mut observed_runs = std::collections::HashSet::new();
+    for entry in transcript.entries() {
+        if let atman_runtime::projection::flow::FlowRecord::Execution(record) = &entry.record
+            && let atman_runtime::event::Event::FlowStart { run_id, .. } = &record.event
+            && observed_runs.insert(run_id.clone())
+        {
+            let owner = record.scope.lease().unwrap();
+            let turn = transcript
+                .turns()
+                .find(|turn| turn.lease() == owner)
+                .unwrap();
+            assert_eq!(
+                turn.workflow()
+                    .find_node(&run_id.0.to_string())
+                    .unwrap()
+                    .started_at,
+                Some(record.timestamp)
+            );
+        }
+    }
+    assert!(!observed_runs.is_empty());
     assert_eq!(
         history
             .iter()

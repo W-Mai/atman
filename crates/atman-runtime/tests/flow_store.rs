@@ -861,6 +861,215 @@ fn start(flow: &mut FlowStore) -> TurnLease<AtmanUuid> {
 }
 
 #[test]
+fn transcript_turn_graphs_preserve_instance_ownership_times_and_completion() {
+    use atman_runtime::{
+        event::{Event, FlowStatus},
+        flow_store::{
+            completion::{InvocationResult, StoredValue},
+            publication::MessagePublication,
+            trace::{ExecutionEvent, ExecutionScope},
+        },
+        message::{MessageOrigin, MessagePart, MessageRole},
+        projection::flow::FlowTranscript,
+        workflow::NodeStatus,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let mut session = root.create_session(session_descriptor()).unwrap();
+    let info = descriptor(session.projection().descriptor.id);
+    let mut flow = session.create_flow(info.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+    let end = at + chrono::Duration::seconds(7);
+    let mut source = FlowTranscript::new(info.address.clone());
+    let mut sequence = 0;
+    for cancelled in [false, true] {
+        let lease = start(&mut flow);
+        let mut record = |event, timestamp| {
+            sequence += 1;
+            ExecutionEvent {
+                scope: ExecutionScope::Invocation(lease.clone()),
+                sequence,
+                timestamp,
+                event,
+            }
+        };
+        flow.append_execution_events(vec![
+            record(
+                Event::FlowStart {
+                    run_id: lease.run.clone(),
+                    flow_name: "worker".into(),
+                    parent_run_id: Some(RunId::now()),
+                    parent_node_id: Some("spawn".into()),
+                    spawned: true,
+                },
+                at,
+            ),
+            record(
+                Event::FlowNodeStart {
+                    run_id: lease.run.clone(),
+                    node_id: "dispatch".into(),
+                    kind: atman_runtime::nodegraph::NodeKind::ToolCall {
+                        path: "dispatch_all".into(),
+                    },
+                    label: "dispatch_all".into(),
+                    parent_node_id: None,
+                },
+                at,
+            ),
+            record(
+                Event::ToolNode {
+                    run_id: lease.run.clone(),
+                    parent_node_id: "dispatch".into(),
+                    tool_use_id: "read".into(),
+                    tool_name: "fs.read".into(),
+                    args_preview: "file.txt".into(),
+                    call_intent: None,
+                },
+                at,
+            ),
+        ])
+        .unwrap();
+        flow.publish_message(MessagePublication {
+            id: Uuid::new_v4(),
+            lease: lease.clone(),
+            run: lease.run.clone(),
+            context_run: None,
+            message: Message {
+                turn_id: lease.turn.clone(),
+                role: MessageRole::Tool,
+                origin: MessageOrigin::Internal,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: "read".into(),
+                    content: "missing file".into(),
+                    is_error: true,
+                }],
+            },
+        })
+        .unwrap();
+        if cancelled {
+            change(
+                &mut flow,
+                FlowTransition::PhaseChanged {
+                    lease: lease.clone(),
+                    phase: TurnPhase::Cancelling,
+                },
+            );
+        } else {
+            flow.append_execution_events(vec![record(
+                Event::FlowEnd {
+                    run_id: lease.run.clone(),
+                    flow_name: "worker".into(),
+                    status: FlowStatus::Ok,
+                },
+                end,
+            )])
+            .unwrap();
+        }
+        let completed = flow
+            .finish_turn(lease.clone(), InvocationResult::Returned(StoredValue::Unit))
+            .unwrap();
+        // Buffered execution diagnostics can be persisted after the completion fact.
+        flow.append_execution_events(vec![record(
+            Event::FlowNodeStart {
+                run_id: lease.run.clone(),
+                node_id: "late".into(),
+                kind: atman_runtime::nodegraph::NodeKind::ToolCall {
+                    path: "flush".into(),
+                },
+                label: "flush".into(),
+                parent_node_id: None,
+            },
+            end,
+        )])
+        .unwrap();
+        loop {
+            let page = flow
+                .read_updates(source.cursor(), std::num::NonZeroUsize::new(2).unwrap())
+                .unwrap();
+            for batch in page.batches {
+                source.apply(batch.clone()).unwrap();
+                let revisions = source
+                    .turns()
+                    .map(|turn| turn.workflow().revision())
+                    .collect::<Vec<_>>();
+                source.apply(batch).unwrap();
+                assert_eq!(
+                    source
+                        .turns()
+                        .map(|turn| turn.workflow().revision())
+                        .collect::<Vec<_>>(),
+                    revisions
+                );
+            }
+            if !page.has_more {
+                break;
+            }
+        }
+        let turn = source.turns().next_back().unwrap();
+        assert_eq!(turn.lease(), &lease);
+        assert_eq!(turn.workflow().turn_id, lease.turn);
+        assert_eq!(
+            turn.completion().unwrap().outcome,
+            completed.completion.outcome
+        );
+        let graph = turn.workflow();
+        assert_eq!(
+            graph.root.len(),
+            1,
+            "external creators do not hide this instance's entry"
+        );
+        assert_eq!(graph.root[0].started_at, Some(at));
+        assert_eq!(
+            graph.root[0].ended_at,
+            Some(if cancelled {
+                completed.completion.finished_at
+            } else {
+                end
+            })
+        );
+        let tool = graph
+            .find_node(&format!("tool:{}:read", lease.run))
+            .unwrap();
+        assert_eq!(tool.status, NodeStatus::Err);
+        assert_eq!(
+            tool.ended_at, None,
+            "a publication with no timestamp must not invent a duration"
+        );
+        let late = graph.find_node(&format!("{}::late", lease.run)).unwrap();
+        assert_eq!(
+            late.status,
+            if cancelled {
+                NodeStatus::Cancelled
+            } else {
+                NodeStatus::Ok
+            }
+        );
+        assert_eq!(late.ended_at, Some(completed.completion.finished_at));
+    }
+    assert_eq!(source.turns().count(), 2);
+    let mut replay = FlowTranscript::new(info.address);
+    loop {
+        let page = flow
+            .read_updates(replay.cursor(), std::num::NonZeroUsize::new(128).unwrap())
+            .unwrap();
+        for batch in page.batches {
+            replay.apply(batch).unwrap();
+        }
+        if !page.has_more {
+            break;
+        }
+    }
+    for (live, restored) in source.turns().zip(replay.turns()) {
+        assert_eq!(live.workflow().graph(), restored.workflow().graph());
+        assert_eq!(
+            live.completion().unwrap().record,
+            restored.completion().unwrap().record
+        );
+    }
+}
+
+#[test]
 fn transcript_projection_preserves_committed_provenance_and_rejects_partial_or_foreign_batches() {
     use atman_runtime::{
         event_log::journal::{CommitReceipt, CommittedBatch},
