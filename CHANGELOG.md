@@ -89,6 +89,8 @@ All notable changes to atman are documented in this file.
 
 - **Persistent session names** — Session catalogs retain display-name changes independently of creation data and flow execution. Host updates check catalog revisions, notify subscribers after persistence, and remain visible through recorded listings after restart.
 
+- **Session rename controls** — Persistent terminal and TUI views support `:rename`, with committed names shared across the Session's main and floating views while preserving drafts and execution.
+
 - **Consistent flow views** — Persistent conversation readers expose execution, Goal, plans, and pending input at the same committed position as the transcript. Paged catch-up retains progress across cancellation and preserves later writes for subsequent updates.
 
 - **Instance workflow projections** — Committed transcripts expose an execution graph for each admitted turn. Recorded timestamps, scoped tool outcomes, late diagnostics, and permission updates retain their original turn; completed turns stay terminal during replay.

@@ -265,6 +265,7 @@ impl Workspace {
                 }
             }
             refresh_instance_live(&mut selected.ui, &mut selected.editor, &selected.handle);
+            refresh_session_name(&mut selected.ui, &mut selected.handle);
             refresh_live_output(&mut selected.ui, &mut selected.handle)?;
             if selected.handle.settings.take_changes() {
                 apply_provider_catalog_changed(&mut selected.ui, None);
@@ -437,6 +438,10 @@ impl Workspace {
             .map(|(_, view)| {
                 Box::pin(async move {
                     let update = tokio::select! {
+                        _ = changed(view.handle.session_name_rx.as_mut()) => {
+                            refresh_session_name(&mut view.ui, &mut view.handle);
+                            return;
+                        }
                         _ = view.handle.settings.changed() => {
                             apply_provider_catalog_changed(&mut view.ui, None);
                             return;
@@ -744,7 +749,7 @@ fn adjusted(rect: Rect, dx: i32, dy: i32, resize: bool, canvas: Rect) -> Rect {
     )
 }
 
-async fn changed<T>(rx: Option<&mut tokio::sync::watch::Receiver<T>>) {
+pub(super) async fn changed<T>(rx: Option<&mut tokio::sync::watch::Receiver<T>>) {
     if let Some(rx) = rx
         && rx.changed().await.is_ok()
     {

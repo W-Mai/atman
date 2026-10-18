@@ -156,6 +156,84 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         .await
         .unwrap()
         .unwrap();
+    // Rename only the bound Session and preserve the flow's execution journal.
+    let previous = views[0].1.worker.snapshot().await.unwrap().cursor;
+    views[0]
+        .0
+        .control_tx
+        .as_ref()
+        .unwrap()
+        .send(TuiControl::Submit(TuiSubmission {
+            text: ":rename Renamed Session".into(),
+            images: vec![],
+            presentation: None,
+            reasoning: None,
+        }))
+        .unwrap();
+    let control = incoming.recv().await.unwrap();
+    views[0]
+        .1
+        .scope
+        .tui_control(
+            &views[0].1.worker,
+            control.ticket.request_id,
+            control.command,
+            &control.replies,
+            &forms,
+        )
+        .await
+        .unwrap();
+    let replies = views[0].0.control_reply_rx.as_mut().unwrap();
+    assert!(matches!(
+        replies.recv().await.unwrap().command,
+        TuiCommand::Toast { .. }
+    ));
+    assert!(matches!(
+        replies.recv().await.unwrap().command,
+        TuiCommand::SubmissionResult { result: Ok(()) }
+    ));
+    let names = views[0].0.session_name_rx.as_mut().unwrap();
+    names.changed().await.unwrap();
+    assert_eq!(
+        names.borrow_and_update().as_deref(),
+        Some("Renamed Session")
+    );
+    assert!(
+        !views[1]
+            .0
+            .session_name_rx
+            .as_ref()
+            .unwrap()
+            .has_changed()
+            .unwrap()
+    );
+    assert_eq!(views[0].1.worker.snapshot().await.unwrap().cursor, previous);
+    assert!(
+        views[0]
+            .1
+            .scope
+            .command(&views[0].1.worker, ":rename")
+            .await
+            .unwrap()
+            .contains("Renamed Session")
+    );
+    views[0]
+        .1
+        .scope
+        .command(&views[0].1.worker, ":rename clear")
+        .await
+        .unwrap();
+    let names = views[0].0.session_name_rx.as_mut().unwrap();
+    names.changed().await.unwrap();
+    assert!(names.borrow_and_update().is_none());
+    let (reopened, _, _) = views[0]
+        .1
+        .scope
+        .prepare_tui_view(&views[0].1.worker, commands.clone(), &forms)
+        .await
+        .unwrap();
+    assert!(reopened.session_name.is_none());
+    assert_eq!(views[0].1.worker.snapshot().await.unwrap().cursor, previous);
     // Pause one Session, submit to both, then deliver the replies in reverse order.
     views[0]
         .1

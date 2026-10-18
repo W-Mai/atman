@@ -553,7 +553,16 @@ impl Attachment {
         let (command, argument) = line.split_once(' ').unwrap_or((line, ""));
         let argument = argument.trim();
         match command {
-            ":help" => Ok("Text submits to the focused flow; /command [arguments] queues a captured command in the same flow. :attach <path>|list|clear · :focus <flow-prefix> · :flows · :status · :invoke <JSON arguments> · :insert <text> · :pause/:resume (execution) · :recover · :cancel · :close · :goal [set <text>|pause|resume|clear] · :pending · :reply <prompt-id> <JSON> · :approve/:deny <flow-prefix> <request-id> · :quit. EOF waits for runnable work; :quit detaches immediately.".into()),
+            ":help" => Ok("Text submits to the focused flow; /command [arguments] queues a captured command in the same flow. :attach <path>|list|clear · :rename [<text>|clear] · :focus <flow-prefix> · :flows · :status · :invoke <JSON arguments> · :insert <text> · :pause/:resume (execution) · :recover · :cancel · :close · :goal [set <text>|pause|resume|clear] · :pending · :reply <prompt-id> <JSON> · :approve/:deny <flow-prefix> <request-id> · :quit. EOF waits for runnable work; :quit detaches immediately.".into()),
+            ":rename" => {
+                let snapshot = self.session.snapshot().await?;
+                if argument.is_empty() {
+                    return Ok(format!("Session title: {} · :rename <text> to set, :rename clear to remove", snapshot.catalog.title.as_deref().unwrap_or("(none)")));
+                }
+                let title = (argument != "clear").then(|| argument.to_owned());
+                self.session.set_title(snapshot.cursor, title.clone()).await?;
+                Ok(title.map_or_else(|| "Session title cleared".into(), |name| format!("Session renamed: {name}")))
+            }
             ":flows" => {
                 let catalog = self.session.snapshot().await?;
                 let mut rows = Vec::new();

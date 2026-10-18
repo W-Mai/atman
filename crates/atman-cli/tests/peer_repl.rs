@@ -277,6 +277,24 @@ fn created_session_waits_without_synthetic_turns_and_rejects_bad_startup_before_
     )));
     resume(root, sid, "");
     assert_eq!(updates(root, sid, &fid).len(), initial.len());
+    let output = resume(root, sid, ":rename Named session\n:rename\n");
+    assert!(output.contains("Session title: Named session"), "{output}");
+    let renamed = RuntimeStore::inspect_session(&root.join("data"), sid).unwrap();
+    assert_eq!(renamed.projection.title.as_deref(), Some("Named session"));
+    assert_eq!(
+        renamed.projection.descriptor,
+        inspected.projection.descriptor
+    );
+    let output = resume(root, sid, ":rename\n:rename clear\n");
+    assert!(output.contains("Session title: Named session"), "{output}");
+    assert!(
+        RuntimeStore::inspect_session(&root.join("data"), sid)
+            .unwrap()
+            .projection
+            .title
+            .is_none()
+    );
+    assert_eq!(updates(root, sid, &fid).len(), initial.len());
     std::fs::write(root.join("config/on_session_start.at"), "flow invalid(").unwrap();
     let failed = command(root)
         .args(["session", "new"])

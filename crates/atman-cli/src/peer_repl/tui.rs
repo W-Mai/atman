@@ -138,7 +138,9 @@ impl Attachment {
         let mut handle =
             TuiHandle::from_flow(worker, binding.clone(), controls, self.config.clone()).await?;
         handle.session_id = self.session.id().to_string();
-        handle.session_name = Some(self.descriptor.title.clone());
+        let mut names = self.session.subscribe_title();
+        handle.session_name = names.borrow_and_update().clone();
+        handle.session_name_rx = Some(names);
         handle.project_root = self
             .descriptor
             .project

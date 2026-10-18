@@ -2555,6 +2555,7 @@ async fn cmd_repl_once(
             session_id: session.id().to_string(),
             session_dir: session.dir().to_string_lossy().to_string(),
             session_name: session_meta.title,
+            session_name_rx: None,
             project_root: session_meta
                 .project_root
                 .map(|path| path.display().to_string()),

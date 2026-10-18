@@ -86,6 +86,7 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
         app = app.with_task_registry(tr);
     }
     let mut app = UiState::new(app);
+    refresh_session_name(&mut app, handle);
     let ui_state = crate::states::PersistedUiState::load();
     ui_state.apply(&mut app.app);
     if handle.onboarding_recommended && !app.app.onboarding_skipped {
@@ -156,6 +157,14 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
         refresh_live_output(&mut app, handle)?;
     }
     Ok((app, editor))
+}
+
+fn refresh_session_name(ui: &mut UiState, handle: &mut TuiHandle) {
+    if let Some(rx) = &mut handle.session_name_rx {
+        let name = rx.borrow_and_update().clone();
+        ui.app.session_name = name.clone();
+        handle.session_name = name;
+    }
 }
 
 fn refresh_instance_live(ui: &mut UiState, editor: &mut InputEditor, handle: &TuiHandle) {
@@ -335,6 +344,9 @@ pub(crate) async fn run_frames(
 
         // Fair polling keeps continuously ready view updates from starving input and replies.
         tokio::select! {
+            _ = views::changed(handle.session_name_rx.as_mut()) => {
+                refresh_session_name(&mut app, &mut handle);
+            }
             _ = handle.settings.changed() => {
                 apply_provider_catalog_changed(&mut app, None);
             }
@@ -3554,6 +3566,11 @@ mod tests {
             );
             workers.push(worker);
         }
+        let host = atman_runtime::flow_runtime::host::RuntimeHost::default();
+        let session = host.attach_session(session).unwrap();
+        for handle in &mut handles {
+            handle.session_name_rx = Some(session.subscribe_title());
+        }
         let b = handles.pop().unwrap();
         let mut handle = handles.pop().unwrap();
         let a_binding = handle
@@ -3564,6 +3581,7 @@ mod tests {
             .unwrap()
             .clone();
         let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
+        assert_eq!(ui.app.session_name.as_deref(), Some("Focus test"));
         editor.insert_str("draft A");
         ui.app.scroll_offset = 42;
         ui.app.follow_tail = false;
@@ -3707,7 +3725,7 @@ mod tests {
             flow: workers[0].address().clone(),
             placement: FlowPlacement::Floating,
         };
-        let floating_handle = TuiHandle::from_flow(
+        let mut floating_handle = TuiHandle::from_flow(
             &workers[0],
             ViewBinding {
                 view_id: Uuid::now_v7(),
@@ -3719,6 +3737,7 @@ mod tests {
         )
         .await
         .unwrap();
+        floating_handle.session_name_rx = Some(session.subscribe_title());
         let floating_binding = floating_handle
             .control_tx
             .as_ref()
@@ -3747,6 +3766,29 @@ mod tests {
             flow: workers[1].address().clone(),
             placement: FlowPlacement::Main,
         };
+        session
+            .set_title(
+                session.snapshot().await.unwrap().cursor,
+                Some("Renamed".into()),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while views.views[&a_main].ui.app.session_name.as_deref() != Some("Renamed") {
+                views.next_background().await;
+            }
+        })
+        .await
+        .unwrap();
+        views::changed(handle.session_name_rx.as_mut()).await;
+        refresh_session_name(&mut ui, &mut handle);
+        assert_eq!(ui.app.session_name.as_deref(), Some("Renamed"));
+        assert_eq!(
+            views.views[&hidden].ui.app.session_name.as_deref(),
+            Some("Focus test")
+        );
+        assert_eq!(editor.buf(), floating_draft);
+        assert_eq!(views.views[&a_main].editor.buf(), main_draft);
         views
             .views
             .get_mut(&hidden)
@@ -3990,6 +4032,24 @@ mod tests {
             [("shared".into(), "example".into())]
         );
         assert_eq!(editor.buf(), "draft B");
+        assert_eq!(ui.app.session_name.as_deref(), Some("Renamed"));
+        session
+            .set_title(session.snapshot().await.unwrap().cursor, None)
+            .await
+            .unwrap();
+        views::changed(handle.session_name_rx.as_mut()).await;
+        refresh_session_name(&mut ui, &mut handle);
+        assert!(ui.app.session_name.is_none());
+        host.shutdown().await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                views::changed(handle.session_name_rx.as_mut())
+            )
+            .await
+            .is_err(),
+            "closed metadata subscriptions must not cause redraw loops"
+        );
         for worker in workers {
             assert!(matches!(
                 worker.state().await.unwrap().state(),

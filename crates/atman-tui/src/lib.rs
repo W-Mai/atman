@@ -570,6 +570,8 @@ pub struct TuiHandle {
     pub session_id: String,
     pub session_dir: String,
     pub session_name: Option<String>,
+    /// Committed container metadata shared by views of the same persistent Session.
+    pub session_name_rx: Option<tokio::sync::watch::Receiver<Option<String>>>,
     pub project_root: Option<String>,
     pub projects: Vec<atman_runtime::project_catalog::ProjectRecord>,
     pub goal: Option<String>,
@@ -616,6 +618,7 @@ impl TuiHandle {
             session_dir: session.dir().to_string_lossy().to_string(),
             session_name: atman_runtime::session_meta::SessionMeta::load(session.dir())
                 .and_then(|meta| meta.title),
+            session_name_rx: None,
             project_root: atman_runtime::session_meta::SessionMeta::load(session.dir())
                 .and_then(|meta| meta.project_root)
                 .map(|path| path.display().to_string()),
