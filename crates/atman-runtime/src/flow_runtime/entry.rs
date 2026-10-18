@@ -49,6 +49,7 @@ pub(super) fn decode_argument(
 /// The last durably admitted entry input, excluding conversation text.
 #[derive(Clone, Debug)]
 pub struct AdmittedInvocation {
+    pub command: Option<crate::flow_store::EntrySnapshot>,
     pub lease: atman_rt::TurnLease<crate::event::AtmanUuid>,
     pub arguments: BTreeMap<String, serde_json::Value>,
     pub invocation: BTreeMap<String, serde_json::Value>,
@@ -142,6 +143,7 @@ impl EntryRecipe {
                 && (matches!(
                     message.request.payload,
                     InboxPayload::Invocation { .. }
+                        | InboxPayload::Command { .. }
                         | InboxPayload::GoalContinuation { .. }
                         | InboxPayload::GoalResume { .. }
                 ) || self.parameter.is_some())
@@ -197,7 +199,12 @@ impl EntryRecipe {
                 context.push(crate::flow_runtime::input::context_message(first, &turn)?);
                 (admitted.arguments.clone(), admitted.invocation.clone())
             }
-            InboxPayload::Invocation {
+            InboxPayload::Command {
+                arguments,
+                invocation,
+                ..
+            }
+            | InboxPayload::Invocation {
                 arguments,
                 invocation,
                 ..
@@ -218,7 +225,9 @@ impl EntryRecipe {
                 for message in snapshot.pending.iter().filter(ordinary) {
                     if matches!(
                         message.request.payload,
-                        InboxPayload::Invocation { .. } | InboxPayload::GoalResume { .. }
+                        InboxPayload::Invocation { .. }
+                            | InboxPayload::Command { .. }
+                            | InboxPayload::GoalResume { .. }
                     ) {
                         break;
                     }
@@ -238,8 +247,45 @@ impl EntryRecipe {
                 (self.arguments.clone(), invocation)
             }
         };
-        if !matches!(first.request.payload, InboxPayload::Invocation { .. })
-            && let Some(parameter) = &self.parameter
+        let parameter = if matches!(
+            first.request.payload,
+            InboxPayload::GoalResume { .. } | InboxPayload::GoalContinuation { .. }
+        ) {
+            match snapshot
+                .last_invocation
+                .as_ref()
+                .and_then(|invocation| invocation.command.as_ref())
+            {
+                Some(entry) => {
+                    let source =
+                        entry
+                            .bundle
+                            .sources
+                            .get(&entry.bundle.entry)
+                            .ok_or_else(|| {
+                                crate::flow_store::invalid("command source is unavailable")
+                            })?;
+                    let file = atman_rt::parse_file(source).map_err(crate::flow_store::invalid)?;
+                    let flow = file
+                        .flows
+                        .iter()
+                        .find(|flow| flow.name.name == entry.name)
+                        .ok_or_else(|| {
+                            crate::flow_store::invalid("command entry is unavailable")
+                        })?;
+                    crate::validate::invocation_message_parameter(flow)
+                        .map_err(crate::flow_store::invalid)?
+                        .map(str::to_owned)
+                }
+                None => self.parameter.clone(),
+            }
+        } else {
+            self.parameter.clone()
+        };
+        if !matches!(
+            first.request.payload,
+            InboxPayload::Invocation { .. } | InboxPayload::Command { .. }
+        ) && let Some(parameter) = &parameter
         {
             arguments.insert(
                 parameter.clone(),

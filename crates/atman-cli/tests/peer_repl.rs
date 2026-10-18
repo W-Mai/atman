@@ -111,6 +111,64 @@ fn launch(root: &Path, source: &str) -> (uuid::Uuid, FlowInstanceId) {
 }
 
 #[test]
+fn commands_capture_sources_and_share_the_instance_inbox_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (sid, fid) = launch(
+        root,
+        r#"flow main(input: string) -> string {
+        contract { invocation { user_message: input } }
+        return final.answer(message: input)
+    }"#,
+    );
+    let commands = root.join("config/commands");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(
+        commands.join("helper.at"),
+        "pub flow decorate(text: string) -> string { return \"command: \" + text }",
+    )
+    .unwrap();
+    std::fs::write(
+        commands.join("inspect.at"),
+        r#"use "./helper.at"::decorate
+        flow inspect(text: string) -> string {
+            contract { invocation { user_message: text } }
+            // Source-only sentinel must not enter read-only updates.
+            return final.answer(message: decorate(text).await)
+        }"#,
+    )
+    .unwrap();
+    let rejected = resume(root, sid, ":pause\n/inspect\n/missing payload\n");
+    assert!(rejected.contains("missing command argument"), "{rejected}");
+    assert!(rejected.contains("no such command"), "{rejected}");
+    let queued = resume(root, sid, "/inspect captured\n/inspect second\n");
+    assert_eq!(queued.matches("Input accepted:").count(), 2, "{queued}");
+    assert_eq!(answers(&updates(root, sid, &fid)), ["seed"]);
+    let visible = serde_json::to_string(&updates(root, sid, &fid)).unwrap();
+    assert!(visible.contains("command_accepted"));
+    assert!(!visible.contains("Source-only sentinel"));
+    std::fs::remove_dir_all(commands).unwrap();
+    let continued = resume(root, sid, ":resume\n");
+    assert!(continued.contains("command: captured"), "{continued}");
+    assert_eq!(
+        answers(&updates(root, sid, &fid)),
+        ["seed", "command: captured", "command: second"]
+    );
+    resume(root, sid, "");
+    assert_eq!(answers(&updates(root, sid, &fid)).len(), 3);
+    resume(root, sid, ":goal set finish inspection\n:goal pause\n");
+    resume(root, sid, ":goal resume\n");
+    let resumed = answers(&updates(root, sid, &fid));
+    assert_eq!(resumed.len(), 4);
+    assert!(resumed[3].starts_with("command: "), "{resumed:?}");
+    resume(root, sid, "ordinary input\n");
+    assert_eq!(
+        answers(&updates(root, sid, &fid)).last().unwrap(),
+        "ordinary input"
+    );
+}
+
+#[test]
 fn terminal_preserves_inbox_gates_and_consumption_across_restarts() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

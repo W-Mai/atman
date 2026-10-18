@@ -1102,6 +1102,7 @@ fn transcript_projection_preserves_committed_provenance_and_rejects_partial_or_f
     flow.commit_input(
         &batch,
         InputContent::InvocationInput {
+            command: None,
             arguments: BTreeMap::new(),
             invocation: BTreeMap::new(),
             messages: vec![Message::user_text(lease.turn.clone(), "request")],
@@ -1898,6 +1899,7 @@ fn goal_continuations_share_inbox_receipts_and_recover_without_restarting_interr
                 .commit_input(
                     &reservation,
                     InputContent::InvocationInput {
+                        command: None,
                         arguments: Default::default(),
                         invocation: Default::default(),
                         messages: vec![],
@@ -3091,6 +3093,7 @@ fn delivery_identity_scope_and_authorization_reject_invalid_new_acceptance() {
 
 fn invocation_content(lease: &TurnLease<AtmanUuid>) -> InputContent {
     InputContent::InvocationInput {
+        command: None,
         arguments: BTreeMap::from([("input".into(), serde_json::json!("accepted input"))]),
         invocation: BTreeMap::from([("effort".into(), serde_json::json!("high"))]),
         messages: vec![Message::user_text(
@@ -3104,6 +3107,82 @@ fn context_content(lease: &TurnLease<AtmanUuid>) -> InputContent {
     InputContent::Context {
         messages: vec![Message::user_text(lease.turn.clone(), "boundary input")],
     }
+}
+
+#[test]
+fn command_sources_require_user_authority_and_commit_the_selected_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let mut request = delivery(
+        &description.address,
+        SenderIdentity::User(Uuid::now_v7()),
+        "command",
+    );
+    request.delivery = DeliveryMode::NextTurn;
+    request.payload = InboxPayload::Command {
+        entry: Box::new(description.entry().unwrap().clone()),
+        arguments: BTreeMap::new(),
+        invocation: BTreeMap::new(),
+        user: atman_runtime::flow_store::inbox::UserContent {
+            text: "/main".into(),
+            images: vec![],
+            presentation: None,
+        },
+    };
+    let before = flow.cursor().clone();
+    for sender in [
+        SenderIdentity::Flow(description.address.clone()),
+        SenderIdentity::Host(Uuid::now_v7()),
+    ] {
+        let mut forged = request.clone();
+        forged.sender = sender;
+        assert!(flow.accept_input(forged, |_| Ok(())).is_err());
+    }
+    let mut injection = request.clone();
+    injection.delivery = DeliveryMode::AtBoundary;
+    assert!(flow.accept_input(injection, |_| Ok(())).is_err());
+    assert_eq!(flow.cursor(), &before);
+    let receipt = flow.accept_input(request.clone(), |_| Ok(())).unwrap();
+    assert_eq!(
+        flow.accept_input(request, |_| panic!(
+            "retry must not reauthorize accepted input"
+        ))
+        .unwrap()
+        .message_id,
+        receipt.message_id
+    );
+    let reserved = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    let lease = reserved.lease().clone();
+    let content = |command| InputContent::InvocationInput {
+        command,
+        arguments: BTreeMap::new(),
+        invocation: BTreeMap::new(),
+        messages: vec![Message::user_text(lease.turn.clone(), "/main")],
+    };
+    assert!(flow.commit_input(&reserved, content(None)).is_err());
+    assert!(
+        flow.commit_input(&reserved, content(Some(Uuid::now_v7())))
+            .is_err()
+    );
+    flow.commit_input(&reserved, content(Some(receipt.message_id)))
+        .unwrap();
+    assert!(flow.pending_inputs().next().is_none());
+    drop(flow);
+    drop(session);
+    let session = root.open_session(info.id).unwrap();
+    let flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert!(
+        matches!(flow.last_invocation_input().unwrap().input.content, InputContent::InvocationInput { command: Some(id), .. } if id == receipt.message_id)
+    );
+    assert!(flow.pending_inputs().next().is_none());
 }
 
 #[test]
@@ -3968,6 +4047,7 @@ async fn recorded_source_and_committed_input_execute_with_the_persistent_instanc
     flow.commit_input(
         &reservation,
         InputContent::InvocationInput {
+            command: None,
             arguments: BTreeMap::from([("input".into(), serde_json::json!(21))]),
             invocation: BTreeMap::from([("marker".into(), serde_json::json!("persisted"))]),
             messages: Vec::new(),

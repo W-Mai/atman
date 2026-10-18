@@ -89,6 +89,83 @@ pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
 }
 
 impl Attachment {
+    async fn user_payload(
+        &self,
+        worker: &FlowWorker,
+        content: UserContent,
+        invocation: BTreeMap<String, serde_json::Value>,
+    ) -> Result<InboxPayload> {
+        if content.text.trim_start().starts_with('/') {
+            let (program, name, arguments, _) = crate::resolve_slash_command_from(
+                &content.text,
+                self.config.config_dir(),
+                self.descriptor
+                    .project
+                    .as_ref()
+                    .map(|project| project.root()),
+            )?;
+            let flow = program
+                .entry_flow(&name)
+                .and_then(|id| program.flow(&id))
+                .context("command entry is unavailable")?;
+            if let Err(errors) = atman_runtime::validate::validate(flow, &self.executor.tools) {
+                bail!(
+                    "command validation failed: {}",
+                    errors
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+            }
+            for (name, _) in &arguments {
+                ensure!(
+                    flow.params
+                        .iter()
+                        .any(|parameter| parameter.name.name == *name),
+                    "unknown command argument: {name}"
+                );
+                ensure!(
+                    arguments.iter().filter(|(key, _)| key == name).count() == 1,
+                    "duplicate command argument: {name}"
+                );
+            }
+            for parameter in &flow.params {
+                ensure!(
+                    parameter.default.is_some()
+                        || arguments
+                            .iter()
+                            .any(|(name, _)| name == &parameter.name.name),
+                    "missing command argument: {}",
+                    parameter.name.name
+                );
+            }
+            return Ok(InboxPayload::Command {
+                entry: Box::new(atman_runtime::flow_store::EntrySnapshot {
+                    name,
+                    path: program
+                        .entry_path()
+                        .context("command source path is unavailable")?
+                        .to_path_buf(),
+                    bundle: program.revision_bundle(),
+                }),
+                arguments: arguments
+                    .into_iter()
+                    .map(|(name, value)| {
+                        Ok((name, atman_runtime::value::ValueJson::to_json(&value)?))
+                    })
+                    .collect::<Result<_, atman_runtime::RuntimeError>>()?,
+                invocation,
+                user: content,
+            });
+        }
+        self.validate_text_input(worker).await?;
+        Ok(InboxPayload::UserSubmission {
+            content,
+            invocation,
+        })
+    }
+
     async fn open(
         root: &Path,
         id: Uuid,
@@ -358,7 +435,7 @@ impl Attachment {
         let (command, argument) = line.split_once(' ').unwrap_or((line, ""));
         let argument = argument.trim();
         match command {
-            ":help" => Ok("Text submits to the focused flow. :focus <flow-prefix> · :flows · :status · :invoke <JSON arguments> · :insert <text> · :pause/:resume (execution) · :recover · :cancel · :close · :goal [set <text>|pause|resume|clear] · :pending · :reply <prompt-id> <JSON> · :approve/:deny <flow-prefix> <request-id> · :quit. EOF waits for runnable work; :quit detaches immediately.".into()),
+            ":help" => Ok("Text submits to the focused flow; /command [arguments] queues a captured command in the same flow. :focus <flow-prefix> · :flows · :status · :invoke <JSON arguments> · :insert <text> · :pause/:resume (execution) · :recover · :cancel · :close · :goal [set <text>|pause|resume|clear] · :pending · :reply <prompt-id> <JSON> · :approve/:deny <flow-prefix> <request-id> · :quit. EOF waits for runnable work; :quit detaches immediately.".into()),
             ":flows" => {
                 let catalog = self.session.snapshot().await?;
                 let mut rows = Vec::new();
@@ -422,14 +499,14 @@ impl Attachment {
             _ => {
                 let payload = match command {
                     ":invoke" => InboxPayload::Invocation { arguments: serde_json::from_str(argument)?, invocation: BTreeMap::new(), user: None },
-                    name if (name.starts_with(':') && name != ":insert") || name.starts_with('/') => bail!("unknown persistent flow command; use :help"),
+                    name if name.starts_with(':') && name != ":insert" => bail!("unknown persistent flow command; use :help"),
                     _ => {
-                        self.validate_text_input(worker).await?;
                         if command == ":insert" {
+                            self.validate_text_input(worker).await?;
                             ensure!(!argument.is_empty(), "insertion must not be empty");
                             InboxPayload::Interjection { text: argument.into() }
                         } else {
-                            InboxPayload::UserSubmission { content: UserContent { text: original.into(), images: vec![], presentation: None }, invocation: BTreeMap::new() }
+                            self.user_payload(worker, UserContent { text: original.into(), images: vec![], presentation: None }, BTreeMap::new()).await?
                         }
                     }
                 };

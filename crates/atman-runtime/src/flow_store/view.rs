@@ -63,6 +63,15 @@ impl super::SessionInspection {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum FlowUpdate {
+    CommandAccepted {
+        id: Uuid,
+        request_id: Uuid,
+        recipient: FlowRef,
+        sender: inbox::SenderIdentity,
+        accepted_at: chrono::DateTime<chrono::Utc>,
+        name: String,
+        user: inbox::UserContent,
+    },
     Created {
         flow: FlowRef,
         content: FlowContentSummary,
@@ -118,7 +127,21 @@ impl From<FlowFact> for FlowUpdate {
             FlowFact::WorkspaceRequested(value) => Self::WorkspaceRequested(value),
             FlowFact::Transition(value) => Self::Transition(value),
             FlowFact::TurnCompleted(value) => Self::TurnCompleted(value),
-            FlowFact::EnvelopeAccepted(value) => Self::EnvelopeAccepted(value),
+            FlowFact::EnvelopeAccepted(value) => {
+                if let inbox::InboxPayload::Command { entry, user, .. } = value.request.payload {
+                    Self::CommandAccepted {
+                        id: value.id,
+                        request_id: value.request.request_id,
+                        recipient: value.request.recipient,
+                        sender: value.request.sender,
+                        accepted_at: value.accepted_at,
+                        name: entry.name,
+                        user,
+                    }
+                } else {
+                    Self::EnvelopeAccepted(value)
+                }
+            }
             FlowFact::InputCommitted(value) => Self::InputCommitted(value),
             FlowFact::MessagePublished(value) => Self::MessagePublished(value),
             FlowFact::ContextCheckpoint(value) => Self::ContextCheckpoint(value),

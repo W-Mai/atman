@@ -64,6 +64,10 @@ Drag a window's title to move it or its bottom-right corner to resize it. F6/Mov
 
 Active model calls display text, thinking, and tool-argument previews in both main and floating views. Focus changes recover the current preview snapshot. Each call has its own identity and attempt; retry, cancellation, or completion removes only that call's preview. Previews end when the provider call returns; only explicit flow publication adds content to committed history. Previewing `final.answer` arguments does not finish a turn or fold work. Token updates preserve item identity and local disclosure without rebuilding document structure.
 
+Main, floating, and plain-terminal views accept `/command [arguments]` through the same input path. Command lookup uses the bound Session's project and configuration directories, including project overrides. Acceptance captures the linked source bundle, arguments, invocation settings, and original user text and images. Queued commands survive file changes and restart; a failed lookup, source validation, or argument decoding preserves the draft without accepting input.
+
+Each command uses a separate next-turn invocation in the existing instance. It cannot enter an active model call or change the instance's default entry, identity, permissions, or pause state. Ordinary input and watcher notifications use the default entry. Goal resume and continuation retain the last admitted invocation's source and argument mapping. The committed invocation references its accepted command identity; mismatched references and mixed command batches are rejected during live execution and replay. Read-only updates expose command names and user content without source bundles.
+
 Restoring a Session uses its recorded configuration directory independently of the client's default directory. Relationship graphs, full pending-input management, Session creation/deletion, and process-terminal controls are unsupported in this attachment. Unsupported host controls report an error. Plain-terminal attachment supports selecting other instances within its Session with `:focus`.
 
 ### Plain-terminal attachment
@@ -74,6 +78,7 @@ Restoring a Session uses its recorded configuration directory independently of t
 |---------|----------|
 | `:flows`, `:focus <flow-prefix>`, `:status` | Inspect instances and change the local input/output focus; the stored default remains unchanged |
 | Plain text | Queue authenticated user content for a new turn through the declared `invocation.user_message` mapping |
+| `/command [arguments]` | Capture an installed command and queue it as a separate invocation in the focused flow |
 | `:insert <text>` | Submit an interjection for a running turn's next eligible context boundary, or a later turn when idle |
 | `:invoke <JSON object>` | Queue explicit entry arguments without guessing a text parameter |
 | `:pause`, `:resume` | Add or remove the user's execution pause; other controllers and Goal status remain independent |

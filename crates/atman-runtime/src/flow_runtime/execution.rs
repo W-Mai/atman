@@ -125,7 +125,10 @@ impl FlowWorker {
                 None
             };
             worker.context().bind_executor(&executor).map_err(invalid)?;
-            let entry = store.descriptor().entry()?;
+            let selected_command = store.command_for_input(&request.messages)?;
+            let command = selected_command.map(|(id, _)| id);
+            let entry = selected_command
+                .map_or_else(|| store.descriptor().entry(), |(_, entry)| Ok(entry))?;
             let program = crate::source_program::load_program_from_bundle(
                 &entry.bundle,
                 &entry.path,
@@ -195,6 +198,7 @@ impl FlowWorker {
             store.commit_input(
                 &reserved,
                 InputContent::InvocationInput {
+                    command,
                     arguments: request.arguments,
                     invocation: request.invocation,
                     messages: request.context.clone(),

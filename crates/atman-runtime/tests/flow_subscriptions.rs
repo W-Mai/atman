@@ -829,6 +829,7 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
         .commit_input(
             &reserved,
             InputContent::InvocationInput {
+                command: None,
                 arguments: Default::default(),
                 invocation: Default::default(),
                 messages: vec![projected],

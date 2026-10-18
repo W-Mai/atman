@@ -52,6 +52,13 @@ pub struct UserContent {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum InboxPayload {
+    /// A user-selected command source captured before durable acceptance.
+    Command {
+        entry: Box<super::EntrySnapshot>,
+        arguments: BTreeMap<String, Value>,
+        invocation: BTreeMap<String, Value>,
+        user: UserContent,
+    },
     /// Explicit user control, recorded as internal context rather than a new human message.
     GoalResume {
         goal: super::goal::GoalVersion,
@@ -133,6 +140,14 @@ impl DeliveryRequest {
             };
         }
         let valid = match (&self.sender, &self.payload) {
+            (SenderIdentity::User(_), InboxPayload::Command { entry, .. }) => {
+                self.delivery == DeliveryMode::NextTurn
+                    && self.correlation.is_none()
+                    && self.scope.is_none()
+                    && self.cause.is_none()
+                    && !entry.name.is_empty()
+                    && entry.path.is_absolute()
+            }
             (SenderIdentity::User(_), InboxPayload::GoalResume { goal, objective }) => {
                 self.delivery == DeliveryMode::NextTurn
                     && self.correlation.is_none()
@@ -220,6 +235,8 @@ pub enum InputContent {
         messages: Vec<Message>,
     },
     InvocationInput {
+        /// Accepted command source, or the instance's default entry when absent.
+        command: Option<Uuid>,
         arguments: BTreeMap<String, Value>,
         invocation: BTreeMap<String, Value>,
         messages: Vec<Message>,
@@ -322,6 +339,55 @@ impl Inbox {
 
     pub fn last_invocation(&self) -> Option<&InputRecord> {
         self.last_invocation.map(|index| &self.inputs[index])
+    }
+
+    pub fn command_entry(&self, id: Uuid) -> io::Result<&super::EntrySnapshot> {
+        let entry = self
+            .messages
+            .get(&id)
+            .and_then(|index| self.entries.get(*index));
+        match entry.map(|entry| &entry.envelope.request.payload) {
+            Some(InboxPayload::Command { entry, .. }) => Ok(entry),
+            _ => Err(invalid("invocation command source is unavailable")),
+        }
+    }
+
+    pub fn last_command(&self) -> Option<Uuid> {
+        match self.last_invocation().map(|record| &record.input.content) {
+            Some(InputContent::InvocationInput { command, .. }) => *command,
+            _ => None,
+        }
+    }
+
+    /// Select source from actual input, including a continuation of a previously admitted command.
+    pub fn command_for_input(
+        &self,
+        ids: &[Uuid],
+    ) -> io::Result<Option<(Uuid, &super::EntrySnapshot)>> {
+        let mut selected = ids.iter().map(|id| {
+            self.messages
+                .get(id)
+                .map(|index| &self.entries[*index].envelope)
+                .ok_or_else(|| invalid("selected invocation input is unavailable"))
+        });
+        let first = selected.next().transpose()?;
+        let command = match first.map(|envelope| (&envelope.request.payload, envelope.id)) {
+            Some((InboxPayload::Command { .. }, id)) => Some(id),
+            Some((InboxPayload::GoalResume { .. } | InboxPayload::GoalContinuation { .. }, _)) => {
+                self.last_command()
+            }
+            _ => None,
+        };
+        for envelope in selected {
+            if command.is_some()
+                || matches!(envelope?.request.payload, InboxPayload::Command { .. })
+            {
+                return Err(invalid("command invocation requires a separate turn"));
+            }
+        }
+        command
+            .map(|id| self.command_entry(id).map(|entry| (id, entry)))
+            .transpose()
     }
 
     pub fn reserve(
@@ -491,6 +557,14 @@ impl Inbox {
             {
                 return Err(invalid("next-turn input cannot enter an active turn"));
             }
+        }
+        if let InputContent::InvocationInput { command, .. } = &input.content
+            && *command
+                != self
+                    .command_for_input(&input.message_ids)?
+                    .map(|(id, _)| id)
+        {
+            return Err(invalid("invocation source does not match selected input"));
         }
         Ok(())
     }

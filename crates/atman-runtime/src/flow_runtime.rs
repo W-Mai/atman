@@ -366,6 +366,7 @@ impl FlowWorker {
 
     pub async fn snapshot(&self) -> io::Result<FlowSnapshot> {
         self.request(|store| {
+            let command = store.last_command_entry()?.cloned();
             Ok(FlowSnapshot {
                 state: store.state().clone(),
                 cursor: store.cursor().clone(),
@@ -380,6 +381,7 @@ impl FlowWorker {
                         unreachable!("invocation index points to invocation input")
                     };
                     entry::AdmittedInvocation {
+                        command,
                         lease: record.input.lease.clone(),
                         arguments: arguments.clone(),
                         invocation: invocation.clone(),

@@ -265,6 +265,67 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
             vec![format!("seed-{index}"), format!("answer-{index}")]
         );
     }
+    for (index, (handle, service)) in views.iter_mut().enumerate() {
+        let commands = service.scope.config.config_dir().join("commands");
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::write(commands.join("echo.at"), format!("flow echo(value: string) -> string {{ return final.answer(message: \"scope-{index}: \" + value) }}")).unwrap();
+        handle
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .send(TuiControl::Submit(TuiSubmission {
+                text: "/echo selected".into(),
+                images: vec![],
+                presentation: None,
+                reasoning: None,
+            }))
+            .unwrap();
+        let control = incoming.recv().await.unwrap();
+        service
+            .scope
+            .tui_control(
+                &service.worker,
+                control.ticket.request_id,
+                control.command,
+                &control.replies,
+                &forms,
+            )
+            .await
+            .unwrap();
+        let TuiCommand::SubmissionResult { result } = handle
+            .control_reply_rx
+            .as_mut()
+            .unwrap()
+            .recv()
+            .await
+            .unwrap()
+            .command
+        else {
+            panic!("missing command acknowledgement")
+        };
+        result.unwrap();
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    for (index, (handle, _)) in views.iter_mut().enumerate() {
+        let mut model = atman_tui::flow_view::FlowViewModel::default();
+        model
+            .sync_view(
+                handle.flow_view.as_mut().unwrap().refresh().await.unwrap(),
+                None,
+            )
+            .unwrap();
+        let answers: Vec<_> = model
+            .iter()
+            .filter_map(|item| match item {
+                atman_tui::app::OutputItem::AssistantMd { md, .. } => Some(md.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers.last().unwrap(), &format!("scope-{index}: selected"));
+    }
     host.shutdown().await.unwrap();
     assert!(
         !missing_project.exists(),

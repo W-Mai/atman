@@ -163,26 +163,24 @@ impl Attachment {
         request: Uuid,
         submission: TuiSubmission,
     ) -> Result<()> {
-        self.validate_text_input(worker).await?;
         let mut invocation = BTreeMap::new();
         if let Some(reasoning) = submission.reasoning {
             invocation.insert("effort".into(), reasoning.to_string().into());
         }
-        self.accept_payload(
-            worker,
-            request,
-            InboxPayload::UserSubmission {
-                content: UserContent {
+        let payload = self
+            .user_payload(
+                worker,
+                UserContent {
                     text: submission.text,
                     images: submission.images,
                     presentation: submission.presentation,
                 },
                 invocation,
-            },
-            DeliveryMode::NextTurn,
-        )
-        .await
-        .map(|_| ())
+            )
+            .await?;
+        self.accept_payload(worker, request, payload, DeliveryMode::NextTurn)
+            .await
+            .map(|_| ())
     }
 
     async fn tui_control(

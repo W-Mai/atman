@@ -23,6 +23,20 @@ impl FlowStore {
         self.inbox.last_invocation()
     }
 
+    pub(crate) fn command_for_input(
+        &self,
+        ids: &[Uuid],
+    ) -> io::Result<Option<(Uuid, &super::EntrySnapshot)>> {
+        self.inbox.command_for_input(ids)
+    }
+
+    pub(crate) fn last_command_entry(&self) -> io::Result<Option<&super::EntrySnapshot>> {
+        self.inbox
+            .last_command()
+            .map(|id| self.inbox.command_entry(id))
+            .transpose()
+    }
+
     /// The host selects inputs compatible with the current invocation at an explicit safe point.
     pub fn reserve_context_input(
         &mut self,

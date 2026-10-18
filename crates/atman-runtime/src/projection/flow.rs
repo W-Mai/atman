@@ -155,6 +155,7 @@ impl FlowTranscript {
                     }
                     Some(flow)
                 }
+                FlowUpdate::CommandAccepted { recipient, .. } => Some(recipient),
                 FlowUpdate::Activated { envelope, .. } | FlowUpdate::EnvelopeAccepted(envelope) => {
                     Some(&envelope.request.recipient)
                 }

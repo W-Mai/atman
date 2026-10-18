@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Persistent flow commands** — Main, floating, and plain-terminal views queue installed commands in the selected flow. Captured sources and dependencies survive file changes and restart; commands retain original user content and execute separately from active model calls. Goal continuation retains its admitted entry, while ordinary input uses the default entry.
+
 - **Cross-session FlowHub** — Browse Session and Flow catalogs with shared pagination, search, keyboard controls, and padded mouse targets. Open another Session's flow in the main workspace or a floating window while preserving each view's draft, replies, configuration, and execution scope. Catalog reads do not start work; missing project paths remain browsable.
 
 - **Live flow previews** — Main and floating views show text, thinking, and tool arguments from active model calls. Focus changes recover current previews; retries and cancellation clear only the affected call. Committed replies retain their publication and folding semantics, and token updates preserve document structure and disclosure state.

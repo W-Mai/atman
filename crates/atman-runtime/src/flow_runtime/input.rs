@@ -152,7 +152,7 @@ fn compatible(
         return false;
     }
     match &envelope.request.payload {
-        InboxPayload::Invocation { .. } => false,
+        InboxPayload::Invocation { .. } | InboxPayload::Command { .. } => false,
         InboxPayload::UserSubmission {
             content,
             invocation: requested,
@@ -194,6 +194,7 @@ pub fn context_message(
         return Ok(message);
     }
     let user = match &envelope.request.payload {
+        InboxPayload::Command { user, .. } => Some(user),
         InboxPayload::UserSubmission { content, .. } => Some(content),
         InboxPayload::Invocation { user, .. } => user.as_ref(),
         _ => None,
