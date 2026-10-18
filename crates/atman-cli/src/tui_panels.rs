@@ -14,13 +14,15 @@ use tokio::{
 };
 
 use crate::{
-    config_dir, execute_model_mutation, execute_provider_mutation, load_mcp_configs,
-    loaded_rule_views, spawn_provider_mutation_task, suggest_confession_organization,
-    switch_smart_model, test_model_endpoint, test_provider_endpoint,
+    execute_model_mutation, execute_provider_mutation, loaded_rule_views,
+    spawn_provider_mutation_task, suggest_confession_organization, switch_smart_model,
+    test_model_endpoint, test_provider_endpoint,
 };
 
 pub(crate) struct PanelServices {
     session: Arc<Session>,
+    config: atman_runtime::config_hub::ConfigHub,
+    project_root: Option<PathBuf>,
     executor: Executor,
     replies: mpsc::UnboundedSender<TuiCommand>,
     lifecycle: ProviderLifecycle,
@@ -40,30 +42,49 @@ impl PanelServices {
         replies: mpsc::UnboundedSender<TuiCommand>,
         refresh: Vec<String>,
     ) -> Result<Self> {
+        let config = atman_runtime::config_hub::ConfigHub::global()?;
+        let project_root = session.meta().and_then(|meta| meta.project_root);
+        let project = project_root.and_then(|root| {
+            atman_runtime::storage::ProjectContext::resolve(
+                &config,
+                &root,
+                &atman_runtime::storage::data_dir().ok()?,
+            )
+            .ok()
+        });
+        Self::for_scope(session, executor, replies, refresh, config, project)
+    }
+
+    pub fn for_scope(
+        session: Arc<Session>,
+        executor: Executor,
+        replies: mpsc::UnboundedSender<TuiCommand>,
+        refresh: Vec<String>,
+        config: atman_runtime::config_hub::ConfigHub,
+        project: Option<atman_runtime::storage::ProjectContext>,
+    ) -> Result<Self> {
         let lifecycle = executor
             .provider_lifecycle()
             .context("provider lifecycle unavailable")?;
-        let knowledge = session
-            .meta()
-            .and_then(|meta| meta.project_root)
-            .and_then(|project_root| {
-                atman_runtime::storage::resolve_project_scope_for(&project_root).ok()
-            })
-            .map(|scope| {
-                let mut store =
-                    atman_runtime::memory::ConfessionStore::at(scope.join("confessions"));
-                if let Some(index) = &executor.tool_ctx.project_index {
-                    store = store.with_index(index.clone());
-                }
-                if let Some(redactor) =
-                    atman_daemon::bootstrap::build_redactor(crate::config_dir().ok().as_deref())
-                {
-                    store = store.with_redactor(redactor);
-                }
-                std::sync::Arc::new(store)
-            });
+        let project_root = project.as_ref().map(|project| project.root().to_path_buf());
+        let knowledge = project.as_ref().map(|project| {
+            let mut store = atman_runtime::memory::ConfessionStore::at(
+                project.storage_root().join("confessions"),
+            );
+            if let Some(index) = &executor.tool_ctx.project_index {
+                store = store.with_index(index.clone());
+            }
+            if let Some(redactor) =
+                atman_daemon::bootstrap::build_redactor(Some(config.config_dir()))
+            {
+                store = store.with_redactor(redactor);
+            }
+            std::sync::Arc::new(store)
+        });
         let mut services = Self {
             session,
+            config,
+            project_root,
             executor,
             replies,
             lifecycle,
@@ -124,8 +145,8 @@ impl PanelServices {
                 });
             }
             atman_tui::TuiControl::MutateModel(request) => {
-                let result =
-                    execute_model_mutation(&request.action).map_err(|error| error.to_string());
+                let result = execute_model_mutation(&self.config, &request.action)
+                    .map_err(|error| error.to_string());
                 let _ = self
                     .replies
                     .send(atman_tui::TuiCommand::ModelMutationResult { request, result });
@@ -134,16 +155,15 @@ impl PanelServices {
                 // handled internally in the TUI — no-op here
             }
             atman_tui::TuiControl::OnboardingInit => {
-                if let Ok(dir) = config_dir() {
-                    let _ = crate::init::init_config_dir_with_mode(&dir, None);
-                }
+                let _ = crate::init::init_config_dir_with_mode(self.config.config_dir(), None);
             }
             atman_tui::TuiControl::SwitchModel { request_id, model } => {
-                let result = atman_runtime::config_hub::ConfigHub::global()
-                    .map_err(|error| error.to_string())
-                    .and_then(|hub| {
-                        switch_smart_model(&hub, &self.executor.providers, &self.session, &model)
-                    });
+                let result = switch_smart_model(
+                    &self.config,
+                    &self.executor.providers,
+                    &self.session,
+                    &model,
+                );
                 let _ = self.replies.send(atman_tui::TuiCommand::ModelSwitchResult {
                     request_id,
                     model,
@@ -175,8 +195,8 @@ impl PanelServices {
             atman_tui::TuiControl::McpTest { name } => {
                 let tx = self.replies.clone();
                 let name = name.clone();
+                let configs = self.config.load_mcp();
                 tokio::spawn(async move {
-                    let configs = load_mcp_configs();
                     let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
                         let _ = tx.send(atman_tui::TuiCommand::McpTestResult {
                             name,
@@ -201,8 +221,8 @@ impl PanelServices {
             atman_tui::TuiControl::McpListResources { name } => {
                 let tx = self.replies.clone();
                 let name = name.clone();
+                let configs = self.config.load_mcp();
                 tokio::spawn(async move {
-                    let configs = load_mcp_configs();
                     let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
                         let _ = tx.send(atman_tui::TuiCommand::McpResourcesResult {
                             name,
@@ -221,8 +241,8 @@ impl PanelServices {
             atman_tui::TuiControl::McpListPrompts { name } => {
                 let tx = self.replies.clone();
                 let name = name.clone();
+                let configs = self.config.load_mcp();
                 tokio::spawn(async move {
-                    let configs = load_mcp_configs();
                     let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
                         let _ = tx.send(atman_tui::TuiCommand::McpPromptsResult {
                             name,
@@ -267,10 +287,7 @@ impl PanelServices {
                     .send(atman_tui::TuiCommand::KnowledgeResult(result));
             }
             atman_tui::TuiControl::ReloadRules => {
-                let result = match (
-                    self.session.meta().and_then(|meta| meta.project_root),
-                    std::env::var_os("HOME"),
-                ) {
+                let result = match (self.project_root.clone(), std::env::var_os("HOME")) {
                     (Some(project_root), Some(home)) => {
                         let rules = if std::env::var_os("ATMAN_DISABLE_MIGRATION").is_some() {
                             Vec::new()

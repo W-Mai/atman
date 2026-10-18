@@ -1745,9 +1745,7 @@ async fn boot_first_session(
 }
 
 async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
-    if !tui_mode_requested()
-        && let Some(sid) = &resume_sid
-    {
+    if let Some(sid) = &resume_sid {
         let root = data_dir()?;
         let sid = resolve_session_prefix(&root, sid)?;
         if let Some(recorded) = session_catalog::inspect(&root, &sid)? {
@@ -2582,6 +2580,8 @@ async fn cmd_repl_once(
             shutdown_rx: Some(sh_rx),
             control_tx: Some(ctrl_tx),
             cmd_rx: Some(cmd_rx),
+            control_reply_rx: None,
+            flow_view: None,
             initial_items,
             goal_rx: Some(session.subscribe_goal()),
             context_rx: Some(session.subscribe_context()),
@@ -3765,9 +3765,9 @@ async fn execute_provider_mutation(
 }
 
 fn execute_model_mutation(
+    hub: &atman_runtime::config_hub::ConfigHub,
     action: &atman_tui::ModelMutation,
 ) -> Result<atman_tui::ModelMutationSuccess> {
-    let hub = atman_runtime::config_hub::ConfigHub::global()?;
     match action {
         atman_tui::ModelMutation::Upsert {
             old_name,

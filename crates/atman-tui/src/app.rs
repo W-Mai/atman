@@ -810,7 +810,8 @@ pub struct AppState {
         std::collections::BTreeSet<atman_runtime::permission::PermissionRequestId>,
     pub pending_injections: Vec<atman_runtime::injection::Injection>,
     pub queued_submissions: Vec<atman_runtime::QueuedSubmissionView>,
-    pub pending_quote: Option<String>,
+    pub pending_quote: Option<std::sync::Arc<str>>,
+    pub(crate) pending_submission: Option<crate::composer::PendingSubmission>,
     pub quote_rect: Option<ratatui::layout::Rect>,
     pub quote_close_hovered: bool,
     pub quote_expanded: bool,
@@ -1881,6 +1882,12 @@ impl AppState {
     }
 
     pub fn has_running_workflow(&self) -> bool {
+        if let Some(snapshot) = self.items.snapshot() {
+            return matches!(
+                snapshot.status.execution.state(),
+                atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(_))
+            );
+        }
         self.items
             .iter()
             .any(|it| matches!(it, OutputItem::WorkflowPanel { ended_at: None, .. }))
@@ -2462,6 +2469,15 @@ impl AppState {
     }
 
     pub fn push_note(&mut self, text: impl Into<String>, level: NoteLevel) {
+        if self.items.flow().is_some() {
+            self.push_toast(
+                text,
+                level,
+                std::time::Duration::from_secs(8),
+                ToastPosition::BottomRight,
+            );
+            return;
+        }
         self.push_item(OutputItem::SystemNote {
             text: text.into(),
             level,
@@ -4811,6 +4827,9 @@ impl AppState {
     }
 
     pub fn cancel_running_activities(&mut self) {
+        if self.items.flow().is_some() {
+            return;
+        }
         self.seal_completed_final_answer_draft();
         let now = std::time::Instant::now();
         for n in self.activity_nodes.iter_mut() {

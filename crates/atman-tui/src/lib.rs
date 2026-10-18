@@ -16,7 +16,9 @@ pub mod boot_animation;
 pub mod clipboard;
 pub mod compact_review_modal;
 pub mod completion;
+mod composer;
 pub mod control;
+mod instance_view;
 pub use control::ControlSender;
 mod directional_selector;
 pub mod flow_view;
@@ -254,6 +256,10 @@ pub struct SessionPickerRow {
 
 #[non_exhaustive]
 pub enum TuiCommand {
+    /// Returned through the captured flow reply mailbox after the host accepts or rejects input.
+    SubmissionResult {
+        result: Result<(), String>,
+    },
     FormSubmissionResult {
         request_id: u64,
         form_id: String,
@@ -536,6 +542,8 @@ pub struct TuiHandle {
     pub shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
     pub control_tx: Option<crate::ControlSender>,
     pub cmd_rx: Option<mpsc::UnboundedReceiver<TuiCommand>>,
+    pub control_reply_rx: Option<mpsc::UnboundedReceiver<control::ControlReply>>,
+    pub flow_view: Option<atman_runtime::flow_runtime::FlowViewReader>,
     pub initial_items: Vec<app::OutputItem>,
     pub goal_rx: Option<tokio::sync::watch::Receiver<Option<String>>>,
     pub context_rx: Option<tokio::sync::watch::Receiver<atman_runtime::ContextSnapshot>>,
@@ -580,6 +588,8 @@ impl TuiHandle {
             shutdown_rx: None,
             control_tx: None,
             cmd_rx: None,
+            control_reply_rx: None,
+            flow_view: None,
             initial_items: Vec::new(),
             goal_rx: Some(session.subscribe_goal()),
             context_rx: Some(session.subscribe_context()),

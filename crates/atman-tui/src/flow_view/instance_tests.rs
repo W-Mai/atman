@@ -496,6 +496,25 @@ async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_res
     );
     assert!(main.sync_view(view, None).unwrap());
     assert_eq!(main.snapshot().unwrap().status.execution.pauses().len(), 1);
+    let mut app = crate::app::AppState::new(session_id.to_string(), None)
+        .with_session(Some(worker.context()));
+    app.sync_flow_view(view).unwrap();
+    let version = app.items_version;
+    let original_count = app.items.len();
+    app.push_note("local control acknowledgement", crate::app::NoteLevel::Info);
+    app.cancel_running_activities();
+    assert_eq!(app.items.len(), original_count);
+    assert!(app.items.snapshot().is_some());
+    assert_eq!(app.plans.len(), 1);
+    let goal = app.goal_record().unwrap();
+    assert!(
+        matches!(app.goal_toggle_control(), Some(crate::TuiControl::GoalControl { action: atman_runtime::goal::GoalAction::Pause, goal_id: Some(id), revision: Some(revision), .. }) if id == goal.id && revision == goal.revision)
+    );
+    app.sync_flow_view(view).unwrap();
+    assert_eq!(
+        app.items_version, version,
+        "same snapshot must retain document layout"
+    );
     floating.replace(vec![OutputItem::Divider]);
     assert!(floating.snapshot().is_none());
     assert!(floating.sync_view(view, None).is_err());

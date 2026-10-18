@@ -897,6 +897,13 @@ impl WindowManager {
                         panel.content = Some(Box::new(
                             crate::window::goal_panel::GoalPanelContent::new(session),
                         ));
+                        if let Some(snapshot) = app.items.snapshot() {
+                            panel
+                                .content
+                                .as_mut()
+                                .unwrap()
+                                .set_flow_snapshot(snapshot.clone());
+                        }
                     }
                 }
             }
@@ -1093,6 +1100,17 @@ impl WindowManager {
                     },
                     &mut ctx,
                 );
+            }
+        }
+    }
+
+    pub(crate) fn flow_snapshot(
+        &mut self,
+        snapshot: std::sync::Arc<atman_runtime::flow_runtime::FlowViewSnapshot>,
+    ) {
+        for panel in &mut self.panels {
+            if let Some(content) = panel.content.as_mut() {
+                content.set_flow_snapshot(snapshot.clone());
             }
         }
     }

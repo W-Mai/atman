@@ -9,6 +9,7 @@ use crate::ModeColorExt;
 
 #[derive(Default)]
 pub struct InputFooter {
+    pub sending: bool,
     pub queued_count: usize,
     pub pending_quote_lines: Option<usize>,
 }
@@ -37,7 +38,9 @@ pub fn input_paragraph<'a>(
         title,
         Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
     );
-    let hint_right = if let Some(lines) = footer.pending_quote_lines {
+    let hint_right = if footer.sending {
+        " Sending · draft retained ".into()
+    } else if let Some(lines) = footer.pending_quote_lines {
         format!(" quote · {lines} lines · Ctrl+U remove · Enter send ")
     } else if footer.queued_count > 0 {
         format!(
@@ -731,6 +734,14 @@ impl InputEditor {
 
     /// Record accepted text in history. Clear the composer only if the captured draft is still current; cursor movement alone does not make it stale.
     pub fn acknowledge_submission(&mut self, prepared: PreparedSubmission) -> bool {
+        self.acknowledge_submission_if(prepared, true)
+    }
+
+    pub(crate) fn acknowledge_submission_if(
+        &mut self,
+        prepared: PreparedSubmission,
+        clear: bool,
+    ) -> bool {
         if !std::sync::Arc::ptr_eq(&self.owner, &prepared.owner) {
             return false;
         }
@@ -738,7 +749,7 @@ impl InputEditor {
         if !line.trim().is_empty() && self.history.last().is_none_or(|prev| prev != &line) {
             self.history.push(line);
         }
-        if self.revision != prepared.revision {
+        if !clear || self.revision != prepared.revision {
             return false;
         }
         self.content_changed();

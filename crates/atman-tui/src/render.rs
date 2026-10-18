@@ -647,26 +647,27 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         }
     }
     if let Some(area) = sidebar_rect {
-        let project_root = app
-            .session
-            .as_ref()
-            .and_then(|s| s.meta())
-            .and_then(|m| m.project_root)
-            .map(|p| p.display().to_string());
+        let project_root = app.project_root.clone().or_else(|| {
+            app.session
+                .as_ref()
+                .and_then(|s| s.meta())
+                .and_then(|m| m.project_root)
+                .map(|p| p.display().to_string())
+        });
         let goal_scroll = app.goal_scroll;
         let plans_scroll = app.plans_scroll;
         let todos_scroll = app.todos_scroll;
-        let goal_state = app.session.as_ref().map(|s| s.goal_control.snapshot());
+        let goal = app.goal_record();
+        let goal_status = app.goal_presentation();
         let sr = sidebar::render(
             f,
             area,
             sidebar::SidebarInputs {
-                goal: goal_state
+                goal: goal
                     .as_ref()
-                    .and_then(|s| s.goal.as_ref())
                     .map(|g| g.objective.as_str())
                     .or(app.goal.as_deref()),
-                goal_state: goal_state.as_ref(),
+                goal_status: goal_status.as_ref(),
                 context: &app.context,
                 attach_count: app.attach_count,
                 session_id: &app.session_id,
@@ -966,6 +967,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             &app.trust,
             reasoning_badge.as_deref(),
             InputFooter {
+                sending: app.pending_submission.is_some(),
                 queued_count: app.queued_submissions.len(),
                 pending_quote_lines: app
                     .pending_quote

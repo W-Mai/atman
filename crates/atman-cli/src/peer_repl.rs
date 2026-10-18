@@ -33,6 +33,7 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 mod prompts;
+mod tui;
 
 const PAGE: NonZeroUsize = NonZeroUsize::new(64).unwrap();
 const YIELD: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
@@ -106,7 +107,11 @@ pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
             prompts,
             permissions: Some(permissions),
         };
-        attachment.interact(prompt_rx).await
+        if crate::tui_mode_requested() {
+            attachment.interact_tui().await
+        } else {
+            attachment.interact(prompt_rx).await
+        }
     }
     .await;
     // Errors and explicit exit release ownership without closing persistent instances.
@@ -117,6 +122,47 @@ pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
 }
 
 impl Attachment {
+    async fn validate_text_input(&self, worker: &FlowWorker) -> Result<()> {
+        let descriptor = worker.descriptor().await?;
+        let entry = descriptor.entry()?;
+        let program =
+            load_program_from_bundle(&entry.bundle, &entry.path, &self.descriptor.source_roots())?;
+        let flow = program
+            .entry_flow(&entry.name)
+            .and_then(|id| program.flow(&id))
+            .context("entry is unavailable")?;
+        ensure!(
+            atman_runtime::validate::invocation_message_parameter(flow)?.is_some(),
+            "entry has no invocation user_message parameter; use :invoke <JSON arguments>"
+        );
+        Ok(())
+    }
+
+    async fn accept_payload(
+        &self,
+        worker: &FlowWorker,
+        request_id: Uuid,
+        payload: InboxPayload,
+        delivery: DeliveryMode,
+    ) -> Result<Uuid> {
+        self.bind(worker).await?;
+        let receipt = worker
+            .accept_input(
+                DeliveryRequest {
+                    request_id,
+                    sender: SenderIdentity::User(USER),
+                    recipient: worker.address().clone(),
+                    delivery,
+                    cause: None,
+                    correlation: None,
+                    scope: None,
+                    payload,
+                },
+                |_| Ok(()),
+            )
+            .await?;
+        Ok(receipt.message_id)
+    }
     async fn bind(&self, worker: &FlowWorker) -> Result<()> {
         if self
             .session
@@ -277,6 +323,16 @@ impl Attachment {
     }
 
     async fn command(&self, worker: &FlowWorker, line: &str) -> Result<String> {
+        self.command_with_request(worker, line, Uuid::now_v7())
+            .await
+    }
+
+    async fn command_with_request(
+        &self,
+        worker: &FlowWorker,
+        line: &str,
+        request_id: Uuid,
+    ) -> Result<String> {
         let original = line;
         let line = line.trim();
         let (command, argument) = line.split_once(' ').unwrap_or((line, ""));
@@ -316,7 +372,7 @@ impl Attachment {
                 let start_turn = matches!(edit, GoalEdit::Resume { .. });
                 if start_turn { self.bind(worker).await?; }
                 let expected = worker.goal().await?.goal.as_ref().map(GoalVersion::from);
-                let result = worker.edit_goal(GoalRequest { id: Uuid::now_v7(), sender: SenderIdentity::User(USER), expected, edit, start_turn }, |_| Ok(())).await?;
+                let result = worker.edit_goal(GoalRequest { id: request_id, sender: SenderIdentity::User(USER), expected, edit, start_turn }, |_| Ok(())).await?;
                 Ok(serde_json::to_string_pretty(&result.goal)?)
             }
             ":pending" => {
@@ -348,11 +404,7 @@ impl Attachment {
                     ":invoke" => InboxPayload::Invocation { arguments: serde_json::from_str(argument)?, invocation: BTreeMap::new(), user: None },
                     name if (name.starts_with(':') && name != ":insert") || name.starts_with('/') => bail!("unknown persistent flow command; use :help"),
                     _ => {
-                        let descriptor = worker.descriptor().await?;
-                        let entry = descriptor.entry()?;
-                        let program = load_program_from_bundle(&entry.bundle, &entry.path, &self.descriptor.source_roots())?;
-                        let flow = program.entry_flow(&entry.name).and_then(|id| program.flow(&id)).context("entry is unavailable")?;
-                        ensure!(atman_runtime::validate::invocation_message_parameter(flow)?.is_some(), "entry has no invocation user_message parameter; use :invoke <JSON arguments>");
+                        self.validate_text_input(worker).await?;
                         if command == ":insert" {
                             ensure!(!argument.is_empty(), "insertion must not be empty");
                             InboxPayload::Interjection { text: argument.into() }
@@ -361,13 +413,8 @@ impl Attachment {
                         }
                     }
                 };
-                self.bind(worker).await?;
-                let receipt = worker.accept_input(DeliveryRequest {
-                    request_id: Uuid::now_v7(), sender: SenderIdentity::User(USER), recipient: worker.address().clone(),
-                    delivery: if command == ":insert" { DeliveryMode::AtBoundary } else { DeliveryMode::NextTurn },
-                    cause: None, correlation: None, scope: None, payload,
-                }, |_| Ok(())).await?;
-                Ok(format!("Input accepted: {}", receipt.message_id))
+                let id = self.accept_payload(worker, request_id, payload, if command == ":insert" { DeliveryMode::AtBoundary } else { DeliveryMode::NextTurn }).await?;
+                Ok(format!("Input accepted: {id}"))
             }
         }
     }

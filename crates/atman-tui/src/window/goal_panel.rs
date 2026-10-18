@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use atman_runtime::goal::{GoalAction, GoalController, GoalSnapshot};
+use atman_runtime::goal::{GoalAction, GoalController};
 use crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::{
     Frame,
@@ -15,14 +15,6 @@ use crate::settings_form::{Action, render_action, render_record};
 use crate::wm::component::{
     EventCtx, HitRegion, RenderCtx, SizeHint, WindowComponent, WmCommand, WmEvent, WmEventResult,
 };
-
-pub(crate) fn status(snapshot: &GoalSnapshot) -> String {
-    crate::agent_presentation::GoalPresentation::new(snapshot).status
-}
-
-pub(crate) fn toggle(snapshot: &GoalSnapshot) -> Option<GoalAction> {
-    crate::agent_presentation::GoalPresentation::new(snapshot).action
-}
 
 pub(crate) fn command(
     control: &GoalController,
@@ -41,6 +33,7 @@ pub(crate) fn command(
 
 pub struct GoalPanelContent {
     session: Arc<atman_runtime::Session>,
+    snapshot: Option<Arc<atman_runtime::flow_runtime::FlowViewSnapshot>>,
     selected: usize,
     focus: usize,
     hover: Option<usize>,
@@ -61,6 +54,7 @@ impl GoalPanelContent {
     pub fn new(session: Arc<atman_runtime::Session>) -> Self {
         Self {
             session,
+            snapshot: None,
             selected: 0,
             focus: 4,
             hover: None,
@@ -80,6 +74,9 @@ impl GoalPanelContent {
 
     fn choices(&self) -> Vec<(Option<String>, Arc<GoalController>)> {
         let mut entries = vec![(None, self.session.goal_control.clone())];
+        if self.snapshot.is_some() {
+            return entries;
+        }
         entries.extend(
             self.session
                 .flow_registry
@@ -95,6 +92,9 @@ impl GoalPanelContent {
         target: &Option<String>,
         control: &GoalController,
     ) -> crate::agent_presentation::GoalPresentation {
+        if let Some(snapshot) = &self.snapshot {
+            return crate::agent_presentation::GoalPresentation::for_instance(snapshot);
+        }
         target
             .as_ref()
             .and_then(|handle| self.session.flow_registry.lookup(handle).ok())
@@ -102,6 +102,28 @@ impl GoalPanelContent {
             .unwrap_or_else(|| {
                 crate::agent_presentation::GoalPresentation::new(&control.snapshot())
             })
+    }
+
+    fn record(&self, control: &GoalController) -> Option<atman_runtime::memory::goal::GoalRecord> {
+        self.snapshot
+            .as_ref()
+            .map_or_else(|| control.record(), |snapshot| snapshot.status.goal.clone())
+    }
+
+    fn goal_command(
+        &self,
+        control: &GoalController,
+        target: Option<String>,
+        action: GoalAction,
+    ) -> WmCommand {
+        let record = self.record(control);
+        WmCommand::GoalControl {
+            request_id: None,
+            target,
+            goal_id: record.as_ref().map(|g| g.id.clone()),
+            revision: record.map(|g| g.revision),
+            action,
+        }
     }
 
     fn activate(&mut self, index: usize) -> Vec<WmCommand> {
@@ -117,10 +139,10 @@ impl GoalPanelContent {
                 self.confirm_clear = false;
                 vec![]
             }
-            1 if self.editor.is_none() && control.record().is_some() => self
+            1 if self.editor.is_none() && self.record(control).is_some() => self
                 .presentation(target, control)
                 .action
-                .map(|action| vec![command(control, target.clone(), action)])
+                .map(|action| vec![self.goal_command(control, target.clone(), action)])
                 .unwrap_or_default(),
             2 => {
                 if let Some(editor) = self.editor.as_ref() {
@@ -150,7 +172,7 @@ impl GoalPanelContent {
                         },
                     }]
                 } else {
-                    let record = control.record();
+                    let record = self.record(control);
                     if record.is_none() {
                         return vec![];
                     }
@@ -168,17 +190,17 @@ impl GoalPanelContent {
                     vec![]
                 }
             }
-            3 if control.record().is_some() && self.editor.is_none() => {
+            3 if self.record(control).is_some() && self.editor.is_none() => {
                 if self.confirm_clear {
                     self.confirm_clear = false;
-                    vec![command(control, target.clone(), GoalAction::Clear)]
+                    vec![self.goal_command(control, target.clone(), GoalAction::Clear)]
                 } else {
                     self.confirm_clear = true;
                     vec![]
                 }
             }
             4 if self.editor.is_none() => {
-                self.edit_revision = control.record().map(|g| (g.id, g.revision));
+                self.edit_revision = self.record(control).map(|g| (g.id, g.revision));
                 self.edit_target = target.clone();
                 self.creating = true;
                 self.editor = Some(InputEditor::default());
@@ -194,6 +216,9 @@ impl GoalPanelContent {
 }
 
 impl WindowComponent for GoalPanelContent {
+    fn set_flow_snapshot(&mut self, snapshot: Arc<atman_runtime::flow_runtime::FlowViewSnapshot>) {
+        self.snapshot = Some(snapshot);
+    }
     fn render_content(&mut self, area: Rect, frame: &mut Frame, _: &RenderCtx) -> Vec<HitRegion> {
         self.hits.clear();
         self.cursor_visible = false;
@@ -208,9 +233,13 @@ impl WindowComponent for GoalPanelContent {
         let choices = self.choices();
         self.selected = self.selected.min(choices.len() - 1);
         let (target, control) = &choices[self.selected];
-        let snapshot = control.snapshot();
+        let record = self.record(control);
         let presentation = self.presentation(target, control);
-        let name = target.as_deref().unwrap_or("Main agent");
+        let name = target.as_deref().unwrap_or(if self.snapshot.is_some() {
+            "Selected flow"
+        } else {
+            "Main agent"
+        });
         render_action(
             frame,
             top,
@@ -271,7 +300,7 @@ impl WindowComponent for GoalPanelContent {
             .as_ref()
             .map(|e| e.buf().to_owned())
             .unwrap_or_else(|| {
-                let goal = snapshot.goal.as_ref();
+                let goal = record.as_ref();
                 format!(
                     "{}\n\n{}{}",
                     presentation.status,
@@ -351,8 +380,8 @@ impl WindowComponent for GoalPanelContent {
                     hovered: self.hover == Some(index),
                     disabled: (index == 1 && presentation.action.is_none())
                         || self.pending_save.is_some()
-                        || (index == 2 && self.editor.is_none() && snapshot.goal.is_none())
-                        || (index != 2 && (snapshot.goal.is_none() || self.editor.is_some())),
+                        || (index == 2 && self.editor.is_none() && record.is_none())
+                        || (index != 2 && (record.is_none() || self.editor.is_some())),
                 },
                 &t,
             );

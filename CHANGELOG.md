@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- **Persistent TUI attachment** — Restore a persistent session's default flow with committed conversation, execution, Goal, and planning state. Composer drafts remain intact until durable input acceptance; stale Goal edits are rejected and form replies retain their invoking flow.
+
 ### ⚠️ Breaking Changes
 
 - **TUI control transport** — `TuiHandle` and panel interactions use `ControlSender`. Flow-bound commands capture the destination, view revision, request ID, and reply mailbox before entering the host queue. Existing session hosts use `ControlSender::channel()`.

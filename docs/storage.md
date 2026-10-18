@@ -38,6 +38,14 @@ Migration work stays under `runtime-v1/.migrations/<destination>/work` until eve
 
 ## Session and flow storage
 
+### Persistent TUI attachment
+
+`atman --continue <session-id-or-prefix>` opens a persistent session's default executable flow in the TUI. Its transcript, workflow, Goal, plan, pending-input count, and execution status come from one committed view snapshot. The Goal panel and sidebar use that same snapshot. Goal pause controls objective continuation independently of execution pause; `:pause`, `:resume`, `:recover`, and `:cancel` control execution explicitly.
+
+Submitting input retains the composer until its captured request receives durable acceptance. Failed submissions preserve text, images, and quotes; acknowledgements cannot clear edits or a new quote made while sending. Form answers and Goal saves report failures to the originating editor. Goal edits include the displayed revision, and ordinary input preserves the selected invocation effort without adding it to conversation history. Exiting stops this embedded host and preserves instance history and pending input; an interrupted active turn requires explicit recovery.
+
+This attachment displays committed conversation and execution updates; uncommitted model-token drafts are not included. It attaches one default flow and requires the session's configuration directory to match `ATMAN_CONFIG_DIR` or the current default configuration. Flow focus switching, full pending-input management, session navigation, and process-terminal controls are unsupported in this attachment and report an error. Plain-terminal attachment supports selecting other instances with `:focus`.
+
 ### Plain-terminal attachment
 
 `ATMAN_NO_TUI=1 atman --continue <session-id-or-prefix>` attaches an existing persistent Session to `RuntimeHost`. Open executable entries bind their retained source and current trust configuration to the common scheduler. Binding preserves execution pauses and interruption gates; an unavailable entry is reported independently. The terminal reads committed `FlowUpdate` batches for replies and completion failures, retaining a separate cursor for each selected flow.

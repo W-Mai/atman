@@ -14,7 +14,7 @@ pub enum SidebarPopupKind {
 
 pub struct SidebarInputs<'a> {
     pub goal: Option<&'a str>,
-    pub goal_state: Option<&'a atman_runtime::goal::GoalSnapshot>,
+    pub goal_status: Option<&'a crate::agent_presentation::GoalPresentation>,
     pub context: &'a ContextSnapshot,
     pub attach_count: usize,
     pub session_id: &'a str,
@@ -159,13 +159,7 @@ pub fn render(
     let goal_lines = if inputs.goal_collapsed {
         2
     } else {
-        GOAL_MAX_LINES as u16
-            + 4
-            + if inputs.goal_state.is_some_and(|s| s.goal.is_some()) {
-                5
-            } else {
-                0
-            }
+        GOAL_MAX_LINES as u16 + 4 + if inputs.goal_status.is_some() { 5 } else { 0 }
     };
     let plan_steps = inputs
         .plans
@@ -717,7 +711,7 @@ fn render_upper_content(
         .add_modifier(Modifier::BOLD);
 
     let mut lines: Vec<Line<'_>> = Vec::new();
-    let goal_has_control = inputs.goal_state.is_some_and(|s| s.goal.is_some());
+    let goal_has_control = inputs.goal_status.is_some();
     let goal_preview_rows =
         GOAL_MAX_LINES.min(
             area.height
@@ -761,10 +755,10 @@ fn render_upper_content(
                 Style::default().fg(t.subtle_fg.into()),
             )));
         }
-        if let Some(snapshot) = inputs.goal_state.filter(|s| s.goal.is_some()) {
+        if let Some(presentation) = inputs.goal_status {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!("  {}", crate::window::goal_panel::status(snapshot)),
+                format!("  {}", presentation.status),
                 Style::default().fg(t.subtle_fg.into()),
             )));
             lines.push(Line::from(""));
@@ -1146,17 +1140,17 @@ fn render_upper_content(
     let visible: Vec<Line<'_>> = lines.into_iter().take(area.height as usize).collect();
     f.render_widget(ratatui::widgets::Paragraph::new(visible), area);
     if let Some(rect) = result.strip_rects.get("goal-control")
-        && let Some(snapshot) = inputs.goal_state
+        && let Some(presentation) = inputs.goal_status
     {
         crate::settings_form::render_action(
             f,
             *rect,
             &crate::settings_form::Action {
-                label: crate::agent_presentation::GoalPresentation::new(snapshot).action_label,
+                label: presentation.action_label,
                 shortcut: "Ctrl+Y",
                 focused: false,
                 hovered: inputs.hovered_row == Some("goal-control"),
-                disabled: crate::window::goal_panel::toggle(snapshot).is_none(),
+                disabled: presentation.action.is_none(),
             },
             t,
         );

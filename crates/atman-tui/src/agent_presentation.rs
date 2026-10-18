@@ -92,13 +92,42 @@ impl AgentState {
     }
 }
 
-pub(crate) struct GoalPresentation {
+pub struct GoalPresentation {
     pub status: String,
     pub action: Option<GoalAction>,
     pub action_label: &'static str,
 }
 
 impl GoalPresentation {
+    pub fn for_instance(snapshot: &atman_runtime::flow_runtime::FlowViewSnapshot) -> Self {
+        let Some(goal) = &snapshot.status.goal else {
+            return Self {
+                status: "No goal".into(),
+                action: None,
+                action_label: "No goal",
+            };
+        };
+        let paused = goal.status == GoalStatus::Paused;
+        let open = matches!(
+            snapshot.status.execution.state(),
+            atman_rt::InstanceState::Open(_)
+        );
+        Self {
+            status: if paused { "Paused" } else { "Active" }.into(),
+            action: open.then_some(if paused {
+                GoalAction::Resume
+            } else {
+                GoalAction::Pause
+            }),
+            action_label: if !open {
+                "Flow closed"
+            } else if paused {
+                "Resume goal"
+            } else {
+                "Pause goal"
+            },
+        }
+    }
     pub fn for_flow(entry: &atman_runtime::tools::agent_ctrl::FlowEntry) -> Option<Self> {
         let mut presentation = Self::new(&entry.goal_control.get()?.snapshot());
         let lifecycle = entry.status.lock().unwrap();

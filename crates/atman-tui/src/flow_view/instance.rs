@@ -58,6 +58,7 @@ pub struct FlowViewModel {
     flow: Option<FlowRef>,
     instance: InstanceDocument,
     snapshot: Option<Arc<FlowViewSnapshot>>,
+    updated_workflows: Vec<usize>,
 }
 
 impl Deref for FlowViewModel {
@@ -83,6 +84,9 @@ impl From<Vec<OutputItem>> for FlowViewModel {
 }
 
 impl FlowViewModel {
+    pub(crate) fn updated_workflows(&self) -> &[usize] {
+        &self.updated_workflows
+    }
     pub fn has_active_animation(&self) -> bool {
         self.document.has_active_animation()
             || self
@@ -157,6 +161,7 @@ impl FlowViewModel {
                 "archived records require the legacy history reader",
             ));
         }
+        self.updated_workflows.clear();
         if source.cursor() == self.instance.cursor.as_ref() {
             self.flow = Some(source.flow().clone());
             return Ok(false);
@@ -235,6 +240,7 @@ impl FlowViewModel {
                 continue;
             }
             if let Some(index) = view.panel {
+                self.updated_workflows.push(index);
                 self.document
                     .mutate(index, OutputMutation::Semantic, |item| {
                         let OutputItem::WorkflowPanel {

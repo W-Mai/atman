@@ -1331,6 +1331,9 @@ pub(crate) fn handle_key(
             edited = true;
         }
         KeyAction::Submit => {
+            if app.pending_submission.is_some() {
+                return;
+            }
             if let Some(session) = app.session.as_ref() {
                 editor.reconcile_images(&session.pending_images());
             }
@@ -1347,7 +1350,7 @@ pub(crate) fn handle_key(
                         .map(|quote| atman_runtime::user_input::UserInputPresentation {
                             prompt: editor_submission.text.clone(),
                             quote: Some(atman_runtime::user_input::QuoteSnapshot {
-                                text: quote.clone(),
+                                text: quote.to_string(),
                             }),
                         });
                 let line = presentation.as_ref().map_or_else(
@@ -1366,6 +1369,26 @@ pub(crate) fn handle_key(
                         reasoning: app.input_reasoning_for_submission(),
                         presentation: presentation.clone(),
                     };
+                    if let Some(tx) = control_tx.filter(|tx| tx.binding().is_some()) {
+                        match tx.send_tracked(TuiControl::Submit(submission)) {
+                            Ok(Some(ticket)) => {
+                                app.pending_submission = Some(crate::composer::PendingSubmission {
+                                    ticket,
+                                    draft: prepared,
+                                    quote,
+                                    images,
+                                });
+                            }
+                            _ => app.push_toast(
+                                "Input was not sent; the connection is closed",
+                                crate::app::NoteLevel::Error,
+                                std::time::Duration::from_secs(6),
+                                crate::app::ToastPosition::BottomRight,
+                            ),
+                        }
+                        *interrupt_prompt = None;
+                        return;
+                    }
                     let failed = if let Some(tx) = control_tx {
                         tx.send(TuiControl::Submit(submission))
                             .err()
@@ -1457,20 +1480,10 @@ pub(crate) fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::ToggleGoal => {
-            if let Some(session) = &app.session {
-                let control = &session.goal_control;
-                if let Some(goal) = control.record()
-                    && let Some(action) = crate::window::goal_panel::toggle(&control.snapshot())
-                    && let Some(tx) = control_tx
-                {
-                    let _ = tx.send(TuiControl::GoalControl {
-                        request_id: None,
-                        target: None,
-                        goal_id: Some(goal.id),
-                        revision: Some(goal.revision),
-                        action,
-                    });
-                }
+            if let Some(command) = app.goal_toggle_control()
+                && let Some(tx) = control_tx
+            {
+                let _ = tx.send(command);
             }
         }
         KeyAction::NudgePrefill => {

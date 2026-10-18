@@ -23,6 +23,23 @@ use crate::{
 };
 use atman_runtime::stream::StreamFrame;
 
+fn is_live_instance_frame(frame: &StreamFrame) -> bool {
+    matches!(
+        frame,
+        StreamFrame::PermissionRequestCreated { .. }
+            | StreamFrame::PermissionRequestTargeted { .. }
+            | StreamFrame::PermissionRequestDeferred { .. }
+            | StreamFrame::PermissionRequestApproved { .. }
+            | StreamFrame::PermissionRequestDenied { .. }
+            | StreamFrame::PermissionRequestCancelled { .. }
+            | StreamFrame::PermissionGroupCreated { .. }
+            | StreamFrame::PermissionGroupUpdated { .. }
+            | StreamFrame::PermissionGroupResolved { .. }
+            | StreamFrame::PermissionGrantCreated { .. }
+            | StreamFrame::PermissionGrantExpired { .. }
+    )
+}
+
 async fn recv_input_event(
     rx: &mut mpsc::UnboundedReceiver<std::io::Result<CtEvent>>,
     pending: &mut Option<std::io::Result<CtEvent>>,
@@ -114,6 +131,10 @@ pub(crate) async fn run_frames(
     if let Some(rx) = handle.queued_submission_rx.as_ref() {
         app.app.queued_submissions = rx.borrow().clone();
     }
+    let persistent = handle.flow_view.is_some();
+    if let Some(reader) = handle.flow_view.as_mut() {
+        app.app.sync_flow_view(reader.next().await?)?;
+    }
     let mut editor = InputEditor::default();
     if let Some(sess) = handle.session.as_ref() {
         let past: Vec<String> = sess
@@ -150,7 +171,11 @@ pub(crate) async fn run_frames(
     toast_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     selection_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending_input_event = None;
-    let mut goal_changes = handle.session.as_ref().map(|s| s.goal_control.subscribe());
+    let mut goal_changes = handle
+        .session
+        .as_ref()
+        .filter(|_| !persistent)
+        .map(|s| s.goal_control.subscribe());
 
     let _reader_guard = ReaderGuard(reader_shutdown);
     let mut update_check = tokio::spawn(check_latest_release());
@@ -167,6 +192,9 @@ pub(crate) async fn run_frames(
             loop {
                 match srx.recv().await {
                     Ok(frame) => {
+                        if persistent && !is_live_instance_frame(&frame) {
+                            continue;
+                        }
                         if !forward_ui_frame(frame, &semantic_tx, &bulk_tx).await {
                             break;
                         }
@@ -233,6 +261,17 @@ pub(crate) async fn run_frames(
             }
             latest = poll_update_check(&mut update_check), if !update_check.is_finished() => {
                 app.app.latest_release = latest;
+            }
+            view = async {
+                match handle.flow_view.as_mut() {
+                    Some(reader) => reader.next().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                app.app.sync_flow_view(view?)?;
+                if let Some(snapshot) = app.app.items.snapshot() {
+                    app.wm.flow_snapshot(snapshot.clone());
+                }
             }
 
             key = recv_input_event(&mut key_events, &mut pending_input_event) => {
@@ -803,11 +842,8 @@ pub(crate) async fn run_frames(
                                     .find(|(_, r)| rect_contains(**r, me.column, me.row))
                                 {
                                     if key == "goal-control" {
-                                        if let Some(session) = &app.app.session && let Some(tx) = handle.control_tx.as_ref() {
-                                            let control = &session.goal_control;
-                                            if let Some(goal) = control.record() && let Some(action) = crate::window::goal_panel::toggle(&control.snapshot()) {
-                                                let _ = tx.send(crate::TuiControl::GoalControl { request_id: None, target: None, goal_id: Some(goal.id), revision: Some(goal.revision), action });
-                                            }
+                                        if let Some(command) = app.app.goal_toggle_control() && let Some(tx) = handle.control_tx.as_ref() {
+                                            let _ = tx.send(command);
                                         }
                                     } else if let Some(idx) = key
                                         .strip_prefix("plan:")
@@ -1708,9 +1744,12 @@ pub(crate) async fn run_frames(
                     }
                 }
             }
-            cmd = recv_cmd(handle.cmd_rx.as_mut()) => {
-                if let Some(cmd) = cmd {
+            cmd = recv_cmd(&mut handle.cmd_rx, &mut handle.control_reply_rx, handle.control_tx.as_ref().and_then(|tx| tx.binding())) => {
+                if let Some((ticket, cmd)) = cmd {
                     match cmd {
+                        TuiCommand::SubmissionResult { result } => {
+                            app.app.submission_result(&mut editor, ticket.as_ref(), result);
+                        }
                         TuiCommand::FormSubmissionResult { request_id, form_id, result } => {
                             app.wm.modals.form_modal.submission_result(&form_id, request_id, result);
                         }
@@ -2143,12 +2182,30 @@ fn apply_model_mutation_result(
     );
 }
 
-pub(crate) async fn recv_cmd(
-    rx: Option<&mut mpsc::UnboundedReceiver<TuiCommand>>,
-) -> Option<TuiCommand> {
+async fn recv_optional<T>(rx: Option<&mut mpsc::UnboundedReceiver<T>>) -> Option<T> {
     match rx {
-        Some(r) => r.recv().await,
+        Some(rx) => rx.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+pub(crate) async fn recv_cmd(
+    rx: &mut Option<mpsc::UnboundedReceiver<TuiCommand>>,
+    bound: &mut Option<mpsc::UnboundedReceiver<crate::control::ControlReply>>,
+    binding: Option<&crate::control::ViewBinding>,
+) -> Option<(Option<crate::control::ControlTicket>, TuiCommand)> {
+    loop {
+        tokio::select! {
+            command = recv_optional(rx.as_mut()) => match command {
+                Some(command) => return Some((None, command)),
+                None => *rx = None,
+            },
+            reply = recv_optional(bound.as_mut()) => match reply {
+                Some(reply) if Some(&reply.ticket.binding) == binding => return Some((Some(reply.ticket), reply.command)),
+                Some(_) => {},
+                None => *bound = None,
+            },
+        }
     }
 }
 
@@ -2744,7 +2801,7 @@ fn apply_selection_action(
                     | crate::selection::CopyPayload::PlainText(text)
                     | crate::selection::CopyPayload::Preview(text) => text,
                 };
-                ui.app.pending_quote = Some(text);
+                ui.app.pending_quote = Some(text.into());
                 ui.app.quote_close_hovered = false;
                 ui.app.quote_expanded = false;
                 ui.app.quote_scroll = 0;

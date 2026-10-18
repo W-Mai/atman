@@ -186,6 +186,11 @@ pub struct EventCtx<'a> {
 /// The WM shell owns border, title, buttons, drag, resize, and shadow.
 /// Content rendering and event handling are delegated to this trait.
 pub trait WindowComponent: Send {
+    fn set_flow_snapshot(
+        &mut self,
+        _snapshot: std::sync::Arc<atman_runtime::flow_runtime::FlowViewSnapshot>,
+    ) {
+    }
     /// Render content into the given area (inside the shell border).
     /// Return hit regions for mouse dispatch.
     fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion>;
