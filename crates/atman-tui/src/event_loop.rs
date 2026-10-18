@@ -286,10 +286,15 @@ pub(crate) async fn run_frames(
     let frame_bulk_tx = bulk_tx.clone();
 
     loop {
-        if std::mem::take(&mut app.app.open_flow_hub) {
+        if let Some(request) = app.app.open_flow_hub.take() {
             let mut opened = crate::flow_hub::FlowHub::default();
             if let Some(tx) = handle.control_tx.as_ref() {
-                dispatch_hub_action(&mut opened, crate::flow_hub::Action::Load(None), tx, None);
+                dispatch_hub_action(
+                    &mut opened,
+                    crate::flow_hub::Action::Load(request),
+                    tx,
+                    None,
+                );
             }
             hub = Some(opened);
         }
@@ -429,7 +434,10 @@ pub(crate) async fn run_frames(
                         app.app.flow_hub_hovered = app.app.flow_hub_rect.is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()));
                         clicked = app.app.flow_hub_hovered && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && !app.wm.modals.any_open();
                     }
-                    if escape || clicked { app.app.open_flow_hub = true; continue; }
+                    if escape || clicked {
+                        app.app.open_flow_hub = handle.control_tx.as_ref().and_then(|tx| tx.binding()).map(|binding| crate::flow_hub::HubRequest::Flows { session: binding.flow.session_id.0, before: None });
+                        continue;
+                    }
                 }
                 let mut current = key;
                 let mut scroll_delta: i32 = 0;
@@ -1957,9 +1965,14 @@ fn apply_view_command(
             app.app.sidebar_mode = mode;
         }
         TuiCommand::OpenSessionSwitcher => {
-            let scope = crate::session_switcher::SessionScope::Project;
-            let rows = key_handler::enumerate_session_rows(app, scope);
-            app.wm.modals.session_switcher.open_with(rows, scope);
+            if app.app.items.flow().is_some() {
+                app.app.open_flow_hub =
+                    Some(crate::flow_hub::HubRequest::Sessions { before: None });
+            } else {
+                let scope = crate::session_switcher::SessionScope::Project;
+                let rows = key_handler::enumerate_session_rows(app, scope);
+                app.wm.modals.session_switcher.open_with(rows, scope);
+            }
         }
         TuiCommand::OpenProjectHub => {
             let canvas = app.app.maximized_canvas();
@@ -3455,7 +3468,7 @@ fn dispatch_hub_action(
     reuse: Option<crate::control::ViewBinding>,
 ) {
     let command = match action {
-        crate::flow_hub::Action::Load(before) => TuiControl::ListFlows { before },
+        crate::flow_hub::Action::Load(request) => TuiControl::BrowseFlows(request),
         crate::flow_hub::Action::Focus(flow) => TuiControl::FocusFlow {
             flow,
             placement: FlowPlacement::Main,

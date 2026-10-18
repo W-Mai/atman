@@ -1,9 +1,6 @@
 //! A paged instance directory. Reading and selecting rows never controls execution.
 
-use atman_runtime::{
-    flow_runtime::access::InstancePage,
-    flow_store::{FlowInstanceId, FlowRef},
-};
+use atman_runtime::flow_store::FlowRef;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
@@ -16,16 +13,14 @@ use crate::{control::ControlTicket, keys::KeyAction};
 
 pub const PAGE_SIZE: usize = 50;
 
-pub struct FlowHubPage {
-    pub page: InstancePage,
-    pub session: String,
-    pub default_flow: Option<FlowInstanceId>,
-}
+mod page;
+pub use page::{FlowHubPage, HubRequest};
 
+#[derive(Clone)]
 pub(crate) enum Action {
     None,
     Close,
-    Load(Option<FlowInstanceId>),
+    Load(HubRequest),
     Focus(FlowRef),
     Float(FlowRef),
 }
@@ -34,7 +29,7 @@ pub(crate) enum Action {
 pub(crate) struct FlowHub {
     pub pending: Option<ControlTicket>,
     page: Option<FlowHubPage>,
-    cursors: Vec<Option<FlowInstanceId>>,
+    cursors: Vec<HubRequest>,
     index: usize,
     requested_index: Option<usize>,
     selected: usize,
@@ -47,6 +42,8 @@ pub(crate) struct FlowHub {
     next: Rect,
     close: Rect,
     refresh: Rect,
+    sessions: Rect,
+    sessions_hovered: bool,
     hovered: Option<usize>,
 }
 
@@ -62,6 +59,16 @@ impl FlowHub {
         self.pending = None;
         match result {
             Ok(page) => {
+                if self
+                    .page
+                    .as_ref()
+                    .is_none_or(|current| current.first() != page.first())
+                {
+                    self.cursors = vec![page.first()];
+                    self.index = 0;
+                    self.requested_index = None;
+                    self.query.clear();
+                }
                 self.page = Some(*page);
                 if let Some(index) = self.requested_index.take() {
                     self.index = index;
@@ -88,17 +95,12 @@ impl FlowHub {
         self.page
             .as_ref()
             .map(|page| {
-                page.page
-                    .instances
+                page.rows(None)
                     .iter()
                     .enumerate()
                     .filter_map(|(i, row)| {
-                        (row.entry
-                            .as_deref()
-                            .unwrap_or("")
-                            .to_lowercase()
-                            .contains(&query)
-                            || row.address.instance_id.to_string().contains(&query))
+                        (row.title.to_lowercase().contains(&query)
+                            || row.detail.to_lowercase().contains(&query))
                         .then_some(i)
                     })
                     .collect()
@@ -112,16 +114,15 @@ impl FlowHub {
             .as_ref()
             .and_then(|page| {
                 rows.get(self.selected)
-                    .map(|index| &page.page.instances[*index])
+                    .map(|index| page.rows(None)[*index].action.clone())
             })
-            .map(|row| Action::Focus(row.address.clone()))
             .unwrap_or(Action::None)
     }
 
     fn float(&self) -> Action {
         match self.focus() {
             Action::Focus(flow) => Action::Float(flow),
-            _ => Action::None,
+            other => other,
         }
     }
 
@@ -130,14 +131,14 @@ impl FlowHub {
             return Action::None;
         }
         if self.cursors.is_empty() {
-            self.cursors.push(None);
+            return Action::None;
         }
         let target = if forward {
-            let Some(next) = self.page.as_ref().and_then(|page| page.page.next.clone()) else {
+            let Some(next) = self.page.as_ref().and_then(FlowHubPage::next) else {
                 return Action::None;
             };
             self.cursors.truncate(self.index + 1);
-            self.cursors.push(Some(next));
+            self.cursors.push(next);
             self.index + 1
         } else if self.index > 0 {
             self.index - 1
@@ -158,8 +159,13 @@ impl FlowHub {
         }
         match key {
             KeyAction::RedirectPrefill => {
-                return Action::Load(self.cursors.get(self.index).cloned().flatten());
+                return self
+                    .cursors
+                    .get(self.index)
+                    .cloned()
+                    .map_or(Action::None, Action::Load);
             }
+            KeyAction::Save => return Action::Load(HubRequest::Sessions { before: None }),
             KeyAction::Submit => return self.focus(),
             KeyAction::ToggleLastTool => return self.float(),
             KeyAction::HistoryUp => self.selected = self.selected.saturating_sub(1),
@@ -185,6 +191,7 @@ impl FlowHub {
 
     pub fn mouse(&mut self, event: MouseEvent) -> Action {
         let point = (event.column, event.row).into();
+        self.sessions_hovered = self.sessions.contains(point);
         self.hovered = self
             .hits
             .iter()
@@ -193,6 +200,9 @@ impl FlowHub {
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) if self.close.contains(point) => Action::Close,
             _ if self.pending.is_some() => Action::None,
+            MouseEventKind::Down(MouseButton::Left) if self.sessions.contains(point) => {
+                self.key(KeyAction::Save)
+            }
             MouseEventKind::ScrollDown => self.key(KeyAction::HistoryDown),
             MouseEventKind::ScrollUp => self.key(KeyAction::HistoryUp),
             MouseEventKind::Down(MouseButton::Left) if self.previous.contains(point) => {
@@ -237,6 +247,7 @@ impl FlowHub {
             self.next = Rect::default();
             self.close = Rect::default();
             self.refresh = Rect::default();
+            self.sessions = Rect::default();
             return;
         }
         let width = area.width.saturating_sub(4).min(112);
@@ -248,7 +259,7 @@ impl FlowHub {
         );
         let fg = Style::default().fg(t.heading.into());
         let muted = Style::default().fg(t.meta_fg.into());
-        let session = self.page.as_ref().map_or("Loading", |page| &page.session);
+        let session = self.page.as_ref().map_or("Loading", FlowHubPage::title);
         frame.render_widget(
             Paragraph::new(format!("FlowHub  /  {session}")).style(fg),
             Rect::new(content.x, content.y, width.saturating_sub(34), 1),
@@ -272,9 +283,20 @@ impl FlowHub {
                 .alignment(Alignment::Right),
             self.close,
         );
+        self.sessions = Rect::new(content.x, content.y + 1, 20, 3);
+        frame.render_widget(
+            Paragraph::new("\nSessions  Ctrl+S")
+                .style(muted.bg(if self.sessions_hovered {
+                    t.work_bg.lerp(t.work_hover_bg, 0.5)
+                } else {
+                    t.work_bg.into_inner()
+                }))
+                .alignment(Alignment::Center),
+            self.sessions,
+        );
         frame.render_widget(
             Paragraph::new(format!("Search this page: {}", self.query)).style(muted),
-            Rect::new(content.x, content.y + 2, width, 1),
+            Rect::new(content.x + 22, content.y + 2, width.saturating_sub(22), 1),
         );
         let rows = self.filtered();
         let visible = usize::from(content.height.saturating_sub(11) / 4);
@@ -286,8 +308,13 @@ impl FlowHub {
         }
         self.hits.clear();
         self.float_hits.clear();
+        let page_rows = self
+            .page
+            .as_ref()
+            .map(|page| page.rows(Some(focused)))
+            .unwrap_or_default();
         for (pos, index) in rows.iter().enumerate().skip(self.offset).take(visible) {
-            let row = &self.page.as_ref().unwrap().page.instances[*index];
+            let row = &page_rows[*index];
             let rect = Rect::new(
                 content.x,
                 content.y + 4 + ((pos - self.offset) * 4) as u16,
@@ -309,62 +336,39 @@ impl FlowHub {
                     Rect::new(rect.x, rect.y, 1, 4),
                 );
             }
-            let title = row.entry.as_deref().unwrap_or("Unavailable flow");
-            let marker = if &row.address == focused {
-                " · focused"
-            } else if self.page.as_ref().unwrap().default_flow.as_ref()
-                == Some(&row.address.instance_id)
-            {
-                " · default"
-            } else {
-                ""
-            };
             frame.render_widget(
-                Paragraph::new(format!("{title}{marker}")).style(fg.bg(bg)),
+                Paragraph::new(row.title.as_str()).style(fg.bg(bg)),
                 Rect::new(rect.x + 2, rect.y + 1, width.saturating_sub(23), 1),
             );
             let open = Rect::new(rect.right().saturating_sub(20), rect.y, 18, 3);
             frame.render_widget(
-                Paragraph::new("\nWindow Ctrl+O")
-                    .alignment(Alignment::Center)
-                    .style(muted.bg(bg)),
+                Paragraph::new(if matches!(row.action, Action::Focus(_)) {
+                    "\nWindow Ctrl+O"
+                } else {
+                    "\nFlows  Enter"
+                })
+                .alignment(Alignment::Center)
+                .style(muted.bg(bg)),
                 open,
             );
             self.float_hits.push((open, pos));
-            let status = row.state.as_ref().map_or("Unavailable", |state| {
-                if !row.loaded {
-                    "Detached"
-                } else {
-                    execution_label(state.state())
-                }
-            });
-            let paused = row
-                .state
-                .as_ref()
-                .is_some_and(|state| !state.pauses().is_empty());
-            let detail = row.unavailable.clone().unwrap_or_else(|| {
-                format!(
-                    "{} · {status}{}",
-                    row.address.instance_id,
-                    if paused { " · execution paused" } else { "" }
-                )
-            });
             frame.render_widget(
-                Paragraph::new(detail).style(muted.bg(bg)),
+                Paragraph::new(row.detail.as_str()).style(muted.bg(bg)),
                 Rect::new(rect.x + 2, rect.y + 2, width.saturating_sub(4), 1),
             );
             self.hits.push((rect, pos));
         }
         let footer = content.bottom().saturating_sub(6);
-        let total = self.page.as_ref().map_or(0, |page| page.page.total);
+        let total = self.page.as_ref().map_or(0, FlowHubPage::total);
         let page_count = total.div_ceil(PAGE_SIZE).max(1);
         let message = self.error.clone().unwrap_or_else(|| {
             if self.pending.is_some() {
                 "Loading…".into()
             } else {
                 format!(
-                    "Snapshot · {} flows · Page {} / {} · {} matches",
+                    "Snapshot · {} {} · Page {} / {} · {} matches",
                     total,
+                    self.page.as_ref().map_or("flows", FlowHubPage::unit),
                     self.index + 1,
                     page_count,
                     rows.len()
@@ -394,10 +398,8 @@ impl FlowHub {
             );
         }
         frame.render_widget(
-            Paragraph::new(
-                "↑↓ select · Enter focus · Ctrl+O window · Esc back · :flows / Ctrl+P FlowHub",
-            )
-            .style(muted),
+            Paragraph::new("↑↓ select · Enter open · Ctrl+O window · Ctrl+S sessions · Esc back")
+                .style(muted),
             Rect::new(content.x, footer + 5, width, 1),
         );
     }
@@ -421,8 +423,113 @@ pub(crate) fn execution_label(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atman_runtime::{event_log::journal::CommitReceipt, flow_runtime::access::InstanceSummary};
+    use atman_runtime::{
+        event_log::journal::CommitReceipt,
+        flow_runtime::access::{InstancePage, InstanceSummary},
+        flow_store::FlowInstanceId,
+    };
     use uuid::Uuid;
+
+    #[test]
+    fn session_directory_and_flow_pages_share_navigation_and_ignore_stale_replies() {
+        use atman_runtime::flow_runtime::catalog::{SessionPage, SessionSummary};
+        let flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let ticket = ControlTicket {
+            binding: crate::control::ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: flow.clone(),
+            },
+            request_id: Uuid::now_v7(),
+        };
+        let session = Uuid::now_v7();
+        let page = || {
+            Box::new(FlowHubPage::Sessions(SessionPage {
+                sessions: vec![SessionSummary::unavailable(session, "unavailable fixture")],
+                next: Some(session),
+                total: 51,
+            }))
+        };
+        let mut hub = FlowHub {
+            pending: Some(ticket.clone()),
+            ..Default::default()
+        };
+        hub.receive(Some(&ticket), Ok(page()));
+        assert!(
+            matches!(hub.key(KeyAction::Submit), Action::Load(HubRequest::Flows { session: id, before: None }) if id == session)
+        );
+        assert!(
+            matches!(hub.key(KeyAction::PageDown), Action::Load(HubRequest::Sessions { before: Some(id) }) if id == session)
+        );
+        hub.pending = Some(ticket.clone());
+        hub.receive(Some(&ticket), Ok(page()));
+        assert_eq!(hub.index, 1);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
+        terminal.draw(|f| hub.render(f, &flow)).unwrap();
+        let rect = hub.hits[0].0;
+        for row in rect.y..rect.bottom() {
+            assert!(
+                matches!(hub.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: rect.x + 1, row, modifiers: crossterm::event::KeyModifiers::NONE }), Action::Load(HubRequest::Flows { session: id, .. }) if id == session)
+            );
+        }
+        assert!(matches!(
+            hub.key(KeyAction::Save),
+            Action::Load(HubRequest::Sessions { before: None })
+        ));
+        let button = hub.sessions;
+        for row in button.y..button.bottom() {
+            assert!(matches!(
+                hub.mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: button.x + 1,
+                    row,
+                    modifiers: crossterm::event::KeyModifiers::NONE
+                }),
+                Action::Load(HubRequest::Sessions { before: None })
+            ));
+        }
+        hub.query = "keep this filter".into();
+        hub.pending = Some(ticket.clone());
+        hub.receive(Some(&ticket), Err("unreadable session".into()));
+        assert_eq!(hub.index, 1);
+        assert_eq!(hub.query, "keep this filter");
+        hub.pending = Some(ticket.clone());
+        let mut stale = ticket.clone();
+        stale.request_id = Uuid::now_v7();
+        hub.receive(Some(&stale), Ok(page()));
+        assert_eq!(hub.query, "keep this filter");
+        hub.receive(
+            Some(&ticket),
+            Ok(Box::new(FlowHubPage::Flows {
+                session,
+                title: "Chosen session".into(),
+                default_flow: None,
+                page: InstancePage {
+                    instances: vec![],
+                    next: None,
+                    total: 0,
+                    catalog: CommitReceipt {
+                        journal_id: Uuid::now_v7(),
+                        sequence: 1,
+                        digest: "test".into(),
+                    },
+                },
+            })),
+        );
+        assert_eq!(hub.index, 0);
+        assert!(hub.query.is_empty());
+        assert_eq!(
+            hub.cursors,
+            vec![HubRequest::Flows {
+                session,
+                before: None
+            }]
+        );
+    }
 
     #[test]
     fn native_hub_pages_commit_on_ack_and_rows_have_equal_keyboard_and_mouse_targets() {
@@ -439,8 +546,9 @@ mod tests {
             request_id: Uuid::now_v7(),
         };
         let page = || {
-            Box::new(FlowHubPage {
-                session: "Example".into(),
+            Box::new(FlowHubPage::Flows {
+                session: flow.session_id.0,
+                title: "Example".into(),
                 default_flow: Some(flow.instance_id.clone()),
                 page: InstancePage {
                     instances: vec![InstanceSummary {
@@ -468,7 +576,10 @@ mod tests {
         hub.receive(Some(&ticket), Ok(page()));
         assert!(matches!(
             hub.key(KeyAction::PageDown),
-            Action::Load(Some(_))
+            Action::Load(HubRequest::Flows {
+                before: Some(_),
+                ..
+            })
         ));
         hub.pending = Some(ticket.clone());
         hub.receive(Some(&ticket), Err("read failed".into()));

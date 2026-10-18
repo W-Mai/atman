@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Cross-session FlowHub** — Browse Session and Flow catalogs with shared pagination, search, keyboard controls, and padded mouse targets. Open another Session's flow in the main workspace or a floating window while preserving each view's draft, replies, configuration, and execution scope. Catalog reads do not start work; missing project paths remain browsable.
+
 - **Live flow previews** — Main and floating views show text, thinking, and tool arguments from active model calls. Focus changes recover current previews; retries and cancellation clear only the affected call. Committed replies retain their publication and folding semantics, and token updates preserve document structure and disclosure state.
 
 - **Shared settings updates** — Configuration commits and model discovery refresh choices in other views using the same source. Hidden views catch up when focused; editor drafts and pending save or model-switch requests retain their identity.

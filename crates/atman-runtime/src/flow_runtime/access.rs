@@ -535,42 +535,13 @@ impl FlowClient {
         limit: usize,
     ) -> io::Result<super::catalog::SessionPage> {
         self.authenticate()?;
-        if !(1..=50).contains(&limit) {
-            return Err(invalid("session page limit must be between 1 and 50"));
-        }
-        let catalog = self.host.session_catalog();
-        let mut visible = Vec::new();
-        for id in catalog.ids().await? {
-            if self.discovers_session(id)? {
-                visible.push(id);
-            }
-        }
-        let eligible: Vec<_> = visible
-            .iter()
-            .rev()
-            .copied()
-            .filter(|id| before.is_none_or(|before| *id < before))
-            .collect();
-        let mut sessions = Vec::new();
-        for &id in eligible.iter().take(limit) {
-            let row = match catalog.overview(id).await {
-                Ok(view) => view.summary,
-                Err(error) => super::catalog::SessionSummary::unavailable(id, error),
-            };
-            sessions.push(row);
-        }
-        // Revocation or a stale invocation cannot leak either previously sampled rows or counts.
-        for &id in &visible {
-            if !self.discovers_session(id)? {
-                return Err(denied("session discovery authority changed"));
-            }
-        }
+        let page = self
+            .host
+            .session_catalog()
+            .page(before, limit, |id| self.discovers_session(id))
+            .await?;
         self.authenticate()?;
-        Ok(super::catalog::SessionPage {
-            next: (eligible.len() > limit).then(|| eligible[limit - 1]),
-            total: visible.len(),
-            sessions,
-        })
+        Ok(page)
     }
 
     pub async fn inspect(&self, target: FlowRef) -> io::Result<FlowInstance<AtmanUuid>> {

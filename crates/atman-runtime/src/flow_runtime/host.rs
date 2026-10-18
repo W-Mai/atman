@@ -113,6 +113,15 @@ impl RuntimeHost {
 
     /// Attach an exclusively owned catalog without opening or starting its recorded flows.
     pub fn attach_session(&self, store: SessionStore) -> io::Result<SessionHandle> {
+        self.attach_session_with_redactor(store, self.directory.services.redactor.clone())
+    }
+
+    /// Bind a Session's diagnostic policy independently of other Session owners.
+    pub fn attach_session_with_redactor(
+        &self,
+        store: SessionStore,
+        redactor: Option<Arc<crate::redact::Redactor>>,
+    ) -> io::Result<SessionHandle> {
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let id = store.projection().descriptor.id;
         let mut sessions = self.directory.sessions.lock().unwrap();
@@ -143,7 +152,10 @@ impl RuntimeHost {
             flows,
             access,
             WeakRuntimeHost(Arc::downgrade(&self.directory)),
-            self.directory.services.clone(),
+            HostServices {
+                redactor,
+                ..self.directory.services.clone()
+            },
             receiver,
         ));
         sessions.insert(id, handle.clone());

@@ -33,12 +33,14 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 mod prompts;
+mod scopes;
 mod tui;
 
 const PAGE: NonZeroUsize = NonZeroUsize::new(64).unwrap();
 const YIELD: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 const USER: Uuid = Uuid::from_bytes(*b"atman-local-user");
 
+#[derive(Clone)]
 struct Attachment {
     host: RuntimeHost,
     session: SessionHandle,
@@ -52,28 +54,59 @@ struct Attachment {
 
 pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
     let store = RuntimeStore::open(root)?;
-    let recorded = RuntimeStore::inspect_session(root, id)?;
-    let descriptor = recorded.projection.descriptor;
-    let SessionConfiguration::Atman(source) = &descriptor.configuration else {
-        bail!("session requires an Atman configuration source to execute");
-    };
-    let config = ConfigHub::from_source(source)?;
     let permissions = Arc::new(PermissionClients::default());
-    let redactor = atman_daemon::bootstrap::build_redactor(Some(config.config_dir()));
     let host = RuntimeHost::with_services(HostServices {
-        redactor: redactor.clone(),
+        redactor: None,
         permission_clients: Arc::downgrade(&permissions),
     });
     let outcome = async {
-        let session = host.attach_session(store.open_session(id)?)?;
         // Profile ownership can belong to another frontend; local interaction remains available.
         match ProfileStore::open(&store).and_then(|profile| host.attach_profile(profile)) {
             Ok(_) => {}
             Err(error) => eprintln!("profile management unavailable: {error}"),
         }
+        let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+        let attachment = Attachment::open(
+            root,
+            id,
+            host.clone(),
+            Some(permissions),
+            Arc::new(prompts::Prompts::new(prompt_tx)),
+        )
+        .await?;
+        if crate::tui_mode_requested() {
+            attachment.interact_tui(root).await
+        } else {
+            attachment.interact(prompt_rx).await
+        }
+    }
+    .await;
+    // Errors and explicit exit release ownership without closing persistent instances.
+    let shutdown = host.shutdown().await;
+    outcome?;
+    shutdown?;
+    Ok(())
+}
+
+impl Attachment {
+    async fn open(
+        root: &Path,
+        id: Uuid,
+        host: RuntimeHost,
+        permissions: Option<Arc<PermissionClients>>,
+        prompts: Arc<prompts::Prompts>,
+    ) -> Result<Self> {
+        let store = RuntimeStore::open(root)?;
+        let session = store.open_session(id)?;
+        let descriptor = session.projection().descriptor.clone();
+        let SessionConfiguration::Atman(source) = &descriptor.configuration else {
+            bail!("session requires an Atman configuration source to execute");
+        };
+        let config = ConfigHub::from_source(source)?;
+        let redactor = atman_daemon::bootstrap::build_redactor(Some(config.config_dir()));
         let mut events = EventSink::new();
-        if let Some(redactor) = redactor {
-            events = events.with_redactor(redactor);
+        if let Some(redactor) = &redactor {
+            events = events.with_redactor(redactor.clone());
         }
         let runtime = AtmanRuntime::build(AtmanRuntimeOptions {
             events,
@@ -94,34 +127,21 @@ pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
             )
             .await;
         }
-        let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
-        let prompts = Arc::new(prompts::Prompts::new(prompt_tx));
         let mut executor = runtime.executor;
         executor.tool_ctx.prompt_resolver = Some(prompts.clone());
-        let attachment = Attachment {
-            host: host.clone(),
+        // No fallible setup or suspension follows attachment; a cancelled load cannot orphan an owner.
+        let session = host.attach_session_with_redactor(session, redactor)?;
+        Ok(Self {
+            host,
             session,
             descriptor,
             executor,
             config,
             prompts,
-            permissions: Some(permissions),
-        };
-        if crate::tui_mode_requested() {
-            attachment.interact_tui().await
-        } else {
-            attachment.interact(prompt_rx).await
-        }
+            permissions,
+        })
     }
-    .await;
-    // Errors and explicit exit release ownership without closing persistent instances.
-    let shutdown = host.shutdown().await;
-    outcome?;
-    shutdown?;
-    Ok(())
-}
 
-impl Attachment {
     async fn validate_text_input(&self, worker: &FlowWorker) -> Result<()> {
         let descriptor = worker.descriptor().await?;
         let entry = descriptor.entry()?;

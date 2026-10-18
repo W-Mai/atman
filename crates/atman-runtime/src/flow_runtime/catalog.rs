@@ -80,6 +80,50 @@ impl SessionCatalog {
         Ok(ids)
     }
 
+    /// Page authorized metadata without opening execution owners. Authorization is rechecked before returning counts or rows.
+    pub async fn page(
+        &self,
+        before: Option<Uuid>,
+        limit: usize,
+        visible: impl Fn(Uuid) -> io::Result<bool>,
+    ) -> io::Result<SessionPage> {
+        if !(1..=50).contains(&limit) {
+            return Err(invalid("session page limit must be between 1 and 50"));
+        }
+        let mut ids = Vec::new();
+        for id in self.ids().await? {
+            if visible(id)? {
+                ids.push(id);
+            }
+        }
+        let eligible: Vec<_> = ids
+            .iter()
+            .rev()
+            .copied()
+            .filter(|id| before.is_none_or(|before| *id < before))
+            .collect();
+        let mut sessions = Vec::new();
+        for &id in eligible.iter().take(limit) {
+            sessions.push(match self.overview(id).await {
+                Ok(view) => view.summary,
+                Err(error) => SessionSummary::unavailable(id, error),
+            });
+        }
+        for &id in &ids {
+            if !visible(id)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "session discovery authority changed",
+                ));
+            }
+        }
+        Ok(SessionPage {
+            next: (eligible.len() > limit).then(|| eligible[limit - 1]),
+            total: ids.len(),
+            sessions,
+        })
+    }
+
     fn attached(&self, id: Uuid) -> io::Result<Option<SessionHandle>> {
         match self.host.as_ref().map(|host| host.session(id)) {
             Some(Ok(session)) => Ok(Some(session)),

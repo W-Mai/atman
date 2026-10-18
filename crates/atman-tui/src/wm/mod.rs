@@ -775,9 +775,14 @@ impl WindowManager {
                 }
             }
             PaletteEntryId::SwitchSession => {
-                let scope = crate::session_switcher::SessionScope::Project;
-                let rows = crate::key_handler::enumerate_session_rows(app, scope);
-                self.modals.session_switcher.open_with(rows, scope);
+                if control_tx.is_some_and(|tx| tx.binding().is_some()) {
+                    app.open_flow_hub =
+                        Some(crate::flow_hub::HubRequest::Sessions { before: None });
+                } else {
+                    let scope = crate::session_switcher::SessionScope::Project;
+                    let rows = crate::key_handler::enumerate_session_rows(app, scope);
+                    self.modals.session_switcher.open_with(rows, scope);
+                }
             }
             PaletteEntryId::NewSession => {
                 if let Some(tx) = control_tx {
@@ -822,8 +827,11 @@ impl WindowManager {
                 self.open_project_hub(canvas, app.projects.clone(), session.as_deref());
             }
             PaletteEntryId::OpenFlowHub => {
-                if control_tx.is_some_and(|tx| tx.binding().is_some()) {
-                    app.open_flow_hub = true;
+                if let Some(binding) = control_tx.and_then(|tx| tx.binding()) {
+                    app.open_flow_hub = Some(crate::flow_hub::HubRequest::Flows {
+                        session: binding.flow.session_id.0,
+                        before: None,
+                    });
                 } else {
                     app.push_note(
                         "FlowHub requires a persistent session",

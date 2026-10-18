@@ -111,9 +111,7 @@ impl TuiNote {
 
 #[non_exhaustive]
 pub enum TuiControl {
-    ListFlows {
-        before: Option<atman_runtime::flow_store::FlowInstanceId>,
-    },
+    BrowseFlows(flow_hub::HubRequest),
     FocusFlow {
         flow: atman_runtime::flow_store::FlowRef,
         placement: control::FlowPlacement,

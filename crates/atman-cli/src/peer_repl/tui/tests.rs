@@ -6,6 +6,273 @@ use atman_runtime::flow_store::{
 use atman_runtime::source_program::RevisionBundle;
 
 #[tokio::test]
+async fn session_navigation_retains_bound_configuration_execution_and_reply_ownership() {
+    use atman_tui::{
+        control::FlowPlacement,
+        flow_hub::{FlowHubPage, HubRequest},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let ids = [Uuid::now_v7(), Uuid::now_v7()];
+    let missing_project = dir.path().join("removed-project");
+    std::fs::create_dir(&missing_project).unwrap();
+    // An instance ID alone must never identify a view or its services.
+    let instance = FlowInstanceId::now();
+    for (index, id) in ids.into_iter().enumerate() {
+        let config_dir = dir.path().join(format!("config-{index}"));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.toml"), format!(
+            "[redact]\nenabled = true\ncustom_patterns = [{{kind = 'sample', regex = 'TOKEN-{index}'}}]\n"
+        )).unwrap();
+        let config = ConfigHub::from_config_dir(config_dir);
+        let project = (index == 1).then(|| {
+            atman_runtime::storage::ProjectContext::resolve(&config, &missing_project, dir.path())
+                .unwrap()
+        });
+        let mut session = root
+            .create_session(SessionDescriptor {
+                id,
+                project,
+                configuration: SessionConfiguration::Atman(config.source()),
+                title: format!("Session {index}"),
+            })
+            .unwrap();
+        let address = FlowRef {
+            session_id: id.into(),
+            instance_id: instance.clone(),
+        };
+        let creation = Uuid::now_v7();
+        let mut flow = session.create_flow(FlowDescriptor {
+            address: address.clone(), creation_request: creation, created_by: None,
+            content: EntrySnapshot {
+                name: "main".into(), path: dir.path().join("main.at"),
+                bundle: RevisionBundle { entry: "entry:main.at".into(), edges: Default::default(), sources: [(
+                    "entry:main.at".into(),
+                    "flow main(input: string) -> string { contract { invocation { user_message: input } } return final.answer(message: input) }".into(),
+                )].into() },
+            }.into(),
+        }).unwrap();
+        flow.activate_with_input(
+            LaunchInput {
+                workspace: None,
+                initial_goal: None,
+                inherited_context: vec![],
+                result_route: None,
+                execution: Some(EntryBinding {
+                    session_start: false,
+                    first_turn: atman_rt::TurnId::now(),
+                    first_run: atman_rt::RunId::now(),
+                    authority: EffectiveAuthority::root(&Default::default(), false, None),
+                }),
+                request: DeliveryRequest {
+                    request_id: creation,
+                    sender: SenderIdentity::User(USER),
+                    recipient: address,
+                    delivery: DeliveryMode::NextTurn,
+                    cause: None,
+                    correlation: None,
+                    scope: None,
+                    payload: InboxPayload::Invocation {
+                        arguments: [("input".into(), format!("seed-{index}").into())].into(),
+                        invocation: BTreeMap::new(),
+                        user: None,
+                    },
+                },
+            },
+            None,
+            |_| Ok(()),
+        )
+        .unwrap();
+        session.select_default(instance.clone()).unwrap();
+    }
+    std::fs::remove_dir(&missing_project).unwrap();
+    let host = RuntimeHost::default();
+    let (notices, _rx) = mpsc::unbounded_channel();
+    let initial = Attachment::open(
+        dir.path(),
+        ids[0],
+        host.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(notices)),
+    )
+    .await
+    .unwrap();
+    let scopes = scopes::Scopes::new(dir.path(), initial);
+    let directory = scopes
+        .browse(HubRequest::Sessions { before: None })
+        .await
+        .unwrap();
+    assert!(matches!(*directory, FlowHubPage::Sessions(page) if page.total == 2));
+    let directory = scopes
+        .browse(HubRequest::Flows {
+            session: ids[1],
+            before: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(*directory, FlowHubPage::Flows { page, .. } if !page.instances[0].loaded));
+    assert_eq!(
+        host.sessions(),
+        vec![ids[0]],
+        "catalog browsing must not attach execution"
+    );
+    let (one, two) = tokio::join!(scopes.open(ids[1]), scopes.open(ids[1]));
+    assert_eq!(one.unwrap().session.id(), two.unwrap().session.id());
+    assert_eq!(host.sessions().len(), 2);
+    let (commands, mut incoming) = mpsc::unbounded_channel();
+    let forms = Arc::new(atman_runtime::session::FormRegistry::default());
+    let mut views = Vec::new();
+    for (index, id) in ids.into_iter().enumerate() {
+        let Navigation::Focus {
+            handle, service, ..
+        } = scopes
+            .focus(
+                FlowRef {
+                    session_id: id.into(),
+                    instance_id: instance.clone(),
+                },
+                FlowPlacement::Main,
+                commands.clone(),
+                forms.clone(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("missing view")
+        };
+        assert_eq!(
+            handle.session_name.as_deref(),
+            Some(format!("Session {index}").as_str())
+        );
+        let snapshot = service.worker.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.pending.len(),
+            1,
+            "selecting must not execute queued input"
+        );
+        let redactor = service.worker.context().sink().redactor().unwrap();
+        let (sample, _) = redactor.redact("TOKEN-0 TOKEN-1");
+        assert!(!sample.contains(&format!("TOKEN-{index}")));
+        assert!(sample.contains(&format!("TOKEN-{}", 1 - index)));
+        service.scope.bind(&service.worker).await.unwrap();
+        views.push((handle, service));
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    // Pause one Session, submit to both, then deliver the replies in reverse order.
+    views[0]
+        .1
+        .scope
+        .command(&views[0].1.worker, ":pause")
+        .await
+        .unwrap();
+    let mut requests = Vec::new();
+    for (index, (handle, _)) in views.iter().enumerate() {
+        requests.push(
+            handle
+                .control_tx
+                .as_ref()
+                .unwrap()
+                .send_tracked(TuiControl::Submit(TuiSubmission {
+                    text: format!("answer-{index}"),
+                    images: vec![],
+                    presentation: None,
+                    reasoning: None,
+                }))
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let controls = [
+        incoming.recv().await.unwrap(),
+        incoming.recv().await.unwrap(),
+    ];
+    for control in controls.into_iter().rev() {
+        let (_, service) = views
+            .iter()
+            .find(|(_, service)| service.binding == control.ticket.binding)
+            .unwrap();
+        service
+            .scope
+            .tui_control(
+                &service.worker,
+                control.ticket.request_id,
+                control.command,
+                &control.replies,
+                &forms,
+            )
+            .await
+            .unwrap();
+    }
+    for ((handle, _), request) in views.iter_mut().zip(requests) {
+        let reply = handle
+            .control_reply_rx
+            .as_mut()
+            .unwrap()
+            .recv()
+            .await
+            .unwrap();
+        assert_eq!(reply.ticket, request);
+        assert!(matches!(
+            reply.command,
+            TuiCommand::SubmissionResult { result: Ok(()) }
+        ));
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(views[0].1.worker.snapshot().await.unwrap().pending.len(), 1);
+    assert!(
+        views[1]
+            .1
+            .worker
+            .snapshot()
+            .await
+            .unwrap()
+            .pending
+            .is_empty()
+    );
+    views[0]
+        .1
+        .scope
+        .command(&views[0].1.worker, ":resume")
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    for (index, (handle, _)) in views.iter_mut().enumerate() {
+        let mut model = atman_tui::flow_view::FlowViewModel::default();
+        model
+            .sync_view(
+                handle.flow_view.as_mut().unwrap().refresh().await.unwrap(),
+                None,
+            )
+            .unwrap();
+        let answers: Vec<_> = model
+            .iter()
+            .filter_map(|item| match item {
+                atman_tui::app::OutputItem::AssistantMd { md, .. } => Some(md.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            answers,
+            vec![format!("seed-{index}"), format!("answer-{index}")]
+        );
+    }
+    host.shutdown().await.unwrap();
+    assert!(
+        !missing_project.exists(),
+        "history navigation must not recreate a missing project"
+    );
+}
+
+#[tokio::test]
 async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     let dir = tempfile::tempdir().unwrap();
     let config = ConfigHub::from_config_dir(dir.path().join("config"));

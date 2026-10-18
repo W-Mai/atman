@@ -7,7 +7,7 @@ use atman_tui::{
 };
 
 impl Attachment {
-    pub(super) async fn interact_tui(mut self) -> Result<()> {
+    pub(super) async fn interact_tui(mut self, root: &Path) -> Result<()> {
         let catalog = self.session.snapshot().await?;
         let worker = self
             .session
@@ -46,6 +46,8 @@ impl Attachment {
                 });
             }
         }
+        let scopes = Arc::new(scopes::Scopes::new(root, self));
+        let mut navigation = tokio::task::JoinSet::new();
         let ui = atman_tui::run_tui(handle);
         tokio::pin!(ui);
         loop {
@@ -55,6 +57,17 @@ impl Attachment {
             }
             tokio::select! {
                 result = &mut ui => return result,
+                Some(result) = navigation.join_next() => {
+                    let (replies, result): (ControlReplies, Result<Navigation>) = result?;
+                    match result {
+                        Ok(Navigation::Catalog(page)) => { let _ = replies.send(TuiCommand::FlowCatalog { result: Ok(page) }); }
+                        Ok(Navigation::Focus { flow, placement, handle, service }) => {
+                            views.insert(service.binding.view_id, *service);
+                            let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: Some(handle) });
+                        }
+                        Err(error) => { let _ = replies.send(TuiCommand::Toast { message: format!("{error:#}"), level: atman_tui::app::NoteLevel::Error }); }
+                    }
+                }
                 result = next_panel_completion(&mut views) => { result?; }
                 Some(control) = input.recv() => {
                     let BoundControl { ticket, command, replies } = control;
@@ -63,36 +76,27 @@ impl Attachment {
                         continue;
                     };
                     let worker = view.worker.clone();
+                    let scope = view.scope.clone();
                     let Some(command) = view.panels.dispatch(command).await else { continue; };
                     let result = match command {
-                        TuiControl::ListFlows { before } => {
-                            let result = async {
-                                let page = self.session.instances(before, atman_tui::flow_hub::PAGE_SIZE, |_| Ok(())).await?;
-                                let catalog = self.session.snapshot().await?;
-                                Ok::<_, anyhow::Error>(Box::new(atman_tui::flow_hub::FlowHubPage {
-                                    page, session: self.descriptor.title.clone(), default_flow: catalog.catalog.default_flow,
-                                }))
-                            }.await.map_err(|error| format!("{error:#}"));
-                            let _ = replies.send(TuiCommand::FlowCatalog { result });
-                            Ok(())
+                        TuiControl::BrowseFlows(request) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move { let result = scopes.browse(request).await.map(Navigation::Catalog); (replies, result) });
+                            continue;
                         }
                         TuiControl::FocusFlow { flow, placement, reuse } => {
-                            async {
-                                ensure!(flow.session_id == self.session.id().into(), "flow belongs to a different session");
-                                let attachment = if let Some(binding) = reuse {
-                                    ensure!(binding.flow == flow && views.get(&binding.view_id).is_some_and(|view| view.binding == binding), "view binding is no longer attached");
-                                    None
-                                } else {
-                                    let selected = self.session.open_flow(flow.instance_id.clone()).await?;
-                                    let (handle, service, _) = self.prepare_tui_view(&selected, controls.clone(), &forms).await?;
-                                    views.insert(service.binding.view_id, service);
-                                    Some(Box::new(handle))
-                                };
-                                let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment });
-                                Ok::<_, anyhow::Error>(())
-                            }.await
+                            if let Some(binding) = reuse {
+                                if binding.flow == flow && views.get(&binding.view_id).is_some_and(|view| view.binding == binding) {
+                                    let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: None });
+                                    Ok(())
+                                } else { Err(anyhow::anyhow!("view binding is no longer attached")) }
+                            } else {
+                                let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
+                                navigation.spawn(async move { let result = scopes.focus(flow, placement, controls, forms).await; (replies, result) });
+                                continue;
+                            }
                         }
-                        command => self.tui_control(&worker, ticket.request_id, command, &replies, &forms).await,
+                        command => scope.tui_control(&worker, ticket.request_id, command, &replies, &forms).await,
                     };
                     if let Err(error) = result {
                         let _ = replies.send(TuiCommand::Toast { message: format!("{error:#}"), level: atman_tui::app::NoteLevel::Error });
@@ -108,6 +112,13 @@ impl Attachment {
         controls: mpsc::UnboundedSender<BoundControl>,
         forms: &Arc<atman_runtime::session::FormRegistry>,
     ) -> Result<(TuiHandle, ViewServices, mpsc::UnboundedSender<TuiCommand>)> {
+        ensure!(
+            worker.address().session_id == self.session.id().into(),
+            "view and Session scope differ"
+        );
+        worker
+            .context()
+            .bind_model_registry(self.config.models().clone())?;
         let binding = ViewBinding {
             view_id: Uuid::now_v7(),
             revision: 1,
@@ -123,7 +134,7 @@ impl Attachment {
             .as_ref()
             .map(|project| project.root().display().to_string());
         handle.form_rx = Some(forms.subscribe_for(worker.context().deferred_form_inbox()));
-        handle.trust = worker.context().trust_config();
+        handle.trust = self.config.trust_config()?;
         let (commands, command_rx) = mpsc::unbounded_channel();
         handle.cmd_rx = Some(command_rx);
         let panels = crate::tui_panels::PanelServices::for_scope(
@@ -137,6 +148,7 @@ impl Attachment {
         Ok((
             handle,
             ViewServices {
+                scope: self.clone(),
                 binding,
                 worker: worker.clone(),
                 panels,
@@ -351,9 +363,71 @@ impl Attachment {
 }
 
 struct ViewServices {
+    scope: Attachment,
     binding: ViewBinding,
     worker: FlowWorker,
     panels: crate::tui_panels::PanelServices,
+}
+
+enum Navigation {
+    Catalog(Box<atman_tui::flow_hub::FlowHubPage>),
+    Focus {
+        flow: atman_runtime::flow_store::FlowRef,
+        placement: atman_tui::control::FlowPlacement,
+        handle: Box<TuiHandle>,
+        service: Box<ViewServices>,
+    },
+}
+
+impl scopes::Scopes {
+    async fn browse(
+        &self,
+        request: atman_tui::flow_hub::HubRequest,
+    ) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
+        use atman_tui::flow_hub::{FlowHubPage, HubRequest, PAGE_SIZE};
+        Ok(Box::new(match request {
+            HubRequest::Sessions { before } => {
+                FlowHubPage::Sessions(self.catalog.page(before, PAGE_SIZE, |_| Ok(true)).await?)
+            }
+            HubRequest::Flows { session, before } => {
+                let overview = self.catalog.overview(session).await?;
+                let page = self
+                    .catalog
+                    .instances(session, before, PAGE_SIZE, |_| Ok(()))
+                    .await?;
+                FlowHubPage::Flows {
+                    session,
+                    title: overview
+                        .summary
+                        .title
+                        .unwrap_or_else(|| session.to_string()),
+                    default_flow: overview.summary.default_flow,
+                    page,
+                }
+            }
+        }))
+    }
+
+    async fn focus(
+        &self,
+        flow: atman_runtime::flow_store::FlowRef,
+        placement: atman_tui::control::FlowPlacement,
+        controls: mpsc::UnboundedSender<BoundControl>,
+        forms: Arc<atman_runtime::session::FormRegistry>,
+    ) -> Result<Navigation> {
+        let mut scope = self.open(flow.session_id.0).await?;
+        scope.executor.tool_ctx.prompt_resolver = Some(Arc::new(
+            atman_runtime::rendezvous::FormPromptResolver::new(forms.clone()),
+        ));
+        let worker = scope.session.open_flow(flow.instance_id.clone()).await?;
+        let (handle, service, _) = scope.prepare_tui_view(&worker, controls, &forms).await?;
+        Ok(Navigation::Focus {
+            flow,
+            placement,
+            handle: Box::new(handle),
+            service: Box::new(service),
+        })
+    }
 }
 
 async fn next_panel_completion(
