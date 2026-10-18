@@ -54,9 +54,9 @@ pub enum BootProgress {
     Finish(BootStepId, NodeStatus),
 }
 
-pub fn build_boot_graph() -> WorkflowGraph {
-    let mut root = Vec::with_capacity(BootStepId::ALL.len());
-    for step in BootStepId::ALL {
+pub fn build_boot_graph(steps: &[BootStepId]) -> WorkflowGraph {
+    let mut root = Vec::with_capacity(steps.len());
+    for step in steps {
         root.push(WorkflowNode {
             id: step.id(),
             kind: WorkflowNodeKind::Stmt {
@@ -109,8 +109,8 @@ pub fn apply_progress(graph: &mut WorkflowGraph, event: &BootProgress) {
 
 pub async fn run_boot_animation(
     mut rx: mpsc::UnboundedReceiver<BootProgress>,
-    version: String,
-    recent: Vec<crate::app::StartupSessionEntry>,
+    card: crate::app::StartupCard,
+    steps: &[BootStepId],
     toast_buf: std::sync::Arc<std::sync::Mutex<Vec<atman_runtime::notify::Notification>>>,
 ) -> Result<(
     Terminal<CrosstermBackend<std::io::Stdout>>,
@@ -119,7 +119,7 @@ pub async fn run_boot_animation(
     use std::io::stdout;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
-    let mut graph = build_boot_graph();
+    let mut graph = build_boot_graph(steps);
     let mut spinner_tick = tokio::time::interval(std::time::Duration::from_millis(80));
     spinner_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut frame: u32 = 0;
@@ -135,7 +135,7 @@ pub async fn run_boot_animation(
     // Consume input events to prevent tty input buffer exhaustion during
     // boot animation. Without this, mouse events pile up in the OS buffer
     // until stdout writes block, causing a CPU-0% deadlock.
-    let (mut key_events, reader_shutdown) = crate::spawn_event_reader();
+    let (mut key_events, _reader_guard) = crate::spawn_event_reader();
     let mut sigterm = crate::build_sigterm_stream();
 
     let result: Result<(
@@ -143,7 +143,7 @@ pub async fn run_boot_animation(
         Vec<atman_runtime::notify::Notification>,
     )> = loop {
         let reveal_count = ((reveal_start.elapsed().as_millis() / reveal_ms_per_row) as usize + 1)
-            .min(recent.len());
+            .min(card.recent.len());
         let settled = ready_at.is_some();
         // Drain new toasts.
         if let Ok(mut buf) = toast_buf.lock() {
@@ -162,18 +162,7 @@ pub async fn run_boot_animation(
         while toasts.len() > 3 {
             toasts.remove(0);
         }
-        terminal.draw(|f| {
-            render(
-                f,
-                &graph,
-                frame,
-                &version,
-                &recent,
-                reveal_count,
-                settled,
-                &toasts,
-            )
-        })?;
+        terminal.draw(|f| render(f, &graph, frame, &card, reveal_count, settled, &toasts))?;
         tokio::select! {
             _ = spinner_tick.tick() => {
                 frame = frame.wrapping_add(1);
@@ -212,7 +201,8 @@ pub async fn run_boot_animation(
             // Drain and discard all input events to keep the tty input
             // buffer empty. Ctrl+C / Esc aborts the boot animation early.
             ev = key_events.recv() => {
-                if let Some(Ok(CtEvent::Key(ke))) = ev {
+                let event = ev.ok_or_else(|| anyhow::anyhow!("terminal input reader stopped during startup"))??;
+                if let CtEvent::Key(ke) = event {
                     if ke.code == KeyCode::Char('c')
                         && ke.modifiers.contains(KeyModifiers::CONTROL)
                     {
@@ -235,17 +225,14 @@ pub async fn run_boot_animation(
             break Ok((terminal, toasts));
         }
     };
-    reader_shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
     result
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render(
     f: &mut ratatui::Frame,
     graph: &WorkflowGraph,
     frame: u32,
-    version: &str,
-    recent: &[crate::app::StartupSessionEntry],
+    card: &crate::app::StartupCard,
     reveal_count: usize,
     settled: bool,
     toasts: &[atman_runtime::notify::Notification],
@@ -272,10 +259,10 @@ fn render(
     let splash = crate::output::render_startup_overlay(
         f,
         crate::output::StartupOverlayRender {
-            directory: crate::app::StartupDirectory::Projects,
+            directory: card.directory,
             area: l.transcript,
-            version,
-            recent,
+            version: &card.version,
+            recent: &card.recent,
             dim: false,
             reveal_count,
             focus: crate::app::StartupFocus::Input,
@@ -298,28 +285,7 @@ fn render(
     );
     if settled {
         // Convert Notifications to ToastNotes and delegate to shared renderer.
-        let toast_notes: Vec<crate::app::ToastNote> = toasts
-            .iter()
-            .enumerate()
-            .map(|(i, n)| {
-                let level = match n.level {
-                    atman_runtime::notify::NotifyLevel::Error => crate::app::NoteLevel::Error,
-                    atman_runtime::notify::NotifyLevel::Warn => crate::app::NoteLevel::Warn,
-                    atman_runtime::notify::NotifyLevel::Success => crate::app::NoteLevel::Success,
-                    _ => crate::app::NoteLevel::Info,
-                };
-                crate::app::ToastNote {
-                    id: format!("boot-{i}", i = i),
-                    level,
-                    message: n.message.clone(),
-                    ttl: std::time::Duration::from_secs(10),
-                    created: n.created_at,
-                    position: crate::app::ToastPosition::TopRight,
-                    fading: false,
-                    fade_started: None,
-                }
-            })
-            .collect();
+        let toast_notes = self::toasts(toasts.iter().cloned());
         crate::render_toast_notes(f, area, &toast_notes);
         return;
     }
@@ -342,10 +308,17 @@ fn render(
     f.render_widget(ratatui::widgets::Clear, splash.banner_rect);
     f.render_widget(Paragraph::new(lines), splash.banner_rect);
     // Convert Notifications to ToastNotes and delegate to shared renderer.
-    let toast_notes: Vec<crate::app::ToastNote> = toasts
-        .iter()
-        .enumerate()
-        .map(|(i, n)| {
+    let toast_notes = self::toasts(toasts.iter().cloned());
+    crate::render_toast_notes(f, area, &toast_notes);
+}
+
+/// Carry collected startup notices into the interactive view.
+pub fn toasts(
+    notifications: impl IntoIterator<Item = atman_runtime::notify::Notification>,
+) -> Vec<crate::app::ToastNote> {
+    notifications
+        .into_iter()
+        .map(|n| {
             let level = match n.level {
                 atman_runtime::notify::NotifyLevel::Error => crate::app::NoteLevel::Error,
                 atman_runtime::notify::NotifyLevel::Warn => crate::app::NoteLevel::Warn,
@@ -353,9 +326,9 @@ fn render(
                 _ => crate::app::NoteLevel::Info,
             };
             crate::app::ToastNote {
-                id: format!("boot-{i}", i = i),
+                id: format!("boot-{}", n.message.len()),
                 level,
-                message: n.message.clone(),
+                message: n.message,
                 ttl: std::time::Duration::from_secs(10),
                 created: n.created_at,
                 position: crate::app::ToastPosition::TopRight,
@@ -363,6 +336,5 @@ fn render(
                 fade_started: None,
             }
         })
-        .collect();
-    crate::render_toast_notes(f, area, &toast_notes);
+        .collect()
 }

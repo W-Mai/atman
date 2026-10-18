@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- **Terminal startup ownership** — Startup animation and interactive views stop and join their input reader before handing over the terminal. Persistent TUI attachment retains terminal cleanup through host shutdown, shows startup notices as toasts, and opens setup using the session's configuration when credentials or model selection are missing.
+
 - **Control command drafts** — Colon commands use authored prompt text and retain unsubmitted quotes and images. Shared submission acknowledgement keeps newer drafts and failed submissions intact across main and floating views.
 
 - **Image draft ownership** — Persistent main and floating views keep separate attachments when displaying the same flow. Refresh, deletion, and submission acknowledgements affect only the originating composer; panel and control commands retain images they did not submit.

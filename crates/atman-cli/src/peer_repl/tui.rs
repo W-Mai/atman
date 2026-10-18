@@ -7,7 +7,12 @@ use atman_tui::{
 };
 
 impl Attachment {
-    pub(super) async fn interact_tui(mut self, root: &Path) -> Result<()> {
+    pub(super) async fn interact_tui(
+        mut self,
+        root: &Path,
+        terminal: atman_tui::InheritedTerminal,
+        notifications: Vec<atman_runtime::notify::Notification>,
+    ) -> Result<()> {
         let catalog = self.session.snapshot().await?;
         let worker = self
             .session
@@ -23,9 +28,14 @@ impl Attachment {
             atman_runtime::rendezvous::FormPromptResolver::new(forms.clone()),
         ));
         let (controls, mut input) = mpsc::unbounded_channel();
-        let (handle, service, commands) = self
+        let (mut handle, service, commands) = self
             .prepare_tui_view(&worker, controls.clone(), &forms)
             .await?;
+        handle.onboarding_recommended =
+            self.config.models().is_first_run(&self.config.load_auth()?);
+        handle
+            .boot_toasts
+            .extend(atman_tui::boot_animation::toasts(notifications));
         let mut views = HashMap::from([(service.binding.view_id, service)]);
         for row in catalog.catalog.flows {
             let result = async {
@@ -48,7 +58,7 @@ impl Attachment {
         }
         let scopes = Arc::new(scopes::Scopes::new(root, self));
         let mut navigation = tokio::task::JoinSet::new();
-        let ui = atman_tui::run_tui(handle);
+        let ui = atman_tui::run_tui_ex(handle, Some(terminal));
         tokio::pin!(ui);
         loop {
             // Drain controls already submitted by a closed view before releasing its services.

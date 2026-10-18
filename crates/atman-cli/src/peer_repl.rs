@@ -88,17 +88,26 @@ pub(crate) async fn create(root: &Path) -> Result<Uuid> {
 }
 
 pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
+    let tui = crate::tui_mode_requested();
+    let _terminal = if tui {
+        Some(atman_tui::terminal_guard::TerminalGuard::install()?)
+    } else {
+        None
+    };
     let store = RuntimeStore::open(root)?;
     let permissions = Arc::new(PermissionClients::default());
     let host = RuntimeHost::with_services(HostServices {
         redactor: None,
         permission_clients: Arc::downgrade(&permissions),
     });
+    let (collector, notifications) = atman_runtime::notify::ToastCollector::new();
+    let mut notification_sink =
+        tui.then(|| atman_runtime::notify::ScopedSink::replace_with(Arc::new(collector)));
     let outcome = async {
         // Profile ownership can belong to another frontend; local interaction remains available.
         match ProfileStore::open(&store).and_then(|profile| host.attach_profile(profile)) {
             Ok(_) => {}
-            Err(error) => eprintln!("profile management unavailable: {error}"),
+            Err(error) => atman_runtime::notify!(warn, "profile management unavailable: {error}"),
         }
         let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
         let prompts = Arc::new(prompts::Prompts::new(prompt_tx));
@@ -108,10 +117,29 @@ pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
             Some(permissions),
             prompts.clone(),
         ));
-        let attachment = scopes.open(id).await?;
-        if crate::tui_mode_requested() {
-            attachment.interact_tui(root).await
+        if tui {
+            use atman_tui::boot_animation::{BootStepId, run_boot_animation};
+            let (progress, updates) = mpsc::unbounded_channel();
+            let (prepared, animation) = tokio::join!(
+                prepare_attachment(&scopes, id, progress),
+                run_boot_animation(
+                    updates,
+                    atman_tui::app::StartupCard {
+                        version: env!("CARGO_PKG_VERSION").into(),
+                        recent: vec![],
+                        directory: atman_tui::app::StartupDirectory::Sessions,
+                    },
+                    &[BootStepId::BuildExecutor, BootStepId::Ready],
+                    notifications,
+                ),
+            );
+            drop(notification_sink.take());
+            notification_sink = Some(atman_runtime::notify::ScopedSink::tui());
+            let attachment = prepared?;
+            let (terminal, notifications) = animation?;
+            attachment.interact_tui(root, terminal, notifications).await
         } else {
+            let attachment = scopes.open(id).await?;
             attachment.interact(prompt_rx).await
         }
     }
@@ -121,6 +149,28 @@ pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
     outcome?;
     shutdown?;
     Ok(())
+}
+
+async fn prepare_attachment(
+    scopes: &Arc<scopes::Scopes>,
+    id: Uuid,
+    progress: mpsc::UnboundedSender<atman_tui::boot_animation::BootProgress>,
+) -> Result<Attachment> {
+    use atman_tui::boot_animation::{BootProgress, BootStepId};
+    let emit = |event| {
+        let _ = progress.send(event);
+    };
+    emit(BootProgress::Start(BootStepId::BuildExecutor));
+    let attachment = scopes.open(id).await?;
+    emit(BootProgress::Finish(
+        BootStepId::BuildExecutor,
+        atman_runtime::workflow::NodeStatus::Ok,
+    ));
+    emit(BootProgress::Finish(
+        BootStepId::Ready,
+        atman_runtime::workflow::NodeStatus::Ok,
+    ));
+    Ok(attachment)
 }
 
 impl Attachment {

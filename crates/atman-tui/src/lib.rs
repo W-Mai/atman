@@ -704,22 +704,28 @@ pub(crate) async fn wait_sigterm(_sig: Option<&mut ()>) {
     std::future::pending().await
 }
 
-pub(crate) struct ReaderGuard(Arc<AtomicBool>);
+pub(crate) struct ReaderGuard {
+    shutdown: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
 
 impl Drop for ReaderGuard {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
 pub(crate) fn spawn_event_reader() -> (
     tokio::sync::mpsc::UnboundedReceiver<std::io::Result<CtEvent>>,
-    Arc<AtomicBool>,
+    ReaderGuard,
 ) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_for_thread = shutdown.clone();
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("atman-tui-input".into())
         .spawn(move || {
             loop {
@@ -739,12 +745,21 @@ pub(crate) fn spawn_event_reader() -> (
                         }
                     },
                     Ok(false) => {}
-                    Err(_) => {}
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
                 }
             }
         })
         .expect("spawn tui input thread");
-    (rx, shutdown)
+    (
+        rx,
+        ReaderGuard {
+            shutdown,
+            thread: Some(thread),
+        },
+    )
 }
 
 /// Render a list of toast notes. Public so boot_animation can reuse it.
@@ -903,6 +918,28 @@ pub(crate) fn render_toast_notes(
 mod tests {
     use super::*;
     use ratatui::style::Color;
+
+    #[test]
+    fn input_reader_shutdown_finishes_before_owner_returns() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flag = shutdown.clone();
+        let (finished, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            while !flag.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            finished.send(()).unwrap();
+        });
+        drop(ReaderGuard {
+            shutdown,
+            thread: Some(thread),
+        });
+        assert_eq!(
+            rx.try_recv(),
+            Ok(()),
+            "a subsequent view must own stdin exclusively"
+        );
+    }
 
     fn to_rgb(c: Color) -> (u8, u8, u8) {
         match c {

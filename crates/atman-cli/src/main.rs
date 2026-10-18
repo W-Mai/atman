@@ -1724,7 +1724,16 @@ async fn boot_first_session(
             .context("boot animation prebuild runtime init")?;
         rt.block_on(prebuild_session(resume_sid, None, Some(tx), None))
     });
-    let animation = atman_tui::boot_animation::run_boot_animation(rx, version, recent, toast_buf);
+    let animation = atman_tui::boot_animation::run_boot_animation(
+        rx,
+        atman_tui::app::StartupCard {
+            version,
+            recent,
+            directory: atman_tui::app::StartupDirectory::Projects,
+        },
+        atman_tui::boot_animation::BootStepId::ALL,
+        toast_buf,
+    );
     let (anim_result, prebuild_result) = tokio::join!(animation, prebuild);
     let (terminal, boot_notifications) = anim_result?;
     match prebuild_result {
@@ -2595,31 +2604,7 @@ async fn cmd_repl_once(
             trust: session.trust_config(),
             task_registry: executor.tool_ctx.task_registry.clone(),
             permission_client: Some(session.permission_broker().register_client()),
-            boot_toasts: boot_notifications
-                .into_iter()
-                .map(|n| {
-                    let level = match n.level {
-                        atman_runtime::notify::NotifyLevel::Error => {
-                            atman_tui::app::NoteLevel::Error
-                        }
-                        atman_runtime::notify::NotifyLevel::Warn => atman_tui::app::NoteLevel::Warn,
-                        atman_runtime::notify::NotifyLevel::Success => {
-                            atman_tui::app::NoteLevel::Success
-                        }
-                        _ => atman_tui::app::NoteLevel::Info,
-                    };
-                    atman_tui::app::ToastNote {
-                        id: format!("boot-{}", n.message.len()),
-                        level,
-                        message: n.message,
-                        ttl: std::time::Duration::from_secs(10),
-                        created: n.created_at,
-                        position: atman_tui::app::ToastPosition::TopRight,
-                        fading: false,
-                        fade_started: None,
-                    }
-                })
-                .collect(),
+            boot_toasts: atman_tui::boot_animation::toasts(boot_notifications),
         };
         (
             Some(tokio::spawn(atman_tui::run_tui_ex(

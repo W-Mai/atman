@@ -13,7 +13,6 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
-use crate::ReaderGuard;
 use crate::app;
 use crate::app::AppState;
 use crate::input::{InputEditor, cursor_from_wrapped};
@@ -231,7 +230,7 @@ pub(crate) async fn run_frames(
     let persistent = handle.flow_view.is_some();
     let mut views = Workspace::new(&handle);
     let mut hub: Option<crate::flow_hub::FlowHub> = None;
-    let (mut key_events, reader_shutdown) = spawn_event_reader();
+    let (mut key_events, _reader_guard) = spawn_event_reader();
     // Flush stale input events accumulated during boot animation.
     // Without this, mouse events from the boot phase flood the first
     // render frame and cause a visible stutter.
@@ -258,7 +257,6 @@ pub(crate) async fn run_frames(
         .filter(|_| !persistent)
         .map(|s| s.goal_control.subscribe());
 
-    let _reader_guard = ReaderGuard(reader_shutdown);
     let mut update_check = tokio::spawn(check_latest_release());
 
     // Keep bulk process output off the semantic lane so a noisy command cannot
@@ -401,6 +399,10 @@ pub(crate) async fn run_frames(
             }
             _ = views.next_background(), if persistent => {}
             key = recv_input_event(&mut key_events, &mut pending_input_event) => {
+                let key: Option<std::io::Result<CtEvent>> = match key {
+                    Some(event) => Some(Ok(event?)),
+                    None => break,
+                };
                 if std::env::var_os("ATMAN_TRACE_EVENTS").is_some() {
                     atman_runtime::notify!(debug, "event: {key:?}");
                 }
@@ -1651,6 +1653,7 @@ pub(crate) async fn run_frames(
                                 }
                             }
                         }
+                        Some(Err(error)) => return Err(error.into()),
                         _ => {}
                     }
                     drained = drained.saturating_add(1);
