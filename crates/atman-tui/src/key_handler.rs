@@ -1334,19 +1334,13 @@ pub(crate) fn handle_key(
             if let Some(session) = app.session.as_ref() {
                 editor.reconcile_images(&session.pending_images());
             }
-            let editor_submission = editor.submit_with_images().or_else(|| {
-                app.pending_quote
-                    .as_ref()
-                    .map(|_| crate::input::EditorSubmission {
-                        text: String::new(),
-                        images: Vec::new(),
-                    })
-            });
-            if let Some(editor_submission) = editor_submission {
+            let prepared = editor.prepare_submission();
+            if !prepared.is_empty() || app.pending_quote.is_some() {
+                let editor_submission = prepared.content();
                 if app.reconcile_input_reasoning() {
                     app.save_ui_state();
                 }
-                let quote = app.pending_quote.take();
+                let quote = app.pending_quote.clone();
                 let presentation =
                     quote
                         .as_ref()
@@ -1360,23 +1354,17 @@ pub(crate) fn handle_key(
                     || editor_submission.text.clone(),
                     |value| value.model_text(),
                 );
-                if !app.has_running_workflow() {
-                    app.push_user_turn_with_presentation(line.clone(), presentation.clone());
-                }
                 if control_tx.is_some() || submit_tx.is_some() {
                     let images = if line.trim_start().starts_with(':') {
                         Vec::new()
                     } else {
-                        app.session
-                            .as_ref()
-                            .map(|session| session.take_pending_images())
-                            .unwrap_or_default()
+                        editor_submission.images.clone()
                     };
                     let submission = crate::TuiSubmission {
-                        text: line,
-                        images,
+                        text: line.clone(),
+                        images: images.clone(),
                         reasoning: app.input_reasoning_for_submission(),
-                        presentation,
+                        presentation: presentation.clone(),
                     };
                     let failed = if let Some(tx) = control_tx {
                         tx.send(TuiControl::Submit(submission))
@@ -1390,19 +1378,28 @@ pub(crate) fn handle_key(
                             .and_then(|tx| tx.send(submission).err())
                             .map(|error| error.0)
                     };
-                    if let Some(failed) = failed {
-                        app.pending_quote = quote;
-                        if let Some(session) = app.session.clone() {
-                            app.attach_count = session.restore_pending_images(failed.images);
-                            editor.reconcile_images(&session.pending_images());
+                    if failed.is_some() {
+                        app.push_toast(
+                            "Input was not sent; the connection is closed",
+                            crate::app::NoteLevel::Error,
+                            std::time::Duration::from_secs(6),
+                            crate::app::ToastPosition::BottomRight,
+                        );
+                    } else {
+                        editor.acknowledge_submission(prepared);
+                        app.pending_quote = None;
+                        if !app.has_running_workflow() {
+                            app.push_user_turn_with_presentation(line, presentation);
                         }
-                    } else if let Some(session) = app.session.clone() {
-                        app.attach_count = session.pending_image_count();
-                        if !editor_submission.images.is_empty() {
-                            editor.reconcile_images(&session.pending_images());
+                        if let Some(session) = app.session.as_ref() {
+                            for image in &images {
+                                session.remove_pending_image(image);
+                            }
                         }
                     }
-                } else if let Some(session) = app.session.clone() {
+                }
+                if let Some(session) = app.session.clone() {
+                    app.attach_count = session.pending_image_count();
                     editor.reconcile_images(&session.pending_images());
                 }
             }
@@ -2663,7 +2660,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_submit_restores_captured_attachments() {
+    fn failed_submit_retains_the_entire_draft_and_does_not_publish_a_turn() {
         let session = std::sync::Arc::new(atman_runtime::Session::open_ephemeral());
         session
             .queue_image_bytes(PNG_BYTES, Some("clipboard.png"))
@@ -2672,6 +2669,12 @@ mod tests {
         state.app.session = Some(session.clone());
         let mut editor = InputEditor::default();
         editor.insert_str("/agent inspect");
+        editor.ingest_paste("one\ntwo\nthree\nfour\nfive\nsix");
+        editor.reconcile_images(&session.pending_images());
+        editor.move_home();
+        state.app.pending_quote = Some("quoted source".into());
+        let before = editor.buf().to_owned();
+        let items = state.app.items.len();
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx);
         let mut interrupt_prompt = None;
@@ -2687,6 +2690,11 @@ mod tests {
 
         assert_eq!(session.pending_image_count(), 1);
         assert_eq!(state.app.attach_count, 1);
+        assert_eq!(editor.buf(), before);
+        assert_eq!(editor.cursor(), 0);
+        assert_eq!(editor.pending_pastes().len(), 1);
+        assert_eq!(state.app.pending_quote.as_deref(), Some("quoted source"));
+        assert_eq!(state.app.items.len(), items);
     }
 
     #[test]

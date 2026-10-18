@@ -366,6 +366,23 @@ pub struct EditorSubmission {
     pub images: Vec<atman_runtime::message::ImageSource>,
 }
 
+/// An immutable submission captured without consuming the draft. Its acknowledgement cannot clear later edits or another editor.
+pub struct PreparedSubmission {
+    owner: std::sync::Arc<()>,
+    revision: u64,
+    content: EditorSubmission,
+}
+
+impl PreparedSubmission {
+    pub fn content(&self) -> &EditorSubmission {
+        &self.content
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.content.text.trim().is_empty() && self.content.images.is_empty()
+    }
+}
+
 // Paste larger than these gets folded into a placeholder so the editor
 // doesn't drown in a hundred-line dump. Numbers match Gemini CLI.
 const PASTE_FOLD_LINE_THRESHOLD: usize = 5;
@@ -373,6 +390,8 @@ const PASTE_FOLD_CHAR_THRESHOLD: usize = 500;
 
 #[derive(Default)]
 pub struct InputEditor {
+    owner: std::sync::Arc<()>,
+    revision: u64,
     buf: String,
     cursor: usize,
     history: Vec<String>,
@@ -404,6 +423,7 @@ impl InputEditor {
     }
 
     pub fn insert_char(&mut self, c: char) {
+        self.content_changed();
         self.consume_history_view();
         self.buf.insert(self.cursor, c);
         self.cursor += c.len_utf8();
@@ -413,6 +433,7 @@ impl InputEditor {
         if s.is_empty() {
             return;
         }
+        self.content_changed();
         self.consume_history_view();
         self.buf.insert_str(self.cursor, s);
         self.cursor += s.len();
@@ -459,6 +480,7 @@ impl InputEditor {
         if self.cursor == 0 {
             return;
         }
+        self.content_changed();
         let mut prev = self.cursor - 1;
         while prev > 0 && !self.buf.is_char_boundary(prev) {
             prev -= 1;
@@ -472,6 +494,7 @@ impl InputEditor {
         if self.cursor == 0 {
             return;
         }
+        self.content_changed();
         let target = word_boundary_backward(&self.buf, self.cursor);
         self.buf.drain(target..self.cursor);
         self.cursor = target;
@@ -482,6 +505,7 @@ impl InputEditor {
         if self.cursor >= self.buf.len() {
             return;
         }
+        self.content_changed();
         let mut next = self.cursor + 1;
         while next < self.buf.len() && !self.buf.is_char_boundary(next) {
             next += 1;
@@ -651,12 +675,14 @@ impl InputEditor {
     }
 
     pub fn clear(&mut self) -> String {
+        self.content_changed();
         self.consume_history_view();
         self.cursor = 0;
         std::mem::take(&mut self.buf)
     }
 
     pub fn replace_with(&mut self, text: &str) {
+        self.content_changed();
         self.consume_history_view();
         self.buf.clear();
         self.buf.push_str(text);
@@ -666,6 +692,7 @@ impl InputEditor {
     pub fn prefill(&mut self, prefix: &str) {
         self.consume_history_view();
         if !self.buf.starts_with(prefix) {
+            self.content_changed();
             self.buf.insert_str(0, prefix);
             self.cursor += prefix.len();
         }
@@ -681,28 +708,49 @@ impl InputEditor {
     }
 
     pub fn submit_with_images(&mut self) -> Option<EditorSubmission> {
-        let raw = std::mem::take(&mut self.buf);
+        let prepared = self.prepare_submission();
+        let content = (!prepared.is_empty()).then(|| prepared.content.clone());
+        self.acknowledge_submission(prepared);
+        content
+    }
+
+    pub fn prepare_submission(&self) -> PreparedSubmission {
+        PreparedSubmission {
+            owner: self.owner.clone(),
+            revision: self.revision,
+            content: EditorSubmission {
+                text: self.submission_text(),
+                images: self
+                    .pending_images
+                    .iter()
+                    .map(|image| image.source.clone())
+                    .collect(),
+            },
+        }
+    }
+
+    /// Record accepted text in history. Clear the composer only if the captured draft is still current; cursor movement alone does not make it stale.
+    pub fn acknowledge_submission(&mut self, prepared: PreparedSubmission) -> bool {
+        if !std::sync::Arc::ptr_eq(&self.owner, &prepared.owner) {
+            return false;
+        }
+        let line = prepared.content.text;
+        if !line.trim().is_empty() && self.history.last().is_none_or(|prev| prev != &line) {
+            self.history.push(line);
+        }
+        if self.revision != prepared.revision {
+            return false;
+        }
+        self.content_changed();
+        self.buf.clear();
         self.cursor = 0;
         self.history_idx = None;
         self.stashed = None;
-        let pending = std::mem::take(&mut self.pending_pastes);
-        let pending_images = std::mem::take(&mut self.pending_images);
+        self.pending_pastes.clear();
+        self.pending_images.clear();
         self.next_paste_index = 0;
         self.next_image_index = 0;
-        let line = expand_submission_text(raw, &pending_images, &pending);
-        if line.trim().is_empty() && pending_images.is_empty() {
-            return None;
-        }
-        if !line.trim().is_empty() && self.history.last().is_none_or(|prev| prev != &line) {
-            self.history.push(line.clone());
-        }
-        Some(EditorSubmission {
-            text: line,
-            images: pending_images
-                .into_iter()
-                .map(|image| image.source)
-                .collect(),
-        })
+        true
     }
 
     pub fn expand_paste_at_cursor(&mut self) -> bool {
@@ -719,6 +767,7 @@ impl InputEditor {
         let Some((idx, start, end)) = hit else {
             return false;
         };
+        self.content_changed();
         let entry = self.pending_pastes.remove(idx);
         self.buf.replace_range(start..end, &entry.content);
         self.cursor = start + entry.content.len();
@@ -797,6 +846,7 @@ impl InputEditor {
 
     pub fn remove_last_image(&mut self) -> Option<atman_runtime::message::ImageSource> {
         let image = self.pending_images.pop()?;
+        self.content_changed();
         self.remove_image_marker(&image.marker);
         Some(image.source)
     }
@@ -811,6 +861,9 @@ impl InputEditor {
                 false
             }
         });
+        if !removed.is_empty() {
+            self.content_changed();
+        }
         removed
     }
 
@@ -829,6 +882,9 @@ impl InputEditor {
                 false
             }
         });
+        if !removed_markers.is_empty() {
+            self.content_changed();
+        }
         for marker in removed_markers {
             self.remove_image_marker(&marker);
         }
@@ -856,6 +912,7 @@ impl InputEditor {
         if self.history.is_empty() {
             return;
         }
+        self.content_changed();
         let new_idx = match self.history_idx {
             None => {
                 if self.stashed.is_none() {
@@ -875,6 +932,7 @@ impl InputEditor {
         let Some(i) = self.history_idx else {
             return;
         };
+        self.content_changed();
         if i + 1 >= self.history.len() {
             self.history_idx = None;
             self.buf = self.stashed.take().unwrap_or_default();
@@ -887,6 +945,15 @@ impl InputEditor {
 
     fn consume_history_view(&mut self) {
         self.history_idx = None;
+    }
+
+    fn content_changed(&mut self) {
+        if let Some(revision) = self.revision.checked_add(1) {
+            self.revision = revision;
+        } else {
+            self.owner = std::sync::Arc::default();
+            self.revision = 0;
+        }
     }
 }
 
@@ -940,6 +1007,54 @@ fn word_boundary_backward(s: &str, cursor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submission_acknowledgement_owns_only_its_captured_draft() {
+        let mut editor = InputEditor::default();
+        editor.ingest_paste("one\ntwo\nthree\nfour\nfive\nsix");
+        editor.attach_image(image("first"));
+        editor.move_home();
+        let text = editor.buf().to_owned();
+        let cursor = editor.cursor();
+        let rejected = editor.prepare_submission();
+        assert!(rejected.content().text.contains("one\ntwo"));
+        assert_eq!(rejected.content().images.len(), 1);
+        drop(rejected);
+        assert_eq!(editor.buf(), text);
+        assert_eq!(editor.cursor(), cursor);
+        assert_eq!(editor.pending_pastes().len(), 1);
+        let accepted = editor.prepare_submission();
+        editor.move_end();
+        assert!(editor.acknowledge_submission(accepted));
+        assert!(editor.buf().is_empty());
+        assert!(editor.pending_images().is_empty());
+        assert!(editor.pending_pastes().is_empty());
+
+        editor.insert_str("again");
+        let stale = editor.prepare_submission();
+        editor.insert_str("!");
+        editor.backspace();
+        assert!(!editor.acknowledge_submission(stale));
+        assert_eq!(
+            editor.buf(),
+            "again",
+            "editing back to identical text is a new draft"
+        );
+        let foreign = editor.prepare_submission();
+        let mut other = InputEditor::default();
+        other.insert_str("again");
+        assert!(!other.acknowledge_submission(foreign));
+        assert_eq!(other.buf(), "again");
+
+        let stale = editor.prepare_submission();
+        editor.attach_image(image("second"));
+        assert!(!editor.acknowledge_submission(stale));
+        assert_eq!(editor.pending_images().len(), 1);
+        let stale = editor.prepare_submission();
+        editor.reconcile_images(&[]);
+        assert!(!editor.acknowledge_submission(stale));
+        assert_eq!(editor.submission_text(), "again");
+    }
 
     fn image(name: &str) -> atman_runtime::message::ImageSource {
         atman_runtime::message::ImageSource {
