@@ -219,6 +219,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Viewport shadows** — Clip window shadows to the drawing surface, including surfaces with a nonzero origin and empty viewports, to prevent out-of-bounds rendering.
+
 - **Flow-owned forms** — Persistent views show only forms addressed to their flow. Submissions validate the original answer destination, and reconnecting a view preserves expired forms awaiting a late reply.
 
 - **Transcript layout** — Reconcile document revisions before applying fold invalidation hints so batched background updates cannot leave new records unmeasured or interrupt rendering.

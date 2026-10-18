@@ -45,8 +45,8 @@ fn shadow_ring_cells(rect: Rect, area: Rect) -> HashSet<(u16, u16)> {
     let rx0 = (rect.x + rect.width).min(max_x);
     let rx1 = (rect.x + rect.width + 1).min(max_x);
     let mut cells = HashSet::new();
-    for y in top_y..=bot_y {
-        for x in lx0..=rx1 {
+    for y in top_y.max(area.y)..=bot_y {
+        for x in lx0.max(area.x)..=rx1 {
             if y == top_y || y == bot_y || x == lx0 || x == lx1 || x == rx0 || x == rx1 {
                 cells.insert((x, y));
             }
@@ -57,6 +57,9 @@ fn shadow_ring_cells(rect: Rect, area: Rect) -> HashSet<(u16, u16)> {
 
 fn render_shadow_to_buffer(buf: &mut Buffer, rect: Rect, shadow: Color, factor: Color) {
     let area = *buf.area();
+    if area.is_empty() {
+        return;
+    }
     let ring = shadow_ring_cells(rect, area);
     let transparent_continuations = ring
         .iter()
@@ -295,6 +298,27 @@ mod tests {
     use ratatui::style::{Color, Style};
 
     const SHADOW: Color = Color::Rgb(48, 48, 48);
+
+    #[test]
+    fn shadow_is_clipped_to_the_surface_coordinate_space() {
+        for area in [
+            Rect::new(2, 6, 156, 42),
+            Rect::new(10, 20, 1, 1),
+            Rect::new(3, 7, 0, 0),
+        ] {
+            let mut buffer = Buffer::empty(area);
+            for panel in [area, Rect::new(0, 0, 20, 30), Rect::new(100, 80, 30, 20)] {
+                render_shadow_to_buffer(&mut buffer, panel, SHADOW, Color::Rgb(128, 128, 128));
+                if !area.is_empty() {
+                    assert!(
+                        shadow_ring_cells(panel, area)
+                            .iter()
+                            .all(|&(x, y)| area.contains((x, y).into()))
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn shadow_ring_does_not_duplicate_corners() {
