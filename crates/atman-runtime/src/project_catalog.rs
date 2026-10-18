@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+use crate::flow_store::{ProjectDeletion, RuntimeStore};
 use crate::session_meta::{SessionMeta, fingerprint_from_root};
 
 const CATALOG_FILENAME: &str = "project-catalog.json";
@@ -94,10 +95,13 @@ impl ProjectCatalogStore {
     pub fn reconcile_sessions(&self) -> Result<ProjectCatalog> {
         let sessions_dir = self.data_dir.join("sessions");
         self.mutate(|catalog| {
-            let Ok(entries) = std::fs::read_dir(&sessions_dir) else {
-                return Ok(catalog.clone());
+            let entries = match std::fs::read_dir(&sessions_dir) {
+                Ok(entries) => Some(entries),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error).context("read legacy sessions"),
             };
-            for entry in entries.flatten() {
+            for entry in entries.into_iter().flatten() {
+                let entry = entry?;
                 let session_dir = entry.path();
                 if !session_dir.is_dir() {
                     continue;
@@ -110,25 +114,23 @@ impl ProjectCatalogStore {
                 else {
                     continue;
                 };
-                if let Some(project) = catalog
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.fingerprint == fingerprint)
-                {
-                    project.first_seen = project.first_seen.min(opened_at);
-                    project.last_opened = project.last_opened.max(opened_at);
+                reconcile_project(catalog, &root, fingerprint, opened_at, opened_at);
+            }
+            for id in RuntimeStore::session_ids(&self.data_dir)? {
+                let session = RuntimeStore::inspect_session(&self.data_dir, id)?;
+                let Some(project) = &session.projection.descriptor.project else {
                     continue;
-                }
-                let root = canonical_root(&root);
-                catalog.projects.push(ProjectRecord {
-                    fingerprint,
-                    display_name: display_name(&root),
-                    root,
-                    pinned: false,
-                    archived: false,
-                    first_seen: opened_at,
-                    last_opened: opened_at,
-                });
+                };
+                let meta = session.dir.join("events.jsonl").metadata()?;
+                let first_seen = meta.created().or_else(|_| meta.modified())?;
+                let activity = session.activity_time().unwrap_or(first_seen);
+                reconcile_project(
+                    catalog,
+                    project.root(),
+                    fingerprint_from_root(project.root()),
+                    first_seen.into(),
+                    activity.into(),
+                );
             }
             sort_projects(&mut catalog.projects);
             Ok(catalog.clone())
@@ -148,7 +150,7 @@ impl ProjectCatalogStore {
         fingerprint: &str,
         active_project_fingerprint: Option<&str>,
     ) -> Result<ProjectCatalog> {
-        self.mutate(|catalog| {
+        let (catalog, _deletion) = self.mutate(|catalog| {
             let index = catalog
                 .projects
                 .iter()
@@ -164,10 +166,13 @@ impl ProjectCatalogStore {
                 active_project_fingerprint != Some(fingerprint),
                 "cannot delete active session project"
             );
+            let runtime = RuntimeStore::open(&self.data_dir)?;
+            let deletion = ProjectDeletion::purge_closed_sessions(&runtime, &project.root)?;
             purge_project_data(&self.data_dir, &project)?;
             catalog.projects.remove(index);
-            Ok(catalog.clone())
-        })
+            Ok((catalog.clone(), deletion))
+        })?;
+        Ok(catalog)
     }
 
     fn set_flag(&self, fingerprint: &str, update: impl FnOnce(&mut ProjectRecord)) -> Result<bool> {
@@ -205,6 +210,34 @@ impl ProjectCatalogStore {
 
     fn catalog_path(&self) -> PathBuf {
         self.data_dir.join(CATALOG_FILENAME)
+    }
+}
+
+fn reconcile_project(
+    catalog: &mut ProjectCatalog,
+    root: &Path,
+    fingerprint: String,
+    first_seen: DateTime<Utc>,
+    last_opened: DateTime<Utc>,
+) {
+    if let Some(project) = catalog
+        .projects
+        .iter_mut()
+        .find(|p| p.fingerprint == fingerprint)
+    {
+        project.first_seen = project.first_seen.min(first_seen);
+        project.last_opened = project.last_opened.max(last_opened);
+    } else {
+        let root = canonical_root(root);
+        catalog.projects.push(ProjectRecord {
+            fingerprint,
+            display_name: display_name(&root),
+            root,
+            pinned: false,
+            archived: false,
+            first_seen,
+            last_opened,
+        });
     }
 }
 
@@ -390,8 +423,311 @@ fn schema_version() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flow_store::{
+        EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowStore, FlowTransition,
+        SessionDescriptor, SessionStore,
+    };
     use chrono::TimeZone;
     use tempfile::TempDir;
+    use uuid::Uuid;
+
+    fn persistent_session(data: &Path, project: &Path) -> (SessionStore, FlowStore) {
+        let root = RuntimeStore::open(data).unwrap();
+        let binding = serde_json::from_value(serde_json::json!({
+            "root": project,
+            "scope": "global",
+            "storage_root": data.join("projects").join(fingerprint_from_root(project))
+        }))
+        .unwrap();
+        let id = Uuid::new_v4();
+        let mut session = root
+            .create_session(SessionDescriptor {
+                id,
+                project: Some(binding),
+                configuration: Default::default(),
+                title: "Example".into(),
+            })
+            .unwrap();
+        let flow = session
+            .create_flow(FlowDescriptor {
+                address: FlowRef {
+                    session_id: id.into(),
+                    instance_id: FlowInstanceId::now(),
+                },
+                creation_request: Uuid::new_v4(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: "main".into(),
+                    path: "main.at".into(),
+                    bundle: crate::source_program::RevisionBundle {
+                        entry: "entry:main.at".into(),
+                        sources: [("entry:main.at".into(), "flow main() { return 1 }".into())]
+                            .into(),
+                        edges: Default::default(),
+                    },
+                }
+                .into(),
+            })
+            .unwrap();
+        (session, flow)
+    }
+
+    fn close(flow: &mut FlowStore) {
+        for change in [FlowTransition::CloseRequested, FlowTransition::Closed] {
+            flow.transition(flow.state().revision(), change).unwrap();
+        }
+    }
+
+    #[test]
+    fn reconciliation_discovers_persistent_sessions_without_legacy_or_project_directories() {
+        let data = TempDir::new().unwrap();
+        let project = data.path().join("missing-project");
+        let (session, flow) = persistent_session(data.path(), &project);
+        let events = session.dir().join("events.jsonl");
+        let before = std::fs::read(&events).unwrap();
+        let cache = session.dir().join("session.json");
+        std::fs::write(&cache, "invalid cache").unwrap();
+        let store = ProjectCatalogStore::new(data.path());
+        let catalog = store.reconcile_sessions().unwrap();
+        assert_eq!(catalog.projects.len(), 1);
+        assert!(!catalog.projects[0].path_available());
+        assert!(!data.path().join("sessions").exists());
+        assert_eq!(catalog.projects[0].root, project);
+        store
+            .set_archived(&catalog.projects[0].fingerprint, true)
+            .unwrap();
+        store
+            .set_pinned(&catalog.projects[0].fingerprint, true)
+            .unwrap();
+        let again = store.reconcile_sessions().unwrap();
+        assert!(again.projects[0].archived && again.projects[0].pinned);
+        assert_eq!(again.projects[0].first_seen, catalog.projects[0].first_seen);
+        assert_eq!(std::fs::read(events).unwrap(), before);
+        assert_eq!(std::fs::read(cache).unwrap(), b"invalid cache");
+        assert_eq!(flow.state().revision(), 0);
+    }
+
+    #[test]
+    fn project_deletion_preflights_every_persistent_owner_and_flow_before_purging() {
+        let data = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let store = ProjectCatalogStore::new(data.path());
+        let record = store.register(project.path(), at(10)).unwrap();
+        store.set_archived(&record.fingerprint, true).unwrap();
+        let shared = data.path().join("projects").join(&record.fingerprint);
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("index.db"), "retained").unwrap();
+        let (closed_session, mut closed_flow) = persistent_session(data.path(), project.path());
+        let closed_path = closed_session.dir().to_owned();
+        close(&mut closed_flow);
+        drop((closed_session, closed_flow));
+        let (session, flow) = persistent_session(data.path(), project.path());
+        let id = session.projection().descriptor.id;
+        let path = session.dir().to_owned();
+        let before = std::fs::read(path.join("events.jsonl")).unwrap();
+        drop(session);
+        // A surviving flow retains the session owner even after the catalog handle is dropped.
+        assert!(
+            store
+                .delete_archived(&record.fingerprint, None)
+                .unwrap_err()
+                .to_string()
+                .contains("owner")
+        );
+        drop(flow);
+        assert!(
+            store
+                .delete_archived(&record.fingerprint, None)
+                .unwrap_err()
+                .to_string()
+                .contains("not closed")
+        );
+        assert_eq!(std::fs::read(shared.join("index.db")).unwrap(), b"retained");
+        assert_eq!(std::fs::read(path.join("events.jsonl")).unwrap(), before);
+        assert!(closed_path.exists());
+        let root = RuntimeStore::open(data.path()).unwrap();
+        let session = root.open_session(id).unwrap();
+        let mut flow = session
+            .open_flow(&session.projection().flows[0].id)
+            .unwrap();
+        close(&mut flow);
+        drop((session, flow));
+        let (other, other_flow) = persistent_session(data.path(), &project.path().join("other"));
+        let other_path = other.dir().to_owned();
+        let catalog = store.delete_archived(&record.fingerprint, None).unwrap();
+        assert!(catalog.projects.is_empty());
+        assert!(!path.exists() && !closed_path.exists() && !shared.exists());
+        assert!(other_path.exists());
+        assert_eq!(other_flow.state().revision(), 0);
+    }
+
+    #[test]
+    fn project_deletion_preserves_management_binding_until_replaced() {
+        use crate::flow_store::profile::ProfileStore;
+        let data = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let root = RuntimeStore::open(data.path()).unwrap();
+        let store = ProjectCatalogStore::new(data.path());
+        let record = store.register(project.path(), at(10)).unwrap();
+        store.set_archived(&record.fingerprint, true).unwrap();
+        let (session, mut flow) = persistent_session(data.path(), project.path());
+        close(&mut flow);
+        let id = session.projection().descriptor.id;
+        let path = session.dir().to_owned();
+        drop((session, flow));
+        let mut profile = ProfileStore::open(&root).unwrap();
+        let original = profile
+            .bootstrap(Default::default())
+            .unwrap()
+            .management
+            .unwrap()
+            .session
+            .id;
+        profile
+            .select(
+                Uuid::new_v4(),
+                profile.snapshot().cursor.clone(),
+                id,
+                vec![],
+            )
+            .unwrap();
+        let error = store
+            .delete_archived(&record.fingerprint, None)
+            .unwrap_err();
+        assert!(error.to_string().contains("management session"));
+        assert!(path.exists());
+        assert_eq!(
+            profile.snapshot().management.as_ref().unwrap().session.id,
+            id
+        );
+        profile
+            .select(
+                Uuid::new_v4(),
+                profile.snapshot().cursor.clone(),
+                original,
+                vec![],
+            )
+            .unwrap();
+        store.delete_archived(&record.fingerprint, None).unwrap();
+        assert!(!path.exists());
+        assert!(RuntimeStore::inspect_session(data.path(), original).is_ok());
+    }
+
+    #[test]
+    fn project_deletion_never_repairs_incomplete_journals() {
+        let data = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let store = ProjectCatalogStore::new(data.path());
+        let record = store.register(project.path(), at(10)).unwrap();
+        store.set_archived(&record.fingerprint, true).unwrap();
+        let (session, mut flow) = persistent_session(data.path(), project.path());
+        close(&mut flow);
+        let path = flow.dir().join("events.jsonl");
+        drop((session, flow));
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"incomplete\":")
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(
+            store
+                .delete_archived(&record.fingerprint, None)
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete")
+        );
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        assert_eq!(store.load().unwrap().projects.len(), 1);
+    }
+
+    #[test]
+    fn project_deletion_serializes_open_create_and_management_selection() {
+        use crate::flow_store::profile::ProfileStore;
+        use std::{sync::mpsc, time::Duration};
+        let data = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let root = RuntimeStore::open(data.path()).unwrap();
+        let (session, mut flow) = persistent_session(data.path(), project.path());
+        close(&mut flow);
+        let descriptor = session.projection().descriptor.clone();
+        let id = descriptor.id;
+        drop((session, flow));
+        let mut profile = ProfileStore::open(&root).unwrap();
+        profile.bootstrap(Default::default()).unwrap();
+        let guard = ProjectDeletion::purge_closed_sessions(&root, project.path()).unwrap();
+        let (started, ready) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        std::thread::scope(|scope| {
+            for operation in ["open", "create"] {
+                let started = started.clone();
+                let finished = finished.clone();
+                let root = &root;
+                let descriptor = descriptor.clone();
+                scope.spawn(move || {
+                    started.send(()).unwrap();
+                    match operation {
+                        "open" => assert_eq!(
+                            root.open_session(id).err().unwrap().kind(),
+                            std::io::ErrorKind::NotFound
+                        ),
+                        "create" => {
+                            let mut descriptor = descriptor;
+                            descriptor.id = Uuid::new_v4();
+                            root.create_session(descriptor).unwrap();
+                        }
+                        _ => unreachable!(),
+                    }
+                    finished.send(()).unwrap();
+                });
+            }
+            let started = started.clone();
+            let finished = finished.clone();
+            scope.spawn(move || {
+                started.send(()).unwrap();
+                let result = profile.replace(crate::flow_store::profile::ReplaceManagement {
+                    request_id: Uuid::new_v4(),
+                    expected: profile.snapshot().cursor.clone(),
+                    binding: crate::flow_store::profile::ManagementBinding {
+                        session: descriptor,
+                        grants: vec![],
+                    },
+                });
+                assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+                finished.send(()).unwrap();
+            });
+            for _ in 0..3 {
+                ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            assert!(matches!(
+                done.recv_timeout(Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            drop(guard);
+            for _ in 0..3 {
+                done.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn project_deletion_retries_hidden_partial_removal_without_discovering_it() {
+        let data = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let store = ProjectCatalogStore::new(data.path());
+        let record = store.register(project.path(), at(10)).unwrap();
+        store.set_archived(&record.fingerprint, true).unwrap();
+        let root = RuntimeStore::open(data.path()).unwrap();
+        let trash = root.root().join(".deletions").join(&record.fingerprint);
+        let partial = trash.join(Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&partial).unwrap();
+        std::fs::write(partial.join("events.jsonl"), "partial deletion").unwrap();
+        assert!(RuntimeStore::session_ids(data.path()).unwrap().is_empty());
+        store.delete_archived(&record.fingerprint, None).unwrap();
+        assert!(!trash.exists());
+        assert!(store.reconcile_sessions().unwrap().projects.is_empty());
+    }
 
     fn at(seconds: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(seconds, 0).unwrap()

@@ -182,6 +182,32 @@ impl Projection {
 }
 
 impl ProfileStore {
+    /// Called under the catalog lock; binding changes use the same lock. Inspection never creates or repairs the profile.
+    pub(super) fn protected_session(runtime: &RuntimeStore) -> io::Result<Option<Uuid>> {
+        let directory = runtime.root.join("host");
+        if !directory.try_exists()? {
+            return Ok(None);
+        }
+        let identity = read_identity(&directory)?;
+        let mut projection = None;
+        let journal = Journal::inspect(
+            &directory.join("events.jsonl"),
+            identity.profile_id,
+            |receipt, facts| {
+                Projection::replay(&mut projection, identity.profile_id, receipt, facts)
+            },
+        )?;
+        if journal.trailing_bytes != 0 {
+            return Err(invalid("management profile journal is incomplete"));
+        }
+        let projection = projection.ok_or_else(|| invalid("profile creation was not recorded"))?;
+        Ok(projection
+            .snapshot
+            .management
+            .map(|binding| binding.session.id)
+            .or_else(|| projection.prepared.map(|session| session.id)))
+    }
+
     pub(crate) fn data_dir(&self) -> &std::path::Path {
         self.runtime.root.parent().unwrap()
     }
@@ -212,12 +238,7 @@ impl ProfileStore {
                 Ok(())
             })?;
         }
-        let identity: Identity =
-            serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)
-                .map_err(invalid)?;
-        if identity.version != VERSION || identity.profile_id.is_nil() {
-            return Err(invalid("unsupported profile version or invalid identity"));
-        }
+        let identity = read_identity(&directory)?;
         let mut projection = None;
         let (journal, recovered_tail) = Journal::open(
             &directory.join("events.jsonl"),
@@ -267,6 +288,7 @@ impl ProfileStore {
         &mut self,
         configuration: SessionConfiguration,
     ) -> io::Result<ProfileSnapshot> {
+        let _catalog = self.runtime.lock_catalog()?;
         self.validate_management()?;
         if self.snapshot().management.is_some() {
             return Ok(self.snapshot().clone());
@@ -280,7 +302,7 @@ impl ProfileStore {
             }))?;
         }
         let descriptor = self.projection.prepared.as_ref().unwrap().clone();
-        match self.runtime.create_session(descriptor.clone()) {
+        match self.runtime.create_session_locked(descriptor.clone()) {
             Ok(store) => drop(store),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 self.inspect_binding(&ManagementBinding {
@@ -305,6 +327,7 @@ impl ProfileStore {
                 ))
             };
         }
+        let _catalog = self.runtime.lock_catalog()?;
         self.inspect_binding(&request.binding)?;
         self.commit(Fact::ManagementReplaced(request))
     }
@@ -371,6 +394,16 @@ impl ProfileStore {
         self.projection.apply(fact, receipt.clone())?;
         Ok(receipt)
     }
+}
+
+fn read_identity(directory: &std::path::Path) -> io::Result<Identity> {
+    let identity: Identity =
+        serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)
+            .map_err(invalid)?;
+    if identity.version != VERSION || identity.profile_id.is_nil() {
+        return Err(invalid("unsupported profile version or invalid identity"));
+    }
+    Ok(identity)
 }
 
 #[cfg(test)]

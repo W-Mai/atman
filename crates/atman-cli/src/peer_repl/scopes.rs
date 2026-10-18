@@ -113,17 +113,7 @@ impl Scopes {
                 {
                     continue;
                 }
-                // Activity is a display hint. No flow history or execution owner is opened.
-                let activity = std::iter::once(read.dir.join("events.jsonl"))
-                    .chain(read.projection.flows.iter().map(|flow| {
-                        read.dir
-                            .join("flows")
-                            .join(flow.id.to_string())
-                            .join("events.jsonl")
-                    }))
-                    .filter_map(|path| path.metadata().and_then(|meta| meta.modified()).ok())
-                    .max();
-                rows.push((activity, id));
+                rows.push((read.activity_time(), id));
             }
             rows.sort_unstable_by(|left, right| right.cmp(left));
             rows

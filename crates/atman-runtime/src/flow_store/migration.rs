@@ -164,6 +164,7 @@ impl RuntimeStore {
             .join("sessions")
             .join(plan.destination.id.to_string());
         if published.try_exists()? {
+            let _catalog = self.lock_catalog()?;
             return self.completed_migration(&plan);
         }
         let stage = RuntimeStore {
@@ -208,7 +209,7 @@ impl RuntimeStore {
     }
 
     fn completed_migration(&self, plan: &MigrationPlan) -> io::Result<LegacyMigration> {
-        let session = self.open_session(plan.destination.id)?;
+        let session = self.open_session_locked(plan.destination.id)?;
         let receipt =
             session.projection.migrated_from.as_ref().ok_or_else(|| {
                 invalid("destination exists without matching migration provenance")

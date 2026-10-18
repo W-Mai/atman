@@ -6,6 +6,7 @@ pub mod access;
 pub mod completion;
 pub mod context;
 pub mod continuation;
+mod deletion;
 pub mod goal;
 pub mod history;
 pub mod inbox;
@@ -23,6 +24,8 @@ pub mod trace;
 pub mod view;
 pub mod waiter;
 pub mod workspace;
+
+pub(crate) use deletion::ProjectDeletion;
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -527,6 +530,19 @@ pub struct FlowInspection {
 }
 
 impl SessionInspection {
+    /// Filesystem activity hint for directory ordering only; it is not an execution timestamp or journal cursor.
+    pub fn activity_time(&self) -> Option<std::time::SystemTime> {
+        std::iter::once(self.dir.join("events.jsonl"))
+            .chain(self.projection.flows.iter().map(|flow| {
+                self.dir
+                    .join("flows")
+                    .join(flow.id.to_string())
+                    .join("events.jsonl")
+            }))
+            .filter_map(|path| path.metadata().and_then(|meta| meta.modified()).ok())
+            .max()
+    }
+
     pub fn inspect_flow(&self, id: &FlowInstanceId) -> io::Result<FlowInspection> {
         inspect_registered_flow(&self.dir, &self.projection, id)
     }
@@ -626,11 +642,15 @@ impl RuntimeStore {
     pub fn create_session(&self, descriptor: SessionDescriptor) -> io::Result<SessionStore> {
         descriptor.validate()?;
         let _catalog = self.lock_catalog()?;
+        self.create_session_locked(descriptor)
+    }
+
+    fn create_session_locked(&self, descriptor: SessionDescriptor) -> io::Result<SessionStore> {
         let dir = self.root.join("sessions").join(descriptor.id.to_string());
         initialize_dir(&dir, |dir| {
             self.create_session_at(dir, descriptor.clone()).map(drop)
         })?;
-        self.open_session(descriptor.id)
+        self.open_session_locked(descriptor.id)
     }
 
     fn lock_catalog(&self) -> io::Result<File> {
@@ -678,6 +698,11 @@ impl RuntimeStore {
     }
 
     pub fn open_session(&self, id: Uuid) -> io::Result<SessionStore> {
+        let _catalog = self.lock_catalog()?;
+        self.open_session_locked(id)
+    }
+
+    fn open_session_locked(&self, id: Uuid) -> io::Result<SessionStore> {
         let dir = self.root.join("sessions").join(id.to_string());
         let owner_lock = SessionOwner::lock(&dir)?;
         let mut projection: Option<SessionProjection> = None;

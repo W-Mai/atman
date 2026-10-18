@@ -38,6 +38,14 @@ Migration work stays under `runtime-v1/.migrations/<destination>/work` until eve
 
 ## Session and flow storage
 
+### Project discovery and deletion
+
+`ProjectCatalogStore::reconcile_sessions` discovers projects from both flat legacy metadata and persistent session journals, including projects whose source directories no longer exist. Pin and archive settings remain unchanged. Persistent session discovery reads recorded bindings without opening execution owners or repairing logs; filesystem activity times are display hints, not execution facts.
+
+An archived project can be deleted only when its persistent sessions have no attached writer and every executable flow is explicitly closed. Idle, paused, and interrupted flows still retain their resources and history. The selected management session must be replaced before its project can be deleted. Incomplete or corrupt journals reject deletion without repair. Hosts must close flows through their resource owner and detach sessions before requesting deletion; project deletion does not perform lifecycle transitions itself.
+
+Session creation, opening, migration publication, management selection, and project deletion share the runtime catalog lock. Deletion validates all matching sessions before removing any project data and retains that lock through shared-data cleanup and catalog persistence. Validated session directories move to `runtime-v1/.deletions/<project-fingerprint>/<session-uuid>` before removal, so an interrupted filesystem cleanup cannot expose a partially deleted session. Retrying project deletion removes remaining staged data. Cleanup across multiple sessions, legacy history, and shared project files is not atomic; failures retain project registration and report an error. The persistent owner checks do not lock executors from older versions using flat legacy storage.
+
 ### Persistent TUI attachment
 
 `atman --continue <session-id-or-prefix>` opens a persistent session's default executable flow in the TUI. Its transcript, workflow, Goal, plan, pending-input count, and execution status come from one committed view snapshot. The Goal panel and sidebar use that same snapshot. Goal pause controls objective continuation independently of execution pause; `:pause`, `:resume`, `:recover`, and `:cancel` control execution explicitly.

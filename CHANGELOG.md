@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- **Project data ownership** — Project deletion checks persistent session ownership, closed flow lifecycles, and management bindings before removing shared data. Concurrent session opens and management changes cannot bypass these checks; interrupted directory removal can be retried.
+
 - **Terminal startup ownership** — Startup animation and interactive views stop and join their input reader before handing over the terminal. Persistent TUI attachment retains terminal cleanup through host shutdown, shows startup notices as toasts, and opens setup using the session's configuration when credentials or model selection are missing.
 
 - **Control command drafts** — Colon commands use authored prompt text and retain unsubmitted quotes and images. Shared submission acknowledgement keeps newer drafts and failed submissions intact across main and floating views.
@@ -15,6 +17,8 @@ All notable changes to atman are documented in this file.
 - **Image draft ownership** — Persistent main and floating views keep separate attachments when displaying the same flow. Refresh, deletion, and submission acknowledgements affect only the originating composer; panel and control commands retain images they did not submit.
 
 ### Features
+
+- **Persistent project discovery** — Project catalog discovery includes persistent session bindings alongside legacy metadata while preserving pin and archive settings. Projects with missing source directories remain listed.
 
 - **Persistent welcome navigation** — New Session shows recent sessions from the same project, ordered by journal activity. Keyboard and mouse selection reuse existing flow views and preserve drafts; All Sessions opens the shared directory without stopping background work.
 
