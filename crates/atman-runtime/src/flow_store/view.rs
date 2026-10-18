@@ -78,7 +78,8 @@ pub enum FlowUpdate {
         created_by: Option<FlowRef>,
     },
     Activated {
-        envelope: Box<inbox::AcceptedEnvelope>,
+        flow: FlowRef,
+        envelope: Option<Box<inbox::AcceptedEnvelope>>,
         inherited_context: Vec<Message>,
     },
     WorkspaceRequested(Box<super::workspace::WorkspaceRequest>),
@@ -121,7 +122,8 @@ impl From<FlowFact> for FlowUpdate {
                 created_by: descriptor.created_by,
             },
             FlowFact::Activated(activation) => Self::Activated {
-                envelope: Box::new(activation.envelope()),
+                flow: activation.input.request.recipient.clone(),
+                envelope: activation.envelope().map(Box::new),
                 inherited_context: activation.input.inherited_context,
             },
             FlowFact::WorkspaceRequested(value) => Self::WorkspaceRequested(value),

@@ -156,9 +156,16 @@ impl FlowTranscript {
                     Some(flow)
                 }
                 FlowUpdate::CommandAccepted { recipient, .. } => Some(recipient),
-                FlowUpdate::Activated { envelope, .. } | FlowUpdate::EnvelopeAccepted(envelope) => {
-                    Some(&envelope.request.recipient)
+                FlowUpdate::Activated { flow, envelope, .. } => {
+                    if envelope
+                        .as_ref()
+                        .is_some_and(|envelope| &envelope.request.recipient != flow)
+                    {
+                        return Err(invalid("activation input belongs to another flow"));
+                    }
+                    Some(flow)
                 }
+                FlowUpdate::EnvelopeAccepted(envelope) => Some(&envelope.request.recipient),
                 FlowUpdate::InputCommitted(input) => Some(&input.lease.flow),
                 FlowUpdate::MessagePublished(publication) => Some(&publication.lease.flow),
                 FlowUpdate::TurnCompleted(completion) => Some(&completion.lease.flow),

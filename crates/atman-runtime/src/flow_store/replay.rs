@@ -13,7 +13,7 @@ pub(super) struct FlowReplay {
     pub(super) publications: publication::Publications,
     pub(super) subscriptions: subscription::Subscriptions,
     pub(super) process_watches: process_watch::ProcessWatches,
-    pub(super) activation: Option<launch::Activation>,
+    pub(super) activation: Option<(launch::Activation, CommitReceipt)>,
     pub(super) workspace: Option<workspace::WorkspaceRequest>,
     pub(super) closed: Option<CommitReceipt>,
     pub(super) completions: completion::Completions,
@@ -94,7 +94,7 @@ impl FlowReplay {
                     )?;
                     inbox.state_changed(state, &receipt);
                     record.apply(inbox, &receipt);
-                    self.activation = Some(*record);
+                    self.activation = Some((*record, receipt.clone()));
                 }
                 (Some((_, state, inbox)), FlowFact::TurnCompleted(completion)) => {
                     inbox.turn_completed(&completion, &receipt);
@@ -140,7 +140,7 @@ impl FlowReplay {
                     let window = publication::context_window(
                         inbox,
                         &self.publications,
-                        self.activation.as_ref(),
+                        self.activation.as_ref().map(|(record, _)| record),
                         self.checkpoints.latest(),
                     );
                     self.checkpoints.validate(state, &checkpoint, &window)?;

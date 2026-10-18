@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::flow_runtime::launch::EntryExecution;
-use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity};
+use crate::flow_store::inbox::SenderIdentity;
 use crate::flow_store::launch::{EntryBinding, LaunchInput, ResultRoute, SynchronousReply};
 use crate::flow_store::{EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef};
 
@@ -144,19 +144,13 @@ pub(super) async fn spawn(
             first_run,
             authority: authority.clone(),
         }),
-        request: DeliveryRequest {
+        request: crate::flow_store::launch::EntryRequest {
             request_id: creation,
             sender: SenderIdentity::Flow(client.source().clone()),
             recipient: address.clone(),
-            delivery: DeliveryMode::NextTurn,
-            cause: None,
-            correlation: None,
-            scope: None,
-            payload: InboxPayload::Invocation {
-                user: None,
-                arguments: arguments.clone(),
-                invocation: invocation.clone(),
-            },
+            arguments: arguments.clone(),
+            invocation: invocation.clone(),
+            start: crate::flow_store::launch::EntryStart::Invoke { user: None },
         },
         inherited_context: history,
         result_route: Some(ResultRoute {

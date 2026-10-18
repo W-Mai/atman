@@ -30,6 +30,215 @@ fn session_info() -> SessionDescriptor {
 }
 
 #[tokio::test]
+async fn waiting_entries_restore_without_input_and_start_hooks_with_the_first_real_turn() {
+    use atman_runtime::flow_runtime::launch::EntryExecution;
+    use atman_runtime::flow_store::launch::{EntryBinding, EntryStart};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_info();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let mut entry = descriptor(info.id);
+    entry.entry_mut().unwrap().bundle.sources.insert(
+        "entry:main.at".into(),
+        r#"flow main(label: string, amount: int) -> string {
+        contract { invocation { user_message: label } }
+        when amount != 42 { return final.answer(message: "wrong defaults") }
+        return final.answer(message: label)
+    }"#
+        .into(),
+    );
+    let authority = EffectiveAuthority::root(&Default::default(), false, None);
+    let first_turn = TurnId::now();
+    let first_run = RunId::now();
+    let mut input = initial(&entry, &entry.address);
+    input.request.start = EntryStart::Waiting;
+    input.request.sender = SenderIdentity::User(Uuid::now_v7());
+    input.inherited_context.clear();
+    input.result_route = None;
+    input.execution = Some(EntryBinding {
+        session_start: true,
+        first_turn: first_turn.clone(),
+        first_run: first_run.clone(),
+        authority: authority.clone(),
+    });
+    let mut invalid = input.clone();
+    invalid.execution = None;
+    assert!(
+        host.launch_flow(entry.clone(), invalid, |_, _| Ok(()))
+            .await
+            .is_err()
+    );
+    assert!(session.snapshot().await.unwrap().catalog.flows.is_empty());
+    let executor = || {
+        let mut executor = Executor::new();
+        atman_runtime::tools::register_flow_memory(&executor.tools);
+        let mut hooks = atman_runtime::lifecycle::LifecycleRunner::new();
+        hooks.absorb(&atman_rt::parse_file(r#"on session.start { memory.todo.set(where: "startup", why: "container", how: "hook", expected_result: "once") }"#).unwrap());
+        executor.tool_ctx.lifecycle_hooks = Some(Arc::new(hooks));
+        executor
+    };
+    let launched = host
+        .launch_entry(
+            entry.clone(),
+            input.clone(),
+            EntryExecution {
+                executor: executor(),
+                authority: authority.clone(),
+                trust: Default::default(),
+                yield_interval: NonZeroUsize::new(16).unwrap(),
+                catalog: session.snapshot().await.unwrap().cursor,
+            },
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap();
+    assert!(launched.record.acceptance.is_none());
+    host.wait_quiescent().await.unwrap();
+    let snapshot = launched.worker.snapshot().await.unwrap();
+    assert!(snapshot.pending.is_empty() && snapshot.last_invocation.is_none());
+    assert!(launched.worker.context().messages_full().is_empty());
+    assert!(launched.worker.planning().await.unwrap().todos.is_empty());
+    let mut reader = launched
+        .worker
+        .subscribe_view(NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
+    let view = reader.refresh().await.unwrap();
+    assert_eq!(view.transcript().turns().count(), 0);
+    assert!(view.snapshot().pending.is_empty());
+    let receipt = launched.record.receipt;
+    host.shutdown().await.unwrap();
+
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.open_session(info.id).unwrap())
+        .unwrap();
+    let worker = session
+        .open_flow(entry.address.instance_id.clone())
+        .await
+        .unwrap();
+    let restored = worker.launch_record().await.unwrap().unwrap();
+    assert_eq!(restored.receipt, receipt);
+    assert!(restored.acceptance.is_none());
+    assert_eq!(restored.input, input);
+    session
+        .bind_entry(
+            entry.address.instance_id.clone(),
+            executor(),
+            authority,
+            Default::default(),
+            NonZeroUsize::new(16).unwrap(),
+        )
+        .await
+        .unwrap();
+    host.wait_quiescent().await.unwrap();
+    assert!(worker.snapshot().await.unwrap().last_invocation.is_none());
+    for text in ["first real input", "second real input"] {
+        worker
+            .accept_input(
+                DeliveryRequest {
+                    request_id: Uuid::now_v7(),
+                    sender: input.request.sender.clone(),
+                    recipient: entry.address.clone(),
+                    delivery: DeliveryMode::NextTurn,
+                    cause: None,
+                    correlation: None,
+                    scope: None,
+                    payload: InboxPayload::UserSubmission {
+                        content: atman_runtime::flow_store::inbox::UserContent {
+                            text: text.into(),
+                            images: vec![],
+                            presentation: None,
+                        },
+                        invocation: Default::default(),
+                    },
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+            .await
+            .unwrap()
+            .unwrap();
+        let snapshot = worker.snapshot().await.unwrap();
+        let invocation = snapshot.last_invocation.unwrap();
+        if text == "first real input" {
+            assert_eq!(invocation.lease.turn, first_turn);
+            assert_eq!(invocation.lease.run, first_run);
+        } else {
+            assert_ne!(invocation.lease.turn, first_turn);
+        }
+        assert_eq!(worker.planning().await.unwrap().todos.len(), 1);
+        assert_eq!(
+            worker
+                .context()
+                .messages_full()
+                .last()
+                .unwrap()
+                .text_concat(),
+            text
+        );
+    }
+    let retry = host
+        .launch_flow(entry, input, |_, _| {
+            panic!("accepted activation reauthorized")
+        })
+        .await
+        .unwrap();
+    assert_eq!(retry.record.receipt, receipt);
+    assert!(retry.record.acceptance.is_none());
+    host.shutdown().await.unwrap();
+}
+
+#[test]
+fn waiting_activation_and_initial_goal_share_atomic_recovery_without_an_inbox_receipt() {
+    use atman_runtime::flow_store::launch::{EntryBinding, EntryStart};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_info();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let entry = descriptor(info.id);
+    let mut store = session.create_flow(entry.clone()).unwrap();
+    let mut input = initial(&entry, &entry.address);
+    input.request.start = EntryStart::Waiting;
+    input.result_route = None;
+    input.initial_goal = Some("Wait for the user's work".into());
+    input.execution = Some(EntryBinding {
+        session_start: false,
+        first_turn: TurnId::now(),
+        first_run: RunId::now(),
+        authority: EffectiveAuthority::root(&Default::default(), false, None),
+    });
+    let path = store.dir().join("events.jsonl");
+    let prefix = std::fs::metadata(&path).unwrap().len();
+    let record = store
+        .activate_entry(input.clone(), None, |_| Ok(()))
+        .unwrap();
+    assert!(record.acceptance.is_none());
+    assert!(store.pending_inputs().next().is_none());
+    assert!(store.goal().is_some());
+    drop(store);
+    let complete = std::fs::read(&path).unwrap();
+    std::fs::write(&path, &complete[..complete.len() - 1]).unwrap();
+    let mut store = session.open_flow(&entry.address.instance_id).unwrap();
+    assert_eq!(store.state().state(), &InstanceState::Prepared);
+    assert!(store.goal().is_none() && store.launch_record().is_none());
+    assert!(store.pending_inputs().next().is_none());
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), prefix);
+    let record = store.activate_entry(input, None, |_| Ok(())).unwrap();
+    assert!(record.acceptance.is_none());
+    drop(store);
+    let store = session.open_flow(&entry.address.instance_id).unwrap();
+    assert_eq!(store.launch_record().unwrap().receipt, record.receipt);
+    assert!(store.goal().is_some());
+    assert!(store.inbox_entries().is_empty());
+}
+
+#[tokio::test]
 async fn live_output_tracks_execution_and_clears_before_committed_final_delivery() {
     use atman_runtime::flow_runtime::live::DraftPart;
     let directory = tempfile::tempdir().unwrap();
@@ -51,7 +260,10 @@ async fn live_output_tracks_execution_and_clears_before_committed_final_delivery
     store
         .transition(store.state().revision(), FlowTransition::Activated)
         .unwrap();
-    let mut request = initial(&entry, &entry.address).request;
+    let mut request = initial(&entry, &entry.address)
+        .request
+        .initial_input()
+        .unwrap();
     request.sender = SenderIdentity::User(Uuid::now_v7());
     store.accept_input(request.clone(), |_| Ok(())).unwrap();
     let worker = FlowWorker::start(store).await.unwrap();
@@ -235,23 +447,17 @@ fn initial(info: &FlowDescriptor, recipient: &FlowRef) -> LaunchInput {
         workspace: None,
         initial_goal: None,
         execution: None,
-        request: DeliveryRequest {
+        request: atman_runtime::flow_store::launch::EntryRequest {
             request_id: info.creation_request,
             sender: SenderIdentity::Flow(recipient.clone()),
             recipient: info.address.clone(),
-            delivery: DeliveryMode::NextTurn,
-            cause: None,
-            correlation: None,
-            scope: None,
-            payload: InboxPayload::Invocation {
-                user: None,
-                arguments: [
-                    ("label".into(), "first answer".into()),
-                    ("amount".into(), 42.into()),
-                ]
-                .into(),
-                invocation: [("effort".into(), "high".into())].into(),
-            },
+            arguments: [
+                ("label".into(), "first answer".into()),
+                ("amount".into(), 42.into()),
+            ]
+            .into(),
+            invocation: [("effort".into(), "high".into())].into(),
+            start: atman_runtime::flow_store::launch::EntryStart::Invoke { user: None },
         },
         inherited_context: vec![
             Message::user_text(TurnId::now(), "previous context"),
@@ -402,7 +608,8 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
         ],
         presentation: Some(presentation),
     };
-    let InboxPayload::Invocation { user, .. } = &mut input.request.payload else {
+    let atman_runtime::flow_store::launch::EntryStart::Invoke { user } = &mut input.request.start
+    else {
         unreachable!()
     };
     *user = Some(content.clone());
@@ -464,14 +671,14 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
     let launched = launched.unwrap();
     let repeated = repeated.unwrap();
     assert_eq!(
-        launched.record.acceptance.receipt,
-        repeated.record.acceptance.receipt
+        launched.record.acceptance.as_ref().unwrap().receipt,
+        repeated.record.acceptance.as_ref().unwrap().receipt
     );
     assert_eq!(
-        launched.record.acceptance.message_id,
-        repeated.record.acceptance.message_id
+        launched.record.acceptance.as_ref().unwrap().message_id,
+        repeated.record.acceptance.as_ref().unwrap().message_id
     );
-    let receipt = launched.record.acceptance.clone();
+    let receipt = launched.record.acceptance.clone().unwrap();
     let worker = launched.worker.clone();
     drop(launched);
     delivered(&worker, "first answer").await;
@@ -494,14 +701,14 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
         content.images.iter().collect::<Vec<_>>()
     );
     assert!(human.parts.iter().any(|part| matches!(part, atman_runtime::message::MessagePart::InputPresentation { presentation } if Some(presentation) == content.presentation.as_ref())));
-    let InboxPayload::Invocation { user, .. } = worker
+    let atman_runtime::flow_store::launch::EntryStart::Invoke { user } = worker
         .launch_record()
         .await
         .unwrap()
         .unwrap()
         .input
         .request
-        .payload
+        .start
     else {
         unreachable!()
     };
@@ -548,10 +755,16 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
         })
         .await
         .unwrap();
-    assert_eq!(retry.record.acceptance.message_id, receipt.message_id);
-    assert_eq!(retry.record.acceptance.receipt, receipt.receipt);
+    assert_eq!(
+        retry.record.acceptance.as_ref().unwrap().message_id,
+        receipt.message_id
+    );
+    assert_eq!(
+        retry.record.acceptance.as_ref().unwrap().receipt,
+        receipt.receipt
+    );
     assert!(matches!(
-        retry.record.acceptance.disposition,
+        retry.record.acceptance.as_ref().unwrap().disposition,
         InboxDisposition::InputCommitted { .. }
     ));
     assert_eq!(worker.snapshot().await.unwrap().state, paused.state);
@@ -664,7 +877,7 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     let mut source = session.create_flow(source_info.clone()).unwrap();
     let mut input = initial(&source_info, recipient.state().address());
     input.initial_goal = Some("Finish the requested work".into());
-    let mut invalid_mid_turn = input.request.clone();
+    let mut invalid_mid_turn = input.request.initial_input().unwrap();
     invalid_mid_turn.recipient = recipient.state().address().clone();
     invalid_mid_turn.delivery = DeliveryMode::AtBoundary;
     assert!(
@@ -674,7 +887,7 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     );
     assert!(
         source
-            .activate_with_input(input.clone(), None, |_| Ok(()))
+            .activate_entry(input.clone(), None, |_| Ok(()))
             .is_err()
     );
     assert_eq!(source.state().state(), &InstanceState::Prepared);
@@ -706,7 +919,7 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     });
     assert!(
         source
-            .activate_with_input(invalid_binding, Some(proof.clone()), |_| Ok(()))
+            .activate_entry(invalid_binding, Some(proof.clone()), |_| Ok(()))
             .is_err()
     );
     assert_eq!(source.state().state(), &InstanceState::Prepared);
@@ -721,14 +934,14 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     });
     assert!(
         source
-            .activate_with_input(peer_start, Some(proof.clone()), |_| Ok(()))
+            .activate_entry(peer_start, Some(proof.clone()), |_| Ok(()))
             .is_err()
     );
     let mut invalid_goal = input.clone();
     invalid_goal.initial_goal = Some("  ".into());
     assert!(
         source
-            .activate_with_input(invalid_goal, Some(proof.clone()), |_| Ok(()))
+            .activate_entry(invalid_goal, Some(proof.clone()), |_| Ok(()))
             .is_err()
     );
     assert_eq!(source.state().state(), &InstanceState::Prepared);
@@ -737,15 +950,18 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
         .unwrap()
         .len() as usize;
     let committed = source
-        .activate_with_input(input.clone(), Some(proof.clone()), |_| Ok(()))
+        .activate_entry(input.clone(), Some(proof.clone()), |_| Ok(()))
         .unwrap();
-    assert_eq!(source.cursor(), &committed.acceptance.receipt);
+    assert_eq!(
+        source.cursor(),
+        &committed.acceptance.as_ref().unwrap().receipt
+    );
     let goal = source.goal().cloned().unwrap();
     assert_eq!(goal.objective, "Finish the requested work");
     assert_eq!(goal.revision, 1);
     assert_eq!(
         source.goal_updates()[0].receipt,
-        committed.acceptance.receipt
+        committed.acceptance.as_ref().unwrap().receipt
     );
     source
         .transition(
@@ -764,7 +980,7 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     assert_eq!(source.goal_updates().len(), 1);
     assert_eq!(
         source
-            .activate_with_input(input.clone(), None, |_| panic!("retry reauthorized"))
+            .activate_entry(input.clone(), None, |_| panic!("retry reauthorized"))
             .unwrap()
             .acceptance,
         committed.acceptance
@@ -774,25 +990,22 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     changed_goal.initial_goal = Some("different objective".into());
     assert!(
         source
-            .activate_with_input(changed_goal, None, |_| Ok(()))
+            .activate_entry(changed_goal, None, |_| Ok(()))
             .is_err()
     );
     assert_eq!(source.goal(), Some(&goal));
     let mut changed = input.clone();
     changed.inherited_context.clear();
-    assert!(
-        source
-            .activate_with_input(changed, None, |_| Ok(()))
-            .is_err()
-    );
+    assert!(source.activate_entry(changed, None, |_| Ok(())).is_err());
     source
         .transition(source.state().revision(), FlowTransition::CloseRequested)
         .unwrap();
     assert!(matches!(
         source
-            .activate_with_input(input.clone(), None, |_| panic!("closed retry reauthorized"))
+            .activate_entry(input.clone(), None, |_| panic!("closed retry reauthorized"))
             .unwrap()
             .acceptance
+            .unwrap()
             .disposition,
         InboxDisposition::Cancelled { .. }
     ));
@@ -817,7 +1030,7 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     assert!(recovered.goal().is_none());
     assert!(recovered.goal_updates().is_empty());
     recovered
-        .activate_with_input(input, Some(proof), |_| Ok(()))
+        .activate_entry(input, Some(proof), |_| Ok(()))
         .unwrap();
     assert_eq!(recovered.pending_inputs().count(), 1);
     assert_eq!(
@@ -858,8 +1071,8 @@ async fn host_launch_registers_before_execution_and_restores_parameters_context_
     let first = first.unwrap();
     let retry = retry.unwrap();
     assert_eq!(
-        first.record.acceptance.receipt,
-        retry.record.acceptance.receipt
+        first.record.acceptance.as_ref().unwrap().receipt,
+        retry.record.acceptance.as_ref().unwrap().receipt
     );
     let received = wait_answer(&recipient).await;
     assert_eq!(received.pending.len(), 1);
@@ -955,10 +1168,11 @@ async fn host_launch_registers_before_execution_and_restores_parameters_context_
             .unwrap()
             .unwrap()
             .acceptance
+            .unwrap()
             .disposition,
         InboxDisposition::InputCommitted { .. }
     ));
-    let receipt = first.record.acceptance.receipt.clone();
+    let receipt = first.record.acceptance.as_ref().unwrap().receipt.clone();
     drop(first);
     drop(retry);
     session
@@ -976,13 +1190,13 @@ async fn host_launch_registers_before_execution_and_restores_parameters_context_
         restored.worker.context().messages_full().as_ref(),
         history.as_ref()
     );
-    assert_eq!(restored.record.acceptance.receipt, receipt);
+    assert_eq!(
+        restored.record.acceptance.as_ref().unwrap().receipt,
+        receipt
+    );
     assert!(restored.worker.snapshot().await.unwrap().pending.is_empty());
     let mut changed = input;
-    let InboxPayload::Invocation { arguments, .. } = &mut changed.request.payload else {
-        unreachable!()
-    };
-    arguments.insert("amount".into(), 43.into());
+    changed.request.arguments.insert("amount".into(), 43.into());
     assert!(
         host.launch_flow(source_info, changed, |_, _| Ok(()))
             .await
@@ -1070,5 +1284,8 @@ async fn failed_activation_stays_prepared_and_abandoned_retry_finishes_without_n
         })
         .await
         .unwrap();
-    assert_eq!(retried.record.acceptance.receipt, stored.acceptance.receipt);
+    assert_eq!(
+        retried.record.acceptance.as_ref().unwrap().receipt,
+        stored.acceptance.as_ref().unwrap().receipt
+    );
 }

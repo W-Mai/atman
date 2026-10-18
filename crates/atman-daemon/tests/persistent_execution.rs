@@ -67,6 +67,49 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
+#[test]
+fn waiting_launch_records_configuration_without_input_and_preserves_gates_on_restore() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flow, launch, accepted) = runtime().block_on(async {
+        let (state, flow, mut launch) = setup(&dir, "flow main(label: string) -> string { return final.answer(message: label) }").await;
+        launch["start"] = json!("waiting");
+        let mut invalid = launch.clone();
+        invalid["user"] = json!({"text": "must not be discarded"});
+        assert!(dispatch(state.clone(), JsonRpcRequest::new(1, methods::FLOW_LAUNCH, invalid)).await.error.is_some());
+        let accepted = rpc(&state, methods::FLOW_LAUNCH, launch.clone()).await;
+        assert!(accepted["acceptance"].is_null());
+        assert!(accepted["receipt"].is_object());
+        assert_eq!(rpc(&state, methods::FLOW_LAUNCH, launch.clone()).await, accepted);
+        let view = rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await;
+        assert!(view["last_completion"].is_null());
+        assert_eq!(view["execution"]["state"]["open"], "idle");
+        assert_eq!(rpc(&state, methods::FLOW_OUTPUT, json!({"flow": flow})).await["messages"], json!([]));
+        let mut conflict = launch.clone();
+        conflict["start"] = json!("invoke");
+        assert!(dispatch(state.clone(), JsonRpcRequest::new(1, methods::FLOW_LAUNCH, conflict)).await.error.is_some());
+        rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "action": "pause", "expected_revision": view["execution"]["revision"]})).await;
+        std::fs::remove_file(dir.path().join("main.at")).unwrap();
+        state.shutdown().await.unwrap();
+        (flow, launch, accepted)
+    });
+    runtime().block_on(async {
+        let state = Arc::new(DaemonState::new(dir.path().join("data")));
+        rpc(&state, methods::SESSION_OPEN, json!({"session_id": flow["session_id"]})).await;
+        assert_eq!(rpc(&state, methods::FLOW_LAUNCH, launch).await, accepted);
+        rpc(&state, methods::FLOW_BIND, json!({"flow": flow})).await;
+        rpc(&state, methods::FLOW_INVOKE, json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"label": "real input"}, "user": {"text": "real input"}})).await;
+        let paused = rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await;
+        assert!(paused["last_completion"].is_null());
+        assert_eq!(paused["execution"]["pause_count"], 1);
+        rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "action": "resume", "expected_revision": paused["execution"]["revision"]})).await;
+        wait_completion(&state, &flow, None).await;
+        let output = rpc(&state, methods::FLOW_OUTPUT, json!({"flow": flow})).await;
+        assert_eq!(output["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(answer(&output, 0), "real input");
+        state.shutdown().await.unwrap();
+    });
+}
+
 #[tokio::test]
 async fn close_rpc_stops_paused_execution_and_preserves_history_across_restart() {
     let dir = tempfile::tempdir().unwrap();

@@ -184,9 +184,6 @@ impl FlowWorker {
                                     .execution
                                     .as_ref()
                                     .is_some_and(|binding| binding.session_start)
-                                    && reserved
-                                        .message_ids()
-                                        .contains(&record.acceptance.message_id)
                             }),
                     )
                     .with_vm_options(

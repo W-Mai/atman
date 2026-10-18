@@ -888,7 +888,7 @@ pub struct FlowStore {
     publications: publication::Publications,
     subscriptions: subscription::Subscriptions,
     process_watches: process_watch::ProcessWatches,
-    activation: Option<launch::Activation>,
+    activation: Option<(launch::Activation, CommitReceipt)>,
     workspace: Option<workspace::WorkspaceRequest>,
     completions: completion::Completions,
     checkpoints: context::Checkpoints,

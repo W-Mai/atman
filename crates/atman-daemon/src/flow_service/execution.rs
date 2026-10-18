@@ -15,7 +15,7 @@ use atman_runtime::flow_runtime::launch::EntryExecution;
 use atman_runtime::flow_store::inbox::{
     DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity,
 };
-use atman_runtime::flow_store::launch::{EntryBinding, LaunchInput};
+use atman_runtime::flow_store::launch::{EntryBinding, EntryRequest, EntryStart, LaunchInput};
 use atman_runtime::flow_store::{
     EntrySnapshot, FlowDescriptor, SessionConfiguration, SessionDescriptor,
 };
@@ -152,10 +152,25 @@ impl SessionService {
         let flow = core_address(request.flow.clone());
         let session = self.session(flow.session_id.0)?;
         let snapshot = session.snapshot().await?;
-        let payload = InboxPayload::Invocation {
-            user: user_content(request.user.as_ref())?,
+        let start = match request.start {
+            atman_proto::flows::FlowStart::Invoke => EntryStart::Invoke {
+                user: user_content(request.user.as_ref())?,
+            },
+            atman_proto::flows::FlowStart::Waiting => {
+                ensure!(
+                    request.user.is_none(),
+                    "waiting activation cannot accept user input"
+                );
+                EntryStart::Waiting
+            }
+        };
+        let entry_request = EntryRequest {
+            request_id: request.request_id,
+            recipient: flow.clone(),
+            sender: SenderIdentity::User(OPERATOR),
             arguments: request.arguments.clone(),
             invocation: request.invocation.clone(),
+            start,
         };
         let descriptor = if snapshot
             .catalog
@@ -174,12 +189,13 @@ impl SessionService {
             );
             if let Some(record) = worker.launch_record().await? {
                 ensure!(
-                    record.input.request.sender == SenderIdentity::User(OPERATOR)
-                        && record.input.request.payload == payload
+                    record.input.request == entry_request
                         && record.input.initial_goal == request.initial_goal,
                     "launch conflicts with the recorded input"
                 );
-                return Ok(json!({"flow": address(&flow), "acceptance": record.acceptance}));
+                return Ok(
+                    json!({"flow": address(&flow), "receipt": record.receipt, "acceptance": record.acceptance}),
+                );
             }
             descriptor
         } else {
@@ -216,14 +232,16 @@ impl SessionService {
                 snapshot,
                 PreparedEntry {
                     descriptor,
-                    payload,
+                    request: entry_request,
                     initial_goal: request.initial_goal,
                     session_start: false,
                 },
                 launcher_home(state),
             )
             .await?;
-        Ok(json!({"flow": address(&flow), "acceptance": launched.record.acceptance}))
+        Ok(
+            json!({"flow": address(&flow), "receipt": launched.record.receipt, "acceptance": launched.record.acceptance}),
+        )
     }
 
     async fn activate_entry(
@@ -235,7 +253,7 @@ impl SessionService {
     ) -> Result<atman_runtime::flow_runtime::launch::LaunchedFlow> {
         let PreparedEntry {
             descriptor,
-            payload,
+            request,
             initial_goal,
             session_start,
         } = entry;
@@ -252,16 +270,7 @@ impl SessionService {
                 first_run: atman_rt::RunId(request_id.into()),
                 authority: authority.clone(),
             }),
-            request: DeliveryRequest {
-                request_id,
-                sender: SenderIdentity::User(OPERATOR),
-                recipient: descriptor.address.clone(),
-                delivery: DeliveryMode::NextTurn,
-                cause: None,
-                correlation: None,
-                scope: None,
-                payload,
-            },
+            request,
             inherited_context: vec![],
             result_route: None,
         };
@@ -360,7 +369,7 @@ fn config(descriptor: &SessionDescriptor) -> Result<ConfigHub> {
 
 struct PreparedEntry {
     descriptor: FlowDescriptor,
-    payload: InboxPayload,
+    request: EntryRequest,
     initial_goal: Option<String>,
     session_start: bool,
 }
@@ -483,12 +492,15 @@ pub(crate) async fn launch_run(
             &state,
             handle.snapshot().await?,
             PreparedEntry {
-                descriptor,
-                payload: InboxPayload::Invocation {
-                    user,
+                request: EntryRequest {
+                    request_id: descriptor.creation_request,
+                    sender: SenderIdentity::User(OPERATOR),
+                    recipient: descriptor.address.clone(),
                     arguments,
                     invocation,
+                    start: EntryStart::Invoke { user },
                 },
+                descriptor,
                 initial_goal,
                 session_start: true,
             },
@@ -497,7 +509,15 @@ pub(crate) async fn launch_run(
         .await?;
     let goal_id = options
         .goal
-        .then(|| launched.record.acceptance.message_id.to_string());
+        .then(|| {
+            launched
+                .record
+                .acceptance
+                .as_ref()
+                .context("initial invocation has no acceptance")
+                .map(|accepted| accepted.message_id.to_string())
+        })
+        .transpose()?;
     Ok(crate::run::SpawnedRun {
         session_id,
         instance_id,

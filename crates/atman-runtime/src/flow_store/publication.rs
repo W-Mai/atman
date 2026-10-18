@@ -112,7 +112,7 @@ impl FlowStore {
         context_window(
             &self.inbox,
             &self.publications,
-            self.activation.as_ref(),
+            self.activation.as_ref().map(|(record, _)| record),
             self.checkpoints.latest(),
         )
     }
@@ -122,7 +122,7 @@ impl FlowStore {
         conversation(
             &self.inbox,
             &self.publications,
-            self.activation.as_ref(),
+            self.activation.as_ref().map(|(record, _)| record),
             None,
         )
     }

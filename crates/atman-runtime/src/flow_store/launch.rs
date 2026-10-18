@@ -1,13 +1,16 @@
-//! Atomic instance activation with its initial invocation and committed reply route.
+//! Atomic entry activation with optional initial input and a committed reply route.
 
-use std::io;
+use std::{collections::BTreeMap, io};
 
 use atman_rt::{FlowInstance, InstanceState};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::inbox::{Acceptance, AcceptedEnvelope, DeliveryRequest, Inbox, InboxPayload};
+use super::inbox::{
+    Acceptance, AcceptedEnvelope, DeliveryMode, DeliveryRequest, Inbox, InboxPayload,
+    SenderIdentity, UserContent,
+};
 use super::subscription::{
     FlowEventFilter, FlowSubscription, ResultRegistration, ResultSubscriptionProof,
     SubscriptionPurpose, SubscriptionStatus,
@@ -56,12 +59,80 @@ impl ResultRoute {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LaunchInput {
     pub workspace: Option<super::workspace::WorkspaceRequest>,
-    pub request: DeliveryRequest,
+    pub request: EntryRequest,
     /// Explicit initial objective, committed with activation before any turn can start.
     pub initial_goal: Option<String>,
     pub inherited_context: Vec<Message>,
     pub result_route: Option<ResultRoute>,
     pub execution: Option<EntryBinding>,
+}
+
+impl LaunchInput {
+    pub(crate) fn validate(&self) -> io::Result<()> {
+        self.request.validate_source()?;
+        if matches!(self.request.start, EntryStart::Waiting)
+            && (self.execution.is_none()
+                || self
+                    .result_route
+                    .as_ref()
+                    .is_some_and(|route| route.synchronous.is_some()))
+        {
+            return Err(invalid(
+                "waiting entry requires an execution binding and cannot await an initial result",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Creation identity and entry defaults exist independently of pending invocation input.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EntryRequest {
+    pub request_id: Uuid,
+    pub sender: SenderIdentity,
+    pub recipient: FlowRef,
+    pub arguments: BTreeMap<String, serde_json::Value>,
+    pub invocation: BTreeMap<String, serde_json::Value>,
+    pub start: EntryStart,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EntryStart {
+    Waiting,
+    Invoke { user: Option<UserContent> },
+}
+
+impl EntryRequest {
+    pub fn initial_input(&self) -> Option<DeliveryRequest> {
+        let EntryStart::Invoke { user } = &self.start else {
+            return None;
+        };
+        Some(DeliveryRequest {
+            request_id: self.request_id,
+            sender: self.sender.clone(),
+            recipient: self.recipient.clone(),
+            delivery: DeliveryMode::NextTurn,
+            cause: None,
+            correlation: None,
+            scope: None,
+            payload: InboxPayload::Invocation {
+                arguments: self.arguments.clone(),
+                invocation: self.invocation.clone(),
+                user: user.clone(),
+            },
+        })
+    }
+
+    pub(crate) fn validate_source(&self) -> io::Result<()> {
+        if self.request_id.is_nil() {
+            return Err(invalid("entry request identity is empty"));
+        }
+        if let Some(input) = self.initial_input() {
+            input.validate_source()?;
+        }
+        Ok(())
+    }
 }
 
 /// Recorded identity and structural ceilings; restoring them does not authorize execution.
@@ -77,7 +148,8 @@ pub struct EntryBinding {
 #[derive(Clone, Debug)]
 pub struct LaunchRecord {
     pub input: LaunchInput,
-    pub acceptance: Acceptance,
+    pub receipt: CommitReceipt,
+    pub acceptance: Option<Acceptance>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -107,12 +179,15 @@ impl Activation {
             })
     }
 
-    pub(super) fn envelope(&self) -> AcceptedEnvelope {
-        AcceptedEnvelope {
-            id: self.id,
-            accepted_at: self.accepted_at,
-            request: self.input.request.clone(),
-        }
+    pub(super) fn envelope(&self) -> Option<AcceptedEnvelope> {
+        self.input
+            .request
+            .initial_input()
+            .map(|request| AcceptedEnvelope {
+                id: self.id,
+                accepted_at: self.accepted_at,
+                request,
+            })
     }
 
     pub fn validate(
@@ -126,14 +201,12 @@ impl Activation {
             || self.id.is_nil()
             || self.input.request.recipient != descriptor.address
             || self.input.request.request_id != descriptor.creation_request
-            || self.input.request.scope.is_some()
-            || self.input.request.cause.is_some()
-            || !matches!(self.input.request.payload, InboxPayload::Invocation { .. })
         {
             return Err(invalid(
-                "activation requires the prepared instance's original invocation",
+                "activation requires the prepared instance's creation identity",
             ));
         }
+        self.input.validate()?;
         if let Some(binding) = &self.input.execution
             && (binding.first_turn.0.0.is_nil()
                 || binding.first_run.0.0.is_nil()
@@ -193,32 +266,38 @@ impl Activation {
                 ));
             }
         }
-        inbox.validate(&self.envelope())?;
+        if let Some(envelope) = self.envelope() {
+            inbox.validate(&envelope)?;
+        }
         let mut candidate = state.clone();
         candidate.activate().map_err(invalid)?;
         Ok(candidate)
     }
 
-    pub fn apply(&self, inbox: &mut Inbox, receipt: &CommitReceipt) -> Acceptance {
-        inbox.apply(self.envelope(), receipt.clone())
+    pub fn apply(&self, inbox: &mut Inbox, receipt: &CommitReceipt) -> Option<Acceptance> {
+        self.envelope()
+            .map(|envelope| inbox.apply(envelope, receipt.clone()))
     }
 }
 
 impl FlowStore {
     pub fn launch_record(&self) -> Option<LaunchRecord> {
-        self.activation.as_ref().map(|activation| LaunchRecord {
-            input: activation.input.clone(),
-            acceptance: self
-                .inbox
-                .previous(&activation.input.request)
-                .expect("validated launch input")
-                .expect("committed launch acceptance"),
-        })
+        self.activation
+            .as_ref()
+            .map(|(activation, receipt)| LaunchRecord {
+                input: activation.input.clone(),
+                receipt: receipt.clone(),
+                acceptance: activation.input.request.initial_input().map(|request| {
+                    self.inbox
+                        .previous(&request)
+                        .expect("validated launch input")
+                        .expect("committed launch acceptance")
+                }),
+            })
     }
 
-    /// Authenticate before calling. Identical retries recover acceptance without changing lifecycle,
-    /// pause state, or consumption; only new activation requires current authorization and proof.
-    pub fn activate_with_input(
+    /// Authenticate before calling. Identical retries recover activation and input receipts without changing lifecycle, pause state, or consumption; only new activation requires current authorization and proof.
+    pub fn activate_entry(
         &mut self,
         input: LaunchInput,
         proof: Option<ResultSubscriptionProof>,
@@ -266,10 +345,14 @@ impl FlowStore {
         if let Some((update, goal)) = goal {
             self.goals.apply(update, goal, receipt.clone());
         }
-        self.cursor = receipt;
+        self.cursor = receipt.clone();
         let input = activation.input.clone();
-        self.activation = Some(activation);
+        self.activation = Some((activation, receipt.clone()));
         self.refresh_projection();
-        Ok(LaunchRecord { input, acceptance })
+        Ok(LaunchRecord {
+            input,
+            receipt,
+            acceptance,
+        })
     }
 }

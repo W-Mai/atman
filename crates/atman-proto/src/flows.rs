@@ -115,6 +115,8 @@ pub struct LaunchFlowRequest {
     /// Absolute source path. Source contents are retained at creation.
     pub path: String,
     pub entry: String,
+    #[serde(default)]
+    pub start: FlowStart,
     /// Optional objective installed atomically before entry execution.
     pub initial_goal: Option<String>,
     #[serde(default)]
@@ -122,6 +124,15 @@ pub struct LaunchFlowRequest {
     #[serde(default)]
     pub invocation: BTreeMap<String, serde_json::Value>,
     pub user: Option<FlowUserContent>,
+}
+
+/// An entry can be ready to receive input without creating an initial turn.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowStart {
+    #[default]
+    Invoke,
+    Waiting,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]

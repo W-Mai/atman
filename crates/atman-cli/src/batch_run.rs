@@ -13,7 +13,7 @@ use atman_runtime::flow_store::{
     EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, RuntimeStore, SessionConfiguration,
     SessionDescriptor,
     completion::InvocationResult,
-    inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity, UserContent},
+    inbox::{SenderIdentity, UserContent},
     launch::{EntryBinding, LaunchInput},
 };
 use atman_runtime::source_program::LinkedProgram;
@@ -181,22 +181,18 @@ pub(crate) async fn run(file: &Path, program: &LinkedProgram, options: Options) 
                         first_run: atman_rt::RunId(request.into()),
                         authority: authority.clone(),
                     }),
-                    request: DeliveryRequest {
+                    request: atman_runtime::flow_store::launch::EntryRequest {
                         request_id: request,
                         sender: SenderIdentity::User(request),
                         recipient: address,
-                        delivery: DeliveryMode::NextTurn,
-                        cause: None,
-                        correlation: None,
-                        scope: None,
-                        payload: InboxPayload::Invocation {
+                        arguments,
+                        invocation,
+                        start: atman_runtime::flow_store::launch::EntryStart::Invoke {
                             user: Some(UserContent {
                                 text,
                                 images,
                                 presentation: None,
                             }),
-                            arguments,
-                            invocation,
                         },
                     },
                     inherited_context: vec![],

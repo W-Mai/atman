@@ -52,7 +52,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
                 )].into() },
             }.into(),
         }).unwrap();
-        flow.activate_with_input(
+        flow.activate_entry(
             LaunchInput {
                 workspace: None,
                 initial_goal: None,
@@ -64,19 +64,13 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
                     first_run: atman_rt::RunId::now(),
                     authority: EffectiveAuthority::root(&Default::default(), false, None),
                 }),
-                request: DeliveryRequest {
+                request: atman_runtime::flow_store::launch::EntryRequest {
                     request_id: creation,
                     sender: SenderIdentity::User(USER),
                     recipient: address,
-                    delivery: DeliveryMode::NextTurn,
-                    cause: None,
-                    correlation: None,
-                    scope: None,
-                    payload: InboxPayload::Invocation {
-                        arguments: [("input".into(), format!("seed-{index}").into())].into(),
-                        invocation: BTreeMap::new(),
-                        user: None,
-                    },
+                    arguments: [("input".into(), format!("seed-{index}").into())].into(),
+                    invocation: BTreeMap::new(),
+                    start: atman_runtime::flow_store::launch::EntryStart::Invoke { user: None },
                 },
             },
             None,
@@ -396,19 +390,13 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
                 first_run: atman_rt::RunId::now(),
                 authority: EffectiveAuthority::root(&Default::default(), false, None),
             }),
-            request: DeliveryRequest {
+            request: atman_runtime::flow_store::launch::EntryRequest {
                 request_id: entry.creation_request,
                 sender: SenderIdentity::User(USER),
                 recipient: address.clone(),
-                delivery: DeliveryMode::NextTurn,
-                cause: None,
-                correlation: None,
-                scope: None,
-                payload: InboxPayload::Invocation {
-                    arguments: [("input".into(), "seed".into())].into(),
-                    invocation: BTreeMap::new(),
-                    user: None,
-                },
+                arguments: [("input".into(), "seed".into())].into(),
+                invocation: BTreeMap::new(),
+                start: atman_runtime::flow_store::launch::EntryStart::Invoke { user: None },
             },
         },
         |_, _| Ok(()),

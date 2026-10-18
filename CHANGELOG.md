@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Waiting flow entries** — Activate a persistent entry without submitting input or starting a turn. Source, default arguments, execution settings, and optional Goal survive restart; startup hooks run when the first input is admitted. Daemon `flow.launch` accepts `start: "waiting"` and returns an activation receipt independently of input acknowledgement.
+
 - **Persistent flow commands** — Main, floating, and plain-terminal views queue installed commands in the selected flow. Captured sources and dependencies survive file changes and restart; commands retain original user content and execute separately from active model calls. Goal continuation retains its admitted entry, while ordinary input uses the default entry.
 
 - **Cross-session FlowHub** — Browse Session and Flow catalogs with shared pagination, search, keyboard controls, and padded mouse targets. Open another Session's flow in the main workspace or a floating window while preserving each view's draft, replies, configuration, and execution scope. Catalog reads do not start work; missing project paths remain browsable.
@@ -24,6 +26,8 @@ All notable changes to atman are documented in this file.
 - **Persistent TUI attachment** — Restore a persistent session's default flow with committed conversation, execution, Goal, and planning state. Composer drafts remain intact until durable input acceptance; stale Goal edits are rejected and form replies retain their invoking flow.
 
 ### ⚠️ Breaking Changes
+
+- **Entry activation types** — `LaunchInput.request` uses `EntryRequest` with explicit `EntryStart`. `LaunchRecord` separates its activation receipt from optional input acceptance; activation view updates identify the flow and carry an optional envelope.
 
 - **TUI control transport** — `TuiHandle` and panel interactions use `ControlSender`. Flow-bound commands capture the destination, view revision, request ID, and reply mailbox before entering the host queue. Existing session hosts use `ControlSender::channel()`.
 

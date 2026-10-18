@@ -113,7 +113,7 @@ impl RuntimeHost {
             {
                 return Err(invalid("launch input does not match creation identity"));
             }
-            input.request.validate_source()?;
+            input.validate()?;
             let session = host.session(descriptor.address.session_id.0)?;
             let snapshot = session.snapshot().await?;
             let startup = input
@@ -290,7 +290,7 @@ impl RuntimeHost {
                 worker
                     .request(move |store| {
                         let new = store.launch_record().is_none();
-                        let record = store.activate_with_input(input, proof, |input| {
+                        let record = store.activate_entry(input, proof, |input| {
                             authorize(&descriptor, input)?;
                             if let Some(route) = &input.result_route {
                                 access
@@ -339,7 +339,7 @@ impl RuntimeHost {
 mod tests {
     use super::*;
     use crate::flow_runtime::execution::TurnRequest;
-    use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity};
+    use crate::flow_store::inbox::SenderIdentity;
     use crate::flow_store::{
         EntrySnapshot, FlowInstanceId, FlowRef, RuntimeStore, SessionDescriptor,
     };
@@ -390,19 +390,13 @@ mod tests {
             workspace: None,
             initial_goal: None,
             execution: None,
-            request: DeliveryRequest {
+            request: crate::flow_store::launch::EntryRequest {
                 request_id: descriptor.creation_request,
                 sender: SenderIdentity::User(Uuid::new_v4()),
                 recipient: descriptor.address.clone(),
-                delivery: DeliveryMode::NextTurn,
-                cause: None,
-                correlation: None,
-                scope: None,
-                payload: InboxPayload::Invocation {
-                    user: None,
-                    arguments: Default::default(),
-                    invocation: Default::default(),
-                },
+                arguments: Default::default(),
+                invocation: Default::default(),
+                start: crate::flow_store::launch::EntryStart::Invoke { user: None },
             },
             inherited_context: vec![],
             result_route: None,

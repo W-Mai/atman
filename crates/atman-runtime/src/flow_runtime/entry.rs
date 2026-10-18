@@ -9,7 +9,6 @@ use crate::{
     message::Message,
 };
 use std::{collections::BTreeMap, io, num::NonZeroUsize};
-use uuid::Uuid;
 
 /// JSON transports encode paths as strings; restore declared host paths before VM validation.
 pub(super) fn decode_argument(
@@ -58,7 +57,6 @@ pub struct AdmittedInvocation {
 /// Immutable entry defaults and authority supplied by the trusted host.
 /// Source execution still validates argument types and the instance lease at admission.
 pub struct EntryRecipe {
-    pub creation: Uuid,
     pub first_turn: TurnId,
     pub first_run: FlowRunId,
     pub arguments: BTreeMap<String, serde_json::Value>,
@@ -87,14 +85,9 @@ impl EntryRecipe {
             .execution
             .as_ref()
             .ok_or_else(|| invalid("instance has no recorded entry binding"))?;
-        let InboxPayload::Invocation {
-            arguments,
-            invocation,
-            ..
-        } = &input.request.payload
-        else {
-            return Err(invalid("entry binding requires invocation input"));
-        };
+        input.validate()?;
+        let arguments = &input.request.arguments;
+        let invocation = &input.request.invocation;
         let entry = descriptor.entry()?;
         let program = crate::source_program::load_program_from_bundle(
             &entry.bundle,
@@ -126,7 +119,6 @@ impl EntryRecipe {
                 .map_err(invalid)?,
         };
         Ok(Self {
-            creation: descriptor.creation_request,
             first_turn: binding.first_turn.clone(),
             first_run: binding.first_run.clone(),
             arguments: arguments.clone(),
@@ -163,8 +155,7 @@ impl EntryRecipe {
         else {
             return Ok(None);
         };
-        let initial =
-            snapshot.last_invocation.is_none() && first.request.request_id == self.creation;
+        let initial = snapshot.last_invocation.is_none();
         let turn = if initial {
             self.first_turn.clone()
         } else {

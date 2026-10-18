@@ -3757,19 +3757,13 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
             LaunchInput {
                 workspace: None,
                 initial_goal: None,
-                request: DeliveryRequest {
+                request: atman_runtime::flow_store::launch::EntryRequest {
                     request_id: descriptor.creation_request,
                     sender: SenderIdentity::User(Uuid::new_v4()),
                     recipient: address.clone(),
-                    delivery: DeliveryMode::NextTurn,
-                    cause: None,
-                    correlation: None,
-                    scope: None,
-                    payload: InboxPayload::Invocation {
-                        user: None,
-                        arguments: [("input".into(), "first".into())].into(),
-                        invocation: [("effort".into(), "high".into())].into(),
-                    },
+                    arguments: [("input".into(), "first".into())].into(),
+                    invocation: [("effort".into(), "high".into())].into(),
+                    start: atman_runtime::flow_store::launch::EntryStart::Invoke { user: None },
                 },
                 inherited_context: Vec::new(),
                 result_route: None,
@@ -4092,7 +4086,6 @@ async fn entry_authored_continuation_uses_the_same_scheduler_for_direct_and_spaw
                 .unwrap();
             change(&worker, FlowTransition::Activated).await;
             let recipe = EntryRecipe {
-                creation: descriptor.creation_request,
                 first_turn: TurnId::now(),
                 first_run: RunId::now(),
                 arguments: [
@@ -4787,7 +4780,14 @@ async fn persistent_workspace_failed_launch_keeps_intent_and_close_retries_do_no
     };
     let input = LaunchInput {
         workspace: Some(workspace.clone()),
-        request,
+        request: atman_runtime::flow_store::launch::EntryRequest {
+            request_id: request.request_id,
+            sender: request.sender,
+            recipient: request.recipient,
+            arguments: Default::default(),
+            invocation: Default::default(),
+            start: atman_runtime::flow_store::launch::EntryStart::Invoke { user: None },
+        },
         initial_goal: None,
         inherited_context: vec![],
         result_route: None,
