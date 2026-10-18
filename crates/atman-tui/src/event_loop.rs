@@ -3581,6 +3581,7 @@ mod tests {
             ticket: ticket.clone(),
             draft: editor.prepare_submission(),
             quote: ui.app.pending_quote.clone(),
+            consumes_quote: true,
             images: vec![],
         });
         let submitted = incoming.recv().await.unwrap();
@@ -3827,6 +3828,7 @@ mod tests {
             ticket,
             draft: main_view.editor.prepare_submission(),
             quote: main_view.ui.app.pending_quote.clone(),
+            consumes_quote: false,
             images: vec![image.clone()],
         });
         incoming

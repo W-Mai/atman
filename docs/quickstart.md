@@ -140,6 +140,8 @@ Models with image input enabled can also call `image.read(path: "...")` to inspe
 
 Persistent main and floating views keep separate image drafts, even when displaying the same flow. A successful submission clears only its originating, unchanged draft; failures and later edits retain the images. Opening a panel or sending a control command keeps images that were not included in that command.
 
+Colon controls such as `:pause` and `:status` submit only the command. Pending quotes and images remain in the composer for the next message; quoted text cannot select a control command. Ordinary prompts and `/command` flow calls include their quotes and images.
+
 Use `@./image.png`, `@../image.png`, or `@/absolute/path.png` in a prompt to attach a local image. Persistent terminal, main, and floating views resolve relative paths from the selected flow's workspace or bound project. The image is copied into that flow's storage before input acceptance, so deleting the original file does not break accepted input. File references inside quoted context remain quoted text.
 
 Optional tool output payload limits can be set in `~/.config/atman/config.toml`:

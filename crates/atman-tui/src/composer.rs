@@ -13,10 +13,43 @@ pub(crate) struct PendingSubmission {
     pub ticket: ControlTicket,
     pub draft: PreparedSubmission,
     pub quote: Option<Arc<str>>,
+    pub consumes_quote: bool,
     pub images: Vec<atman_runtime::message::ImageSource>,
 }
 
 impl AppState {
+    pub(crate) fn prepare_composer_submission(
+        &self,
+        draft: &PreparedSubmission,
+    ) -> crate::TuiSubmission {
+        let content = draft.content();
+        let presentation = self.pending_quote.as_ref().map(|quote| {
+            atman_runtime::user_input::UserInputPresentation {
+                prompt: content.text.clone(),
+                quote: Some(atman_runtime::user_input::QuoteSnapshot {
+                    text: quote.to_string(),
+                }),
+            }
+        });
+        let mut submission = crate::TuiSubmission {
+            text: presentation
+                .as_ref()
+                .map_or_else(|| content.text.clone(), |value| value.model_text()),
+            images: content.images.clone(),
+            reasoning: self.input_reasoning_for_submission(),
+            presentation,
+        };
+        if let Some(command) = submission.control_command() {
+            submission = crate::TuiSubmission {
+                text: command.to_owned(),
+                images: vec![],
+                reasoning: None,
+                presentation: None,
+            };
+        }
+        submission
+    }
+
     fn legacy_attachment_session(&self) -> Option<&Session> {
         self.session
             .as_deref()
@@ -112,7 +145,9 @@ impl AppState {
                 };
                 if self.acknowledge_composer(editor, pending.draft, quote_matches, &pending.images)
                 {
-                    self.pending_quote = None;
+                    if pending.consumes_quote {
+                        self.pending_quote = None;
+                    }
                 } else {
                     self.push_toast(
                         "Input accepted; newer draft retained",
@@ -146,6 +181,8 @@ mod tests {
             .import_image_bytes(b"\x89PNG\r\n\x1a\n", None)
             .unwrap();
         editor.insert_str(":status");
+        let quote: Arc<str> = "pending quote".into();
+        app.pending_quote = Some(quote.clone());
         app.attach_composer_image(&mut editor, image.clone());
         // Control commands do not consume images that were not submitted.
         let ticket = ControlTicket {
@@ -159,7 +196,8 @@ mod tests {
         let pending = |editor: &InputEditor, images| PendingSubmission {
             ticket: ticket.clone(),
             draft: editor.prepare_submission(),
-            quote: None,
+            quote: Some(quote.clone()),
+            consumes_quote: false,
             images,
         };
         app.pending_submission = Some(pending(&editor, vec![]));
@@ -168,9 +206,11 @@ mod tests {
         assert_eq!(editor.pending_images()[0].source, image);
         assert_eq!(app.attach_count, 1);
         assert_eq!(session.pending_image_count(), 0);
+        assert!(Arc::ptr_eq(app.pending_quote.as_ref().unwrap(), &quote));
         app.pending_submission = Some(pending(&editor, vec![image.clone()]));
         app.submission_result(&mut editor, Some(&ticket), Err("disk full".into()));
         assert_eq!(editor.pending_images().len(), 1);
+        assert!(Arc::ptr_eq(app.pending_quote.as_ref().unwrap(), &quote));
         app.pending_submission = Some(pending(&editor, vec![image.clone()]));
         editor.insert_str("new draft");
         app.submission_result(&mut editor, Some(&ticket), Ok(()));
@@ -204,6 +244,7 @@ mod tests {
             ticket: ticket.clone(),
             draft: editor.prepare_submission(),
             quote: app.pending_quote.clone(),
+            consumes_quote: true,
             images: vec![],
         };
         app.pending_submission = Some(pending(&editor, &app));

@@ -1316,36 +1316,19 @@ pub(crate) fn handle_key(
             app.sync_composer_images(editor);
             let prepared = editor.prepare_submission();
             if !prepared.is_empty() || app.pending_quote.is_some() {
-                let editor_submission = prepared.content();
                 if app.reconcile_input_reasoning() {
                     app.save_ui_state();
                 }
                 let quote = app.pending_quote.clone();
-                let presentation =
-                    quote
-                        .as_ref()
-                        .map(|quote| atman_runtime::user_input::UserInputPresentation {
-                            prompt: editor_submission.text.clone(),
-                            quote: Some(atman_runtime::user_input::QuoteSnapshot {
-                                text: quote.to_string(),
-                            }),
-                        });
-                let line = presentation.as_ref().map_or_else(
-                    || editor_submission.text.clone(),
-                    |value| value.model_text(),
-                );
                 if control_tx.is_some() || submit_tx.is_some() {
-                    let images = if line.trim_start().starts_with(':') {
-                        Vec::new()
-                    } else {
-                        editor_submission.images.clone()
-                    };
-                    let submission = crate::TuiSubmission {
-                        text: line.clone(),
-                        images: images.clone(),
-                        reasoning: app.input_reasoning_for_submission(),
-                        presentation: presentation.clone(),
-                    };
+                    let submission = app.prepare_composer_submission(&prepared);
+                    let line = submission.text.clone();
+                    let presentation = submission.presentation.clone();
+                    let images = submission.images.clone();
+                    let control_command = submission.control_command().is_some();
+                    let consumes_quote = presentation
+                        .as_ref()
+                        .is_some_and(|value| value.quote.is_some());
                     if let Some(tx) = control_tx.filter(|tx| tx.binding().is_some()) {
                         match tx.send_tracked(TuiControl::Submit(submission)) {
                             Ok(Some(ticket)) => {
@@ -1353,6 +1336,7 @@ pub(crate) fn handle_key(
                                     ticket,
                                     draft: prepared,
                                     quote,
+                                    consumes_quote,
                                     images,
                                 });
                             }
@@ -1387,8 +1371,10 @@ pub(crate) fn handle_key(
                         );
                     } else {
                         app.acknowledge_composer(editor, prepared, true, &images);
-                        app.pending_quote = None;
-                        if !app.has_running_workflow() {
+                        if consumes_quote {
+                            app.pending_quote = None;
+                        }
+                        if !control_command && !app.has_running_workflow() {
                             app.push_user_turn_with_presentation(line, presentation);
                         }
                     }
@@ -2380,6 +2366,90 @@ mod tests {
             panic!("submission must share the ordered control channel");
         };
         assert_eq!(submission.text, "run after mode update");
+    }
+
+    #[test]
+    fn control_commands_preserve_unsubmitted_context_in_both_transports() {
+        use crate::control::ViewBinding;
+        use atman_runtime::flow_store::{FlowInstanceId, FlowRef};
+
+        for native in [false, true] {
+            let mut state = crate::UiState::new(AppState::new("session".into(), None));
+            let mut editor = InputEditor::default();
+            let image = atman_runtime::Session::open_ephemeral()
+                .import_image_bytes(b"\x89PNG\r\n\x1a\n", None)
+                .unwrap();
+            let quote: std::sync::Arc<str> = "quoted @/not-a-file.png".into();
+            state.app.pending_quote = Some(quote.clone());
+            editor.insert_str("  :status");
+            state.app.attach_composer_image(&mut editor, image.clone());
+            let (legacy, mut legacy_rx) = crate::ControlSender::channel();
+            let (host, mut incoming) = mpsc::unbounded_channel();
+            let (bound, _replies) = crate::ControlSender::for_flow(
+                ViewBinding {
+                    view_id: uuid::Uuid::now_v7(),
+                    revision: 1,
+                    flow: FlowRef {
+                        session_id: uuid::Uuid::now_v7().into(),
+                        instance_id: FlowInstanceId::now(),
+                    },
+                },
+                host,
+            );
+            let sender = if native { &bound } else { &legacy };
+            let mut interrupt = None;
+            handle_key(
+                KeyAction::Submit,
+                &mut state,
+                &mut editor,
+                &mut interrupt,
+                None,
+                Some(sender),
+            );
+            let (command, ticket) = if native {
+                let request = incoming.try_recv().unwrap();
+                (request.command, Some(request.ticket))
+            } else {
+                (legacy_rx.try_recv().unwrap(), None)
+            };
+            let TuiControl::Submit(submission) = command else {
+                panic!("missing submission")
+            };
+            assert_eq!(submission.text, ":status");
+            assert!(submission.images.is_empty());
+            assert!(submission.presentation.is_none());
+            assert!(submission.reasoning.is_none());
+            if native {
+                assert!(editor.buf().contains(":status"));
+                state
+                    .app
+                    .submission_result(&mut editor, ticket.as_ref(), Ok(()));
+            }
+            assert!(!editor.buf().contains(":status"));
+            assert!(std::sync::Arc::ptr_eq(
+                state.app.pending_quote.as_ref().unwrap(),
+                &quote
+            ));
+            assert_eq!(editor.pending_images()[0].source, image);
+            assert!(
+                !state
+                    .app
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, crate::app::OutputItem::UserTurn { .. }))
+            );
+
+            editor.insert_str("/agent inspect");
+            let submission = state
+                .app
+                .prepare_composer_submission(&editor.prepare_submission());
+            assert!(submission.control_command().is_none());
+            assert_eq!(submission.images, [image]);
+            assert_eq!(
+                submission.presentation.unwrap().quote.unwrap().text,
+                quote.as_ref()
+            );
+        }
     }
 
     #[test]

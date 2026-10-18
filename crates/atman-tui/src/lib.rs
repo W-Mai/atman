@@ -549,6 +549,18 @@ pub struct TuiSubmission {
     pub presentation: Option<atman_runtime::user_input::UserInputPresentation>,
 }
 
+impl TuiSubmission {
+    /// Read control intent from the authored prompt, independently of quoted context.
+    pub fn control_command(&self) -> Option<&str> {
+        let prompt = self
+            .presentation
+            .as_ref()
+            .map_or(self.text.as_str(), |value| &value.prompt)
+            .trim_start();
+        prompt.starts_with(':').then_some(prompt)
+    }
+}
+
 pub struct TuiHandle {
     pub settings: settings::SettingsSource,
     pub session_id: String,

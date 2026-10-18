@@ -621,7 +621,44 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     let sender = handle.control_tx.as_ref().unwrap();
     let replies = handle.control_reply_rx.as_mut().unwrap();
 
-    attachment.command(&worker, ":pause").await.unwrap();
+    // Control routing reads the authored prompt even if a caller supplies a quote.
+    let presentation = atman_runtime::user_input::UserInputPresentation {
+        prompt: "  :pause".into(),
+        quote: Some(atman_runtime::user_input::QuoteSnapshot {
+            text: "quoted @/not-a-file.png".into(),
+        }),
+    };
+    let ticket = sender
+        .send_tracked(TuiControl::Submit(TuiSubmission {
+            text: presentation.model_text(),
+            images: vec![],
+            reasoning: None,
+            presentation: Some(presentation),
+        }))
+        .unwrap()
+        .unwrap();
+    let bound = commands_rx.recv().await.unwrap();
+    attachment
+        .tui_control(
+            &worker,
+            bound.ticket.request_id,
+            bound.command,
+            &bound.replies,
+            &forms,
+        )
+        .await
+        .unwrap();
+    let info = replies.recv().await.unwrap();
+    assert_eq!(info.ticket, ticket);
+    assert!(matches!(info.command, TuiCommand::Toast { .. }));
+    let ack = replies.recv().await.unwrap();
+    assert_eq!(ack.ticket, ticket);
+    assert!(matches!(
+        ack.command,
+        TuiCommand::SubmissionResult { result: Ok(()) }
+    ));
+    assert_eq!(worker.state().await.unwrap().pauses().len(), 1);
+    assert!(worker.snapshot().await.unwrap().pending.is_empty());
     let ticket = sender
         .send_tracked(TuiControl::Submit(TuiSubmission {
             text: "queued".into(),

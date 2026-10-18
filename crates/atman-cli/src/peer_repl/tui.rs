@@ -205,8 +205,8 @@ impl Attachment {
         let context = worker.context();
         match command {
             TuiControl::Submit(submission) => {
-                let result = if submission.text.trim_start().starts_with(':') {
-                    self.command_with_request(worker, &submission.text, request)
+                let result = if let Some(command) = submission.control_command() {
+                    self.command_with_request(worker, command, request)
                         .await
                         .map(|message| {
                             let _ = replies.send(TuiCommand::Toast {

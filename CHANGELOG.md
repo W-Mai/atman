@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- **Control command drafts** — Colon commands use authored prompt text and retain unsubmitted quotes and images. Shared submission acknowledgement keeps newer drafts and failed submissions intact across main and floating views.
+
 - **Image draft ownership** — Persistent main and floating views keep separate attachments when displaying the same flow. Refresh, deletion, and submission acknowledgements affect only the originating composer; panel and control commands retain images they did not submit.
 
 ### Features
