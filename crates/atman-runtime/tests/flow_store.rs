@@ -333,6 +333,38 @@ fn planning_commits_replay_exactly_and_reconcile_retries_without_rolling_back_st
             .unwrap(),
         accepted
     );
+    let mut clear = request(PlanningEdit::ClearTodos);
+    clear.expected_revision = Some(expected.revision);
+    let cleared = flow.edit_planning(clear.clone(), |_| Ok(())).unwrap();
+    assert_eq!(cleared.outcome, PlanningOutcome::TodosCleared);
+    assert!(flow.planning().todos.is_empty());
+    assert_eq!(flow.planning().plans, expected.plans);
+    assert_eq!(flow.state(), &state);
+    let mut next = add.clone();
+    next.id = Uuid::new_v4();
+    flow.edit_planning(next, |_| Ok(())).unwrap();
+    let after_clear = flow.planning().clone();
+    let mut stale = clear.clone();
+    stale.id = Uuid::new_v4();
+    assert!(flow.edit_planning(stale, |_| Ok(())).is_err());
+    assert_eq!(
+        flow.edit_planning(clear.clone(), |_| panic!("clear retry"))
+            .unwrap(),
+        cleared
+    );
+    assert_eq!(
+        flow.planning(),
+        &after_clear,
+        "retry must not erase subsequently added todos"
+    );
+    drop(flow);
+    let mut flow = session.open_flow(&address.instance_id).unwrap();
+    assert_eq!(flow.planning(), &after_clear);
+    assert_eq!(
+        flow.edit_planning(clear, |_| panic!("reopened clear retry"))
+            .unwrap(),
+        cleared
+    );
     change(&mut flow, FlowTransition::CloseRequested);
     change(&mut flow, FlowTransition::Closed);
     assert_eq!(
@@ -340,7 +372,7 @@ fn planning_commits_replay_exactly_and_reconcile_retries_without_rolling_back_st
         accepted
     );
     assert!(flow.edit_planning(write("closed"), |_| Ok(())).is_err());
-    assert_eq!(flow.planning(), &expected);
+    assert_eq!(flow.planning(), &after_clear);
 }
 
 fn turn_request(

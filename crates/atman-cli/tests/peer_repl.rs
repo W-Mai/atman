@@ -131,6 +131,58 @@ fn create_session(root: &Path) -> uuid::Uuid {
 }
 
 #[test]
+fn terminal_todo_controls_share_tool_state_and_preserve_execution_across_restart() {
+    use atman_runtime::memory::todo::TodoStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (sid, fid) = launch(
+        root,
+        r#"
+        flow main(input: string) -> string {
+            contract { invocation { user_message: input } }
+            memory.todo.set(where: "first task", why: "check", how: "verify", expected_result: "saved")
+            memory.todo.set(where: "second task", why: "check", how: "verify", expected_result: "saved")
+            plan.write(id: "plan", title: "Keep plan", steps: ["verify"])
+            return final.answer(message: input)
+        }
+    "#,
+    );
+    let store = RuntimeStore::open(&root.join("data")).unwrap();
+    let session = store.open_session(sid).unwrap();
+    let flow = session.open_flow(&fid).unwrap();
+    let second = flow.planning().todos[1].id.clone();
+    let original_plans = flow.planning().plans.clone();
+    drop(flow);
+    drop(session);
+    let output = resume(
+        root,
+        sid,
+        &format!(":pause\n:todo list\n:todo done 0\n:todo cancel {second}\n:todo done 99\n"),
+    );
+    assert!(output.contains("first task"), "{output}");
+    assert!(output.contains("index 99 out of range"), "{output}");
+    let session = store.open_session(sid).unwrap();
+    let flow = session.open_flow(&fid).unwrap();
+    assert_eq!(flow.planning().todos[0].status, TodoStatus::Done);
+    assert_eq!(flow.planning().todos[1].status, TodoStatus::Cancelled);
+    assert_eq!(flow.planning().plans, original_plans);
+    let state = flow.state().clone();
+    drop(flow);
+    drop(session);
+    let output = resume(root, sid, ":todo list\n:todo clear\n:todo list\n");
+    assert!(output.contains("✓ first task"), "{output}");
+    assert!(output.contains("✗ second task"), "{output}");
+    assert!(output.contains("No todos yet"), "{output}");
+    let session = store.open_session(sid).unwrap();
+    let flow = session.open_flow(&fid).unwrap();
+    assert!(flow.planning().todos.is_empty());
+    assert_eq!(flow.planning().plans, original_plans);
+    assert_eq!(flow.state(), &state);
+    assert_eq!(answers(&updates(root, sid, &fid)), ["seed"]);
+    assert!(!flow.dir().join("todos.jsonl").exists());
+}
+
+#[test]
 fn terminal_captures_inline_images_in_the_selected_flow_before_acceptance() {
     use atman_runtime::flow_store::{inbox::InboxPayload, view::AcceptedInput};
     let dir = tempfile::tempdir().unwrap();

@@ -737,6 +737,72 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     ));
     assert_eq!(worker.state().await.unwrap().pauses().len(), 1);
     assert!(worker.snapshot().await.unwrap().pending.is_empty());
+    // Todo commands update the same view snapshot without creating a turn or resuming it.
+    use atman_runtime::{
+        flow_store::planning::{PlanningEdit, PlanningRequest},
+        memory::todo::TodoStatus,
+    };
+    worker
+        .edit_planning(
+            PlanningRequest {
+                id: Uuid::now_v7(),
+                sender: SenderIdentity::User(USER),
+                expected_revision: None,
+                edit: PlanningEdit::AddTodo {
+                    where_: "view task".into(),
+                    why: "test".into(),
+                    how: "command".into(),
+                    expected_result: "snapshot".into(),
+                },
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let execution = worker.state().await.unwrap();
+    for (text, expected) in [
+        (":todo done 0", Some(TodoStatus::Done)),
+        (":todo cancel 0", Some(TodoStatus::Cancelled)),
+        (":todo clear", None),
+    ] {
+        sender
+            .send(TuiControl::Submit(TuiSubmission {
+                text: text.into(),
+                images: vec![],
+                presentation: None,
+                reasoning: None,
+            }))
+            .unwrap();
+        let bound = commands_rx.recv().await.unwrap();
+        attachment
+            .tui_control(
+                &worker,
+                bound.ticket.request_id,
+                bound.command,
+                &bound.replies,
+                &forms,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            replies.recv().await.unwrap().command,
+            TuiCommand::Toast { .. }
+        ));
+        assert!(matches!(
+            replies.recv().await.unwrap().command,
+            TuiCommand::SubmissionResult { result: Ok(()) }
+        ));
+        let view = source.refresh().await.unwrap();
+        assert_eq!(
+            view.snapshot()
+                .planning
+                .todos
+                .first()
+                .map(|todo| &todo.status),
+            expected.as_ref()
+        );
+        assert_eq!(view.snapshot().status.execution, execution);
+    }
     let ticket = sender
         .send_tracked(TuiControl::Submit(TuiSubmission {
             text: "queued".into(),

@@ -405,7 +405,12 @@ fn repl_fires_dsl_on_session_start_body_at_startup() {
         .spawn()
         .unwrap();
     use std::io::Write;
-    child.stdin.as_mut().unwrap().write_all(b":exit\n").unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b":todo list\n:todo done 0\n:todo list\n:exit\n")
+        .unwrap();
     let out = child.wait_with_output().unwrap();
     assert!(
         out.status.success(),
@@ -413,6 +418,9 @@ fn repl_fires_dsl_on_session_start_body_at_startup() {
         String::from_utf8_lossy(&out.stderr)
     );
 
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("○ boot"), "{stdout}");
+    assert!(stdout.contains("✓ boot"), "{stdout}");
     let sessions_dir = data.path().join("sessions");
     let sid_dir = std::fs::read_dir(&sessions_dir)
         .unwrap()

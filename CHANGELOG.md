@@ -87,6 +87,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Persistent Todo controls** — `:todo` lists, completes, cancels, and clears the focused flow's tasks through the same journal as planning tools. Revision checks protect selections, and clearing preserves plans and execution state.
+
 - **Persistent session names** — Session catalogs retain display-name changes independently of creation data and flow execution. Host updates check catalog revisions, notify subscribers after persistence, and remain visible through recorded listings after restart.
 
 - **Session rename controls** — Persistent terminal and TUI views support `:rename`, with committed names shared across the Session's main and floating views while preserving drafts and execution.

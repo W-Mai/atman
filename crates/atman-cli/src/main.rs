@@ -4945,19 +4945,9 @@ async fn handle_todo_builtin(arg: &str, session: &Session, reporter: &Reporter) 
     let trimmed = arg.trim();
     match trimmed {
         "" | "list" => match store.list().await {
-            Ok(list) if list.is_empty() => reporter.info("[atman] no todos yet"),
             Ok(list) => {
-                for (i, t) in list.iter().enumerate() {
-                    let glyph = match t.status {
-                        TodoStatus::Pending => "○",
-                        TodoStatus::InProgress => "⚡",
-                        TodoStatus::Done => "✓",
-                        TodoStatus::Cancelled => "✗",
-                    };
-                    reporter.info(format!(
-                        "  {i:>2}  {glyph} {}  ({})",
-                        t.where_, t.id
-                    ));
+                for row in todo_rows(&list) {
+                    reporter.info(row);
                 }
             }
             Err(e) => reporter.error(format!("[atman] :todo list: {e}")),
@@ -5008,17 +4998,47 @@ async fn parse_todo_id(
     if let Ok(id) = atman_runtime::memory::MemoryId::parse(s) {
         return Ok(id);
     }
+    let list = store
+        .list()
+        .await
+        .map_err(|e| format!("list failed: {e}"))?;
+    resolve_todo_id(s, &list)
+}
+
+fn resolve_todo_id(
+    s: &str,
+    list: &[atman_runtime::memory::todo::Todo],
+) -> Result<atman_runtime::memory::MemoryId, String> {
+    if let Ok(id) = atman_runtime::memory::MemoryId::parse(s) {
+        return Ok(id);
+    }
     if let Ok(idx) = s.parse::<usize>() {
-        let list = store
-            .list()
-            .await
-            .map_err(|e| format!("list failed: {e}"))?;
         if let Some(t) = list.get(idx) {
             return Ok(t.id.clone());
         }
         return Err(format!("index {idx} out of range"));
     }
     Err(format!("bad todo id `{s}` (use uuid or list index)"))
+}
+
+fn todo_rows(todos: &[atman_runtime::memory::todo::Todo]) -> Vec<String> {
+    use atman_runtime::memory::todo::TodoStatus;
+    if todos.is_empty() {
+        return vec!["No todos yet".into()];
+    }
+    todos
+        .iter()
+        .enumerate()
+        .map(|(i, todo)| {
+            let glyph = match todo.status {
+                TodoStatus::Pending => "○",
+                TodoStatus::InProgress => "⚡",
+                TodoStatus::Done => "✓",
+                TodoStatus::Cancelled => "✗",
+            };
+            format!("  {i:>2}  {glyph} {}  ({})", todo.where_, todo.id)
+        })
+        .collect()
 }
 
 fn handle_goal_builtin(cmd: &str, session: &Session, reporter: &Reporter) {

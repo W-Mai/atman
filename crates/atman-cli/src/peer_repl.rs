@@ -553,7 +553,7 @@ impl Attachment {
         let (command, argument) = line.split_once(' ').unwrap_or((line, ""));
         let argument = argument.trim();
         match command {
-            ":help" => Ok("Text submits to the focused flow; /command [arguments] queues a captured command in the same flow. :attach <path>|list|clear · :rename [<text>|clear] · :focus <flow-prefix> · :flows · :status · :invoke <JSON arguments> · :insert <text> · :pause/:resume (execution) · :recover · :cancel · :close · :goal [set <text>|pause|resume|clear] · :pending · :reply <prompt-id> <JSON> · :approve/:deny <flow-prefix> <request-id> · :quit. EOF waits for runnable work; :quit detaches immediately.".into()),
+            ":help" => Ok("Text submits to the focused flow; /command [arguments] queues a captured command in the same flow. :attach <path>|list|clear · :rename [<text>|clear] · :focus <flow-prefix> · :flows · :status · :invoke <JSON arguments> · :insert <text> · :pause/:resume (execution) · :recover · :cancel · :close · :goal [set <text>|pause|resume|clear] · :todo [list|done <id>|cancel <id>|clear] · :pending · :reply <prompt-id> <JSON> · :approve/:deny <flow-prefix> <request-id> · :quit. EOF waits for runnable work; :quit detaches immediately.".into()),
             ":rename" => {
                 let snapshot = self.session.snapshot().await?;
                 if argument.is_empty() {
@@ -576,6 +576,30 @@ impl Attachment {
             ":status" => {
                 let status = worker.status().await?;
                 Ok(format!("Flow {} · {:?} · {} execution pauses · Goal {}", worker.address().instance_id, status.execution.state(), status.execution.pauses().len(), status.goal.map_or_else(|| "none".into(), |goal| format!("{:?}: {}", goal.status, goal.objective))))
+            }
+            ":todo" => {
+                use atman_runtime::flow_store::planning::{PlanningEdit, PlanningRequest};
+                use atman_runtime::memory::todo::TodoStatus;
+                let planning = worker.planning().await?;
+                if matches!(argument, "" | "list") {
+                    return Ok(crate::todo_rows(&planning.todos).join("\n"));
+                }
+                let edit = if argument == "clear" {
+                    PlanningEdit::ClearTodos
+                } else {
+                    let (action, id) = argument.split_once(char::is_whitespace).context("use :todo list, done <id>, cancel <id>, or clear")?;
+                    let status = match action {
+                        "done" => TodoStatus::Done,
+                        "cancel" => TodoStatus::Cancelled,
+                        _ => bail!("use :todo list, done <id>, cancel <id>, or clear"),
+                    };
+                    let id = crate::resolve_todo_id(id.trim(), &planning.todos).map_err(anyhow::Error::msg)?;
+                    PlanningEdit::SetTodoStatus { id, status }
+                };
+                worker.edit_planning(PlanningRequest {
+                    id: request_id, sender: SenderIdentity::User(USER), expected_revision: Some(planning.revision), edit,
+                }, |_| Ok(())).await?;
+                Ok("Todos updated".into())
             }
             ":pause" | ":resume" | ":cancel" | ":close" | ":recover" => {
                 let control = match command { ":pause" => PeerControl::Pause, ":resume" => PeerControl::Resume, ":cancel" => PeerControl::CancelTurn, ":recover" => PeerControl::Recover, _ => PeerControl::Close };

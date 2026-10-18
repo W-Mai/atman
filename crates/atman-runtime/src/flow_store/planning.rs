@@ -34,6 +34,7 @@ pub enum PlanningEdit {
     DeleteTodo {
         id: MemoryId,
     },
+    ClearTodos,
     WritePlan {
         id: String,
         title: String,
@@ -112,6 +113,10 @@ impl PlanningSnapshot {
                 TodoEntry::Delete { id: id.clone() }.apply(&mut self.todos);
                 PlanningOutcome::Todo(id.clone())
             }
+            PlanningEdit::ClearTodos => {
+                self.todos.clear();
+                PlanningOutcome::TodosCleared
+            }
             PlanningEdit::WritePlan { id, title, steps } => {
                 let plan = Plan::new_at(id, title, steps.clone(), update.at);
                 PlanEntry::Upsert(plan).apply(&mut self.plans);
@@ -146,6 +151,7 @@ impl PlanningSnapshot {
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum PlanningOutcome {
     Todo(MemoryId),
+    TodosCleared,
     Plan(Plan),
 }
 
