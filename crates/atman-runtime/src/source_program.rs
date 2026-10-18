@@ -556,19 +556,27 @@ struct CanonicalRoots {
 
 impl CanonicalRoots {
     fn new(roots: &SourceRoots) -> Result<Self> {
+        fn existing(path: &Path) -> std::io::Result<Option<PathBuf>> {
+            match fs::canonicalize(path) {
+                Ok(path) => Ok(Some(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+            }
+        }
         let project = roots
             .project_root
             .as_deref()
-            .map(fs::canonicalize)
+            .map(existing)
             .transpose()
-            .context("project source root")?;
+            .context("project source root")?
+            .flatten();
         let config = roots
             .config_dir
             .as_deref()
-            .filter(|path| path.exists())
-            .map(fs::canonicalize)
+            .map(existing)
             .transpose()
-            .context("user source root")?;
+            .context("user source root")?
+            .flatten();
         Ok(Self { project, config })
     }
 
@@ -719,6 +727,26 @@ mod tests {
 
     fn local(name: &str) -> FlowRef {
         FlowRef::Local(Ident::new(name, Span::default()))
+    }
+
+    #[test]
+    fn absent_source_roots_only_block_imports_that_require_them() {
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join("config");
+        let entry = write(&config, "commands/main.at", "flow main() {}");
+        let roots = SourceRoots {
+            project_root: Some(dir.path().join("removed-project")),
+            config_dir: Some(config.clone()),
+        };
+        assert!(load_program(&entry, &roots).is_ok());
+        fs::write(
+            &entry,
+            "use \"project:shared.at\"::shared\nflow main() { shared().await }",
+        )
+        .unwrap();
+        let error = load_program(&entry, &roots).unwrap_err();
+        assert!(format!("{error:#}").contains("requires a project root"));
+        assert!(!roots.project_root.unwrap().exists());
     }
 
     fn qualified(module: &str, flow: &str) -> FlowRef {

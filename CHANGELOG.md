@@ -229,6 +229,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Source loading** — Missing project directories no longer prevent commands from loading unrelated user sources. Imports into missing roots fail explicitly, and path boundaries remain enforced.
+
 - **Flow reasoning settings** — Resolve composer choices, displayed effort, and submission values from the bound flow's model directory. Invalid selections report a local notification without modifying committed history.
 
 - **Viewport shadows** — Clip window shadows to the drawing surface, including surfaces with a nonzero origin and empty viewports, to prevent out-of-bounds rendering.

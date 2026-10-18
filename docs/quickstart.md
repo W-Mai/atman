@@ -338,6 +338,8 @@ flow review(input: string) -> string {
 
 Run the entry flow with `atman run .atman/commands/review.at --flow review input=hello`. A relative specifier such as `use "./lib/text.at"::normalize` resolves beside its declaring file. `use "user:text.at"::normalize` reads from `~/.config/atman/lib/`. A named `use` makes only the selected public flow callable in the current file; the shared file's private helper flows remain available to its own flows. Calling `normalize(input)` creates a cold Future; `.await` executes it, and `fanout [normalize(a), normalize(b)]` runs both calls concurrently.
 
+An absent project or user source directory does not block unrelated sources. An import that requires the missing directory still fails; existing roots retain their path and symlink boundaries.
+
 ### MCP discovery and calls
 
 The MCP browser supports arrows to select a server, `Enter` or a click to expand it, and `Tab` to cycle Tools, Resources, and Prompts. Scroll expanded descriptions or diagnostics with the wheel or `PgUp` / `PgDn`. Add / `a`, Edit / `e`, Test / `t`, Toggle / `d`, and Remove / `r` have clickable buttons. Remove first displays Confirm / `Enter` and Cancel / `Esc`; changing the selection cancels the pending removal. Small terminals retain a complete server record above the actions.
