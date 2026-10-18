@@ -775,7 +775,22 @@ impl LayoutCache {
                 .collect::<std::collections::HashSet<_>>();
             self.workflow_body_rows
                 .retain(|id, _| live_ids.contains(id));
-            let changed_from = self.pending_structure_from.unwrap_or(0).min(items.len());
+            // Fold and paint hints may begin after an unseen batch append. The
+            // document's revisions, not those hints, delimit the unchanged prefix.
+            let unchanged = self
+                .entries
+                .iter()
+                .zip(revisions)
+                .take_while(|(entry, revision)| {
+                    entry.revision.id == revision.id
+                        && entry.revision.layout == revision.layout
+                        && entry.revision.paint == revision.paint
+                })
+                .count();
+            let changed_from = self
+                .pending_structure_from
+                .unwrap_or(unchanged)
+                .min(unchanged);
             if changed_from == self.entries.len() && self.entries.len() <= items.len() {
                 self.entries.resize(items.len(), ItemCacheEntry::default());
                 self.row_ends.resize(items.len(), self.total_rows);
@@ -8571,6 +8586,58 @@ line2
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batched_document_growth_with_later_fold_hints_matches_fresh_layout() {
+        let mut items = FlowDocument::from(vec![OutputItem::Divider]);
+        let key = LayoutKey {
+            width: 100,
+            theme: crate::theme::ThemeMode::Dark,
+        };
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 100,
+            follow_tail_rows: None,
+        };
+        let mut cache = LayoutCache::default();
+        cache.update_dirty(key, &items, &RenderCtx::empty(), request);
+        items.push(OutputItem::UserTurn {
+            text: "background request".into(),
+            presentation: None,
+        });
+        items.push(OutputItem::AssistantMd {
+            md: "Finished".into(),
+            streaming: false,
+            retried: false,
+        });
+        let folds = vec![WorkFoldProjection {
+            key: items.revisions()[2].id,
+            start_index: 2,
+            end_index: 2,
+            visible_members: 0,
+            total_members: 1,
+            boundary_member: None,
+            boundary_level: 3,
+            completed_steps: 1,
+            total_steps: 1,
+            expanded: false,
+            animating: false,
+            hovered: false,
+            title: "Background work".into(),
+            stats: String::new(),
+        }];
+        cache.set_work_folds(folds.clone());
+        let reused = cache.update_dirty(key, &items, &RenderCtx::empty(), request);
+        let mut fresh = LayoutCache::default();
+        fresh.set_work_folds(folds);
+        let rebuilt = fresh.update_dirty(key, &items, &RenderCtx::empty(), request);
+        assert_eq!(reused.total_rows, rebuilt.total_rows);
+        assert_eq!(cache.row_ends, fresh.row_ends);
+        assert_eq!(
+            cache.visible_slice(0, 100, 0).lines,
+            fresh.visible_slice(0, 100, 0).lines
+        );
+    }
 
     fn startup_entry(goal: Option<&str>) -> crate::app::StartupSessionEntry {
         crate::app::StartupSessionEntry {

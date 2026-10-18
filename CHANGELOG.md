@@ -218,6 +218,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Transcript layout** — Reconcile document revisions before applying fold invalidation hints so batched background updates cannot leave new records unmeasured or interrupt rendering.
+
 - **Unsent drafts** — A closed TUI command connection preserves text, folded pastes, images, quotes, and cursor position. Failed sends do not add a user turn to the transcript. Submission snapshots retain editor identity and content revision so acknowledgements cannot clear later edits.
 
 - **Persistent input quotes** — Human input retains its prompt and quote metadata through committed messages and transcript restoration. Display metadata does not change model request bodies or token estimates.
