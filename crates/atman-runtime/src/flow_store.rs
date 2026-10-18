@@ -429,6 +429,7 @@ pub struct FlowRegistration {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 enum SessionFact {
     Created(SessionDescriptor),
+    TitleChanged(Option<String>),
     FlowRegistered(FlowRegistration),
     DefaultFlowSelected(FlowInstanceId),
     AccessGranted(access::FlowGrant),
@@ -439,6 +440,8 @@ enum SessionFact {
 #[derive(Clone, Debug, Serialize)]
 pub struct SessionProjection {
     pub descriptor: SessionDescriptor,
+    /// Mutable display name; the creation descriptor remains unchanged.
+    pub title: Option<String>,
     pub flows: Vec<FlowRegistration>,
     pub default_flow: Option<FlowInstanceId>,
     pub access: access::SessionAccess,
@@ -452,6 +455,7 @@ impl SessionProjection {
                 (None, SessionFact::Created(descriptor)) if descriptor.id == id => {
                     descriptor.validate()?;
                     *projection = Some(SessionProjection {
+                        title: (!descriptor.title.is_empty()).then(|| descriptor.title.clone()),
                         descriptor,
                         flows: Vec::new(),
                         default_flow: None,
@@ -469,6 +473,7 @@ impl SessionProjection {
     fn apply(&mut self, fact: SessionFact) -> io::Result<()> {
         match fact {
             SessionFact::Created(_) => return Err(invalid("duplicate session creation")),
+            SessionFact::TitleChanged(title) => self.title = title,
             SessionFact::FlowRegistered(registration) => {
                 if self.flows.iter().any(|flow| {
                     flow.id == registration.id
@@ -657,6 +662,7 @@ impl RuntimeStore {
             owner,
             journal,
             projection: SessionProjection {
+                title: (!descriptor.title.is_empty()).then(|| descriptor.title.clone()),
                 descriptor,
                 flows: Vec::new(),
                 default_flow: None,
@@ -852,6 +858,21 @@ impl SessionStore {
             return Ok(self.cursor.clone());
         }
         self.commit(vec![SessionFact::DefaultFlowSelected(id)])
+    }
+
+    /// Persist a display name without changing creation identity or flow execution. An already applied value is a no-op; a stale snapshot cannot replace a different title.
+    pub fn set_title(
+        &mut self,
+        expected: &CommitReceipt,
+        title: Option<String>,
+    ) -> io::Result<CommitReceipt> {
+        if self.projection.title == title {
+            return Ok(self.cursor.clone());
+        }
+        if expected != &self.cursor {
+            return Err(invalid("session catalog changed; refresh before renaming"));
+        }
+        self.commit(vec![SessionFact::TitleChanged(title)])
     }
 
     fn commit(&mut self, facts: Vec<SessionFact>) -> io::Result<CommitReceipt> {

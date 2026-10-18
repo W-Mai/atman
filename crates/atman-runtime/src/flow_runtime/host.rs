@@ -141,16 +141,19 @@ impl RuntimeHost {
         let (commands, receiver) = mpsc::channel(64);
         let flows = FlowDirectory::default();
         let access = Arc::new(RwLock::new(store.projection().access.clone()));
+        let (title, title_rx) = watch::channel(store.projection().title.clone());
         let handle = SessionHandle {
             id,
             commands,
             flows: flows.clone(),
             access: access.clone(),
+            title: title_rx,
         };
         runtime.spawn(serve_catalog(
             store,
             flows,
             access,
+            title,
             WeakRuntimeHost(Arc::downgrade(&self.directory)),
             HostServices {
                 redactor,
@@ -290,6 +293,7 @@ pub struct SessionHandle {
     commands: mpsc::Sender<CatalogCommand>,
     flows: FlowDirectory,
     pub(super) access: Arc<RwLock<SessionAccess>>,
+    title: watch::Receiver<Option<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -343,6 +347,11 @@ enum CatalogCommand {
         id: FlowInstanceId,
         reply: oneshot::Sender<io::Result<CommitReceipt>>,
     },
+    Title {
+        title: Option<String>,
+        expected: CommitReceipt,
+        reply: oneshot::Sender<io::Result<CommitReceipt>>,
+    },
     Snapshot(oneshot::Sender<io::Result<SessionSnapshot>>),
 }
 
@@ -389,6 +398,25 @@ impl SessionHandle {
     }
     pub fn id(&self) -> Uuid {
         self.id
+    }
+
+    /// Subscribe to committed Session display metadata without opening or controlling a flow.
+    pub fn subscribe_title(&self) -> watch::Receiver<Option<String>> {
+        self.title.clone()
+    }
+
+    /// Trusted host mutation. Accepted catalog work continues if its caller disconnects.
+    pub async fn set_title(
+        &self,
+        expected: CommitReceipt,
+        title: Option<String>,
+    ) -> io::Result<CommitReceipt> {
+        self.request(|reply| CatalogCommand::Title {
+            title,
+            expected,
+            reply,
+        })
+        .await
     }
 
     /// Install automatic admission under catalog ownership. Dropping the returned status receiver
@@ -557,6 +585,7 @@ async fn serve_catalog(
     mut store: SessionStore,
     flows: FlowDirectory,
     access: Arc<RwLock<SessionAccess>>,
+    title: watch::Sender<Option<String>>,
     host: WeakRuntimeHost,
     services: HostServices,
     mut commands: mpsc::Receiver<CatalogCommand>,
@@ -749,6 +778,31 @@ async fn serve_catalog(
                     catalog: store.projection().clone(),
                     cursor: store.cursor().clone(),
                 }));
+            }
+            CatalogCommand::Title {
+                title: next,
+                expected,
+                reply,
+            } => {
+                let result = tokio::task::spawn_blocking(move || {
+                    let result = store.set_title(&expected, next);
+                    (store, result)
+                })
+                .await;
+                let Ok((returned, result)) = result else {
+                    return;
+                };
+                store = returned;
+                if result.is_ok() {
+                    title.send_if_modified(|current| {
+                        if current == &store.projection().title {
+                            return false;
+                        }
+                        *current = store.projection().title.clone();
+                        true
+                    });
+                }
+                let _ = reply.send(result);
             }
             CatalogCommand::Select { id, reply } => {
                 let result = tokio::task::spawn_blocking(move || {

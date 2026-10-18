@@ -20,6 +20,52 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn session_titles_replay_independently_of_creation_and_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let descriptor = session_descriptor();
+    let mut session = root.create_session(descriptor.clone()).unwrap();
+    let original = session.cursor().clone();
+    let renamed = session
+        .set_title(&original, Some("Renamed".into()))
+        .unwrap();
+    assert_eq!(session.projection().descriptor, descriptor);
+    assert_eq!(session.projection().title.as_deref(), Some("Renamed"));
+    assert_eq!(
+        session
+            .set_title(&original, Some("Renamed".into()))
+            .unwrap(),
+        renamed
+    );
+    assert!(session.set_title(&original, Some("Stale".into())).is_err());
+    let cleared = session.set_title(&renamed, None).unwrap();
+    assert!(session.projection().title.is_none());
+    assert!(
+        session
+            .set_title(&original, Some("Renamed".into()))
+            .is_err()
+    );
+    let path = session.dir().to_owned();
+    let facts = std::fs::read(path.join("events.jsonl")).unwrap();
+    // A disposable cache is never the source of the current name.
+    std::fs::write(path.join("session.json"), b"{\"title\":\"stale\"}").unwrap();
+    let inspected = RuntimeStore::inspect_session(dir.path(), descriptor.id).unwrap();
+    assert!(inspected.projection.title.is_none());
+    assert_eq!(inspected.projection.descriptor, descriptor);
+    assert_eq!(inspected.journal.cursor, Some(cleared.clone()));
+    assert_eq!(std::fs::read(path.join("events.jsonl")).unwrap(), facts);
+    assert_eq!(
+        std::fs::read(path.join("session.json")).unwrap(),
+        b"{\"title\":\"stale\"}"
+    );
+    drop(session);
+    let reopened = root.open_session(descriptor.id).unwrap();
+    assert!(reopened.projection().title.is_none());
+    assert_eq!(reopened.projection().descriptor, descriptor);
+    assert_eq!(reopened.cursor(), &cleared);
+}
+
+#[test]
 fn project_binding_retains_scope_without_recreating_missing_paths_or_accepting_invalid_config() {
     use atman_runtime::config_hub::ConfigHub;
     use atman_runtime::flow_store::SessionConfiguration;

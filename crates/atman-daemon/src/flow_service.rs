@@ -522,7 +522,7 @@ fn decode<T: DeserializeOwned>(params: Value) -> Result<T, JsonRpcError> {
 async fn describe_session(session: &SessionHandle) -> Result<Value> {
     let snapshot = session.snapshot().await?;
     Ok(json!({
-        "session_id": session.id(), "title": snapshot.catalog.descriptor.title,
+        "session_id": session.id(), "title": snapshot.catalog.title,
         "project_root": snapshot.catalog.descriptor.project.as_ref().map(|project| project.root()),
         "default_flow": snapshot.catalog.default_flow, "flow_count": snapshot.catalog.flows.len(),
         "catalog": snapshot.cursor,

@@ -150,7 +150,7 @@ pub(crate) fn list(root: &Path, project: Option<&Path>) -> Result<usize> {
                 "{:<38} {:>5}  {:<28} {}",
                 descriptor.id,
                 read.projection.flows.len(),
-                single_line(&descriptor.title),
+                single_line(read.projection.title.as_deref().unwrap_or("-")),
                 single_line(&location)
             );
         }
@@ -170,7 +170,10 @@ pub(crate) fn show(root: &Path, sid: &str) -> Result<bool> {
     let descriptor = &read.projection.descriptor;
     println!("session_id: {id}");
     println!("layout:     persistent (recorded catalog)");
-    println!("title:      {}", single_line(&descriptor.title));
+    println!(
+        "title:      {}",
+        single_line(read.projection.title.as_deref().unwrap_or("-"))
+    );
     println!("dir:        {}", read.dir.display());
     println!(
         "project:    {}",

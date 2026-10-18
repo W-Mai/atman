@@ -5878,10 +5878,13 @@ async fn list_sessions_summary(data: &std::path::Path) -> Vec<serde_json::Value>
                     Ok(None) => (0, None),
                     Err(error) => (0, Some(error.to_string())),
                 };
-                out.push((id.to_string(), serde_json::json!({
-                    "id": id, "event_count": count, "first_ts": null, "error": error,
-                    "instance_id": read.projection.default_flow, "title": read.projection.descriptor.title,
-                })));
+                out.push((
+                    id.to_string(),
+                    serde_json::json!({
+                        "id": id, "event_count": count, "first_ts": null, "error": error,
+                        "instance_id": read.projection.default_flow, "title": read.projection.title,
+                    }),
+                ));
             }
             Err(error) => out.push((
                 id.to_string(),

@@ -26,6 +26,78 @@ fn session_descriptor() -> SessionDescriptor {
 }
 
 #[tokio::test]
+async fn session_titles_publish_only_committed_changes_without_loading_flows() {
+    use atman_runtime::flow_runtime::catalog::SessionCatalog;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut store = root.create_session(info.clone()).unwrap();
+    let flow = store.create_flow(flow_descriptor(info.id)).unwrap();
+    let flow_log = flow.dir().join("events.jsonl");
+    let flow_before = std::fs::read(&flow_log).unwrap();
+    drop(flow);
+    let host = RuntimeHost::default();
+    let session = host.attach_session(store).unwrap();
+    let catalog = SessionCatalog::new(Some(host.clone()), Some(dir.path().to_owned()));
+    let mut first = session.subscribe_title();
+    let mut second = session.subscribe_title();
+    assert_eq!(first.borrow_and_update().as_deref(), Some("Workspace"));
+    second.borrow_and_update();
+    let initial = session.snapshot().await.unwrap().cursor;
+    let renamed = session
+        .set_title(initial.clone(), Some("Renamed".into()))
+        .await
+        .unwrap();
+    first.changed().await.unwrap();
+    second.changed().await.unwrap();
+    assert_eq!(first.borrow_and_update().as_deref(), Some("Renamed"));
+    assert_eq!(second.borrow_and_update().as_deref(), Some("Renamed"));
+    assert_eq!(session.snapshot().await.unwrap().catalog.descriptor, info);
+    assert_eq!(
+        catalog
+            .overview(info.id)
+            .await
+            .unwrap()
+            .summary
+            .title
+            .as_deref(),
+        Some("Renamed")
+    );
+    assert_eq!(
+        session
+            .set_title(initial.clone(), Some("Renamed".into()))
+            .await
+            .unwrap(),
+        renamed
+    );
+    assert!(!first.has_changed().unwrap());
+    assert!(
+        session
+            .set_title(initial, Some("Stale".into()))
+            .await
+            .is_err()
+    );
+    assert!(!second.has_changed().unwrap());
+    drop(first);
+    drop(second);
+    session.set_title(renamed, None).await.unwrap();
+    let mut reattached = session.subscribe_title();
+    assert!(reattached.borrow_and_update().is_none());
+    let view = catalog.overview(info.id).await.unwrap();
+    assert!(view.summary.title.is_none());
+    assert_eq!(view.summary.loaded_flows, Some(0));
+    assert_eq!(std::fs::read(&flow_log).unwrap(), flow_before);
+    host.shutdown().await.unwrap();
+    assert!(reattached.changed().await.is_err());
+    let detached = SessionCatalog::new(None, Some(dir.path().to_owned()))
+        .overview(info.id)
+        .await
+        .unwrap();
+    assert!(detached.summary.title.is_none());
+    assert_eq!(std::fs::read(&flow_log).unwrap(), flow_before);
+}
+
+#[tokio::test]
 async fn session_discovery_requires_container_authority_and_preserves_detached_execution() {
     use atman_runtime::flow_store::{
         access::{AccessTarget, FlowAction, FlowGrant},

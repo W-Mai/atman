@@ -255,7 +255,7 @@ impl SessionSummary {
     ) -> Self {
         Self {
             session_id: catalog.descriptor.id,
-            title: Some(catalog.descriptor.title.clone()),
+            title: catalog.title.clone(),
             project_root: catalog
                 .descriptor
                 .project
