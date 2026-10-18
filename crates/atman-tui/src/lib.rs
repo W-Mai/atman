@@ -115,6 +115,7 @@ pub enum TuiControl {
     },
     FocusFlow {
         flow: atman_runtime::flow_store::FlowRef,
+        placement: control::FlowPlacement,
         reuse: Option<control::ViewBinding>,
     },
     Submit(TuiSubmission),
@@ -269,6 +270,7 @@ pub enum TuiCommand {
     },
     FocusFlow {
         flow: atman_runtime::flow_store::FlowRef,
+        placement: control::FlowPlacement,
         attachment: Option<Box<TuiHandle>>,
     },
     /// Returned through the captured flow reply mailbox after the host accepts or rejects input.

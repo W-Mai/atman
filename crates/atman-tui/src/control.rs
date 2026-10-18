@@ -6,6 +6,14 @@ use uuid::Uuid;
 
 use crate::{TuiCommand, TuiControl};
 
+/// A view location, independent of the flow's execution or default designation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub enum FlowPlacement {
+    #[default]
+    Main,
+    Floating,
+}
+
 /// A client view's selection, independent of the instance's execution revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ViewBinding {

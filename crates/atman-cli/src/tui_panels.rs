@@ -115,6 +115,15 @@ impl PanelServices {
         !self.provider_mutations.is_empty() || !self.refreshes.is_empty()
     }
 
+    pub fn can_detach(&self) -> bool {
+        self.replies.is_closed()
+            && !self.has_pending_work()
+            && self
+                .organization
+                .as_ref()
+                .is_none_or(JoinHandle::is_finished)
+    }
+
     pub async fn next_completion(&mut self) -> Result<(), JoinError> {
         tokio::select! {
             result = self.provider_mutations.join_next(), if !self.provider_mutations.is_empty() => {

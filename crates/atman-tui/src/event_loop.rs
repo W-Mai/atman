@@ -1,5 +1,9 @@
+mod views;
+
 use crate::UiState;
+use crate::control::FlowPlacement;
 use std::io::Stdout;
+use views::{ViewKey, Workspace};
 
 use anyhow::Result;
 use crossterm::event::{Event as CtEvent, KeyModifiers, MouseButton, MouseEventKind};
@@ -202,7 +206,7 @@ pub(crate) async fn run_frames(
 ) -> Result<()> {
     let (mut app, mut editor) = initialize_view(&mut handle).await?;
     let persistent = handle.flow_view.is_some();
-    let mut views = std::collections::HashMap::new();
+    let mut views = Workspace::new(&handle);
     let mut hub: Option<crate::flow_hub::FlowHub> = None;
     let (mut key_events, reader_shutdown) = spawn_event_reader();
     // Flush stale input events accumulated during boot animation.
@@ -273,6 +277,7 @@ pub(crate) async fn run_frames(
         }
         app.app.tick_toasts();
         terminal.backend_mut().queue(BeginSynchronizedUpdate)?;
+        let mut composition = Ok(());
         let draw_result = terminal
             .draw(|f| {
                 if let Some(hub) = hub.as_mut() {
@@ -281,11 +286,14 @@ pub(crate) async fn run_frames(
                         &handle.control_tx.as_ref().unwrap().binding().unwrap().flow,
                     );
                 } else {
-                    render_frame(f, &mut app, &editor);
+                    composition = views.render(f, &mut app, &editor);
                 }
             })
             .map(|_| ());
-        let cursor_result = if hub.is_some() || app.app.modal_notification.is_some() {
+        let cursor_result = if hub.is_some()
+            || app.app.modal_notification.is_some()
+            || (persistent && !views.cursor_visible)
+        {
             terminal.hide_cursor()
         } else if let Some(kind) = app.wm.top_kind() {
             if app.wm.modals.cursor_visible(kind) {
@@ -303,6 +311,7 @@ pub(crate) async fn run_frames(
         };
         let sync_result = terminal.backend_mut().execute(EndSynchronizedUpdate);
         draw_result?;
+        composition?;
         cursor_result?;
         sync_result?;
         app.app.tick = app.app.tick.wrapping_add(1);
@@ -311,8 +320,8 @@ pub(crate) async fn run_frames(
             break;
         }
 
+        // Fair polling keeps continuously ready view updates from starving input and replies.
         tokio::select! {
-            biased;
             _ = wait_shutdown(shutdown.as_mut()) => {
                 break;
             }
@@ -355,6 +364,7 @@ pub(crate) async fn run_frames(
             }, if persistent => {
                 if frame.is_some() { app.app.sync_instance_permissions(); } else { break; }
             }
+            _ = views.next_background(), if persistent => {}
             key = recv_input_event(&mut key_events, &mut pending_input_event) => {
                 if std::env::var_os("ATMAN_TRACE_EVENTS").is_some() {
                     atman_runtime::notify!(debug, "event: {key:?}");
@@ -367,10 +377,25 @@ pub(crate) async fn run_frames(
                         _ => crate::flow_hub::Action::None,
                     };
                     if matches!(action, crate::flow_hub::Action::Close) { hub = None; }
-                    else if let Some(tx) = handle.control_tx.as_ref() { let reuse = match &action { crate::flow_hub::Action::Focus(flow) => if tx.binding().is_some_and(|binding| &binding.flow == flow) { tx.binding().cloned() } else { views.get(flow).and_then(|view: &AttachedView| view.handle.control_tx.as_ref()).and_then(|tx| tx.binding()).cloned() }, _ => None }; dispatch_hub_action(opened, action, tx, reuse); }
+                    else if let Some(tx) = handle.control_tx.as_ref() { let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle)); dispatch_hub_action(opened, action, tx, reuse); }
                     continue;
                 }
                 if persistent {
+                    let shortcuts = app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none();
+                    if let Some(Ok(event)) = &key {
+                        let result = match views.event(event, shortcuts) {
+                            views::Action::Pass => Ok(true),
+                            views::Action::Consume => Ok(false),
+                            views::Action::Focus { key, forward } => { interrupt_prompt = None; views.focus(&mut app, &mut editor, &mut handle, key, None).await.map(|()| forward) },
+                            views::Action::Close(key) => views.close(&mut app, &mut editor, &mut handle, &key).await.map(|()| false),
+                            views::Action::Promote(key) => views.focus(&mut app, &mut editor, &mut handle, key, None).await.map(|()| { views.promote(); false }),
+                        };
+                        match result {
+                            Ok(true) => {},
+                            Ok(false) => { interrupt_prompt = None; continue; },
+                            Err(error) => { app.app.push_toast(format!("{error:#}"), crate::app::NoteLevel::Error, std::time::Duration::from_secs(6), crate::app::ToastPosition::TopRight); continue; },
+                        }
+                    }
                     let escape = matches!(&key, Some(Ok(CtEvent::Key(key))) if map_key(*key) == KeyAction::Escape)
                         && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none();
                     let mut clicked = false;
@@ -1598,6 +1623,11 @@ pub(crate) async fn run_frames(
                         break;
                     }
                     match pending_input_event.take().or_else(|| key_events.try_recv().ok()) {
+                        Some(next) if persistent && !matches!(&next, Ok(CtEvent::Paste(_)) | Ok(CtEvent::Key(crossterm::event::KeyEvent { code: crossterm::event::KeyCode::Char(_), modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT, .. }))) => {
+                            // Navigation and pointer events must pass through workspace routing.
+                            pending_input_event = Some(next);
+                            break;
+                        }
                         Some(next) => current = Some(next),
                         None => break,
                     }
@@ -1852,253 +1882,20 @@ pub(crate) async fn run_frames(
                         TuiCommand::FlowCatalog { result } => {
                             if let Some(hub) = hub.as_mut() { hub.receive(ticket.as_ref(), result); }
                         }
-                        TuiCommand::FocusFlow { flow, attachment } => {
+                        TuiCommand::FocusFlow { flow, placement, attachment } => {
                             // Closing the directory cancels navigation, never the submitted host work.
                             if !hub.as_ref().is_some_and(|hub| hub.pending.as_ref() == ticket.as_ref()) { continue; }
-                            match switch_view(&mut views, &mut app, &mut editor, &mut handle, flow, attachment).await {
+                            match views.focus(&mut app, &mut editor, &mut handle, ViewKey { flow, placement }, attachment).await {
                                 Ok(()) => { interrupt_prompt = None; hub = None; }
                                 Err(error) => hub.as_mut().unwrap().failed(error.to_string()),
                             }
                         }
-                        TuiCommand::SubmissionResult { result } => {
-                            app.app.submission_result(&mut editor, ticket.as_ref(), result);
-                        }
-                        TuiCommand::FormSubmissionResult { request_id, form_id, result } => {
-                            app.wm.modals.form_modal.submission_result(&form_id, request_id, result);
-                        }
-                        TuiCommand::SetSidebar(mode) => {
-                            app.app.sidebar_mode = mode;
-                        }
-                        TuiCommand::OpenSessionSwitcher => {
-                            let scope = crate::session_switcher::SessionScope::Project;
-                            let rows = key_handler::enumerate_session_rows(&app, scope);
-                            app.wm.modals.session_switcher.open_with(rows, scope);
-                        }
-                        TuiCommand::OpenProjectHub => {
-                            let canvas = app.app.maximized_canvas();
-                            let session = app.app.session.clone();
-                            app.wm.open_project_hub(
-                                canvas,
-                                app.app.projects.clone(),
-                                session.as_deref(),
-                            );
-                        }
-                        TuiCommand::OpenProjectStorageScopePicker => {
-                            key_handler::open_project_storage_scope_picker(&mut app.app);
-                        }
-                        TuiCommand::SessionNameUpdated(name) => {
-                            app.app.session_name = Some(name);
-                            if app.wm.modals.session_switcher.open {
-                                let scope = app.wm.modals.session_switcher.scope;
-                                let rows = key_handler::enumerate_session_rows(&app, scope);
-                                app.wm.modals.session_switcher.set_rows(rows);
-                            }
-                        }
-                        TuiCommand::OpenTrustModePicker => {
-                            app.wm.modals.open_trust_mode_picker(&mut app.app);
-                        }
-                        TuiCommand::OpenThemePicker => {
-                            app.wm.modals.theme_picker_open = true;
-                        }
-                        TuiCommand::OpenModelPicker => {
-                            app.wm.modals.model_picker.open();
-                        }
-                        TuiCommand::ModelSwitchResult {
-                            request_id,
-                            model,
-                            result,
-                        } => {
-                            app.wm.modals.resolve_model_switch(
-                                &mut app.app,
-                                request_id,
-                                model,
-                                result,
-                            );
-                        }
-                        TuiCommand::ProviderCatalogChanged { added_provider } => {
-                            apply_provider_catalog_changed(&mut app, added_provider);
-                        }
-                        TuiCommand::ProviderCatalogRefreshResult {
-                            provider_id,
-                            result,
-                        } => {
-                            apply_provider_catalog_refresh_result(&mut app, &provider_id, result);
-                        }
-                        TuiCommand::ProviderMutationResult { request, result } => {
-                            apply_provider_mutation_result(&mut app, request, result);
-                        }
-                        TuiCommand::ModelMutationResult { request, result } => {
-                            apply_model_mutation_result(&mut app, request, result);
-                        }
-                        TuiCommand::ProviderTestResult { request_id, result } => {
-                            if app.wm.modals.provider_manager.resolve_test(request_id, &result) {
-                                let (message, level) = match result {
-                                    Ok(message) => (message, app::NoteLevel::Success),
-                                    Err(message) => (message, app::NoteLevel::Error),
-                                };
-                                app.app.push_toast(message, level, std::time::Duration::from_secs(5), app::ToastPosition::TopRight);
-                            }
-                        }
-                        TuiCommand::ModelTestResult { request_id, result } => {
-                            if app.wm.modals.model_manager.resolve_test(request_id, &result) {
-                                let (message, level) = match result {
-                                    Ok(message) => (message, app::NoteLevel::Success),
-                                    Err(message) => (message, app::NoteLevel::Error),
-                                };
-                                app.app.push_toast(message, level, std::time::Duration::from_secs(8), app::ToastPosition::TopRight);
-                            }
-                        }
-                        TuiCommand::McpTestResult { name, message, ok } => {
-                            let level = if ok {
-                                app::NoteLevel::Success
-                            } else {
-                                app::NoteLevel::Error
-                            };
-                            app.app.push_toast(
-                                format!("{name}: {message}"),
-                                level,
-                                std::time::Duration::from_secs(5),
-                                app::ToastPosition::TopRight,
-                            );
-                        }
-                        TuiCommand::McpReloaded => {
-                            app.app.push_toast(
-                                "MCP servers reloaded",
-                                app::NoteLevel::Success,
-                                std::time::Duration::from_secs(3),
-                                app::ToastPosition::TopRight,
-                            );
-                        }
-                        TuiCommand::KnowledgeResult(result) => {
-                            let mut state = app.app.knowledge_state.lock().unwrap();
-                            match result {
-                                Ok((confessions, rules)) => {
-                                    if !state.loading && !state.applying && !state.archiving
-                                        && (state.message.is_empty()
-                                            || state.message.contains(" confessions · ")
-                                            || state.message.starts_with("Refreshing memory")
-                                            || state.message.starts_with("Reloading rules")) {
-                                        state.message = format!("{} confessions · {} rules", confessions.len(), rules.len());
-                                    }
-                                    state.confessions = confessions;
-                                    state.rules = rules;
-                                }
-                                Err(error) => state.message = error,
-                            }
-                        }
-                        TuiCommand::ConfessionHistoryResult { id, result } => {
-                            let mut state = app.app.knowledge_state.lock().unwrap();
-                            match result {
-                                Ok(changes) => { state.history_id = Some(id); state.history = changes; }
-                                Err(error) => state.message = error,
-                            }
-                        }
-                        TuiCommand::ConfessionSaved(id) => {
-                            app.app.knowledge_state.lock().unwrap().saved_id = Some(id);
-                        }
-                        TuiCommand::ConfessionSaveFailed { id, error } => {
-                            let mut state = app.app.knowledge_state.lock().unwrap();
-                            state.failed_save_id = Some(id);
-                            state.message = error;
-                        }
-                        TuiCommand::ConfessionArchived => {
-                            let mut state = app.app.knowledge_state.lock().unwrap();
-                            state.archiving = false;
-                            state.message = "Confession archived · active memory and search updated".into();
-                        }
-                        TuiCommand::ConfessionArchiveFailed(error) => {
-                            let mut state = app.app.knowledge_state.lock().unwrap();
-                            state.archiving = false;
-                            state.message = format!("Archive failed: {error}");
-                        }
-                        TuiCommand::OrganizationProgress { request_id, completed, total } => {
-                            let mut state = app.app.knowledge_state.lock().unwrap();
-                            if request_id != state.organize_request { continue; }
-                            state.message = format!("Analyzing confessions {completed}/{total}…");
-                        }
-                        TuiCommand::OrganizationResult { request_id, result } => {
-                            let mut state = app.app.knowledge_state.lock().unwrap();
-                            if request_id != state.organize_request { continue; }
-                            state.loading = false;
-                            match result {
-                                Ok(proposals) => {
-                                    state.message = if proposals.is_empty() {
-                                        "No active confessions to organize".into()
-                                    } else {
-                                        format!("{} suggestions · select with Space, apply with A", proposals.len())
-                                    };
-                                    state.proposals = proposals;
-                                }
-                                Err(error) => state.message = format!("Organization failed: {error}"),
-                            }
-                        }
-                        TuiCommand::OrganizationApplied => {
-                            let mut state = app.app.knowledge_state.lock().unwrap();
-                            state.applying = false;
-                            state.proposals.clear();
-                            state.message = "Organization applied".into();
-                        }
-                        TuiCommand::OrganizationApplyFailed(error) => {
-                            let mut state = app.app.knowledge_state.lock().unwrap();
-                            state.applying = false;
-                            state.message = error;
-                        }
-                        TuiCommand::ProjectCatalogUpdated {
-                            selected_fingerprint,
-                            success_message,
-                            result,
-                        } => match result {
-                            Ok(projects) => {
-                                app.app.projects = projects;
-                                let canvas = app.app.maximized_canvas();
-                                let session = app.app.session.clone();
-                                app.wm.open_project_hub_selected(
-                                    canvas,
-                                    app.app.projects.clone(),
-                                    session.as_deref(),
-                                    Some(&selected_fingerprint),
-                                );
-                                app.app.push_toast(
-                                    success_message,
-                                    app::NoteLevel::Success,
-                                    std::time::Duration::from_secs(3),
-                                    app::ToastPosition::TopRight,
-                                );
-                            }
-                            Err(error) => app.app.push_toast(
-                                format!("Project update failed: {error}"),
-                                app::NoteLevel::Error,
-                                std::time::Duration::from_secs(5),
-                                app::ToastPosition::TopRight,
-                            ),
-                        },
-                        TuiCommand::GoalSaved { request_id, result } => {
-                            app.wm.goal_saved(request_id, result);
-                        }
-                        TuiCommand::QueueMutationRejected(message) => {
-                            app.app.push_toast(
-                                format!("queue update rejected: {message}"),
-                                app::NoteLevel::Warn,
-                                std::time::Duration::from_secs(4),
-                                app::ToastPosition::TopRight,
-                            );
-                        }
-                        TuiCommand::Toast { message, level } => {
-                            if let Some(hub) = hub.as_mut() && hub.pending.as_ref() == ticket.as_ref() {
-                                hub.failed(message.clone());
-                            }
-                            app.app.push_toast(
-                                message,
-                                level,
-                                std::time::Duration::from_secs(4),
-                                app::ToastPosition::TopRight,
-                            );
-                        }
-                        TuiCommand::McpResourcesResult { name, resources } => {
-                            app.app.replace_mcp_resources(name, resources);
-                        }
-                        TuiCommand::McpPromptsResult { name, prompts } => {
-                            app.app.replace_mcp_prompts(name, prompts);
+                        command => {
+                            if let TuiCommand::Toast { message, .. } = &command
+                                && let Some(hub) = hub.as_mut()
+                                && hub.pending.as_ref() == ticket.as_ref()
+                            { hub.failed(message.clone()); }
+                            apply_view_command(&mut app, &mut editor, ticket.as_ref(), command);
                         }
                     }
                 }
@@ -2106,6 +1903,294 @@ pub(crate) async fn run_frames(
         }
     }
     Ok(())
+}
+
+fn apply_view_command(
+    app: &mut UiState,
+    editor: &mut InputEditor,
+    ticket: Option<&crate::control::ControlTicket>,
+    command: TuiCommand,
+) {
+    match command {
+        // Navigation belongs to the workspace; a late response cannot move a background view.
+        TuiCommand::FlowCatalog { .. } | TuiCommand::FocusFlow { .. } => {}
+        TuiCommand::SubmissionResult { result } => {
+            app.app.submission_result(editor, ticket, result);
+        }
+        TuiCommand::FormSubmissionResult {
+            request_id,
+            form_id,
+            result,
+        } => {
+            app.wm
+                .modals
+                .form_modal
+                .submission_result(&form_id, request_id, result);
+        }
+        TuiCommand::SetSidebar(mode) => {
+            app.app.sidebar_mode = mode;
+        }
+        TuiCommand::OpenSessionSwitcher => {
+            let scope = crate::session_switcher::SessionScope::Project;
+            let rows = key_handler::enumerate_session_rows(app, scope);
+            app.wm.modals.session_switcher.open_with(rows, scope);
+        }
+        TuiCommand::OpenProjectHub => {
+            let canvas = app.app.maximized_canvas();
+            let session = app.app.session.clone();
+            app.wm
+                .open_project_hub(canvas, app.app.projects.clone(), session.as_deref());
+        }
+        TuiCommand::OpenProjectStorageScopePicker => {
+            key_handler::open_project_storage_scope_picker(&mut app.app);
+        }
+        TuiCommand::SessionNameUpdated(name) => {
+            app.app.session_name = Some(name);
+            if app.wm.modals.session_switcher.open {
+                let scope = app.wm.modals.session_switcher.scope;
+                let rows = key_handler::enumerate_session_rows(app, scope);
+                app.wm.modals.session_switcher.set_rows(rows);
+            }
+        }
+        TuiCommand::OpenTrustModePicker => {
+            app.wm.modals.open_trust_mode_picker(&mut app.app);
+        }
+        TuiCommand::OpenThemePicker => {
+            app.wm.modals.theme_picker_open = true;
+        }
+        TuiCommand::OpenModelPicker => {
+            app.wm.modals.model_picker.open();
+        }
+        TuiCommand::ModelSwitchResult {
+            request_id,
+            model,
+            result,
+        } => {
+            app.wm
+                .modals
+                .resolve_model_switch(&mut app.app, request_id, model, result);
+        }
+        TuiCommand::ProviderCatalogChanged { added_provider } => {
+            apply_provider_catalog_changed(app, added_provider);
+        }
+        TuiCommand::ProviderCatalogRefreshResult {
+            provider_id,
+            result,
+        } => {
+            apply_provider_catalog_refresh_result(app, &provider_id, result);
+        }
+        TuiCommand::ProviderMutationResult { request, result } => {
+            apply_provider_mutation_result(app, request, result);
+        }
+        TuiCommand::ModelMutationResult { request, result } => {
+            apply_model_mutation_result(app, request, result);
+        }
+        TuiCommand::ProviderTestResult { request_id, result } => {
+            if app
+                .wm
+                .modals
+                .provider_manager
+                .resolve_test(request_id, &result)
+            {
+                let (message, level) = match result {
+                    Ok(message) => (message, app::NoteLevel::Success),
+                    Err(message) => (message, app::NoteLevel::Error),
+                };
+                app.app.push_toast(
+                    message,
+                    level,
+                    std::time::Duration::from_secs(5),
+                    app::ToastPosition::TopRight,
+                );
+            }
+        }
+        TuiCommand::ModelTestResult { request_id, result } => {
+            if app
+                .wm
+                .modals
+                .model_manager
+                .resolve_test(request_id, &result)
+            {
+                let (message, level) = match result {
+                    Ok(message) => (message, app::NoteLevel::Success),
+                    Err(message) => (message, app::NoteLevel::Error),
+                };
+                app.app.push_toast(
+                    message,
+                    level,
+                    std::time::Duration::from_secs(8),
+                    app::ToastPosition::TopRight,
+                );
+            }
+        }
+        TuiCommand::McpTestResult { name, message, ok } => {
+            let level = if ok {
+                app::NoteLevel::Success
+            } else {
+                app::NoteLevel::Error
+            };
+            app.app.push_toast(
+                format!("{name}: {message}"),
+                level,
+                std::time::Duration::from_secs(5),
+                app::ToastPosition::TopRight,
+            );
+        }
+        TuiCommand::McpReloaded => {
+            app.app.push_toast(
+                "MCP servers reloaded",
+                app::NoteLevel::Success,
+                std::time::Duration::from_secs(3),
+                app::ToastPosition::TopRight,
+            );
+        }
+        TuiCommand::KnowledgeResult(result) => {
+            let mut state = app.app.knowledge_state.lock().unwrap();
+            match result {
+                Ok((confessions, rules)) => {
+                    if !state.loading
+                        && !state.applying
+                        && !state.archiving
+                        && (state.message.is_empty()
+                            || state.message.contains(" confessions · ")
+                            || state.message.starts_with("Refreshing memory")
+                            || state.message.starts_with("Reloading rules"))
+                    {
+                        state.message =
+                            format!("{} confessions · {} rules", confessions.len(), rules.len());
+                    }
+                    state.confessions = confessions;
+                    state.rules = rules;
+                }
+                Err(error) => state.message = error,
+            }
+        }
+        TuiCommand::ConfessionHistoryResult { id, result } => {
+            let mut state = app.app.knowledge_state.lock().unwrap();
+            match result {
+                Ok(changes) => {
+                    state.history_id = Some(id);
+                    state.history = changes;
+                }
+                Err(error) => state.message = error,
+            }
+        }
+        TuiCommand::ConfessionSaved(id) => {
+            app.app.knowledge_state.lock().unwrap().saved_id = Some(id);
+        }
+        TuiCommand::ConfessionSaveFailed { id, error } => {
+            let mut state = app.app.knowledge_state.lock().unwrap();
+            state.failed_save_id = Some(id);
+            state.message = error;
+        }
+        TuiCommand::ConfessionArchived => {
+            let mut state = app.app.knowledge_state.lock().unwrap();
+            state.archiving = false;
+            state.message = "Confession archived · active memory and search updated".into();
+        }
+        TuiCommand::ConfessionArchiveFailed(error) => {
+            let mut state = app.app.knowledge_state.lock().unwrap();
+            state.archiving = false;
+            state.message = format!("Archive failed: {error}");
+        }
+        TuiCommand::OrganizationProgress {
+            request_id,
+            completed,
+            total,
+        } => {
+            let mut state = app.app.knowledge_state.lock().unwrap();
+            if request_id != state.organize_request {
+                return;
+            }
+            state.message = format!("Analyzing confessions {completed}/{total}…");
+        }
+        TuiCommand::OrganizationResult { request_id, result } => {
+            let mut state = app.app.knowledge_state.lock().unwrap();
+            if request_id != state.organize_request {
+                return;
+            }
+            state.loading = false;
+            match result {
+                Ok(proposals) => {
+                    state.message = if proposals.is_empty() {
+                        "No active confessions to organize".into()
+                    } else {
+                        format!(
+                            "{} suggestions · select with Space, apply with A",
+                            proposals.len()
+                        )
+                    };
+                    state.proposals = proposals;
+                }
+                Err(error) => state.message = format!("Organization failed: {error}"),
+            }
+        }
+        TuiCommand::OrganizationApplied => {
+            let mut state = app.app.knowledge_state.lock().unwrap();
+            state.applying = false;
+            state.proposals.clear();
+            state.message = "Organization applied".into();
+        }
+        TuiCommand::OrganizationApplyFailed(error) => {
+            let mut state = app.app.knowledge_state.lock().unwrap();
+            state.applying = false;
+            state.message = error;
+        }
+        TuiCommand::ProjectCatalogUpdated {
+            selected_fingerprint,
+            success_message,
+            result,
+        } => match result {
+            Ok(projects) => {
+                app.app.projects = projects;
+                let canvas = app.app.maximized_canvas();
+                let session = app.app.session.clone();
+                app.wm.open_project_hub_selected(
+                    canvas,
+                    app.app.projects.clone(),
+                    session.as_deref(),
+                    Some(&selected_fingerprint),
+                );
+                app.app.push_toast(
+                    success_message,
+                    app::NoteLevel::Success,
+                    std::time::Duration::from_secs(3),
+                    app::ToastPosition::TopRight,
+                );
+            }
+            Err(error) => app.app.push_toast(
+                format!("Project update failed: {error}"),
+                app::NoteLevel::Error,
+                std::time::Duration::from_secs(5),
+                app::ToastPosition::TopRight,
+            ),
+        },
+        TuiCommand::GoalSaved { request_id, result } => {
+            app.wm.goal_saved(request_id, result);
+        }
+        TuiCommand::QueueMutationRejected(message) => {
+            app.app.push_toast(
+                format!("queue update rejected: {message}"),
+                app::NoteLevel::Warn,
+                std::time::Duration::from_secs(4),
+                app::ToastPosition::TopRight,
+            );
+        }
+        TuiCommand::Toast { message, level } => {
+            app.app.push_toast(
+                message,
+                level,
+                std::time::Duration::from_secs(4),
+                app::ToastPosition::TopRight,
+            );
+        }
+        TuiCommand::McpResourcesResult { name, resources } => {
+            app.app.replace_mcp_resources(name, resources);
+        }
+        TuiCommand::McpPromptsResult { name, prompts } => {
+            app.app.replace_mcp_prompts(name, prompts);
+        }
+    }
 }
 
 fn apply_provider_catalog_changed(app: &mut UiState, added_provider: Option<String>) {
@@ -3279,75 +3364,16 @@ fn handle_transcript_selection_mouse(
     }
 }
 
-struct AttachedView {
-    ui: UiState,
-    editor: InputEditor,
-    handle: TuiHandle,
-}
-
-async fn switch_view(
-    views: &mut std::collections::HashMap<atman_runtime::flow_store::FlowRef, AttachedView>,
-    ui: &mut UiState,
-    editor: &mut InputEditor,
-    handle: &mut TuiHandle,
-    flow: atman_runtime::flow_store::FlowRef,
-    attachment: Option<Box<TuiHandle>>,
-) -> Result<()> {
-    let old = handle
-        .control_tx
-        .as_ref()
-        .and_then(|tx| tx.binding())
-        .ok_or_else(|| anyhow::anyhow!("view is not bound"))?
-        .flow
-        .clone();
-    if old == flow {
-        return Ok(());
-    }
-    let mut selected = if let Some(view) = views.remove(&flow) {
-        view
-    } else {
-        let mut handle = attachment.ok_or_else(|| anyhow::anyhow!("view attachment is missing"))?;
-        anyhow::ensure!(
-            handle
-                .control_tx
-                .as_ref()
-                .and_then(|tx| tx.binding())
-                .is_some_and(|binding| binding.flow == flow),
-            "view source does not match destination"
-        );
-        let (ui, editor) = initialize_view(&mut handle).await?;
-        AttachedView {
-            ui,
-            editor,
-            handle: *handle,
-        }
+fn hub_view_key(action: &crate::flow_hub::Action) -> Option<ViewKey> {
+    let (flow, placement) = match action {
+        crate::flow_hub::Action::Focus(flow) => (flow, FlowPlacement::Main),
+        crate::flow_hub::Action::Float(flow) => (flow, FlowPlacement::Floating),
+        _ => return None,
     };
-    // Catch up before publishing the new binding. No mixed old/new controls are drawn.
-    if let Some(reader) = selected.handle.flow_view.as_mut() {
-        if let Err(error) = async { selected.ui.app.sync_flow_view(reader.refresh().await?) }.await
-        {
-            views.insert(flow, selected);
-            return Err(error.into());
-        }
-        if let Some(snapshot) = selected.ui.app.items.snapshot() {
-            selected.ui.wm.flow_snapshot(snapshot.clone());
-        }
-    }
-    refresh_instance_live(&mut selected.ui, &mut selected.editor, &selected.handle);
-    ui.app.transcript_selection_pointer = None;
-    ui.app.thinking_click_origin = None;
-    ui.selection_menu = None;
-    ui.wm.interaction.drag_target = None;
-    ui.wm.interaction.resize_target = None;
-    views.insert(
-        old,
-        AttachedView {
-            ui: std::mem::replace(ui, selected.ui),
-            editor: std::mem::replace(editor, selected.editor),
-            handle: std::mem::replace(handle, selected.handle),
-        },
-    );
-    Ok(())
+    Some(ViewKey {
+        flow: flow.clone(),
+        placement,
+    })
 }
 
 fn dispatch_hub_action(
@@ -3358,7 +3384,16 @@ fn dispatch_hub_action(
 ) {
     let command = match action {
         crate::flow_hub::Action::Load(before) => TuiControl::ListFlows { before },
-        crate::flow_hub::Action::Focus(flow) => TuiControl::FocusFlow { flow, reuse },
+        crate::flow_hub::Action::Focus(flow) => TuiControl::FocusFlow {
+            flow,
+            placement: FlowPlacement::Main,
+            reuse,
+        },
+        crate::flow_hub::Action::Float(flow) => TuiControl::FocusFlow {
+            flow,
+            placement: FlowPlacement::Floating,
+            reuse,
+        },
         _ => return,
     };
     match tx.send_tracked(command) {
@@ -3470,17 +3505,20 @@ mod tests {
             images: vec![],
         });
         let submitted = incoming.recv().await.unwrap();
-        let mut views = std::collections::HashMap::new();
-        switch_view(
-            &mut views,
-            &mut ui,
-            &mut editor,
-            &mut handle,
-            workers[1].address().clone(),
-            Some(Box::new(b)),
-        )
-        .await
-        .unwrap();
+        let mut views = Workspace::new(&handle);
+        views
+            .focus(
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                ViewKey {
+                    flow: workers[1].address().clone(),
+                    placement: FlowPlacement::Main,
+                },
+                Some(Box::new(b)),
+            )
+            .await
+            .unwrap();
         editor.insert_str("draft B");
         submitted
             .replies
@@ -3499,16 +3537,19 @@ mod tests {
             ui.app.items.snapshot().unwrap().status.execution.address(),
             workers[1].address()
         );
-        switch_view(
-            &mut views,
-            &mut ui,
-            &mut editor,
-            &mut handle,
-            workers[0].address().clone(),
-            None,
-        )
-        .await
-        .unwrap();
+        views
+            .focus(
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                ViewKey {
+                    flow: workers[0].address().clone(),
+                    placement: FlowPlacement::Main,
+                },
+                None,
+            )
+            .await
+            .unwrap();
         assert_eq!(
             handle.control_tx.as_ref().unwrap().binding(),
             Some(&a_binding)
@@ -3529,33 +3570,202 @@ mod tests {
         ui.app
             .submission_result(&mut editor, reply_ticket.as_ref(), result);
         assert!(editor.buf().is_empty());
-        switch_view(
-            &mut views,
-            &mut ui,
-            &mut editor,
-            &mut handle,
-            workers[1].address().clone(),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(editor.buf(), "draft B");
-        assert!(
-            switch_view(
-                &mut views,
+        views
+            .focus(
                 &mut ui,
                 &mut editor,
                 &mut handle,
-                FlowRef {
-                    session_id: sid.into(),
-                    instance_id: FlowInstanceId::now()
+                ViewKey {
+                    flow: workers[1].address().clone(),
+                    placement: FlowPlacement::Main,
                 },
-                None
+                None,
             )
             .await
-            .is_err()
+            .unwrap();
+        assert_eq!(editor.buf(), "draft B");
+        assert!(
+            views
+                .focus(
+                    &mut ui,
+                    &mut editor,
+                    &mut handle,
+                    ViewKey {
+                        flow: FlowRef {
+                            session_id: sid.into(),
+                            instance_id: FlowInstanceId::now()
+                        },
+                        placement: FlowPlacement::Main
+                    },
+                    None
+                )
+                .await
+                .is_err()
         );
         assert_eq!(editor.buf(), "draft B");
+        // The same flow may be displayed twice, with separate drafts and reply addresses.
+        let a_main = ViewKey {
+            flow: workers[0].address().clone(),
+            placement: FlowPlacement::Main,
+        };
+        views
+            .focus(&mut ui, &mut editor, &mut handle, a_main.clone(), None)
+            .await
+            .unwrap();
+        editor.insert_str("main draft");
+        let floating = ViewKey {
+            flow: workers[0].address().clone(),
+            placement: FlowPlacement::Floating,
+        };
+        let floating_handle = TuiHandle::from_flow(
+            &workers[0],
+            ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: floating.flow.clone(),
+            },
+            commands.clone(),
+        )
+        .await
+        .unwrap();
+        let floating_binding = floating_handle
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .binding()
+            .unwrap()
+            .clone();
+        assert_ne!(floating_binding.view_id, a_binding.view_id);
+        views
+            .focus(
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                floating.clone(),
+                Some(Box::new(floating_handle)),
+            )
+            .await
+            .unwrap();
+        assert!(editor.buf().is_empty());
+        editor.insert_str("floating draft");
+        assert_eq!(views.views[&a_main].editor.buf(), "main draft");
+        let main_view = views.views.get_mut(&a_main).unwrap();
+        let ticket = main_view
+            .handle
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .send_tracked(TuiControl::Submit(crate::TuiSubmission {
+                text: "main draft".into(),
+                images: vec![],
+                reasoning: None,
+                presentation: None,
+            }))
+            .unwrap()
+            .unwrap();
+        main_view.ui.app.pending_submission = Some(crate::composer::PendingSubmission {
+            ticket,
+            draft: main_view.editor.prepare_submission(),
+            quote: main_view.ui.app.pending_quote.clone(),
+            images: vec![],
+        });
+        incoming
+            .recv()
+            .await
+            .unwrap()
+            .replies
+            .send(TuiCommand::SubmissionResult { result: Ok(()) })
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while views.views[&a_main].ui.app.pending_submission.is_some() {
+                views.next_background().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(views.views[&a_main].editor.buf().is_empty());
+        assert_eq!(editor.buf(), "floating draft");
+        views
+            .views
+            .get_mut(&a_main)
+            .unwrap()
+            .editor
+            .insert_str("main draft");
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(160, 50)).unwrap();
+        terminal
+            .draw(|frame| views.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        let content = ui.app.last_full_rect.unwrap();
+        assert!(content.x > 0 && content.y > 0 && content.width < 160 && content.height < 50);
+        assert_eq!(
+            views.views[&a_main].ui.app.last_full_rect,
+            Some(ratatui::layout::Rect::new(0, 0, 160, 50))
+        );
+        let key = |code| CtEvent::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE));
+        views.event(&key(crossterm::event::KeyCode::F(6)), true);
+        views.event(&key(crossterm::event::KeyCode::Right), true);
+        views.event(&key(crossterm::event::KeyCode::Enter), true);
+        terminal
+            .draw(|frame| views.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        assert_eq!(ui.app.last_full_rect.unwrap().x, content.x + 2);
+        views.event(&key(crossterm::event::KeyCode::F(7)), true);
+        views.event(&key(crossterm::event::KeyCode::Down), true);
+        views.event(&key(crossterm::event::KeyCode::Enter), true);
+        terminal
+            .draw(|frame| views.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        assert_eq!(ui.app.last_full_rect.unwrap().height, content.height + 1);
+        views.event(&key(crossterm::event::KeyCode::F(10)), true);
+        terminal
+            .draw(|frame| views.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        assert!(ui.app.last_full_rect.unwrap().width > content.width);
+        views.event(&key(crossterm::event::KeyCode::F(10)), true);
+        // Small viewports retain a keyboard escape route without out-of-bounds rendering.
+        let mut tiny = Terminal::new(ratatui::backend::TestBackend::new(4, 3)).unwrap();
+        tiny.draw(|frame| views.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        terminal
+            .draw(|frame| views.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        assert!(matches!(
+            views.event(&key(crossterm::event::KeyCode::Esc), false),
+            views::Action::Pass
+        ));
+        assert!(matches!(
+            views.event(&key(crossterm::event::KeyCode::Esc), true),
+            views::Action::Close(_)
+        ));
+        views
+            .close(&mut ui, &mut editor, &mut handle, &floating)
+            .await
+            .unwrap();
+        assert_eq!(editor.buf(), "main draft");
+        assert_eq!(
+            handle.control_tx.as_ref().unwrap().binding(),
+            Some(&a_binding)
+        );
+        views
+            .focus(&mut ui, &mut editor, &mut handle, floating.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(editor.buf(), "floating draft");
+        views.promote();
+        assert_eq!(
+            handle.control_tx.as_ref().unwrap().binding(),
+            Some(&floating_binding)
+        );
+        assert_eq!(views.views[&floating].editor.buf(), "main draft");
+        terminal
+            .draw(|frame| views.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        assert_eq!(
+            ui.app.last_full_rect,
+            Some(ratatui::layout::Rect::new(0, 0, 160, 50))
+        );
+        // Closing and promoting views must not send runtime controls.
+        assert!(incoming.try_recv().is_err());
         for worker in workers {
             assert!(matches!(
                 worker.state().await.unwrap().state(),

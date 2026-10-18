@@ -27,6 +27,7 @@ pub(crate) enum Action {
     Close,
     Load(Option<FlowInstanceId>),
     Focus(FlowRef),
+    Float(FlowRef),
 }
 
 #[derive(Default)]
@@ -41,6 +42,7 @@ pub(crate) struct FlowHub {
     query: String,
     error: Option<String>,
     hits: Vec<(Rect, usize)>,
+    float_hits: Vec<(Rect, usize)>,
     previous: Rect,
     next: Rect,
     close: Rect,
@@ -116,6 +118,13 @@ impl FlowHub {
             .unwrap_or(Action::None)
     }
 
+    fn float(&self) -> Action {
+        match self.focus() {
+            Action::Focus(flow) => Action::Float(flow),
+            _ => Action::None,
+        }
+    }
+
     fn page(&mut self, forward: bool) -> Action {
         if self.pending.is_some() {
             return Action::None;
@@ -152,6 +161,7 @@ impl FlowHub {
                 return Action::Load(self.cursors.get(self.index).cloned().flatten());
             }
             KeyAction::Submit => return self.focus(),
+            KeyAction::ToggleLastTool => return self.float(),
             KeyAction::HistoryUp => self.selected = self.selected.saturating_sub(1),
             KeyAction::HistoryDown => {
                 self.selected = (self.selected + 1).min(self.filtered().len().saturating_sub(1))
@@ -193,6 +203,14 @@ impl FlowHub {
                 self.key(KeyAction::RedirectPrefill)
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                if let Some((_, index)) = self
+                    .float_hits
+                    .iter()
+                    .find(|(rect, _)| rect.contains(point))
+                {
+                    self.selected = *index;
+                    return self.float();
+                }
                 if let Some(index) = self.hovered {
                     self.selected = index;
                     self.focus()
@@ -214,6 +232,7 @@ impl FlowHub {
         if area.width < 40 || area.height < 20 {
             frame.render_widget(Paragraph::new("FlowHub needs 40×20 · Esc back"), area);
             self.hits.clear();
+            self.float_hits.clear();
             self.previous = Rect::default();
             self.next = Rect::default();
             self.close = Rect::default();
@@ -266,6 +285,7 @@ impl FlowHub {
             self.offset = (self.selected + 1).saturating_sub(visible);
         }
         self.hits.clear();
+        self.float_hits.clear();
         for (pos, index) in rows.iter().enumerate().skip(self.offset).take(visible) {
             let row = &self.page.as_ref().unwrap().page.instances[*index];
             let rect = Rect::new(
@@ -301,8 +321,16 @@ impl FlowHub {
             };
             frame.render_widget(
                 Paragraph::new(format!("{title}{marker}")).style(fg.bg(bg)),
-                Rect::new(rect.x + 2, rect.y + 1, width.saturating_sub(4), 1),
+                Rect::new(rect.x + 2, rect.y + 1, width.saturating_sub(23), 1),
             );
+            let open = Rect::new(rect.right().saturating_sub(20), rect.y, 18, 3);
+            frame.render_widget(
+                Paragraph::new("\nWindow Ctrl+O")
+                    .alignment(Alignment::Center)
+                    .style(muted.bg(bg)),
+                open,
+            );
+            self.float_hits.push((open, pos));
             let status = row.state.as_ref().map_or("Unavailable", |state| {
                 if !row.loaded {
                     "Detached"
@@ -366,8 +394,10 @@ impl FlowHub {
             );
         }
         frame.render_widget(
-            Paragraph::new("↑↓ select · Enter / click focus · Esc back · :flows / Ctrl+P FlowHub")
-                .style(muted),
+            Paragraph::new(
+                "↑↓ select · Enter focus · Ctrl+O window · Esc back · :flows / Ctrl+P FlowHub",
+            )
+            .style(muted),
             Rect::new(content.x, footer + 5, width, 1),
         );
     }
@@ -450,6 +480,15 @@ mod tests {
         let rect = hub.hits[0].0;
         assert_eq!(rect.height, 4);
         assert!(matches!(hub.key(KeyAction::Submit), Action::Focus(target) if target == flow));
+        assert!(
+            matches!(hub.key(KeyAction::ToggleLastTool), Action::Float(target) if target == flow)
+        );
+        let window = hub.float_hits[0].0;
+        for row in window.y..window.bottom() {
+            assert!(
+                matches!(hub.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: window.x + 1, row, modifiers: crossterm::event::KeyModifiers::NONE }), Action::Float(target) if target == flow)
+            );
+        }
         for row in rect.y..rect.bottom() {
             assert!(
                 matches!(hub.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: rect.x + 1, row, modifiers: crossterm::event::KeyModifiers::NONE }), Action::Focus(target) if target == flow)

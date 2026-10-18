@@ -30,7 +30,7 @@ impl Attachment {
         let (handle, service, commands) = self
             .prepare_tui_view(&worker, controls.clone(), &forms)
             .await?;
-        let mut views = HashMap::from([(worker.address().clone(), service)]);
+        let mut views = HashMap::from([(service.binding.view_id, service)]);
         for row in catalog.catalog.flows {
             let result = async {
                 let peer = self.session.open_flow(row.id.clone()).await?;
@@ -53,12 +53,16 @@ impl Attachment {
         let ui = atman_tui::run_tui(handle);
         tokio::pin!(ui);
         loop {
+            // Drain controls already submitted by a closed view before releasing its services.
+            if input.is_empty() {
+                views.retain(|_, view| !view.panels.can_detach());
+            }
             tokio::select! {
                 result = &mut ui => return result,
                 result = next_panel_completion(&mut views) => { result?; }
                 Some(control) = input.recv() => {
                     let BoundControl { ticket, command, replies } = control;
-                    let Some(view) = views.get_mut(&ticket.binding.flow).filter(|view| view.binding == ticket.binding) else {
+                    let Some(view) = views.get_mut(&ticket.binding.view_id).filter(|view| view.binding == ticket.binding) else {
                         let _ = replies.send(TuiCommand::SubmissionResult { result: Err("view is no longer attached to this flow".into()) });
                         continue;
                     };
@@ -76,19 +80,19 @@ impl Attachment {
                             let _ = replies.send(TuiCommand::FlowCatalog { result });
                             Ok(())
                         }
-                        TuiControl::FocusFlow { flow, reuse } => {
+                        TuiControl::FocusFlow { flow, placement, reuse } => {
                             async {
                                 ensure!(flow.session_id == self.session.id().into(), "flow belongs to a different session");
                                 let attachment = if let Some(binding) = reuse {
-                                    ensure!(views.get(&flow).is_some_and(|view| view.binding == binding), "view binding is no longer attached");
+                                    ensure!(binding.flow == flow && views.get(&binding.view_id).is_some_and(|view| view.binding == binding), "view binding is no longer attached");
                                     None
                                 } else {
                                     let selected = self.session.open_flow(flow.instance_id.clone()).await?;
                                     let (handle, service, _) = self.prepare_tui_view(&selected, controls.clone(), &forms).await?;
-                                    views.insert(flow.clone(), service);
+                                    views.insert(service.binding.view_id, service);
                                     Some(Box::new(handle))
                                 };
-                                let _ = replies.send(TuiCommand::FocusFlow { flow, attachment });
+                                let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment });
                                 Ok::<_, anyhow::Error>(())
                             }.await
                         }
@@ -356,7 +360,7 @@ struct ViewServices {
 }
 
 async fn next_panel_completion(
-    views: &mut HashMap<atman_runtime::flow_store::FlowRef, ViewServices>,
+    views: &mut HashMap<Uuid, ViewServices>,
 ) -> Result<(), tokio::task::JoinError> {
     let pending: Vec<_> = views
         .values_mut()

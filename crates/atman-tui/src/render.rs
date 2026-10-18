@@ -442,6 +442,9 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             status_area.height,
         )
     });
+    if app.flow_hub_rect.is_some() {
+        status_area.width = status_area.width.saturating_sub(2);
+    }
     f.render_widget(
         status::render_bar(status::StatusInputs {
             flow_id,
