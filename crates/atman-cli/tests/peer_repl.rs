@@ -110,6 +110,124 @@ fn launch(root: &Path, source: &str) -> (uuid::Uuid, FlowInstanceId) {
     (id, selected)
 }
 
+fn create_session(root: &Path) -> uuid::Uuid {
+    let child = command(root)
+        .args(["session", "new"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    String::from_utf8(finish(child).stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn created_session_retains_startup_without_execution_and_routes_input_after_attachment() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let config = root.join("config");
+    std::fs::create_dir_all(config.join("commands")).unwrap();
+    std::fs::write(config.join("routes.at"), "default_route { flow: echo }").unwrap();
+    std::fs::write(
+        config.join("commands/echo.at"),
+        "flow echo(text: string) -> string { contract { invocation { user_message: text } } return final.answer(message: text) }",
+    )
+    .unwrap();
+    let startup = config.join("on_session_start.at");
+    std::fs::write(
+        &startup,
+        "flow startup() -> string { return final.answer(message: \"startup delivered\") }",
+    )
+    .unwrap();
+    let sid = create_session(root);
+    let ids = RuntimeStore::session_ids(&root.join("data")).unwrap();
+    assert_eq!(ids, [sid]);
+    let inspected = RuntimeStore::inspect_session(&root.join("data"), sid).unwrap();
+    assert_eq!(
+        inspected.projection.descriptor.project.unwrap().root(),
+        root.canonicalize().unwrap()
+    );
+    let fid = inspected.projection.default_flow.unwrap();
+    let prepared = updates(root, sid, &fid);
+    assert!(
+        prepared
+            .iter()
+            .any(|update| matches!(update, FlowUpdate::Activated { input: Some(_), .. }))
+    );
+    assert!(!prepared.iter().any(|update| matches!(
+        update,
+        FlowUpdate::InputCommitted(_)
+            | FlowUpdate::TurnCompleted(_)
+            | FlowUpdate::MessagePublished(_)
+    )));
+    // The first attachment uses the captured source, even after the file changes.
+    std::fs::write(&startup, "flow invalid(").unwrap();
+    let output = resume(root, sid, "first input\n/echo direct input\n");
+    assert!(output.contains("startup delivered"), "{output}");
+    assert!(output.contains("direct input"), "{output}");
+    assert_eq!(
+        answers(&updates(root, sid, &fid)),
+        ["startup delivered", "first input", "direct input"]
+    );
+    // Reopening never rereads or recreates the startup command.
+    resume(root, sid, "after restart\n");
+    assert_eq!(RuntimeStore::session_ids(&root.join("data")).unwrap(), ids);
+    assert_eq!(
+        answers(&updates(root, sid, &fid)),
+        [
+            "startup delivered",
+            "first input",
+            "direct input",
+            "after restart"
+        ]
+    );
+    assert!(!root.join("data/sessions").exists());
+}
+
+#[test]
+fn created_session_waits_without_synthetic_turns_and_rejects_bad_startup_before_creation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir(root.join("config")).unwrap();
+    let sid = create_session(root);
+    let ids = RuntimeStore::session_ids(&root.join("data")).unwrap();
+    assert_eq!(ids, [sid]);
+    let inspected = RuntimeStore::inspect_session(&root.join("data"), sid).unwrap();
+    let fid = inspected.projection.default_flow.unwrap();
+    let initial = updates(root, sid, &fid);
+    assert!(
+        initial
+            .iter()
+            .any(|update| matches!(update, FlowUpdate::Activated { input: None, .. }))
+    );
+    assert!(!initial.iter().any(|update| matches!(
+        update,
+        FlowUpdate::InputCommitted(_)
+            | FlowUpdate::TurnCompleted(_)
+            | FlowUpdate::MessagePublished(_)
+    )));
+    resume(root, sid, "");
+    assert_eq!(updates(root, sid, &fid).len(), initial.len());
+    std::fs::write(root.join("config/on_session_start.at"), "flow invalid(").unwrap();
+    let failed = command(root)
+        .args(["session", "new"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8(failed.stderr)
+            .unwrap()
+            .contains("on_session_start.at")
+    );
+    assert_eq!(RuntimeStore::session_ids(&root.join("data")).unwrap(), ids);
+    assert!(!root.join("data/sessions").exists());
+}
+
 #[test]
 fn commands_capture_sources_and_share_the_instance_inbox_across_restart() {
     let dir = tempfile::tempdir().unwrap();

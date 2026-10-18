@@ -83,7 +83,7 @@ impl Attachment {
                             let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
                             navigation.spawn(async move {
                                 let result = async {
-                                    let flow = scopes.create_session(scope, ticket.request_id).await?;
+                                    let flow = scopes.create_session((&scope).into(), ticket.request_id, scopes::CreationMode::Interactive).await?;
                                     scopes.focus(flow, atman_tui::control::FlowPlacement::Main, controls, forms).await
                                 }.await;
                                 (replies, result)

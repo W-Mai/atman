@@ -331,7 +331,11 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     let rejected = Uuid::now_v7();
     assert!(
         scopes
-            .create_session(source.clone(), rejected)
+            .create_session(
+                (&source).into(),
+                rejected,
+                scopes::CreationMode::Interactive
+            )
             .await
             .is_err()
     );
@@ -352,13 +356,13 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     .unwrap();
     let request = Uuid::now_v7();
     let created = scopes
-        .create_session(source.clone(), request)
+        .create_session((&source).into(), request, scopes::CreationMode::Interactive)
         .await
         .unwrap();
     host.wait_quiescent().await.unwrap();
     assert_eq!(
         scopes
-            .create_session(source.clone(), request)
+            .create_session((&source).into(), request, scopes::CreationMode::Interactive)
             .await
             .unwrap(),
         created
@@ -424,10 +428,57 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     assert_eq!(answers, ["ready", "scope-1: selected route"]);
     assert_eq!(original.state().await.unwrap(), original_state);
     assert_eq!(original.context().messages_full(), original_messages);
+    // Deferred creation and retries retain input without installing execution services.
+    let deferred_id = Uuid::now_v7();
+    let deferred = scopes
+        .create_session(
+            (&source).into(),
+            deferred_id,
+            scopes::CreationMode::Deferred,
+        )
+        .await
+        .unwrap();
+    let worker = host.flow(&deferred).await.unwrap();
+    let before = worker.snapshot().await.unwrap();
+    assert_eq!(before.pending.len(), 1);
+    assert!(worker.context().messages_full().is_empty());
+    assert_eq!(
+        scopes
+            .create_session(
+                (&source).into(),
+                deferred_id,
+                scopes::CreationMode::Deferred
+            )
+            .await
+            .unwrap(),
+        deferred
+    );
+    host.wait_quiescent().await.unwrap();
+    assert_eq!(worker.snapshot().await.unwrap().pending, before.pending);
+    assert!(worker.context().messages_full().is_empty());
+    // Attaching services reuses the existing journal owner; explicit binding starts work.
+    let attached = scopes.open(deferred_id).await.unwrap();
+    assert!(worker.context().messages_full().is_empty());
+    attached.bind(&worker).await.unwrap();
+    host.wait_quiescent().await.unwrap();
+    assert_eq!(worker.context().messages_full().len(), 2);
+    assert_eq!(
+        worker
+            .context()
+            .messages_full()
+            .last()
+            .unwrap()
+            .text_concat(),
+        "ready"
+    );
     // The same factory creates an idle entry when no startup command is configured.
     std::fs::remove_file(cfg.join("on_session_start.at")).unwrap();
     let waiting = scopes
-        .create_session(source.clone(), Uuid::now_v7())
+        .create_session(
+            (&source).into(),
+            Uuid::now_v7(),
+            scopes::CreationMode::Interactive,
+        )
         .await
         .unwrap();
     host.wait_quiescent().await.unwrap();

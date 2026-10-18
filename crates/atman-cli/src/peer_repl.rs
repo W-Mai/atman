@@ -52,6 +52,41 @@ struct Attachment {
     permissions: Option<Arc<PermissionClients>>,
 }
 
+pub(crate) async fn create(root: &Path) -> Result<Uuid> {
+    let host = RuntimeHost::default();
+    let (prompt_tx, _prompt_rx) = mpsc::unbounded_channel();
+    let scopes = Arc::new(scopes::Scopes::empty(
+        root,
+        host.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(prompt_tx)),
+    ));
+    let outcome = async {
+        let config = ConfigHub::global()?;
+        let project = atman_runtime::storage::ProjectContext::resolve(
+            &config,
+            &std::env::current_dir().context("reading current project root")?,
+            root,
+        )?;
+        scopes
+            .create_session(
+                scopes::SessionSeed {
+                    config,
+                    project: Some(project),
+                    prompt_resolver: None,
+                },
+                Uuid::now_v7(),
+                scopes::CreationMode::Deferred,
+            )
+            .await
+    }
+    .await;
+    let shutdown = host.shutdown().await;
+    let created = outcome?;
+    shutdown?;
+    Ok(created.session_id.0)
+}
+
 pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
     let store = RuntimeStore::open(root)?;
     let permissions = Arc::new(PermissionClients::default());
@@ -66,14 +101,14 @@ pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
             Err(error) => eprintln!("profile management unavailable: {error}"),
         }
         let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
-        let attachment = Attachment::open(
+        let prompts = Arc::new(prompts::Prompts::new(prompt_tx));
+        let scopes = Arc::new(scopes::Scopes::empty(
             root,
-            id,
             host.clone(),
             Some(permissions),
-            Arc::new(prompts::Prompts::new(prompt_tx)),
-        )
-        .await?;
+            prompts.clone(),
+        ));
+        let attachment = scopes.open(id).await?;
         if crate::tui_mode_requested() {
             attachment.interact_tui(root).await
         } else {
@@ -190,9 +225,21 @@ impl Attachment {
         permissions: Option<Arc<PermissionClients>>,
         prompts: Arc<prompts::Prompts>,
     ) -> Result<Self> {
-        let store = RuntimeStore::open(root)?;
-        let session = store.open_session(id)?;
-        let descriptor = session.projection().descriptor.clone();
+        enum Owner {
+            Stored(Box<atman_runtime::flow_store::SessionStore>),
+            Attached(SessionHandle),
+        }
+        let owner = match host.session(id) {
+            Ok(session) => Owner::Attached(session),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Owner::Stored(Box::new(RuntimeStore::open(root)?.open_session(id)?))
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let descriptor = match &owner {
+            Owner::Stored(session) => session.projection().descriptor.clone(),
+            Owner::Attached(session) => session.snapshot().await?.catalog.descriptor,
+        };
         let SessionConfiguration::Atman(source) = &descriptor.configuration else {
             bail!("session requires an Atman configuration source to execute");
         };
@@ -224,7 +271,10 @@ impl Attachment {
         let mut executor = runtime.executor;
         executor.tool_ctx.prompt_resolver = Some(prompts.clone());
         // No fallible setup or suspension follows attachment; a cancelled load cannot orphan an owner.
-        let session = host.attach_session_with_redactor(session, redactor)?;
+        let session = match owner {
+            Owner::Stored(session) => host.attach_session_with_redactor(*session, redactor)?,
+            Owner::Attached(session) => session,
+        };
         Ok(Self {
             host,
             session,

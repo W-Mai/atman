@@ -993,14 +993,7 @@ async fn cmd_session_show(sid: String) -> Result<()> {
 
 async fn cmd_session_new() -> Result<()> {
     let root = data_dir()?;
-    let sessions = root.join("sessions");
-    std::fs::create_dir_all(&sessions)?;
-    let id = uuid::Uuid::new_v4();
-    let dir = sessions.join(id.to_string());
-    std::fs::create_dir_all(&dir)?;
-    let meta = atman_runtime::session_meta::SessionMeta::from_cwd();
-    meta.save(&dir)?;
-    println!("{}", id);
+    println!("{}", peer_repl::create(&root).await?);
     Ok(())
 }
 
