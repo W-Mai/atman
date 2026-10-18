@@ -145,7 +145,7 @@ fn commands_capture_sources_and_share_the_instance_inbox_across_restart() {
     assert_eq!(queued.matches("Input accepted:").count(), 2, "{queued}");
     assert_eq!(answers(&updates(root, sid, &fid)), ["seed"]);
     let visible = serde_json::to_string(&updates(root, sid, &fid)).unwrap();
-    assert!(visible.contains("command_accepted"));
+    assert!(visible.contains("input_accepted"));
     assert!(!visible.contains("Source-only sentinel"));
     std::fs::remove_dir_all(commands).unwrap();
     let continued = resume(root, sid, ":resume\n");

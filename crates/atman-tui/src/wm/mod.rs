@@ -776,8 +776,9 @@ impl WindowManager {
             }
             PaletteEntryId::SwitchSession => {
                 if control_tx.is_some_and(|tx| tx.binding().is_some()) {
-                    app.open_flow_hub =
-                        Some(crate::flow_hub::HubRequest::Sessions { before: None });
+                    app.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                        crate::flow_hub::HubRequest::Sessions { before: None },
+                    ));
                 } else {
                     let scope = crate::session_switcher::SessionScope::Project;
                     let rows = crate::key_handler::enumerate_session_rows(app, scope);
@@ -785,7 +786,9 @@ impl WindowManager {
                 }
             }
             PaletteEntryId::NewSession => {
-                if let Some(tx) = control_tx {
+                if control_tx.is_some_and(|tx| tx.binding().is_some()) {
+                    app.open_flow_hub = Some(crate::flow_hub::Action::NewSession);
+                } else if let Some(tx) = control_tx {
                     let _ = tx.send(crate::TuiControl::NewSession);
                 }
             }
@@ -828,10 +831,12 @@ impl WindowManager {
             }
             PaletteEntryId::OpenFlowHub => {
                 if let Some(binding) = control_tx.and_then(|tx| tx.binding()) {
-                    app.open_flow_hub = Some(crate::flow_hub::HubRequest::Flows {
-                        session: binding.flow.session_id.0,
-                        before: None,
-                    });
+                    app.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                        crate::flow_hub::HubRequest::Flows {
+                            session: binding.flow.session_id.0,
+                            before: None,
+                        },
+                    ));
                 } else {
                     app.push_note(
                         "FlowHub requires a persistent session",

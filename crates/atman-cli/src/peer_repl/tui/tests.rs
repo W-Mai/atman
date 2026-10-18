@@ -59,6 +59,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
                 inherited_context: vec![],
                 result_route: None,
                 execution: Some(EntryBinding {
+                    user_routes: false,
                     session_start: false,
                     first_turn: atman_rt::TurnId::now(),
                     first_run: atman_rt::RunId::now(),
@@ -91,7 +92,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     )
     .await
     .unwrap();
-    let scopes = scopes::Scopes::new(dir.path(), initial);
+    let scopes = Arc::new(scopes::Scopes::new(dir.path(), initial));
     let directory = scopes
         .browse(HubRequest::Sessions { before: None })
         .await
@@ -320,6 +321,128 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
             .collect();
         assert_eq!(answers.last().unwrap(), &format!("scope-{index}: selected"));
     }
+    let source = views[1].1.scope.clone();
+    let original = views[1].1.worker.clone();
+    source.command(&original, ":pause").await.unwrap();
+    let original_state = original.state().await.unwrap();
+    let original_messages = original.context().messages_full();
+    let cfg = source.config.config_dir();
+    std::fs::write(cfg.join("on_session_start.at"), "flow broken(").unwrap();
+    let rejected = Uuid::now_v7();
+    assert!(
+        scopes
+            .create_session(source.clone(), rejected)
+            .await
+            .is_err()
+    );
+    assert!(
+        !RuntimeStore::session_ids(dir.path())
+            .unwrap()
+            .contains(&rejected)
+    );
+    std::fs::write(
+        cfg.join("routes.at"),
+        "route \"!\" { flow: echo }\ndefault_route { flow: agent }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        cfg.join("on_session_start.at"),
+        "flow startup() -> string { return final.answer(message: \"ready\") }",
+    )
+    .unwrap();
+    let request = Uuid::now_v7();
+    let created = scopes
+        .create_session(source.clone(), request)
+        .await
+        .unwrap();
+    host.wait_quiescent().await.unwrap();
+    assert_eq!(
+        scopes
+            .create_session(source.clone(), request)
+            .await
+            .unwrap(),
+        created
+    );
+    let Navigation::Focus {
+        mut handle,
+        service,
+        ..
+    } = scopes
+        .focus(
+            created.clone(),
+            FlowPlacement::Main,
+            commands.clone(),
+            forms.clone(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("missing new view")
+    };
+    assert_eq!(service.scope.descriptor.project, source.descriptor.project);
+    assert_eq!(service.scope.config.source(), source.config.source());
+    assert_eq!(
+        service
+            .worker
+            .context()
+            .messages_full()
+            .last()
+            .unwrap()
+            .text_concat(),
+        "ready"
+    );
+    assert!(service.worker.goal().await.unwrap().goal.is_none());
+    service
+        .scope
+        .submit_tui(
+            &service.worker,
+            Uuid::now_v7(),
+            TuiSubmission {
+                text: "! selected route".into(),
+                images: vec![],
+                presentation: None,
+                reasoning: None,
+            },
+        )
+        .await
+        .unwrap();
+    host.wait_quiescent().await.unwrap();
+    let mut model = atman_tui::flow_view::FlowViewModel::default();
+    model
+        .sync_view(
+            handle.flow_view.as_mut().unwrap().refresh().await.unwrap(),
+            None,
+        )
+        .unwrap();
+    let answers: Vec<_> = model
+        .iter()
+        .filter_map(|item| match item {
+            atman_tui::app::OutputItem::AssistantMd { md, .. } => Some(md.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answers, ["ready", "scope-1: selected route"]);
+    assert_eq!(original.state().await.unwrap(), original_state);
+    assert_eq!(original.context().messages_full(), original_messages);
+    // The same factory creates an idle entry when no startup command is configured.
+    std::fs::remove_file(cfg.join("on_session_start.at")).unwrap();
+    let waiting = scopes
+        .create_session(source.clone(), Uuid::now_v7())
+        .await
+        .unwrap();
+    host.wait_quiescent().await.unwrap();
+    let worker = host.flow(&waiting).await.unwrap();
+    assert!(worker.context().messages_full().is_empty());
+    assert!(worker.snapshot().await.unwrap().pending.is_empty());
+    assert!(
+        worker
+            .launch_record()
+            .await
+            .unwrap()
+            .unwrap()
+            .acceptance
+            .is_none()
+    );
     host.shutdown().await.unwrap();
     assert!(
         !missing_project.exists(),
@@ -385,6 +508,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
             inherited_context: vec![],
             result_route: None,
             execution: Some(EntryBinding {
+                user_routes: false,
                 session_start: false,
                 first_turn: atman_rt::TurnId::now(),
                 first_run: atman_rt::RunId::now(),

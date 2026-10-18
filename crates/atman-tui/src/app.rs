@@ -775,7 +775,7 @@ pub struct QueuedSubmissionEdit {
 #[derive(Default)]
 pub struct AppState {
     pub(crate) settings: crate::settings::SettingsSource,
-    pub(crate) open_flow_hub: Option<crate::flow_hub::HubRequest>,
+    pub(crate) open_flow_hub: Option<crate::flow_hub::Action>,
     pub(crate) flow_hub_rect: Option<ratatui::layout::Rect>,
     pub(crate) flow_hub_hovered: bool,
     pub knowledge_state:

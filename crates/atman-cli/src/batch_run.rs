@@ -176,6 +176,7 @@ pub(crate) async fn run(file: &Path, program: &LinkedProgram, options: Options) 
                     workspace: None,
                     initial_goal: None,
                     execution: Some(EntryBinding {
+                        user_routes: false,
                         session_start: true,
                         first_turn: atman_rt::TurnId(request.into()),
                         first_run: atman_rt::RunId(request.into()),

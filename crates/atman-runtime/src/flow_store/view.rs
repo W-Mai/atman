@@ -59,19 +59,53 @@ impl super::SessionInspection {
     }
 }
 
-/// Read-only updates for one instance, in original commit order. Message origins, isolated contexts, and typed completion remain distinct; creation metadata omits the retained source bundle and activation omits execution authority.
+/// Accepted input metadata, shared by activation and subsequent inbox deliveries. Command sources and execution parameters remain in the private journal.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
-pub enum FlowUpdate {
-    CommandAccepted {
+pub enum AcceptedInput {
+    Command {
         id: Uuid,
         request_id: Uuid,
         recipient: FlowRef,
         sender: inbox::SenderIdentity,
         accepted_at: chrono::DateTime<chrono::Utc>,
         name: String,
-        user: inbox::UserContent,
+        user: Option<Box<inbox::UserContent>>,
     },
+    Envelope(Box<inbox::AcceptedEnvelope>),
+}
+
+impl AcceptedInput {
+    pub fn recipient(&self) -> &FlowRef {
+        match self {
+            Self::Command { recipient, .. } => recipient,
+            Self::Envelope(envelope) => &envelope.request.recipient,
+        }
+    }
+}
+
+impl From<inbox::AcceptedEnvelope> for AcceptedInput {
+    fn from(value: inbox::AcceptedEnvelope) -> Self {
+        if let inbox::InboxPayload::Command { entry, user, .. } = value.request.payload {
+            Self::Command {
+                id: value.id,
+                request_id: value.request.request_id,
+                recipient: value.request.recipient,
+                sender: value.request.sender,
+                accepted_at: value.accepted_at,
+                name: entry.name,
+                user: user.map(Box::new),
+            }
+        } else {
+            Self::Envelope(Box::new(value))
+        }
+    }
+}
+
+/// Read-only updates for one instance, in original commit order. Message origins, isolated contexts, and typed completion remain distinct; creation metadata omits the retained source bundle and activation omits execution authority.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum FlowUpdate {
     Created {
         flow: FlowRef,
         content: FlowContentSummary,
@@ -79,13 +113,13 @@ pub enum FlowUpdate {
     },
     Activated {
         flow: FlowRef,
-        envelope: Option<Box<inbox::AcceptedEnvelope>>,
+        input: Option<Box<AcceptedInput>>,
         inherited_context: Vec<Message>,
     },
     WorkspaceRequested(Box<super::workspace::WorkspaceRequest>),
     Transition(FlowTransition),
     TurnCompleted(Box<completion::Completion>),
-    EnvelopeAccepted(Box<inbox::AcceptedEnvelope>),
+    InputAccepted(Box<AcceptedInput>),
     InputCommitted(Box<inbox::CommittedInput>),
     MessagePublished(Box<publication::MessagePublication>),
     ContextCheckpoint(Box<context::ContextCheckpoint>),
@@ -123,27 +157,15 @@ impl From<FlowFact> for FlowUpdate {
             },
             FlowFact::Activated(activation) => Self::Activated {
                 flow: activation.input.request.recipient.clone(),
-                envelope: activation.envelope().map(Box::new),
+                input: activation
+                    .envelope()
+                    .map(|envelope| Box::new(envelope.into())),
                 inherited_context: activation.input.inherited_context,
             },
             FlowFact::WorkspaceRequested(value) => Self::WorkspaceRequested(value),
             FlowFact::Transition(value) => Self::Transition(value),
             FlowFact::TurnCompleted(value) => Self::TurnCompleted(value),
-            FlowFact::EnvelopeAccepted(value) => {
-                if let inbox::InboxPayload::Command { entry, user, .. } = value.request.payload {
-                    Self::CommandAccepted {
-                        id: value.id,
-                        request_id: value.request.request_id,
-                        recipient: value.request.recipient,
-                        sender: value.request.sender,
-                        accepted_at: value.accepted_at,
-                        name: entry.name,
-                        user,
-                    }
-                } else {
-                    Self::EnvelopeAccepted(value)
-                }
-            }
+            FlowFact::EnvelopeAccepted(value) => Self::InputAccepted(Box::new((*value).into())),
             FlowFact::InputCommitted(value) => Self::InputCommitted(value),
             FlowFact::MessagePublished(value) => Self::MessagePublished(value),
             FlowFact::ContextCheckpoint(value) => Self::ContextCheckpoint(value),

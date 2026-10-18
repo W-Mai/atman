@@ -3128,11 +3128,11 @@ fn command_sources_require_user_authority_and_commit_the_selected_identity() {
         entry: Box::new(description.entry().unwrap().clone()),
         arguments: BTreeMap::new(),
         invocation: BTreeMap::new(),
-        user: atman_runtime::flow_store::inbox::UserContent {
+        user: Some(atman_runtime::flow_store::inbox::UserContent {
             text: "/main".into(),
             images: vec![],
             presentation: None,
-        },
+        }),
     };
     let before = flow.cursor().clone();
     for sender in [
@@ -3146,6 +3146,12 @@ fn command_sources_require_user_authority_and_commit_the_selected_identity() {
     let mut injection = request.clone();
     injection.delivery = DeliveryMode::AtBoundary;
     assert!(flow.accept_input(injection, |_| Ok(())).is_err());
+    let mut peer_command = request.clone();
+    peer_command.sender = SenderIdentity::Flow(description.address.clone());
+    if let InboxPayload::Command { user, .. } = &mut peer_command.payload {
+        *user = None;
+    }
+    assert!(flow.accept_input(peer_command, |_| Ok(())).is_err());
     assert_eq!(flow.cursor(), &before);
     let receipt = flow.accept_input(request.clone(), |_| Ok(())).unwrap();
     assert_eq!(

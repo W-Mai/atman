@@ -21,6 +21,7 @@ pub(crate) enum Action {
     None,
     Close,
     Load(HubRequest),
+    NewSession,
     Focus(FlowRef),
     Float(FlowRef),
 }

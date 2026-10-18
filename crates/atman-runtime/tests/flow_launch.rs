@@ -30,6 +30,167 @@ fn session_info() -> SessionDescriptor {
 }
 
 #[tokio::test]
+async fn captured_startup_commands_run_once_without_replacing_the_default_entry() {
+    use atman_runtime::flow_runtime::launch::EntryExecution;
+    use atman_runtime::flow_store::launch::{EntryBinding, EntryStart};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_info();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let mut entry = descriptor(info.id);
+    entry.entry_mut().unwrap().bundle.sources.insert(
+        "entry:main.at".into(),
+        r#"flow main(label: string, amount: int) -> string {
+        contract { invocation { user_message: label } }
+        when amount != 42 { return final.answer(message: "wrong defaults") }
+        when env("effort") != "high" { return final.answer(message: "wrong invocation") }
+        return final.answer(message: label)
+    }"#
+        .into(),
+    );
+    let authority = EffectiveAuthority::root(&Default::default(), false, None);
+    let mut input = initial(&entry, &entry.address);
+    input.request.sender = SenderIdentity::Host(Uuid::now_v7());
+    input.request.start = EntryStart::Command {
+        entry: Box::new(EntrySnapshot {
+            name: "startup".into(),
+            path: dir.path().join("startup.at"),
+            bundle: RevisionBundle {
+                entry: "entry:startup.at".into(),
+                edges: Default::default(),
+                sources: [(
+                    "entry:startup.at".into(),
+                    r#"// STARTUP_SOURCE_ONLY_SENTINEL
+                    flow startup(label: string) -> string { return final.answer(message: label) }"#
+                        .into(),
+                )]
+                .into(),
+            },
+        }),
+        arguments: [("label".into(), "ready".into())].into(),
+        invocation: Default::default(),
+    };
+    input.inherited_context.clear();
+    input.result_route = None;
+    input.execution = Some(EntryBinding {
+        user_routes: false,
+        session_start: true,
+        first_turn: TurnId::now(),
+        first_run: RunId::now(),
+        authority: authority.clone(),
+    });
+    let launched = host
+        .launch_entry(
+            entry.clone(),
+            input.clone(),
+            EntryExecution {
+                executor: Executor::new(),
+                authority: authority.clone(),
+                trust: Default::default(),
+                yield_interval: NonZeroUsize::new(16).unwrap(),
+                catalog: session.snapshot().await.unwrap().cursor,
+            },
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    let receipt = launched.record.receipt.clone();
+    assert!(launched.record.acceptance.is_some());
+    let messages = launched.worker.context().messages_full();
+    assert_eq!(messages[0].origin, MessageOrigin::Internal);
+    assert_eq!(messages.last().unwrap().text_concat(), "ready");
+    assert!(!messages.iter().any(|message| {
+        message
+            .text_concat()
+            .contains("STARTUP_SOURCE_ONLY_SENTINEL")
+    }));
+    let mut reader = launched
+        .worker
+        .subscribe_view(NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
+    let view = reader.refresh().await.unwrap();
+    assert_eq!(view.transcript().turns().count(), 1);
+    let page = launched
+        .worker
+        .read_updates(None, NonZeroUsize::new(64).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        !serde_json::to_string(&page.batches)
+            .unwrap()
+            .contains("STARTUP_SOURCE_ONLY_SENTINEL")
+    );
+    host.shutdown().await.unwrap();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.open_session(info.id).unwrap())
+        .unwrap();
+    session
+        .bind_entry(
+            entry.address.instance_id.clone(),
+            Executor::new(),
+            authority,
+            Default::default(),
+            NonZeroUsize::new(16).unwrap(),
+        )
+        .await
+        .unwrap();
+    let worker = host.flow(&entry.address).await.unwrap();
+    host.wait_quiescent().await.unwrap();
+    assert_eq!(worker.context().messages_full().len(), messages.len());
+    worker
+        .accept_input(
+            DeliveryRequest {
+                request_id: Uuid::now_v7(),
+                sender: SenderIdentity::User(Uuid::now_v7()),
+                recipient: entry.address.clone(),
+                delivery: DeliveryMode::NextTurn,
+                cause: None,
+                correlation: None,
+                scope: None,
+                payload: InboxPayload::UserSubmission {
+                    content: atman_runtime::flow_store::inbox::UserContent {
+                        text: "ordinary input".into(),
+                        images: vec![],
+                        presentation: None,
+                    },
+                    invocation: Default::default(),
+                },
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        worker
+            .context()
+            .messages_full()
+            .last()
+            .unwrap()
+            .text_concat(),
+        "ordinary input"
+    );
+    let retry = host
+        .launch_flow(entry, input, |_, _| panic!("retry reauthorized"))
+        .await
+        .unwrap();
+    assert_eq!(retry.record.receipt, receipt);
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn waiting_entries_restore_without_input_and_start_hooks_with_the_first_real_turn() {
     use atman_runtime::flow_runtime::launch::EntryExecution;
     use atman_runtime::flow_store::launch::{EntryBinding, EntryStart};
@@ -59,6 +220,7 @@ async fn waiting_entries_restore_without_input_and_start_hooks_with_the_first_re
     input.inherited_context.clear();
     input.result_route = None;
     input.execution = Some(EntryBinding {
+        user_routes: false,
         session_start: true,
         first_turn: first_turn.clone(),
         first_run: first_run.clone(),
@@ -208,6 +370,7 @@ fn waiting_activation_and_initial_goal_share_atomic_recovery_without_an_inbox_re
     input.result_route = None;
     input.initial_goal = Some("Wait for the user's work".into());
     input.execution = Some(EntryBinding {
+        user_routes: false,
         session_start: false,
         first_turn: TurnId::now(),
         first_run: RunId::now(),
@@ -615,6 +778,7 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
     *user = Some(content.clone());
     input.result_route = None;
     input.execution = Some(EntryBinding {
+        user_routes: false,
         session_start: true,
         first_turn: TurnId::now(),
         first_run: RunId::now(),
@@ -815,6 +979,7 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
     let mut input = initial(&other, &other.address);
     input.result_route = None;
     input.execution = Some(EntryBinding {
+        user_routes: false,
         session_start: false,
         first_turn: TurnId::now(),
         first_run: RunId::now(),
@@ -912,6 +1077,7 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
         .unwrap();
     let mut invalid_binding = input.clone();
     invalid_binding.execution = Some(atman_runtime::flow_store::launch::EntryBinding {
+        user_routes: false,
         session_start: false,
         first_turn: TurnId(Uuid::nil().into()),
         first_run: RunId::now(),
@@ -927,6 +1093,7 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     let pause = Uuid::new_v4().into();
     let mut peer_start = input.clone();
     peer_start.execution = Some(atman_runtime::flow_store::launch::EntryBinding {
+        user_routes: false,
         session_start: true,
         first_turn: TurnId::now(),
         first_run: RunId::now(),

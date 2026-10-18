@@ -100,13 +100,36 @@ pub struct EntryRequest {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EntryStart {
     Waiting,
-    Invoke { user: Option<UserContent> },
+    Invoke {
+        user: Option<UserContent>,
+    },
+    /// A captured startup command; subsequent ordinary input uses the default entry.
+    Command {
+        entry: Box<super::EntrySnapshot>,
+        arguments: BTreeMap<String, serde_json::Value>,
+        invocation: BTreeMap<String, serde_json::Value>,
+    },
 }
 
 impl EntryRequest {
     pub fn initial_input(&self) -> Option<DeliveryRequest> {
-        let EntryStart::Invoke { user } = &self.start else {
-            return None;
+        let payload = match &self.start {
+            EntryStart::Waiting => return None,
+            EntryStart::Invoke { user } => InboxPayload::Invocation {
+                arguments: self.arguments.clone(),
+                invocation: self.invocation.clone(),
+                user: user.clone(),
+            },
+            EntryStart::Command {
+                entry,
+                arguments,
+                invocation,
+            } => InboxPayload::Command {
+                entry: entry.clone(),
+                arguments: arguments.clone(),
+                invocation: invocation.clone(),
+                user: None,
+            },
         };
         Some(DeliveryRequest {
             request_id: self.request_id,
@@ -116,11 +139,7 @@ impl EntryRequest {
             cause: None,
             correlation: None,
             scope: None,
-            payload: InboxPayload::Invocation {
-                arguments: self.arguments.clone(),
-                invocation: self.invocation.clone(),
-                user: user.clone(),
-            },
+            payload,
         })
     }
 
@@ -138,6 +157,8 @@ impl EntryRequest {
 /// Recorded identity and structural ceilings; restoring them does not authorize execution.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct EntryBinding {
+    /// Interactive clients select human text through the bound configuration's routes.at.
+    pub user_routes: bool,
     /// Execute container startup hooks in the first admitted invocation of its initial entry.
     pub session_start: bool,
     pub first_turn: crate::event::TurnId,

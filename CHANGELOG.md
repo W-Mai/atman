@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Persistent session creation** — New Session in the command palette creates an independent session using the requesting view's project and configuration. Captured startup commands run once; configured text routes and slash commands enter the same durable inbox. Switching to the new view preserves existing drafts and execution state.
+
 - **Waiting flow entries** — Activate a persistent entry without submitting input or starting a turn. Source, default arguments, execution settings, and optional Goal survive restart; startup hooks run when the first input is admitted. Daemon `flow.launch` accepts `start: "waiting"` and returns an activation receipt independently of input acknowledgement.
 
 - **Persistent flow commands** — Main, floating, and plain-terminal views queue installed commands in the selected flow. Captured sources and dependencies survive file changes and restart; commands retain original user content and execute separately from active model calls. Goal continuation retains its admitted entry, while ordinary input uses the default entry.
@@ -27,7 +29,9 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
-- **Entry activation types** — `LaunchInput.request` uses `EntryRequest` with explicit `EntryStart`. `LaunchRecord` separates its activation receipt from optional input acceptance; activation view updates identify the flow and carry an optional envelope.
+- **Startup input and view updates** — `EntryStart::Command` selects a captured initial command without replacing the default entry. Command user content is optional for trusted host calls. `FlowUpdate::InputAccepted` and activation share `AcceptedInput` metadata; `EntryBinding.user_routes` records whether interactive text uses configured routing.
+
+- **Entry activation types** — `LaunchInput.request` uses `EntryRequest` with explicit `EntryStart`. `LaunchRecord` separates its activation receipt from optional input acceptance; activation view updates identify the flow and carry optional accepted-input metadata.
 
 - **TUI control transport** — `TuiHandle` and panel interactions use `ControlSender`. Flow-bound commands capture the destination, view revision, request ID, and reply mailbox before entering the host queue. Existing session hosts use `ControlSender::channel()`.
 

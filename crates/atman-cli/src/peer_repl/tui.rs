@@ -79,6 +79,17 @@ impl Attachment {
                     let scope = view.scope.clone();
                     let Some(command) = view.panels.dispatch(command).await else { continue; };
                     let result = match command {
+                        TuiControl::NewSession => {
+                            let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
+                            navigation.spawn(async move {
+                                let result = async {
+                                    let flow = scopes.create_session(scope, ticket.request_id).await?;
+                                    scopes.focus(flow, atman_tui::control::FlowPlacement::Main, controls, forms).await
+                                }.await;
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::BrowseFlows(request) => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move { let result = scopes.browse(request).await.map(Navigation::Catalog); (replies, result) });

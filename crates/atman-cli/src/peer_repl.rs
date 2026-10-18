@@ -95,9 +95,26 @@ impl Attachment {
         content: UserContent,
         invocation: BTreeMap<String, serde_json::Value>,
     ) -> Result<InboxPayload> {
-        if content.text.trim_start().starts_with('/') {
+        let command = if content.text.trim_start().starts_with('/') {
+            Some(content.text.clone())
+        } else if worker.launch_record().await?.is_some_and(|record| {
+            record
+                .input
+                .execution
+                .is_some_and(|binding| binding.user_routes)
+        }) {
+            Some(
+                atman_runtime::routing::RouteProgram::load(&self.config)?
+                    .resolve(content.text.trim())
+                    .context("no route matched; configure routes.at or use /name args")?
+                    .slash_call(),
+            )
+        } else {
+            None
+        };
+        if let Some(command) = command {
             let (program, name, arguments, _) = crate::resolve_slash_command_from(
-                &content.text,
+                &command,
                 self.config.config_dir(),
                 self.descriptor
                     .project
@@ -156,7 +173,7 @@ impl Attachment {
                     })
                     .collect::<Result<_, atman_runtime::RuntimeError>>()?,
                 invocation,
-                user: content,
+                user: Some(content),
             });
         }
         self.validate_text_input(worker).await?;

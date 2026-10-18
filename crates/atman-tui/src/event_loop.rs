@@ -286,15 +286,10 @@ pub(crate) async fn run_frames(
     let frame_bulk_tx = bulk_tx.clone();
 
     loop {
-        if let Some(request) = app.app.open_flow_hub.take() {
+        if let Some(action) = app.app.open_flow_hub.take() {
             let mut opened = crate::flow_hub::FlowHub::default();
             if let Some(tx) = handle.control_tx.as_ref() {
-                dispatch_hub_action(
-                    &mut opened,
-                    crate::flow_hub::Action::Load(request),
-                    tx,
-                    None,
-                );
+                dispatch_hub_action(&mut opened, action, tx, None);
             }
             hub = Some(opened);
         }
@@ -435,7 +430,7 @@ pub(crate) async fn run_frames(
                         clicked = app.app.flow_hub_hovered && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && !app.wm.modals.any_open();
                     }
                     if escape || clicked {
-                        app.app.open_flow_hub = handle.control_tx.as_ref().and_then(|tx| tx.binding()).map(|binding| crate::flow_hub::HubRequest::Flows { session: binding.flow.session_id.0, before: None });
+                        app.app.open_flow_hub = handle.control_tx.as_ref().and_then(|tx| tx.binding()).map(|binding| crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Flows { session: binding.flow.session_id.0, before: None }));
                         continue;
                     }
                 }
@@ -1966,8 +1961,9 @@ fn apply_view_command(
         }
         TuiCommand::OpenSessionSwitcher => {
             if app.app.items.flow().is_some() {
-                app.app.open_flow_hub =
-                    Some(crate::flow_hub::HubRequest::Sessions { before: None });
+                app.app.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                    crate::flow_hub::HubRequest::Sessions { before: None },
+                ));
             } else {
                 let scope = crate::session_switcher::SessionScope::Project;
                 let rows = key_handler::enumerate_session_rows(app, scope);
@@ -3468,6 +3464,7 @@ fn dispatch_hub_action(
     reuse: Option<crate::control::ViewBinding>,
 ) {
     let command = match action {
+        crate::flow_hub::Action::NewSession => TuiControl::NewSession,
         crate::flow_hub::Action::Load(request) => TuiControl::BrowseFlows(request),
         crate::flow_hub::Action::Focus(flow) => TuiControl::FocusFlow {
             flow,

@@ -160,7 +160,7 @@ default_route { flow: agent }
 "#;
 
 pub const ON_SESSION_START_AT: &str = r#"flow on_session_start() -> string {
-    return "atman ready. `/hello` for a smoke test, plain text to chat."
+    return final.answer(message: "atman ready. `/hello` for a smoke test, plain text to chat.")
 }
 "#;
 

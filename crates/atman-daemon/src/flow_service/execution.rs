@@ -265,6 +265,7 @@ impl SessionService {
             workspace: None,
             initial_goal,
             execution: Some(EntryBinding {
+                user_routes: false,
                 session_start,
                 first_turn: atman_rt::TurnId(request_id.into()),
                 first_run: atman_rt::RunId(request_id.into()),

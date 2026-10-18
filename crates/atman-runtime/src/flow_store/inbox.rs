@@ -52,12 +52,12 @@ pub struct UserContent {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum InboxPayload {
-    /// A user-selected command source captured before durable acceptance.
+    /// A user- or host-selected command source captured before durable acceptance.
     Command {
         entry: Box<super::EntrySnapshot>,
         arguments: BTreeMap<String, Value>,
         invocation: BTreeMap<String, Value>,
-        user: UserContent,
+        user: Option<UserContent>,
     },
     /// Explicit user control, recorded as internal context rather than a new human message.
     GoalResume {
@@ -140,13 +140,17 @@ impl DeliveryRequest {
             };
         }
         let valid = match (&self.sender, &self.payload) {
-            (SenderIdentity::User(_), InboxPayload::Command { entry, .. }) => {
+            (
+                SenderIdentity::User(_) | SenderIdentity::Host(_),
+                InboxPayload::Command { entry, user, .. },
+            ) => {
                 self.delivery == DeliveryMode::NextTurn
                     && self.correlation.is_none()
                     && self.scope.is_none()
                     && self.cause.is_none()
                     && !entry.name.is_empty()
                     && entry.path.is_absolute()
+                    && (user.is_none() || matches!(self.sender, SenderIdentity::User(_)))
             }
             (SenderIdentity::User(_), InboxPayload::GoalResume { goal, objective }) => {
                 self.delivery == DeliveryMode::NextTurn

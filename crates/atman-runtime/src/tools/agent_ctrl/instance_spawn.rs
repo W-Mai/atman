@@ -139,6 +139,7 @@ pub(super) async fn spawn(
         workspace,
         initial_goal: None,
         execution: Some(EntryBinding {
+            user_routes: false,
             session_start: false,
             first_turn: first_turn.clone(),
             first_run,
