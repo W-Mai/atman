@@ -554,6 +554,48 @@ impl FormRegistry {
             .collect()
     }
 
+    /// Subscribe to forms whose normal and late answers belong to this destination.
+    pub fn subscribe_for(
+        self: &std::sync::Arc<Self>,
+        inbox: std::sync::Arc<DeferredFormInbox>,
+    ) -> watch::Receiver<Vec<crate::form::PendingForm>> {
+        // Subscribe before reading the initial snapshot; concurrent requests remain observable.
+        let mut changes = self.subscribe();
+        let (tx, rx) = watch::channel(self.pending_for(&inbox));
+        let registry = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tx.closed() => break,
+                    result = changes.changed() => {
+                        if result.is_err() { break; }
+                        tx.send_replace(registry.pending_for(&inbox));
+                    }
+                }
+            }
+        });
+        rx
+    }
+
+    fn pending_for(
+        &self,
+        inbox: &std::sync::Arc<DeferredFormInbox>,
+    ) -> Vec<crate::form::PendingForm> {
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| std::sync::Arc::ptr_eq(&entry.inbox, inbox))
+            .map(|entry| entry.pending.clone())
+            .collect()
+    }
+
+    pub fn owns_form(&self, form_id: &str, inbox: &std::sync::Arc<DeferredFormInbox>) -> bool {
+        self.entries.lock().unwrap().iter().any(|entry| {
+            entry.pending.form_id == form_id && std::sync::Arc::ptr_eq(&entry.inbox, inbox)
+        })
+    }
+
     pub fn subscriber_count(&self) -> usize {
         self.watch_tx.receiver_count()
     }
@@ -4723,6 +4765,59 @@ mod tests {
         let got = rx.blocking_recv().unwrap();
         assert_eq!(got, crate::form::FormSubmission::Rejected);
         assert!(reg.list_pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn form_subscriptions_keep_their_answer_destination() {
+        let registry = std::sync::Arc::new(FormRegistry::new());
+        let a = std::sync::Arc::new(DeferredFormInbox::new(EventSink::new(), vec![]));
+        let b = std::sync::Arc::new(DeferredFormInbox::new(EventSink::new(), vec![]));
+        let mut a_view = registry.subscribe_for(a.clone());
+        let mut b_view = registry.subscribe_for(b.clone());
+        let _a_answer = registry.request_with_inbox(mk_form("a", "A"), a.clone());
+        let _b_answer = registry.request_with_inbox(mk_form("b", "B"), b.clone());
+        for (view, expected) in [(&mut a_view, "a"), (&mut b_view, "b")] {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    view.changed().await.unwrap();
+                    let forms = view.borrow_and_update();
+                    if !forms.is_empty() {
+                        assert_eq!(forms.len(), 1);
+                        assert_eq!(forms[0].form_id, expected);
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        }
+        assert!(registry.owns_form("a", &a));
+        assert!(!registry.owns_form("a", &b));
+        registry.expire("a");
+        let reattached = registry.subscribe_for(a.clone());
+        assert_eq!(reattached.borrow()[0].form_id, "a");
+        registry.cancel("a");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                a_view.changed().await.unwrap();
+                if a_view.borrow_and_update().is_empty() {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(b_view.borrow()[0].form_id, "b");
+        drop(a_view);
+        drop(b_view);
+        drop(reattached);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while registry.subscriber_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

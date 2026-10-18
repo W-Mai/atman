@@ -121,7 +121,7 @@ impl Attachment {
             .project
             .as_ref()
             .map(|project| project.root().display().to_string());
-        handle.form_rx = Some(forms.subscribe());
+        handle.form_rx = Some(forms.subscribe_for(worker.context().deferred_form_inbox()));
         handle.trust = worker.context().trust_config();
         let (commands, command_rx) = mpsc::unbounded_channel();
         handle.cmd_rx = Some(command_rx);
@@ -274,10 +274,14 @@ impl Attachment {
                 form_id,
                 submission,
             } => {
-                let result = forms
-                    .submit(&form_id, submission)
-                    .await
-                    .map_err(|error| error.to_string());
+                let result = if forms.owns_form(&form_id, &context.deferred_form_inbox()) {
+                    forms
+                        .submit(&form_id, submission)
+                        .await
+                        .map_err(|error| error.to_string())
+                } else {
+                    Err("Form is no longer pending in this flow".into())
+                };
                 let _ = replies.send(TuiCommand::FormSubmissionResult {
                     request_id,
                     form_id,

@@ -219,6 +219,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Flow-owned forms** — Persistent views show only forms addressed to their flow. Submissions validate the original answer destination, and reconnecting a view preserves expired forms awaiting a late reply.
+
 - **Transcript layout** — Reconcile document revisions before applying fold invalidation hints so batched background updates cannot leave new records unmeasured or interrupt rendering.
 
 - **Unsent drafts** — A closed TUI command connection preserves text, folded pastes, images, quotes, and cursor position. Failed sends do not add a user turn to the transcript. Submission snapshots retain editor identity and content revision so acknowledgements cannot clear later edits.
