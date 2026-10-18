@@ -301,9 +301,18 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
         .unwrap();
     assert_eq!(human.origin, MessageOrigin::User);
     assert_eq!(human.turn_id, input.execution.as_ref().unwrap().first_turn);
-    assert!(
-        matches!(&human.parts[1], atman_runtime::message::MessagePart::Image { source } if source == &content.images[0])
+    assert_eq!(
+        human
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                atman_runtime::message::MessagePart::Image { source } => Some(source),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        content.images.iter().collect::<Vec<_>>()
     );
+    assert!(human.parts.iter().any(|part| matches!(part, atman_runtime::message::MessagePart::InputPresentation { presentation } if Some(presentation) == content.presentation.as_ref())));
     let InboxPayload::Invocation { user, .. } = worker
         .launch_record()
         .await
