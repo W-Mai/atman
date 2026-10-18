@@ -14,6 +14,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **View attachment commands** — `:attach <path>`, `:attach list`, and `:attach clear` manage images in the requesting terminal or TUI view. File imports use the selected flow's workspace and storage; focus changes, failed inputs, and late acknowledgements preserve attachment ownership.
+
 - **Inline flow images** — Persistent terminal, main, and floating views import `@path` images into the selected flow before accepting input. Relative paths use the flow's workspace or project, accepted images survive removal of the original file, and quoted context does not select attachments or commands.
 
 - **Deferred session creation** — `atman session new` creates a persistent default flow and prints its session ID without starting providers, MCP servers, or model work. Attaching with `--continue` binds execution and runs any captured startup command once.

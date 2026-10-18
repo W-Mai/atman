@@ -1314,6 +1314,10 @@ pub(crate) fn handle_key(
                 return;
             }
             app.sync_composer_images(editor);
+            if app.composer_attachment_command(editor) {
+                *interrupt_prompt = None;
+                return;
+            }
             let prepared = editor.prepare_submission();
             if !prepared.is_empty() || app.pending_quote.is_some() {
                 if app.reconcile_input_reasoning() {

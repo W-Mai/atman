@@ -1936,6 +1936,9 @@ fn apply_view_command(
         TuiCommand::SubmissionResult { result } => {
             app.app.submission_result(editor, ticket, result);
         }
+        TuiCommand::AttachmentImported { result } => {
+            app.app.attachment_imported(editor, ticket, result);
+        }
         TuiCommand::FormSubmissionResult {
             request_id,
             form_id,
@@ -3847,6 +3850,49 @@ mod tests {
         .unwrap();
         assert!(views.views[&a_main].editor.buf().is_empty());
         assert_eq!(views.views[&a_main].ui.app.attach_count, 0);
+        let imported = workers[0]
+            .context()
+            .import_image_bytes(b"\x89PNG\r\n\x1a\nimported", Some("imported.png"))
+            .unwrap();
+        let main_view = views.views.get_mut(&a_main).unwrap();
+        main_view.editor.insert_str(":attach imported.png");
+        crate::key_handler::handle_key(
+            KeyAction::Submit,
+            &mut main_view.ui,
+            &mut main_view.editor,
+            &mut None,
+            None,
+            main_view.handle.control_tx.as_ref(),
+        );
+        incoming
+            .recv()
+            .await
+            .unwrap()
+            .replies
+            .send(TuiCommand::AttachmentImported {
+                result: Ok(imported.clone()),
+            })
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while views.views[&a_main].ui.app.pending_submission.is_some() {
+                views.next_background().await;
+            }
+        })
+        .await
+        .unwrap();
+        let main_view = views.views.get_mut(&a_main).unwrap();
+        assert_eq!(main_view.editor.pending_images()[0].source, imported);
+        main_view.editor.insert_str(":attach clear");
+        crate::key_handler::handle_key(
+            KeyAction::Submit,
+            &mut main_view.ui,
+            &mut main_view.editor,
+            &mut None,
+            None,
+            main_view.handle.control_tx.as_ref(),
+        );
+        assert!(main_view.editor.pending_images().is_empty());
+        assert!(incoming.try_recv().is_err());
         refresh_instance_live(&mut ui, &mut editor, &handle);
         assert_eq!(editor.buf(), floating_draft);
         assert_eq!(editor.pending_images().len(), 1);

@@ -178,20 +178,18 @@ impl Attachment {
         if let Some(reasoning) = submission.reasoning {
             invocation.insert("effort".into(), reasoning.to_string().into());
         }
-        let payload = self
-            .user_payload(
-                worker,
-                UserContent {
-                    text: submission.text,
-                    images: submission.images,
-                    presentation: submission.presentation,
-                },
-                invocation,
-            )
-            .await?;
-        self.accept_payload(worker, request, payload, DeliveryMode::NextTurn)
-            .await
-            .map(|_| ())
+        self.submit_user(
+            worker,
+            request,
+            UserContent {
+                text: submission.text,
+                images: submission.images,
+                presentation: submission.presentation,
+            },
+            invocation,
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn tui_control(
@@ -205,6 +203,27 @@ impl Attachment {
         let context = worker.context();
         match command {
             TuiControl::Submit(submission) => {
+                if let Some(command) = submission.control_command()
+                    && let Some(command) =
+                        atman_runtime::meta_commands::AttachmentCommand::from_line(command)
+                {
+                    let result = async {
+                        let command = command.map_err(anyhow::Error::msg)?;
+                        let atman_runtime::meta_commands::AttachmentCommand::Add(path) = command
+                        else {
+                            bail!(
+                                "attachment lists and clearing belong to the requesting composer"
+                            );
+                        };
+                        let record = worker.launch_record().await?;
+                        self.import_image(worker, record.as_ref(), Path::new(path))
+                    }
+                    .await;
+                    let _ = replies.send(TuiCommand::AttachmentImported {
+                        result: result.map_err(|error| format!("{error:#}")),
+                    });
+                    return Ok(());
+                }
                 let result = if let Some(command) = submission.control_command() {
                     self.command_with_request(worker, command, request)
                         .await

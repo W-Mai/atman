@@ -732,6 +732,34 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
 
     let image_path = dir.path().join("inline.png");
     std::fs::write(&image_path, b"\x89PNG\r\n\x1a\n").unwrap();
+    let ticket = sender
+        .send_tracked(TuiControl::Submit(TuiSubmission {
+            text: format!(":attach {}", image_path.display()),
+            images: vec![],
+            reasoning: None,
+            presentation: None,
+        }))
+        .unwrap()
+        .unwrap();
+    let bound = commands_rx.recv().await.unwrap();
+    attachment
+        .tui_control(
+            &worker,
+            bound.ticket.request_id,
+            bound.command,
+            &bound.replies,
+            &forms,
+        )
+        .await
+        .unwrap();
+    let reply = replies.recv().await.unwrap();
+    assert_eq!(reply.ticket, ticket);
+    let TuiCommand::AttachmentImported { result } = reply.command else {
+        panic!("missing imported image")
+    };
+    let imported = result.unwrap();
+    assert!(worker.snapshot().await.unwrap().pending.is_empty());
+    assert_eq!(worker.context().pending_image_count(), 0);
     let presentation = atman_runtime::user_input::UserInputPresentation {
         prompt: format!("inspect\n  this @{}", image_path.display()),
         quote: Some(atman_runtime::user_input::QuoteSnapshot {
@@ -779,6 +807,10 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         .await
         .unwrap();
     std::fs::remove_file(image_path).unwrap();
+    assert_eq!(
+        atman_runtime::attachment_store::image_bytes(&imported).unwrap(),
+        b"\x89PNG\r\n\x1a\n"
+    );
     attachment.host.wait_quiescent().await.unwrap();
     assert_eq!(
         atman_runtime::attachment_store::image_bytes(&captured).unwrap(),

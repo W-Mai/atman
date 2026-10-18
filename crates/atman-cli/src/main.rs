@@ -5062,15 +5062,16 @@ fn handle_goal_builtin(cmd: &str, session: &Session, reporter: &Reporter) {
 }
 
 fn handle_attach_builtin(arg: &str, session: &Session, reporter: &Reporter) {
-    match arg {
-        "" => {
-            reporter.error(":attach <path>  |  :attach clear  |  :attach list");
+    use atman_runtime::meta_commands::AttachmentCommand;
+    match AttachmentCommand::parse(arg) {
+        Err(error) => {
+            reporter.error(error);
         }
-        "clear" => {
+        Ok(AttachmentCommand::Clear) => {
             session.clear_pending_images();
             reporter.info("[atman] pending attachments cleared");
         }
-        "list" => {
+        Ok(AttachmentCommand::List) => {
             let names = session.pending_image_names();
             if names.is_empty() {
                 reporter.info("[atman] no pending attachments");
@@ -5080,7 +5081,7 @@ fn handle_attach_builtin(arg: &str, session: &Session, reporter: &Reporter) {
                 }
             }
         }
-        path => {
+        Ok(AttachmentCommand::Add(path)) => {
             let expanded = std::path::PathBuf::from(path);
             if !expanded.exists() {
                 reporter.error(format!(":attach: file not found: {}", expanded.display()));

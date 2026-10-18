@@ -124,6 +124,42 @@ pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
 }
 
 impl Attachment {
+    fn import_image(
+        &self,
+        worker: &FlowWorker,
+        record: Option<&atman_runtime::flow_store::launch::LaunchRecord>,
+        path: &Path,
+    ) -> Result<atman_runtime::message::ImageSource> {
+        let path = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            record
+                .and_then(|record| record.input.workspace.as_ref())
+                .map(|workspace| workspace.binding.path.as_path())
+                .or_else(|| {
+                    self.descriptor
+                        .project
+                        .as_ref()
+                        .map(|project| project.root())
+                })
+                .context("relative image paths require a bound project or workspace")?
+                .join(path)
+        };
+        Ok(worker.context().import_image_path(&path)?)
+    }
+
+    async fn submit_user(
+        &self,
+        worker: &FlowWorker,
+        request: Uuid,
+        content: UserContent,
+        invocation: BTreeMap<String, serde_json::Value>,
+    ) -> Result<Uuid> {
+        let payload = self.user_payload(worker, content, invocation).await?;
+        self.accept_payload(worker, request, payload, DeliveryMode::NextTurn)
+            .await
+    }
+
     async fn user_payload(
         &self,
         worker: &FlowWorker,
@@ -135,28 +171,10 @@ impl Attachment {
         let (text, paths) =
             crate::extract_presented_at_paths(&content.text, &mut content.presentation);
         content.text = text;
-        if !paths.is_empty() {
-            let root = record
-                .as_ref()
-                .and_then(|record| record.input.workspace.as_ref())
-                .map(|workspace| workspace.binding.path.as_path())
-                .or_else(|| {
-                    self.descriptor
-                        .project
-                        .as_ref()
-                        .map(|project| project.root())
-                });
-            for path in paths {
-                let path = if path.is_absolute() {
-                    path
-                } else {
-                    root.context("relative image paths require a bound project or workspace")?
-                        .join(path)
-                };
-                content
-                    .images
-                    .push(worker.context().import_image_path(&path)?);
-            }
+        for path in paths {
+            content
+                .images
+                .push(self.import_image(worker, record.as_ref(), &path)?);
         }
         let prompt = content
             .presentation
@@ -507,7 +525,7 @@ impl Attachment {
                         }
                         continue;
                     }
-                    let result = self.command(&focus, &input.text).await;
+                    let result = focused_view.submit(&self, &focus, &input.text).await;
                     match result {
                         Ok(text) if !text.is_empty() => crate::render_note(&mut printer, text),
                         Ok(_) => {},
@@ -535,7 +553,7 @@ impl Attachment {
         let (command, argument) = line.split_once(' ').unwrap_or((line, ""));
         let argument = argument.trim();
         match command {
-            ":help" => Ok("Text submits to the focused flow; /command [arguments] queues a captured command in the same flow. :focus <flow-prefix> · :flows · :status · :invoke <JSON arguments> · :insert <text> · :pause/:resume (execution) · :recover · :cancel · :close · :goal [set <text>|pause|resume|clear] · :pending · :reply <prompt-id> <JSON> · :approve/:deny <flow-prefix> <request-id> · :quit. EOF waits for runnable work; :quit detaches immediately.".into()),
+            ":help" => Ok("Text submits to the focused flow; /command [arguments] queues a captured command in the same flow. :attach <path>|list|clear · :focus <flow-prefix> · :flows · :status · :invoke <JSON arguments> · :insert <text> · :pause/:resume (execution) · :recover · :cancel · :close · :goal [set <text>|pause|resume|clear] · :pending · :reply <prompt-id> <JSON> · :approve/:deny <flow-prefix> <request-id> · :quit. EOF waits for runnable work; :quit detaches immediately.".into()),
             ":flows" => {
                 let catalog = self.session.snapshot().await?;
                 let mut rows = Vec::new();
@@ -620,6 +638,7 @@ impl Attachment {
 struct TerminalView {
     reader: FlowViewReader,
     rendered: usize,
+    images: Vec<atman_runtime::message::ImageSource>,
 }
 
 impl TerminalView {
@@ -627,7 +646,61 @@ impl TerminalView {
         Ok(Self {
             reader: worker.subscribe_view(PAGE).await?,
             rendered: 0,
+            images: vec![],
         })
+    }
+
+    async fn submit(
+        &mut self,
+        host: &Attachment,
+        worker: &FlowWorker,
+        text: &str,
+    ) -> Result<String> {
+        use atman_runtime::{attachment_store::display_name, meta_commands::AttachmentCommand};
+        if let Some(command) = AttachmentCommand::from_line(text) {
+            return match command.map_err(anyhow::Error::msg)? {
+                AttachmentCommand::List => Ok(if self.images.is_empty() {
+                    "No pending attachments".into()
+                } else {
+                    self.images
+                        .iter()
+                        .enumerate()
+                        .map(|(index, image)| format!("{}: {}", index + 1, display_name(image)))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }),
+                AttachmentCommand::Clear => {
+                    self.images.clear();
+                    Ok("Pending attachments cleared".into())
+                }
+                AttachmentCommand::Add(path) => {
+                    let record = worker.launch_record().await?;
+                    self.images.push(host.import_image(
+                        worker,
+                        record.as_ref(),
+                        Path::new(path),
+                    )?);
+                    Ok(format!("Attached image ({} pending)", self.images.len()))
+                }
+            };
+        }
+        if text.trim_start().starts_with(':') {
+            return host.command(worker, text).await;
+        }
+        let id = host
+            .submit_user(
+                worker,
+                Uuid::now_v7(),
+                UserContent {
+                    text: text.into(),
+                    images: self.images.clone(),
+                    presentation: None,
+                },
+                BTreeMap::new(),
+            )
+            .await?;
+        self.images.clear();
+        Ok(format!("Input accepted: {id}"))
     }
 }
 

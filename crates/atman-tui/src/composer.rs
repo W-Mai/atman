@@ -18,6 +18,69 @@ pub(crate) struct PendingSubmission {
 }
 
 impl AppState {
+    pub(crate) fn composer_attachment_command(&mut self, editor: &mut InputEditor) -> bool {
+        use atman_runtime::meta_commands::AttachmentCommand;
+        let draft = editor.prepare_submission();
+        let Some(command) = AttachmentCommand::from_line(&draft.content().text) else {
+            return false;
+        };
+        let (message, removed) = match command {
+            Ok(AttachmentCommand::Add(_)) => return false,
+            Err(error) => {
+                self.push_note(error, NoteLevel::Error);
+                return true;
+            }
+            Ok(AttachmentCommand::Clear) => (
+                "Pending attachments cleared".into(),
+                draft.content().images.clone(),
+            ),
+            Ok(AttachmentCommand::List) => {
+                let names = editor
+                    .pending_images()
+                    .iter()
+                    .map(|image| format!("{}: {}", image.number, image.name))
+                    .collect::<Vec<_>>();
+                (
+                    if names.is_empty() {
+                        "No pending attachments".into()
+                    } else {
+                        names.join("\n")
+                    },
+                    vec![],
+                )
+            }
+        };
+        self.acknowledge_composer(editor, draft, true, &removed);
+        self.push_note(message, NoteLevel::Info);
+        true
+    }
+
+    pub(crate) fn attachment_imported(
+        &mut self,
+        editor: &mut InputEditor,
+        ticket: Option<&ControlTicket>,
+        result: Result<ImageSource, String>,
+    ) {
+        if !self
+            .pending_submission
+            .as_ref()
+            .is_some_and(|pending| Some(&pending.ticket) == ticket)
+        {
+            return;
+        }
+        match result {
+            Err(error) => self.submission_result(editor, ticket, Err(error)),
+            Ok(source) => {
+                self.submission_result(editor, ticket, Ok(()));
+                let number = self.attach_composer_image(editor, source);
+                self.push_note(
+                    format!("Attached image {number} ({} pending)", self.attach_count),
+                    NoteLevel::Info,
+                );
+            }
+        }
+    }
+
     pub(crate) fn prepare_composer_submission(
         &self,
         draft: &PreparedSubmission,
@@ -216,11 +279,37 @@ mod tests {
         app.submission_result(&mut editor, Some(&ticket), Ok(()));
         assert!(editor.buf().contains("new draft"));
         assert_eq!(editor.pending_images().len(), 1);
-        app.pending_submission = Some(pending(&editor, vec![image]));
+        app.pending_submission = Some(pending(&editor, vec![image.clone()]));
         app.submission_result(&mut editor, Some(&ticket), Ok(()));
         assert!(editor.buf().is_empty());
         assert!(editor.pending_images().is_empty());
         assert_eq!(app.attach_count, 0);
+
+        editor.insert_str(":attach image.png");
+        app.pending_submission = Some(pending(&editor, vec![]));
+        let mut wrong_ticket = ticket.clone();
+        wrong_ticket.request_id = Uuid::now_v7();
+        app.attachment_imported(&mut editor, Some(&wrong_ticket), Ok(image.clone()));
+        assert!(editor.pending_images().is_empty());
+        app.attachment_imported(&mut editor, Some(&ticket), Err("cannot read image".into()));
+        assert_eq!(editor.buf(), ":attach image.png");
+        app.pending_submission = Some(pending(&editor, vec![]));
+        editor.replace_with("newer draft");
+        app.attachment_imported(&mut editor, Some(&ticket), Ok(image.clone()));
+        assert!(editor.buf().contains("newer draft"));
+        assert_eq!(editor.pending_images().len(), 1);
+        app.attachment_imported(&mut editor, Some(&ticket), Ok(image.clone()));
+        assert_eq!(editor.pending_images().len(), 1);
+        assert!(Arc::ptr_eq(app.pending_quote.as_ref().unwrap(), &quote));
+        editor.replace_with(":attach list");
+        assert!(app.composer_attachment_command(&mut editor));
+        assert_eq!(editor.pending_images().len(), 1);
+        editor.insert_str(":attach clear");
+        assert!(app.composer_attachment_command(&mut editor));
+        assert!(editor.pending_images().is_empty());
+        assert_eq!(app.attach_count, 0);
+        assert_eq!(session.pending_image_count(), 0);
+        assert!(Arc::ptr_eq(app.pending_quote.as_ref().unwrap(), &quote));
     }
 
     #[test]

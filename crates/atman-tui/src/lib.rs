@@ -277,6 +277,10 @@ pub enum TuiCommand {
     SubmissionResult {
         result: Result<(), String>,
     },
+    /// A captured file import returned to the requesting composer without accepting a message.
+    AttachmentImported {
+        result: Result<atman_runtime::message::ImageSource, String>,
+    },
     FormSubmissionResult {
         request_id: u64,
         form_id: String,

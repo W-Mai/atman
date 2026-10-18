@@ -5,6 +5,31 @@ pub struct MetaCommand {
     pub aliases: &'static [&'static str],
 }
 
+/// Attachment commands operate on a view's pending draft, independently of execution.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AttachmentCommand<'a> {
+    List,
+    Clear,
+    Add(&'a str),
+}
+
+impl<'a> AttachmentCommand<'a> {
+    pub fn parse(args: &'a str) -> Result<Self, &'static str> {
+        match args.trim() {
+            "" => Err(":attach <path> | :attach clear | :attach list"),
+            "list" => Ok(Self::List),
+            "clear" => Ok(Self::Clear),
+            path => Ok(Self::Add(path)),
+        }
+    }
+
+    pub fn from_line(line: &'a str) -> Option<Result<Self, &'static str>> {
+        let line = line.trim();
+        let (command, args) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        (command == ":attach").then(|| Self::parse(args))
+    }
+}
+
 pub const META_COMMANDS: &[MetaCommand] = &[
     MetaCommand {
         name: "panel",
@@ -228,6 +253,25 @@ pub fn match_command(input: &str) -> Option<&'static MetaCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_commands_require_exact_intent_and_preserve_paths() {
+        assert_eq!(
+            AttachmentCommand::from_line(":attach list"),
+            Some(Ok(AttachmentCommand::List))
+        );
+        assert_eq!(
+            AttachmentCommand::from_line(" :attach\tclear "),
+            Some(Ok(AttachmentCommand::Clear))
+        );
+        assert_eq!(
+            AttachmentCommand::from_line(":attach ./image with spaces.png"),
+            Some(Ok(AttachmentCommand::Add("./image with spaces.png")))
+        );
+        assert!(AttachmentCommand::from_line(":attach").unwrap().is_err());
+        assert!(AttachmentCommand::from_line(":attachment list").is_none());
+        assert!(AttachmentCommand::from_line("> :attach file\n\nprompt").is_none());
+    }
 
     #[test]
     fn all_commands_have_nonempty_fields() {

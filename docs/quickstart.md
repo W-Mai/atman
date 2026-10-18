@@ -144,6 +144,8 @@ Colon controls such as `:pause` and `:status` submit only the command. Pending q
 
 Use `@./image.png`, `@../image.png`, or `@/absolute/path.png` in a prompt to attach a local image. Persistent terminal, main, and floating views resolve relative paths from the selected flow's workspace or bound project. The image is copied into that flow's storage before input acceptance, so deleting the original file does not break accepted input. File references inside quoted context remain quoted text.
 
+Use `:attach <path>` to add an image before composing a message, including paths containing spaces. `:attach list` shows the current view's images and `:attach clear` removes them from its draft. Imports use the same flow directory and storage as inline images. Switching flow focus preserves each open view's pending attachments. A failed import or rejected input keeps existing attachments; only an accepted message consumes the images it submitted. Clearing a draft does not delete files referenced by accepted messages.
+
 Optional tool output payload limits can be set in `~/.config/atman/config.toml`:
 
 ```toml

@@ -517,12 +517,50 @@ fn terminal_focus_routes_input_and_controls_to_equal_instances() {
         .id
         .clone();
     std::fs::remove_file(root.join("child.at")).unwrap();
+    let parent_image = b"\x89PNG\r\n\x1a\nparent";
+    let child_image = b"\x89PNG\r\n\x1a\nchild";
+    std::fs::write(root.join("parent image.png"), parent_image).unwrap();
+    std::fs::write(root.join("child.png"), child_image).unwrap();
     let out = resume(
         root,
         sid,
-        &format!(":pause\n:focus {child}\nchild input\n:focus {parent}\nparent input\n"),
+        &format!(
+            ":pause\n:attach parent image.png\n:focus {child}\n:attach list\n:attach child.png\n/missing rejected\n:attach missing.png\nchild input\n:attach list\n:attach child.png\n:attach clear\n:attach list\n:focus {parent}\nparent input\n"
+        ),
     );
     assert!(out.contains("Pause acknowledged"), "{out}");
+    assert_eq!(out.matches("No pending attachments").count(), 3, "{out}");
+    assert!(out.contains("no such command"), "{out}");
+    assert!(out.contains("cannot read"), "{out}");
+    for (flow, expected) in [
+        (&parent, parent_image.as_slice()),
+        (&child, child_image.as_slice()),
+    ] {
+        let accepted = updates(root, sid, flow)
+            .into_iter()
+            .find_map(|update| {
+                let FlowUpdate::InputAccepted(input) = update else {
+                    return None;
+                };
+                let atman_runtime::flow_store::view::AcceptedInput::Envelope(envelope) = *input
+                else {
+                    return None;
+                };
+                let atman_runtime::flow_store::inbox::InboxPayload::UserSubmission {
+                    content, ..
+                } = envelope.request.payload
+                else {
+                    return None;
+                };
+                Some(content)
+            })
+            .unwrap();
+        assert_eq!(accepted.images.len(), 1);
+        assert_eq!(
+            atman_runtime::attachment_store::image_bytes(&accepted.images[0]).unwrap(),
+            expected
+        );
+    }
     assert_eq!(
         answers(&updates(root, sid, &child)),
         ["child seed", "child input"]
