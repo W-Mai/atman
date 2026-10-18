@@ -2185,6 +2185,7 @@ pub fn render_startup_intro_fade(
     transcript_area: ratatui::layout::Rect,
     version: &str,
     recent: &[crate::app::StartupSessionEntry],
+    directory: crate::app::StartupDirectory,
     progress: f32,
 ) -> StartupOverlayLayout {
     if progress >= 0.9 {
@@ -2202,6 +2203,7 @@ pub fn render_startup_intro_fade(
             selected: 0,
             hovered: None,
             projects_hovered: false,
+            directory,
         },
     )
 }
@@ -2216,6 +2218,7 @@ pub struct StartupOverlayRender<'a> {
     pub selected: usize,
     pub hovered: Option<usize>,
     pub projects_hovered: bool,
+    pub directory: crate::app::StartupDirectory,
 }
 
 pub fn render_startup_overlay(
@@ -2232,6 +2235,7 @@ pub fn render_startup_overlay(
         selected,
         hovered,
         projects_hovered,
+        directory,
     } = render;
     let t = crate::theme::theme();
     let recent = &recent[..reveal_count.min(recent.len())];
@@ -2301,6 +2305,7 @@ pub fn render_startup_overlay(
                 card.width as usize,
                 dim,
                 projects_hovered,
+                directory,
             )),
             card,
         );
@@ -2332,7 +2337,12 @@ fn startup_record_background(selected: bool, hovered: bool) -> Color {
     }
 }
 
-fn render_all_projects_card(width: usize, dim: bool, hovered: bool) -> Vec<Line<'static>> {
+fn render_all_projects_card(
+    width: usize,
+    dim: bool,
+    hovered: bool,
+    directory: crate::app::StartupDirectory,
+) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
     let bg = startup_record_background(false, hovered);
     let extra = if dim {
@@ -2358,14 +2368,18 @@ fn render_all_projects_card(width: usize, dim: bool, hovered: bool) -> Vec<Line<
         .bg(bg)
         .add_modifier(extra);
     let content_width = width.saturating_sub(8);
-    let shortcut = "[Ctrl+L]";
+    let (label, detail, shortcut) = match directory {
+        crate::app::StartupDirectory::Projects => {
+            ("All Projects", "Browse every workspace", "[Ctrl+L]")
+        }
+        crate::app::StartupDirectory::Sessions => {
+            ("All Sessions", "Browse sessions and flows", "[:sessions]")
+        }
+    };
     let title_width = content_width.saturating_sub(crate::width::width(shortcut) + 1);
-    let title = crate::width::pad_right(
-        &crate::width::truncate("All Projects", title_width),
-        title_width,
-    );
+    let title = crate::width::pad_right(&crate::width::truncate(label, title_width), title_width);
     let meta = crate::width::pad_right(
-        &crate::width::truncate("Browse every workspace", content_width),
+        &crate::width::truncate(detail, content_width),
         content_width,
     );
     let blank = Line::from(Span::styled(" ".repeat(width), bg_only));
@@ -2444,13 +2458,8 @@ fn render_session_card(
         .project
         .as_deref()
         .filter(|project| !project.is_empty())
-        .map(|project| {
-            format!(
-                "{}  ·  {} events  ·  {project}",
-                entry.age_label, entry.event_count
-            )
-        })
-        .unwrap_or_else(|| format!("{}  ·  {} events", entry.age_label, entry.event_count));
+        .map(|project| format!("{}  ·  {project}", entry.activity))
+        .unwrap_or_else(|| entry.activity.clone());
     let meta = crate::width::pad_right(
         &crate::width::truncate(&meta_source, content_width),
         content_width,
@@ -8640,12 +8649,11 @@ mod tests {
 
     fn startup_entry(goal: Option<&str>) -> crate::app::StartupSessionEntry {
         crate::app::StartupSessionEntry {
-            session_id: "session-1".into(),
+            target: crate::app::StartupSessionTarget::Legacy("session-1".into()),
             short_id: "session1".into(),
             goal: goal.map(str::to_owned),
             project: Some("project".into()),
-            age_label: "2h ago".into(),
-            event_count: 42,
+            activity: "2h ago  ·  42 events".into(),
         }
     }
 
@@ -8764,8 +8772,10 @@ mod tests {
     #[test]
     fn all_projects_card_matches_recent_session_spacing_and_hover() {
         let width = 72;
-        let normal = render_all_projects_card(width, false, false);
-        let hovered = render_all_projects_card(width, false, true);
+        let normal =
+            render_all_projects_card(width, false, false, crate::app::StartupDirectory::Projects);
+        let hovered =
+            render_all_projects_card(width, false, true, crate::app::StartupDirectory::Projects);
         let recent_hovered =
             render_session_card(1, &startup_entry(Some("goal")), width, false, false, true);
 
@@ -8789,6 +8799,13 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("All Projects"));
         assert!(rendered.contains("[Ctrl+L]"));
+        let sessions =
+            render_all_projects_card(width, false, true, crate::app::StartupDirectory::Sessions);
+        assert_eq!(sessions.len(), hovered.len());
+        assert_eq!(sessions[0].spans[0].style.bg, hovered[0].spans[0].style.bg);
+        let text = sessions.iter().map(plain_line).collect::<String>();
+        assert!(text.contains("All Sessions"));
+        assert!(text.contains("[:sessions]"));
     }
 
     #[test]

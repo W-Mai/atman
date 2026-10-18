@@ -83,6 +83,98 @@ impl Scopes {
         Ok(scope)
     }
 
+    pub async fn startup_recent(
+        &self,
+        source: &Attachment,
+        limit: usize,
+    ) -> Result<Vec<atman_tui::app::StartupSessionEntry>> {
+        let ids = self.catalog.ids().await?;
+        let root = self.root.clone();
+        let current = source.session.id();
+        let project = source
+            .descriptor
+            .project
+            .as_ref()
+            .map(|p| p.root().to_owned());
+        let rows = tokio::task::spawn_blocking(move || {
+            let mut rows = Vec::new();
+            for id in ids.into_iter().filter(|id| *id != current) {
+                let Ok(read) = RuntimeStore::inspect_session(&root, id) else {
+                    continue;
+                };
+                if read.projection.default_flow.is_none()
+                    || read
+                        .projection
+                        .descriptor
+                        .project
+                        .as_ref()
+                        .map(|p| p.root())
+                        != project.as_deref()
+                {
+                    continue;
+                }
+                // Activity is a display hint. No flow history or execution owner is opened.
+                let activity = std::iter::once(read.dir.join("events.jsonl"))
+                    .chain(read.projection.flows.iter().map(|flow| {
+                        read.dir
+                            .join("flows")
+                            .join(flow.id.to_string())
+                            .join("events.jsonl")
+                    }))
+                    .filter_map(|path| path.metadata().and_then(|meta| meta.modified()).ok())
+                    .max();
+                rows.push((activity, id));
+            }
+            rows.sort_unstable_by(|left, right| right.cmp(left));
+            rows
+        })
+        .await?;
+        let mut recent = Vec::new();
+        for (activity, id) in rows {
+            if recent.len() == limit {
+                break;
+            }
+            let Ok(view) = self.catalog.overview(id).await else {
+                continue;
+            };
+            let Some(instance_id) = view.summary.default_flow else {
+                continue;
+            };
+            let age = activity
+                .map(|time| {
+                    crate::format_age(
+                        std::time::SystemTime::now()
+                            .duration_since(time)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    )
+                })
+                .unwrap_or_else(|| "Recorded".into());
+            let activity = match view.summary.flow_count {
+                Some(1) => format!("{age}  ·  1 flow"),
+                Some(count) => format!("{age}  ·  {count} flows"),
+                None => age,
+            };
+            recent.push(atman_tui::app::StartupSessionEntry {
+                target: atman_tui::app::StartupSessionTarget::Flow(
+                    atman_runtime::flow_store::FlowRef {
+                        session_id: id.into(),
+                        instance_id,
+                    },
+                ),
+                short_id: id.to_string().chars().take(8).collect(),
+                goal: view.default_goal.or(view.summary.title),
+                project: view
+                    .summary
+                    .project_root
+                    .as_deref()
+                    .map(crate::short_project_path),
+                activity,
+            });
+        }
+        Ok(recent)
+    }
+
     /// Accepted creation outlives its caller and requires no existing session.
     pub async fn create_session(
         self: &Arc<Self>,

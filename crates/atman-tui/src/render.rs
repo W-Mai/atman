@@ -480,7 +480,12 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     );
     let effective_viewport = document_visible_rows.max(1);
     if startup_active {
-        if let Some(crate::app::StartupCard { version, recent }) = app.startup_card.as_ref() {
+        if let Some(crate::app::StartupCard {
+            version,
+            recent,
+            directory,
+        }) = app.startup_card.as_ref()
+        {
             f.render_widget(ratatui::widgets::Clear, l.transcript);
             let startup_layout = output::render_startup_overlay(
                 f,
@@ -494,6 +499,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                     selected: app.startup_selected_session,
                     hovered: app.startup_hovered_session,
                     projects_hovered: app.startup_projects_hovered,
+                    directory: *directory,
                 },
             );
             app.startup_container_rect = startup_layout.recent_container;
@@ -801,6 +807,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             l.transcript,
             &intro.version,
             &intro.recent,
+            intro.directory,
             intro_progress,
         );
     }

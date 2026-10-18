@@ -82,10 +82,7 @@ impl Attachment {
                         TuiControl::NewSession => {
                             let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
                             navigation.spawn(async move {
-                                let result = async {
-                                    let flow = scopes.create_session((&scope).into(), ticket.request_id, scopes::CreationMode::Interactive).await?;
-                                    scopes.focus(flow, atman_tui::control::FlowPlacement::Main, controls, forms).await
-                                }.await;
+                                let result = scopes.create_tui_session((&scope).into(), ticket.request_id, controls, forms).await;
                                 (replies, result)
                             });
                             continue;
@@ -410,6 +407,53 @@ enum Navigation {
 }
 
 impl scopes::Scopes {
+    async fn create_tui_session(
+        self: &Arc<Self>,
+        seed: scopes::SessionSeed,
+        request: Uuid,
+        controls: mpsc::UnboundedSender<BoundControl>,
+        forms: Arc<atman_runtime::session::FormRegistry>,
+    ) -> Result<Navigation> {
+        let flow = self
+            .create_session(seed, request, scopes::CreationMode::Interactive)
+            .await?;
+        let mut navigation = self
+            .focus(
+                flow,
+                atman_tui::control::FlowPlacement::Main,
+                controls,
+                forms,
+            )
+            .await?;
+        if let Navigation::Focus {
+            handle, service, ..
+        } = &mut navigation
+        {
+            let recent = match self.startup_recent(&service.scope, 5).await {
+                Ok(recent) => recent,
+                Err(error) => {
+                    handle.boot_toasts.push(atman_tui::app::ToastNote {
+                        id: "session-directory".into(),
+                        message: format!("Recent sessions unavailable: {error:#}"),
+                        level: atman_tui::app::NoteLevel::Warn,
+                        ttl: std::time::Duration::from_secs(10),
+                        created: std::time::Instant::now(),
+                        position: atman_tui::app::ToastPosition::BottomRight,
+                        fading: false,
+                        fade_started: None,
+                    });
+                    Vec::new()
+                }
+            };
+            handle.startup_card = Some(atman_tui::app::StartupCard {
+                version: env!("CARGO_PKG_VERSION").into(),
+                recent,
+                directory: atman_tui::app::StartupDirectory::Sessions,
+            });
+        }
+        Ok(navigation)
+    }
+
     async fn browse(
         &self,
         request: atman_tui::flow_hub::HubRequest,

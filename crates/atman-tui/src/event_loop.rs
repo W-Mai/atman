@@ -294,7 +294,8 @@ pub(crate) async fn run_frames(
         if let Some(action) = app.app.open_flow_hub.take() {
             let mut opened = crate::flow_hub::FlowHub::default();
             if let Some(tx) = handle.control_tx.as_ref() {
-                dispatch_hub_action(&mut opened, action, tx, None);
+                let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle));
+                dispatch_hub_action(&mut opened, action, tx, reuse);
             }
             hub = Some(opened);
         }
@@ -2591,7 +2592,14 @@ fn handle_startup_session_mouse(
         .is_some_and(|rect| rect_contains(rect, event.column, event.row));
     app.startup_projects_hovered = projects_hit;
     if projects_hit && event.kind == MouseEventKind::Down(MouseButton::Left) {
-        app.startup_open_projects = true;
+        match app.startup_card.as_ref().unwrap().directory {
+            app::StartupDirectory::Projects => app.startup_open_projects = true,
+            app::StartupDirectory::Sessions => {
+                app.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                    crate::flow_hub::HubRequest::Sessions { before: None },
+                ));
+            }
+        }
         return true;
     }
     let hit = app
@@ -2617,13 +2625,8 @@ fn handle_startup_session_mouse(
         app.startup_selected_session = index;
         app.startup_last_click = Some((index, now));
         app.popup.close();
-        if double_click
-            && let Some(session_id) = app
-                .startup_card
-                .as_ref()
-                .and_then(|card| card.recent.get(index).map(|entry| entry.session_id.clone()))
-        {
-            key_handler::request_session_switch(app, control_tx, session_id);
+        if double_click {
+            key_handler::request_startup_session(app, control_tx, index);
         }
     }
     true
@@ -4375,13 +4378,13 @@ mod tests {
         let mut app = AppState::new("current".into(), None);
         app.startup_card = Some(app::StartupCard {
             version: "1.0.0".into(),
+            directory: app::StartupDirectory::Projects,
             recent: vec![app::StartupSessionEntry {
-                session_id: "target".into(),
+                target: app::StartupSessionTarget::Legacy("target".into()),
                 short_id: "target00".into(),
                 goal: Some("resume work".into()),
                 project: Some("project".into()),
-                age_label: "1m ago".into(),
-                event_count: 7,
+                activity: "1m ago  ·  7 events".into(),
             }],
         });
         app.startup_container_rect = Some(ratatui::layout::Rect::new(9, 18, 42, 9));
@@ -5248,6 +5251,7 @@ mod tests {
         app.startup_intro = Some(app::StartupIntro {
             started_at: std::time::Instant::now(),
             version: "1.0.0".into(),
+            directory: app::StartupDirectory::Projects,
             recent: Vec::new(),
         });
         assert!(!handle_startup_session_mouse(
@@ -5257,6 +5261,36 @@ mod tests {
         ));
         assert_eq!(app.startup_focus, app::StartupFocus::Input);
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn startup_flow_mouse_navigation_uses_the_shared_directory() {
+        let mut app = startup_app();
+        let target = atman_runtime::flow_store::FlowRef {
+            session_id: uuid::Uuid::now_v7().into(),
+            instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+        };
+        let card = app.startup_card.as_mut().unwrap();
+        card.directory = app::StartupDirectory::Sessions;
+        card.recent[0].target = app::StartupSessionTarget::Flow(target.clone());
+        let click = startup_mouse(MouseEventKind::Down(MouseButton::Left), 21);
+        assert!(handle_startup_session_mouse(&mut app, &click, None));
+        assert!(app.open_flow_hub.is_none());
+        assert!(handle_startup_session_mouse(&mut app, &click, None));
+        assert!(
+            matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Focus(flow)) if flow == target)
+        );
+        assert!(!app.should_quit);
+        app.startup_projects_rect = Some(ratatui::layout::Rect::new(18, 25, 40, 4));
+        let click = startup_mouse(MouseEventKind::Down(MouseButton::Left), 26);
+        assert!(handle_startup_session_mouse(&mut app, &click, None));
+        assert!(matches!(
+            app.open_flow_hub,
+            Some(crate::flow_hub::Action::Load(
+                crate::flow_hub::HubRequest::Sessions { before: None }
+            ))
+        ));
+        assert!(!app.startup_open_projects);
     }
 
     #[test]

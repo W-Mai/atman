@@ -2131,6 +2131,7 @@ async fn cmd_repl_once(
             atman_tui::app::StartupCard {
                 version: env!("CARGO_PKG_VERSION").into(),
                 recent,
+                directory: atman_tui::app::StartupDirectory::Projects,
             }
         });
         let (ctrl_tx, mut ctrl_rx) = atman_tui::ControlSender::channel();
@@ -4768,12 +4769,11 @@ fn build_startup_recent(
             .unwrap_or(0);
             let short_id: String = r.sid.chars().take(8).collect();
             atman_tui::app::StartupSessionEntry {
-                session_id: r.sid,
+                target: atman_tui::app::StartupSessionTarget::Legacy(r.sid),
                 short_id,
                 goal: r.goal,
                 project: r.project,
-                age_label: format_age(age_secs),
-                event_count,
+                activity: format!("{}  ·  {event_count} events", format_age(age_secs)),
             }
         })
         .collect()
@@ -9175,7 +9175,10 @@ mod tests {
         let recent = build_startup_recent(root, &project, "", 2);
         let ids = recent
             .iter()
-            .map(|entry| entry.session_id.as_str())
+            .map(|entry| match &entry.target {
+                atman_tui::app::StartupSessionTarget::Legacy(id) => id.as_str(),
+                _ => panic!("legacy startup target expected"),
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(ids, vec!["current-4", "current-3"]);

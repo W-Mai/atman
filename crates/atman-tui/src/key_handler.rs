@@ -1059,12 +1059,7 @@ pub(crate) fn handle_key(
                 }
                 KeyAction::Submit => {
                     let index = app.startup_selected_session.min(len.saturating_sub(1));
-                    let session_id = app.startup_card.as_ref().and_then(|card| {
-                        card.recent.get(index).map(|entry| entry.session_id.clone())
-                    });
-                    if let Some(session_id) = session_id {
-                        request_session_switch(app, control_tx, session_id);
-                    }
+                    request_startup_session(app, control_tx, index);
                     return;
                 }
                 KeyAction::Char(_) => {
@@ -1127,6 +1122,7 @@ pub(crate) fn handle_key(
             started_at: std::time::Instant::now(),
             version: card.version,
             recent: card.recent,
+            directory: card.directory,
         });
     }
     if app.popup.is_open() {
@@ -1790,6 +1786,27 @@ fn handle_submission_queue_key(
     }
 }
 
+pub(crate) fn request_startup_session(
+    app: &mut AppState,
+    control_tx: Option<&crate::ControlSender>,
+    index: usize,
+) {
+    let target = app
+        .startup_card
+        .as_ref()
+        .and_then(|card| card.recent.get(index))
+        .map(|entry| entry.target.clone());
+    match target {
+        Some(crate::app::StartupSessionTarget::Legacy(sid)) => {
+            request_session_switch(app, control_tx, sid);
+        }
+        Some(crate::app::StartupSessionTarget::Flow(flow)) => {
+            app.open_flow_hub = Some(crate::flow_hub::Action::Focus(flow));
+        }
+        None => {}
+    }
+}
+
 // The outgoing tui exits fast; the incoming tui plays the fade+slide
 // intro on top of the freshly rendered new session so content appears
 // first, then the banner/sessions fade out and input docks bottom.
@@ -1799,10 +1816,15 @@ pub(crate) fn request_session_switch(
     sid: String,
 ) {
     let intro = match app.startup_card.as_ref() {
-        Some(crate::app::StartupCard { version, recent }) => crate::app::StartupIntro {
+        Some(crate::app::StartupCard {
+            version,
+            recent,
+            directory,
+        }) => crate::app::StartupIntro {
             started_at: std::time::Instant::now(),
             version: version.clone(),
             recent: recent.clone(),
+            directory: *directory,
         },
         _ => {
             // No StartupCard (e.g. mid-session switch): still play the
@@ -1811,6 +1833,7 @@ pub(crate) fn request_session_switch(
                 started_at: std::time::Instant::now(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 recent: Vec::new(),
+                directory: crate::app::StartupDirectory::Projects,
             }
         }
     };
@@ -1839,6 +1862,7 @@ pub(crate) fn request_project_session_switch(
         started_at: std::time::Instant::now(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         recent: Vec::new(),
+        directory: crate::app::StartupDirectory::Projects,
     };
     if let Some(tx) = control_tx {
         let _ = tx.send(TuiControl::SwitchSession {
@@ -1929,18 +1953,18 @@ mod tests {
     fn startup_state() -> crate::UiState {
         let recent = (1..=3)
             .map(|index| crate::app::StartupSessionEntry {
-                session_id: format!("session-{index}"),
+                target: crate::app::StartupSessionTarget::Legacy(format!("session-{index}")),
                 short_id: format!("session{index}"),
                 goal: Some(format!("goal {index}")),
                 project: Some("project".into()),
-                age_label: "1m ago".into(),
-                event_count: index,
+                activity: format!("1m ago  ·  {index} events"),
             })
             .collect();
         let mut state = crate::UiState::new(AppState::new("current".into(), None));
         state.app.startup_card = Some(crate::app::StartupCard {
             version: "1.0.0".into(),
             recent,
+            directory: crate::app::StartupDirectory::Projects,
         });
         state.app.startup_session_rects = (0..3)
             .map(|index| ratatui::layout::Rect::new(10, 20 + index * 4, 40, 4))
@@ -2039,6 +2063,29 @@ mod tests {
             rx.try_recv(),
             Ok(TuiControl::SwitchSession { sid, .. }) if sid == "session-3"
         ));
+    }
+
+    #[test]
+    fn startup_flow_navigation_preserves_the_current_view_and_draft() {
+        let mut state = startup_state();
+        let target = atman_runtime::flow_store::FlowRef {
+            session_id: uuid::Uuid::now_v7().into(),
+            instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+        };
+        state.startup_card.as_mut().unwrap().recent[0].target =
+            crate::app::StartupSessionTarget::Flow(target.clone());
+        let mut editor = InputEditor::default();
+        editor.insert_str("keep draft");
+        let (tx, mut rx) = crate::ControlSender::channel();
+        press_startup_key(&mut state, &mut editor, KeyAction::BackTab, Some(&tx));
+        press_startup_key(&mut state, &mut editor, KeyAction::Submit, Some(&tx));
+        assert!(
+            matches!(&state.open_flow_hub, Some(crate::flow_hub::Action::Focus(flow)) if *flow == target)
+        );
+        assert!(!state.should_quit);
+        assert!(state.startup_card.is_some());
+        assert_eq!(editor.buf(), "keep draft");
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

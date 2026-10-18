@@ -14,6 +14,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Persistent welcome navigation** — New Session shows recent sessions from the same project, ordered by journal activity. Keyboard and mouse selection reuse existing flow views and preserve drafts; All Sessions opens the shared directory without stopping background work.
+
 - **View attachment commands** — `:attach <path>`, `:attach list`, and `:attach clear` manage images in the requesting terminal or TUI view. File imports use the selected flow's workspace and storage; focus changes, failed inputs, and late acknowledgements preserve attachment ownership.
 
 - **Inline flow images** — Persistent terminal, main, and floating views import `@path` images into the selected flow before accepting input. Relative paths use the flow's workspace or project, accepted images survive removal of the original file, and quoted context does not select attachments or commands.

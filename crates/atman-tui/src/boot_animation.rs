@@ -272,6 +272,7 @@ fn render(
     let splash = crate::output::render_startup_overlay(
         f,
         crate::output::StartupOverlayRender {
+            directory: crate::app::StartupDirectory::Projects,
             area: l.transcript,
             version,
             recent,

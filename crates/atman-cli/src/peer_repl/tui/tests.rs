@@ -450,12 +450,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         service,
         ..
     } = scopes
-        .focus(
-            created.clone(),
-            FlowPlacement::Main,
-            commands.clone(),
-            forms.clone(),
-        )
+        .create_tui_session((&source).into(), request, commands.clone(), forms.clone())
         .await
         .unwrap()
     else {
@@ -463,6 +458,17 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     };
     assert_eq!(service.scope.descriptor.project, source.descriptor.project);
     assert_eq!(service.scope.config.source(), source.config.source());
+    let welcome = handle.startup_card.as_ref().unwrap();
+    assert!(matches!(
+        welcome.directory,
+        atman_tui::app::StartupDirectory::Sessions
+    ));
+    assert_eq!(welcome.recent.len(), 1);
+    assert!(
+        matches!(&welcome.recent[0].target, atman_tui::app::StartupSessionTarget::Flow(flow) if flow == original.address())
+    );
+    assert!(welcome.recent[0].activity.contains("1 flow"));
+    assert!(handle.initial_items.is_empty());
     assert_eq!(
         service
             .worker
@@ -519,6 +525,25 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     let worker = host.flow(&deferred).await.unwrap();
     let before = worker.snapshot().await.unwrap();
     assert_eq!(before.pending.len(), 1);
+    assert!(worker.context().messages_full().is_empty());
+    // An older Session with newer flow activity precedes a newly created Session.
+    let read = RuntimeStore::inspect_session(dir.path(), created.session_id.0).unwrap();
+    let log = read
+        .dir
+        .join("flows")
+        .join(created.instance_id.to_string())
+        .join("events.jsonl");
+    let file = std::fs::OpenOptions::new().write(true).open(log).unwrap();
+    let activity = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    file.set_modified(activity).unwrap();
+    let owners = host.sessions();
+    let recent = scopes.startup_recent(&source, 1).await.unwrap();
+    assert_eq!(recent.len(), 1);
+    assert!(
+        matches!(&recent[0].target, atman_tui::app::StartupSessionTarget::Flow(flow) if flow == &created)
+    );
+    assert_eq!(host.sessions(), owners);
+    assert_eq!(worker.snapshot().await.unwrap().cursor, before.cursor);
     assert!(worker.context().messages_full().is_empty());
     assert_eq!(
         scopes

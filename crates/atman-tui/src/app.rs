@@ -696,6 +696,13 @@ pub enum StartupFocus {
 pub struct StartupCard {
     pub version: String,
     pub recent: Vec<StartupSessionEntry>,
+    pub directory: StartupDirectory,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum StartupDirectory {
+    Projects,
+    Sessions,
 }
 
 #[derive(Debug, Clone)]
@@ -703,16 +710,22 @@ pub struct StartupIntro {
     pub started_at: Instant,
     pub version: String,
     pub recent: Vec<StartupSessionEntry>,
+    pub directory: StartupDirectory,
+}
+
+#[derive(Debug, Clone)]
+pub enum StartupSessionTarget {
+    Legacy(String),
+    Flow(atman_runtime::flow_store::FlowRef),
 }
 
 #[derive(Debug, Clone)]
 pub struct StartupSessionEntry {
-    pub session_id: String,
+    pub target: StartupSessionTarget,
     pub short_id: String,
     pub goal: Option<String>,
     pub project: Option<String>,
-    pub age_label: String,
-    pub event_count: u64,
+    pub activity: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
