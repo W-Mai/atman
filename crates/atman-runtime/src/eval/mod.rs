@@ -828,6 +828,7 @@ fn value_struct_string(value: &Value, name: &str) -> Option<String> {
 
 #[derive(Default)]
 pub(super) struct StreamCallCtx<'a> {
+    live: Option<crate::flow_runtime::live::LiveCall>,
     session: Option<&'a crate::session::Session>,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     flow_run_id: Option<&'a crate::event::FlowRunId>,
@@ -849,6 +850,7 @@ pub(super) async fn call_and_maybe_stream(
 
     let result = if let Some(tx) = stream_ctx.stream_tx {
         let mut stream = base.with_stream_tx(tx);
+        stream = stream.with_live_call(stream_ctx.live);
         if let Some(rules) = watch_rules {
             stream = stream.with_watch_rules(rules);
         }

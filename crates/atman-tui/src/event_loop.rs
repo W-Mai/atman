@@ -153,6 +153,7 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
     }
     if handle.flow_view.is_some() {
         refresh_instance_live(&mut app, &mut editor, handle);
+        refresh_live_output(&mut app, handle)?;
     }
     Ok((app, editor))
 }
@@ -198,6 +199,22 @@ fn refresh_instance_live(ui: &mut UiState, editor: &mut InputEditor, handle: &Tu
             None => ui.wm.modals.compact_review = None,
             _ => {}
         }
+    }
+}
+
+fn refresh_live_output(ui: &mut UiState, handle: &mut TuiHandle) -> std::io::Result<()> {
+    if let Some(reader) = &mut handle.live_output {
+        ui.app.sync_live_output(reader.snapshot())?;
+    }
+    Ok(())
+}
+
+async fn live_output_change(
+    reader: &mut Option<atman_runtime::flow_runtime::live::LiveOutputReader>,
+) {
+    match reader {
+        Some(reader) => reader.changed().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -352,9 +369,14 @@ pub(crate) async fn run_frames(
                 }
             } => {
                 app.app.sync_flow_view(view?)?;
+                refresh_live_output(&mut app, &mut handle)?;
                 if let Some(snapshot) = app.app.items.snapshot() {
                     app.wm.flow_snapshot(snapshot.clone());
                 }
+            }
+
+            _ = live_output_change(&mut handle.live_output) => {
+                refresh_live_output(&mut app, &mut handle)?;
             }
 
             frame = async {

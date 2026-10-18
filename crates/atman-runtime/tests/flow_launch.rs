@@ -29,6 +29,187 @@ fn session_info() -> SessionDescriptor {
     }
 }
 
+#[tokio::test]
+async fn live_output_tracks_execution_and_clears_before_committed_final_delivery() {
+    use atman_runtime::flow_runtime::live::DraftPart;
+    let directory = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(directory.path()).unwrap();
+    let info = session_info();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut entry = descriptor(info.id);
+    entry.entry_mut().unwrap().bundle.sources.insert(
+        "entry:main.at".into(),
+        r#"
+        flow main(label: string, amount: int) -> string {
+            reply = llm.call(model: "mock", context: "session", record: false)
+            return final.answer(message: reply)
+        }
+    "#
+        .into(),
+    );
+    let mut store = session.create_flow(entry.clone()).unwrap();
+    store
+        .transition(store.state().revision(), FlowTransition::Activated)
+        .unwrap();
+    let mut request = initial(&entry, &entry.address).request;
+    request.sender = SenderIdentity::User(Uuid::now_v7());
+    store.accept_input(request.clone(), |_| Ok(())).unwrap();
+    let worker = FlowWorker::start(store).await.unwrap();
+    let mut reader = worker.subscribe_live_output();
+    assert!(reader.snapshot().calls.is_empty());
+    let answer = "active preview ".repeat(30);
+    let models = Arc::new(atman_runtime::model_registry::ModelRegistry::new());
+    models
+        .replace_config(atman_runtime::model_registry::ProviderConfig {
+            providers: [(
+                "mock".into(),
+                atman_runtime::model_registry::ProviderEntry {
+                    name: "mock".into(),
+                    kind: "openai-compat".into(),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            models: [(
+                "mock".into(),
+                atman_runtime::model_registry::ModelEntry {
+                    model: "mock".into(),
+                    provider: Some("mock".into()),
+                    context_budget: Some(100_000),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut executor = Executor::new();
+    executor.providers = atman_runtime::provider::ProviderRegistry::with_models(models);
+    executor.providers.register(Arc::new(
+        atman_runtime::providers::mock::MockProvider::new("mock")
+            .with_fallback(atman_runtime::Value::Str(answer.clone()))
+            .with_chunk_delay(Duration::from_millis(2)),
+    ));
+    let ticket = worker
+        .start_turn(
+            executor.clone(),
+            prepare(&worker.snapshot().await.unwrap()).unwrap().unwrap(),
+        )
+        .await
+        .unwrap();
+    let snapshot = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            reader.changed().await;
+            let snapshot = reader.snapshot();
+            if snapshot.calls.iter().any(|call| {
+                call.parts
+                    .iter()
+                    .any(|part| matches!(part, DraftPart::Text(text) if !text.is_empty()))
+            }) {
+                break snapshot;
+            }
+        }
+    })
+    .await;
+    if snapshot.is_err() {
+        panic!(
+            "preview absent: {:?}; {:?}",
+            worker.status().await,
+            worker.completion(None).await
+        );
+    }
+    let snapshot = snapshot.unwrap();
+    assert_eq!(snapshot.flow, *worker.address());
+    assert_eq!(snapshot.calls.len(), 1);
+    assert_eq!(snapshot.calls[0].lease, ticket.lease);
+    assert!(
+        worker
+            .context()
+            .messages()
+            .iter()
+            .all(|message| message.origin != MessageOrigin::FinalAnswer)
+    );
+    let cursor = worker.status().await.unwrap().cursor;
+    let mut attached = worker.subscribe_live_output();
+    assert_eq!(attached.snapshot().calls[0].id, snapshot.calls[0].id);
+    assert!(!reader.snapshot().calls.is_empty());
+    assert_eq!(
+        worker.status().await.unwrap().cursor,
+        cursor,
+        "reading a preview must not write storage"
+    );
+    let done = tokio::time::timeout(Duration::from_secs(5), ticket.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(done.result.is_ok(), "{:?}", done.result);
+    assert!(reader.snapshot().calls.is_empty());
+    assert!(attached.snapshot().calls.is_empty());
+    let messages = worker.context().messages();
+    let finals = messages
+        .iter()
+        .filter(|message| message.origin == MessageOrigin::FinalAnswer)
+        .collect::<Vec<_>>();
+    assert_eq!(finals.len(), 1);
+    assert_eq!(finals[0].text_concat(), answer);
+
+    request.request_id = Uuid::now_v7();
+    worker.accept_input(request, |_| Ok(())).await.unwrap();
+    let cancelled = worker
+        .start_turn(
+            executor,
+            prepare(&worker.snapshot().await.unwrap()).unwrap().unwrap(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            reader.changed().await;
+            if reader.snapshot().calls.iter().any(|call| {
+                call.parts
+                    .iter()
+                    .any(|part| matches!(part, DraftPart::Text(_)))
+            }) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    change(
+        &worker,
+        FlowTransition::PhaseChanged {
+            lease: cancelled.lease.clone(),
+            phase: atman_rt::TurnPhase::Cancelling,
+        },
+    )
+    .await;
+    let done = tokio::time::timeout(Duration::from_secs(5), cancelled.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            done.result,
+            Err(atman_runtime::error::RuntimeError::Cancelled(_))
+        ),
+        "{:?}",
+        done.result
+    );
+    assert!(reader.snapshot().calls.is_empty());
+    assert!(attached.snapshot().calls.is_empty());
+    assert_eq!(
+        worker
+            .context()
+            .messages()
+            .iter()
+            .filter(|message| message.origin == MessageOrigin::FinalAnswer)
+            .count(),
+        1
+    );
+    worker.shutdown().await.unwrap();
+}
+
 fn descriptor(session: Uuid) -> FlowDescriptor {
     FlowDescriptor {
         address: FlowRef { session_id: session.into(), instance_id: FlowInstanceId::now() },

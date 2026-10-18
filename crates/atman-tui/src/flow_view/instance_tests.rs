@@ -82,6 +82,196 @@ fn call_status(view: &FlowViewModel, index: usize) -> ToolCallStatus {
 }
 
 #[tokio::test]
+async fn live_output_preserves_committed_state_and_each_views_disclosure() {
+    use atman_runtime::flow_runtime::{
+        FlowWorker,
+        live::{CallDraft, DraftPart, LiveOutputSnapshot},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(directory.path()).unwrap();
+    let session_id = Uuid::now_v7();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            id: session_id,
+            configuration: Default::default(),
+            project: None,
+            title: "Example".into(),
+        })
+        .unwrap();
+    let flow = FlowRef {
+        session_id: session_id.into(),
+        instance_id: FlowInstanceId::now(),
+    };
+    let mut store = session
+        .create_flow(FlowDescriptor {
+            address: flow.clone(),
+            creation_request: Uuid::now_v7(),
+            created_by: None,
+            content: EntrySnapshot {
+                name: "main".into(),
+                path: "main.at".into(),
+                bundle: RevisionBundle {
+                    entry: "main.at".into(),
+                    sources: [("main.at".into(), "flow main() {}".into())].into(),
+                    edges: Default::default(),
+                },
+            }
+            .into(),
+        })
+        .unwrap();
+    store
+        .transition(store.state().revision(), FlowTransition::Activated)
+        .unwrap();
+    let lease = start(&mut store);
+    publish(
+        &mut store,
+        &lease,
+        &lease.run,
+        Message::assistant_text(lease.turn.clone(), "Committed text"),
+    );
+    let worker = FlowWorker::start(store).await.unwrap();
+    let mut reader = worker
+        .subscribe_view(NonZeroUsize::new(8).unwrap())
+        .await
+        .unwrap();
+    let view = reader.next().await.unwrap();
+    let mut main = FlowViewModel::default();
+    let mut floating = FlowViewModel::default();
+    main.sync_view(view, None).unwrap();
+    floating.sync_view(view, None).unwrap();
+    let before = main.revisions().to_vec();
+    let cursor = main.cursor().cloned();
+    let long_answer = "x".repeat(20_000);
+    let mut snapshot = LiveOutputSnapshot {
+        flow: flow.clone(),
+        revision: 1,
+        calls: vec![CallDraft {
+            id: Uuid::now_v7(),
+            lease: lease.clone(),
+            run: lease.run.clone(),
+            model: "example".into(),
+            attempt: 1,
+            revision: 1,
+            parts: vec![
+                DraftPart::Thinking("Thought".into()),
+                DraftPart::Tool {
+                    index: 0,
+                    call_id: "call".into(),
+                    name: "final.answer".into(),
+                    arguments: format!("{{\"message\":\"{long_answer}"),
+                },
+            ],
+        }],
+    };
+    main.sync_live(snapshot.clone()).unwrap();
+    floating.sync_live(snapshot.clone()).unwrap();
+    let thinking = before.len() + 1;
+    main.mutate(thinking, super::OutputMutation::Interaction, |item| {
+        let OutputItem::Thinking { disclosure, .. } = item else {
+            panic!("thinking missing")
+        };
+        *disclosure = Disclosure::Full;
+        true
+    });
+    let draft_id = main.revisions().last().unwrap().id;
+    let structure = main.structure_revision();
+    snapshot.revision += 1;
+    snapshot.calls[0].revision += 1;
+    let DraftPart::Tool { arguments, .. } = &mut snapshot.calls[0].parts[1] else {
+        unreachable!()
+    };
+    arguments.push_str("end\"}");
+    main.sync_live(snapshot.clone()).unwrap();
+    floating.sync_live(snapshot.clone()).unwrap();
+    assert_eq!(main.revisions().last().unwrap().id, draft_id);
+    assert_eq!(
+        main.structure_revision(),
+        structure,
+        "token deltas must not reorder the document"
+    );
+    assert_eq!(main.cursor(), cursor.as_ref());
+    assert_eq!(
+        main.snapshot().unwrap().status.cursor,
+        cursor.clone().unwrap()
+    );
+    assert_eq!(&main.revisions()[..before.len()], before.as_slice());
+    assert!(matches!(
+        &main[thinking],
+        OutputItem::Thinking {
+            disclosure: Disclosure::Full,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &floating[thinking],
+        OutputItem::Thinking {
+            disclosure: Disclosure::Summary,
+            ..
+        }
+    ));
+    assert!(
+        matches!(main.last(), Some(OutputItem::AssistantMd { md, streaming: true, .. }) if md == &format!("{long_answer}end"))
+    );
+    assert!(main.source_record(main.len() - 1).is_none());
+    assert!(
+        main.work_folds.is_empty(),
+        "a final-answer preview is not a final publication"
+    );
+    let revision = main.revision_clock();
+    let mut foreign = snapshot.clone();
+    foreign.flow.instance_id = FlowInstanceId::now();
+    assert!(main.sync_live(foreign).is_err());
+    assert_eq!(main.revision_clock(), revision);
+
+    // A new committed boundary preserves preview identity and interaction state.
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::ExecutionPaused {
+                key: Uuid::now_v7().into(),
+            },
+        )
+        .await
+        .unwrap();
+    main.sync_view(reader.next().await.unwrap(), None).unwrap();
+    assert_eq!(main.revisions().last().unwrap().id, draft_id);
+    assert!(matches!(
+        &main[thinking],
+        OutputItem::Thinking {
+            disclosure: Disclosure::Full,
+            ..
+        }
+    ));
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::TurnFinished {
+                lease,
+                outcome: atman_rt::TurnOutcome::Completed,
+            },
+        )
+        .await
+        .unwrap();
+    main.sync_view(reader.next().await.unwrap(), None).unwrap();
+    assert!(!main.has_live_output());
+    let count = main.len();
+    snapshot.revision += 1;
+    main.sync_live(snapshot.clone()).unwrap();
+    assert_eq!(
+        main.len(),
+        count,
+        "a late preview cannot reopen a completed turn"
+    );
+    snapshot.revision += 1;
+    snapshot.calls.clear();
+    main.sync_live(snapshot.clone()).unwrap();
+    snapshot.revision -= 1;
+    assert!(!main.sync_live(snapshot).unwrap());
+    assert!(main.snapshot().is_some());
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_results() {
     let directory = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(directory.path()).unwrap();

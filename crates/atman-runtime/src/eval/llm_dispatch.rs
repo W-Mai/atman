@@ -614,6 +614,17 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 provider.as_ref(),
                 context_plan.into_request(),
                 StreamCallCtx {
+                    live: ctx
+                        .instance_publication
+                        .as_ref()
+                        .zip(ctx.flow_run_id.as_ref())
+                        .map(|(binding, run)| {
+                            binding.worker.begin_live_call(
+                                binding.lease.clone(),
+                                run.clone(),
+                                model.clone(),
+                            )
+                        }),
                     session: ctx.session_runtime.as_deref(),
                     stream_tx: stream_tx.clone(),
                     flow_run_id: ctx.flow_run_id.as_ref(),

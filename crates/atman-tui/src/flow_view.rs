@@ -6,6 +6,7 @@ use crate::app::{OutputItem, OutputRevision};
 
 mod fold;
 mod instance;
+mod live;
 pub use instance::FlowViewModel;
 
 #[cfg(test)]
@@ -56,6 +57,31 @@ impl From<Vec<OutputItem>> for FlowDocument {
 }
 
 impl FlowDocument {
+    fn take_tail(&mut self, start: usize) -> Vec<(OutputItem, OutputRevision)> {
+        let revisions = self.revisions.split_off(start);
+        for revision in &revisions {
+            self.animated_ids.remove(&revision.id);
+        }
+        if !revisions.is_empty() {
+            self.structure_revision = self.structure_revision.wrapping_add(1);
+            self.revision_clock = self.revision_clock.wrapping_add(1);
+        }
+        self.values
+            .split_off(start)
+            .into_iter()
+            .zip(revisions)
+            .collect()
+    }
+
+    fn restore_item(&mut self, item: OutputItem, revision: OutputRevision) {
+        if item.has_dynamic_paint() {
+            self.animated_ids.insert(revision.id);
+        }
+        self.values.push(item);
+        self.revisions.push(revision);
+        self.structure_revision = self.structure_revision.wrapping_add(1);
+    }
+
     /// Restore only when the source changes; view interactions do not rebuild messages.
     pub(crate) fn restore_messages(
         &mut self,

@@ -2583,6 +2583,7 @@ async fn cmd_repl_once(
             cmd_rx: Some(cmd_rx),
             control_reply_rx: None,
             flow_view: None,
+            live_output: None,
             initial_items,
             goal_rx: Some(session.subscribe_goal()),
             context_rx: Some(session.subscribe_context()),

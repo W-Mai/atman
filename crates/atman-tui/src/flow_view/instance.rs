@@ -38,9 +38,9 @@ struct TurnView {
 }
 
 #[derive(Default)]
-struct InstanceDocument {
+pub(super) struct InstanceDocument {
     cursor: Option<CommitReceipt>,
-    structure_revision: u64,
+    pub(super) structure_revision: u64,
     entries: usize,
     turns: HashMap<u64, TurnView>,
     calls: HashMap<(u64, FlowRunId, String), (usize, ToolDisplayMeta)>,
@@ -55,8 +55,9 @@ pub struct FlowViewModel {
     pub(super) document: FlowDocument,
     pub(crate) work_folds: Vec<super::fold::WorkFoldState>,
     pub(super) legacy_fold_bindings: HashMap<(atman_rt::TurnId<AtmanUuid>, usize), u64>,
-    flow: Option<FlowRef>,
-    instance: InstanceDocument,
+    pub(super) flow: Option<FlowRef>,
+    pub(super) instance: InstanceDocument,
+    pub(super) live: super::live::LiveDocument,
     snapshot: Option<Arc<FlowViewSnapshot>>,
     updated_workflows: Vec<usize>,
 }
@@ -122,7 +123,8 @@ impl FlowViewModel {
             .is_none_or(|snapshot| snapshot.status.cursor != view.snapshot().status.cursor);
         let document_changed = self.sync(view.transcript(), output_store)?;
         self.snapshot = Some(view.snapshot().clone());
-        Ok(changed || document_changed)
+        let live_changed = self.restore_live();
+        Ok(changed || document_changed || live_changed)
     }
 
     pub fn source_record(&self, index: usize) -> Option<FlowRecordId> {
@@ -167,6 +169,7 @@ impl FlowViewModel {
             return Ok(false);
         }
         let revision = self.document.revision_clock();
+        self.live.detach(&mut self.document);
         let document_start = self.document.len();
         for entry in &source.entries()[self.instance.entries..] {
             match &entry.record {

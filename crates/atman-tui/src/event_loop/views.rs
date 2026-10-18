@@ -265,6 +265,7 @@ impl Workspace {
                 }
             }
             refresh_instance_live(&mut selected.ui, &mut selected.editor, &selected.handle);
+            refresh_live_output(&mut selected.ui, &mut selected.handle)?;
             if selected.handle.settings.take_changes() {
                 apply_provider_catalog_changed(&mut selected.ui, None);
             }
@@ -440,6 +441,7 @@ impl Workspace {
                             apply_provider_catalog_changed(&mut view.ui, None);
                             return;
                         }
+                        _ = live_output_change(&mut view.handle.live_output) => None,
                         command = recv_cmd(&mut view.handle.cmd_rx, &mut view.handle.control_reply_rx, view.handle.control_tx.as_ref().and_then(|tx| tx.binding())) => {
                             if let Some((ticket, command)) = command { apply_view_command(&mut view.ui, &mut view.editor, ticket.as_ref(), command); }
                             return;
@@ -454,11 +456,15 @@ impl Workspace {
                     };
                     let Some(update) = update else {
                         refresh_instance_live(&mut view.ui, &mut view.editor, &view.handle);
+                        if let Err(error) = refresh_live_output(&mut view.ui, &mut view.handle) {
+                            view.handle.live_output = None;
+                            view.ui.app.push_toast(format!("Preview disconnected: {error}"), crate::app::NoteLevel::Error, std::time::Duration::from_secs(8), crate::app::ToastPosition::TopRight);
+                        }
                         return;
                     };
                     match update {
                         Ok(update) => {
-                            if let Err(error) = view.ui.app.sync_flow_view(update) {
+                            if let Err(error) = view.ui.app.sync_flow_view(update).and_then(|()| refresh_live_output(&mut view.ui, &mut view.handle)) {
                                 view.handle.flow_view = None;
                                 view.ui.app.push_toast(
                                     format!("View disconnected: {error}"),

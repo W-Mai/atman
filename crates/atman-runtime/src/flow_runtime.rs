@@ -10,6 +10,7 @@ pub mod host;
 pub mod input;
 pub mod launch;
 mod lifecycle;
+pub mod live;
 pub mod observation;
 pub mod planning;
 mod process_watch;
@@ -85,6 +86,7 @@ pub struct FlowWorker {
     context: Arc<Session>,
     resources: Arc<resources::InstanceResources>,
     trace: Arc<trace::TraceBuffer>,
+    live_output: Arc<live::LiveOutput>,
     commands: mpsc::Sender<Command>,
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
     commits: watch::Receiver<CommitReceipt>,
@@ -283,6 +285,7 @@ impl FlowWorker {
         });
         let worker = Self {
             host,
+            live_output: Arc::new(live::LiveOutput::new(address.clone())),
             address,
             context,
             resources,

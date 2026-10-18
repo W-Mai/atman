@@ -30,6 +30,7 @@ pub(crate) struct LlmStream<'a> {
 
 /// Streaming-enabled LlmStream. Created by `LlmStream::with_stream_tx()`.
 pub(crate) struct StreamingLlmStream<'a> {
+    live: Option<crate::flow_runtime::live::LiveCall>,
     base: LlmStream<'a>,
     stream_tx: Sender<StreamFrame>,
     frame_tx: Option<Sender<StreamFrame>>,
@@ -71,6 +72,7 @@ impl<'a> LlmStream<'a> {
 
     pub(crate) fn with_stream_tx(self, tx: Sender<StreamFrame>) -> StreamingLlmStream<'a> {
         StreamingLlmStream {
+            live: None,
             base: self,
             stream_tx: tx,
             frame_tx: None,
@@ -149,6 +151,14 @@ impl<'a> LlmStream<'a> {
 }
 
 impl<'a> StreamingLlmStream<'a> {
+    pub(crate) fn with_live_call(
+        mut self,
+        live: Option<crate::flow_runtime::live::LiveCall>,
+    ) -> Self {
+        self.live = live;
+        self
+    }
+
     pub(crate) fn with_session(mut self, session: &'a Session) -> Self {
         self.flow_cancel = Some(session.flow_cancel_token());
         self
@@ -214,6 +224,9 @@ impl<'a> StreamingLlmStream<'a> {
     }
 
     async fn single_attempt(&mut self) -> Result<AssistantMessage, RuntimeError> {
+        if let Some(live) = &self.live {
+            live.restart();
+        }
         let req = self.base.rebuild_req();
         let model_name = req.model.clone();
         let run_id = self.base.flow_run_id.as_ref().map(|r| r.0.to_string());
@@ -277,6 +290,9 @@ impl<'a> StreamingLlmStream<'a> {
                         events.recv().await
                     }
                 }, if !events_closed => {
+                    if let (Some(live), Ok(event)) = (&self.live, &ev) {
+                        live.observe(event);
+                    }
                     match ev {
                         Ok(NodeEvent::LlmChunk { text, cumulative_tokens }) => {
                             self.on_chunk(&model_name, run_id.as_deref(), &text, cumulative_tokens);
@@ -327,6 +343,9 @@ impl<'a> StreamingLlmStream<'a> {
         };
 
         while let Ok(ev) = events.try_recv() {
+            if let Some(live) = &self.live {
+                live.observe(&ev);
+            }
             match ev {
                 NodeEvent::LlmChunk {
                     text,

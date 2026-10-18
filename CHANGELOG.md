@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Live flow previews** — Main and floating views show text, thinking, and tool arguments from active model calls. Focus changes recover current previews; retries and cancellation clear only the affected call. Committed replies retain their publication and folding semantics, and token updates preserve document structure and disclosure state.
+
 - **Shared settings updates** — Configuration commits and model discovery refresh choices in other views using the same source. Hidden views catch up when focused; editor drafts and pending save or model-switch requests retain their identity.
 
 - **Flow settings scope** — Provider, Model, Alias, MCP, and setup panels use the displayed Session's configuration and authentication source. Alias and MCP saves wait for host acknowledgement, retain failed drafts, and reject stale editor replies. Persistent TUI attachment accepts a recorded configuration directory different from the client's default.

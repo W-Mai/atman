@@ -35,6 +35,7 @@ impl TuiHandle {
             ));
         }
         handle.settings = config.into();
+        handle.live_output = Some(worker.subscribe_live_output());
         handle.flow_view = Some(
             worker
                 .subscribe_view(NonZeroUsize::new(64).unwrap())
@@ -54,6 +55,18 @@ impl TuiHandle {
 }
 
 impl AppState {
+    pub(crate) fn sync_live_output(
+        &mut self,
+        snapshot: atman_runtime::flow_runtime::live::LiveOutputSnapshot,
+    ) -> io::Result<()> {
+        if self.items.sync_live(snapshot)? {
+            self.items_version = self.items_version.wrapping_add(1);
+            self.streaming = self.items.has_live_output();
+            self.mark_visual_dirty();
+        }
+        Ok(())
+    }
+
     pub(crate) fn sync_instance_permissions(&mut self) {
         let Some(session) = self.session.as_ref() else {
             return;
@@ -120,6 +133,7 @@ impl AppState {
         let output = self.session.as_ref().map(|session| session.output_store());
         let before = self.items.revision_clock();
         self.items.sync_view(view, output.as_deref())?;
+        self.streaming = self.items.has_live_output();
         for &index in self.items.updated_workflows() {
             let crate::app::OutputItem::WorkflowPanel { graph, .. } = &self.items[index] else {
                 continue;
