@@ -774,6 +774,7 @@ pub struct QueuedSubmissionEdit {
 
 #[derive(Default)]
 pub struct AppState {
+    pub(crate) settings: crate::settings::SettingsSource,
     pub(crate) open_flow_hub: bool,
     pub(crate) flow_hub_rect: Option<ratatui::layout::Rect>,
     pub(crate) flow_hub_hovered: bool,
@@ -937,6 +938,7 @@ pub struct AppState {
     pub expanded_mcp_servers: HashSet<String>,
     pub mcp_selected: usize,
     pub mcp_remove_armed: Option<String>,
+    pub(crate) mcp_pending_mutation: Option<uuid::Uuid>,
     pub mcp_browser_tab: crate::mcp_manager::McpBrowserTab,
     pub mcp_content_revision: u64,
     pub mcp_resources_cache:

@@ -34,6 +34,8 @@ pub enum OnboardingStep {
 }
 
 pub struct OnboardingState {
+    pending: Option<crate::settings::SettingsMutationRequest>,
+    pub(crate) settings: crate::settings::SettingsSource,
     pub step: OnboardingStep,
     pub selected_action: usize,
     pub selected_model: usize,
@@ -53,6 +55,8 @@ pub struct OnboardingState {
 impl Default for OnboardingState {
     fn default() -> Self {
         Self {
+            pending: None,
+            settings: Default::default(),
             step: OnboardingStep::ProviderSelect,
             selected_action: 0,
             selected_model: 0,
@@ -76,12 +80,16 @@ pub enum OnboardingEvent {
     None,
     OpenProviderManager,
     OpenModelManager,
+    Save,
     Completed,
     Skipped,
 }
 
 impl OnboardingState {
     pub fn handle_key(&mut self, action: &KeyAction) -> OnboardingEvent {
+        if self.pending.is_some() {
+            return OnboardingEvent::None;
+        }
         self.error = None;
         let event = match self.step {
             OnboardingStep::ProviderSelect => self.handle_provider_key(action),
@@ -98,6 +106,9 @@ impl OnboardingState {
     }
 
     pub fn handle_mouse(&mut self, event: &MouseEvent) -> OnboardingEvent {
+        if self.pending.is_some() {
+            return OnboardingEvent::None;
+        }
         if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
             && self.step == OnboardingStep::ModelSelect
         {
@@ -147,7 +158,7 @@ impl OnboardingState {
     }
 
     fn refresh_models(&mut self) {
-        let models = selectable_models();
+        let models = selectable_models(&self.settings);
         if self.models != models {
             let selected = self.models.get(self.selected_model);
             self.selected_model = selected
@@ -270,13 +281,7 @@ impl OnboardingState {
             KeyAction::Submit if self.model_focus == ModelFocus::Back => {
                 self.handle_model_key(&KeyAction::Escape)
             }
-            KeyAction::Submit if len > 0 => match self.write_config(&self.models) {
-                Ok(()) => OnboardingEvent::Completed,
-                Err(e) => {
-                    self.error = Some(format!("setup failed: {e}"));
-                    OnboardingEvent::None
-                }
-            },
+            KeyAction::Submit if len > 0 => OnboardingEvent::Save,
             KeyAction::Submit => {
                 self.error = Some("No models available. Press 'a' to add a model.".to_string());
                 OnboardingEvent::None
@@ -285,18 +290,40 @@ impl OnboardingState {
         }
     }
 
-    fn write_config(&self, models: &[String]) -> anyhow::Result<()> {
-        let model = models
-            .get(self.selected_model)
-            .ok_or_else(|| anyhow::anyhow!("no model selected"))?;
-        atman_runtime::config_hub::ConfigHub::global()?.bind_default_model(model)?;
-        Ok(())
+    pub(crate) fn save(&mut self, tx: Option<&crate::ControlSender>) {
+        let Some(model) = self.models.get(self.selected_model).cloned() else {
+            return;
+        };
+        match crate::settings::SettingsMutationRequest::send(
+            crate::settings::SettingsMutation::DefaultModel { model },
+            tx,
+        ) {
+            Ok(request) => {
+                self.pending = Some(request);
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    pub(crate) fn mutation_result(
+        &mut self,
+        id: uuid::Uuid,
+        result: &Result<String, String>,
+    ) -> bool {
+        if self.pending.as_ref().is_none_or(|request| request.id != id) {
+            return false;
+        }
+        self.pending = None;
+        self.error = result.as_ref().err().cloned();
+        result.is_ok()
     }
 }
 
-fn selectable_models() -> Vec<String> {
-    let providers = atman_runtime::model_registry::all_provider_entries();
-    let mut models: Vec<String> = atman_runtime::model_registry::all_model_entries()
+fn selectable_models(settings: &crate::settings::SettingsSource) -> Vec<String> {
+    let providers = settings.all_provider_entries();
+    let mut models: Vec<String> = settings
+        .all_model_entries()
         .into_iter()
         .filter_map(|(name, entry)| {
             if entry.enabled == Some(false) {
@@ -594,7 +621,7 @@ impl OnboardingState {
             );
             let model = &self.models[index];
             let text_width = rect.width.saturating_sub(4);
-            let info = atman_runtime::model_registry::model_info(model);
+            let info = self.settings.model_info(model);
             let metadata = format!(
                 "  {} ctx",
                 atman_runtime::humanize::format_count(info.context_budget)
@@ -680,7 +707,9 @@ impl OnboardingState {
             (
                 Hit::Finish,
                 ModelFocus::Finish,
-                if narrow {
+                if self.pending.is_some() {
+                    "Saving…"
+                } else if narrow {
                     "✓"
                 } else if compact {
                     "Save"
@@ -703,7 +732,7 @@ impl OnboardingState {
                     shortcut,
                     focused: self.model_focus == focus,
                     hovered: self.hovered == Some(hit),
-                    disabled: hit == Hit::Finish && count == 0,
+                    disabled: self.pending.is_some() || (hit == Hit::Finish && count == 0),
                 },
                 theme,
             );
@@ -929,6 +958,31 @@ mod tests {
         state.provider_added(Some("example"));
         assert!(state.pending_model_select);
         assert_eq!(state.step, OnboardingStep::ProviderSelect);
+    }
+
+    #[test]
+    fn settings_setup_completes_only_after_matching_persistence_success() {
+        let mut state = OnboardingState {
+            models: vec!["example/model".into()],
+            ..Default::default()
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::ControlSender::from(tx);
+        state.save(Some(&tx));
+        let crate::TuiControl::MutateSettings(first) = rx.try_recv().unwrap() else {
+            panic!()
+        };
+        assert_eq!(state.handle_key(&KeyAction::Submit), OnboardingEvent::None);
+        assert!(!state.mutation_result(uuid::Uuid::now_v7(), &Ok("saved".into())));
+        assert!(!state.mutation_result(first.id, &Err("write failed".into())));
+        assert_eq!(state.models, ["example/model"]);
+        assert_eq!(state.error.as_deref(), Some("write failed"));
+        state.save(Some(&tx));
+        let crate::TuiControl::MutateSettings(retry) = rx.try_recv().unwrap() else {
+            panic!()
+        };
+        assert!(state.mutation_result(retry.id, &Ok("saved".into())));
+        assert!(state.error.is_none());
     }
 
     #[test]

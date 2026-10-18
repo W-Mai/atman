@@ -1341,16 +1341,16 @@ pub fn all_model_entries() -> Vec<(String, ModelEntry)> {
 }
 
 pub fn provider_display_name(provider_key: &str) -> String {
-    AuthStore::load()
-        .ok()
-        .and_then(|auth| {
-            auth.providers
-                .into_iter()
-                .find(|provider| provider.id == provider_key)
-        })
-        .map(|provider| match provider.account {
+    provider_display_name_from_auth(provider_key, &AuthStore::load().unwrap_or_default())
+}
+
+pub fn provider_display_name_from_auth(provider_key: &str, auth: &AuthStore) -> String {
+    auth.providers
+        .iter()
+        .find(|provider| provider.id == provider_key)
+        .map(|provider| match &provider.account {
             Some(account) if !account.is_empty() => format!("{} · {account}", provider.name),
-            _ => provider.name,
+            _ => provider.name.clone(),
         })
         .unwrap_or_else(|| provider_key.to_string())
 }
@@ -2484,22 +2484,27 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
 ];
 
 pub fn is_first_run() -> bool {
-    let providers = all_provider_entries();
-    let config_configured = providers.iter().any(|(_, e)| {
-        e.api_key.as_deref().is_some_and(|k| !k.is_empty())
-            || e.api_key_env
-                .as_deref()
-                .is_some_and(|env| std::env::var(env).is_ok_and(|v| !v.trim().is_empty()))
-    });
-    let env_configured =
-        std::env::var("ANTHROPIC_API_KEY").is_ok() || std::env::var("OPENAI_API_KEY").is_ok();
-    let auth_configured = AuthStore::load()
-        .is_ok_and(|store| store.providers.iter().any(|provider| provider.enabled));
-    let smart_resolves = {
-        let resolved = resolve_alias("smart");
-        resolved != "smart" && model_entry(&resolved).is_some()
-    };
-    !(config_configured || env_configured || auth_configured) || !smart_resolves
+    default_registry().is_first_run(&AuthStore::load().unwrap_or_default())
+}
+
+impl ModelRegistry {
+    pub fn is_first_run(&self, auth: &AuthStore) -> bool {
+        let providers = self.all_provider_entries();
+        let config_configured = providers.iter().any(|(_, e)| {
+            e.api_key.as_deref().is_some_and(|k| !k.is_empty())
+                || e.api_key_env
+                    .as_deref()
+                    .is_some_and(|env| std::env::var(env).is_ok_and(|v| !v.trim().is_empty()))
+        });
+        let env_configured =
+            std::env::var("ANTHROPIC_API_KEY").is_ok() || std::env::var("OPENAI_API_KEY").is_ok();
+        let auth_configured = auth.providers.iter().any(|provider| provider.enabled);
+        let smart_resolves = {
+            let resolved = self.resolve_alias("smart");
+            resolved != "smart" && self.model_entry(&resolved).is_some()
+        };
+        !(config_configured || env_configured || auth_configured) || !smart_resolves
+    }
 }
 
 #[cfg(test)]

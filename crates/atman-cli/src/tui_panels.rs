@@ -19,6 +19,58 @@ use crate::{
     test_model_endpoint, test_provider_endpoint,
 };
 
+fn mutate_settings(
+    config: &atman_runtime::config_hub::ConfigHub,
+    action: &atman_tui::settings::SettingsMutation,
+) -> Result<String> {
+    use atman_tui::settings::SettingsMutation;
+    match action {
+        SettingsMutation::CreateAlias { name, model } => {
+            config.add_alias(name, model)?;
+            Ok(format!("Alias {name} saved"))
+        }
+        SettingsMutation::UpdateAlias {
+            original,
+            name,
+            model,
+        } => {
+            config.update_alias(original.as_deref(), name, model)?;
+            Ok(format!("Alias {name} saved"))
+        }
+        SettingsMutation::RemoveAlias { name } => {
+            config.remove_alias(name)?;
+            Ok(format!("Alias {name} removed"))
+        }
+        SettingsMutation::DefaultModel { model } => {
+            config.bind_default_model(model)?;
+            Ok("Default model saved".into())
+        }
+        SettingsMutation::SaveMcp {
+            original,
+            config: server,
+        } => {
+            if let Some(original) = original {
+                config.replace_mcp(original, *server.clone())?;
+            } else {
+                config.upsert_mcp(*server.clone())?;
+            }
+            Ok(format!("MCP server {} saved", server.name))
+        }
+        SettingsMutation::RemoveMcp { name } => {
+            config.remove_mcp(name)?;
+            Ok(format!("MCP server {name} removed"))
+        }
+        SettingsMutation::ToggleMcp { name } => {
+            let state = if config.toggle_mcp(name)? {
+                "disabled"
+            } else {
+                "enabled"
+            };
+            Ok(format!("MCP server {name} {state}"))
+        }
+    }
+}
+
 pub(crate) struct PanelServices {
     session: Arc<Session>,
     config: atman_runtime::config_hub::ConfigHub,
@@ -66,6 +118,10 @@ impl PanelServices {
         let lifecycle = executor
             .provider_lifecycle()
             .context("provider lifecycle unavailable")?;
+        anyhow::ensure!(
+            lifecycle.config_hub().source() == config.source(),
+            "panel configuration does not match executor scope"
+        );
         let project_root = project.as_ref().map(|project| project.root().to_path_buf());
         let knowledge = project.as_ref().map(|project| {
             let mut store = atman_runtime::memory::ConfessionStore::at(
@@ -146,6 +202,29 @@ impl PanelServices {
     /// Unhandled controls retain their payload and return to the bound execution host.
     pub async fn dispatch(&mut self, command: TuiControl) -> Option<TuiControl> {
         match command {
+            TuiControl::MutateSettings(request) => {
+                let result = mutate_settings(&self.config, &request.action)
+                    .map_err(|error| error.to_string());
+                let reload = result.is_ok()
+                    && matches!(
+                        request.action,
+                        atman_tui::settings::SettingsMutation::SaveMcp { .. }
+                            | atman_tui::settings::SettingsMutation::RemoveMcp { .. }
+                            | atman_tui::settings::SettingsMutation::ToggleMcp { .. }
+                    );
+                let _ = self
+                    .replies
+                    .send(TuiCommand::SettingsMutationResult { request, result });
+                if reload
+                    && let Some(service) = self.executor.tool_ctx.mcp_service()
+                    && let Err(error) = service.reload()
+                {
+                    let _ = self.replies.send(TuiCommand::Toast {
+                        message: format!("Settings saved; MCP reload failed: {error}"),
+                        level: atman_tui::app::NoteLevel::Warn,
+                    });
+                }
+            }
             atman_tui::TuiControl::MutateProvider(request) => {
                 let lifecycle = self.lifecycle.clone();
                 let action = request.action.clone();
@@ -504,16 +583,138 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn settings_mutations_and_replies_retain_the_host_scope() {
+        use atman_tui::settings::{SettingsMutation as Mutation, SettingsMutationRequest};
+        let temp = tempfile::tempdir().unwrap();
+        let first =
+            atman_runtime::config_hub::ConfigHub::from_config_dir(temp.path().join("first"));
+        let second =
+            atman_runtime::config_hub::ConfigHub::from_config_dir(temp.path().join("second"));
+        for (hub, model) in [(&first, "first-model"), (&second, "second-model")] {
+            std::fs::create_dir_all(hub.config_dir()).unwrap();
+            std::fs::write(hub.config_dir().join("config.toml"), format!(
+                "[providers.example]\ntype = 'openai'\napi_key = 'test-key'\n[models.model]\nprovider = 'example'\nmodel = '{model}'\n"
+            )).unwrap();
+            hub.reload().unwrap();
+        }
+        let mut executor = Executor::new();
+        executor.providers =
+            atman_runtime::provider::ProviderRegistry::with_models(first.models().clone());
+        executor.attach_provider_lifecycle(first.clone()).unwrap();
+        let session = Arc::new(Session::open_ephemeral());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(
+            PanelServices::for_scope(
+                session.clone(),
+                executor.clone(),
+                tx.clone(),
+                vec![],
+                second.clone(),
+                None
+            )
+            .is_err()
+        );
+        let mut services =
+            PanelServices::for_scope(session.clone(), executor, tx, vec![], first.clone(), None)
+                .unwrap();
+        let mut mcp = atman_runtime::mcp::McpServerConfig::stdio(
+            "example",
+            "example-mcp",
+            vec![],
+            atman_runtime::tool::Tier::Zero,
+            1_000,
+        );
+        mcp.disabled = true;
+        let actions = [
+            Mutation::CreateAlias {
+                name: "work".into(),
+                model: "model".into(),
+            },
+            Mutation::UpdateAlias {
+                original: Some("work".into()),
+                name: "fast".into(),
+                model: "model".into(),
+            },
+            Mutation::DefaultModel {
+                model: "model".into(),
+            },
+            Mutation::SaveMcp {
+                original: None,
+                config: Box::new(mcp),
+            },
+            Mutation::ToggleMcp {
+                name: "example".into(),
+            },
+        ];
+        for action in actions {
+            let request = SettingsMutationRequest {
+                id: uuid::Uuid::now_v7(),
+                action,
+            };
+            services
+                .dispatch(TuiControl::MutateSettings(request.clone()))
+                .await;
+            let TuiCommand::SettingsMutationResult {
+                request: returned,
+                result,
+            } = rx.try_recv().unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(returned.id, request.id);
+            assert!(result.is_ok(), "{result:?}");
+        }
+        assert_eq!(first.models().resolve_alias("smart"), "model");
+        assert_eq!(first.models().resolve_alias("fast"), "model");
+        assert_eq!(first.load_local_mcp().len(), 1);
+        assert!(!first.load_local_mcp()[0].disabled);
+        assert!(second.models().all_aliases().is_empty());
+        assert!(second.load_local_mcp().is_empty());
+        let original = std::fs::read(first.config_dir().join("config.toml")).unwrap();
+        assert!(
+            mutate_settings(
+                &first,
+                &Mutation::CreateAlias {
+                    name: "fast".into(),
+                    model: "model".into()
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(first.config_dir().join("config.toml")).unwrap(),
+            original
+        );
+        mutate_settings(
+            &first,
+            &Mutation::RemoveAlias {
+                name: "fast".into(),
+            },
+        )
+        .unwrap();
+        mutate_settings(
+            &first,
+            &Mutation::RemoveMcp {
+                name: "example".into(),
+            },
+        )
+        .unwrap();
+        assert!(first.load_local_mcp().is_empty());
+        assert!(session.messages_full().is_empty());
+    }
+
+    #[tokio::test]
     async fn panel_dispatch_preserves_host_controls_and_correlates_async_results() {
         let config = tempfile::tempdir().unwrap();
         let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(config.path());
         let mut executor = Executor::new();
         executor.providers =
             atman_runtime::provider::ProviderRegistry::with_models(hub.models().clone());
-        executor.attach_provider_lifecycle(hub).unwrap();
+        executor.attach_provider_lifecycle(hub.clone()).unwrap();
         let session = Arc::new(Session::open_ephemeral());
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut services = PanelServices::new(session.clone(), executor, tx, vec![]).unwrap();
+        let mut services =
+            PanelServices::for_scope(session.clone(), executor, tx, vec![], hub, None).unwrap();
         let input = TuiControl::Submit(atman_tui::TuiSubmission {
             text: "keep the target and payload".into(),
             images: vec![],

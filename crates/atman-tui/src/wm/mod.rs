@@ -1021,7 +1021,7 @@ impl WindowManager {
             return (true, Vec::new());
         }
         if self.top_kind() == Some(ModalKind::Onboarding) {
-            self.modals.handle_onboarding_mouse(event, app);
+            self.modals.handle_onboarding_mouse(event, app, control_tx);
             return (true, Vec::new());
         }
         if self.top_kind() == Some(ModalKind::AliasManager) {

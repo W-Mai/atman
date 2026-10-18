@@ -23,9 +23,11 @@ impl std::ops::DerefMut for UiState {
 
 impl UiState {
     pub fn new(app: AppState) -> Self {
+        let mut wm = WindowManager::default();
+        wm.modals.bind_settings(app.settings.clone());
         Self {
             app,
-            wm: WindowManager::default(),
+            wm,
             selection_menu: None,
         }
     }

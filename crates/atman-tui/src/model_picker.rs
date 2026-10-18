@@ -18,6 +18,7 @@ pub(crate) struct ModelSwitchRequest {
 
 #[derive(Default)]
 pub struct ModelPicker {
+    pub(crate) settings: crate::settings::SettingsSource,
     pub open: bool,
     browser: ModelBrowser,
     picked: Option<String>,
@@ -32,7 +33,7 @@ pub struct ModelPicker {
 
 impl ModelPicker {
     pub fn open(&mut self) {
-        let current = atman_runtime::model_registry::model_info("smart").name;
+        let current = self.settings.model_info("smart").name;
         self.open_with_model(Some(&current));
     }
 
@@ -52,9 +53,9 @@ impl ModelPicker {
     }
 
     fn refresh(&mut self, current: Option<&str>) {
-        let enabled = atman_runtime::model_registry::enabled_provider_names();
+        let enabled = self.settings.enabled_provider_names();
         let mut rows = Vec::new();
-        for (name, model) in atman_runtime::model_registry::all_aliases() {
+        for (name, model) in self.settings.all_aliases() {
             rows.push(BrowserRow {
                 kind: BrowserRowKind::Alias,
                 label: format!("{name:<10} → {model}"),
@@ -62,7 +63,9 @@ impl ModelPicker {
                 selectable: true,
             });
         }
-        for group in atman_runtime::model_registry::all_provider_groups()
+        for group in self
+            .settings
+            .all_provider_groups()
             .into_iter()
             .filter(|group| enabled.contains(&group.provider_name))
         {
@@ -71,7 +74,7 @@ impl ModelPicker {
                     kind: BrowserRowKind::Model,
                     label: format!(
                         "{} / {}",
-                        atman_runtime::model_registry::provider_display_name(&group.provider_name),
+                        self.settings.provider_display_name(&group.provider_name),
                         model.slug
                     ),
                     value: model.slug,
@@ -231,7 +234,7 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
         } else {
             (
                 "current: ",
-                atman_runtime::model_registry::model_info("smart").name,
+                self.settings.model_info("smart").name,
                 t.accent,
             )
         };

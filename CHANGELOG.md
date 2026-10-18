@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Flow settings scope** — Provider, Model, Alias, MCP, and setup panels use the displayed Session's configuration and authentication source. Alias and MCP saves wait for host acknowledgement, retain failed drafts, and reject stale editor replies. Persistent TUI attachment accepts a recorded configuration directory different from the client's default.
+
 - **Persistent flow windows** — Open interactive floating views from FlowHub, move and resize them with keyboard or mouse, and move a view into the main workspace without losing its draft. Main and floating views share rendering and control handling; background views receive committed updates and replies, and closing a window leaves execution running.
 
 - **FlowHub navigation** — Browse persistent session flows with paged rows, search, keyboard controls, and mouse selection. Focus changes retain each flow's draft, quote, reading position, panels, and original reply mailbox; background execution continues independently.

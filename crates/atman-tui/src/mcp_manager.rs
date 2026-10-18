@@ -623,6 +623,7 @@ pub enum McpEditorMode {
 }
 
 pub struct McpEditor {
+    pending: Option<crate::settings::SettingsMutationRequest>,
     pub open: bool,
     pub name: crate::input::InputEditor,
     pub command: crate::input::InputEditor,
@@ -652,6 +653,7 @@ const MCP_SAVE: usize = MCP_ADD_FIELDS + 1;
 impl Default for McpEditor {
     fn default() -> Self {
         Self {
+            pending: None,
             open: false,
             name: crate::input::InputEditor::default(),
             command: crate::input::InputEditor::default(),
@@ -760,6 +762,9 @@ impl McpEditor {
         app: &mut crate::app::AppState,
         tx: Option<&crate::ControlSender>,
     ) {
+        if self.pending.is_some() {
+            return;
+        }
         use crate::keys::KeyAction;
         use crate::wm::modal::ModalOverlay;
         use crossterm::event::{MouseButton, MouseEventKind};
@@ -912,20 +917,37 @@ impl McpEditor {
         Ok(config)
     }
 
-    fn save(&mut self) -> Result<&'static str, String> {
-        let config = self.build_config()?;
-        let hub = atman_runtime::config_hub::ConfigHub::global().map_err(|e| e.to_string())?;
-        match &self.mode {
-            McpEditorMode::Add => hub.upsert_mcp(config).map_err(|e| e.to_string())?,
-            McpEditorMode::Edit { original_name, .. } => hub
-                .replace_mcp(original_name, config)
-                .map_err(|e| e.to_string())?,
+    fn save(&mut self, tx: Option<&crate::ControlSender>) -> Result<(), String> {
+        let config = Box::new(self.build_config()?);
+        let original = match &self.mode {
+            McpEditorMode::Add => None,
+            McpEditorMode::Edit { original_name, .. } => Some(original_name.clone()),
+        };
+        self.pending = Some(crate::settings::SettingsMutationRequest::send(
+            crate::settings::SettingsMutation::SaveMcp { original, config },
+            tx,
+        )?);
+        self.error = None;
+        Ok(())
+    }
+
+    pub(crate) fn mutation_result(
+        &mut self,
+        id: uuid::Uuid,
+        result: &Result<String, String>,
+    ) -> bool {
+        if self.pending.as_ref().is_none_or(|request| request.id != id) {
+            return false;
         }
-        Ok(if matches!(self.mode, McpEditorMode::Add) {
-            "MCP server added"
-        } else {
-            "MCP server updated"
-        })
+        self.pending = None;
+        match result {
+            Ok(_) => self.open = false,
+            Err(error) => {
+                self.error = Some(error.clone());
+                self.info_scroll = 0;
+            }
+        }
+        true
     }
 
     fn mode_label(&self) -> &'static str {
@@ -1016,7 +1038,9 @@ fn render_mcp_editor(f: &mut ratatui::Frame, area: Rect, form: &mut McpEditor) {
         );
     }
 
-    let info = form.error.as_deref().unwrap_or(if form.field == 4 {
+    let info = form.error.as_deref().unwrap_or(if form.pending.is_some() {
+        "Saving…"
+    } else if form.field == 4 {
         "One KEY=value per line · Shift+Enter: newline"
     } else {
         "Changes take effect after saving."
@@ -1068,7 +1092,8 @@ fn render_mcp_editor(f: &mut ratatui::Frame, area: Rect, form: &mut McpEditor) {
         layout.save,
         &Action {
             label: "Save",
-            shortcut: "Enter",
+            shortcut: "^S / Enter",
+            disabled: form.pending.is_some(),
             hovered: form.hovered == Some(MCP_SAVE),
             ..Action::default()
         },
@@ -1106,30 +1131,24 @@ impl crate::wm::modal::ModalOverlay for McpEditor {
     fn handle_key(
         &mut self,
         action: &crate::keys::KeyAction,
-        app: &mut crate::app::AppState,
+        _app: &mut crate::app::AppState,
         tx: Option<&crate::ControlSender>,
     ) -> Option<crate::wm::modal::ModalAction> {
         use crate::keys::KeyAction;
+        if self.pending.is_some() {
+            if matches!(action, KeyAction::Escape) {
+                self.open = false;
+            }
+            return Some(crate::wm::modal::ModalAction::Consumed);
+        }
         match action {
             KeyAction::Escape => self.open = false,
-            KeyAction::Submit => match self.save() {
-                Ok(message) => {
-                    self.open = false;
-                    if let Some(tx) = tx {
-                        let _ = tx.send(crate::TuiControl::McpReload);
-                    }
-                    app.push_toast(
-                        message.to_string(),
-                        crate::app::NoteLevel::Success,
-                        std::time::Duration::from_secs(3),
-                        crate::app::ToastPosition::TopRight,
-                    );
-                }
-                Err(error) => {
+            KeyAction::Submit | KeyAction::Save => {
+                if let Err(error) = self.save(tx) {
                     self.error = Some(error);
                     self.info_scroll = 0;
                 }
-            },
+            }
             KeyAction::Tab | KeyAction::HistoryDown => self.next_field(),
             KeyAction::BackTab | KeyAction::HistoryUp => self.prev_field(),
             KeyAction::PageUp => {
@@ -1192,6 +1211,9 @@ impl crate::wm::modal::ModalOverlay for McpEditor {
     }
 
     fn handle_paste(&mut self, text: &str) {
+        if self.pending.is_some() {
+            return;
+        }
         let field = self.field;
         if let Some(editor) = self.current_editor() {
             if field == 4 {
@@ -1212,6 +1234,37 @@ mod tests {
     };
     use ratatui::backend::TestBackend;
     use std::collections::HashMap;
+
+    #[test]
+    fn settings_editor_save_waits_for_ack_and_cannot_close_a_replacement() {
+        use crate::wm::modal::ModalOverlay;
+        let mut editor = McpEditor::default();
+        editor.open_add();
+        editor.name.replace_with("example");
+        editor.command.replace_with("example-mcp");
+        let mut app = crate::app::AppState::new("session".into(), None);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::ControlSender::from(tx);
+        editor.handle_key(&crate::keys::KeyAction::Save, &mut app, Some(&tx));
+        let crate::TuiControl::MutateSettings(first) = rx.try_recv().unwrap() else {
+            panic!()
+        };
+        assert!(editor.open);
+        editor.handle_key(&crate::keys::KeyAction::Submit, &mut app, Some(&tx));
+        assert!(rx.try_recv().is_err());
+        assert!(editor.mutation_result(first.id, &Err("write failed".into())));
+        assert!(editor.open);
+        assert_eq!(editor.command.buf(), "example-mcp");
+        editor.handle_key(&crate::keys::KeyAction::Submit, &mut app, Some(&tx));
+        let crate::TuiControl::MutateSettings(retry) = rx.try_recv().unwrap() else {
+            panic!()
+        };
+        assert!(editor.mutation_result(retry.id, &Ok("saved".into())));
+        assert!(!editor.open);
+        editor.open_add();
+        assert!(!editor.mutation_result(first.id, &Ok("saved".into())));
+        assert!(editor.open);
+    }
 
     #[test]
     fn editor_env_horizontal_keys_edit_and_vertical_keys_change_fields() {

@@ -80,6 +80,7 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
         .with_flow_names(std::mem::take(&mut handle.flow_names))
         .with_session(handle.session.clone())
         .with_trust(handle.trust.clone());
+    app.settings = handle.settings.clone();
     app.projects = std::mem::take(&mut handle.projects);
     if let Some(tr) = handle.task_registry.take() {
         app = app.with_task_registry(tr);
@@ -1985,6 +1986,47 @@ fn apply_view_command(
         TuiCommand::ModelMutationResult { request, result } => {
             apply_model_mutation_result(app, request, result);
         }
+        TuiCommand::SettingsMutationResult { request, result } => {
+            app.wm
+                .modals
+                .alias_manager
+                .mutation_result(request.id, &result);
+            app.wm
+                .modals
+                .mcp_editor
+                .mutation_result(request.id, &result);
+            let setup_complete = app
+                .wm
+                .modals
+                .onboarding
+                .mutation_result(request.id, &result);
+            if setup_complete {
+                app.wm.modals.dispatch_onboarding_event(
+                    crate::onboarding::OnboardingEvent::Completed,
+                    &mut app.app,
+                    None,
+                );
+            }
+            if app.app.mcp_pending_mutation == Some(request.id) {
+                app.app.mcp_pending_mutation = None;
+            }
+            if result.is_ok() {
+                apply_provider_catalog_changed(app, None);
+            }
+            if setup_complete {
+                return;
+            }
+            let (message, level) = match result {
+                Ok(message) => (message, app::NoteLevel::Success),
+                Err(message) => (message, app::NoteLevel::Error),
+            };
+            app.app.push_toast(
+                message,
+                level,
+                std::time::Duration::from_secs(5),
+                app::ToastPosition::TopRight,
+            );
+        }
         TuiCommand::ProviderTestResult { request_id, result } => {
             if app
                 .wm
@@ -2200,7 +2242,10 @@ fn apply_provider_catalog_changed(app: &mut UiState, added_provider: Option<Stri
         app.app.save_ui_state();
     }
     if let Some(name) = added_provider {
-        let needs_model = atman_runtime::model_registry::all_provider_groups_with_empty()
+        let needs_model = app
+            .app
+            .settings
+            .all_provider_groups_with_empty()
             .into_iter()
             .find(|group| group.provider_name == name)
             .is_none_or(|group| group.models.is_empty());
@@ -3417,6 +3462,8 @@ mod tests {
         };
         use uuid::Uuid;
         let directory = tempfile::tempdir().unwrap();
+        let config =
+            atman_runtime::config_hub::ConfigHub::from_config_dir(directory.path().join("config"));
         let root = RuntimeStore::open(directory.path()).unwrap();
         let sid = Uuid::now_v7();
         let mut session = root
@@ -3457,6 +3504,10 @@ mod tests {
                 .transition(store.state().revision(), FlowTransition::Activated)
                 .unwrap();
             let worker = FlowWorker::start(store).await.unwrap();
+            worker
+                .context()
+                .bind_model_registry(config.models().clone())
+                .unwrap();
             handles.push(
                 TuiHandle::from_flow(
                     &worker,
@@ -3466,6 +3517,7 @@ mod tests {
                         flow: address,
                     },
                     commands.clone(),
+                    config.clone(),
                 )
                 .await
                 .unwrap(),
@@ -3625,6 +3677,7 @@ mod tests {
                 flow: floating.flow.clone(),
             },
             commands.clone(),
+            config.clone(),
         )
         .await
         .unwrap();

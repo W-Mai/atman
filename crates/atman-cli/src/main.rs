@@ -2558,6 +2558,7 @@ async fn cmd_repl_once(
         let session_meta =
             atman_runtime::session_meta::SessionMeta::load(session.dir()).unwrap_or_default();
         let handle = atman_tui::TuiHandle {
+            settings: Default::default(),
             session_id: session.id().to_string(),
             session_dir: session.dir().to_string_lossy().to_string(),
             session_name: session_meta.title,

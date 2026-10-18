@@ -15,6 +15,7 @@ impl TuiHandle {
         worker: &FlowWorker,
         binding: ViewBinding,
         commands: tokio::sync::mpsc::UnboundedSender<BoundControl>,
+        config: atman_runtime::config_hub::ConfigHub,
     ) -> io::Result<Self> {
         if &binding.flow != worker.address() {
             return Err(io::Error::new(
@@ -23,6 +24,17 @@ impl TuiHandle {
             ));
         }
         let mut handle = Self::from_session(worker.context());
+        if !worker
+            .context()
+            .model_registry()
+            .is_some_and(|models| std::sync::Arc::ptr_eq(models, config.models()))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "view configuration does not match flow model scope",
+            ));
+        }
+        handle.settings = config.into();
         handle.flow_view = Some(
             worker
                 .subscribe_view(NonZeroUsize::new(64).unwrap())

@@ -458,7 +458,9 @@ fn render_details(f: &mut Frame, rect: Rect, manager: &mut ProviderManager, t: &
             lines.push(String::new());
         }
         if matches!(provider.source, ProviderSource::Config)
-            && let Some((_, entry)) = atman_runtime::model_registry::all_provider_entries()
+            && let Some((_, entry)) = manager
+                .settings
+                .all_provider_entries()
                 .into_iter()
                 .find(|(name, _)| name == &provider.name)
         {

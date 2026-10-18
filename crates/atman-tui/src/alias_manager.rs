@@ -36,7 +36,10 @@ enum Hit {
 
 #[derive(Default)]
 pub struct AliasManager {
+    pub(crate) settings: crate::settings::SettingsSource,
     pub open: bool,
+    pending: Option<crate::settings::SettingsMutationRequest>,
+    error: Option<String>,
     pub aliases: Vec<(String, String)>,
     pub selected: usize,
     pub show_form: bool,
@@ -83,6 +86,8 @@ impl AliasManager {
     }
 
     pub fn close(&mut self) {
+        self.pending = None;
+        self.error = None;
         self.open = false;
         self.show_form = false;
         self.confirm_delete = None;
@@ -111,6 +116,9 @@ impl AliasManager {
         event: &crossterm::event::MouseEvent,
         control_tx: Option<&crate::ControlSender>,
     ) {
+        if self.pending.is_some() {
+            return;
+        }
         use crossterm::event::{MouseButton, MouseEventKind};
         let point = (event.column, event.row);
         let target = self.hit_at(point);
@@ -239,15 +247,17 @@ impl AliasManager {
     }
 
     pub fn refresh_list(&mut self) {
-        self.aliases = atman_runtime::model_registry::all_aliases();
+        self.aliases = self.settings.all_aliases();
         self.aliases.sort_by(|a, b| a.0.cmp(&b.0));
         self.selected = 0;
         self.list_offset = 0;
     }
 
     fn refresh_groups(&mut self) {
-        let enabled_providers = atman_runtime::model_registry::enabled_provider_names();
-        self.groups = atman_runtime::model_registry::all_provider_groups_with_empty()
+        let enabled_providers = self.settings.enabled_provider_names();
+        self.groups = self
+            .settings
+            .all_provider_groups_with_empty()
             .into_iter()
             .filter(|g| enabled_providers.contains(&g.provider_name))
             .collect();
@@ -260,9 +270,7 @@ impl AliasManager {
     fn sync_browser(&mut self, selected: Option<&str>) {
         let query = self.search.buf().trim().to_lowercase();
         let entries: std::collections::HashMap<_, _> =
-            atman_runtime::model_registry::all_model_entries()
-                .into_iter()
-                .collect();
+            self.settings.all_model_entries().into_iter().collect();
         let mut rows = Vec::new();
         for group in &self.groups {
             if self
@@ -272,8 +280,7 @@ impl AliasManager {
             {
                 continue;
             }
-            let display_name =
-                atman_runtime::model_registry::provider_display_name(&group.provider_name);
+            let display_name = self.settings.provider_display_name(&group.provider_name);
             let provider_matches = format!("{} {display_name}", group.provider_name)
                 .to_lowercase()
                 .contains(&query);
@@ -327,6 +334,8 @@ impl AliasManager {
     }
 
     fn prepare_form(&mut self, is_edit: bool, alias: Option<&str>, model: Option<&str>) {
+        self.pending = None;
+        self.error = None;
         self.clear_geometry();
         self.show_form = true;
         self.is_edit = is_edit;
@@ -388,21 +397,19 @@ impl AliasManager {
     }
 
     pub fn handle_key(&mut self, action: &KeyAction, control_tx: Option<&crate::ControlSender>) {
+        if self.pending.is_some() {
+            if matches!(action, KeyAction::Escape) {
+                self.close();
+            }
+            return;
+        }
         if let Some(alias) = self.confirm_delete.clone() {
             match action {
                 KeyAction::Submit | KeyAction::Char('y') | KeyAction::Char('Y') => {
-                    match atman_runtime::config_hub::ConfigHub::global()
-                        .and_then(|hub| hub.remove_alias(&alias))
-                    {
-                        Ok(()) => {
-                            self.confirm_delete = None;
-                            self.clear_geometry();
-                            self.refresh_list();
-                        }
-                        Err(error) => {
-                            atman_runtime::notify!(error, "Alias {alias:?} delete failed: {error}");
-                        }
-                    }
+                    self.submit(
+                        crate::settings::SettingsMutation::RemoveAlias { name: alias },
+                        control_tx,
+                    );
                 }
                 KeyAction::Escape | KeyAction::Char('n') | KeyAction::Char('N') => {
                     self.confirm_delete = None;
@@ -584,39 +591,61 @@ impl AliasManager {
         }
     }
 
-    fn commit_alias(&mut self, _control_tx: Option<&crate::ControlSender>) {
-        let alias = self.editor.buf().trim().to_string();
-        if alias.is_empty() {
-            return;
-        }
-        let Some(slug) = self.target_model.as_deref().filter(|slug| !slug.is_empty()) else {
-            return;
-        };
-        let result = atman_runtime::config_hub::ConfigHub::global()
-            .and_then(|hub| self.persist_alias(&hub, &alias, slug));
-        match result {
-            Ok(()) => {
-                self.refresh_list();
-                self.show_form = false;
-                self.clear_geometry();
+    fn submit(
+        &mut self,
+        action: crate::settings::SettingsMutation,
+        tx: Option<&crate::ControlSender>,
+    ) {
+        match crate::settings::SettingsMutationRequest::send(action, tx) {
+            Ok(request) => {
+                self.pending = Some(request);
+                self.error = None;
             }
-            Err(error) => {
-                atman_runtime::notify!(error, "Alias {alias:?} save failed: {error}");
-            }
+            Err(error) => self.error = Some(error),
         }
     }
 
-    fn persist_alias(
-        &self,
-        hub: &atman_runtime::config_hub::ConfigHub,
-        alias: &str,
-        model: &str,
-    ) -> Result<(), atman_runtime::config_hub::ConfigError> {
-        if self.is_edit {
-            hub.update_alias(self.edit_original.as_deref(), alias, model)
-        } else {
-            hub.add_alias(alias, model)
+    fn commit_alias(&mut self, tx: Option<&crate::ControlSender>) {
+        let name = self.editor.buf().trim().to_string();
+        let Some(model) = self.target_model.clone().filter(|model| !model.is_empty()) else {
+            return;
+        };
+        if name.is_empty() {
+            return;
         }
+        let action = if self.is_edit {
+            crate::settings::SettingsMutation::UpdateAlias {
+                original: self.edit_original.clone(),
+                name,
+                model,
+            }
+        } else {
+            crate::settings::SettingsMutation::CreateAlias { name, model }
+        };
+        self.submit(action, tx);
+    }
+
+    pub(crate) fn mutation_result(
+        &mut self,
+        id: uuid::Uuid,
+        result: &Result<String, String>,
+    ) -> bool {
+        if self.pending.as_ref().is_none_or(|request| request.id != id) {
+            return false;
+        }
+        self.pending = None;
+        match result {
+            Ok(_) => {
+                self.error = None;
+                self.confirm_delete = None;
+                self.show_form = false;
+                self.refresh_list();
+                self.refresh_groups();
+                self.clear_geometry();
+            }
+            Err(error) => self.error = Some(error.clone()),
+        }
+        true
     }
 }
 
@@ -758,7 +787,7 @@ fn render_preview_panel(
                 .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(Span::styled(
-            atman_runtime::model_registry::provider_display_name(&m.provider_name),
+            mgr.settings.provider_display_name(&m.provider_name),
             Style::default().fg(theme.subtle_fg.into()),
         )));
         lines.push(Line::from(""));
@@ -1005,7 +1034,11 @@ fn render_alias_form(
         (Hit::Save, "Save", "^S", buttons[4]),
     ] {
         let disabled = match hit {
-            Hit::Save => mgr.editor.buf().trim().is_empty() || mgr.target_model.is_none(),
+            Hit::Save => {
+                mgr.pending.is_some()
+                    || mgr.editor.buf().trim().is_empty()
+                    || mgr.target_model.is_none()
+            }
             _ => mgr.groups.is_empty(),
         };
         render_action(
@@ -1137,12 +1170,36 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
     ) {
         self.clear_geometry();
         let margin = u16::from(area.height >= 18);
-        let area = Rect::new(
+        let mut area = Rect::new(
             area.x + area.width.min(1),
             area.y + margin,
             area.width.saturating_sub(2),
             area.height.saturating_sub(margin * 2),
         );
+        if let Some(message) = self
+            .error
+            .as_deref()
+            .or_else(|| self.pending.as_ref().map(|_| "Saving…"))
+        {
+            let height = area.height.min(3);
+            let status = Rect::new(
+                area.x,
+                area.bottom().saturating_sub(height),
+                area.width,
+                height,
+            );
+            f.render_widget(
+                Paragraph::new(message)
+                    .wrap(Wrap { trim: false })
+                    .style(Style::default().fg(if self.error.is_some() {
+                        t.error.into()
+                    } else {
+                        t.meta_fg.into()
+                    })),
+                status,
+            );
+            area.height = area.height.saturating_sub(height + 1);
+        }
         if let Some(alias) = self.confirm_delete.as_deref() {
             let (yes, no) = render_delete_confirm(f, area, alias, self.hovered, t);
             self.confirm_yes_rect = Some(yes);
@@ -1191,6 +1248,9 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
     }
 
     fn handle_paste(&mut self, text: &str) {
+        if self.pending.is_some() {
+            return;
+        }
         if self.open && self.show_form {
             match self.focus {
                 Focus::NameInput => self.editor.paste_single_line(text),
@@ -1447,6 +1507,35 @@ mod tests {
     }
 
     #[test]
+    fn settings_save_waits_for_matching_ack_and_preserves_failed_draft() {
+        let mut manager = populated_manager();
+        manager.prepare_form(true, Some("smart"), Some("vendor/model-09"));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::ControlSender::from(tx);
+        manager.handle_key(&KeyAction::Save, Some(&tx));
+        let crate::TuiControl::MutateSettings(first) = rx.try_recv().unwrap() else {
+            panic!()
+        };
+        assert!(manager.show_form);
+        manager.handle_key(&KeyAction::Save, Some(&tx));
+        assert!(rx.try_recv().is_err());
+        assert!(!manager.mutation_result(uuid::Uuid::now_v7(), &Ok("saved".into())));
+        assert!(manager.mutation_result(first.id, &Err("disk unavailable".into())));
+        assert!(manager.show_form);
+        assert_eq!(manager.editor.buf(), "smart");
+        assert_eq!(manager.error.as_deref(), Some("disk unavailable"));
+        manager.handle_key(&KeyAction::Save, Some(&tx));
+        let crate::TuiControl::MutateSettings(retry) = rx.try_recv().unwrap() else {
+            panic!()
+        };
+        assert!(manager.mutation_result(retry.id, &Ok("saved".into())));
+        assert!(!manager.show_form);
+        manager.prepare_form(false, None, Some("vendor/model-09"));
+        assert!(!manager.mutation_result(first.id, &Ok("saved".into())));
+        assert!(manager.show_form);
+    }
+
+    #[test]
     fn editing_preserves_the_target_until_a_model_is_explicitly_selected() {
         let mut manager = populated_manager();
         manager.prepare_form(true, Some("smart"), Some("vendor/model-09"));
@@ -1672,13 +1761,11 @@ mod tests {
             2
         );
         assert_eq!(manager.target_model.as_deref(), Some("vendor/model-09"));
-        let dir = tempfile::tempdir().unwrap();
-        let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
-        manager
-            .persist_alias(&hub, "smart", manager.target_model.as_deref().unwrap())
-            .unwrap();
-        let config = hub.model_config().unwrap().unwrap();
-        assert_eq!(config.aliases["smart"].model, "vendor/model-09");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        manager.commit_alias(Some(&crate::ControlSender::from(tx)));
+        assert!(
+            matches!(rx.try_recv().unwrap(), crate::TuiControl::MutateSettings(crate::settings::SettingsMutationRequest { action: crate::settings::SettingsMutation::UpdateAlias { name, model, .. }, .. }) if name == "smart" && model == "vendor/model-09")
+        );
     }
 
     #[test]

@@ -46,6 +46,8 @@ Submitting input retains the composer until its captured request receives durabl
 
 The composer's reasoning choices, effective value, and submission validation use the model directory bound to the displayed flow. A catalog change reconciles that view's selection without changing another view's draft. Invalid selections produce a local toast and leave committed conversation records unchanged.
 
+Provider, Model, Alias, MCP, and setup panels retain the displayed Session's configuration and authentication source. `TuiHandle::from_flow` requires that source to match the flow's model directory. Settings mutations use the bound host and return a request-correlated acknowledgement to the original view. Alias and MCP editors remain open while saving, preserve failed drafts, and ignore acknowledgements for replaced editors. MCP persistence and connection reload report separate outcomes. Terminal-wide presentation preferences, including theme, formula rendering, and diff layout, retain the client's configuration source.
+
 Shared form transports retain each prompt's answer destination. Persistent views subscribe only to their flow's forms, including expired prompts awaiting a late reply; the host rejects a submission from another flow's view. Dropping the view subscription does not cancel pending forms or change their destination.
 
 Open FlowHub with `:flows`, the Ctrl+P palette, or the status-bar button. Esc from the focused conversation opens the directory; Esc in a panel only closes that panel. The directory reads the current session in pages of 50 instances, supports page-local title/ID search, and shows the page count. PgUp/PgDn or the Previous/Next buttons change pages; Ctrl+R or Refresh reads a new snapshot. Enter or a row click focuses the selected flow without changing execution or the session's default-flow selection.
@@ -56,7 +58,7 @@ Ctrl+O or a row's Window button opens a floating view. The main workspace and fl
 
 Drag a window's title to move it or its bottom-right corner to resize it. F6/Move and F7/Size enable arrow-key adjustment; Enter accepts and Esc cancels that adjustment. F10/Max toggles maximization. Ctrl+Enter/Main moves the entire view, including its draft and reply mailbox, into the main workspace. Esc first dismisses an active inner panel; otherwise Esc/Close closes only the floating view and preserves its draft for reopening. These navigation actions do not pause or cancel flow execution.
 
-This attachment displays committed conversation and execution updates; uncommitted model-token drafts are not included. It requires the session's configuration directory to match `ATMAN_CONFIG_DIR` or the current default configuration. Relationship graphs, cross-session focus, full pending-input management, session navigation, and process-terminal controls are unsupported in this attachment. Unsupported host controls report an error. Plain-terminal attachment supports selecting other instances with `:focus`.
+This attachment displays committed conversation and execution updates; uncommitted model-token drafts are not included. Restoring a Session uses its recorded configuration directory independently of the client's default directory. Relationship graphs, cross-session focus, full pending-input management, session navigation, and process-terminal controls are unsupported in this attachment. Unsupported host controls report an error. Plain-terminal attachment supports selecting other instances with `:focus`.
 
 ### Plain-terminal attachment
 

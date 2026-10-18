@@ -8,10 +8,6 @@ use atman_tui::{
 
 impl Attachment {
     pub(super) async fn interact_tui(mut self) -> Result<()> {
-        ensure!(
-            self.config.source() == ConfigHub::global()?.source(),
-            "TUI settings require the session configuration directory; select it with ATMAN_CONFIG_DIR or use ATMAN_REPL_NON_INTERACTIVE=1"
-        );
         let catalog = self.session.snapshot().await?;
         let worker = self
             .session
@@ -117,7 +113,8 @@ impl Attachment {
             revision: 1,
             flow: worker.address().clone(),
         };
-        let mut handle = TuiHandle::from_flow(worker, binding.clone(), controls).await?;
+        let mut handle =
+            TuiHandle::from_flow(worker, binding.clone(), controls, self.config.clone()).await?;
         handle.session_id = self.session.id().to_string();
         handle.session_name = Some(self.descriptor.title.clone());
         handle.project_root = self

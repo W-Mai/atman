@@ -59,6 +59,7 @@ fn parse_reasoning(value: &str) -> Option<atman_runtime::provider::ReasoningSele
 
 #[derive(Default)]
 pub struct ModelManager {
+    pub(crate) settings: crate::settings::SettingsSource,
     pub open: bool,
     resume_on_open: bool,
     groups: Vec<atman_runtime::model_registry::ProviderGroup>,
@@ -433,11 +434,13 @@ impl ModelManager {
     }
 
     pub fn refresh(&mut self) {
-        self.groups = atman_runtime::model_registry::all_provider_groups_for_management();
+        self.groups = self.settings.management_groups();
         self.groups
             .sort_by(|a, b| a.provider_name.cmp(&b.provider_name));
-        self.configured = atman_runtime::config_hub::ConfigHub::global()
-            .and_then(|hub| hub.model_config())
+        self.configured = self
+            .settings
+            .config()
+            .and_then(|hub| hub.model_config().map_err(|error| error.to_string()))
             .ok()
             .flatten()
             .map(|config| {
@@ -462,7 +465,7 @@ impl ModelManager {
 
     pub(crate) fn refresh_delete_references(&mut self) {
         if let Some(name) = &self.confirm_delete {
-            self.delete_aliases = Self::aliases_for(name);
+            self.delete_aliases = self.aliases_for(name);
             self.confirm_focus = 0;
             self.clear_geometry();
         }
@@ -506,9 +509,7 @@ impl ModelManager {
         let old_index = self.browser.selected_index();
         let query = self.search.buf().to_lowercase();
         let entries: std::collections::HashMap<_, _> =
-            atman_runtime::model_registry::all_model_entries()
-                .into_iter()
-                .collect();
+            self.settings.all_model_entries().into_iter().collect();
         let mut rows = Vec::new();
         for group in &self.groups {
             if self
@@ -518,8 +519,7 @@ impl ModelManager {
             {
                 continue;
             }
-            let display_name =
-                atman_runtime::model_registry::provider_display_name(&group.provider_name);
+            let display_name = self.settings.provider_display_name(&group.provider_name);
             let group_start = rows.len();
             rows.push(BrowserRow {
                 kind: BrowserRowKind::Provider,
@@ -740,12 +740,11 @@ impl ModelManager {
         ]
     }
 
-    fn aliases_for(name: &str) -> Vec<String> {
-        atman_runtime::model_registry::all_aliases()
+    fn aliases_for(&self, name: &str) -> Vec<String> {
+        self.settings
+            .all_aliases()
             .into_iter()
-            .filter(|(_, model)| {
-                model == name || atman_runtime::model_registry::resolve_alias(model) == name
-            })
+            .filter(|(_, model)| model == name || self.settings.resolve_alias(model) == name)
             .map(|(alias, _)| alias)
             .collect()
     }
@@ -773,7 +772,7 @@ impl ModelManager {
             Action::Delete if self.current_editable() => {
                 self.status = None;
                 if let Some(name) = self.current_model().map(|model| model.slug.clone()) {
-                    self.delete_aliases = Self::aliases_for(&name);
+                    self.delete_aliases = self.aliases_for(&name);
                     self.confirm_delete = Some(name);
                     self.confirm_focus = 0;
                     self.detail_scroll = 0;
@@ -820,7 +819,7 @@ impl ModelManager {
             }
             Action::Confirm => {
                 if let Some(name) = self.confirm_delete.clone() {
-                    self.delete_aliases = Self::aliases_for(&name);
+                    self.delete_aliases = self.aliases_for(&name);
                     if self.delete_aliases.is_empty() {
                         self.begin_mutation(crate::ModelMutation::Remove { name }, tx);
                     }
@@ -862,7 +861,8 @@ impl ModelManager {
         self.clear_geometry();
     }
     fn provider_entry(&self) -> Option<atman_runtime::model_registry::ProviderEntry> {
-        atman_runtime::model_registry::all_provider_entries()
+        self.settings
+            .all_provider_entries()
             .into_iter()
             .find(|(name, _)| name == &self.selected_provider)
             .map(|(_, entry)| entry)
@@ -886,20 +886,21 @@ impl ModelManager {
     }
 
     fn reasoning_choices(&self) -> Vec<String> {
-        atman_runtime::model_registry::reasoning_selections_for_model_draft(
-            self.editing.as_deref(),
-            &self.selected_provider,
-            if self.model_editor.buf().trim().is_empty() {
-                self.name_editor.buf().trim()
-            } else {
-                self.model_editor.buf().trim()
-            },
-            self.form_api,
-            self.max_tokens_editor.buf().trim().parse().ok(),
-        )
-        .into_iter()
-        .map(|selection| selection.to_string())
-        .collect()
+        self.settings
+            .reasoning_selections_for_model_draft(
+                self.editing.as_deref(),
+                &self.selected_provider,
+                if self.model_editor.buf().trim().is_empty() {
+                    self.name_editor.buf().trim()
+                } else {
+                    self.model_editor.buf().trim()
+                },
+                self.form_api,
+                self.max_tokens_editor.buf().trim().parse().ok(),
+            )
+            .into_iter()
+            .map(|selection| selection.to_string())
+            .collect()
     }
 
     fn form_fields(&self) -> Vec<usize> {
@@ -1037,7 +1038,7 @@ impl ModelManager {
             None => return,
         };
         let provider = self.current_provider().to_string();
-        let entries = atman_runtime::model_registry::all_model_entries();
+        let entries = self.settings.all_model_entries();
         let entry = entries
             .iter()
             .find(|(n, _)| *n == model.slug)

@@ -309,14 +309,16 @@ impl ModelManager {
         let Some(model) = self.current_model() else {
             return "Select a model to view details.".into();
         };
-        let entry = atman_runtime::model_registry::model_entry(&model.slug).filter(|entry| {
+        let entry = self.settings.model_entry(&model.slug).filter(|entry| {
             entry.provider.as_deref().unwrap_or("unknown") == self.current_provider()
         });
-        let provider = atman_runtime::model_registry::all_provider_entries()
+        let provider = self
+            .settings
+            .all_provider_entries()
             .into_iter()
             .find(|(key, _)| key == self.current_provider())
             .map(|(_, entry)| entry);
-        let aliases = Self::aliases_for(&model.slug);
+        let aliases = self.aliases_for(&model.slug);
         let mut lines = vec![
             model.slug.clone(),
             String::new(),
@@ -327,7 +329,7 @@ impl ModelManager {
             },
             format!("Provider: {}", self.current_provider()),
         ];
-        if !atman_runtime::model_registry::is_provider_enabled(self.current_provider()) {
+        if !self.settings.is_provider_enabled(self.current_provider()) {
             lines.push("Provider disabled · configuration remains available".into());
         }
         if let Some(entry) = &entry {

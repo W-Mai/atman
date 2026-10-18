@@ -27,6 +27,7 @@ pub(crate) enum PickerAction {
 
 #[derive(Default)]
 pub struct ModalManager {
+    pub(crate) settings: crate::settings::SettingsSource,
     pub palette: crate::palette::CommandPalette,
     pub form_modal: crate::form_modal::FormModal,
     pub provider_manager: crate::provider_manager::ProviderManager,
@@ -48,12 +49,20 @@ pub struct ModalManager {
 }
 
 impl ModalManager {
+    pub(crate) fn bind_settings(&mut self, settings: crate::settings::SettingsSource) {
+        self.settings = settings.clone();
+        self.provider_manager.settings = settings.clone();
+        self.model_manager.settings = settings.clone();
+        self.alias_manager.settings = settings.clone();
+        self.model_picker.settings = settings.clone();
+        self.onboarding.settings = settings;
+    }
     pub fn open_mcp_add(&mut self) {
         self.mcp_editor.open_add();
     }
 
     pub fn open_mcp_edit(&mut self, name: &str) -> Result<(), String> {
-        let hub = atman_runtime::config_hub::ConfigHub::global().map_err(|e| e.to_string())?;
+        let hub = self.settings.config()?;
         let config = hub
             .load_local_mcp()
             .into_iter()
@@ -308,7 +317,7 @@ impl ModalManager {
             ModalKind::Onboarding => {
                 if self.onboarding_open {
                     let event = self.onboarding.handle_key(action);
-                    self.dispatch_onboarding_event(event, app);
+                    self.dispatch_onboarding_event(event, app, tx);
                 }
                 (true, None)
             }
@@ -419,16 +428,18 @@ impl ModalManager {
         self.dispatch_model_switch(app, tx);
     }
 
-    fn dispatch_onboarding_event(
+    pub(crate) fn dispatch_onboarding_event(
         &mut self,
         event: crate::onboarding::OnboardingEvent,
         app: &mut crate::app::AppState,
+        tx: Option<&crate::ControlSender>,
     ) {
         use crate::onboarding::OnboardingEvent;
         match event {
             OnboardingEvent::None => {}
             OnboardingEvent::OpenProviderManager => self.provider_manager.open_add(),
             OnboardingEvent::OpenModelManager => self.model_manager.open(),
+            OnboardingEvent::Save => self.onboarding.save(tx),
             OnboardingEvent::Completed | OnboardingEvent::Skipped => {
                 self.onboarding_open = false;
                 app.onboarding_skipped = true;
@@ -443,7 +454,7 @@ impl ModalManager {
                     )
                 } else {
                     (
-                        "You can configure atman in ~/.config/atman/config.toml",
+                        "Open Provider Manager to finish setup",
                         crate::app::NoteLevel::Warn,
                     )
                 };
@@ -461,9 +472,10 @@ impl ModalManager {
         &mut self,
         event: &crossterm::event::MouseEvent,
         app: &mut crate::app::AppState,
+        tx: Option<&crate::ControlSender>,
     ) {
         let event = self.onboarding.handle_mouse(event);
-        self.dispatch_onboarding_event(event, app);
+        self.dispatch_onboarding_event(event, app, tx);
     }
 
     pub(super) fn handle_provider_mouse(

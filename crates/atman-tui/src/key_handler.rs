@@ -764,6 +764,33 @@ pub(crate) fn dispatch_approval_click(
     }
 }
 
+fn submit_mcp_mutation(
+    app: &mut UiState,
+    tx: Option<&crate::ControlSender>,
+    action: crate::settings::SettingsMutation,
+) {
+    if app.mcp_pending_mutation.is_some() {
+        return;
+    }
+    match crate::settings::SettingsMutationRequest::send(action, tx) {
+        Ok(request) => {
+            app.mcp_pending_mutation = Some(request.id);
+            app.push_toast(
+                "Saving MCP settings…",
+                app::NoteLevel::Info,
+                std::time::Duration::from_secs(3),
+                app::ToastPosition::TopRight,
+            );
+        }
+        Err(error) => app.push_toast(
+            error,
+            app::NoteLevel::Error,
+            std::time::Duration::from_secs(5),
+            app::ToastPosition::TopRight,
+        ),
+    }
+}
+
 pub(crate) fn handle_mcp_panel_key(
     action: &KeyAction,
     app: &mut UiState,
@@ -779,6 +806,9 @@ pub(crate) fn handle_mcp_panel_key(
     }) else {
         return false;
     };
+    if app.mcp_pending_mutation.is_some() && matches!(action, KeyAction::Char('d' | 'r')) {
+        return true;
+    }
     app.wm.interaction.last_hitmap.mcp_action_rects.clear();
     app.wm.interaction.last_hitmap.mcp_row_rects.clear();
     app.mcp_selected = app
@@ -793,27 +823,11 @@ pub(crate) fn handle_mcp_panel_key(
         if selected_name.as_deref() == Some(armed.as_str())
             && matches!(action, KeyAction::Submit | KeyAction::Char('r'))
         {
-            match atman_runtime::config_hub::ConfigHub::global()
-                .and_then(|hub| hub.remove_mcp(&armed))
-            {
-                Ok(()) => {
-                    app.push_toast(
-                        format!("removed {armed} — reloading…"),
-                        app::NoteLevel::Info,
-                        std::time::Duration::from_secs(3),
-                        app::ToastPosition::TopRight,
-                    );
-                    if let Some(tx) = control_tx {
-                        let _ = tx.send(TuiControl::McpReload);
-                    }
-                }
-                Err(error) => app.push_toast(
-                    format!("remove failed: {error}"),
-                    app::NoteLevel::Error,
-                    std::time::Duration::from_secs(5),
-                    app::ToastPosition::TopRight,
-                ),
-            }
+            submit_mcp_mutation(
+                app,
+                control_tx,
+                crate::settings::SettingsMutation::RemoveMcp { name: armed },
+            );
             return true;
         }
         if matches!(action, KeyAction::Escape) {
@@ -854,34 +868,11 @@ pub(crate) fn handle_mcp_panel_key(
         KeyAction::Char('d') => {
             if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
                 let name = s.name.clone();
-                match atman_runtime::config_hub::ConfigHub::global()
-                    .and_then(|hub| hub.toggle_mcp(&name))
-                {
-                    Ok(disabled) => {
-                        let msg = if disabled {
-                            format!("disabled {name} — reloading…")
-                        } else {
-                            format!("enabled {name} — reloading…")
-                        };
-                        app.push_toast(
-                            msg,
-                            app::NoteLevel::Info,
-                            std::time::Duration::from_secs(3),
-                            app::ToastPosition::TopRight,
-                        );
-                        if let Some(tx) = control_tx {
-                            let _ = tx.send(TuiControl::McpReload);
-                        }
-                    }
-                    Err(e) => {
-                        app.push_toast(
-                            format!("toggle failed: {e}"),
-                            app::NoteLevel::Error,
-                            std::time::Duration::from_secs(5),
-                            app::ToastPosition::TopRight,
-                        );
-                    }
-                }
+                submit_mcp_mutation(
+                    app,
+                    control_tx,
+                    crate::settings::SettingsMutation::ToggleMcp { name },
+                );
             }
             return true;
         }

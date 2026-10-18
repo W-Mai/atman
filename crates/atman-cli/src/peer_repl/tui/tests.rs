@@ -122,7 +122,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         revision: 1,
         flow: address.clone(),
     };
-    let mut handle = TuiHandle::from_flow(&worker, binding, commands)
+    let mut handle = TuiHandle::from_flow(&worker, binding, commands, attachment.config.clone())
         .await
         .unwrap();
     let source = handle.flow_view.as_mut().unwrap();

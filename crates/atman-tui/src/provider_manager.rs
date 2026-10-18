@@ -178,6 +178,7 @@ struct AddProviderOption {
 
 #[derive(Default)]
 pub struct ProviderManager {
+    pub(crate) settings: crate::settings::SettingsSource,
     pub open: bool,
     pub last_input_rect: Option<ratatui::layout::Rect>,
     pub providers: Vec<ProviderEntry>,
@@ -590,7 +591,7 @@ impl ProviderManager {
                 detail: "OPENAI_API_KEY".into(),
             });
         }
-        if let Ok(store) = atman_runtime::auth_store::AuthStore::load() {
+        if let Ok(store) = self.settings.load_auth() {
             for p in &store.providers {
                 self.model_counts.push((
                     ProviderKey::Auth(p.id.clone()),
@@ -613,8 +614,8 @@ impl ProviderManager {
                 });
             }
         }
-        let model_entries = atman_runtime::model_registry::all_model_entries();
-        for (name, entry) in atman_runtime::model_registry::all_provider_entries() {
+        let model_entries = self.settings.all_model_entries();
+        for (name, entry) in self.settings.all_provider_entries() {
             let count = model_entries
                 .iter()
                 .filter(|(_, model)| model.provider.as_deref() == Some(&name))
@@ -633,7 +634,7 @@ impl ProviderManager {
                 detail,
             });
         }
-        self.groups = atman_runtime::model_registry::all_provider_groups();
+        self.groups = self.settings.all_provider_groups();
         if let Some(key) = selected_key {
             if let Some(index) = self
                 .providers
@@ -708,7 +709,7 @@ impl ProviderManager {
     }
 
     fn open_edit(&mut self, name: &str) {
-        let providers = atman_runtime::model_registry::all_provider_entries();
+        let providers = self.settings.all_provider_entries();
         let Some(entry) = providers.iter().find(|(n, _)| n == name).map(|(_, e)| e) else {
             return;
         };
@@ -1337,7 +1338,7 @@ impl ProviderManager {
                     );
                 }
                 ProviderSource::Config => {
-                    let providers = atman_runtime::model_registry::all_provider_entries();
+                    let providers = self.settings.all_provider_entries();
                     if let Some(entry) = providers
                         .iter()
                         .find(|(n, _)| *n == p.name)
@@ -1399,7 +1400,8 @@ impl ProviderManager {
     }
 
     fn provider_dependencies(&self, key: &str) -> Vec<String> {
-        atman_runtime::model_registry::all_model_entries()
+        self.settings
+            .all_model_entries()
             .into_iter()
             .filter(|(_, model)| !model.discovered && model.provider.as_deref() == Some(key))
             .map(|(name, _)| name)
@@ -1610,7 +1612,7 @@ impl ProviderManager {
         let p = self.providers.get(self.selected).cloned();
         if let Some(p) = p {
             if matches!(p.source, ProviderSource::Config) {
-                let providers = atman_runtime::model_registry::all_provider_entries();
+                let providers = self.settings.all_provider_entries();
                 if let Some(mut entry) = providers
                     .iter()
                     .find(|(name, _)| *name == p.name)

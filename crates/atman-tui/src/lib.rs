@@ -32,6 +32,7 @@ pub mod model_browser;
 pub mod model_manager;
 pub mod model_picker;
 pub mod onboarding;
+pub mod settings;
 mod settings_form;
 pub mod window;
 pub mod wm;
@@ -188,6 +189,7 @@ pub enum TuiControl {
     /// Execute a provider mutation; completed operations return one matching result.
     MutateProvider(ProviderMutationRequest),
     MutateModel(ModelMutationRequest),
+    MutateSettings(settings::SettingsMutationRequest),
     OpenAliasManager {
         model: Option<String>,
     },
@@ -328,6 +330,10 @@ pub enum TuiCommand {
         ok: bool,
     },
     McpReloaded,
+    SettingsMutationResult {
+        request: settings::SettingsMutationRequest,
+        result: Result<String, String>,
+    },
     KnowledgeResult(
         Result<
             (
@@ -546,6 +552,7 @@ pub struct TuiSubmission {
 }
 
 pub struct TuiHandle {
+    pub settings: settings::SettingsSource,
     pub session_id: String,
     pub session_dir: String,
     pub session_name: Option<String>,
@@ -589,6 +596,7 @@ impl TuiHandle {
     pub fn from_session(session: std::sync::Arc<atman_runtime::Session>) -> Self {
         let permission_client = session.permission_broker().register_client();
         Self {
+            settings: Default::default(),
             session_id: session.id().to_string(),
             session_dir: session.dir().to_string_lossy().to_string(),
             session_name: atman_runtime::session_meta::SessionMeta::load(session.dir())

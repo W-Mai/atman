@@ -1092,7 +1092,8 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             f,
             l.transcript,
             input_rect,
-            atman_runtime::model_registry::is_first_run(),
+            app.settings
+                .is_first_run(&app.settings.load_auth().unwrap_or_default()),
         );
     }
     render_pulse_bar(
