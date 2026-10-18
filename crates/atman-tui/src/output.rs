@@ -2945,7 +2945,6 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
                 *retried,
             )
         }
-        OutputItem::StartupCard { .. } => Vec::new(),
         OutputItem::AssistantMd {
             md,
             streaming,

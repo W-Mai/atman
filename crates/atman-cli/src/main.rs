@@ -2116,11 +2116,11 @@ async fn cmd_repl_once(
         initial_transcript.extend(session.transcript_since_open());
         let output_store =
             atman_runtime::tools::tool_output::OutputStore::at(session.dir().to_path_buf());
-        let mut initial_items = atman_tui::history::flatten_transcript_with_output_store(
+        let initial_items = atman_tui::history::flatten_transcript_with_output_store(
             &initial_transcript,
             &output_store,
         );
-        if is_fresh_session {
+        let startup_card = is_fresh_session.then(|| {
             let recent = session
                 .meta()
                 .and_then(|meta| meta.project_root)
@@ -2128,14 +2128,11 @@ async fn cmd_repl_once(
                     build_startup_recent(&root, &project_root, &session.id().to_string(), 5)
                 })
                 .unwrap_or_default();
-            initial_items.insert(
-                0,
-                atman_tui::app::OutputItem::StartupCard {
-                    version: env!("CARGO_PKG_VERSION").into(),
-                    recent,
-                },
-            );
-        }
+            atman_tui::app::StartupCard {
+                version: env!("CARGO_PKG_VERSION").into(),
+                recent,
+            }
+        });
         let (ctrl_tx, mut ctrl_rx) = atman_tui::ControlSender::channel();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<atman_tui::TuiCommand>();
         let cmd_tx_for_models = cmd_tx.clone();
@@ -2591,6 +2588,7 @@ async fn cmd_repl_once(
             queued_submission_rx: Some(session.subscribe_queued_submissions()),
             flow_names: flow_names.clone(),
             session: Some(std::sync::Arc::clone(&session)),
+            startup_card,
             startup_intro: intro.clone(),
             onboarding_recommended: atman_runtime::model_registry::is_first_run(),
             trust: session.trust_config(),

@@ -466,10 +466,6 @@ pub enum OutputItem {
         ended_at: Option<Instant>,
         cancelled: bool,
     },
-    StartupCard {
-        version: String,
-        recent: Vec<StartupSessionEntry>,
-    },
     Terminal {
         handle: String,
         title: Option<String>,
@@ -697,6 +693,12 @@ pub enum StartupFocus {
 }
 
 #[derive(Debug, Clone)]
+pub struct StartupCard {
+    pub version: String,
+    pub recent: Vec<StartupSessionEntry>,
+}
+
+#[derive(Debug, Clone)]
 pub struct StartupIntro {
     pub started_at: Instant,
     pub version: String,
@@ -864,6 +866,7 @@ pub struct AppState {
     pub hovered_hamburger: bool,
     pub kill_armed_id: Option<atman_runtime::TaskId>,
     pub kill_armed_at: Option<Instant>,
+    pub startup_card: Option<StartupCard>,
     pub startup_intro: Option<StartupIntro>,
     pub startup_focus: StartupFocus,
     pub startup_selected_session: usize,

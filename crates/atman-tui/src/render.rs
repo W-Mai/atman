@@ -251,10 +251,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         f.render_widget(msg, area);
         return;
     }
-    let startup_active = matches!(
-        app.items.first(),
-        Some(crate::app::OutputItem::StartupCard { .. })
-    );
+    let startup_active = app.startup_card.is_some();
     let intro_progress = app
         .startup_intro
         .as_ref()
@@ -315,15 +312,10 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     let input_buf_lines = total_input_lines.min(12);
     let bottom_rect =
         layout::compute_input_rect(l.transcript, input_buf_lines.min(u16::MAX as u32) as u16);
-    let startup_slot = if startup_active {
-        let recent = match app.items.first() {
-            Some(crate::app::OutputItem::StartupCard { recent, .. }) => recent.clone(),
-            _ => Vec::new(),
-        };
-        Some(output::compute_startup_overlay(l.transcript, &recent).input_slot)
-    } else {
-        None
-    };
+    let startup_slot = app
+        .startup_card
+        .as_ref()
+        .map(|card| output::compute_startup_overlay(l.transcript, &card.recent).input_slot);
     let intro_slot = if intro_active {
         app.startup_intro
             .as_ref()
@@ -488,7 +480,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     );
     let effective_viewport = document_visible_rows.max(1);
     if startup_active {
-        if let Some(crate::app::OutputItem::StartupCard { version, recent }) = app.items.first() {
+        if let Some(crate::app::StartupCard { version, recent }) = app.startup_card.as_ref() {
             f.render_widget(ratatui::widgets::Clear, l.transcript);
             let startup_layout = output::render_startup_overlay(
                 f,

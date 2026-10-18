@@ -1027,12 +1027,10 @@ pub(crate) fn handle_key(
             .open_project_hub(canvas, app.projects.clone(), session.as_deref());
         return;
     }
-    let startup_recent_len = app.items.first().and_then(|item| match item {
-        crate::app::OutputItem::StartupCard { recent, .. } => {
-            Some(recent.len().min(app.startup_session_rects.len()))
-        }
-        _ => None,
-    });
+    let startup_recent_len = app
+        .startup_card
+        .as_ref()
+        .map(|card| card.recent.len().min(app.startup_session_rects.len()));
     let mut startup_released_to_input = false;
     if app.startup_intro.is_none() {
         match (app.startup_focus, startup_recent_len) {
@@ -1061,11 +1059,8 @@ pub(crate) fn handle_key(
                 }
                 KeyAction::Submit => {
                     let index = app.startup_selected_session.min(len.saturating_sub(1));
-                    let session_id = app.items.first().and_then(|item| match item {
-                        crate::app::OutputItem::StartupCard { recent, .. } => {
-                            recent.get(index).map(|entry| entry.session_id.clone())
-                        }
-                        _ => None,
+                    let session_id = app.startup_card.as_ref().and_then(|card| {
+                        card.recent.get(index).map(|entry| entry.session_id.clone())
                     });
                     if let Some(session_id) = session_id {
                         request_session_switch(app, control_tx, session_id);
@@ -1115,20 +1110,12 @@ pub(crate) fn handle_key(
         *interrupt_prompt = None;
         return;
     }
-    if startup_recent_len.is_some()
-        && matches!(action, KeyAction::Submit)
+    if matches!(action, KeyAction::Submit)
         && !editor.buf().trim().is_empty()
         && app.startup_intro.is_none()
         && !app.popup.is_open()
+        && let Some(card) = app.startup_card.take()
     {
-        let (version, recent) = match app.items.first() {
-            Some(crate::app::OutputItem::StartupCard {
-                version, recent, ..
-            }) => (version.clone(), recent.clone()),
-            _ => (String::new(), Vec::new()),
-        };
-        let _ = app.remove_item(0);
-        app.inline_note_indices.clear();
         app.startup_focus = crate::app::StartupFocus::Input;
         app.startup_hovered_session = None;
         app.startup_container_rect = None;
@@ -1138,8 +1125,8 @@ pub(crate) fn handle_key(
         app.startup_last_click = None;
         app.startup_intro = Some(crate::app::StartupIntro {
             started_at: std::time::Instant::now(),
-            version,
-            recent,
+            version: card.version,
+            recent: card.recent,
         });
     }
     if app.popup.is_open() {
@@ -1811,8 +1798,8 @@ pub(crate) fn request_session_switch(
     control_tx: Option<&crate::ControlSender>,
     sid: String,
 ) {
-    let intro = match app.items.first() {
-        Some(crate::app::OutputItem::StartupCard { version, recent }) => crate::app::StartupIntro {
+    let intro = match app.startup_card.as_ref() {
+        Some(crate::app::StartupCard { version, recent }) => crate::app::StartupIntro {
             started_at: std::time::Instant::now(),
             version: version.clone(),
             recent: recent.clone(),
@@ -1950,14 +1937,11 @@ mod tests {
                 event_count: index,
             })
             .collect();
-        let mut state = crate::UiState::new(
-            AppState::new("current".into(), None).with_initial_items(vec![
-                crate::app::OutputItem::StartupCard {
-                    version: "1.0.0".into(),
-                    recent,
-                },
-            ]),
-        );
+        let mut state = crate::UiState::new(AppState::new("current".into(), None));
+        state.app.startup_card = Some(crate::app::StartupCard {
+            version: "1.0.0".into(),
+            recent,
+        });
         state.app.startup_session_rects = (0..3)
             .map(|index| ratatui::layout::Rect::new(10, 20 + index * 4, 40, 4))
             .collect();
@@ -1993,6 +1977,24 @@ mod tests {
         assert_eq!(state.app.startup_focus, crate::app::StartupFocus::Input);
         assert!(!state.app.should_quit);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn startup_submission_preserves_existing_transcript_records() {
+        let mut state = startup_state();
+        state.push_note("startup hook output", crate::app::NoteLevel::Info);
+        let mut editor = InputEditor::default();
+        editor.insert_str("hello");
+        let (tx, mut rx) = crate::ControlSender::channel();
+
+        press_startup_key(&mut state, &mut editor, KeyAction::Submit, Some(&tx));
+
+        assert!(state.startup_card.is_none());
+        assert!(state.startup_intro.is_some());
+        assert!(
+            matches!(state.items.first(), Some(crate::app::OutputItem::SystemNote { text, .. }) if text == "startup hook output")
+        );
+        assert!(matches!(rx.try_recv(), Ok(TuiControl::Submit(input)) if input.text == "hello"));
     }
 
     #[test]
@@ -2110,6 +2112,7 @@ mod tests {
         assert!(state.wm.modals.palette.open);
         assert!(editor.buf().is_empty());
         assert!(state.startup_intro.is_none());
+        assert!(state.startup_card.is_some());
         assert_eq!(state.items.len(), count);
         assert!(rx.try_recv().is_err());
     }

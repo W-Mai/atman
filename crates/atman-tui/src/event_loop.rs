@@ -95,6 +95,7 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
             let _ = tx.send(TuiControl::OnboardingInit);
         }
     }
+    app.app.startup_card = handle.startup_card.take();
     app.app.startup_intro = handle.startup_intro.take();
     // Reset started_at so the 300ms fade begins now, not when the
     // switch was requested (which may have been seconds ago).
@@ -1404,10 +1405,7 @@ pub(crate) async fn run_frames(
                                     .submission_queue_hitmap
                                     .row_at(me.column, me.row);
                                 let skip_hover = app.app.startup_intro.is_some()
-                                    || matches!(
-                                        app.app.items.first(),
-                                        Some(crate::app::OutputItem::StartupCard { .. })
-                                    );
+                                    || app.app.startup_card.is_some();
                                 if !skip_hover {
                                 let topmost_panel = app.wm
                                     .hit_test_panel(me.column, me.row)
@@ -2581,9 +2579,7 @@ fn handle_startup_session_mouse(
     event: &crossterm::event::MouseEvent,
     control_tx: Option<&crate::ControlSender>,
 ) -> bool {
-    if app.startup_intro.is_some()
-        || !matches!(app.items.first(), Some(app::OutputItem::StartupCard { .. }))
-    {
+    if app.startup_intro.is_some() || app.startup_card.is_none() {
         app.startup_focus = app::StartupFocus::Input;
         app.startup_hovered_session = None;
         app.startup_projects_hovered = false;
@@ -2622,12 +2618,10 @@ fn handle_startup_session_mouse(
         app.startup_last_click = Some((index, now));
         app.popup.close();
         if double_click
-            && let Some(session_id) = app.items.first().and_then(|item| match item {
-                app::OutputItem::StartupCard { recent, .. } => {
-                    recent.get(index).map(|entry| entry.session_id.clone())
-                }
-                _ => None,
-            })
+            && let Some(session_id) = app
+                .startup_card
+                .as_ref()
+                .and_then(|card| card.recent.get(index).map(|entry| entry.session_id.clone()))
         {
             key_handler::request_session_switch(app, control_tx, session_id);
         }
@@ -3573,6 +3567,7 @@ mod tests {
         }
         let b = handles.pop().unwrap();
         let mut handle = handles.pop().unwrap();
+        handle.startup_card = startup_app().startup_card;
         let a_binding = handle
             .control_tx
             .as_ref()
@@ -3582,29 +3577,32 @@ mod tests {
             .clone();
         let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
         assert_eq!(ui.app.session_name.as_deref(), Some("Focus test"));
+        assert!(ui.app.startup_card.is_some());
+        assert!(handle.startup_card.is_none());
+        assert!(ui.app.items.is_empty());
+        let snapshot = ui.app.items.snapshot().unwrap().clone();
+        let revision = ui.app.items.revision_clock();
         editor.insert_str("draft A");
         ui.app.scroll_offset = 42;
         ui.app.follow_tail = false;
         ui.app.pending_quote = Some("quote A".into());
-        let ticket = handle
-            .control_tx
-            .as_ref()
-            .unwrap()
-            .send_tracked(TuiControl::Submit(crate::TuiSubmission {
-                text: "draft A".into(),
-                images: vec![],
-                reasoning: None,
-                presentation: None,
-            }))
-            .unwrap()
-            .unwrap();
-        ui.app.pending_submission = Some(crate::composer::PendingSubmission {
-            ticket: ticket.clone(),
-            draft: editor.prepare_submission(),
-            quote: ui.app.pending_quote.clone(),
-            consumes_quote: true,
-            images: vec![],
-        });
+        key_handler::handle_key(
+            KeyAction::Submit,
+            &mut ui,
+            &mut editor,
+            &mut None,
+            None,
+            handle.control_tx.as_ref(),
+        );
+        assert!(ui.app.pending_submission.is_some());
+        assert!(ui.app.startup_card.is_none());
+        assert!(ui.app.startup_intro.is_some());
+        assert_eq!(ui.app.items.revision_clock(), revision);
+        assert!(std::sync::Arc::ptr_eq(
+            &snapshot,
+            ui.app.items.snapshot().unwrap()
+        ));
+        ui.app.startup_intro = None;
         let submitted = incoming.recv().await.unwrap();
         let mut views = Workspace::new(&handle);
         views
@@ -3620,6 +3618,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(ui.app.startup_card.is_none());
         editor.insert_str("draft B");
         submitted
             .replies
@@ -4373,19 +4372,18 @@ mod tests {
     }
 
     fn startup_app() -> AppState {
-        let mut app = AppState::new("current".into(), None).with_initial_items(vec![
-            app::OutputItem::StartupCard {
-                version: "1.0.0".into(),
-                recent: vec![app::StartupSessionEntry {
-                    session_id: "target".into(),
-                    short_id: "target00".into(),
-                    goal: Some("resume work".into()),
-                    project: Some("project".into()),
-                    age_label: "1m ago".into(),
-                    event_count: 7,
-                }],
-            },
-        ]);
+        let mut app = AppState::new("current".into(), None);
+        app.startup_card = Some(app::StartupCard {
+            version: "1.0.0".into(),
+            recent: vec![app::StartupSessionEntry {
+                session_id: "target".into(),
+                short_id: "target00".into(),
+                goal: Some("resume work".into()),
+                project: Some("project".into()),
+                age_label: "1m ago".into(),
+                event_count: 7,
+            }],
+        });
         app.startup_container_rect = Some(ratatui::layout::Rect::new(9, 18, 42, 9));
         app.startup_session_rects = vec![ratatui::layout::Rect::new(10, 20, 40, 4)];
         app
