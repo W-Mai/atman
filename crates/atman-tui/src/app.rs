@@ -774,6 +774,9 @@ pub struct QueuedSubmissionEdit {
 
 #[derive(Default)]
 pub struct AppState {
+    pub(crate) open_flow_hub: bool,
+    pub(crate) flow_hub_rect: Option<ratatui::layout::Rect>,
+    pub(crate) flow_hub_hovered: bool,
     pub knowledge_state:
         std::sync::Arc<std::sync::Mutex<crate::window::knowledge_panel::KnowledgeState>>,
     pub items: FlowViewModel,

@@ -257,6 +257,7 @@ fn render(
     let l = crate::layout::compute_ex(area, 1);
     f.render_widget(
         crate::status::render_bar(crate::status::StatusInputs {
+            flow_id: None,
             session_id: "········",
             session_name: None,
             goal: None,

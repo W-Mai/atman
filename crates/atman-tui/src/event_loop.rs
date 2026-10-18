@@ -68,10 +68,7 @@ async fn recv_input_event(
     Some(event)
 }
 
-pub(crate) async fn run_frames(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    mut handle: TuiHandle,
-) -> Result<()> {
+async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor)> {
     let mut app = AppState::new(handle.session_id.clone(), handle.goal.clone())
         .with_initial_items(std::mem::take(&mut handle.initial_items))
         .with_session_dir(handle.session_dir.clone())
@@ -131,7 +128,6 @@ pub(crate) async fn run_frames(
     if let Some(rx) = handle.queued_submission_rx.as_ref() {
         app.app.queued_submissions = rx.borrow().clone();
     }
-    let persistent = handle.flow_view.is_some();
     if let Some(reader) = handle.flow_view.as_mut() {
         app.app.sync_flow_view(reader.next().await?)?;
     }
@@ -150,6 +146,64 @@ pub(crate) async fn run_frames(
         editor.seed_history(past);
         editor.reconcile_images(&sess.pending_images());
     }
+    if handle.flow_view.is_some() {
+        refresh_instance_live(&mut app, &mut editor, handle);
+    }
+    Ok((app, editor))
+}
+
+fn refresh_instance_live(ui: &mut UiState, editor: &mut InputEditor, handle: &TuiHandle) {
+    ui.app.sync_instance_permissions();
+    if let Some(rx) = &handle.context_rx {
+        ui.app.replace_context_snapshot(rx.borrow().clone());
+    }
+    if let Some(rx) = &handle.trust_rx {
+        ui.app.trust = rx.borrow().clone();
+    }
+    if let Some(rx) = &handle.attach_rx {
+        ui.app.attach_count = *rx.borrow();
+    }
+    if let Some(session) = &handle.session {
+        editor.reconcile_images(&session.pending_images());
+    }
+    if let Some(rx) = &handle.form_rx {
+        let forms = rx.borrow();
+        if let Some(form) = forms.first() {
+            if ui.wm.modals.form_modal.active_form_id() != Some(&form.form_id) {
+                ui.wm.modals.form_modal.attach(form.clone());
+            }
+        } else {
+            ui.wm.modals.form_modal.close();
+        }
+    }
+    if let Some(rx) = &handle.compact_review_rx {
+        match rx.borrow().as_ref() {
+            Some(pending)
+                if ui
+                    .wm
+                    .modals
+                    .compact_review
+                    .as_ref()
+                    .is_none_or(|modal| modal.pending.review_id != pending.review_id) =>
+            {
+                ui.wm.modals.compact_review = Some(
+                    crate::compact_review_modal::CompactReviewModal::new(pending.clone()),
+                );
+            }
+            None => ui.wm.modals.compact_review = None,
+            _ => {}
+        }
+    }
+}
+
+pub(crate) async fn run_frames(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    mut handle: TuiHandle,
+) -> Result<()> {
+    let (mut app, mut editor) = initialize_view(&mut handle).await?;
+    let persistent = handle.flow_view.is_some();
+    let mut views = std::collections::HashMap::new();
+    let mut hub: Option<crate::flow_hub::FlowHub> = None;
     let (mut key_events, reader_shutdown) = spawn_event_reader();
     // Flush stale input events accumulated during boot animation.
     // Without this, mouse events from the boot phase flood the first
@@ -184,10 +238,11 @@ pub(crate) async fn run_frames(
     // delay lifecycle, completion, approval, or cancellation frames.
     let (semantic_tx, mut semantic_rx) = tokio::sync::mpsc::channel::<StreamFrame>(512);
     let (bulk_tx, mut bulk_rx) = tokio::sync::mpsc::channel::<StreamFrame>(256);
-    {
+    if !persistent {
         let semantic_tx = semantic_tx.clone();
         let bulk_tx = bulk_tx.clone();
-        let mut srx = handle.stream_rx;
+        let replacement = handle.stream_rx.resubscribe();
+        let mut srx = std::mem::replace(&mut handle.stream_rx, replacement);
         tokio::spawn(async move {
             loop {
                 match srx.recv().await {
@@ -207,15 +262,30 @@ pub(crate) async fn run_frames(
     }
     let frame_semantic_tx = semantic_tx.clone();
     let frame_bulk_tx = bulk_tx.clone();
-    let session_for_sub = handle.session.clone();
 
     loop {
+        if std::mem::take(&mut app.app.open_flow_hub) {
+            let mut opened = crate::flow_hub::FlowHub::default();
+            if let Some(tx) = handle.control_tx.as_ref() {
+                dispatch_hub_action(&mut opened, crate::flow_hub::Action::Load(None), tx, None);
+            }
+            hub = Some(opened);
+        }
         app.app.tick_toasts();
         terminal.backend_mut().queue(BeginSynchronizedUpdate)?;
         let draw_result = terminal
-            .draw(|f| render_frame(f, &mut app, &editor))
+            .draw(|f| {
+                if let Some(hub) = hub.as_mut() {
+                    hub.render(
+                        f,
+                        &handle.control_tx.as_ref().unwrap().binding().unwrap().flow,
+                    );
+                } else {
+                    render_frame(f, &mut app, &editor);
+                }
+            })
             .map(|_| ());
-        let cursor_result = if app.app.modal_notification.is_some() {
+        let cursor_result = if hub.is_some() || app.app.modal_notification.is_some() {
             terminal.hide_cursor()
         } else if let Some(kind) = app.wm.top_kind() {
             if app.wm.modals.cursor_visible(kind) {
@@ -274,9 +344,41 @@ pub(crate) async fn run_frames(
                 }
             }
 
+            frame = async {
+                loop {
+                    match handle.stream_rx.recv().await {
+                        Ok(frame) if is_live_instance_frame(&frame) => break Some(frame),
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break None,
+                    }
+                }
+            }, if persistent => {
+                if frame.is_some() { app.app.sync_instance_permissions(); } else { break; }
+            }
             key = recv_input_event(&mut key_events, &mut pending_input_event) => {
                 if std::env::var_os("ATMAN_TRACE_EVENTS").is_some() {
                     atman_runtime::notify!(debug, "event: {key:?}");
+                }
+                if let Some(opened) = hub.as_mut() {
+                    let action = match key {
+                        Some(Ok(CtEvent::Key(key))) if map_key(key) == KeyAction::Quit => { break; },
+                        Some(Ok(CtEvent::Key(key))) => opened.key(map_key(key)),
+                        Some(Ok(CtEvent::Mouse(mouse))) => opened.mouse(mouse),
+                        _ => crate::flow_hub::Action::None,
+                    };
+                    if matches!(action, crate::flow_hub::Action::Close) { hub = None; }
+                    else if let Some(tx) = handle.control_tx.as_ref() { let reuse = match &action { crate::flow_hub::Action::Focus(flow) => if tx.binding().is_some_and(|binding| &binding.flow == flow) { tx.binding().cloned() } else { views.get(flow).and_then(|view: &AttachedView| view.handle.control_tx.as_ref()).and_then(|tx| tx.binding()).cloned() }, _ => None }; dispatch_hub_action(opened, action, tx, reuse); }
+                    continue;
+                }
+                if persistent {
+                    let escape = matches!(&key, Some(Ok(CtEvent::Key(key))) if map_key(*key) == KeyAction::Escape)
+                        && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none();
+                    let mut clicked = false;
+                    if let Some(Ok(CtEvent::Mouse(mouse))) = &key {
+                        app.app.flow_hub_hovered = app.app.flow_hub_rect.is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()));
+                        clicked = app.app.flow_hub_hovered && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && !app.wm.modals.any_open();
+                    }
+                    if escape || clicked { app.app.open_flow_hub = true; continue; }
                 }
                 let mut current = key;
                 let mut scroll_delta: i32 = 0;
@@ -1511,13 +1613,13 @@ pub(crate) async fn run_frames(
                     // Spawn per-FlowRun frame_tx forwarders when new FlowRuns appear.
                     let new_handle: Option<String> = match &frame {
                         StreamFrame::FlowStart { parent_run_id: None, .. } => {
-                            session_for_sub.as_ref().and_then(|s| s.current_root())
+                            handle.session.as_ref().and_then(|s| s.current_root())
                         }
                         StreamFrame::SubAgentStarted { handle, .. } => Some(handle.clone()),
                         _ => None,
                     };
                     if let Some(h) = new_handle
-                        && let Some(sess) = &session_for_sub
+                        && let Some(sess) = &handle.session
                         && let Ok(entry) = sess.flow_registry.lookup(&h)
                     {
                         let semantic_tx = frame_semantic_tx.clone();
@@ -1747,6 +1849,17 @@ pub(crate) async fn run_frames(
             cmd = recv_cmd(&mut handle.cmd_rx, &mut handle.control_reply_rx, handle.control_tx.as_ref().and_then(|tx| tx.binding())) => {
                 if let Some((ticket, cmd)) = cmd {
                     match cmd {
+                        TuiCommand::FlowCatalog { result } => {
+                            if let Some(hub) = hub.as_mut() { hub.receive(ticket.as_ref(), result); }
+                        }
+                        TuiCommand::FocusFlow { flow, attachment } => {
+                            // Closing the directory cancels navigation, never the submitted host work.
+                            if !hub.as_ref().is_some_and(|hub| hub.pending.as_ref() == ticket.as_ref()) { continue; }
+                            match switch_view(&mut views, &mut app, &mut editor, &mut handle, flow, attachment).await {
+                                Ok(()) => { interrupt_prompt = None; hub = None; }
+                                Err(error) => hub.as_mut().unwrap().failed(error.to_string()),
+                            }
+                        }
                         TuiCommand::SubmissionResult { result } => {
                             app.app.submission_result(&mut editor, ticket.as_ref(), result);
                         }
@@ -1971,6 +2084,9 @@ pub(crate) async fn run_frames(
                             );
                         }
                         TuiCommand::Toast { message, level } => {
+                            if let Some(hub) = hub.as_mut() && hub.pending.as_ref() == ticket.as_ref() {
+                                hub.failed(message.clone());
+                            }
                             app.app.push_toast(
                                 message,
                                 level,
@@ -3163,8 +3279,291 @@ fn handle_transcript_selection_mouse(
     }
 }
 
+struct AttachedView {
+    ui: UiState,
+    editor: InputEditor,
+    handle: TuiHandle,
+}
+
+async fn switch_view(
+    views: &mut std::collections::HashMap<atman_runtime::flow_store::FlowRef, AttachedView>,
+    ui: &mut UiState,
+    editor: &mut InputEditor,
+    handle: &mut TuiHandle,
+    flow: atman_runtime::flow_store::FlowRef,
+    attachment: Option<Box<TuiHandle>>,
+) -> Result<()> {
+    let old = handle
+        .control_tx
+        .as_ref()
+        .and_then(|tx| tx.binding())
+        .ok_or_else(|| anyhow::anyhow!("view is not bound"))?
+        .flow
+        .clone();
+    if old == flow {
+        return Ok(());
+    }
+    let mut selected = if let Some(view) = views.remove(&flow) {
+        view
+    } else {
+        let mut handle = attachment.ok_or_else(|| anyhow::anyhow!("view attachment is missing"))?;
+        anyhow::ensure!(
+            handle
+                .control_tx
+                .as_ref()
+                .and_then(|tx| tx.binding())
+                .is_some_and(|binding| binding.flow == flow),
+            "view source does not match destination"
+        );
+        let (ui, editor) = initialize_view(&mut handle).await?;
+        AttachedView {
+            ui,
+            editor,
+            handle: *handle,
+        }
+    };
+    // Catch up before publishing the new binding. No mixed old/new controls are drawn.
+    if let Some(reader) = selected.handle.flow_view.as_mut() {
+        if let Err(error) = async { selected.ui.app.sync_flow_view(reader.refresh().await?) }.await
+        {
+            views.insert(flow, selected);
+            return Err(error.into());
+        }
+        if let Some(snapshot) = selected.ui.app.items.snapshot() {
+            selected.ui.wm.flow_snapshot(snapshot.clone());
+        }
+    }
+    refresh_instance_live(&mut selected.ui, &mut selected.editor, &selected.handle);
+    ui.app.transcript_selection_pointer = None;
+    ui.app.thinking_click_origin = None;
+    ui.selection_menu = None;
+    ui.wm.interaction.drag_target = None;
+    ui.wm.interaction.resize_target = None;
+    views.insert(
+        old,
+        AttachedView {
+            ui: std::mem::replace(ui, selected.ui),
+            editor: std::mem::replace(editor, selected.editor),
+            handle: std::mem::replace(handle, selected.handle),
+        },
+    );
+    Ok(())
+}
+
+fn dispatch_hub_action(
+    hub: &mut crate::flow_hub::FlowHub,
+    action: crate::flow_hub::Action,
+    tx: &crate::ControlSender,
+    reuse: Option<crate::control::ViewBinding>,
+) {
+    let command = match action {
+        crate::flow_hub::Action::Load(before) => TuiControl::ListFlows { before },
+        crate::flow_hub::Action::Focus(flow) => TuiControl::FocusFlow { flow, reuse },
+        _ => return,
+    };
+    match tx.send_tracked(command) {
+        Ok(Some(ticket)) => hub.pending = Some(ticket),
+        _ => hub.failed("Flow directory is disconnected".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn native_focus_preserves_view_ownership_and_late_acknowledgements() {
+        use crate::control::ViewBinding;
+        use atman_runtime::{
+            flow_runtime::FlowWorker,
+            flow_store::{
+                EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowTransition,
+                RuntimeStore, SessionDescriptor,
+            },
+            source_program::RevisionBundle,
+        };
+        use uuid::Uuid;
+        let directory = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(directory.path()).unwrap();
+        let sid = Uuid::now_v7();
+        let mut session = root
+            .create_session(SessionDescriptor {
+                id: sid,
+                project: None,
+                configuration: Default::default(),
+                title: "Focus test".into(),
+            })
+            .unwrap();
+        let (commands, mut incoming) = mpsc::unbounded_channel();
+        let mut workers = Vec::new();
+        let mut handles = Vec::new();
+        for name in ["a", "b"] {
+            let address = FlowRef {
+                session_id: sid.into(),
+                instance_id: FlowInstanceId::now(),
+            };
+            let mut store = session
+                .create_flow(FlowDescriptor {
+                    address: address.clone(),
+                    creation_request: Uuid::now_v7(),
+                    created_by: None,
+                    content: EntrySnapshot {
+                        name: "main".into(),
+                        path: format!("/example/{name}.at").into(),
+                        bundle: RevisionBundle {
+                            entry: "main.at".into(),
+                            sources: [("main.at".into(), "flow main() -> int { return 7 }".into())]
+                                .into(),
+                            edges: Default::default(),
+                        },
+                    }
+                    .into(),
+                })
+                .unwrap();
+            store
+                .transition(store.state().revision(), FlowTransition::Activated)
+                .unwrap();
+            let worker = FlowWorker::start(store).await.unwrap();
+            handles.push(
+                TuiHandle::from_flow(
+                    &worker,
+                    ViewBinding {
+                        view_id: Uuid::now_v7(),
+                        revision: 1,
+                        flow: address,
+                    },
+                    commands.clone(),
+                )
+                .await
+                .unwrap(),
+            );
+            workers.push(worker);
+        }
+        let b = handles.pop().unwrap();
+        let mut handle = handles.pop().unwrap();
+        let a_binding = handle
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .binding()
+            .unwrap()
+            .clone();
+        let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
+        editor.insert_str("draft A");
+        ui.app.scroll_offset = 42;
+        ui.app.follow_tail = false;
+        ui.app.pending_quote = Some("quote A".into());
+        let ticket = handle
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .send_tracked(TuiControl::Submit(crate::TuiSubmission {
+                text: "draft A".into(),
+                images: vec![],
+                reasoning: None,
+                presentation: None,
+            }))
+            .unwrap()
+            .unwrap();
+        ui.app.pending_submission = Some(crate::composer::PendingSubmission {
+            ticket: ticket.clone(),
+            draft: editor.prepare_submission(),
+            quote: ui.app.pending_quote.clone(),
+            images: vec![],
+        });
+        let submitted = incoming.recv().await.unwrap();
+        let mut views = std::collections::HashMap::new();
+        switch_view(
+            &mut views,
+            &mut ui,
+            &mut editor,
+            &mut handle,
+            workers[1].address().clone(),
+            Some(Box::new(b)),
+        )
+        .await
+        .unwrap();
+        editor.insert_str("draft B");
+        submitted
+            .replies
+            .send(TuiCommand::SubmissionResult { result: Ok(()) })
+            .unwrap();
+        assert!(
+            handle
+                .control_reply_rx
+                .as_mut()
+                .unwrap()
+                .try_recv()
+                .is_err()
+        );
+        assert_eq!(editor.buf(), "draft B");
+        assert_eq!(
+            ui.app.items.snapshot().unwrap().status.execution.address(),
+            workers[1].address()
+        );
+        switch_view(
+            &mut views,
+            &mut ui,
+            &mut editor,
+            &mut handle,
+            workers[0].address().clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            handle.control_tx.as_ref().unwrap().binding(),
+            Some(&a_binding)
+        );
+        assert_eq!(editor.buf(), "draft A");
+        assert_eq!(ui.app.pending_quote.as_deref(), Some("quote A"));
+        assert_eq!(ui.app.scroll_offset, 42);
+        assert!(!ui.app.follow_tail);
+        let (reply_ticket, TuiCommand::SubmissionResult { result }) = recv_cmd(
+            &mut handle.cmd_rx,
+            &mut handle.control_reply_rx,
+            Some(&a_binding),
+        )
+        .await
+        .unwrap() else {
+            panic!("missing original ACK")
+        };
+        ui.app
+            .submission_result(&mut editor, reply_ticket.as_ref(), result);
+        assert!(editor.buf().is_empty());
+        switch_view(
+            &mut views,
+            &mut ui,
+            &mut editor,
+            &mut handle,
+            workers[1].address().clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(editor.buf(), "draft B");
+        assert!(
+            switch_view(
+                &mut views,
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                FlowRef {
+                    session_id: sid.into(),
+                    instance_id: FlowInstanceId::now()
+                },
+                None
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(editor.buf(), "draft B");
+        for worker in workers {
+            assert!(matches!(
+                worker.state().await.unwrap().state(),
+                atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Idle)
+            ));
+        }
+    }
+
     use super::*;
 
     #[test]

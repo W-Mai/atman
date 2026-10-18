@@ -821,6 +821,16 @@ impl WindowManager {
                 let session = app.session.clone();
                 self.open_project_hub(canvas, app.projects.clone(), session.as_deref());
             }
+            PaletteEntryId::OpenFlowHub => {
+                if control_tx.is_some_and(|tx| tx.binding().is_some()) {
+                    app.open_flow_hub = true;
+                } else {
+                    app.push_note(
+                        "FlowHub requires a persistent session",
+                        crate::app::NoteLevel::Info,
+                    );
+                }
+            }
             PaletteEntryId::SetProjectStorageScope => {
                 crate::key_handler::open_project_storage_scope_picker(app);
             }

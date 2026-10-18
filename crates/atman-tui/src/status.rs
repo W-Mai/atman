@@ -4,6 +4,7 @@ use ratatui::widgets::Paragraph;
 
 pub struct StatusInputs<'a> {
     pub session_id: &'a str,
+    pub flow_id: Option<String>,
     pub session_name: Option<&'a str>,
     pub goal: Option<&'a str>,
     pub streaming: bool,
@@ -41,6 +42,12 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
             Style::default().fg(t.subtle_fg.into()),
         ),
     ];
+    if let Some(flow) = &inputs.flow_id {
+        spans.push(Span::styled(
+            format!(" / Flow {}", crate::width::middle_truncate(flow, 17)),
+            Style::default().fg(t.heading.into()),
+        ));
+    }
     if let Some(name) = inputs.session_name {
         spans.push(Span::raw("  · "));
         spans.push(Span::styled(

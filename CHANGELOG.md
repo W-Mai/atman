@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **FlowHub navigation** — Browse persistent session flows with paged rows, search, keyboard controls, and mouse selection. Focus changes retain each flow's draft, quote, reading position, panels, and original reply mailbox; background execution continues independently.
 - **Persistent TUI attachment** — Restore a persistent session's default flow with committed conversation, execution, Goal, and planning state. Composer drafts remain intact until durable input acceptance; stale Goal edits are rejected and form replies retain their invoking flow.
 
 ### ⚠️ Breaking Changes

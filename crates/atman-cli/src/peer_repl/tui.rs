@@ -26,32 +26,11 @@ impl Attachment {
         self.executor.tool_ctx.prompt_resolver = Some(Arc::new(
             atman_runtime::rendezvous::FormPromptResolver::new(forms.clone()),
         ));
-        let binding = ViewBinding {
-            view_id: Uuid::now_v7(),
-            revision: 1,
-            flow: worker.address().clone(),
-        };
         let (controls, mut input) = mpsc::unbounded_channel();
-        // Establish the source and interactive transport before starting schedulers.
-        let mut handle = TuiHandle::from_flow(&worker, binding.clone(), controls).await?;
-        handle.session_name = Some(self.descriptor.title.clone());
-        handle.project_root = self
-            .descriptor
-            .project
-            .as_ref()
-            .map(|project| project.root().display().to_string());
-        handle.form_rx = Some(forms.subscribe());
-        handle.trust = worker.context().trust_config();
-        let (commands, command_rx) = mpsc::unbounded_channel();
-        handle.cmd_rx = Some(command_rx);
-        let mut panels = crate::tui_panels::PanelServices::for_scope(
-            worker.context(),
-            self.executor.clone(),
-            commands.clone(),
-            vec![],
-            self.config.clone(),
-            self.descriptor.project.clone(),
-        )?;
+        let (handle, service, commands) = self
+            .prepare_tui_view(&worker, controls.clone(), &forms)
+            .await?;
+        let mut views = HashMap::from([(worker.address().clone(), service)]);
         for row in catalog.catalog.flows {
             let result = async {
                 let peer = self.session.open_flow(row.id.clone()).await?;
@@ -76,20 +55,93 @@ impl Attachment {
         loop {
             tokio::select! {
                 result = &mut ui => return result,
-                result = panels.next_completion(), if panels.has_pending_work() => { result?; }
+                result = next_panel_completion(&mut views) => { result?; }
                 Some(control) = input.recv() => {
                     let BoundControl { ticket, command, replies } = control;
-                    if ticket.binding != binding {
+                    let Some(view) = views.get_mut(&ticket.binding.flow).filter(|view| view.binding == ticket.binding) else {
                         let _ = replies.send(TuiCommand::SubmissionResult { result: Err("view is no longer attached to this flow".into()) });
                         continue;
-                    }
-                    let Some(command) = panels.dispatch(command).await else { continue; };
-                    if let Err(error) = self.tui_control(&worker, ticket.request_id, command, &replies, &forms).await {
+                    };
+                    let worker = view.worker.clone();
+                    let Some(command) = view.panels.dispatch(command).await else { continue; };
+                    let result = match command {
+                        TuiControl::ListFlows { before } => {
+                            let result = async {
+                                let page = self.session.instances(before, atman_tui::flow_hub::PAGE_SIZE, |_| Ok(())).await?;
+                                let catalog = self.session.snapshot().await?;
+                                Ok::<_, anyhow::Error>(Box::new(atman_tui::flow_hub::FlowHubPage {
+                                    page, session: self.descriptor.title.clone(), default_flow: catalog.catalog.default_flow,
+                                }))
+                            }.await.map_err(|error| format!("{error:#}"));
+                            let _ = replies.send(TuiCommand::FlowCatalog { result });
+                            Ok(())
+                        }
+                        TuiControl::FocusFlow { flow, reuse } => {
+                            async {
+                                ensure!(flow.session_id == self.session.id().into(), "flow belongs to a different session");
+                                let attachment = if let Some(binding) = reuse {
+                                    ensure!(views.get(&flow).is_some_and(|view| view.binding == binding), "view binding is no longer attached");
+                                    None
+                                } else {
+                                    let selected = self.session.open_flow(flow.instance_id.clone()).await?;
+                                    let (handle, service, _) = self.prepare_tui_view(&selected, controls.clone(), &forms).await?;
+                                    views.insert(flow.clone(), service);
+                                    Some(Box::new(handle))
+                                };
+                                let _ = replies.send(TuiCommand::FocusFlow { flow, attachment });
+                                Ok::<_, anyhow::Error>(())
+                            }.await
+                        }
+                        command => self.tui_control(&worker, ticket.request_id, command, &replies, &forms).await,
+                    };
+                    if let Err(error) = result {
                         let _ = replies.send(TuiCommand::Toast { message: format!("{error:#}"), level: atman_tui::app::NoteLevel::Error });
                     }
                 }
             }
         }
+    }
+
+    async fn prepare_tui_view(
+        &self,
+        worker: &FlowWorker,
+        controls: mpsc::UnboundedSender<BoundControl>,
+        forms: &Arc<atman_runtime::session::FormRegistry>,
+    ) -> Result<(TuiHandle, ViewServices, mpsc::UnboundedSender<TuiCommand>)> {
+        let binding = ViewBinding {
+            view_id: Uuid::now_v7(),
+            revision: 1,
+            flow: worker.address().clone(),
+        };
+        let mut handle = TuiHandle::from_flow(worker, binding.clone(), controls).await?;
+        handle.session_id = self.session.id().to_string();
+        handle.session_name = Some(self.descriptor.title.clone());
+        handle.project_root = self
+            .descriptor
+            .project
+            .as_ref()
+            .map(|project| project.root().display().to_string());
+        handle.form_rx = Some(forms.subscribe());
+        handle.trust = worker.context().trust_config();
+        let (commands, command_rx) = mpsc::unbounded_channel();
+        handle.cmd_rx = Some(command_rx);
+        let panels = crate::tui_panels::PanelServices::for_scope(
+            worker.context(),
+            self.executor.clone(),
+            commands.clone(),
+            vec![],
+            self.config.clone(),
+            self.descriptor.project.clone(),
+        )?;
+        Ok((
+            handle,
+            ViewServices {
+                binding,
+                worker: worker.clone(),
+                panels,
+            },
+            commands,
+        ))
     }
 
     async fn submit_tui(
@@ -290,6 +342,27 @@ impl Attachment {
             _ => bail!("This control is not available for persistent flows"),
         }
         Ok(())
+    }
+}
+
+struct ViewServices {
+    binding: ViewBinding,
+    worker: FlowWorker,
+    panels: crate::tui_panels::PanelServices,
+}
+
+async fn next_panel_completion(
+    views: &mut HashMap<atman_runtime::flow_store::FlowRef, ViewServices>,
+) -> Result<(), tokio::task::JoinError> {
+    let pending: Vec<_> = views
+        .values_mut()
+        .filter(|view| view.panels.has_pending_work())
+        .map(|view| Box::pin(view.panels.next_completion()))
+        .collect();
+    if pending.is_empty() {
+        std::future::pending().await
+    } else {
+        futures::future::select_all(pending).await.0
     }
 }
 

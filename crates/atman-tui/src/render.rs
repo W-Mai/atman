@@ -427,8 +427,24 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     }
     app.submission_queue_rect = submission_queue_rect;
     app.input_rect = Some(input_rect);
+    let flow_id = app
+        .items
+        .snapshot()
+        .map(|snapshot| snapshot.status.execution.address().instance_id.to_string());
+    let mut status_area = l.status;
+    app.flow_hub_rect = flow_id.as_ref().map(|_| {
+        let width = 16.min(status_area.width);
+        status_area.width = status_area.width.saturating_sub(width);
+        ratatui::layout::Rect::new(
+            status_area.right(),
+            status_area.y,
+            width,
+            status_area.height,
+        )
+    });
     f.render_widget(
         status::render_bar(status::StatusInputs {
+            flow_id,
             session_id: &app.session_id,
             session_name: app.session_name.as_deref(),
             goal: app.goal.as_deref(),
@@ -438,8 +454,21 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             activity: Some(&app.session_activity),
             pending_permissions: pending_count,
         }),
-        l.status,
+        status_area,
     );
+    if let Some(rect) = app.flow_hub_rect {
+        let t = crate::theme::theme();
+        f.render_widget(
+            Paragraph::new(" FlowHub  Esc ").style(Style::default().fg(t.heading.into()).bg(
+                if app.flow_hub_hovered {
+                    t.work_hover_bg.into()
+                } else {
+                    t.work_bg.into()
+                },
+            )),
+            rect,
+        );
+    }
     let transcript_area = transcript_content;
     app.last_transcript_rect = Some(transcript_area);
     let document_visible_rows = layout::document_visible_rows(transcript_area.height);

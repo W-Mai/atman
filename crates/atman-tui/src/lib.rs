@@ -21,6 +21,7 @@ pub mod control;
 mod instance_view;
 pub use control::ControlSender;
 mod directional_selector;
+pub mod flow_hub;
 pub mod flow_view;
 pub mod form_modal;
 pub mod highlight;
@@ -109,6 +110,13 @@ impl TuiNote {
 
 #[non_exhaustive]
 pub enum TuiControl {
+    ListFlows {
+        before: Option<atman_runtime::flow_store::FlowInstanceId>,
+    },
+    FocusFlow {
+        flow: atman_runtime::flow_store::FlowRef,
+        reuse: Option<control::ViewBinding>,
+    },
     Submit(TuiSubmission),
     UpdateTrust(atman_runtime::trust::TrustConfig),
     CancelFlow,
@@ -256,6 +264,13 @@ pub struct SessionPickerRow {
 
 #[non_exhaustive]
 pub enum TuiCommand {
+    FlowCatalog {
+        result: Result<Box<flow_hub::FlowHubPage>, String>,
+    },
+    FocusFlow {
+        flow: atman_runtime::flow_store::FlowRef,
+        attachment: Option<Box<TuiHandle>>,
+    },
     /// Returned through the captured flow reply mailbox after the host accepts or rejects input.
     SubmissionResult {
         result: Result<(), String>,

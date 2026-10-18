@@ -42,6 +42,68 @@ impl TuiHandle {
 }
 
 impl AppState {
+    pub(crate) fn sync_instance_permissions(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let (requests, groups) = session
+            .permission_broker()
+            .user_list(&session.id().to_string());
+        self.pending_permissions = requests
+            .into_iter()
+            .map(|request| {
+                let memberships = groups
+                    .iter()
+                    .filter(|group| group.request_ids.contains(&request.request_id))
+                    .map(|group| group.group_id.clone())
+                    .collect();
+                let payload = atman_runtime::permission_audit::PermissionRequestAudit::from_request(
+                    &request,
+                    memberships,
+                    None,
+                    request.requested_at,
+                );
+                (
+                    request.request_id.clone(),
+                    crate::app::PendingPermission {
+                        request_id: request.request_id,
+                        revision: request.revision,
+                        payload,
+                    },
+                )
+            })
+            .collect();
+        self.pending_permission_groups = groups
+            .into_iter()
+            .map(|group| {
+                let payload = atman_runtime::permission_audit::PermissionGroupAudit::from_group(
+                    &group,
+                    &session.id().to_string(),
+                    chrono::Utc::now(),
+                );
+                let expanded = self
+                    .pending_permission_groups
+                    .get(&group.group_id)
+                    .is_some_and(|group| group.expanded);
+                (
+                    group.group_id.clone(),
+                    crate::app::PendingPermissionGroup {
+                        group_id: group.group_id,
+                        revision: group.revision,
+                        payload,
+                        expanded,
+                    },
+                )
+            })
+            .collect();
+        self.grouped_permission_request_ids = self
+            .pending_permission_groups
+            .values()
+            .flat_map(|group| group.payload.request_ids.iter().cloned())
+            .collect();
+        self.mark_visual_dirty();
+    }
+
     pub(crate) fn sync_flow_view(&mut self, view: &FlowView) -> io::Result<()> {
         let output = self.session.as_ref().map(|session| session.output_store());
         let before = self.items.revision_clock();
@@ -74,16 +136,7 @@ impl AppState {
             self.todos = snapshot.planning.todos.clone();
             self.plans = snapshot.planning.plans.clone();
             let state = &snapshot.status.execution;
-            let activity = match state.state() {
-                atman_rt::InstanceState::Prepared => "Prepared",
-                atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Idle) => "Idle",
-                atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(_)) => "Running",
-                atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Interrupted {
-                    ..
-                }) => "Interrupted",
-                atman_rt::InstanceState::Closing { .. } => "Closing",
-                atman_rt::InstanceState::Closed => "Closed",
-            };
+            let activity = crate::flow_hub::execution_label(state.state());
             self.status_notes.insert(
                 "flow".into(),
                 format!(

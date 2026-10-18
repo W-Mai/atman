@@ -157,6 +157,12 @@ pub const META_COMMANDS: &[MetaCommand] = &[
         aliases: &[],
     },
     MetaCommand {
+        name: "flows",
+        desc: "browse persistent session flows",
+        usage: ":flows",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "projects",
         desc: "open all projects",
         usage: ":projects",
