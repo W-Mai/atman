@@ -323,6 +323,9 @@ pub(crate) async fn run_frames(
 
         // Fair polling keeps continuously ready view updates from starving input and replies.
         tokio::select! {
+            _ = handle.settings.changed() => {
+                apply_provider_catalog_changed(&mut app, None);
+            }
             _ = wait_shutdown(shutdown.as_mut()) => {
                 break;
             }
@@ -2238,6 +2241,8 @@ fn apply_view_command(
 fn apply_provider_catalog_changed(app: &mut UiState, added_provider: Option<String>) {
     app.wm.modals.provider_manager.refresh_list();
     app.wm.modals.model_manager.refresh();
+    app.wm.modals.alias_manager.catalog_changed();
+    app.wm.modals.model_picker.catalog_changed();
     if !app.wm.modals.model_picker.is_pending() && app.app.reconcile_input_reasoning() {
         app.app.save_ui_state();
     }
@@ -3702,6 +3707,73 @@ mod tests {
         assert!(editor.buf().is_empty());
         editor.insert_str("floating draft");
         assert_eq!(views.views[&a_main].editor.buf(), "main draft");
+        let hidden = ViewKey {
+            flow: workers[1].address().clone(),
+            placement: FlowPlacement::Main,
+        };
+        views
+            .views
+            .get_mut(&hidden)
+            .unwrap()
+            .ui
+            .wm
+            .modals
+            .alias_manager
+            .open();
+        views
+            .views
+            .get_mut(&a_main)
+            .unwrap()
+            .ui
+            .wm
+            .modals
+            .alias_manager
+            .open();
+        ui.wm.modals.alias_manager.open();
+        config.add_alias("shared", "example").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while views.views[&a_main]
+                .ui
+                .wm
+                .modals
+                .alias_manager
+                .aliases
+                .is_empty()
+            {
+                views.next_background().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle.settings.changed())
+            .await
+            .unwrap();
+        apply_provider_catalog_changed(&mut ui, None);
+        assert_eq!(
+            ui.wm.modals.alias_manager.aliases,
+            [("shared".into(), "example".into())]
+        );
+        assert!(
+            views.views[&hidden]
+                .ui
+                .wm
+                .modals
+                .alias_manager
+                .aliases
+                .is_empty()
+        );
+        assert_eq!(editor.buf(), "floating draft");
+        assert_eq!(views.views[&a_main].editor.buf(), "main draft");
+        views
+            .views
+            .get_mut(&a_main)
+            .unwrap()
+            .ui
+            .wm
+            .modals
+            .alias_manager
+            .close();
+        ui.wm.modals.alias_manager.close();
         let main_view = views.views.get_mut(&a_main).unwrap();
         let ticket = main_view
             .handle
@@ -3819,6 +3891,15 @@ mod tests {
         );
         // Closing and promoting views must not send runtime controls.
         assert!(incoming.try_recv().is_err());
+        views
+            .focus(&mut ui, &mut editor, &mut handle, hidden, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            ui.wm.modals.alias_manager.aliases,
+            [("shared".into(), "example".into())]
+        );
+        assert_eq!(editor.buf(), "draft B");
         for worker in workers {
             assert!(matches!(
                 worker.state().await.unwrap().state(),

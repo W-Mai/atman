@@ -59,16 +59,23 @@ impl SettingsMutationRequest {
 pub struct SettingsSource {
     config: Result<ConfigHub, String>,
     models: Arc<ModelRegistry>,
+    updates: Option<tokio::sync::watch::Receiver<()>>,
+    catalog: tokio::sync::watch::Receiver<u64>,
 }
 
 impl Default for SettingsSource {
     fn default() -> Self {
         match ConfigHub::global() {
             Ok(config) => Self::from(config),
-            Err(error) => Self {
-                config: Err(error.to_string()),
-                models: Arc::new(ModelRegistry::new()),
-            },
+            Err(error) => {
+                let models = Arc::new(ModelRegistry::new());
+                Self {
+                    config: Err(error.to_string()),
+                    catalog: models.subscribe_model_catalog(),
+                    models,
+                    updates: None,
+                }
+            }
         }
     }
 }
@@ -76,6 +83,8 @@ impl Default for SettingsSource {
 impl From<ConfigHub> for SettingsSource {
     fn from(config: ConfigHub) -> Self {
         Self {
+            updates: Some(config.subscribe_changes()),
+            catalog: config.models().subscribe_model_catalog(),
             models: config.models().clone(),
             config: Ok(config),
         }
@@ -90,6 +99,19 @@ impl std::ops::Deref for SettingsSource {
 }
 
 impl SettingsSource {
+    pub(crate) async fn changed(&mut self) {
+        tokio::select! {
+            _ = wait_change(self.updates.as_mut()) => {}
+            _ = wait_change(Some(&mut self.catalog)) => {}
+        }
+        self.take_changes();
+    }
+
+    pub(crate) fn take_changes(&mut self) -> bool {
+        let config = self.updates.as_mut().is_some_and(take_change);
+        take_change(&mut self.catalog) || config
+    }
+
     pub(crate) fn config(&self) -> Result<&ConfigHub, String> {
         self.config.as_ref().map_err(Clone::clone)
     }
@@ -125,9 +147,73 @@ impl SettingsSource {
     }
 }
 
+fn take_change<T>(rx: &mut tokio::sync::watch::Receiver<T>) -> bool {
+    if rx.has_changed().unwrap_or(false) {
+        rx.borrow_and_update();
+        true
+    } else {
+        false
+    }
+}
+
+async fn wait_change<T>(rx: Option<&mut tokio::sync::watch::Receiver<T>>) {
+    if let Some(rx) = rx
+        && rx.changed().await.is_ok()
+    {
+        return;
+    }
+    std::future::pending::<()>().await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn settings_subscription_coalesces_commits_without_consuming_another_view() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = ConfigHub::from_config_dir(temp.path().join("config"));
+        let mut first = SettingsSource::from(hub.clone());
+        let mut second = first.clone();
+        let mut foreign =
+            SettingsSource::from(ConfigHub::from_config_dir(temp.path().join("other")));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), first.changed())
+                .await
+                .is_err()
+        );
+        hub.add_alias("one", "example").unwrap();
+        hub.add_alias("two", "example").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), first.changed())
+            .await
+            .unwrap();
+        assert_eq!(first.all_aliases().len(), 2);
+        assert!(!first.take_changes());
+        assert!(second.take_changes());
+        assert!(!second.take_changes());
+        assert!(!foreign.take_changes());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), first.changed())
+                .await
+                .is_err()
+        );
+        hub.models()
+            .replace_provider_catalog(
+                atman_runtime::model_registry::ProviderDescriptor {
+                    provider_key: "catalog".into(),
+                    provider_name: "Catalog".into(),
+                    namespace: "catalog".into(),
+                    wire_profile: atman_runtime::provider::ReasoningWireProfile::Unknown,
+                },
+                &[],
+            )
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), first.changed())
+            .await
+            .unwrap();
+        assert!(second.take_changes());
+        assert!(!foreign.take_changes());
+    }
 
     #[test]
     fn settings_panels_keep_their_bound_catalog_and_auth_source() {

@@ -52,6 +52,14 @@ impl ModelPicker {
         }
     }
 
+    pub(crate) fn catalog_changed(&mut self) {
+        if self.open {
+            let selected = self.browser.selected().map(|row| row.value.clone());
+            self.refresh(selected.as_deref());
+            self.clear_geometry();
+        }
+    }
+
     fn refresh(&mut self, current: Option<&str>) {
         let enabled = self.settings.enabled_provider_names();
         let mut rows = Vec::new();
@@ -386,6 +394,35 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_refresh_keeps_the_pending_request_and_updates_retry_choices() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = atman_runtime::config_hub::ConfigHub::from_config_dir(temp.path());
+        config.add_alias("selected", "example").unwrap();
+        let mut picker = ModelPicker {
+            settings: config.clone().into(),
+            ..Default::default()
+        };
+        picker.open_with_model(Some("selected"));
+        picker.handle_key(&KeyAction::Submit);
+        let request = picker.take_switch_request().unwrap();
+        config.add_alias("added", "another").unwrap();
+        picker.catalog_changed();
+        assert_eq!(picker.pending.as_ref(), Some(&request));
+        assert_eq!(picker.browser.selected().unwrap().value, "selected");
+        assert_eq!(picker.browser.rows().len(), 2);
+
+        config.remove_alias("selected").unwrap();
+        picker.catalog_changed();
+        assert_eq!(picker.pending.as_ref(), Some(&request));
+        assert_eq!(picker.browser.selected().unwrap().value, "added");
+        picker.handle_key(&KeyAction::Submit);
+        assert!(picker.take_switch_request().is_none());
+        assert!(picker.finish_switch(request.request_id, &request.model, false));
+        picker.handle_key(&KeyAction::Submit);
+        assert_eq!(picker.take_switch_request().unwrap().model, "added");
+    }
 
     fn picker() -> ModelPicker {
         ModelPicker {

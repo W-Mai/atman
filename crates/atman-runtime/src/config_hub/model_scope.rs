@@ -6,8 +6,14 @@ use super::{ConfigError, ConfigHub};
 use crate::model_registry::{ModelRegistry, ProviderConfig, commit_prepared_config};
 
 type Source = (PathBuf, PathBuf);
+type Changes = tokio::sync::watch::Sender<()>;
 
-static SCOPES: LazyLock<Mutex<BTreeMap<Source, Weak<ModelRegistry>>>> =
+struct Scope {
+    models: Weak<ModelRegistry>,
+    changes: Weak<Changes>,
+}
+
+static SCOPES: LazyLock<Mutex<BTreeMap<Source, Scope>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 static DEFAULT_SOURCE: LazyLock<Option<Source>> = LazyLock::new(|| {
     crate::storage::config_dir().ok().map(|dir| {
@@ -16,22 +22,53 @@ static DEFAULT_SOURCE: LazyLock<Option<Source>> = LazyLock::new(|| {
     })
 });
 
-pub(super) fn models(config: PathBuf, auth: PathBuf) -> Arc<ModelRegistry> {
+pub(super) fn bind(config: PathBuf, auth: PathBuf) -> (Arc<ModelRegistry>, Arc<Changes>) {
     let mut scopes = SCOPES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    scopes.retain(|_, scope| scope.strong_count() > 0);
+    scopes.retain(|_, scope| scope.models.strong_count() > 0 || scope.changes.strong_count() > 0);
     let source = (config, auth);
-    if let Some(models) = scopes.get(&source).and_then(Weak::upgrade) {
-        return models;
+    let models = scopes
+        .get(&source)
+        .and_then(|scope| scope.models.upgrade())
+        .unwrap_or_else(|| {
+            if DEFAULT_SOURCE.as_ref() == Some(&source) {
+                crate::model_registry::default_registry().clone()
+            } else {
+                Arc::new(ModelRegistry::new())
+            }
+        });
+    let changes = scopes
+        .get(&source)
+        .and_then(|scope| scope.changes.upgrade())
+        .unwrap_or_else(|| Arc::new(tokio::sync::watch::channel(()).0));
+    scopes.insert(
+        source,
+        Scope {
+            models: Arc::downgrade(&models),
+            changes: Arc::downgrade(&changes),
+        },
+    );
+    (models, changes)
+}
+
+pub(super) fn notify_auth(hub: &ConfigHub) {
+    notify(|(_, auth)| auth == hub.auth_path());
+}
+
+pub(super) fn notify_mcp(hub: &ConfigHub) {
+    notify(|(config, _)| config == &hub.config_toml_path());
+}
+
+fn notify(matches: impl Fn(&Source) -> bool) {
+    let scopes = SCOPES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (_, scope) in scopes.iter().filter(|(source, _)| matches(source)) {
+        if let Some(changes) = scope.changes.upgrade() {
+            changes.send_replace(());
+        }
     }
-    let models = if DEFAULT_SOURCE.as_ref() == Some(&source) {
-        crate::model_registry::default_registry().clone()
-    } else {
-        Arc::new(ModelRegistry::new())
-    };
-    scopes.insert(source, Arc::downgrade(&models));
-    models
 }
 
 /// Validate every live projection before writing the shared configuration source.
@@ -48,7 +85,7 @@ pub(super) fn publish(
     let models = scopes
         .iter()
         .filter(|((path, _), _)| path == &config)
-        .filter_map(|(_, scope)| scope.upgrade())
+        .filter_map(|(_, scope)| scope.models.upgrade())
         .collect::<Vec<_>>();
     let prepared = models
         .iter()
@@ -66,6 +103,11 @@ pub(super) fn publish(
     for update in prepared {
         commit_prepared_config(update);
     }
+    for (_, scope) in scopes.iter().filter(|((path, _), _)| path == &config) {
+        if let Some(changes) = scope.changes.upgrade() {
+            changes.send_replace(());
+        }
+    }
     Ok(snapshot)
 }
 
@@ -74,6 +116,66 @@ mod tests {
     use super::*;
     use crate::model_registry::ProviderDescriptor;
     use crate::provider::{DiscoveredModelDetails, ReasoningWireProfile};
+
+    #[test]
+    fn settings_commits_notify_only_sources_sharing_the_written_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = ConfigHub::from_auth_path(dir.path().join("first.json"));
+        let same = ConfigHub::from_source(&first.source()).unwrap();
+        let second = ConfigHub::from_auth_path(dir.path().join("second.json"));
+        let other = ConfigHub::from_config_dir(dir.path().join("other"));
+        let mut updates = [
+            first.subscribe_changes(),
+            same.subscribe_changes(),
+            second.subscribe_changes(),
+            other.subscribe_changes(),
+        ];
+        let consume = |updates: &mut [tokio::sync::watch::Receiver<()>], expected: [bool; 4]| {
+            for (rx, expected) in updates.iter_mut().zip(expected) {
+                assert_eq!(rx.has_changed().unwrap(), expected);
+                rx.borrow_and_update();
+                assert!(!rx.has_changed().unwrap());
+            }
+        };
+        first.add_alias("smart", "example").unwrap();
+        consume(&mut updates, [true, true, true, false]);
+        assert_eq!(second.models().resolve_alias("smart"), "example");
+        first.update_auth(|_| Ok(())).unwrap();
+        consume(&mut updates, [true, true, false, false]);
+        first
+            .upsert_mcp(crate::mcp::McpServerConfig::stdio(
+                "example",
+                "example-mcp",
+                vec![],
+                crate::tool::Tier::Zero,
+                1_000,
+            ))
+            .unwrap();
+        consume(&mut updates, [true, true, true, false]);
+        assert!(first.add_alias("smart", "other").is_err());
+        assert!(
+            publish(&first, "[alias.smart]\nmodel = 'unwritten'", || Err(
+                ConfigError::Invalid("write failed".into())
+            ))
+            .is_err()
+        );
+        assert!(
+            first
+                .update_auth::<()>(|_| Err(ConfigError::Invalid("rejected".into())))
+                .is_err()
+        );
+        let mcp_path = first.config_dir().join("mcp_servers.json");
+        std::fs::remove_file(&mcp_path).unwrap();
+        std::fs::create_dir(&mcp_path).unwrap();
+        assert!(first.save_mcp(&[]).is_err());
+        consume(&mut updates, [false; 4]);
+        let models = first.models().clone();
+        let source = first.source();
+        drop(first);
+        drop(same);
+        let reopened = ConfigHub::from_source(&source).unwrap();
+        assert!(Arc::ptr_eq(&models, reopened.models()));
+    }
 
     #[test]
     fn source_identity_is_stable_before_directory_creation() {

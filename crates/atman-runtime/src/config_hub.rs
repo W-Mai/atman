@@ -190,6 +190,7 @@ pub struct ConfigHub {
     daemon_config_path: Option<PathBuf>,
     auth_path: PathBuf,
     models: Arc<crate::model_registry::ModelRegistry>,
+    changes: Arc<tokio::sync::watch::Sender<()>>,
 }
 
 /// Durable configuration identity. Credentials remain in their original stores.
@@ -259,6 +260,11 @@ impl ConfigHub {
     /// Model directory shared by this configuration and authentication source pair.
     pub fn models(&self) -> &Arc<crate::model_registry::ModelRegistry> {
         &self.models
+    }
+
+    /// Subscribe before reading settings. Successful in-process configuration, auth, and MCP commits invalidate this source; notifications coalesce and contain no credentials. External file writes are not monitored.
+    pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changes.subscribe()
     }
 
     pub fn config_dir(&self) -> &Path {
@@ -438,12 +444,14 @@ impl ConfigHub {
             auth_path.parent().unwrap_or_else(|| Path::new(".")),
         );
         let auth_path = config_dir.join(auth_path.file_name().unwrap_or_default());
-        let models = model_scope::models(config_dir.join("config.toml"), auth_path.clone());
+        let (models, changes) =
+            model_scope::bind(config_dir.join("config.toml"), auth_path.clone());
         Self {
             config_dir,
             daemon_config_path: None,
             auth_path,
             models,
+            changes,
         }
     }
 
@@ -633,6 +641,9 @@ impl ConfigHub {
             self.write_auth_document(&document)?;
         }
         let follow_up = after_write(&result);
+        if changed {
+            model_scope::notify_auth(self);
+        }
         Ok((result, follow_up))
     }
 
@@ -2011,7 +2022,9 @@ impl ConfigHub {
     fn write_mcp(&self, configs: &[crate::mcp::McpServerConfig]) -> Result<(), ConfigError> {
         let json = crate::mcp_config::serialize(configs)
             .map_err(|error| ConfigError::Invalid(format!("serialize mcp config: {error}")))?;
-        self.write_atomic("mcp_servers.json", ".mcp_servers.json.tmp", &json)
+        self.write_atomic("mcp_servers.json", ".mcp_servers.json.tmp", &json)?;
+        model_scope::notify_mcp(self);
+        Ok(())
     }
 
     fn write_atomic(

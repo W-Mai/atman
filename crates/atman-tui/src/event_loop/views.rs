@@ -265,6 +265,9 @@ impl Workspace {
                 }
             }
             refresh_instance_live(&mut selected.ui, &mut selected.editor, &selected.handle);
+            if selected.handle.settings.take_changes() {
+                apply_provider_catalog_changed(&mut selected.ui, None);
+            }
             ui.app.transcript_selection_pointer = None;
             ui.app.thinking_click_origin = None;
             ui.selection_menu = None;
@@ -433,6 +436,10 @@ impl Workspace {
             .map(|(_, view)| {
                 Box::pin(async move {
                     let update = tokio::select! {
+                        _ = view.handle.settings.changed() => {
+                            apply_provider_catalog_changed(&mut view.ui, None);
+                            return;
+                        }
                         command = recv_cmd(&mut view.handle.cmd_rx, &mut view.handle.control_reply_rx, view.handle.control_tx.as_ref().and_then(|tx| tx.binding())) => {
                             if let Some((ticket, command)) = command { apply_view_command(&mut view.ui, &mut view.editor, ticket.as_ref(), command); }
                             return;

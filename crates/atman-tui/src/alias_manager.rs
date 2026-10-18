@@ -253,6 +253,29 @@ impl AliasManager {
         self.list_offset = 0;
     }
 
+    pub(crate) fn catalog_changed(&mut self) {
+        if !self.open {
+            return;
+        }
+        let alias = self
+            .aliases
+            .get(self.selected)
+            .map(|(name, _)| name.clone());
+        let model = self.browser.selected().map(|row| row.value.clone());
+        let focus = self.focus;
+        let offset = self.list_offset;
+        self.refresh_list();
+        self.selected = alias
+            .and_then(|name| self.aliases.iter().position(|(key, _)| *key == name))
+            .unwrap_or(self.selected);
+        self.list_offset = offset.min(self.aliases.len().saturating_sub(1));
+        self.refresh_groups();
+        self.sync_browser(model.as_deref());
+        self.focus = focus;
+        self.tree_pages.clear();
+        self.clear_geometry();
+    }
+
     fn refresh_groups(&mut self) {
         let enabled_providers = self.settings.enabled_provider_names();
         self.groups = self
@@ -1532,6 +1555,25 @@ mod tests {
         assert!(!manager.show_form);
         manager.prepare_form(false, None, Some("vendor/model-09"));
         assert!(!manager.mutation_result(first.id, &Ok("saved".into())));
+        assert!(manager.show_form);
+    }
+
+    #[test]
+    fn catalog_refresh_preserves_alias_draft_focus_target_and_pending_save() {
+        let mut manager = populated_manager();
+        manager.prepare_form(true, Some("smart"), Some("vendor/model-09"));
+        manager.editor.replace_with("new alias");
+        manager.search.replace_with("model-09");
+        manager.focus = Focus::Search;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        manager.commit_alias(Some(&crate::ControlSender::from(tx)));
+        let request = manager.pending.as_ref().unwrap().id;
+        manager.catalog_changed();
+        assert_eq!(manager.pending.as_ref().unwrap().id, request);
+        assert_eq!(manager.editor.buf(), "new alias");
+        assert_eq!(manager.search.buf(), "model-09");
+        assert_eq!(manager.focus, Focus::Search);
+        assert_eq!(manager.target_model.as_deref(), Some("vendor/model-09"));
         assert!(manager.show_form);
     }
 
