@@ -138,6 +138,8 @@ Drag across transcript text, line-end space, or short Markdown gaps to open Copy
 
 Models with image input enabled can also call `image.read(path: "...")` to inspect a local PNG, JPEG, GIF, or WebP file during an agent run. The tool imports at most 20 MiB through the session attachment store and supplies the image to the next model call without placing base64 in the textual tool result.
 
+Persistent main and floating views keep separate image drafts, even when displaying the same flow. A successful submission clears only its originating, unchanged draft; failures and later edits retain the images. Opening a panel or sending a control command keeps images that were not included in that command.
+
 Optional tool output payload limits can be set in `~/.config/atman/config.toml`:
 
 ```toml

@@ -149,8 +149,8 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
             .filter(|s| !s.trim().is_empty())
             .collect();
         editor.seed_history(past);
-        editor.reconcile_images(&sess.pending_images());
     }
+    app.sync_composer_images(&mut editor);
     if handle.flow_view.is_some() {
         refresh_instance_live(&mut app, &mut editor, handle);
         refresh_live_output(&mut app, handle)?;
@@ -166,12 +166,7 @@ fn refresh_instance_live(ui: &mut UiState, editor: &mut InputEditor, handle: &Tu
     if let Some(rx) = &handle.trust_rx {
         ui.app.trust = rx.borrow().clone();
     }
-    if let Some(rx) = &handle.attach_rx {
-        ui.app.attach_count = *rx.borrow();
-    }
-    if let Some(session) = &handle.session {
-        editor.reconcile_images(&session.pending_images());
-    }
+    ui.app.sync_composer_images(editor);
     if let Some(rx) = &handle.form_rx {
         let forms = rx.borrow();
         if let Some(form) = forms.first() {
@@ -1754,12 +1749,7 @@ pub(crate) async fn run_frames(
                 }
             }
             _ = wait_attach_change(handle.attach_rx.as_mut()) => {
-                if let Some(rx) = handle.attach_rx.as_mut() {
-                    app.app.attach_count = *rx.borrow();
-                }
-                if let Some(session) = handle.session.as_ref() {
-                    editor.reconcile_images(&session.pending_images());
-                }
+                app.app.sync_composer_images(&mut editor);
             }
             _ = wait_todos_change(handle.todos_rx.as_mut()) => {
                 if let Some(rx) = handle.todos_rx.as_mut() {
@@ -3702,6 +3692,13 @@ mod tests {
             .await
             .unwrap();
         editor.insert_str("main draft");
+        let image = workers[0]
+            .context()
+            .import_image_bytes(b"\x89PNG\r\n\x1a\n", Some("main.png"))
+            .unwrap();
+        ui.app.attach_composer_image(&mut editor, image.clone());
+        let main_draft = editor.buf().to_owned();
+        assert_eq!(workers[0].context().pending_image_count(), 0);
         let floating = ViewKey {
             flow: workers[0].address().clone(),
             placement: FlowPlacement::Floating,
@@ -3738,7 +3735,10 @@ mod tests {
             .unwrap();
         assert!(editor.buf().is_empty());
         editor.insert_str("floating draft");
-        assert_eq!(views.views[&a_main].editor.buf(), "main draft");
+        assert!(editor.pending_images().is_empty());
+        ui.app.attach_composer_image(&mut editor, image.clone());
+        let floating_draft = editor.buf().to_owned();
+        assert_eq!(views.views[&a_main].editor.buf(), main_draft);
         let hidden = ViewKey {
             flow: workers[1].address().clone(),
             placement: FlowPlacement::Main,
@@ -3794,8 +3794,11 @@ mod tests {
                 .aliases
                 .is_empty()
         );
-        assert_eq!(editor.buf(), "floating draft");
-        assert_eq!(views.views[&a_main].editor.buf(), "main draft");
+        refresh_instance_live(&mut ui, &mut editor, &handle);
+        assert_eq!(editor.buf(), floating_draft);
+        assert_eq!(views.views[&a_main].editor.buf(), main_draft);
+        assert_eq!(editor.pending_images().len(), 1);
+        assert_eq!(views.views[&a_main].editor.pending_images().len(), 1);
         views
             .views
             .get_mut(&a_main)
@@ -3814,7 +3817,7 @@ mod tests {
             .unwrap()
             .send_tracked(TuiControl::Submit(crate::TuiSubmission {
                 text: "main draft".into(),
-                images: vec![],
+                images: vec![image.clone()],
                 reasoning: None,
                 presentation: None,
             }))
@@ -3824,7 +3827,7 @@ mod tests {
             ticket,
             draft: main_view.editor.prepare_submission(),
             quote: main_view.ui.app.pending_quote.clone(),
-            images: vec![],
+            images: vec![image.clone()],
         });
         incoming
             .recv()
@@ -3841,6 +3844,13 @@ mod tests {
         .await
         .unwrap();
         assert!(views.views[&a_main].editor.buf().is_empty());
+        assert_eq!(views.views[&a_main].ui.app.attach_count, 0);
+        refresh_instance_live(&mut ui, &mut editor, &handle);
+        assert_eq!(editor.buf(), floating_draft);
+        assert_eq!(editor.pending_images().len(), 1);
+        assert_eq!(ui.app.attach_count, 1);
+        assert_eq!(editor.remove_last_image(), Some(image.clone()));
+        ui.app.remove_composer_images(&mut editor, &[image]);
         assert_eq!(editor.buf(), "floating draft");
         views
             .views

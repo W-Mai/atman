@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### Fixes
+
+- **Image draft ownership** — Persistent main and floating views keep separate attachments when displaying the same flow. Refresh, deletion, and submission acknowledgements affect only the originating composer; panel and control commands retain images they did not submit.
+
 ### Features
 
 - **Deferred session creation** — `atman session new` creates a persistent default flow and prints its session ID without starting providers, MCP servers, or model work. Attaching with `--continue` binds execution and runs any captured startup command once.

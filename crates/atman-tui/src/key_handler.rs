@@ -1110,10 +1110,8 @@ pub(crate) fn handle_key(
             .wm
             .dispatch_meta_command(&editor.submission_text(), &mut app.app, control_tx)
     {
-        editor.submit();
-        if let Some(session) = app.session.as_ref() {
-            editor.reconcile_images(&session.pending_images());
-        }
+        let draft = editor.prepare_submission();
+        app.acknowledge_composer(editor, draft, true, &[]);
         *interrupt_prompt = None;
         return;
     }
@@ -1161,12 +1159,7 @@ pub(crate) fn handle_key(
             KeyAction::Tab | KeyAction::Submit => {
                 if let Some(item) = app.popup.accept() {
                     editor.replace_with(&item.insert);
-                    if let Some(session) = app.session.as_ref() {
-                        for source in editor.prune_missing_image_references() {
-                            session.remove_pending_image(&source);
-                        }
-                        app.attach_count = session.pending_image_count();
-                    }
+                    app.prune_composer_images(editor);
                 }
                 app.refresh_popup(editor.buf());
                 return;
@@ -1224,9 +1217,8 @@ pub(crate) fn handle_key(
                     .map_err(Into::into)
             }) {
                 Ok(source) => {
-                    let count = session.queue_image_source(source.clone());
-                    let number = editor.attach_image(source);
-                    app.attach_count = count;
+                    let number = app.attach_composer_image(editor, source);
+                    let count = app.attach_count;
                     app.push_note(
                         format!("attached clipboard image as [image {number}] ({count} pending)"),
                         app::NoteLevel::Info,
@@ -1247,15 +1239,11 @@ pub(crate) fn handle_key(
                 *interrupt_prompt = None;
                 return;
             }
-            let Some(session) = app.session.clone() else {
-                return;
-            };
-            editor.reconcile_images(&session.pending_images());
+            app.sync_composer_images(editor);
             match editor.remove_last_image() {
                 Some(source) => {
-                    session.remove_pending_image(&source);
-                    let count = session.pending_image_count();
-                    app.attach_count = count;
+                    app.remove_composer_images(editor, std::slice::from_ref(&source));
+                    let count = app.attach_count;
                     app.push_note(
                         format!(
                             "removed attachment {} ({} pending)",
@@ -1325,9 +1313,7 @@ pub(crate) fn handle_key(
             if app.pending_submission.is_some() {
                 return;
             }
-            if let Some(session) = app.session.as_ref() {
-                editor.reconcile_images(&session.pending_images());
-            }
+            app.sync_composer_images(editor);
             let prepared = editor.prepare_submission();
             if !prepared.is_empty() || app.pending_quote.is_some() {
                 let editor_submission = prepared.content();
@@ -1400,22 +1386,14 @@ pub(crate) fn handle_key(
                             crate::app::ToastPosition::BottomRight,
                         );
                     } else {
-                        editor.acknowledge_submission(prepared);
+                        app.acknowledge_composer(editor, prepared, true, &images);
                         app.pending_quote = None;
                         if !app.has_running_workflow() {
                             app.push_user_turn_with_presentation(line, presentation);
                         }
-                        if let Some(session) = app.session.as_ref() {
-                            for image in &images {
-                                session.remove_pending_image(image);
-                            }
-                        }
                     }
                 }
-                if let Some(session) = app.session.clone() {
-                    app.attach_count = session.pending_image_count();
-                    editor.reconcile_images(&session.pending_images());
-                }
+                app.sync_composer_images(editor);
             }
             *interrupt_prompt = None;
             edited = true;
@@ -1656,12 +1634,7 @@ pub(crate) fn handle_key(
         KeyAction::OpenProjectHub => {}
     }
     if edited {
-        if let Some(session) = app.session.as_ref() {
-            for source in editor.prune_missing_image_references() {
-                session.remove_pending_image(&source);
-            }
-            app.attach_count = session.pending_image_count();
-        }
+        app.prune_composer_images(editor);
         app.refresh_popup(editor.buf());
     }
 }
@@ -2154,12 +2127,28 @@ mod tests {
     #[test]
     fn panel_commands_bypass_submission_and_preserve_pending_content() {
         for command in [":panel", ":history", ":memory"] {
-            for (running, image_first) in
-                [(false, false), (false, true), (true, false), (true, true)]
-            {
-                let session = std::sync::Arc::new(atman_runtime::Session::open_ephemeral());
-                session
-                    .queue_image_bytes(PNG_BYTES, Some("pending.png"))
+            for (running, image_first, persistent) in [
+                (false, false, false),
+                (false, true, false),
+                (true, false, false),
+                (true, true, false),
+                (false, false, true),
+                (false, true, true),
+                (true, false, true),
+                (true, true, true),
+            ] {
+                let session = std::sync::Arc::new(if persistent {
+                    atman_runtime::Session::open_instance_context(
+                        atman_runtime::flow_store::FlowRef {
+                            session_id: uuid::Uuid::now_v7().into(),
+                            instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+                        },
+                    )
+                } else {
+                    atman_runtime::Session::open_ephemeral()
+                });
+                let image = session
+                    .import_image_bytes(PNG_BYTES, Some("pending.png"))
                     .unwrap();
                 let mut state = crate::UiState::new(AppState::new("session".into(), None));
                 state.session = Some(session.clone());
@@ -2175,11 +2164,11 @@ mod tests {
                 let count = state.items.len();
                 let mut editor = InputEditor::default();
                 if image_first {
-                    editor.reconcile_images(&session.pending_images());
+                    state.attach_composer_image(&mut editor, image);
                     editor.insert_str(command);
                 } else {
                     editor.insert_str(command);
-                    editor.reconcile_images(&session.pending_images());
+                    state.attach_composer_image(&mut editor, image);
                 }
                 assert!(editor.buf().contains("[image 1]"));
                 let (control_tx, mut control_rx) = crate::ControlSender::channel();
@@ -2214,7 +2203,8 @@ mod tests {
                 assert_eq!(state.items.len(), count);
                 assert_eq!(state.has_running_workflow(), running);
                 assert_eq!(state.pending_quote.as_deref(), Some("pending quote"));
-                assert_eq!(session.pending_image_count(), 1);
+                assert_eq!(session.pending_image_count(), usize::from(!persistent));
+                assert_eq!(editor.pending_images().len(), 1);
                 assert!(!session.flow_cancel_token().is_cancelled());
                 assert!(!editor.buf().contains(command));
                 assert!(editor.buf().contains("[image 1]"));

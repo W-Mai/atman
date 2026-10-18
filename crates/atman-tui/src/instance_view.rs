@@ -50,6 +50,7 @@ impl TuiHandle {
         handle.plans_rx = None;
         handle.injection_rx = None;
         handle.queued_submission_rx = None;
+        handle.attach_rx = None;
         Ok(handle)
     }
 }

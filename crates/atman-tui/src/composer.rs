@@ -7,6 +7,7 @@ use crate::{
     control::ControlTicket,
     input::{InputEditor, PreparedSubmission},
 };
+use atman_runtime::{Session, message::ImageSource};
 
 pub(crate) struct PendingSubmission {
     pub ticket: ControlTicket,
@@ -16,6 +17,72 @@ pub(crate) struct PendingSubmission {
 }
 
 impl AppState {
+    fn legacy_attachment_session(&self) -> Option<&Session> {
+        self.session
+            .as_deref()
+            .filter(|session| session.flow_instance().is_none())
+    }
+
+    /// Persistent views own their drafts; legacy hosts still expose an attachment queue.
+    pub(crate) fn sync_composer_images(&mut self, editor: &mut InputEditor) {
+        if let Some(session) = self.legacy_attachment_session() {
+            editor.reconcile_images(&session.pending_images());
+        }
+        self.attach_count = editor.pending_images().len();
+    }
+
+    pub(crate) fn attach_composer_image(
+        &mut self,
+        editor: &mut InputEditor,
+        source: ImageSource,
+    ) -> u32 {
+        if let Some(session) = self.legacy_attachment_session() {
+            session.queue_image_source(source.clone());
+        }
+        let number = editor.attach_image(source);
+        self.sync_composer_images(editor);
+        number
+    }
+
+    pub(crate) fn remove_composer_images(
+        &mut self,
+        editor: &mut InputEditor,
+        images: &[ImageSource],
+    ) {
+        if let Some(session) = self.legacy_attachment_session() {
+            for image in images {
+                session.remove_pending_image(image);
+            }
+        }
+        self.sync_composer_images(editor);
+    }
+
+    pub(crate) fn prune_composer_images(&mut self, editor: &mut InputEditor) {
+        let removed = editor.prune_missing_image_references();
+        self.remove_composer_images(editor, &removed);
+    }
+
+    pub(crate) fn acknowledge_composer(
+        &mut self,
+        editor: &mut InputEditor,
+        draft: PreparedSubmission,
+        clear: bool,
+        submitted_images: &[ImageSource],
+    ) -> bool {
+        let mut retained = draft.content().images.clone();
+        for image in submitted_images {
+            if let Some(index) = retained.iter().position(|pending| pending == image) {
+                retained.remove(index);
+            }
+        }
+        if !editor.acknowledge_submission_if(draft, clear) {
+            return false;
+        }
+        editor.reconcile_images(&retained);
+        self.remove_composer_images(editor, submitted_images);
+        true
+    }
+
     pub(crate) fn submission_result(
         &mut self,
         editor: &mut InputEditor,
@@ -43,15 +110,9 @@ impl AppState {
                     (None, None) => true,
                     _ => false,
                 };
-                if editor.acknowledge_submission_if(pending.draft, quote_matches) {
+                if self.acknowledge_composer(editor, pending.draft, quote_matches, &pending.images)
+                {
                     self.pending_quote = None;
-                    if let Some(session) = self.session.as_ref() {
-                        for image in &pending.images {
-                            session.remove_pending_image(image);
-                        }
-                        editor.reconcile_images(&session.pending_images());
-                        self.attach_count = session.pending_image_count();
-                    }
                 } else {
                     self.push_toast(
                         "Input accepted; newer draft retained",
@@ -71,6 +132,56 @@ mod tests {
     use crate::control::ViewBinding;
     use atman_runtime::flow_store::{FlowInstanceId, FlowRef};
     use uuid::Uuid;
+
+    #[test]
+    fn native_images_follow_draft_and_ack_ownership() {
+        let flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let session = Arc::new(Session::open_instance_context(flow.clone()));
+        let mut app = AppState::new("session".into(), None).with_session(Some(session.clone()));
+        let mut editor = InputEditor::default();
+        let image = session
+            .import_image_bytes(b"\x89PNG\r\n\x1a\n", None)
+            .unwrap();
+        editor.insert_str(":status");
+        app.attach_composer_image(&mut editor, image.clone());
+        // Control commands do not consume images that were not submitted.
+        let ticket = ControlTicket {
+            binding: ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow,
+            },
+            request_id: Uuid::now_v7(),
+        };
+        let pending = |editor: &InputEditor, images| PendingSubmission {
+            ticket: ticket.clone(),
+            draft: editor.prepare_submission(),
+            quote: None,
+            images,
+        };
+        app.pending_submission = Some(pending(&editor, vec![]));
+        app.submission_result(&mut editor, Some(&ticket), Ok(()));
+        assert!(!editor.buf().contains(":status"));
+        assert_eq!(editor.pending_images()[0].source, image);
+        assert_eq!(app.attach_count, 1);
+        assert_eq!(session.pending_image_count(), 0);
+        app.pending_submission = Some(pending(&editor, vec![image.clone()]));
+        app.submission_result(&mut editor, Some(&ticket), Err("disk full".into()));
+        assert_eq!(editor.pending_images().len(), 1);
+        app.pending_submission = Some(pending(&editor, vec![image.clone()]));
+        editor.insert_str("new draft");
+        app.submission_result(&mut editor, Some(&ticket), Ok(()));
+        assert!(editor.buf().contains("new draft"));
+        assert_eq!(editor.pending_images().len(), 1);
+        app.pending_submission = Some(pending(&editor, vec![image]));
+        app.submission_result(&mut editor, Some(&ticket), Ok(()));
+        assert!(editor.buf().is_empty());
+        assert!(editor.pending_images().is_empty());
+        assert_eq!(app.attach_count, 0);
+    }
 
     #[test]
     fn native_input_ack_preserves_ownership_and_newer_drafts() {
