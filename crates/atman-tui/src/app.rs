@@ -1025,10 +1025,14 @@ impl AppState {
     pub fn input_reasoning_choices(
         &self,
     ) -> Vec<Option<atman_runtime::provider::ReasoningSelection>> {
-        if atman_runtime::model_registry::model_info("smart").context_budget == 0 {
+        let Some(models) = self.model_registry() else {
+            return vec![None];
+        };
+        if models.model_info("smart").context_budget == 0 {
             return vec![None];
         }
-        let mut choices = atman_runtime::model_registry::reasoning_selections_for_model("smart")
+        let mut choices = models
+            .reasoning_selections_for_model("smart")
             .into_iter()
             .map(|selection| {
                 (!matches!(
@@ -1069,14 +1073,14 @@ impl AppState {
     }
 
     fn resolve_input_reasoning(&self) -> InputReasoningResolution {
-        let info = atman_runtime::model_registry::model_info("smart");
+        let Some(models) = self.model_registry() else {
+            return InputReasoningResolution::ModelUnavailable;
+        };
+        let info = models.model_info("smart");
         if info.context_budget == 0 {
             return InputReasoningResolution::ModelUnavailable;
         }
-        match atman_runtime::model_registry::effective_reasoning_for_model(
-            "smart",
-            self.input_reasoning.as_ref(),
-        ) {
+        match models.effective_reasoning_for_model("smart", self.input_reasoning.as_ref()) {
             Ok(selection) => InputReasoningResolution::Resolved(selection),
             Err(_) => InputReasoningResolution::Invalid(
                 self.input_reasoning.clone().unwrap_or(info.reasoning),
@@ -1099,29 +1103,40 @@ impl AppState {
         let Some(selection) = self.input_reasoning.clone() else {
             return false;
         };
-        if atman_runtime::model_registry::reasoning_selection_uses_legacy_capabilities(
-            "smart", &selection,
-        ) {
+        let Some(models) = self.model_registry() else {
+            return false;
+        };
+        if models.reasoning_selection_uses_legacy_capabilities("smart", &selection) {
             return false;
         }
-        let info = atman_runtime::model_registry::model_info("smart");
+        let info = models.model_info("smart");
         if info.context_budget == 0 {
             return false;
         }
-        let error =
-            atman_runtime::model_registry::resolve_reasoning_for_model("smart", &selection).err();
+        let error = models
+            .resolve_reasoning_for_model("smart", &selection)
+            .err();
         let Some(error) = error else {
             return false;
         };
         self.input_reasoning = None;
-        self.push_note(
+        self.push_toast(
             format!(
                 "input reasoning `{selection}` reset to model default for `{}`: {error}",
                 info.name
             ),
             NoteLevel::Warn,
+            std::time::Duration::from_secs(6),
+            ToastPosition::TopRight,
         );
         true
+    }
+
+    fn model_registry(&self) -> Option<&atman_runtime::model_registry::ModelRegistry> {
+        match self.session.as_ref() {
+            Some(session) => session.model_registry().map(std::sync::Arc::as_ref),
+            None => Some(atman_runtime::model_registry::default_registry()),
+        }
     }
 
     pub fn toggle_mouse_capture(&mut self) -> bool {
@@ -5753,13 +5768,117 @@ mod tests {
 
         assert!(app.reconcile_input_reasoning());
         assert_eq!(app.input_reasoning, None);
-        assert!(matches!(
-            app.items.last(),
-            Some(OutputItem::SystemNote {
-                level: NoteLevel::Warn,
-                ..
-            })
-        ));
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| toast.level == NoteLevel::Warn)
+        );
+    }
+
+    #[test]
+    fn input_reasoning_uses_the_bound_flow_catalog_without_editing_history() {
+        use atman_runtime::flow_store::{FlowInstanceId, FlowRef};
+        use atman_runtime::model_registry::{
+            AliasEntry, ModelEntry, ModelRegistry, ProviderConfig, ProviderEntry,
+        };
+        use atman_runtime::provider::{ReasoningEffort, ReasoningSelection};
+        use std::sync::Arc;
+
+        let config = |effort: ReasoningEffort| ProviderConfig {
+            providers: [(
+                "gateway".into(),
+                ProviderEntry {
+                    kind: "openai".into(),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            models: [(
+                "primary".into(),
+                ModelEntry {
+                    model: "vendor/model".into(),
+                    provider: Some("gateway".into()),
+                    context_budget: Some(128_000),
+                    reasoning: Some(effort.to_string()),
+                    reasoning_efforts: vec![effort.clone()],
+                    default_reasoning_effort: Some(effort),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            aliases: [(
+                "smart".into(),
+                AliasEntry {
+                    model: "primary".into(),
+                },
+            )]
+            .into(),
+        };
+        let selection = |effort| ReasoningSelection::Effort {
+            effort,
+            execution_mode: None,
+        };
+        let low = selection(ReasoningEffort::Low);
+        let high = selection(ReasoningEffort::High);
+        let mut views = Vec::new();
+        let mut models = Vec::new();
+        for effort in [ReasoningEffort::Low, ReasoningEffort::High] {
+            let session = Arc::new(atman_runtime::Session::open_instance_context(FlowRef {
+                session_id: uuid::Uuid::now_v7().into(),
+                instance_id: FlowInstanceId::now(),
+            }));
+            let app = AppState::new("scoped".into(), None).with_session(Some(session.clone()));
+            assert_eq!(app.input_reasoning_choices(), vec![None]);
+            assert_eq!(app.effective_input_reasoning_badge(), None);
+            let registry = Arc::new(ModelRegistry::new());
+            registry.replace_config(config(effort)).unwrap();
+            session.bind_model_registry(registry.clone()).unwrap();
+            views.push(app);
+            models.push(registry);
+        }
+        assert!(
+            views[0]
+                .input_reasoning_choices()
+                .contains(&Some(low.clone()))
+        );
+        assert!(
+            !views[0]
+                .input_reasoning_choices()
+                .contains(&Some(high.clone()))
+        );
+        assert!(
+            views[1]
+                .input_reasoning_choices()
+                .contains(&Some(high.clone()))
+        );
+        assert_eq!(views[0].input_reasoning_for_submission(), Some(low.clone()));
+        assert_eq!(
+            views[1].input_reasoning_for_submission(),
+            Some(high.clone())
+        );
+        assert_eq!(
+            views[0].effective_input_reasoning_badge(),
+            Some(low.to_string())
+        );
+        views[0].input_reasoning = Some(high.clone());
+        views[1].input_reasoning = Some(high.clone());
+        let revision = views[0].items.structure_revision();
+        assert!(views[0].reconcile_input_reasoning());
+        assert_eq!(views[0].items.structure_revision(), revision);
+        assert!(!views[1].reconcile_input_reasoning());
+        assert_eq!(views[1].input_reasoning, Some(high));
+        models[0]
+            .replace_config(config(ReasoningEffort::High))
+            .unwrap();
+        assert!(
+            views[0]
+                .input_reasoning_choices()
+                .contains(&views[1].input_reasoning)
+        );
+        assert_eq!(
+            views[0].input_reasoning_for_submission(),
+            views[1].input_reasoning_for_submission()
+        );
     }
 
     #[test]

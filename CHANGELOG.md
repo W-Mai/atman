@@ -221,6 +221,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Flow reasoning settings** — Resolve composer choices, displayed effort, and submission values from the bound flow's model directory. Invalid selections report a local notification without modifying committed history.
+
 - **Viewport shadows** — Clip window shadows to the drawing surface, including surfaces with a nonzero origin and empty viewports, to prevent out-of-bounds rendering.
 
 - **Flow-owned forms** — Persistent views show only forms addressed to their flow. Submissions validate the original answer destination, and reconnecting a view preserves expired forms awaiting a late reply.
