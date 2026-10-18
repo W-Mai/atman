@@ -71,6 +71,7 @@ impl Attachment {
                     let (replies, result): (ControlReplies, Result<Navigation>) = result?;
                     match result {
                         Ok(Navigation::Catalog(page)) => { let _ = replies.send(TuiCommand::FlowCatalog { result: Ok(page) }); }
+                        Ok(Navigation::Projects(command)) => { let _ = replies.send(*command); }
                         Ok(Navigation::Focus { flow, placement, handle, service }) => {
                             views.insert(service.binding.view_id, *service);
                             let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: Some(handle) });
@@ -89,6 +90,18 @@ impl Attachment {
                     let scope = view.scope.clone();
                     let Some(command) = view.panels.dispatch(command).await else { continue; };
                     let result = match command {
+                        TuiControl::Projects(request) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let command = crate::tui_projects::request(
+                                    scopes.root.clone(), scope.session.id().to_string(),
+                                    scope.descriptor.project.as_ref().map(|p| p.root().to_owned()),
+                                    scope.config.clone(), Some(&scopes.catalog), request,
+                                ).await;
+                                (replies, Ok(Navigation::Projects(Box::new(command))))
+                            });
+                            continue;
+                        }
                         TuiControl::NewSession => {
                             let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
                             navigation.spawn(async move {
@@ -407,6 +420,7 @@ struct ViewServices {
 }
 
 enum Navigation {
+    Projects(Box<TuiCommand>),
     Catalog(Box<atman_tui::flow_hub::FlowHubPage>),
     Focus {
         flow: atman_runtime::flow_store::FlowRef,
@@ -458,7 +472,7 @@ impl scopes::Scopes {
             handle.startup_card = Some(atman_tui::app::StartupCard {
                 version: env!("CARGO_PKG_VERSION").into(),
                 recent,
-                directory: atman_tui::app::StartupDirectory::Sessions,
+                directory: atman_tui::app::StartupDirectory::Projects,
             });
         }
         Ok(navigation)

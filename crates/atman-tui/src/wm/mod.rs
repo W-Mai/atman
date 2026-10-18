@@ -266,17 +266,8 @@ impl WindowManager {
         &mut self,
         canvas: Rect,
         projects: Vec<atman_runtime::project_catalog::ProjectRecord>,
-        session: Option<&atman_runtime::Session>,
-    ) {
-        self.open_project_hub_selected(canvas, projects, session, None);
-    }
-
-    pub fn open_project_hub_selected(
-        &mut self,
-        canvas: Rect,
-        projects: Vec<atman_runtime::project_catalog::ProjectRecord>,
-        session: Option<&atman_runtime::Session>,
-        selected_fingerprint: Option<&str>,
+        project_root: Option<&str>,
+        control_tx: Option<&crate::control::ControlSender>,
     ) {
         let id = self.open(
             "project-hub",
@@ -285,12 +276,18 @@ impl WindowManager {
             "Projects",
             canvas,
         );
-        if let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == id) {
+        if let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == id)
+            && panel.content.is_none()
+        {
             panel.content = Some(Box::new(
                 crate::window::project_panel::ProjectPanelContent::new_selected(
                     projects,
-                    session,
-                    selected_fingerprint,
+                    project_root.map(|root| {
+                        atman_runtime::session_meta::fingerprint_from_root(std::path::Path::new(
+                            root,
+                        ))
+                    }),
+                    None,
                 ),
             ));
         }
@@ -302,6 +299,44 @@ impl WindowManager {
         {
             self.toggle_maximize(id, canvas);
         }
+        self.request_projects(control_tx, None);
+    }
+
+    fn request_projects(
+        &mut self,
+        control_tx: Option<&crate::control::ControlSender>,
+        mutation: Option<crate::ProjectMutation>,
+    ) {
+        let Some(component) = self
+            .panels
+            .iter_mut()
+            .find(|p| p.content_kind == WindowContent::Projects)
+            .and_then(|p| p.content.as_mut())
+        else {
+            return;
+        };
+        let Some(id) = component.begin_project_request() else {
+            return;
+        };
+        if control_tx.is_none_or(|tx| {
+            tx.send(crate::TuiControl::Projects(
+                crate::project_hub::ProjectRequest { id, mutation },
+            ))
+            .is_err()
+        }) {
+            component.project_result(id, &Err("Project directory is unavailable".into()));
+        }
+    }
+
+    pub fn project_result(
+        &mut self,
+        request: uuid::Uuid,
+        result: &Result<crate::project_hub::ProjectDirectory, String>,
+    ) -> bool {
+        self.panels
+            .iter_mut()
+            .filter_map(|p| p.content.as_mut())
+            .any(|content| content.project_result(request, result))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -826,8 +861,12 @@ impl WindowManager {
             }
             PaletteEntryId::OpenProjectHub => {
                 let canvas = app.maximized_canvas();
-                let session = app.session.clone();
-                self.open_project_hub(canvas, app.projects.clone(), session.as_deref());
+                self.open_project_hub(
+                    canvas,
+                    app.projects.clone(),
+                    app.project_root.as_deref(),
+                    control_tx,
+                );
             }
             PaletteEntryId::OpenFlowHub => {
                 if let Some(binding) = control_tx.and_then(|tx| tx.binding()) {
@@ -1247,9 +1286,16 @@ impl WindowManager {
                     );
                 }
                 WmCommand::MutateProject(mutation) => {
-                    if let Some(tx) = control_tx {
-                        let _ = tx.send(crate::TuiControl::MutateProject(mutation));
-                    }
+                    self.request_projects(control_tx, Some(mutation));
+                }
+                WmCommand::RefreshProjects => self.request_projects(control_tx, None),
+                WmCommand::BrowseSession(session) => {
+                    app.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                        crate::flow_hub::HubRequest::Flows {
+                            session,
+                            before: None,
+                        },
+                    ));
                 }
             }
         }
@@ -1759,6 +1805,32 @@ mod tests {
         assert_eq!(wm.top_kind(), Some(ModalKind::McpEditor));
         assert_eq!(wm.modals.mcp_editor.name.buf(), "server");
         assert!(wm.modals.palette.input.buf().is_empty());
+    }
+
+    #[test]
+    fn project_directory_replies_cannot_reopen_closed_windows_or_replace_new_requests() {
+        let mut wm = WindowManager::default();
+        let (sender, mut requests) = crate::control::ControlSender::channel();
+        let canvas = Rect::new(0, 0, 130, 40);
+        wm.open_project_hub(canvas, vec![], None, Some(&sender));
+        let crate::TuiControl::Projects(first) = requests.try_recv().unwrap() else {
+            panic!("directory request expected");
+        };
+        let original = wm.panels[0].id;
+        wm.open_project_hub(canvas, vec![], None, Some(&sender));
+        assert!(requests.try_recv().is_err());
+        assert_eq!(wm.panels[0].id, original);
+        wm.close(original);
+        let data = Ok(crate::project_hub::ProjectDirectory::default());
+        assert!(!wm.project_result(first.id, &data));
+        assert!(wm.panels.is_empty());
+        wm.open_project_hub(canvas, vec![], None, Some(&sender));
+        let crate::TuiControl::Projects(second) = requests.try_recv().unwrap() else {
+            panic!("directory request expected");
+        };
+        assert_ne!(first.id, second.id);
+        assert!(!wm.project_result(first.id, &data));
+        assert!(wm.project_result(second.id, &data));
     }
 
     #[test]

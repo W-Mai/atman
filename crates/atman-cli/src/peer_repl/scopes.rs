@@ -26,7 +26,7 @@ pub(super) enum CreationMode {
 }
 
 pub(super) struct Scopes {
-    root: std::path::PathBuf,
+    pub(super) root: std::path::PathBuf,
     host: RuntimeHost,
     permissions: Option<Arc<PermissionClients>>,
     prompts: Arc<prompts::Prompts>,

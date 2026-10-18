@@ -1022,9 +1022,13 @@ pub(crate) fn handle_key(
             .last_full_rect
             .or(app.last_transcript_rect)
             .unwrap_or_default();
-        let session = app.session.clone();
-        app.wm
-            .open_project_hub(canvas, app.projects.clone(), session.as_deref());
+        let project_root = app.project_root.clone();
+        app.wm.open_project_hub(
+            canvas,
+            app.projects.clone(),
+            project_root.as_deref(),
+            control_tx,
+        );
         return;
     }
     let startup_recent_len = app

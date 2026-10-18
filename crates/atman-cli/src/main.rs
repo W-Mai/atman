@@ -23,6 +23,7 @@ mod session_catalog;
 mod suggest;
 mod sync;
 mod tui_panels;
+mod tui_projects;
 mod upgrade;
 
 #[derive(Parser, Debug)]
@@ -2483,26 +2484,28 @@ async fn cmd_repl_once(
                             let _ = idx.delete_events_for_session(&sid);
                         }
                     }
-                    atman_tui::TuiControl::MutateProject(mutation) => {
-                        let selected_fingerprint = mutation.fingerprint().to_owned();
-                        let active_project_fingerprint = session_for_ctrl
-                            .meta()
-                            .and_then(|meta| meta.project_fingerprint);
-                        let result = execute_project_mutation(
-                            &data_root_for_ctrl,
-                            active_project_fingerprint.as_deref(),
-                            &mutation,
-                        );
-                        let (success_message, result) = match result {
-                            Ok((projects, message)) => (message, Ok(projects)),
-                            Err(error) => (String::new(), Err(error.to_string())),
-                        };
-                        let _ =
-                            cmd_tx_for_models.send(atman_tui::TuiCommand::ProjectCatalogUpdated {
-                                selected_fingerprint,
-                                success_message,
-                                result,
-                            });
+                    atman_tui::TuiControl::Projects(request) => {
+                        let root = data_root_for_ctrl.clone();
+                        let current = session_for_ctrl.id().to_string();
+                        let project = session_for_ctrl.meta().and_then(|meta| meta.project_root);
+                        let config = atman_runtime::config_hub::ConfigHub::global();
+                        let commands = cmd_tx_for_models.clone();
+                        tokio::spawn(async move {
+                            let reply = match config {
+                                Ok(config) => {
+                                    tui_projects::request(
+                                        root, current, project, config, None, request,
+                                    )
+                                    .await
+                                }
+                                Err(error) => atman_tui::TuiCommand::ProjectCatalogUpdated {
+                                    request_id: request.id,
+                                    success_message: String::new(),
+                                    result: Err(error.to_string()),
+                                },
+                            };
+                            let _ = commands.send(reply);
+                        });
                     }
                     atman_tui::TuiControl::RenameSession { session_id, title } => {
                         let dir = data_root_for_ctrl.join("sessions").join(&session_id);

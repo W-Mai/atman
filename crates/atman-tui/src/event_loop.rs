@@ -289,6 +289,14 @@ pub(crate) async fn run_frames(
     let frame_bulk_tx = bulk_tx.clone();
 
     loop {
+        if std::mem::take(&mut app.app.startup_open_projects) {
+            app.wm.open_project_hub(
+                app.app.maximized_canvas(),
+                app.app.projects.clone(),
+                app.app.project_root.as_deref(),
+                handle.control_tx.as_ref(),
+            );
+        }
         if let Some(action) = app.app.open_flow_hub.take() {
             let mut opened = crate::flow_hub::FlowHub::default();
             if let Some(tx) = handle.control_tx.as_ref() {
@@ -496,18 +504,6 @@ pub(crate) async fn run_frames(
                                     handle.control_tx.as_ref(),
                                 )
                             {
-                                if std::mem::take(&mut app.app.startup_open_projects) {
-                                    let canvas = app
-                                        .app
-                                        .last_full_rect
-                                        .or(app.app.last_transcript_rect)
-                                        .unwrap_or_default();
-                                    app.wm.open_project_hub(
-                                        canvas,
-                                        app.app.projects.clone(),
-                                        app.app.session.as_deref(),
-                                    );
-                                }
                                 interrupt_prompt = None;
                                 break;
                             }
@@ -641,18 +637,6 @@ pub(crate) async fn run_frames(
                                     handle.control_tx.as_ref(),
                                 )
                             {
-                                if std::mem::take(&mut app.app.startup_open_projects) {
-                                    let canvas = app
-                                        .app
-                                        .last_full_rect
-                                        .or(app.app.last_transcript_rect)
-                                        .unwrap_or_default();
-                                    app.wm.open_project_hub(
-                                        canvas,
-                                        app.app.projects.clone(),
-                                        app.app.session.as_deref(),
-                                    );
-                                }
                                 interrupt_prompt = None;
                                 break;
                             }
@@ -1977,12 +1961,7 @@ fn apply_view_command(
                 app.wm.modals.session_switcher.open_with(rows, scope);
             }
         }
-        TuiCommand::OpenProjectHub => {
-            let canvas = app.app.maximized_canvas();
-            let session = app.app.session.clone();
-            app.wm
-                .open_project_hub(canvas, app.app.projects.clone(), session.as_deref());
-        }
+        TuiCommand::OpenProjectHub => app.app.startup_open_projects = true,
         TuiCommand::OpenProjectStorageScopePicker => {
             key_handler::open_project_storage_scope_picker(&mut app.app);
         }
@@ -2220,34 +2199,24 @@ fn apply_view_command(
             state.message = error;
         }
         TuiCommand::ProjectCatalogUpdated {
-            selected_fingerprint,
+            request_id,
             success_message,
             result,
-        } => match result {
-            Ok(projects) => {
-                app.app.projects = projects;
-                let canvas = app.app.maximized_canvas();
-                let session = app.app.session.clone();
-                app.wm.open_project_hub_selected(
-                    canvas,
-                    app.app.projects.clone(),
-                    session.as_deref(),
-                    Some(&selected_fingerprint),
-                );
-                app.app.push_toast(
-                    success_message,
-                    app::NoteLevel::Success,
-                    std::time::Duration::from_secs(3),
-                    app::ToastPosition::TopRight,
-                );
+        } => {
+            if app.wm.project_result(request_id, &result) {
+                if let Ok(directory) = result {
+                    app.app.projects = directory.projects;
+                }
+                if !success_message.is_empty() {
+                    app.app.push_toast(
+                        success_message,
+                        app::NoteLevel::Success,
+                        std::time::Duration::from_secs(3),
+                        app::ToastPosition::TopRight,
+                    );
+                }
             }
-            Err(error) => app.app.push_toast(
-                format!("Project update failed: {error}"),
-                app::NoteLevel::Error,
-                std::time::Duration::from_secs(5),
-                app::ToastPosition::TopRight,
-            ),
-        },
+        }
         TuiCommand::GoalSaved { request_id, result } => {
             app.wm.goal_saved(request_id, result);
         }

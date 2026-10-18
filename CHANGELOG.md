@@ -18,9 +18,11 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Project Hub navigation** — Load project directories asynchronously, refresh with keyboard or mouse, and retain selection after project actions. Persistent Session rows open their flow catalog without leaving the TUI. Late replies cannot reopen closed panels, and missing workspace paths remain browsable.
+
 - **Persistent project discovery** — Project catalog discovery includes persistent session bindings alongside legacy metadata while preserving pin and archive settings. Projects with missing source directories remain listed.
 
-- **Persistent welcome navigation** — New Session shows recent sessions from the same project, ordered by journal activity. Keyboard and mouse selection reuse existing flow views and preserve drafts; All Sessions opens the shared directory without stopping background work.
+- **Persistent welcome navigation** — New Session shows recent sessions from the same project, ordered by journal activity. Keyboard and mouse selection reuse existing flow views and preserve drafts; All Projects opens Project Hub without stopping background work.
 
 - **View attachment commands** — `:attach <path>`, `:attach list`, and `:attach clear` manage images in the requesting terminal or TUI view. File imports use the selected flow's workspace and storage; focus changes, failed inputs, and late acknowledgements preserve attachment ownership.
 

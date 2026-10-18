@@ -21,15 +21,7 @@ const PAGE_CONTROL_HEIGHT: u16 = 3;
 const WORKSPACE_MAX_WIDTH: u16 = 150;
 const INSPECTOR_WIDTH: u16 = 38;
 
-#[derive(Clone)]
-struct ProjectSession {
-    id: String,
-    title: String,
-    message_count: u64,
-    updated_at: String,
-    goal: Option<String>,
-    is_current: bool,
-}
+use crate::project_hub::{ProjectDirectory, ProjectSession, SessionTarget};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProjectView {
@@ -52,7 +44,12 @@ struct ProjectConfirmation {
 
 pub struct ProjectPanelContent {
     projects: Vec<ProjectRecord>,
+    pending: Option<uuid::Uuid>,
+    error: Option<String>,
+    refresh_rect: Option<Rect>,
+    refresh_hovered: bool,
     sessions: HashMap<String, Vec<ProjectSession>>,
+    details: HashMap<String, crate::project_hub::ProjectDetails>,
     current_project_fingerprint: Option<String>,
     selected: usize,
     hovered: Option<usize>,
@@ -79,13 +76,13 @@ pub struct ProjectPanelContent {
 }
 
 impl ProjectPanelContent {
-    pub fn new(projects: Vec<ProjectRecord>, session: Option<&atman_runtime::Session>) -> Self {
-        Self::new_selected(projects, session, None)
+    pub fn new(projects: Vec<ProjectRecord>, current_project_fingerprint: Option<String>) -> Self {
+        Self::new_selected(projects, current_project_fingerprint, None)
     }
 
     pub fn new_selected(
         projects: Vec<ProjectRecord>,
-        session: Option<&atman_runtime::Session>,
+        current_project_fingerprint: Option<String>,
         selected_fingerprint: Option<&str>,
     ) -> Self {
         let selected = selected_fingerprint
@@ -95,11 +92,13 @@ impl ProjectPanelContent {
                     .position(|project| project.fingerprint == fingerprint)
             })
             .unwrap_or_default();
-        let current_project_fingerprint = session
-            .and_then(atman_runtime::Session::meta)
-            .and_then(|meta| meta.project_fingerprint);
         Self {
-            sessions: discover_sessions(session),
+            sessions: HashMap::new(),
+            details: HashMap::new(),
+            pending: None,
+            error: None,
+            refresh_rect: None,
+            refresh_hovered: false,
             projects,
             current_project_fingerprint,
             selected,
@@ -175,6 +174,9 @@ impl ProjectPanelContent {
     }
 
     fn project_action(&mut self, action: ProjectAction) -> Vec<WmCommand> {
+        if self.pending.is_some() {
+            return Vec::new();
+        }
         let Some(project) = self.projects.get(self.selected).cloned() else {
             return Vec::new();
         };
@@ -312,23 +314,28 @@ impl ProjectPanelContent {
             };
             let marker = if selected { "▌ " } else { "  " };
             let marker_style = Style::default().fg(t.accent.into()).bg(bg);
-            let (dot, state, state_color): (&str, &str, ratatui::style::Color) =
-                if !project.path_available() {
-                    ("○", "MISSING PATH", t.warn.into())
-                } else if project.archived {
-                    ("○", "ARCHIVED", t.warn.into())
-                } else {
-                    ("●", "AVAILABLE", t.success.into())
-                };
+            let (dot, state, state_color): (&str, &str, ratatui::style::Color) = if !self
+                .details
+                .get(&project.fingerprint)
+                .is_some_and(|detail| detail.path_available)
+            {
+                ("○", "MISSING PATH", t.warn.into())
+            } else if project.archived {
+                ("○", "ARCHIVED", t.warn.into())
+            } else {
+                ("●", "AVAILABLE", t.success.into())
+            };
             let pin = if project.pinned { "PINNED" } else { "" };
             let project_sessions = self.sessions.get(&project.fingerprint);
             let session_count = project_sessions.map_or(0, Vec::len);
-            let scope = match atman_runtime::storage::load_storage_config(Some(&project.root))
-                .scope
-                .unwrap_or_default()
+            let scope = match self
+                .details
+                .get(&project.fingerprint)
+                .and_then(|detail| detail.scope)
             {
-                atman_runtime::storage::StorageScope::Global => "GLOBAL",
-                atman_runtime::storage::StorageScope::Local => "LOCAL",
+                Some(atman_runtime::storage::StorageScope::Global) => "GLOBAL",
+                Some(atman_runtime::storage::StorageScope::Local) => "LOCAL",
+                None => "UNKNOWN",
             };
             let summary = project_sessions
                 .and_then(|sessions| sessions.first())
@@ -442,7 +449,11 @@ impl ProjectPanelContent {
                 Line::from(Span::styled(
                     format!(
                         "{}  ·  {} sessions  ·  last opened {}",
-                        if project.path_available() {
+                        if self
+                            .details
+                            .get(&project.fingerprint)
+                            .is_some_and(|detail| detail.path_available)
+                        {
                             "● AVAILABLE"
                         } else {
                             "○ MISSING PATH"
@@ -531,10 +542,7 @@ impl ProjectPanelContent {
             let goal = row.goal.as_deref().unwrap_or("No goal saved");
             let inner_width = area.width.saturating_sub(4) as usize;
             let meta = crate::width::truncate(
-                &format!(
-                    "{} messages  ·  {}  ·  {}",
-                    row.message_count, row.updated_at, goal
-                ),
+                &format!("{}  ·  {}  ·  {}", row.activity, row.updated_at, goal),
                 inner_width,
             );
             frame.render_widget(
@@ -566,7 +574,7 @@ impl ProjectPanelContent {
         }
     }
 
-    fn render_header(&self, area: Rect, frame: &mut Frame) {
+    fn render_header(&mut self, area: Rect, frame: &mut Frame) {
         let t = crate::theme::theme();
         let (eyebrow, title, subtitle) = match self.view {
             ProjectView::Grid => (
@@ -587,6 +595,21 @@ impl ProjectPanelContent {
                 )
             }
         };
+        let subtitle = self.error.clone().unwrap_or_else(|| {
+            if self.pending.is_some() {
+                "Loading project directory…".into()
+            } else {
+                subtitle
+            }
+        });
+        let refresh = Rect::new(
+            area.right().saturating_sub(15),
+            area.y,
+            15.min(area.width),
+            3.min(area.height),
+        );
+        self.refresh_rect = Some(refresh);
+        let text_area = Rect::new(area.x, area.y, area.width.saturating_sub(16), area.height);
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
@@ -610,7 +633,15 @@ impl ProjectPanelContent {
                     .border_style(Style::default().fg(t.border.into()))
                     .padding(ratatui::widgets::Padding::horizontal(1)),
             ),
-            area,
+            text_area,
+        );
+        render_page_control(
+            frame,
+            refresh,
+            "Refresh  R",
+            self.pending.is_none(),
+            self.refresh_hovered,
+            &t,
         );
     }
 
@@ -625,14 +656,20 @@ impl ProjectPanelContent {
             .map(Vec::as_slice)
             .unwrap_or_default();
         let recent = sessions.first();
-        let scope = match atman_runtime::storage::load_storage_config(Some(&project.root))
-            .scope
-            .unwrap_or_default()
+        let scope = match self
+            .details
+            .get(&project.fingerprint)
+            .and_then(|detail| detail.scope)
         {
-            atman_runtime::storage::StorageScope::Global => "GLOBAL",
-            atman_runtime::storage::StorageScope::Local => "LOCAL",
+            Some(atman_runtime::storage::StorageScope::Global) => "GLOBAL",
+            Some(atman_runtime::storage::StorageScope::Local) => "LOCAL",
+            None => "UNKNOWN",
         };
-        let state = if !project.path_available() {
+        let state = if !self
+            .details
+            .get(&project.fingerprint)
+            .is_some_and(|detail| detail.path_available)
+        {
             "○ MISSING PATH"
         } else if project.archived {
             "○ ARCHIVED"
@@ -889,14 +926,71 @@ impl ProjectPanelContent {
         let Some(session) = self.selected_sessions().get(self.session_selected) else {
             return Vec::new();
         };
-        vec![WmCommand::SwitchSession {
-            sid: session.id.clone(),
-            project_root: project.root.clone(),
-        }]
+        match &session.target {
+            SessionTarget::Legacy(id) => vec![WmCommand::SwitchSession {
+                sid: id.clone(),
+                project_root: project.root.clone(),
+            }],
+            SessionTarget::Persistent(id) => vec![WmCommand::BrowseSession(*id)],
+        }
     }
 }
 
 impl WindowComponent for ProjectPanelContent {
+    fn begin_project_request(&mut self) -> Option<uuid::Uuid> {
+        if self.pending.is_some() {
+            return None;
+        }
+        let id = uuid::Uuid::now_v7();
+        self.pending = Some(id);
+        self.error = None;
+        Some(id)
+    }
+
+    fn project_result(
+        &mut self,
+        request: uuid::Uuid,
+        result: &Result<ProjectDirectory, String>,
+    ) -> bool {
+        if self.pending != Some(request) {
+            return false;
+        }
+        self.pending = None;
+        match result {
+            Err(error) => self.error = Some(error.clone()),
+            Ok(directory) => {
+                let project = self
+                    .projects
+                    .get(self.selected)
+                    .map(|p| p.fingerprint.clone());
+                let session = self
+                    .selected_sessions()
+                    .get(self.session_selected)
+                    .map(|s| s.target.clone());
+                self.projects = directory.projects.clone();
+                self.sessions = directory.sessions.clone();
+                self.details = directory.details.clone();
+                self.selected = project
+                    .and_then(|id| self.projects.iter().position(|p| p.fingerprint == id))
+                    .unwrap_or(self.selected.min(self.projects.len().saturating_sub(1)));
+                self.page = self.selected / self.cards_per_page.max(1);
+                self.session_selected = session
+                    .and_then(|target| {
+                        self.selected_sessions()
+                            .iter()
+                            .position(|s| s.target == target)
+                    })
+                    .unwrap_or(
+                        self.session_selected
+                            .min(self.selected_sessions().len().saturating_sub(1)),
+                    );
+                self.confirmation = None;
+                self.error = None;
+            }
+        }
+        true
+    }
+
     fn render_content(
         &mut self,
         area: Rect,
@@ -945,6 +1039,18 @@ impl WindowComponent for ProjectPanelContent {
         );
         self.render_header(header, frame);
 
+        if let Some(error) = &self.error {
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "Could not refresh project directory\n\n{error}\n\nRefresh  R"
+                ))
+                .style(Style::default().fg(t.subtle_fg.into()))
+                .wrap(Wrap { trim: false }),
+                inset(main, 1, 1),
+            );
+            return Vec::new();
+        }
+
         let (board, inspector) = if main.width >= 96 {
             let inspector_width = INSPECTOR_WIDTH.min(main.width / 3);
             (
@@ -977,6 +1083,23 @@ impl WindowComponent for ProjectPanelContent {
     }
 
     fn handle_event(&mut self, event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
+        if let WmEvent::Mouse(mouse) = event {
+            self.refresh_hovered = self
+                .refresh_rect
+                .is_some_and(|r| contains(r, mouse.column, mouse.row));
+        }
+        let refresh = matches!(event, WmEvent::Key(KeyAction::Char('r' | 'R')))
+            || matches!(event, WmEvent::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.refresh_hovered);
+        if refresh {
+            return WmEventResult::Consumed(if self.pending.is_none() {
+                vec![WmCommand::RefreshProjects]
+            } else {
+                vec![]
+            });
+        }
+        if self.error.is_some() && !matches!(event, WmEvent::Key(KeyAction::Escape)) {
+            return WmEventResult::Consumed(vec![]);
+        }
         let mut commands = Vec::new();
         match (self.view, event) {
             (ProjectView::Grid, WmEvent::Key(KeyAction::CursorLeft)) => self.move_selection(-1),
@@ -1118,71 +1241,6 @@ impl WindowComponent for ProjectPanelContent {
     }
 }
 
-fn discover_sessions(
-    session: Option<&atman_runtime::Session>,
-) -> HashMap<String, Vec<ProjectSession>> {
-    let mut grouped: HashMap<String, Vec<ProjectSession>> = HashMap::new();
-    let Some(session) = session else {
-        return grouped;
-    };
-    let Some(sessions_root) = session.dir().parent() else {
-        return grouped;
-    };
-    let current_id = session.id().to_string();
-    let Ok(entries) = std::fs::read_dir(sessions_root) else {
-        return grouped;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(meta) = atman_runtime::session_meta::SessionMeta::load(&path) else {
-            continue;
-        };
-        let Some(fingerprint) = meta.project_fingerprint else {
-            continue;
-        };
-        let stats =
-            atman_runtime::session_meta::SessionStats::load_or_rebuild(&path).unwrap_or_default();
-        if stats.user_message_count == 0 {
-            continue;
-        }
-        let id = entry.file_name().to_string_lossy().to_string();
-        let updated_at = std::fs::metadata(path.join("events.jsonl"))
-            .and_then(|metadata| metadata.modified())
-            .or_else(|_| entry.metadata().and_then(|metadata| metadata.modified()))
-            .ok()
-            .map(|timestamp| {
-                let local: chrono::DateTime<chrono::Local> = timestamp.into();
-                local.format("%Y-%m-%d %H:%M").to_string()
-            })
-            .unwrap_or_else(|| "unknown".into());
-        let goal = atman_runtime::memory::goal::GoalStore::at(&path).get().ok();
-        grouped
-            .entry(fingerprint)
-            .or_default()
-            .push(ProjectSession {
-                title: meta
-                    .title
-                    .unwrap_or_else(|| format!("Session {}", &id[..id.len().min(8)])),
-                message_count: stats.message_count,
-                updated_at,
-                goal,
-                is_current: id == current_id,
-                id,
-            });
-    }
-    for sessions in grouped.values_mut() {
-        sessions.sort_by(|a, b| {
-            b.updated_at
-                .cmp(&a.updated_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-    }
-    grouped
-}
-
 fn hit_index(rects: &[(usize, Rect)], x: u16, y: u16) -> Option<usize> {
     rects
         .iter()
@@ -1310,6 +1368,79 @@ mod tests {
             WmEventResult::Consumed(commands) => commands,
             WmEventResult::Ignored => panic!("event was ignored"),
         }
+    }
+
+    #[test]
+    fn project_refresh_preserves_navigation_and_rejects_stale_replies() {
+        let target = uuid::Uuid::new_v4();
+        let mut panel = ProjectPanelContent::new((0..13).map(project).collect(), None);
+        panel.cards_per_page = 6;
+        panel.selected = 7;
+        panel.page = 1;
+        panel.view = ProjectView::Detail;
+        let row = ProjectSession {
+            target: SessionTarget::Persistent(target),
+            title: "Retained".into(),
+            activity: "2 flows".into(),
+            updated_at: "Now".into(),
+            goal: None,
+            is_current: false,
+        };
+        panel.sessions.insert("project-7".into(), vec![row.clone()]);
+        let request = panel.begin_project_request().unwrap();
+        assert!(panel.begin_project_request().is_none());
+        let mut directory = ProjectDirectory {
+            projects: panel.projects.clone(),
+            sessions: [("project-7".into(), vec![row])].into(),
+            ..Default::default()
+        };
+        directory.projects.swap(0, 7);
+        assert!(!panel.project_result(uuid::Uuid::new_v4(), &Ok(directory.clone())));
+        assert!(panel.project_result(request, &Ok(directory)));
+        assert_eq!(panel.selected, 0);
+        assert!(panel.view == ProjectView::Detail);
+        assert!(
+            matches!(panel.switch_selected_session().as_slice(), [WmCommand::BrowseSession(id)] if *id == target)
+        );
+        assert!(!panel.project_result(request, &Err("stale".into())));
+        let request = panel.begin_project_request().unwrap();
+        assert!(panel.project_result(request, &Err("retry this request".into())));
+        assert_eq!(panel.error.as_deref(), Some("retry this request"));
+        assert_eq!(panel.selected_sessions().len(), 1);
+    }
+
+    #[test]
+    fn project_refresh_has_matching_keyboard_and_mouse_actions() {
+        let mut panel = ProjectPanelContent::new(vec![project(0)], None);
+        let mut terminal = Terminal::new(TestBackend::new(80, 4)).unwrap();
+        terminal
+            .draw(|frame| panel.render_header(frame.area(), frame))
+            .unwrap();
+        let mut scroll = 0;
+        let mut h_scroll = 0;
+        let mut ctx = EventCtx {
+            scroll: &mut scroll,
+            h_scroll: &mut h_scroll,
+        };
+        let rect = panel.refresh_rect.unwrap();
+        for event in [
+            WmEvent::Key(KeyAction::Char('r')),
+            WmEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + 1,
+                row: rect.y + 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+        ] {
+            assert!(
+                matches!(panel.handle_event(&event, &mut ctx), WmEventResult::Consumed(commands) if matches!(commands.as_slice(), [WmCommand::RefreshProjects]))
+            );
+        }
+        panel.begin_project_request();
+        assert!(
+            matches!(panel.handle_event(&WmEvent::Key(KeyAction::Char('r')), &mut ctx), WmEventResult::Consumed(commands) if commands.is_empty())
+        );
+        assert!(panel.project_action(ProjectAction::Pin).is_empty());
     }
 
     #[test]
@@ -1448,9 +1579,9 @@ mod tests {
         panel.sessions.insert(
             "project-0".into(),
             vec![ProjectSession {
-                id: "session-0".into(),
+                target: SessionTarget::Legacy("session-0".into()),
                 title: "Stored session".into(),
-                message_count: 4,
+                activity: "4 messages".into(),
                 updated_at: "2026-09-15 18:00".into(),
                 goal: None,
                 is_current: false,
@@ -1502,9 +1633,9 @@ mod tests {
         panel.sessions.insert(
             "project-0".into(),
             vec![ProjectSession {
-                id: "session-0".into(),
+                target: SessionTarget::Legacy("session-0".into()),
                 title: "Selected session".into(),
-                message_count: 12,
+                activity: "12 messages".into(),
                 updated_at: "2026-09-15 16:20".into(),
                 goal: Some("Keep the project context".into()),
                 is_current: false,

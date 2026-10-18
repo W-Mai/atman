@@ -93,6 +93,41 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     .await
     .unwrap();
     let scopes = Arc::new(scopes::Scopes::new(dir.path(), initial));
+    let project_reply = crate::tui_projects::request(
+        dir.path().to_owned(),
+        ids[0].to_string(),
+        None,
+        ConfigHub::from_config_dir(dir.path().join("config-0")),
+        Some(&scopes.catalog),
+        atman_tui::project_hub::ProjectRequest {
+            id: Uuid::new_v4(),
+            mutation: None,
+        },
+    )
+    .await;
+    let TuiCommand::ProjectCatalogUpdated {
+        result: Ok(projects),
+        ..
+    } = project_reply
+    else {
+        panic!("project directory failed");
+    };
+    let fingerprint = atman_runtime::session_meta::fingerprint_from_root(&missing_project);
+    assert_eq!(projects.projects.len(), 1);
+    assert!(!projects.details[&fingerprint].path_available);
+    assert!(
+        matches!(projects.sessions[&fingerprint][0].target, atman_tui::project_hub::SessionTarget::Persistent(id) if id == ids[1])
+    );
+    assert!(
+        projects.sessions[&fingerprint][0]
+            .activity
+            .contains("Detached")
+    );
+    assert_eq!(
+        host.sessions(),
+        vec![ids[0]],
+        "project discovery cannot attach an executor"
+    );
     let directory = scopes
         .browse(HubRequest::Sessions { before: None })
         .await
@@ -461,7 +496,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     let welcome = handle.startup_card.as_ref().unwrap();
     assert!(matches!(
         welcome.directory,
-        atman_tui::app::StartupDirectory::Sessions
+        atman_tui::app::StartupDirectory::Projects
     ));
     assert_eq!(welcome.recent.len(), 1);
     assert!(

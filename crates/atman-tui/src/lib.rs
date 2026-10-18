@@ -32,6 +32,7 @@ pub mod model_browser;
 pub mod model_manager;
 pub mod model_picker;
 pub mod onboarding;
+pub mod project_hub;
 pub mod settings;
 mod settings_form;
 pub mod window;
@@ -174,7 +175,7 @@ pub enum TuiControl {
     NewSession,
     MoveSession,
     DeleteSession(String),
-    MutateProject(ProjectMutation),
+    Projects(project_hub::ProjectRequest),
     RenameSession {
         session_id: String,
         title: Option<String>,
@@ -368,9 +369,9 @@ pub enum TuiCommand {
     OrganizationApplied,
     OrganizationApplyFailed(String),
     ProjectCatalogUpdated {
-        selected_fingerprint: String,
+        request_id: uuid::Uuid,
         success_message: String,
-        result: Result<Vec<atman_runtime::project_catalog::ProjectRecord>, String>,
+        result: Result<project_hub::ProjectDirectory, String>,
     },
     QueueMutationRejected(String),
     GoalSaved {
