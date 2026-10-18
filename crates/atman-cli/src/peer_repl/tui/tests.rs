@@ -693,6 +693,98 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         |item| matches!(item, atman_tui::app::OutputItem::AssistantMd { md, .. } if md == "queued")
     ));
 
+    let image_path = dir.path().join("inline.png");
+    std::fs::write(&image_path, b"\x89PNG\r\n\x1a\n").unwrap();
+    let presentation = atman_runtime::user_input::UserInputPresentation {
+        prompt: format!("inspect\n  this @{}", image_path.display()),
+        quote: Some(atman_runtime::user_input::QuoteSnapshot {
+            text: "quoted @/not-an-attachment.png".into(),
+        }),
+    };
+    let content = UserContent {
+        text: presentation.model_text(),
+        images: vec![],
+        presentation: Some(presentation),
+    };
+    let payload = attachment
+        .user_payload(&worker, content, BTreeMap::new())
+        .await
+        .unwrap();
+    let InboxPayload::UserSubmission { content, .. } = &payload else {
+        panic!("missing input");
+    };
+    assert_eq!(
+        content.presentation.as_ref().unwrap().prompt,
+        "inspect\n  this"
+    );
+    assert_eq!(
+        content.text,
+        "> quoted @/not-an-attachment.png\n\ninspect\n  this"
+    );
+    assert_eq!(content.images.len(), 1);
+    let captured = content.images[0].clone();
+    assert!(
+        attachment
+            .user_payload(
+                &worker,
+                UserContent {
+                    text: "relative @./inline.png".into(),
+                    images: vec![],
+                    presentation: None
+                },
+                BTreeMap::new()
+            )
+            .await
+            .is_err()
+    );
+    attachment
+        .accept_payload(&worker, Uuid::now_v7(), payload, DeliveryMode::NextTurn)
+        .await
+        .unwrap();
+    std::fs::remove_file(image_path).unwrap();
+    attachment.host.wait_quiescent().await.unwrap();
+    assert_eq!(
+        atman_runtime::attachment_store::image_bytes(&captured).unwrap(),
+        b"\x89PNG\r\n\x1a\n"
+    );
+    let commands = attachment.config.config_dir().join("commands");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(
+        commands.join("quoted.at"),
+        "flow quoted(value: string) -> string { return final.answer(message: value) }",
+    )
+    .unwrap();
+    let presentation = atman_runtime::user_input::UserInputPresentation {
+        prompt: "/quoted authored".into(),
+        quote: Some(atman_runtime::user_input::QuoteSnapshot {
+            text: "/unrelated @/not-a-file.png".into(),
+        }),
+    };
+    let text = presentation.model_text();
+    let payload = attachment
+        .user_payload(
+            &worker,
+            UserContent {
+                text: text.clone(),
+                images: vec![],
+                presentation: Some(presentation),
+            },
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    let InboxPayload::Command {
+        arguments,
+        user: Some(user),
+        ..
+    } = payload
+    else {
+        panic!("quoted command not selected");
+    };
+    assert_eq!(arguments["value"], "authored");
+    assert_eq!(user.text, text);
+    assert!(user.images.is_empty());
+
     sender
         .send(TuiControl::GoalControl {
             request_id: Some(7),

@@ -12,6 +12,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Inline flow images** — Persistent terminal, main, and floating views import `@path` images into the selected flow before accepting input. Relative paths use the flow's workspace or project, accepted images survive removal of the original file, and quoted context does not select attachments or commands.
+
 - **Deferred session creation** — `atman session new` creates a persistent default flow and prints its session ID without starting providers, MCP servers, or model work. Attaching with `--continue` binds execution and runs any captured startup command once.
 
 - **Persistent session creation** — New Session in the command palette creates an independent session using the requesting view's project and configuration. Captured startup commands run once; configured text routes and slash commands enter the same durable inbox. Switching to the new view preserves existing drafts and execution state.

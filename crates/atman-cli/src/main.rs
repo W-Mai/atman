@@ -4484,7 +4484,8 @@ async fn run_turn_with_interjection(
         }
         (message.text_concat(), message.turn_id)
     } else {
-        let (text, inline_attachments) = extract_at_paths(raw_line);
+        let mut presentation = presentation;
+        let (text, inline_attachments) = extract_presented_at_paths(raw_line, &mut presentation);
         let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
         let user_msg = match build_user_message(
             &session,
@@ -4666,31 +4667,36 @@ fn consume_interjection_input(line: &str, session: &Session, reporter: &Reporter
     false
 }
 
+fn extract_presented_at_paths(
+    text: &str,
+    presentation: &mut Option<atman_runtime::user_input::UserInputPresentation>,
+) -> (String, Vec<std::path::PathBuf>) {
+    let prompt = presentation.as_ref().map_or(text, |value| &value.prompt);
+    let (prompt, paths) = extract_at_paths(prompt);
+    let text = match presentation.as_mut() {
+        Some(value) => {
+            value.prompt = prompt;
+            value.model_text()
+        }
+        None => prompt,
+    };
+    (text, paths)
+}
+
 fn extract_at_paths(line: &str) -> (String, Vec<std::path::PathBuf>) {
     let mut text = String::with_capacity(line.len());
     let mut attachments = Vec::new();
-    let mut first = true;
-    for tok in line.split_whitespace() {
-        if let Some(rest) = tok
-            .strip_prefix("@./")
-            .or_else(|| tok.strip_prefix("@../"))
-            .or_else(|| tok.strip_prefix("@/"))
-        {
-            let prefix = if tok.starts_with("@./") {
-                "./"
-            } else if tok.starts_with("@../") {
-                "../"
-            } else {
-                "/"
-            };
-            attachments.push(std::path::PathBuf::from(format!("{prefix}{rest}")));
+    for chunk in line.split_inclusive(char::is_whitespace) {
+        let token = chunk.trim_end();
+        if token.starts_with("@./") || token.starts_with("@../") || token.starts_with("@/") {
+            attachments.push(std::path::PathBuf::from(&token[1..]));
+            text.push_str(&chunk[token.len()..]);
         } else {
-            if !first {
-                text.push(' ');
-            }
-            text.push_str(tok);
-            first = false;
+            text.push_str(chunk);
         }
+    }
+    if !attachments.is_empty() {
+        text.truncate(text.trim_end().len());
     }
     (text, attachments)
 }
@@ -8800,6 +8806,24 @@ async fn test_provider_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_image_paths_preserve_unrelated_prompt_formatting() {
+        for text in [
+            "first\n  second\n",
+            "中文  spaces\tand @symbol",
+            "  /echo text",
+        ] {
+            assert_eq!(extract_at_paths(text), (text.to_owned(), vec![]));
+        }
+        assert_eq!(
+            extract_at_paths("first\n  second @./image.png\n  third @../other.png"),
+            (
+                "first\n  second \n  third".into(),
+                vec!["./image.png".into(), "../other.png".into()]
+            )
+        );
+    }
 
     #[tokio::test]
     async fn form_submission_acknowledges_settings_errors_without_removing_the_form() {

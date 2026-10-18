@@ -43,7 +43,12 @@ fn finish(mut child: std::process::Child) -> Output {
 }
 
 fn resume(root: &Path, id: uuid::Uuid, text: &str) -> String {
+    resume_from(root, root, id, text)
+}
+
+fn resume_from(root: &Path, cwd: &Path, id: uuid::Uuid, text: &str) -> String {
     let mut child = command(root)
+        .current_dir(cwd)
         .args(["--continue", &id.to_string()[..8]])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -123,6 +128,66 @@ fn create_session(root: &Path) -> uuid::Uuid {
         .trim()
         .parse()
         .unwrap()
+}
+
+#[test]
+fn terminal_captures_inline_images_in_the_selected_flow_before_acceptance() {
+    use atman_runtime::flow_store::{inbox::InboxPayload, view::AcceptedInput};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (sid, fid) = launch(
+        root,
+        "flow main(input: string) -> string { contract { invocation { user_message: input } } return final.answer(message: input) }",
+    );
+    let bytes = b"\x89PNG\r\n\x1a\n";
+    std::fs::write(root.join("sample.png"), bytes).unwrap();
+    let elsewhere = root.join("another-project");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::fs::write(
+        elsewhere.join("sample.png"),
+        [bytes.as_slice(), b"other"].concat(),
+    )
+    .unwrap();
+    let output = resume_from(root, &elsewhere, sid, ":pause\nlook @./sample.png\n");
+    assert!(output.contains("Input accepted"), "{output}");
+    let image = updates(root, sid, &fid)
+        .into_iter()
+        .find_map(|update| {
+            let FlowUpdate::InputAccepted(input) = update else {
+                return None;
+            };
+            let AcceptedInput::Envelope(envelope) = *input else {
+                return None;
+            };
+            let InboxPayload::UserSubmission { content, .. } = envelope.request.payload else {
+                return None;
+            };
+            assert_eq!(content.text, "look");
+            Some(content.images.into_iter().next().unwrap())
+        })
+        .unwrap();
+    let atman_runtime::message::ImageData::Artifact { path, .. } = &image.data else {
+        panic!("missing captured artifact");
+    };
+    assert!(
+        path.starts_with(
+            root.join("data/runtime-v1/sessions")
+                .join(sid.to_string())
+                .join("flows")
+                .join(fid.to_string())
+        )
+    );
+    std::fs::remove_file(root.join("sample.png")).unwrap();
+    assert_eq!(
+        atman_runtime::attachment_store::image_bytes(&image).unwrap(),
+        bytes
+    );
+    resume(root, sid, ":resume\n");
+    assert_eq!(answers(&updates(root, sid, &fid)), ["seed", "look"]);
+    let prior = updates(root, sid, &fid).len();
+    let output = resume(root, sid, "rejected @./missing.png\n");
+    assert!(output.contains("cannot read"), "{output}");
+    assert_eq!(updates(root, sid, &fid).len(), prior);
 }
 
 #[test]

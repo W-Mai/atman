@@ -127,20 +127,53 @@ impl Attachment {
     async fn user_payload(
         &self,
         worker: &FlowWorker,
-        content: UserContent,
+        mut content: UserContent,
         invocation: BTreeMap<String, serde_json::Value>,
     ) -> Result<InboxPayload> {
-        let command = if content.text.trim_start().starts_with('/') {
-            Some(content.text.clone())
-        } else if worker.launch_record().await?.is_some_and(|record| {
+        let record = worker.launch_record().await?;
+        // Only authored prompt text selects files or commands; quoted context remains data.
+        let (text, paths) =
+            crate::extract_presented_at_paths(&content.text, &mut content.presentation);
+        content.text = text;
+        if !paths.is_empty() {
+            let root = record
+                .as_ref()
+                .and_then(|record| record.input.workspace.as_ref())
+                .map(|workspace| workspace.binding.path.as_path())
+                .or_else(|| {
+                    self.descriptor
+                        .project
+                        .as_ref()
+                        .map(|project| project.root())
+                });
+            for path in paths {
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    root.context("relative image paths require a bound project or workspace")?
+                        .join(path)
+                };
+                content
+                    .images
+                    .push(worker.context().import_image_path(&path)?);
+            }
+        }
+        let prompt = content
+            .presentation
+            .as_ref()
+            .map_or(content.text.as_str(), |value| &value.prompt);
+        let command = if prompt.trim_start().starts_with('/') {
+            Some(prompt.to_owned())
+        } else if record.as_ref().is_some_and(|record| {
             record
                 .input
                 .execution
+                .as_ref()
                 .is_some_and(|binding| binding.user_routes)
         }) {
             Some(
                 atman_runtime::routing::RouteProgram::load(&self.config)?
-                    .resolve(content.text.trim())
+                    .resolve(prompt.trim())
                     .context("no route matched; configure routes.at or use /name args")?
                     .slash_call(),
             )
