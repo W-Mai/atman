@@ -254,6 +254,19 @@ async fn host_batches_finish_other_targets_after_the_controller_pauses_or_closes
         assert_eq!(target.state().await.unwrap().pauses().len(), 1);
         assert!(stale.state().await.unwrap().pauses().is_empty());
         if action == PeerControl::Pause {
+            let paused = source.state().await.unwrap();
+            assert!(
+                matches!(paused.state(), InstanceState::Open(InstanceActivity::Active(current)) if current.lease == active.lease)
+            );
+            assert_eq!(paused.pauses().len(), 1);
+            assert!(
+                source
+                    .completion(Some(active.lease.turn.clone()))
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "an applied pause must retain the invocation rather than wait for its completion"
+            );
             source
                 .control(
                     control_request(
