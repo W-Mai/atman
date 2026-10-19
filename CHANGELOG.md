@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- **Archived tool outputs** — History migration retains registered long tool results with their original output IDs. Archived transcripts provide read-only paging and search after the original session directory is removed, and incomplete or inconsistent source outputs prevent publication.
+
 - **Archived image retention** — History migration retains managed image contents with their original records. Images remain readable after the old session directory is removed; missing, damaged, or external managed attachments prevent publication of an incomplete archive.
 
 - **Concurrent watcher registration** — Creating or editing a Flow watcher accounts for source events already observed during admission. Earlier notifications stay intact, future events remain deliverable, and internal result routes retain their exact start position.

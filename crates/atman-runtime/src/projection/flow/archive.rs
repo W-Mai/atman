@@ -1,6 +1,6 @@
 //! Shared display projection for original legacy logs and imported immutable archives.
 
-use std::{fs::File, io, path::Path};
+use std::{collections::BTreeMap, fs::File, io, path::Path};
 
 use uuid::Uuid;
 
@@ -19,6 +19,7 @@ use crate::{
 
 pub struct ArchiveTranscript {
     pub entries: Vec<TranscriptEntry>,
+    pub outputs: crate::tools::tool_output::OutputStore,
     /// Records which cannot participate in typed replay, retained for inspection by source line.
     pub unparsed: Vec<LegacyHistoryRecord>,
 }
@@ -114,10 +115,19 @@ fn project_records(
     let mut projected = Vec::new();
     let mut unparsed = Vec::new();
     let mut ownership = FlowOwnership::default();
+    let mut outputs = BTreeMap::new();
     for record in records {
         let record = record?;
         let source = &record.source;
         let parsed = source.sequence.zip(record.project_event()?);
+        for (id, content) in &record.outputs {
+            if outputs
+                .insert(id.clone(), content.clone())
+                .is_some_and(|previous| previous != *content)
+            {
+                return Err(io::Error::other("conflicting retained output contents"));
+            }
+        }
         let Some((seq, mut event)) = parsed else {
             unparsed.push(record);
             continue;
@@ -142,6 +152,8 @@ fn project_records(
     }
     Ok(ArchiveTranscript {
         entries: project_transcript_records(&projected, &ownership),
+        outputs: crate::tools::tool_output::OutputStore::retained(outputs)
+            .map_err(io::Error::other)?,
         unparsed,
     })
 }

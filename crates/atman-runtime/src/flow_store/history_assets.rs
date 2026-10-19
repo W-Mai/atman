@@ -1,4 +1,4 @@
-//! Managed image retention without changing the original historical event bytes.
+//! Managed asset retention without changing the original historical event bytes.
 
 use std::{collections::BTreeSet, fs, io, io::Read, path::Path};
 
@@ -9,9 +9,31 @@ use crate::{
     attachment_store::{MAX_IMAGE_BYTES, image_bytes},
     event::Event,
     message::{ImageData, ImageSource, MessagePart},
+    tools::tool_output::{OutputStore, output_reference},
 };
 
 impl LegacyHistoryRecord {
+    pub(super) fn retain_outputs(&mut self, session_dir: &Path) -> io::Result<()> {
+        let Some(mut event) = self.project_event()? else {
+            return Ok(());
+        };
+        let store = OutputStore::at(session_dir);
+        visit_parts(&mut event, |part| {
+            if let MessagePart::ToolResult { content, .. } = part {
+                if let Some((id, full)) = store.retain_reference(content).map_err(invalid)? {
+                    if self
+                        .outputs
+                        .insert(id, full.clone())
+                        .is_some_and(|old| old != full)
+                    {
+                        return Err(invalid("registered output changed during import"));
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
     pub(super) fn retain_images(&mut self, session_dir: &Path) -> io::Result<()> {
         let Some(mut event) = self.project_event()? else {
             return Ok(());
@@ -51,8 +73,8 @@ impl LegacyHistoryRecord {
     pub(crate) fn project_event(&self) -> io::Result<Option<Event>> {
         let parsed = serde_json::from_slice::<Event>(&self.bytes()?);
         let Ok(mut event) = parsed else {
-            if !self.images.is_empty() {
-                return Err(invalid("unparsed history cannot own retained images"));
+            if !self.images.is_empty() || !self.outputs.is_empty() {
+                return Err(invalid("unparsed history cannot own retained assets"));
             }
             return Ok(None);
         };
@@ -70,6 +92,28 @@ impl LegacyHistoryRecord {
         if used.len() != self.images.len() {
             return Err(invalid(
                 "retained image is not referenced by its historical event",
+            ));
+        }
+        let outputs = OutputStore::retained(self.outputs.clone()).map_err(invalid)?;
+        let mut referenced = BTreeSet::new();
+        visit_parts(&mut event, |part| {
+            if let MessagePart::ToolResult { content, .. } = part {
+                if let Some((id, _)) = output_reference(content) {
+                    if self.outputs.contains_key(&id) {
+                        if !outputs.validates_reference(content) {
+                            return Err(invalid(
+                                "retained output does not match its historical reference",
+                            ));
+                        }
+                        referenced.insert(id);
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        if referenced.len() != self.outputs.len() {
+            return Err(invalid(
+                "retained output is not referenced by its historical event",
             ));
         }
         Ok(Some(event))
@@ -95,6 +139,18 @@ fn visit_images(
     event: &mut Event,
     mut visit: impl FnMut(&mut ImageSource) -> io::Result<()>,
 ) -> io::Result<()> {
+    visit_parts(event, |part| {
+        if let MessagePart::Image { source } = part {
+            visit(source)?;
+        }
+        Ok(())
+    })
+}
+
+fn visit_parts(
+    event: &mut Event,
+    mut visit: impl FnMut(&mut MessagePart) -> io::Result<()>,
+) -> io::Result<()> {
     let messages = match event {
         Event::UserMsg { message, .. }
         | Event::AssistantMsg { message, .. }
@@ -106,9 +162,7 @@ fn visit_images(
     };
     for message in messages {
         for part in &mut message.parts {
-            if let MessagePart::Image { source } = part {
-                visit(source)?;
-            }
+            visit(part)?;
         }
     }
     Ok(())

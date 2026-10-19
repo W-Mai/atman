@@ -11,6 +11,158 @@ use atman_runtime::flow_store::{
 use uuid::Uuid;
 
 #[test]
+fn archived_registered_outputs_keep_original_messages_and_full_read_access() {
+    use atman_runtime::{
+        event::{Event, EventEnvelope},
+        message::{Message, MessageOrigin, MessagePart, MessageRole},
+        tools::tool_output::{
+            OutputStore, ToolOutputBudget, truncate_tool_result_content_with_budget,
+        },
+    };
+    for variant in ["valid", "missing", "changed", "symlink"] {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("original");
+        std::fs::create_dir(&original).unwrap();
+        let full = "retained output line\n".repeat(300);
+        let outputs = OutputStore::at(&original);
+        let notice = truncate_tool_result_content_with_budget(
+            &full,
+            "test",
+            Some(&outputs),
+            ToolOutputBudget {
+                max_lines: 1,
+                max_bytes: 100,
+                max_line_bytes: 100,
+            },
+        );
+        let id = notice
+            .split_once("output_id=")
+            .unwrap()
+            .1
+            .split('.')
+            .next()
+            .unwrap();
+        let envelope = serde_json::json!({"content": "retained output line\n", "truncated": true, "total_lines": 300, "total_bytes": full.len(), "output_id": id, "next": {"mode":"bytes", "offset":21, "has_more":true}}).to_string();
+        let turn = atman_rt::TurnId::now();
+        let message = Message {
+            role: MessageRole::Tool,
+            turn_id: turn.clone(),
+            origin: MessageOrigin::default(),
+            parts: vec![
+                MessagePart::ToolResult {
+                    tool_use_id: "large-output".into(),
+                    content: notice.clone(),
+                    is_error: false,
+                },
+                MessagePart::ToolResult {
+                    tool_use_id: "read-file".into(),
+                    content: envelope.clone(),
+                    is_error: false,
+                },
+            ],
+        };
+        let event = EventEnvelope::new(
+            1,
+            Event::ToolResultMsg {
+                turn_id: turn,
+                flow_run_id: None,
+                message: message.clone(),
+            },
+        );
+        let raw = format!("{}\n", serde_json::to_string(&event).unwrap());
+        let source = original.join("events.jsonl");
+        std::fs::write(&source, &raw).unwrap();
+        let output_path = original.join("tool_outputs").join(format!("{id}.txt"));
+        match variant {
+            "missing" => std::fs::remove_dir_all(original.join("tool_outputs")).unwrap(),
+            "changed" => std::fs::write(&output_path, "changed").unwrap(),
+            "symlink" => {
+                #[cfg(unix)]
+                {
+                    let external = temp.path().join("external.txt");
+                    std::fs::rename(&output_path, &external).unwrap();
+                    std::os::unix::fs::symlink(external, &output_path).unwrap();
+                }
+                #[cfg(not(unix))]
+                continue;
+            }
+            _ => {}
+        }
+        let store = RuntimeStore::open(temp.path()).unwrap();
+        let id = Uuid::now_v7();
+        let result = store.archive_legacy(
+            &source,
+            Uuid::now_v7(),
+            SessionDescriptor {
+                id,
+                project: None,
+                configuration: Default::default(),
+                title: "Outputs".into(),
+            },
+            true,
+        );
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), raw);
+        if variant != "valid" {
+            assert!(result.is_err());
+            assert!(!store.root().join("sessions").join(id.to_string()).exists());
+            continue;
+        }
+        let receipt = result.unwrap();
+        std::fs::remove_dir_all(&original).unwrap();
+        let inspected = RuntimeStore::inspect_session(temp.path(), id).unwrap();
+        let view = inspected
+            .archived_view(&receipt.flows[0].instance)
+            .unwrap()
+            .unwrap();
+        let archive = view.transcript().archived_transcript().unwrap();
+        let atman_runtime::TranscriptEntry::Message {
+            message: restored, ..
+        } = &archive.entries[0]
+        else {
+            panic!("missing message")
+        };
+        assert_eq!(*restored, message);
+        assert_eq!(
+            archive.outputs.retained_content(&notice),
+            Some(full.as_str())
+        );
+        assert_eq!(
+            archive.outputs.retained_content(&envelope),
+            Some(full.as_str())
+        );
+        let output_id = notice
+            .split_once("output_id=")
+            .unwrap()
+            .1
+            .split('.')
+            .next()
+            .unwrap();
+        assert_eq!(
+            archive
+                .outputs
+                .read_lines(output_id, 299, 1, ToolOutputBudget::default())
+                .unwrap()
+                .content,
+            "retained output line\n"
+        );
+        assert_eq!(
+            archive
+                .outputs
+                .search(output_id, "retained", 0, 1)
+                .unwrap()
+                .total_matches,
+            300
+        );
+        assert!(
+            archive
+                .outputs
+                .register("readonly", "must not write")
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn migrated_images_survive_source_removal_and_reject_unowned_or_damaged_content() {
     use atman_runtime::{
         TranscriptEntry,

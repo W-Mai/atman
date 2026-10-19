@@ -1,6 +1,6 @@
 //! Offline, resumable publication of legacy history into the instance namespace.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::num::NonZeroUsize;
@@ -296,6 +296,7 @@ fn import_records(
         blank_lines: inspection.blank_lines,
         flows: Vec::new(),
     };
+    let mut retained_outputs = BTreeMap::new();
     for (owner, records) in groups {
         let instance =
             FlowInstanceId::new(stable_id("atman-legacy-flow", &(destination, &owner))?.into());
@@ -338,6 +339,13 @@ fn import_records(
                         .parent()
                         .ok_or_else(|| invalid("source has no session directory"))?,
                 )?;
+                retained.retain_outputs(
+                    inspection
+                        .source
+                        .path
+                        .parent()
+                        .ok_or_else(|| invalid("source has no session directory"))?,
+                )?;
                 output.push(retained);
             }
             flow.append_legacy_history(output)?;
@@ -352,6 +360,17 @@ fn import_records(
                     for record in batch {
                         if records.get(verified).copied() != Some(&record.source) {
                             return Err(invalid("retained history differs from the source map"));
+                        }
+                        for (id, content) in &record.outputs {
+                            let digest = Sha256::digest(content.as_bytes());
+                            if retained_outputs
+                                .insert(id.clone(), digest)
+                                .is_some_and(|old| old != digest)
+                            {
+                                return Err(invalid(
+                                    "registered output changed across retained history",
+                                ));
+                            }
                         }
                         verified += 1;
                     }

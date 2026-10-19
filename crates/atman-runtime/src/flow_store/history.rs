@@ -51,6 +51,9 @@ pub struct LegacyHistoryRecord {
     /// Managed image contents in base64, keyed by the original artifact content ID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub images: BTreeMap<String, String>,
+    /// Complete registered tool outputs referenced by this record.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub outputs: BTreeMap<String, String>,
 }
 
 impl LegacyHistoryRecord {
@@ -59,6 +62,7 @@ impl LegacyHistoryRecord {
             source,
             raw_base64: STANDARD.encode(bytes),
             images: BTreeMap::new(),
+            outputs: BTreeMap::new(),
         }
     }
 
@@ -87,7 +91,7 @@ impl HistoryProgress {
         for record in records {
             let source = &record.source;
             let bytes = record.bytes()?;
-            if !record.images.is_empty() {
+            if !record.images.is_empty() || !record.outputs.is_empty() {
                 record.project_event()?;
             }
             let end = source

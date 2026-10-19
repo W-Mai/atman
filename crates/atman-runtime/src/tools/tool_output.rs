@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use crate::error::RuntimeError;
 use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
@@ -9,6 +10,7 @@ use crate::value::Value;
 #[derive(Clone, Default)]
 pub struct OutputStore {
     session_dir: Option<Arc<PathBuf>>,
+    retained: Arc<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +43,70 @@ impl OutputStore {
     pub fn at(session_dir: impl Into<PathBuf>) -> Self {
         Self {
             session_dir: Some(Arc::new(session_dir.into())),
+            retained: Arc::default(),
         }
+    }
+
+    /// Immutable output contents carried by an archived transcript.
+    pub fn retained(contents: BTreeMap<String, String>) -> Result<Self, RuntimeError> {
+        if contents.keys().any(|id| !valid_output_id(id)) {
+            return Err(RuntimeError::ToolFailed(
+                "invalid retained output identity".into(),
+            ));
+        }
+        Ok(Self {
+            session_dir: None,
+            retained: Arc::new(contents),
+        })
+    }
+
+    pub fn has_retained_outputs(&self) -> bool {
+        !self.retained.is_empty()
+    }
+
+    /// Resolve a recorded truncation reference without changing its original message.
+    pub fn retained_content(&self, content: &str) -> Option<&str> {
+        let (id, _) = output_reference(content)?;
+        if !self.validates_reference(content) {
+            return None;
+        }
+        self.retained.get(&id).map(String::as_str)
+    }
+
+    pub(crate) fn validates_reference(&self, content: &str) -> bool {
+        is_live_pagination_notice(content, Some(self))
+            || is_live_pagination_envelope(content, Some(self))
+    }
+
+    pub(crate) fn retain_reference(
+        &self,
+        content: &str,
+    ) -> Result<Option<(String, String)>, RuntimeError> {
+        let Some((id, expected_bytes)) = output_reference(content) else {
+            return Ok(None);
+        };
+        let directory = output_dir(
+            self.session_dir
+                .as_deref()
+                .ok_or_else(|| RuntimeError::ToolFailed("missing output store".into()))?,
+        );
+        let path = directory.join(format!("{id}.txt"));
+        if !std::fs::symlink_metadata(&directory).is_ok_and(|meta| meta.is_dir())
+            || !std::fs::symlink_metadata(&path)
+                .is_ok_and(|meta| meta.is_file() && meta.len() == expected_bytes as u64)
+        {
+            return Err(RuntimeError::ToolFailed(
+                "retained output requires a regular registered file".into(),
+            ));
+        }
+        let full = self.read_registered(&id)?.into_owned();
+        let snapshot = Self::retained(BTreeMap::from([(id.clone(), full.clone())]))?;
+        if !snapshot.validates_reference(content) {
+            return Err(RuntimeError::ToolFailed(
+                "recorded output reference does not match its contents".into(),
+            ));
+        }
+        Ok(Some((id, full)))
     }
 
     pub fn register(&self, _label: &str, content: &str) -> Option<String> {
@@ -189,20 +254,21 @@ impl OutputStore {
         }
     }
 
-    fn read_registered(&self, output_id: &str) -> Result<String, RuntimeError> {
-        if !output_id.starts_with("out_")
-            || output_id.len() != 36
-            || !output_id[4..].chars().all(|c| c.is_ascii_hexdigit())
-        {
+    fn read_registered(&self, output_id: &str) -> Result<Cow<'_, str>, RuntimeError> {
+        if !valid_output_id(output_id) {
             return Err(RuntimeError::ToolFailed(
                 "output.read: unknown output_id".into(),
             ));
+        }
+        if let Some(content) = self.retained.get(output_id) {
+            return Ok(Cow::Borrowed(content));
         }
         let session_dir = self.session_dir.as_deref().ok_or_else(|| {
             RuntimeError::ToolFailed("output.read: no session output store available".into())
         })?;
         let path = output_dir(session_dir).join(format!("{output_id}.txt"));
         std::fs::read_to_string(path)
+            .map(Cow::Owned)
             .map_err(|_| RuntimeError::ToolFailed("output.read: unknown output_id".into()))
     }
 }
@@ -486,10 +552,7 @@ fn is_output_read_result(content: &str) -> bool {
             .is_some_and(serde_json::Value::is_u64)
 }
 
-fn is_live_pagination_notice(content: &str, output_store: Option<&OutputStore>) -> bool {
-    let Some(store) = output_store else {
-        return false;
-    };
+fn notice_reference(content: &str) -> Option<(String, usize)> {
     let notice = content
         .rsplit_once("\n\n[Output truncated at configured budget:")
         .map(|(_, notice)| notice)
@@ -498,28 +561,51 @@ fn is_live_pagination_notice(content: &str, output_store: Option<&OutputStore>) 
                 .rsplit_once("\n\n[Output truncated:")
                 .map(|(_, notice)| notice)
         });
-    let Some(notice) = notice else {
-        return false;
-    };
+    let notice = notice?;
     if !notice.ends_with("]") {
-        return false;
+        return None;
     }
-    let Some(total_bytes) = notice
+    let total_bytes = notice
         .split_once("total_bytes=")
         .and_then(|(_, value)| value.split([',', '.']).next())
-        .and_then(|value| value.trim().parse::<usize>().ok())
-    else {
-        return false;
-    };
-    let Some(output_id) = notice
+        .and_then(|value| value.trim().parse::<usize>().ok())?;
+    let output_id = notice
         .split_once("output_id=")
         .and_then(|(_, value)| value.split([',', '.']).next())
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+        .filter(|value| !value.is_empty())?;
+    valid_output_id(output_id).then(|| (output_id.to_owned(), total_bytes))
+}
+
+fn valid_output_id(id: &str) -> bool {
+    id.strip_prefix("out_").is_some_and(|suffix| {
+        suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+pub(crate) fn output_reference(content: &str) -> Option<(String, usize)> {
+    if let Some(reference) = notice_reference(content) {
+        return Some(reference);
+    }
+    let value: serde_json::Value = serde_json::from_str(content).ok()?;
+    let object = value.as_object()?;
+    object.get("content")?.as_str()?;
+    let next = object.get("next")?.as_object()?;
+    if !matches!(next.get("mode")?.as_str()?, "bytes" | "lines") {
+        return None;
+    }
+    next.get("offset")?.as_u64()?;
+    next.get("has_more")?.as_bool()?;
+    let id = object.get("output_id")?.as_str()?;
+    let bytes = usize::try_from(object.get("total_bytes")?.as_u64()?).ok()?;
+    valid_output_id(id).then(|| (id.to_owned(), bytes))
+}
+
+fn is_live_pagination_notice(content: &str, output_store: Option<&OutputStore>) -> bool {
+    let Some((id, bytes)) = notice_reference(content) else {
         return false;
     };
-    store.validates_total_bytes(output_id, total_bytes)
+    output_store.is_some_and(|store| store.validates_total_bytes(&id, bytes))
 }
 
 fn is_live_pagination_envelope(content: &str, output_store: Option<&OutputStore>) -> bool {
