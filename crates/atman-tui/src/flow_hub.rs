@@ -22,10 +22,15 @@ pub use create::WatchDefinition;
 mod inbox;
 mod page;
 mod watch;
+mod workspaces;
 pub use page::{
     FlowHubPage, HubRequest, RelationProgress, RelationRange, SessionDirectory, SessionRow,
 };
 pub use watch::WatchDirectory;
+pub use workspaces::{
+    WorkspaceCursor, WorkspaceDirectory, WorkspaceDirectoryEntry, WorkspaceFlowReference,
+    WorkspaceLocation, WorkspaceRecordPage,
+};
 
 #[derive(Clone)]
 pub(crate) enum Action {
@@ -503,6 +508,9 @@ impl FlowHub {
                 FlowHubPage::Relations { .. }
                     | FlowHubPage::Watchers(_)
                     | FlowHubPage::ProcessSources { .. }
+                    | FlowHubPage::Workspaces(_)
+                    | FlowHubPage::Workspace(_)
+                    | FlowHubPage::WorkspaceRecord(_)
             )
         ) {
             let step = self.hits.len().max(1);
@@ -578,6 +586,12 @@ impl FlowHub {
             return self.detail_action(action);
         }
         if key == KeyAction::Escape {
+            if matches!(
+                &self.page,
+                Some(FlowHubPage::WorkspaceRecord(_) | FlowHubPage::Workspace(_))
+            ) {
+                return Action::Return;
+            }
             if let Some(FlowHubPage::Relations { session, .. }) = self.page {
                 return Action::Load(HubRequest::Flows {
                     session,
@@ -902,7 +916,16 @@ impl FlowHub {
         let is_flows = matches!(self.page, Some(FlowHubPage::Flows { .. }));
         let is_relations = matches!(self.page, Some(FlowHubPage::Relations { .. }));
         let is_watchers = matches!(self.page, Some(FlowHubPage::Watchers(_)));
+        let is_workspaces = matches!(
+            self.page,
+            Some(
+                FlowHubPage::Workspaces(_)
+                    | FlowHubPage::Workspace(_)
+                    | FlowHubPage::WorkspaceRecord(_)
+            )
+        );
         let is_inbox = matches!(self.page, Some(FlowHubPage::Inbox(_)));
+        let is_workspace_record = matches!(self.page, Some(FlowHubPage::WorkspaceRecord(_)));
         let is_processes = matches!(self.page, Some(FlowHubPage::ProcessSources { .. }));
         let picking = self.create_watch.is_some();
         let scoped_links = matches!(
@@ -1041,7 +1064,7 @@ impl FlowHub {
                 4
             };
         frame.render_widget(
-            Paragraph::new(format!("Search {}: {}", if matches!(&self.page, Some(FlowHubPage::Watchers(directory)) if directory.global()) { "loaded records" } else { "this page" }, self.query)).style(muted),
+            Paragraph::new(format!("Search {}: {}", if is_workspaces || matches!(&self.page, Some(FlowHubPage::Watchers(directory)) if directory.global()) { "loaded records" } else { "this page" }, self.query)).style(muted),
             Rect::new(content.x, search_y, width, 1),
         );
         let rows_y = search_y + 2;
@@ -1063,6 +1086,14 @@ impl FlowHub {
                 &self.rows,
                 &rows,
                 self.selected,
+            )
+        } else if is_workspace_record {
+            workspaces::cards(
+                Rect::new(content.x, rows_y, width, footer.saturating_sub(rows_y + 1)),
+                &self.rows,
+                &rows,
+                self.selected,
+                &mut self.offset,
             )
         } else {
             rows.iter()
@@ -1105,8 +1136,9 @@ impl FlowHub {
             frame.render_widget(Paragraph::new("").style(Style::default().bg(bg)), rect);
             if selected {
                 frame.render_widget(
-                    Paragraph::new("▎\n▎\n▎\n▎").style(Style::default().fg(t.accent.into()).bg(bg)),
-                    Rect::new(rect.x, rect.y, 1, 4),
+                    Paragraph::new("▎\n".repeat(usize::from(rect.height)))
+                        .style(Style::default().fg(t.accent.into()).bg(bg)),
+                    Rect::new(rect.x, rect.y, 1, rect.height),
                 );
             }
             let title = if matches!(&row.action, Action::Focus(address) if address == focused) {
@@ -1114,40 +1146,65 @@ impl FlowHub {
             } else {
                 std::borrow::Cow::Borrowed(row.title.as_str())
             };
+            let label =
+                if picking && matches!(row.key, page::RowKey::Process(_) | page::RowKey::Flow(_)) {
+                    Some("\nSelect Enter")
+                } else if matches!(
+                    row.key,
+                    page::RowKey::Watcher { .. } | page::RowKey::Delivery { .. }
+                ) {
+                    Some("\nDetails Enter")
+                } else {
+                    match &row.action {
+                        Action::Focus(_) => Some("\nWindow Ctrl+O"),
+                        Action::Load(
+                            HubRequest::Workspace { .. } | HubRequest::WorkspaceRecord { .. },
+                        ) => Some("\nInspect Enter"),
+                        Action::Load(_) => Some("\nFlows  Enter"),
+                        _ => None,
+                    }
+                };
             frame.render_widget(
                 Paragraph::new(title).style(fg.bg(bg)),
-                Rect::new(rect.x + 2, rect.y + 1, width.saturating_sub(23), 1),
+                Rect::new(
+                    rect.x + 2,
+                    rect.y + 1,
+                    width.saturating_sub(if label.is_some() { 23 } else { 4 }),
+                    1,
+                ),
             );
-            let open = Rect::new(rect.right().saturating_sub(20), rect.y, 18, 3);
-            frame.render_widget(
-                Paragraph::new(if picking && matches!(row.action, Action::Focus(_)) {
-                    "\nSelect Enter"
-                } else if matches!(row.key, page::RowKey::WatchFailure { .. }) {
-                    "\nUnavailable"
-                } else if is_watchers || is_inbox {
-                    "\nDetails Enter"
-                } else if matches!(row.action, Action::Focus(_)) {
-                    "\nWindow Ctrl+O"
-                } else {
-                    "\nFlows  Enter"
-                })
-                .alignment(Alignment::Center)
-                .style(muted.bg(bg)),
-                open,
-            );
-            self.float_hits.push((open, pos));
+            if let Some(label) = label {
+                let open = Rect::new(rect.right().saturating_sub(20), rect.y, 18, 3);
+                frame.render_widget(
+                    Paragraph::new(label)
+                        .alignment(Alignment::Center)
+                        .style(muted.bg(bg)),
+                    open,
+                );
+                self.float_hits.push((open, pos));
+            }
             let detail = if graph_visible {
                 std::borrow::Cow::Owned(graph::compact_detail(row))
+            } else if is_workspace_record {
+                std::borrow::Cow::Owned(
+                    crate::width::word_wrap(&row.detail, usize::from(width.saturating_sub(4)))
+                        .join("\n"),
+                )
             } else {
                 std::borrow::Cow::Borrowed(row.detail.as_str())
             };
             frame.render_widget(
                 Paragraph::new(detail).style(muted.bg(bg)),
-                Rect::new(rect.x + 2, rect.y + 2, width.saturating_sub(4), 1),
+                Rect::new(
+                    rect.x + 2,
+                    rect.y + 2,
+                    width.saturating_sub(4),
+                    rect.height.saturating_sub(3),
+                ),
             );
             self.hits.push((rect, pos));
         }
-        let total = if is_relations || is_watchers || is_processes {
+        let total = if is_relations || is_watchers || is_processes || is_workspaces {
             self.rows.len()
         } else {
             self.page.as_ref().map_or(0, FlowHubPage::total)
@@ -1156,6 +1213,25 @@ impl FlowHub {
         let message = self.error.clone().unwrap_or_else(|| {
             if self.pending.is_some() {
                 "Loading…".into()
+            } else if is_workspace_record {
+                format!(
+                    "Item {} / {} · Resource snapshot",
+                    (self.selected + 1).min(rows.len()),
+                    rows.len()
+                )
+            } else if is_workspaces {
+                let more = self.page.as_ref().and_then(FlowHubPage::next).is_some();
+                format!(
+                    "Page {} / {} · {} matches · {}",
+                    self.selected / visible.max(1) + 1,
+                    rows.len().div_ceil(visible.max(1)).max(1),
+                    rows.len(),
+                    if more {
+                        "More sources PgDn"
+                    } else {
+                        "Snapshot"
+                    }
+                )
             } else if is_inbox {
                 let Some(FlowHubPage::Inbox(page)) = &self.page else {
                     unreachable!()
@@ -1249,7 +1325,7 @@ impl FlowHub {
         for (rect, label) in [
             (
                 self.previous,
-                if is_relations || is_watchers || is_processes {
+                if is_relations || is_watchers || is_processes || is_workspaces {
                     "\n‹ Earlier PgUp"
                 } else {
                     "\n‹ Previous  PgUp"
@@ -1257,7 +1333,7 @@ impl FlowHub {
             ),
             (
                 self.next,
-                if is_relations || is_watchers || is_processes {
+                if is_relations || is_watchers || is_processes || is_workspaces {
                     if self.page.as_ref().and_then(FlowHubPage::next).is_some() {
                         "\nMore PgDn ›"
                     } else {
@@ -1298,6 +1374,8 @@ impl FlowHub {
         frame.render_widget(
             Paragraph::new(if picking {
                 "↑↓ select · Enter choose · Ctrl+B sources · Esc back"
+            } else if is_workspaces {
+                "↑↓ select · Enter inspect / focus · Ctrl+O float · Esc back"
             } else if is_inbox {
                 "↑↓ select · Enter details · Tab side · Esc back"
             } else if is_watchers {

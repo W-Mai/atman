@@ -801,6 +801,7 @@ impl WindowManager {
                     | PaletteEntryId::OpenFlowLinks
                     | PaletteEntryId::OpenWatchHub
                     | PaletteEntryId::OpenInbox
+                    | PaletteEntryId::OpenWorktrees
                     | PaletteEntryId::ToggleActivity
                     | PaletteEntryId::OpenManagement
                     | PaletteEntryId::SwitchSession
@@ -895,6 +896,18 @@ impl WindowManager {
                     app.project_root.as_deref(),
                     control_tx,
                 );
+            }
+            PaletteEntryId::OpenWorktrees => {
+                if control_tx.and_then(|tx| tx.binding()).is_some() {
+                    app.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                        crate::flow_hub::HubRequest::Workspaces { after: None },
+                    ));
+                } else {
+                    app.push_note(
+                        "Worktrees requires a persistent session",
+                        crate::app::NoteLevel::Info,
+                    );
+                }
             }
             PaletteEntryId::OpenFlowHub => {
                 if let Some(binding) = control_tx.and_then(|tx| tx.binding()) {
@@ -1727,6 +1740,26 @@ mod tests {
                 matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Watchers { owner })) if owner == flow)
             );
             assert!(incoming.try_recv().is_err());
+            assert!(wm.dispatch_meta_command(":inbox", &mut app, Some(&tx)));
+            app.open_flow_hub.take();
+            assert!(wm.dispatch_meta_command(":worktrees", &mut app, Some(&tx)));
+            assert!(matches!(
+                app.open_flow_hub.take(),
+                Some(crate::flow_hub::Action::Load(
+                    crate::flow_hub::HubRequest::Workspaces { after: None }
+                ))
+            ));
+            wm.apply_palette_action(
+                crate::palette::PaletteEntryId::OpenWorktrees,
+                &mut app,
+                Some(&tx),
+            );
+            assert!(matches!(
+                app.open_flow_hub.take(),
+                Some(crate::flow_hub::Action::Load(
+                    crate::flow_hub::HubRequest::Workspaces { after: None }
+                ))
+            ));
             assert!(wm.dispatch_meta_command(":inbox", &mut app, Some(&tx)));
             assert!(
                 matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Inbox { owner, .. })) if owner == flow)

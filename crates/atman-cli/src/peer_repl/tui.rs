@@ -2,6 +2,7 @@
 
 use super::*;
 mod directory;
+mod workspaces;
 use atman_tui::{
     TuiCommand, TuiControl, TuiHandle, TuiSubmission,
     control::{BoundControl, ControlReplies, ViewAddress, ViewBinding},
@@ -775,6 +776,24 @@ impl scopes::Scopes {
             FlowHubPage, HubRequest, PAGE_SIZE, RelationProgress, RelationRange,
         };
         Ok(Box::new(match request {
+            HubRequest::Workspaces { after } => FlowHubPage::Workspaces(
+                workspaces::directory(&self.catalog, self.root.clone(), after).await?,
+            ),
+            HubRequest::Workspace { location } => {
+                FlowHubPage::Workspace(workspaces::inspect(location).await?)
+            }
+            HubRequest::WorkspaceRecord { location, id } => {
+                let snapshot = workspaces::inspect(location.clone()).await?;
+                let workspace = snapshot
+                    .workspaces
+                    .into_iter()
+                    .find(|workspace| workspace.record.id == id)
+                    .context("Workspace is no longer registered; refresh the project directory")?;
+                FlowHubPage::WorkspaceRecord(Box::new(atman_tui::flow_hub::WorkspaceRecordPage {
+                    location,
+                    workspace,
+                }))
+            }
             HubRequest::Inbox {
                 owner,
                 side,

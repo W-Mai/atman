@@ -200,6 +200,12 @@ pub const META_COMMANDS: &[MetaCommand] = &[
         aliases: &[],
     },
     MetaCommand {
+        name: "worktrees",
+        desc: "browse project worktrees and Flow references",
+        usage: ":worktrees",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "inbox",
         desc: "inspect the focused flow's received and sent messages",
         usage: ":inbox",

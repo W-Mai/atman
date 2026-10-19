@@ -68,6 +68,16 @@ pub struct RelationProgress {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
+    Workspaces {
+        after: Option<super::WorkspaceCursor>,
+    },
+    Workspace {
+        location: super::WorkspaceLocation,
+    },
+    WorkspaceRecord {
+        location: super::WorkspaceLocation,
+        id: String,
+    },
     Inbox {
         owner: atman_runtime::flow_store::FlowRef,
         side: atman_runtime::flow_store::inbox_view::InboxSide,
@@ -104,6 +114,8 @@ pub enum HubRequest {
 impl HubRequest {
     pub(super) fn first(&self) -> Self {
         match self {
+            Self::Workspaces { .. } => Self::Workspaces { after: None },
+            Self::Workspace { .. } | Self::WorkspaceRecord { .. } => self.clone(),
             Self::Inbox { owner, side, .. } => Self::Inbox {
                 owner: owner.clone(),
                 side: *side,
@@ -140,6 +152,9 @@ impl HubRequest {
 }
 
 pub enum FlowHubPage {
+    Workspaces(super::WorkspaceDirectory),
+    Workspace(atman_runtime::git_workspace::WorkspaceSnapshot),
+    WorkspaceRecord(Box<super::WorkspaceRecordPage>),
     Inbox(atman_runtime::flow_store::inbox_view::InboxHistoryPage),
     ProcessSources {
         owner: atman_runtime::flow_store::FlowRef,
@@ -206,6 +221,13 @@ impl Endpoint {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum RowKey {
+    WorkspaceLocation(super::WorkspaceLocation),
+    Workspace {
+        location: super::WorkspaceLocation,
+        id: String,
+    },
+    WorkspaceField(&'static str),
+    WorkspaceError(String),
     Delivery {
         owner: atman_runtime::flow_store::FlowRef,
         side: atman_runtime::flow_store::inbox_view::InboxSide,
@@ -233,6 +255,12 @@ pub(super) enum RowKey {
 impl FlowHubPage {
     /// Append only the next requested catalog batch; refresh replaces the snapshot.
     pub(super) fn append_catalog(&mut self, previous: Option<&mut Self>) -> Result<(), String> {
+        if let Self::Workspaces(directory) = self {
+            return directory.append(match previous {
+                Some(Self::Workspaces(old)) => Some(old),
+                _ => None,
+            });
+        }
         if let Self::Watchers(directory) = self {
             return directory.append(match previous {
                 Some(Self::Watchers(old)) => Some(old),
@@ -278,6 +306,13 @@ impl FlowHubPage {
 
     pub fn title(&self) -> &str {
         match self {
+            Self::Workspaces(_) => "Worktrees",
+            Self::Workspace(snapshot) => snapshot
+                .repository_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Project worktrees"),
+            Self::WorkspaceRecord(page) => &page.workspace.record.id,
             Self::Inbox(page) => match page.side {
                 atman_runtime::flow_store::inbox_view::InboxSide::Received => "Inbox / Received",
                 atman_runtime::flow_store::inbox_view::InboxSide::Sent => "Inbox / Sent",
@@ -292,6 +327,9 @@ impl FlowHubPage {
     }
     pub fn unit(&self) -> &str {
         match self {
+            Self::Workspaces(_) => "sources",
+            Self::Workspace(_) => "worktrees",
+            Self::WorkspaceRecord(_) => "details",
             Self::Inbox(_) => "deliveries",
             Self::ProcessSources { .. } => "processes",
             Self::Watchers(_) => "subscriptions",
@@ -302,6 +340,14 @@ impl FlowHubPage {
     }
     pub fn first(&self) -> HubRequest {
         match self {
+            Self::Workspaces(_) => HubRequest::Workspaces { after: None },
+            Self::Workspace(snapshot) => HubRequest::Workspace {
+                location: super::workspaces::location(snapshot),
+            },
+            Self::WorkspaceRecord(page) => HubRequest::WorkspaceRecord {
+                location: page.location.clone(),
+                id: page.workspace.record.id.clone(),
+            },
             Self::Inbox(page) => HubRequest::Inbox {
                 owner: page.owner.clone(),
                 side: page.side,
@@ -335,6 +381,11 @@ impl FlowHubPage {
     }
     pub fn next(&self) -> Option<HubRequest> {
         match self {
+            Self::Workspaces(directory) => directory
+                .next
+                .clone()
+                .map(|after| HubRequest::Workspaces { after: Some(after) }),
+            Self::Workspace(_) | Self::WorkspaceRecord(_) => None,
             Self::Inbox(page) => page.next.clone().map(|before| HubRequest::Inbox {
                 owner: page.owner.clone(),
                 side: page.side,
@@ -376,6 +427,9 @@ impl FlowHubPage {
     }
     pub fn total(&self) -> usize {
         match self {
+            Self::Workspaces(directory) => directory.rows().len(),
+            Self::Workspace(snapshot) => snapshot.workspaces.len(),
+            Self::WorkspaceRecord(page) => page.rows().len(),
             Self::Inbox(page) => page.total,
             Self::ProcessSources { sources, .. } => sources.len(),
             Self::Watchers(directory) => directory.total(),
@@ -391,6 +445,9 @@ impl FlowHubPage {
         endpoint: Endpoint,
     ) -> Vec<Row> {
         match self {
+            Self::Workspaces(directory) => directory.rows(),
+            Self::Workspace(snapshot) => super::workspaces::resource_rows(snapshot),
+            Self::WorkspaceRecord(page) => page.rows(),
             Self::Inbox(page) => super::inbox::rows(page),
             Self::ProcessSources { sources, .. } => sources
                 .iter()

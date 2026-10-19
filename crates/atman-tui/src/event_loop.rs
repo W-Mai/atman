@@ -432,7 +432,12 @@ pub(crate) async fn run_frames(
                         && opened.leaves_directory(request) && opened.restores_directory(request) {
                         action = crate::flow_hub::Action::Load(hub_history.request(request.clone()));
                     }
-                    if matches!(action, crate::flow_hub::Action::Close) { hub_history.save(hub.take().unwrap()); }
+                    if matches!(action, crate::flow_hub::Action::Return) {
+                        let (restored, action) = hub_history.open(action, crate::flow_hub::HubRequest::Sessions { before: None });
+                        *opened = restored;
+                        if let Some(tx) = handle.control_tx.as_ref() { dispatch_hub_action(opened, action, tx, None); }
+                    }
+                    else if matches!(action, crate::flow_hub::Action::Close) { hub_history.save(hub.take().unwrap()); }
                     else if let Some(tx) = handle.control_tx.as_ref() { let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle)); dispatch_hub_action(opened, action, tx, reuse); }
                     continue;
                 }
