@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- **Long workspace properties** — Read-only workspace fields and catalog errors open a scrollable full-text view with keyboard and mouse controls. The same reader handles Inbox details and caches wrapping across scroll and hover events.
+
 - **Project catalog errors** — Unreadable project catalogs report their read failure instead of appearing empty. Missing catalogs remain an empty directory without creating files.
 
 - **Partial Bash output** — Output without a newline reaches watchers and live views before process exit. Fragment framing preserves matches across reads, UTF-8 characters, stdout/stderr ordering, and bounded retained output.

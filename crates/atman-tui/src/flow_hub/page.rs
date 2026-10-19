@@ -199,6 +199,15 @@ pub(super) struct Row {
     pub action: Action,
 }
 
+impl Row {
+    pub fn has_text_details(&self) -> bool {
+        matches!(
+            self.key,
+            RowKey::WorkspaceField(_) | RowKey::WorkspaceError(_)
+        ) && matches!(self.action, Action::None)
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub(super) enum Endpoint {
     #[default]

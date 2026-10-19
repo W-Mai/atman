@@ -3,13 +3,10 @@ use atman_runtime::flow_store::{
     inbox_view::{InboxHistoryItem, InboxHistoryPage, InboxSide},
     outbox::SendStatus,
 };
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{
-    Frame,
-    layout::{Alignment, Rect},
-    style::Style,
-    widgets::Paragraph,
-};
+use crossterm::event::MouseEvent;
+#[cfg(test)]
+use crossterm::event::{MouseButton, MouseEventKind};
+use ratatui::{Frame, layout::Rect};
 use uuid::Uuid;
 
 use super::{
@@ -118,11 +115,8 @@ pub(super) fn rows(page: &InboxHistoryPage) -> Vec<Row> {
 #[derive(Default)]
 pub(super) struct Details {
     pub id: Option<Uuid>,
-    scroll: usize,
-    back: Rect,
-    back_hovered: bool,
-    layout: Option<(Uuid, atman_runtime::event_log::journal::CommitReceipt, u16)>,
-    lines: Vec<String>,
+    text: Option<super::text::TextDetails>,
+    cursor: Option<atman_runtime::event_log::journal::CommitReceipt>,
 }
 
 impl Details {
@@ -134,113 +128,39 @@ impl Details {
     }
 
     pub fn key(&mut self, key: KeyAction) -> Action {
-        match key {
-            KeyAction::Escape => self.id = None,
-            KeyAction::HistoryDown => self.scroll = self.scroll.saturating_add(1),
-            KeyAction::HistoryUp => self.scroll = self.scroll.saturating_sub(1),
-            KeyAction::PageDown => self.scroll = self.scroll.saturating_add(10),
-            KeyAction::PageUp => self.scroll = self.scroll.saturating_sub(10),
-            _ => {}
+        if key == KeyAction::Escape || self.text.as_mut().is_some_and(|text| text.key(key)) {
+            *self = Self::default();
         }
         Action::None
     }
 
     pub fn mouse(&mut self, event: MouseEvent) -> Action {
-        self.back_hovered = self.back.contains((event.column, event.row).into());
-        match event.kind {
-            MouseEventKind::Down(MouseButton::Left) if self.back_hovered => {
-                self.key(KeyAction::Escape)
-            }
-            MouseEventKind::ScrollDown => self.key(KeyAction::HistoryDown),
-            MouseEventKind::ScrollUp => self.key(KeyAction::HistoryUp),
-            _ => Action::None,
+        if self.text.as_mut().is_some_and(|text| text.mouse(event)) {
+            *self = Self::default();
         }
+        Action::None
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, page: &InboxHistoryPage) {
-        self.back = Rect::default();
         let Some(item) = page
             .items
             .iter()
             .find(|item| Some(record(item).0) == self.id)
         else {
-            self.id = None;
+            *self = Self::default();
             return;
         };
-        if area.width < 40 || area.height < 16 {
-            frame.render_widget(Paragraph::new("Inbox needs 40×16 · Esc back"), area);
-            return;
+        if self.text.is_none() || self.cursor.as_ref() != Some(&page.cursor) {
+            let scroll = self.text.as_ref().map_or(0, |text| text.scroll);
+            let mut text = super::text::TextDetails::new(
+                format!("Inbox / Details · {}", short_flow(&page.owner)),
+                detail_text(page, item),
+            );
+            text.scroll = scroll;
+            self.text = Some(text);
+            self.cursor = Some(page.cursor.clone());
         }
-        let t = crate::theme::theme();
-        let width = area.width.saturating_sub(4).min(100);
-        let left = area.x + (area.width - width) / 2;
-        let top = area.y + 1;
-        let muted = Style::default().fg(t.meta_fg.into());
-        frame.render_widget(
-            Paragraph::new(format!("Inbox / Details · {}", short_flow(&page.owner)))
-                .style(Style::default().fg(t.heading.into())),
-            Rect::new(left, top, width, 1),
-        );
-        self.back = Rect::new(left, top + 2, 18, 3);
-        frame.render_widget(
-            Paragraph::new("\nBack Esc")
-                .alignment(Alignment::Center)
-                .style(muted.bg(if self.back_hovered {
-                    t.work_bg.lerp(t.work_hover_bg, 0.5)
-                } else {
-                    t.work_bg.into_inner()
-                })),
-            self.back,
-        );
-        let layout = (record(item).0, page.cursor.clone(), width);
-        if self.layout.as_ref() != Some(&layout) {
-            let text = detail_text(page, item);
-            self.lines = text
-                .iter()
-                .flat_map(|paragraph| paragraph.split('\n'))
-                .flat_map(|line| crate::width::word_wrap(line, width.saturating_sub(4) as usize))
-                .collect();
-            self.layout = Some(layout);
-        }
-        let lines = &self.lines;
-        let body = Rect::new(left, top + 6, width, area.height.saturating_sub(10));
-        let inner = Rect::new(
-            body.x + 2,
-            body.y + 1,
-            width - 4,
-            body.height.saturating_sub(2),
-        );
-        self.scroll = self
-            .scroll
-            .min(lines.len().saturating_sub(inner.height as usize));
-        frame.render_widget(Paragraph::new("").style(muted.bg(t.work_bg.into())), body);
-        frame.render_widget(
-            Paragraph::new(
-                lines
-                    .iter()
-                    .skip(self.scroll)
-                    .take(inner.height as usize)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
-            .style(
-                Style::default()
-                    .fg(t.work_title_fg.into())
-                    .bg(t.work_bg.into()),
-            ),
-            inner,
-        );
-        frame.render_widget(
-            Paragraph::new(format!(
-                "Lines {}–{} / {} · ↑↓ PgUp/Dn · Esc back",
-                (self.scroll + 1).min(lines.len()),
-                (self.scroll + inner.height as usize).min(lines.len()),
-                lines.len()
-            ))
-            .style(muted),
-            Rect::new(left, area.bottom() - 2, width, 1),
-        );
+        self.text.as_mut().unwrap().render(frame, area);
     }
 }
 
@@ -520,12 +440,12 @@ mod tests {
         terminal
             .draw(|frame| hub.render(frame, &owner.clone().into()))
             .unwrap();
-        let before_scroll = hub.inbox_details.scroll;
+        let before_scroll = hub.inbox_details.text.as_ref().unwrap().scroll;
         hub.key(KeyAction::PageDown);
         terminal
             .draw(|frame| hub.render(frame, &owner.clone().into()))
             .unwrap();
-        assert!(hub.inbox_details.scroll > before_scroll);
+        assert!(hub.inbox_details.text.as_ref().unwrap().scroll > before_scroll);
         hub.paste("not a search");
         assert!(hub.query.is_empty());
         hub.key(KeyAction::Escape);
@@ -534,7 +454,7 @@ mod tests {
         terminal
             .draw(|frame| hub.render(frame, &owner.clone().into()))
             .unwrap();
-        let back = hub.inbox_details.back;
+        let back = hub.inbox_details.text.as_ref().unwrap().back;
         hub.mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: back.x + 1,

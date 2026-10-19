@@ -21,6 +21,7 @@ mod create;
 pub use create::WatchDefinition;
 mod inbox;
 mod page;
+mod text;
 mod watch;
 mod workspaces;
 pub use page::{
@@ -66,6 +67,7 @@ pub(crate) struct FlowHub {
     create_watch: Option<create::Draft>,
     watch_details: watch::Details,
     inbox_details: inbox::Details,
+    property_details: Option<text::TextDetails>,
     watch_refresh: Option<atman_runtime::flow_store::FlowRef>,
     pub pending: Option<ControlTicket>,
     page: Option<FlowHubPage>,
@@ -318,6 +320,7 @@ impl FlowHub {
                     self.endpoint = page::Endpoint::default();
                 }
                 self.rows = page.rows(None, self.endpoint);
+                self.property_details = None;
                 if changed_directory || changed_page {
                     self.watch_details = watch::Details::default();
                     self.inbox_details = inbox::Details::default();
@@ -407,7 +410,7 @@ impl FlowHub {
         }
         match self.focus() {
             Action::Focus(flow) => Action::Float(flow),
-            other => other,
+            _ => self.activate(),
         }
     }
 
@@ -446,6 +449,15 @@ impl FlowHub {
         }
         if let Some(page::RowKey::Delivery { id, .. }) = selected.map(|row| &row.key) {
             self.inbox_details.open(*id);
+            return Action::None;
+        }
+        if let Some(row) = selected
+            && row.has_text_details()
+        {
+            self.property_details = Some(text::TextDetails::new(
+                row.title.clone(),
+                vec![row.detail.clone()],
+            ));
             return Action::None;
         }
         if let Some(page::RowKey::Watcher { owner, id }) = self
@@ -578,6 +590,12 @@ impl FlowHub {
                 };
                 return self.create_action(Action::Load(request));
             }
+        }
+        if let Some(details) = &mut self.property_details {
+            if details.key(key) {
+                self.property_details = None;
+            }
+            return Action::None;
         }
         if self.inbox_details.id.is_some() {
             return self.inbox_details.key(key);
@@ -772,6 +790,12 @@ impl FlowHub {
     }
 
     pub fn mouse(&mut self, event: MouseEvent) -> Action {
+        if let Some(details) = &mut self.property_details {
+            if details.mouse(event) {
+                self.property_details = None;
+            }
+            return Action::None;
+        }
         if let Some(draft) = &mut self.create_watch
             && !draft.picking
         {
@@ -844,14 +868,7 @@ impl FlowHub {
                     .find(|(rect, _)| rect.contains(point))
                 {
                     self.selected = *index;
-                    return if matches!(
-                        self.page,
-                        Some(FlowHubPage::Watchers(_) | FlowHubPage::Inbox(_))
-                    ) {
-                        self.activate()
-                    } else {
-                        self.float()
-                    };
+                    return self.float();
                 }
                 if let Some(index) = self.hovered {
                     self.selected = index;
@@ -871,6 +888,10 @@ impl FlowHub {
             Paragraph::new("").style(Style::default().bg(t.panel_bg.into())),
             area,
         );
+        if let Some(details) = &mut self.property_details {
+            details.render(frame, area);
+            return;
+        }
         if let Some(draft) = &mut self.create_watch
             && !draft.picking
         {
@@ -1163,6 +1184,8 @@ impl FlowHub {
                     page::RowKey::Watcher { .. } | page::RowKey::Delivery { .. }
                 ) {
                     Some("\nDetails Enter")
+                } else if row.has_text_details() {
+                    Some("\nRead Enter")
                 } else {
                     match &row.action {
                         Action::Focus(_) => Some("\nWindow Ctrl+O"),
@@ -1408,7 +1431,10 @@ impl FlowHub {
                 && !draft.picking
             {
                 draft.paste(text);
-            } else if self.watch_details.id.is_none() && self.inbox_details.id.is_none() {
+            } else if self.watch_details.id.is_none()
+                && self.inbox_details.id.is_none()
+                && self.property_details.is_none()
+            {
                 self.query.extend(text.chars().filter(|c| !c.is_control()));
                 self.selected = 0;
                 self.offset = 0;

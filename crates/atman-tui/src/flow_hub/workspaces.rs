@@ -493,6 +493,89 @@ mod tests {
     }
 
     #[test]
+    fn property_reader_keeps_full_text_and_returns_to_its_record() {
+        let owner = FlowRef {
+            session_id: Uuid::new_v4().into(),
+            instance_id: atman_rt::FlowInstanceId::now(),
+        };
+        let ticket = ControlTicket {
+            binding: ViewBinding {
+                view_id: Uuid::new_v4(),
+                revision: 0,
+                flow: owner.clone().into(),
+            },
+            request_id: Uuid::new_v4(),
+        };
+        let mut hub = FlowHub {
+            pending: Some(ticket.clone()),
+            ..Default::default()
+        };
+        hub.receive(
+            Some(&ticket),
+            Ok(Box::new(FlowHubPage::FlowWorkspace(FlowWorkspacePage {
+                owner: owner.clone(),
+                request: None,
+            }))),
+        );
+        // A property larger than a viewport must remain readable through the same row action.
+        hub.rows[1].detail = format!("{}\nlast-property-line", "完整路径/".repeat(400));
+        hub.selected = 1;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 24)).unwrap();
+        terminal
+            .draw(|frame| hub.render(frame, &owner.clone().into()))
+            .unwrap();
+        let (read, _) = hub
+            .float_hits
+            .iter()
+            .find(|(_, index)| *index == 1)
+            .unwrap();
+        assert!(matches!(
+            hub.mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: read.x + 2,
+                row: read.y + 1,
+                modifiers: KeyModifiers::NONE
+            }),
+            Action::None
+        ));
+        assert!(hub.property_details.is_some());
+        hub.paste("not a query");
+        assert!(hub.query.is_empty());
+        hub.key(KeyAction::CursorEnd);
+        terminal
+            .draw(|frame| hub.render(frame, &owner.clone().into()))
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("last-property-line"));
+        assert!(hub.property_details.as_ref().unwrap().scroll > 0);
+        hub.key(KeyAction::CursorHome);
+        terminal
+            .draw(|frame| hub.render(frame, &owner.clone().into()))
+            .unwrap();
+        assert_eq!(hub.property_details.as_ref().unwrap().scroll, 0);
+        let back = hub.property_details.as_ref().unwrap().back;
+        hub.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: back.x + 1,
+            row: back.y + 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(hub.property_details.is_none());
+        assert_eq!(hub.selected, 1);
+        hub.key(KeyAction::Submit);
+        assert!(hub.property_details.is_some());
+        hub.key(KeyAction::Escape);
+        assert!(hub.property_details.is_none());
+    }
+
+    #[test]
     fn workspace_navigation_preserves_catalog_progress_and_typed_references() {
         let owner = FlowRef {
             session_id: Uuid::new_v4().into(),
@@ -651,12 +734,10 @@ mod tests {
             .draw(|frame| hub.render(frame, &owner.clone().into()))
             .unwrap();
         assert!(hub.hits[0].0.height > 4);
-        assert!(
-            hub.float_hits.iter().all(|(_, index)| matches!(
-                hub.rows[hub.filtered()[*index]].action,
-                Action::Focus(_)
-            ))
-        );
+        assert!(hub.float_hits.iter().all(|(_, index)| {
+            let row = &hub.rows[hub.filtered()[*index]];
+            row.has_text_details() || matches!(row.action, Action::Focus(_))
+        }));
         let rendered: String = terminal
             .backend()
             .buffer()
