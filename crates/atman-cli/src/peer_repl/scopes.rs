@@ -73,7 +73,9 @@ impl Scopes {
         let _ = self.profile().await;
     }
 
-    async fn profile(&self) -> Result<&atman_runtime::flow_runtime::host::ProfileHandle> {
+    pub(super) async fn profile(
+        &self,
+    ) -> Result<&atman_runtime::flow_runtime::host::ProfileHandle> {
         self.management
             .get_or_init(|| async {
                 let root = self.root.clone();

@@ -3479,6 +3479,7 @@ fn dispatch_hub_action(
     reuse: Option<crate::control::ViewBinding>,
 ) {
     let command = match action {
+        crate::flow_hub::Action::UpdateManagement(change) => TuiControl::UpdateManagement(change),
         crate::flow_hub::Action::ReleaseWorkspace(change) => TuiControl::ReleaseWorkspace(change),
         crate::flow_hub::Action::SetWorkspaceRetention(change) => {
             TuiControl::SetWorkspaceRetention(change)

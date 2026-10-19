@@ -68,6 +68,9 @@ pub struct RelationProgress {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
+    Management {
+        grant: Option<Uuid>,
+    },
     Overview {
         after: Option<atman_runtime::flow_runtime::catalog::FlowCatalogCursor>,
     },
@@ -120,6 +123,7 @@ pub enum HubRequest {
 impl HubRequest {
     pub(super) fn first(&self) -> Self {
         match self {
+            Self::Management { .. } => self.clone(),
             Self::Overview { .. } => Self::Overview { after: None },
             Self::Workspaces { .. } => Self::Workspaces { after: None },
             Self::Workspace { .. } | Self::WorkspaceRecord { .. } | Self::FlowWorkspace { .. } => {
@@ -161,6 +165,7 @@ impl HubRequest {
 }
 
 pub enum FlowHubPage {
+    Management(Box<super::ManagementPage>),
     Overview(super::OverviewDirectory),
     FlowWorkspace(super::FlowWorkspacePage),
     Workspaces(super::WorkspaceDirectory),
@@ -208,7 +213,7 @@ impl Row {
     pub fn has_text_details(&self) -> bool {
         matches!(
             self.key,
-            RowKey::WorkspaceField(_) | RowKey::WorkspaceError(_)
+            RowKey::WorkspaceField(_) | RowKey::WorkspaceError(_) | RowKey::ManagementField(_)
         ) && matches!(self.action, Action::None)
     }
 }
@@ -241,6 +246,8 @@ impl Endpoint {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum RowKey {
+    ManagementField(&'static str),
+    ManagementGrant(Uuid),
     Overview,
     OverviewFailure(Uuid),
     WorkspaceLocation(super::WorkspaceLocation),
@@ -346,6 +353,13 @@ impl FlowHubPage {
 
     pub fn title(&self) -> &str {
         match self {
+            Self::Management(page) => {
+                if page.grant.is_some() {
+                    "Management grant"
+                } else {
+                    "Management"
+                }
+            }
             Self::Overview(_) => "All flows",
             Self::FlowWorkspace(_) => "Flow workspace",
             Self::Workspaces(_) => "Worktrees",
@@ -369,6 +383,7 @@ impl FlowHubPage {
     }
     pub fn unit(&self) -> &str {
         match self {
+            Self::Management(_) => "details",
             Self::Overview(_) => "flows",
             Self::FlowWorkspace(_) => "details",
             Self::Workspaces(_) => "sources",
@@ -384,6 +399,7 @@ impl FlowHubPage {
     }
     pub fn first(&self) -> HubRequest {
         match self {
+            Self::Management(page) => HubRequest::Management { grant: page.grant },
             Self::Overview(_) => HubRequest::Overview { after: None },
             Self::FlowWorkspace(page) => HubRequest::FlowWorkspace {
                 owner: page.owner.clone(),
@@ -429,6 +445,7 @@ impl FlowHubPage {
     }
     pub fn next(&self) -> Option<HubRequest> {
         match self {
+            Self::Management(_) => None,
             Self::Overview(directory) => directory.next(),
             Self::FlowWorkspace(_) => None,
             Self::Workspaces(directory) => directory
@@ -477,6 +494,7 @@ impl FlowHubPage {
     }
     pub fn total(&self) -> usize {
         match self {
+            Self::Management(page) => page.total(),
             Self::Overview(directory) => directory.page.entries.len(),
             Self::FlowWorkspace(page) => page.rows().len(),
             Self::Workspaces(directory) => directory.rows().len(),
@@ -497,6 +515,7 @@ impl FlowHubPage {
         endpoint: Endpoint,
     ) -> Vec<Row> {
         match self {
+            Self::Management(page) => page.rows(),
             Self::Overview(directory) => directory.rows(),
             Self::FlowWorkspace(page) => page.rows(),
             Self::Workspaces(directory) => directory.rows(),
@@ -566,6 +585,12 @@ impl FlowHubPage {
                     title: "All flows".into(),
                     detail: "Across sessions · Ctrl+B".into(),
                     action: Action::Load(HubRequest::Overview { after: None }),
+                }))
+                .chain(std::iter::once(Row {
+                    key: RowKey::ManagementField("Directory"),
+                    title: "Management".into(),
+                    detail: "Session binding and explicit flow permissions".into(),
+                    action: Action::Load(HubRequest::Management { grant: None }),
                 }))
                 .collect(),
             Self::Flows {

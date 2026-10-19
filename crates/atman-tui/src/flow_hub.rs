@@ -20,6 +20,8 @@ pub(crate) use focus::{FocusLinks, NeighborSnapshot};
 mod create;
 pub use create::WatchDefinition;
 mod inbox;
+mod management;
+pub use management::ManagementPage;
 mod overview;
 pub use overview::OverviewDirectory;
 mod page;
@@ -39,6 +41,7 @@ pub use workspaces::{
 
 #[derive(Clone)]
 pub(crate) enum Action {
+    UpdateManagement(Box<atman_runtime::flow_store::profile::ReplaceManagement>),
     ReviewWorkspaceRelease(Box<WorkspaceRemoval>),
     ReleaseWorkspace(Box<WorkspaceRemoval>),
     SetWorkspaceRetention(Box<WorkspaceRetention>),
@@ -633,6 +636,7 @@ impl FlowHub {
                 &self.page,
                 Some(
                     FlowHubPage::WorkspaceRecord(_)
+                        | FlowHubPage::Management(_)
                         | FlowHubPage::Workspace(_)
                         | FlowHubPage::FlowWorkspace(_)
                 )
@@ -1273,8 +1277,12 @@ impl FlowHub {
                     match &row.action {
                         Action::Focus(_) => Some("\nWindow Ctrl+O"),
                         Action::Load(
-                            HubRequest::Workspace { .. } | HubRequest::WorkspaceRecord { .. },
+                            HubRequest::Workspace { .. }
+                            | HubRequest::WorkspaceRecord { .. }
+                            | HubRequest::Management { .. },
                         ) => Some("\nInspect Enter"),
+                        Action::UpdateManagement(_) => Some("\nRevoke Enter"),
+                        Action::OpenManagement => Some("\nOpen Enter"),
                         Action::Load(HubRequest::Workspaces { .. }) => Some("\nBrowse Enter"),
                         Action::SetWorkspaceRetention(_) => Some("\nApply Enter"),
                         Action::ReviewWorkspaceRelease(_) => Some("\nReview Enter"),
@@ -2019,6 +2027,7 @@ mod tests {
                     assert_eq!(session, id);
                 }
                 Action::Load(HubRequest::Overview { after: None }) => assert_eq!(index, 2),
+                Action::Load(HubRequest::Management { grant: None }) => assert_eq!(index, 3),
                 _ => panic!("wrong source"),
             }
         }

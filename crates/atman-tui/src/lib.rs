@@ -114,6 +114,7 @@ impl TuiNote {
 
 #[non_exhaustive]
 pub enum TuiControl {
+    UpdateManagement(Box<atman_runtime::flow_store::profile::ReplaceManagement>),
     SetWorkspaceRetention(Box<flow_hub::WorkspaceRetention>),
     ReleaseWorkspace(Box<flow_hub::WorkspaceRemoval>),
     EditInbox(Box<atman_runtime::flow_store::inbox::InboxEditRequest>),

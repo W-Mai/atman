@@ -5,6 +5,126 @@ use atman_runtime::flow_store::{
 };
 use atman_runtime::source_program::RevisionBundle;
 
+#[tokio::test]
+async fn management_directory_and_edits_share_profile_cas_without_scheduling() {
+    use atman_runtime::flow_store::{
+        access::{AccessTarget, FlowAction, FlowGrant},
+        profile::ReplaceManagement,
+    };
+    use atman_tui::flow_hub::{FlowHubPage, HubRequest};
+    let data = tempfile::tempdir().unwrap();
+    let config = ConfigHub::from_config_dir(data.path().join("config"));
+    std::fs::create_dir_all(config.config_dir()).unwrap();
+    std::fs::write(config.config_dir().join("config.toml"), "").unwrap();
+    let host = RuntimeHost::default();
+    let (notices, _received) = mpsc::unbounded_channel();
+    let scopes = Arc::new(scopes::Scopes::empty(
+        data.path(),
+        host.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(notices)),
+    ));
+    let FlowHubPage::Management(initial) = *scopes
+        .browse(HubRequest::Management { grant: None })
+        .await
+        .unwrap()
+    else {
+        panic!("missing profile")
+    };
+    assert!(initial.view.profile.management.is_none());
+    assert!(host.sessions().is_empty());
+    let source = scopes.open_management(config).await.unwrap();
+    let worker = host.flow(&source).await.unwrap();
+    let before = worker.snapshot().await.unwrap();
+    let profile = scopes.profile().await.unwrap();
+    let view = profile.snapshot().await.unwrap();
+    let mut binding = view.profile.management.unwrap();
+    let grant = FlowGrant {
+        id: Uuid::now_v7(),
+        grantee: source.clone(),
+        target: AccessTarget::AllSessions,
+        actions: [FlowAction::Discover, FlowAction::Watch].into(),
+    };
+    let retained = FlowGrant {
+        id: Uuid::now_v7(),
+        actions: [FlowAction::ReadOutput].into(),
+        ..grant.clone()
+    };
+    binding.grants = vec![grant.clone(), retained.clone()];
+    profile
+        .replace(ReplaceManagement {
+            request_id: Uuid::now_v7(),
+            expected: view.profile.cursor,
+            binding,
+        })
+        .await
+        .unwrap();
+    let FlowHubPage::Management(detail) = *scopes
+        .browse(HubRequest::Management {
+            grant: Some(grant.id),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("missing grant")
+    };
+    let mut binding = detail.view.profile.management.clone().unwrap();
+    binding.grants.retain(|entry| entry.id != grant.id);
+    let change = ReplaceManagement {
+        request_id: Uuid::now_v7(),
+        expected: detail.view.profile.cursor.clone(),
+        binding,
+    };
+    let FlowHubPage::Management(saved) = *scopes.update_management(change.clone()).await.unwrap()
+    else {
+        panic!("missing saved profile")
+    };
+    assert_eq!(
+        saved.view.profile.management.as_ref().unwrap().grants,
+        vec![retained.clone()]
+    );
+    let mut stale = change.clone();
+    stale.request_id = Uuid::now_v7();
+    assert!(scopes.update_management(stale).await.is_err());
+    assert!(
+        scopes
+            .browse(HubRequest::Management {
+                grant: Some(grant.id)
+            })
+            .await
+            .is_err()
+    );
+    // An acknowledged retry cannot reinstall the earlier authority after another edit.
+    let mut binding = saved.view.profile.management.unwrap();
+    binding.grants.clear();
+    profile
+        .replace(ReplaceManagement {
+            request_id: Uuid::now_v7(),
+            expected: saved.view.profile.cursor,
+            binding,
+        })
+        .await
+        .unwrap();
+    let current = profile.snapshot().await.unwrap();
+    let FlowHubPage::Management(retried) = *scopes.update_management(change).await.unwrap() else {
+        panic!("missing retry state")
+    };
+    assert_eq!(retried.view.profile.cursor, current.profile.cursor);
+    assert!(retried.view.profile.management.unwrap().grants.is_empty());
+    let after = worker.snapshot().await.unwrap();
+    assert_eq!(before.cursor, after.cursor);
+    assert!(worker.context().messages_full().is_empty());
+    assert!(
+        host.session(source.session_id.0)
+            .unwrap()
+            .scheduling_status(source.instance_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    host.shutdown().await.unwrap();
+}
+
 fn expect_instance(content: atman_tui::FlowViewContent<'_>) -> &FlowView {
     match content {
         atman_tui::FlowViewContent::Instance(view) => view,

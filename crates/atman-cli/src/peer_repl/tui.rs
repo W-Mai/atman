@@ -554,6 +554,14 @@ impl Workspace {
                             navigation.spawn(async move { let result = scopes.browse(request).await.map(Navigation::Catalog); (replies, result) });
                             continue;
                         }
+                        TuiControl::UpdateManagement(change) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = scopes.update_management(*change).await.map(Navigation::Catalog);
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::SetWorkspaceRetention(change) => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
@@ -737,6 +745,16 @@ enum Navigation {
 }
 
 impl scopes::Scopes {
+    async fn update_management(
+        &self,
+        change: atman_runtime::flow_store::profile::ReplaceManagement,
+    ) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
+        self.profile().await?.replace(change).await?;
+        self.browse(atman_tui::flow_hub::HubRequest::Management { grant: None })
+            .await
+            .context("Management saved, but reading updated details failed; refresh to inspect the current state")
+    }
+
     async fn create_tui_session(
         self: &Arc<Self>,
         seed: scopes::SessionSeed,
@@ -800,6 +818,13 @@ impl scopes::Scopes {
             FlowHubPage, HubRequest, PAGE_SIZE, RelationProgress, RelationRange,
         };
         Ok(Box::new(match request {
+            HubRequest::Management { grant } => {
+                let view = self.profile().await?.snapshot().await?;
+                FlowHubPage::Management(Box::new(
+                    atman_tui::flow_hub::ManagementPage::new(view, grant)
+                        .map_err(anyhow::Error::msg)?,
+                ))
+            }
             HubRequest::Overview { after } => {
                 let page = self
                     .catalog
