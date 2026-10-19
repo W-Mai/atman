@@ -117,8 +117,48 @@ impl ControlBatchPage {
                 });
             }
         }
+        if self.record.items.iter().any(|item| !item.is_terminal()) {
+            rows.push(Row { key: RowKey::ControlField("retry".into()), title: "Retry pending delivery".into(), detail: "Reuse the original requests and revisions. Applied and failed targets remain unchanged.".into(), action: Action::RetryControls(self.record.id) });
+        }
+        rows.push(Row {
+            key: RowKey::ControlField("history".into()),
+            title: "Control history".into(),
+            detail: "Browse previous submissions".into(),
+            action: Action::Load(HubRequest::ControlHistory { before: None }),
+        });
         rows
     }
+}
+
+pub(super) fn history_rows(
+    page: &atman_runtime::flow_store::profile::ControlBatchPage,
+) -> Vec<Row> {
+    page.batches
+        .iter()
+        .map(|batch| {
+            let status = if batch.failed > 0 {
+                format!("{} failed", batch.failed)
+            } else if batch.pending + batch.accepted > 0 {
+                format!("{} unfinished", batch.pending + batch.accepted)
+            } else {
+                format!("{} applied", batch.applied)
+            };
+            Row {
+                key: RowKey::ControlField(batch.id.to_string()),
+                title: format!(
+                    "{status} · {} targets",
+                    batch.pending + batch.accepted + batch.applied + batch.failed,
+                ),
+                detail: format!(
+                    "{}\n{} pending · {} accepted · {} applied · {} failed",
+                    batch.id, batch.pending, batch.accepted, batch.applied, batch.failed
+                ),
+                action: Action::Load(HubRequest::ControlBatch {
+                    request_id: batch.id,
+                }),
+            }
+        })
+        .collect()
 }
 
 pub(super) struct Target {
@@ -135,7 +175,7 @@ pub(super) struct Draft {
     pause: usize,
     focus: usize,
     hovered: Option<usize>,
-    buttons: [Rect; 5],
+    buttons: [Rect; 6],
     reader: TextDetails,
     error: Option<String>,
 }
@@ -178,7 +218,7 @@ impl Draft {
             pause: 0,
             focus: 4,
             hovered: None,
-            buttons: [Rect::default(); 5],
+            buttons: [Rect::default(); 6],
             reader: TextDetails::new(String::new(), vec![]),
             error: None,
         };
@@ -296,8 +336,11 @@ impl Draft {
             return Action::None;
         }
         match key {
-            KeyAction::Tab => self.focus = (self.focus + 1) % 5,
-            KeyAction::BackTab => self.focus = (self.focus + 4) % 5,
+            KeyAction::Tab => self.focus = (self.focus + 1) % 6,
+            KeyAction::BackTab => self.focus = (self.focus + 5) % 6,
+            KeyAction::RedirectPrefill => {
+                return Action::Load(HubRequest::ControlHistory { before: None });
+            }
             KeyAction::Save => {
                 return self.request().map_or(Action::None, |request| {
                     Action::SubmitControls(Box::new(request))
@@ -335,6 +378,7 @@ impl Draft {
                     });
                 }
                 4 => return Action::Return,
+                5 => return Action::Load(HubRequest::ControlHistory { before: None }),
                 _ => (),
             },
             _ => {
@@ -365,7 +409,7 @@ impl Draft {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, pending: bool, error: Option<&str>) {
-        self.buttons = [Rect::default(); 5];
+        self.buttons = [Rect::default(); 6];
         if area.width < 40 || area.height < 24 {
             self.reader.back = Rect::default();
             frame.render_widget(Paragraph::new("Controls need 40×24 · Esc back"), area);
@@ -391,6 +435,9 @@ impl Draft {
             );
         }
         self.buttons[4] = self.reader.back;
+        self.buttons[4].width = cell;
+        self.reader.back = self.buttons[4];
+        self.buttons[5] = Rect::new(left + cell + 1, self.reader.back.y, cell, 3);
         let label = if cell < 25 {
             LABELS[self.action].to_owned()
         } else {
@@ -411,6 +458,7 @@ impl Draft {
                 "Submit Ctrl+S"
             },
             "Back Esc",
+            "History Ctrl+R",
         ];
         let t = crate::theme::theme();
         for (index, rect) in self.buttons.iter().copied().enumerate() {
@@ -644,6 +692,28 @@ mod tests {
         }
         hub.key(KeyAction::Submit);
         hub.key(KeyAction::CycleReasoning);
+        let preserved = hub.controls.as_ref().unwrap().identity();
+        assert!(matches!(
+            hub.key(KeyAction::RedirectPrefill),
+            Action::Load(HubRequest::ControlHistory { before: None })
+        ));
+        ticket.request_id = Uuid::new_v4();
+        hub.pending = Some(ticket.clone());
+        history.receive(
+            &mut hub,
+            Some(&ticket),
+            Ok(Box::new(FlowHubPage::ControlHistory(
+                atman_runtime::flow_store::profile::ControlBatchPage {
+                    batches: vec![],
+                    next: None,
+                    total: 0,
+                },
+            ))),
+        );
+        assert!(hub.controls.is_none());
+        let back = hub.key(KeyAction::Escape);
+        (hub, _) = history.open(back, HubRequest::Overview { after: None });
+        assert_eq!(hub.controls.as_ref().unwrap().identity(), preserved);
         let Action::SubmitControls(request) = hub.key(KeyAction::Save) else {
             panic!("missing batch")
         };
@@ -694,7 +764,33 @@ mod tests {
             Ok(Box::new(FlowHubPage::ControlBatch(Box::new(result)))),
         );
         assert!(hub.controls.is_none());
-        assert!(hub.rows.iter().all(Row::has_text_details));
+        assert!(hub.rows[1].has_text_details());
+        assert!(
+            hub.rows
+                .iter()
+                .any(|row| matches!(row.action, Action::RetryControls(id) if id == request.id))
+        );
+        assert_eq!(
+            hub.rows.iter().filter(|row| row.has_text_details()).count(),
+            3
+        );
+        if let Some(FlowHubPage::ControlBatch(page)) = &mut hub.page {
+            for item in &mut page.record.items {
+                item.history
+                    .push(atman_runtime::flow_store::profile::ControlProgressRecord {
+                        progress: ControlProgress::Failed {
+                            reason: "terminal conflict".into(),
+                        },
+                        recorded: page.record.submitted.clone(),
+                    });
+            }
+            assert!(
+                !page
+                    .rows()
+                    .iter()
+                    .any(|row| matches!(row.action, Action::RetryControls(_)))
+            );
+        }
         let action = hub.key(KeyAction::Escape);
         let (restored, _) = history.open(action, HubRequest::Overview { after: None });
         assert_eq!(restored.page.unwrap().first(), page(&first).first());

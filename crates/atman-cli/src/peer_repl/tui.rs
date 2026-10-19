@@ -567,6 +567,14 @@ impl Workspace {
                             });
                             continue;
                         }
+                        TuiControl::RetryControls(id) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = scopes.retry_controls(id).await.map(Navigation::Catalog);
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::UpdateManagement(change) => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
@@ -909,6 +917,36 @@ impl scopes::Scopes {
         )
     }
 
+    async fn operator_control_record(
+        &self,
+        id: Uuid,
+    ) -> Result<atman_runtime::flow_store::profile::ControlBatchRecord> {
+        self.profile()
+            .await?
+            .control_batch(
+                atman_runtime::flow_store::inbox::SenderIdentity::User(super::USER),
+                id,
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Control batch not found"))
+    }
+
+    async fn retry_controls(&self, id: Uuid) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
+        let record = self.operator_control_record(id).await?;
+        self.host
+            .submit_controls(
+                atman_runtime::flow_store::profile::ControlBatchRequest {
+                    id: record.id,
+                    sender: record.sender,
+                    commands: record.items.into_iter().map(|item| item.request).collect(),
+                },
+                |_| Ok(()),
+            )
+            .await?;
+        self.browse(atman_tui::flow_hub::HubRequest::ControlBatch { request_id: id })
+            .await
+    }
+
     async fn browse(
         &self,
         request: atman_tui::flow_hub::HubRequest,
@@ -917,16 +955,18 @@ impl scopes::Scopes {
             FlowHubPage, HubRequest, PAGE_SIZE, RelationProgress, RelationRange,
         };
         Ok(Box::new(match request {
-            HubRequest::ControlBatch { request_id } => {
-                let record = self
-                    .profile()
+            HubRequest::ControlHistory { before } => FlowHubPage::ControlHistory(
+                self.profile()
                     .await?
-                    .control_batch(
+                    .control_batches(
                         atman_runtime::flow_store::inbox::SenderIdentity::User(super::USER),
-                        request_id,
+                        before,
+                        PAGE_SIZE,
                     )
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("Control batch not found"))?;
+                    .await?,
+            ),
+            HubRequest::ControlBatch { request_id } => {
+                let record = self.operator_control_record(request_id).await?;
                 let issues = self.host.subscribe_controls().borrow().issues.clone();
                 FlowHubPage::ControlBatch(Box::new(atman_tui::flow_hub::ControlBatchPage {
                     record,

@@ -43,6 +43,7 @@ pub use workspaces::{
 
 #[derive(Clone)]
 pub(crate) enum Action {
+    RetryControls(uuid::Uuid),
     SubmitControls(Box<OperatorControls>),
     EditManagement,
     EditManagementBinding,
@@ -142,6 +143,15 @@ impl History {
         result: Result<Box<FlowHubPage>, String>,
     ) {
         if !hub.owns_reply(ticket) {
+            return;
+        }
+        // History browsing retains the unsubmitted review as an ordinary back-stack view.
+        if matches!(&result, Ok(page) if matches!(**page, FlowHubPage::ControlHistory(_)))
+            && hub.controls.as_ref().is_some_and(|draft| !draft.picking)
+        {
+            self.save(std::mem::take(hub));
+            hub.pending = ticket.cloned();
+            hub.receive(ticket, result);
             return;
         }
         // Editing returns to the original directory even after choosing a different source.
@@ -807,6 +817,7 @@ impl FlowHub {
                         | FlowHubPage::Workspace(_)
                         | FlowHubPage::FlowWorkspace(_)
                         | FlowHubPage::ControlBatch(_)
+                        | FlowHubPage::ControlHistory(_)
                 )
             ) {
                 return Action::Return;
@@ -1392,7 +1403,12 @@ impl FlowHub {
         let footer = content.bottom().saturating_sub(6);
         let rows = self.filtered();
         let graph_visible = is_flows && self.graph_visible && !picking;
-        let record_height = if is_flows { 5 } else { 4 };
+        let record_height = if is_flows || matches!(self.page, Some(FlowHubPage::ControlHistory(_)))
+        {
+            5
+        } else {
+            4
+        };
         let visible = usize::from(footer.saturating_sub(rows_y) / record_height);
         if self.selected < self.offset {
             self.offset = self.selected;
@@ -1518,6 +1534,9 @@ impl FlowHub {
                 Some("\nRead Enter")
             } else {
                 match &row.action {
+                    Action::RetryControls(_) => Some("\nRetry Enter"),
+                    Action::Load(HubRequest::ControlBatch { .. }) => Some("\nDetails Enter"),
+                    Action::Load(HubRequest::ControlHistory { .. }) => Some("\nHistory Enter"),
                     Action::Focus(_) => Some("\nWindow Ctrl+O"),
                     Action::Load(
                         HubRequest::Workspace { .. }
@@ -1834,7 +1853,10 @@ impl FlowHub {
                 } else {
                     "↑↓ select · Enter choose · Ctrl+B sources · Esc back"
                 }
-            } else if matches!(self.page, Some(FlowHubPage::ControlBatch(_))) {
+            } else if matches!(
+                self.page,
+                Some(FlowHubPage::ControlBatch(_) | FlowHubPage::ControlHistory(_))
+            ) {
                 "Enter details · Ctrl+R refresh · Esc back"
             } else if is_workspaces {
                 "↑↓ select · Enter inspect / focus · Ctrl+O float · Esc back"

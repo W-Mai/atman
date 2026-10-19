@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Added
 
+- **FlowHub control history** — Submitted batches remain discoverable after closing a view or restarting. Main and floating views share paged history, preserved review drafts, and explicit retries of unfinished deliveries using their original command identities.
+
 - **Control history pagination** — Profile storage and runtime handles expose actor-scoped batch summaries with stable submission ordering and current per-target outcome counts. Reads preserve journal contents and do not start target execution.
 
 - **FlowHub control review** — Main and floating views share cross-Session target selection, explicit execution controls, selective pause release, and durable per-target results. Retries retain the original target revisions; closing the review does not cancel accepted work.

@@ -147,6 +147,40 @@ async fn operator_control_batches_keep_identity_partial_results_and_selective_re
         .unwrap()
         .unwrap();
     assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
+    // History retries retain transport-supplied command identities, not only the batch UUID.
+    let distinct = atman_runtime::flow_store::profile::ControlBatchRequest {
+        id: Uuid::new_v4(),
+        sender: SenderIdentity::User(USER),
+        commands: vec![atman_runtime::flow_store::control::ControlRequest {
+            id: Uuid::new_v4(),
+            sender: SenderIdentity::User(USER),
+            target: request.commands[0].target.clone(),
+            expected_revision: worker.state().await.unwrap().revision(),
+            pause_key: operator_key.into(),
+            action: ControlAction::Pause,
+        }],
+    };
+    scopes
+        .profile()
+        .await
+        .unwrap()
+        .submit_controls(distinct.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    let original = scopes.operator_control_record(distinct.id).await.unwrap();
+    let cursor = worker.snapshot().await.unwrap().cursor;
+    let FlowHubPage::ControlBatch(retried) = *scopes.retry_controls(distinct.id).await.unwrap()
+    else {
+        panic!("missing retry")
+    };
+    assert_eq!(retried.record, original);
+    assert_eq!(retried.record.items[0].request.id, distinct.commands[0].id);
+    assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
+    assert!(scopes.retry_controls(Uuid::new_v4()).await.is_err());
     host.shutdown().await.unwrap();
     drop(scopes);
     let restarted = RuntimeHost::default();
@@ -167,6 +201,21 @@ async fn operator_control_batches_keep_identity_partial_results_and_selective_re
         panic!("missing history")
     };
     assert_eq!(restored.record, page.record);
+    let FlowHubPage::ControlHistory(history) = *scopes
+        .browse(HubRequest::ControlHistory { before: None })
+        .await
+        .unwrap()
+    else {
+        panic!("missing history directory")
+    };
+    assert_eq!(history.total, 4);
+    assert_eq!(history.batches[0].id, distinct.id);
+    assert!(
+        history
+            .batches
+            .iter()
+            .any(|batch| batch.id == request.id && batch.applied == 1 && batch.failed == 1)
+    );
     assert!(restarted.sessions().is_empty());
     restarted.shutdown().await.unwrap();
 }

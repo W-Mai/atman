@@ -68,6 +68,9 @@ pub struct RelationProgress {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
+    ControlHistory {
+        before: Option<Uuid>,
+    },
     ControlBatch {
         request_id: Uuid,
     },
@@ -127,6 +130,7 @@ impl HubRequest {
     pub(super) fn first(&self) -> Self {
         match self {
             Self::ControlBatch { .. } => self.clone(),
+            Self::ControlHistory { .. } => Self::ControlHistory { before: None },
             Self::Management { .. } => self.clone(),
             Self::Overview { .. } => Self::Overview { after: None },
             Self::Workspaces { .. } => Self::Workspaces { after: None },
@@ -169,6 +173,7 @@ impl HubRequest {
 }
 
 pub enum FlowHubPage {
+    ControlHistory(atman_runtime::flow_store::profile::ControlBatchPage),
     ControlBatch(Box<super::ControlBatchPage>),
     Management(Box<super::ManagementPage>),
     Overview(super::OverviewDirectory),
@@ -401,6 +406,7 @@ impl FlowHubPage {
     pub fn title(&self) -> &str {
         match self {
             Self::ControlBatch(_) => "Control results",
+            Self::ControlHistory(_) => "Control history",
             Self::Management(page) => {
                 if page.grant.is_some() {
                     "Management grant"
@@ -432,6 +438,7 @@ impl FlowHubPage {
     pub fn unit(&self) -> &str {
         match self {
             Self::ControlBatch(_) => "results",
+            Self::ControlHistory(_) => "batches",
             Self::Management(_) => "details",
             Self::Overview(_) => "flows",
             Self::FlowWorkspace(_) => "details",
@@ -451,6 +458,7 @@ impl FlowHubPage {
             Self::ControlBatch(page) => HubRequest::ControlBatch {
                 request_id: page.record.id,
             },
+            Self::ControlHistory(_) => HubRequest::ControlHistory { before: None },
             Self::Management(page) => HubRequest::Management { grant: page.grant },
             Self::Overview(_) => HubRequest::Overview { after: None },
             Self::FlowWorkspace(page) => HubRequest::FlowWorkspace {
@@ -498,6 +506,9 @@ impl FlowHubPage {
     pub fn next(&self) -> Option<HubRequest> {
         match self {
             Self::ControlBatch(_) => None,
+            Self::ControlHistory(page) => page.next.map(|before| HubRequest::ControlHistory {
+                before: Some(before),
+            }),
             Self::Management(_) => None,
             Self::Overview(directory) => directory.next(),
             Self::FlowWorkspace(_) => None,
@@ -548,6 +559,7 @@ impl FlowHubPage {
     pub fn total(&self) -> usize {
         match self {
             Self::ControlBatch(page) => page.rows().len(),
+            Self::ControlHistory(page) => page.total,
             Self::Management(page) => page.total(),
             Self::Overview(directory) => directory.page.entries.len(),
             Self::FlowWorkspace(page) => page.rows().len(),
@@ -570,6 +582,7 @@ impl FlowHubPage {
     ) -> Vec<Row> {
         match self {
             Self::ControlBatch(page) => page.rows(),
+            Self::ControlHistory(page) => super::controls::history_rows(page),
             Self::Management(page) => page.rows(),
             Self::Overview(directory) => directory.rows(),
             Self::FlowWorkspace(page) => page.rows(),
