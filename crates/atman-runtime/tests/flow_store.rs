@@ -33,11 +33,17 @@ async fn entry_exit_fences_hook_input_and_resumes_one_pending_batch() {
     description.entry_mut().unwrap().bundle.sources.insert(
         "entry:main.at".into(),
         r#"flow main(input: int) -> string {
-            answer = final.answer(message: to_json_string(input))
+            answer = deliver(input).await
+            values = fanout [helper(), helper()]
+            when values[0] != 1 || values[1] != 1 { return "invalid fanout result" }
             execution_probe()
             return answer
-        }"#
-        .into(),
+        }
+        flow deliver(input: int) -> string {
+            return final.answer(message: to_json_string(input))
+        }
+        flow helper() -> int { return 1 }"#
+            .into(),
     );
     let mut store = session.create_flow(description.clone()).unwrap();
     change(&mut store, FlowTransition::Activated);
@@ -90,8 +96,18 @@ async fn entry_exit_fences_hook_input_and_resumes_one_pending_batch() {
         .unwrap()
         .unwrap()
         .forget();
+    let running = worker.state().await.unwrap();
+    let InstanceState::Open(InstanceActivity::Active(active)) = running.state() else {
+        panic!("nested returns must retain the active entry")
+    };
+    assert_eq!(active.phase, TurnPhase::Running);
+    let lease = active.lease.clone();
     assert!(
-        matches!(worker.state().await.unwrap().state(), InstanceState::Open(InstanceActivity::Active(active)) if active.phase == TurnPhase::Running)
+        worker
+            .completion(Some(lease.turn.clone()))
+            .await
+            .unwrap()
+            .is_none()
     );
     assert_eq!(
         worker
@@ -102,7 +118,7 @@ async fn entry_exit_fences_hook_input_and_resumes_one_pending_batch() {
             .count(),
         1
     );
-    // Publication alone does not finish the entry or release its lease.
+    // Publication and nested flow returns do not finish the entry or release its lease.
     probe.release.add_permits(1);
     tokio::time::timeout(Duration::from_secs(5), probe.entered.acquire())
         .await
@@ -110,7 +126,7 @@ async fn entry_exit_fences_hook_input_and_resumes_one_pending_batch() {
         .unwrap()
         .forget();
     assert!(
-        matches!(worker.state().await.unwrap().state(), InstanceState::Open(InstanceActivity::Active(active)) if active.phase == TurnPhase::Finishing)
+        matches!(worker.state().await.unwrap().state(), InstanceState::Open(InstanceActivity::Active(active)) if active.phase == TurnPhase::Finishing && active.lease == lease)
     );
     let key = Uuid::new_v4().into();
     worker
