@@ -18,6 +18,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Legacy history snapshots** — Read original session logs by flow ownership without migrating data or opening execution services. Direct history and imported archives share message projection, retain unsupported records, and reject changed sources.
+
 - **Direct archive browsing** — `--continue` opens imported sessions without execution configuration or writer ownership. Archived and executable TUI views share navigation; non-TUI mode prints archived conversation text and exits. Archive selection and projection read the journal once.
 
 - **Archived FlowHub navigation** — Open imported histories in the main view or floating windows without loading execution services. Read-only controls preserve drafts, and session and project navigation remain available.

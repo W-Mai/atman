@@ -11,6 +11,153 @@ use atman_runtime::flow_store::{
 use uuid::Uuid;
 
 #[test]
+fn direct_history_and_migration_share_partitions_and_display_without_writes() {
+    use atman_runtime::{
+        TranscriptEntry,
+        message::{Message, MessageOrigin},
+        projection::flow::{ArchiveTranscript, LegacyHistory},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("old.jsonl");
+    let id = Uuid::now_v7();
+    let root = Uuid::now_v7();
+    let child = Uuid::now_v7();
+    let turn = atman_rt::TurnId::now();
+    let mut final_message = Message::assistant_text(turn.clone(), "Child final reply");
+    final_message.origin = MessageOrigin::FinalAnswer;
+    let events = [
+        serde_json::json!({"type":"flow_start","run_id":root,"flow_name":"agent","spawned":false}),
+        serde_json::json!({"type":"user_msg","turn_id":turn,"message":Message::user_text(turn.clone(), "Root request")}),
+        serde_json::json!({"type":"flow_start","run_id":child,"flow_name":"child","parent_run_id":root,"spawned":true}),
+        serde_json::json!({"type":"assistant_msg","turn_id":turn,"flow_run_id":child,"message":final_message}),
+        serde_json::json!({"type":"flow_end","run_id":child,"flow_name":"child","status":{"kind":"ok"}}),
+        serde_json::json!({"type":"assistant_msg","turn_id":turn,"flow_run_id":root,"message":Message::assistant_text(turn.clone(), "Root reply")}),
+    ];
+    let mut raw = events
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, mut value)| {
+            // Display must not invent timestamps for older records.
+            value["seq"] = serde_json::json!(index + 1);
+            format!("{value}\n").into_bytes()
+        })
+        .collect::<Vec<_>>();
+    raw.extend_from_slice(b"invalid\n\xfftorn");
+    std::fs::write(&source, &raw).unwrap();
+    let history = LegacyHistory::inspect(&source, id).unwrap();
+    assert_eq!(history.inspection().source.bytes, raw.len() as u64);
+    let views = history
+        .flows()
+        .iter()
+        .map(|key| history.read_flow(key).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(views.len(), 3);
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    assert_eq!(std::fs::read(&source).unwrap(), raw);
+    assert_eq!(
+        history
+            .read_flow(&LegacyFlowKey::Agent {
+                owner: "missing".into()
+            })
+            .err()
+            .unwrap()
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+
+    fn messages(view: &ArchiveTranscript) -> Vec<serde_json::Value> {
+        view.entries
+            .iter()
+            .filter_map(|entry| match entry {
+                TranscriptEntry::Message { message, .. } => {
+                    Some(serde_json::to_value(message).unwrap())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+    let root_view = views
+        .iter()
+        .find(|view| view.owner() == &LegacyFlowKey::Default)
+        .unwrap();
+    assert!(
+        messages(root_view.transcript())
+            .iter()
+            .any(|message| message.to_string().contains("Root reply"))
+    );
+    assert!(
+        !messages(root_view.transcript())
+            .iter()
+            .any(|message| message.to_string().contains("Child final reply"))
+    );
+    let child_view = views
+        .iter()
+        .find(|view| matches!(view.owner(), LegacyFlowKey::SpawnedRun { .. }))
+        .unwrap();
+    assert!(
+        messages(child_view.transcript())
+            .iter()
+            .any(|message| message.to_string().contains("Child final reply"))
+    );
+    let unassigned = views
+        .iter()
+        .find(|view| view.owner() == &LegacyFlowKey::Unassigned)
+        .unwrap();
+    assert_eq!(
+        unassigned
+            .transcript()
+            .unparsed
+            .iter()
+            .flat_map(|record| record.bytes().unwrap())
+            .collect::<Vec<_>>(),
+        b"invalid\n\xfftorn"
+    );
+
+    // Even a change outside the selected flow invalidates the old directory.
+    let mut appended = raw.clone();
+    appended.push(b'\n');
+    std::fs::write(&source, appended).unwrap();
+    assert!(history.read_flow(&LegacyFlowKey::Default).is_err());
+    assert!(
+        messages(root_view.transcript())
+            .iter()
+            .any(|message| message.to_string().contains("Root reply"))
+    );
+    std::fs::write(&source, &raw).unwrap();
+
+    let store = RuntimeStore::open(temp.path()).unwrap();
+    let destination = atman_runtime::flow_store::migration::destination_id(&source, id).unwrap();
+    let receipt = store
+        .archive_legacy(
+            &source,
+            id,
+            SessionDescriptor {
+                id: destination,
+                project: None,
+                configuration: Default::default(),
+                title: "Imported".into(),
+            },
+            true,
+        )
+        .unwrap();
+    std::fs::remove_file(&source).unwrap();
+    assert!(history.read_flow(&LegacyFlowKey::Default).is_err());
+    let read = RuntimeStore::inspect_session(temp.path(), destination).unwrap();
+    for mapping in receipt.flows {
+        let old = views
+            .iter()
+            .find(|view| view.owner() == &mapping.owner)
+            .unwrap();
+        assert_eq!(old.session_id(), id);
+        assert_eq!(old.source(), &history.inspection().source);
+        let stored = read.archived_view(&mapping.instance).unwrap().unwrap();
+        let stored = stored.transcript().archived_transcript().unwrap();
+        assert_eq!(messages(old.transcript()), messages(&stored));
+        assert_eq!(old.transcript().unparsed, stored.unparsed);
+    }
+}
+
+#[test]
 fn archives_reopen_raw_history_without_an_executable_entry_or_original_source() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("old.jsonl");

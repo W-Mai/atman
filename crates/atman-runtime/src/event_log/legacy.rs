@@ -2,8 +2,9 @@
 
 mod ownership;
 
+use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -113,6 +114,34 @@ pub struct LegacyRecord {
     pub issues: Vec<RecordIssue>,
 }
 
+impl LegacyRecord {
+    /// Read one indexed physical record and reject changed content before publishing it.
+    pub(crate) fn read(
+        &self,
+        file: &mut (impl Read + Seek),
+        source_bytes: u64,
+    ) -> io::Result<Vec<u8>> {
+        if self.bytes == 0
+            || self
+                .offset
+                .checked_add(self.bytes)
+                .is_none_or(|end| end > source_bytes)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid legacy record range",
+            ));
+        }
+        file.seek(SeekFrom::Start(self.offset))?;
+        let mut bytes = vec![0; usize::try_from(self.bytes).map_err(io::Error::other)?];
+        file.read_exact(&mut bytes)?;
+        if format!("{:x}", Sha256::digest(&bytes)) != self.sha256 {
+            return Err(source_changed());
+        }
+        Ok(bytes)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LegacyRun {
     pub run_id: String,
@@ -127,6 +156,17 @@ pub struct LegacyInspection {
     pub blank_lines: u64,
     pub records: Vec<LegacyRecord>,
     pub runs: Vec<LegacyRun>,
+}
+
+impl LegacyInspection {
+    pub(crate) fn grouped(&self) -> BTreeMap<LegacyFlowKey, Vec<&LegacyRecord>> {
+        // Empty sessions retain a selectable default history without an executable identity.
+        let mut groups = BTreeMap::from([(LegacyFlowKey::Default, Vec::new())]);
+        for record in &self.records {
+            groups.entry(record.owner.key()).or_default().push(record);
+        }
+        groups
+    }
 }
 
 /// Index original bytes without replay's permissive skipping or generated timestamps.
@@ -265,6 +305,6 @@ fn digest(hash: Sha256) -> String {
 fn source_changed() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        "legacy event source changed; inspect it again before migration",
+        "legacy event source changed; inspect it again",
     )
 }

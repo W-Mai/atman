@@ -1,8 +1,8 @@
 //! Offline, resumable publication of legacy history into the instance namespace.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read};
 use std::num::NonZeroUsize;
 use std::path::Path;
 
@@ -18,7 +18,7 @@ use super::{
 };
 use crate::event_log::{
     journal::{CommitReceipt, private_file_options, sync_parent},
-    legacy::{self, LegacyFlowKey, LegacyInspection, LegacyRecord, LegacySource},
+    legacy::{self, LegacyFlowKey, LegacyInspection, LegacySource},
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -286,12 +286,7 @@ fn import_records(
     inspection: &LegacyInspection,
     snapshot: &Path,
 ) -> io::Result<LegacyMigration> {
-    let mut groups: BTreeMap<LegacyFlowKey, Vec<&LegacyRecord>> = BTreeMap::new();
-    // Even an empty legacy session retains an explicit default history view.
-    groups.insert(LegacyFlowKey::Default, Vec::new());
-    for record in &inspection.records {
-        groups.entry(record.owner.key()).or_default().push(record);
-    }
+    let groups = inspection.grouped();
     let destination = session.projection.descriptor.id;
     let mut file = File::open(snapshot)?;
     let mut completed = LegacyMigration {
@@ -334,9 +329,7 @@ fn import_records(
         for batch in records[consumed..].chunks(64) {
             let mut output = Vec::with_capacity(batch.len());
             for record in batch {
-                file.seek(SeekFrom::Start(record.offset))?;
-                let mut bytes = vec![0; usize::try_from(record.bytes).map_err(invalid)?];
-                file.read_exact(&mut bytes)?;
+                let bytes = record.read(&mut file, inspection.source.bytes)?;
                 output.push(LegacyHistoryRecord::new((*record).clone(), &bytes));
             }
             flow.append_legacy_history(output)?;

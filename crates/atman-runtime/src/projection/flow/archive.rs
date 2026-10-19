@@ -1,12 +1,18 @@
-//! Display projection for already partitioned, immutable legacy archives.
+//! Shared display projection for original legacy logs and imported immutable archives.
 
-use std::io;
+use std::{fs::File, io, path::Path};
+
+use uuid::Uuid;
 
 use super::{FlowRecord, FlowTranscript};
 use crate::{
     TranscriptEntry,
     event::{Event, EventEnvelope},
-    event_log::{reader::ReplayRecord, replay::FlowOwnership},
+    event_log::{
+        legacy::{self, LegacyFlowKey, LegacyInspection, LegacyRecord, LegacySource},
+        reader::ReplayRecord,
+        replay::FlowOwnership,
+    },
     flow_store::{history::LegacyHistoryRecord, view::FlowContentSummary},
     projection::message_window::project_transcript_records,
 };
@@ -15,6 +21,73 @@ pub struct ArchiveTranscript {
     pub entries: Vec<TranscriptEntry>,
     /// Records which cannot participate in typed replay, retained for inspection by source line.
     pub unparsed: Vec<LegacyHistoryRecord>,
+}
+
+/// A validated directory of the original legacy log. Discovery and reading never migrate data or acquire execution ownership.
+pub struct LegacyHistory {
+    inspection: LegacyInspection,
+}
+
+/// Immutable display snapshot with a source identity, not an executable instance address or journal cursor.
+pub struct LegacyFlowView {
+    session_id: Uuid,
+    source: LegacySource,
+    owner: LegacyFlowKey,
+    transcript: ArchiveTranscript,
+}
+
+impl LegacyHistory {
+    pub fn inspect(path: &Path, session_id: Uuid) -> io::Result<Self> {
+        Ok(Self {
+            inspection: legacy::inspect(path, session_id)?,
+        })
+    }
+
+    pub fn inspection(&self) -> &LegacyInspection {
+        &self.inspection
+    }
+
+    pub fn flows(&self) -> Vec<LegacyFlowKey> {
+        self.inspection.grouped().into_keys().collect()
+    }
+
+    /// Read one ownership partition. A changed source invalidates the directory; callers must explicitly inspect again before publishing a new snapshot.
+    pub fn read_flow(&self, owner: &LegacyFlowKey) -> io::Result<LegacyFlowView> {
+        let groups = self.inspection.grouped();
+        let records = groups.get(owner).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "legacy flow is not in this source")
+        })?;
+        self.inspection.source.verify()?;
+        let mut file = File::open(&self.inspection.source.path)?;
+        let transcript = project_records(records.iter().map(|record| {
+            Ok((
+                (*record).clone(),
+                record.read(&mut file, self.inspection.source.bytes)?,
+            ))
+        }))?;
+        self.inspection.source.verify()?;
+        Ok(LegacyFlowView {
+            session_id: self.inspection.session_id,
+            source: self.inspection.source.clone(),
+            owner: owner.clone(),
+            transcript,
+        })
+    }
+}
+
+impl LegacyFlowView {
+    pub fn session_id(&self) -> Uuid {
+        self.session_id
+    }
+    pub fn source(&self) -> &LegacySource {
+        &self.source
+    }
+    pub fn owner(&self) -> &LegacyFlowKey {
+        &self.owner
+    }
+    pub fn transcript(&self) -> &ArchiveTranscript {
+        &self.transcript
+    }
 }
 
 impl FlowTranscript {
@@ -26,46 +99,50 @@ impl FlowTranscript {
         if self.entries().len() as u64 != archive.records {
             return Err(io::Error::other("archive is incomplete"));
         }
-        let mut records = Vec::new();
-        let mut unparsed = Vec::new();
-        let mut ownership = FlowOwnership::default();
-        for entry in self.entries() {
+        project_records(self.entries().iter().map(|entry| {
             let FlowRecord::Legacy(record) = &entry.record else {
                 return Err(io::Error::other("archive contains execution records"));
             };
-            let bytes = record.bytes()?;
-            let parsed = record
-                .source
-                .sequence
-                .zip(serde_json::from_slice::<Event>(&bytes).ok());
-            let Some((seq, mut event)) = parsed else {
-                unparsed.push((**record).clone());
-                continue;
-            };
-            if let Event::FlowStart {
-                run_id, spawned, ..
-            } = &mut event
-            {
-                ownership.known.insert(run_id.clone());
-                // Raw lineage remains unchanged in the retained record.
-                *spawned = false;
-            }
-            records.push(ReplayRecord {
-                envelope: EventEnvelope {
-                    seq,
-                    // The display reducer reads persisted_ts, never this required wire field.
-                    ts: record
-                        .source
-                        .timestamp
-                        .unwrap_or(chrono::DateTime::UNIX_EPOCH),
-                    event,
-                },
-                persisted_ts: record.source.timestamp,
-            });
-        }
-        Ok(ArchiveTranscript {
-            entries: project_transcript_records(&records, &ownership),
-            unparsed,
-        })
+            Ok((record.source.clone(), record.bytes()?))
+        }))
     }
+}
+
+fn project_records(
+    records: impl IntoIterator<Item = io::Result<(LegacyRecord, Vec<u8>)>>,
+) -> io::Result<ArchiveTranscript> {
+    let mut projected = Vec::new();
+    let mut unparsed = Vec::new();
+    let mut ownership = FlowOwnership::default();
+    for record in records {
+        let (source, bytes) = record?;
+        let parsed = source
+            .sequence
+            .zip(serde_json::from_slice::<Event>(&bytes).ok());
+        let Some((seq, mut event)) = parsed else {
+            unparsed.push(LegacyHistoryRecord::new(source, &bytes));
+            continue;
+        };
+        if let Event::FlowStart {
+            run_id, spawned, ..
+        } = &mut event
+        {
+            ownership.known.insert(run_id.clone());
+            // Raw lineage remains unchanged in the retained record.
+            *spawned = false;
+        }
+        projected.push(ReplayRecord {
+            envelope: EventEnvelope {
+                seq,
+                // The display reducer reads persisted_ts, never this required wire field.
+                ts: source.timestamp.unwrap_or(chrono::DateTime::UNIX_EPOCH),
+                event,
+            },
+            persisted_ts: source.timestamp,
+        });
+    }
+    Ok(ArchiveTranscript {
+        entries: project_transcript_records(&projected, &ownership),
+        unparsed,
+    })
 }

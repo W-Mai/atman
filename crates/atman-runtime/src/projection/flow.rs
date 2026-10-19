@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::flow_workflow::FlowWorkflows;
 pub use super::flow_workflow::{FlowTurnEnd, FlowTurnProjection};
 mod archive;
-pub use archive::ArchiveTranscript;
+pub use archive::{ArchiveTranscript, LegacyFlowView, LegacyHistory};
 
 use crate::{
     event_log::journal::{CommitReceipt, CommittedBatch},
