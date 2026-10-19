@@ -867,6 +867,28 @@ impl WorkspaceManager {
         expected: &WorkspaceRecord,
         retained: bool,
     ) -> Result<WorkspaceRecord, WorkspaceError> {
+        Self::mutate_observed(
+            repository_root,
+            storage_root,
+            expected,
+            |manager, registry| {
+                manager.retain_locked(
+                    registry,
+                    &expected.id,
+                    retained,
+                    expected.owner_session.as_deref(),
+                    expected.owner_flow.as_deref(),
+                )
+            },
+        )
+    }
+
+    fn mutate_observed(
+        repository_root: &Path,
+        storage_root: &Path,
+        expected: &WorkspaceRecord,
+        mutate: impl FnOnce(&Self, &mut WorkspaceRegistry) -> Result<WorkspaceRecord, WorkspaceError>,
+    ) -> Result<WorkspaceRecord, WorkspaceError> {
         let manager = Self::at_recorded_location(repository_root, storage_root)?;
         manager.validate_record_scope(expected)?;
         if manager.load_existing()?.is_none() {
@@ -893,7 +915,7 @@ impl WorkspaceManager {
             .find(|record| record.id == expected.id);
         if current != Some(expected) {
             return Err(WorkspaceError::Invalid(
-                "workspace changed; refresh before changing retention".into(),
+                "workspace changed; refresh before changing this resource".into(),
             ));
         }
         if expected.lease.is_some() {
@@ -901,13 +923,7 @@ impl WorkspaceManager {
                 "workspace has an invocation lease; release it through its execution owner".into(),
             ));
         }
-        manager.retain_locked(
-            &mut registry,
-            &expected.id,
-            retained,
-            expected.owner_session.as_deref(),
-            expected.owner_flow.as_deref(),
-        )
+        mutate(&manager, &mut registry)
     }
 
     fn retain_locked(
@@ -1540,6 +1556,46 @@ mod tests {
         let leased = manager.get(&active.id).unwrap();
         assert!(WorkspaceManager::retain_observed(tmp.path(), tmp.path(), &leased, true).is_err());
         assert_eq!(manager.get(&active.id).unwrap(), leased);
+    }
+
+    #[test]
+    fn observed_release_revalidates_snapshot_lease_and_checkout_before_removal() {
+        let tmp = repo();
+        let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+        let storage = manager.managed_root.parent().unwrap().parent().unwrap();
+        let record = manager
+            .create("observed", None, None, false, None, None)
+            .unwrap();
+        let release = |expected: &WorkspaceRecord, force| {
+            WorkspaceManager::release_observed(&manager.repository_root, storage, expected, force)
+        };
+        manager.retain(&record.id, true, None, None).unwrap();
+        let before = fs::read(&manager.registry_path).unwrap();
+        assert!(release(&record, true).is_err());
+        assert_eq!(fs::read(&manager.registry_path).unwrap(), before);
+        let retained = manager.get(&record.id).unwrap();
+        fs::write(record.worktree_path.join("uncommitted"), "keep").unwrap();
+        assert!(release(&retained, false).is_err());
+        assert_eq!(fs::read(&manager.registry_path).unwrap(), before);
+        assert!(record.worktree_path.join("uncommitted").exists());
+        let mut registry = manager.load().unwrap();
+        registry.workspaces[0].lease = Some(WorkspaceLease {
+            daemon_generation: "host".into(),
+            acquired_at: chrono::Utc::now(),
+        });
+        manager.save(&registry).unwrap();
+        let leased = manager.get(&record.id).unwrap();
+        let leased_bytes = fs::read(&manager.registry_path).unwrap();
+        assert!(release(&leased, true).is_err());
+        assert_eq!(fs::read(&manager.registry_path).unwrap(), leased_bytes);
+        fs::write(&manager.registry_path, before).unwrap();
+        let released = release(&retained, true).unwrap();
+        assert_eq!(released.lifecycle_state(), WorkspaceState::Released);
+        assert!(!record.worktree_path.exists());
+        let after = fs::read(&manager.registry_path).unwrap();
+        assert!(release(&retained, true).is_err());
+        assert_eq!(fs::read(&manager.registry_path).unwrap(), after);
+        assert_eq!(release(&released, true).unwrap(), released);
     }
 
     #[test]

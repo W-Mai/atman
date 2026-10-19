@@ -1,8 +1,8 @@
 //! Explicit resource removal records its intent before external effects.
 
 use super::{
-    WorkspaceError, WorkspaceManager, WorkspaceRecord, WorkspaceRelease, WorkspaceState,
-    canonicalize, validate_ownership,
+    WorkspaceError, WorkspaceManager, WorkspaceRecord, WorkspaceRegistry, WorkspaceRelease,
+    WorkspaceState, canonicalize, validate_ownership,
 };
 use crate::git::GitCli;
 
@@ -13,6 +13,30 @@ pub(super) enum ReleaseStage {
 }
 
 impl WorkspaceManager {
+    /// Release an observed resource only while its complete record still matches. Callers authorize both roots. Live references and invocation leases cannot be released by directory controls; pending removals retain their recorded options.
+    pub fn release_observed(
+        repository_root: &std::path::Path,
+        storage_root: &std::path::Path,
+        expected: &WorkspaceRecord,
+        force: bool,
+    ) -> Result<WorkspaceRecord, WorkspaceError> {
+        Self::mutate_observed(
+            repository_root,
+            storage_root,
+            expected,
+            |manager, registry| {
+                manager.release_locked(
+                    registry,
+                    &expected.id,
+                    expected.owner_session.as_deref(),
+                    expected.owner_flow.as_deref(),
+                    force,
+                    |_| Ok(()),
+                )
+            },
+        )
+    }
+
     pub fn release(
         &self,
         id: &str,
@@ -29,10 +53,22 @@ impl WorkspaceManager {
         owner_session: Option<&str>,
         owner_flow: Option<&str>,
         force: bool,
-        mut hook: impl FnMut(ReleaseStage) -> Result<(), WorkspaceError>,
+        hook: impl FnMut(ReleaseStage) -> Result<(), WorkspaceError>,
     ) -> Result<WorkspaceRecord, WorkspaceError> {
         let _lock = self.lock_registry()?;
         let mut registry = self.load()?;
+        self.release_locked(&mut registry, id, owner_session, owner_flow, force, hook)
+    }
+
+    fn release_locked(
+        &self,
+        registry: &mut WorkspaceRegistry,
+        id: &str,
+        owner_session: Option<&str>,
+        owner_flow: Option<&str>,
+        force: bool,
+        mut hook: impl FnMut(ReleaseStage) -> Result<(), WorkspaceError>,
+    ) -> Result<WorkspaceRecord, WorkspaceError> {
         let index = registry
             .workspaces
             .iter()
@@ -72,7 +108,7 @@ impl WorkspaceManager {
                 pending.state = WorkspaceState::Releasing.as_str().into();
                 pending.retained = false;
                 pending.release = Some(WorkspaceRelease { request_id, force });
-                self.save(&registry)?;
+                self.save(registry)?;
             }
             state => {
                 return Err(WorkspaceError::Invalid(format!(
@@ -90,7 +126,7 @@ impl WorkspaceManager {
         released.reconciled_at = Some(chrono::Utc::now());
         released.reconciliation_reason = Some("released by explicit workspace action".into());
         let result = released.clone();
-        self.save(&registry)?;
+        self.save(registry)?;
         Ok(result)
     }
 
