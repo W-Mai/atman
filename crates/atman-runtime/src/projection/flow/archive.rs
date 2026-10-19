@@ -9,7 +9,7 @@ use crate::{
     TranscriptEntry,
     event::{Event, EventEnvelope},
     event_log::{
-        legacy::{self, LegacyFlowKey, LegacyInspection, LegacyRecord, LegacySource},
+        legacy::{self, LegacyFlowKey, LegacyInspection, LegacySource},
         reader::ReplayRecord,
         replay::FlowOwnership,
     },
@@ -60,9 +60,9 @@ impl LegacyHistory {
         self.inspection.source.verify()?;
         let mut file = File::open(&self.inspection.source.path)?;
         let transcript = project_records(records.iter().map(|record| {
-            Ok((
+            Ok(LegacyHistoryRecord::new(
                 (*record).clone(),
-                record.read(&mut file, self.inspection.source.bytes)?,
+                &record.read(&mut file, self.inspection.source.bytes)?,
             ))
         }))?;
         self.inspection.source.verify()?;
@@ -103,24 +103,23 @@ impl FlowTranscript {
             let FlowRecord::Legacy(record) = &entry.record else {
                 return Err(io::Error::other("archive contains execution records"));
             };
-            Ok((record.source.clone(), record.bytes()?))
+            Ok((**record).clone())
         }))
     }
 }
 
 fn project_records(
-    records: impl IntoIterator<Item = io::Result<(LegacyRecord, Vec<u8>)>>,
+    records: impl IntoIterator<Item = io::Result<LegacyHistoryRecord>>,
 ) -> io::Result<ArchiveTranscript> {
     let mut projected = Vec::new();
     let mut unparsed = Vec::new();
     let mut ownership = FlowOwnership::default();
     for record in records {
-        let (source, bytes) = record?;
-        let parsed = source
-            .sequence
-            .zip(serde_json::from_slice::<Event>(&bytes).ok());
+        let record = record?;
+        let source = &record.source;
+        let parsed = source.sequence.zip(record.project_event()?);
         let Some((seq, mut event)) = parsed else {
-            unparsed.push(LegacyHistoryRecord::new(source, &bytes));
+            unparsed.push(record);
             continue;
         };
         if let Event::FlowStart {

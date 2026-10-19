@@ -7,7 +7,7 @@ use crate::error::RuntimeError;
 use crate::message::{ImageData, ImageSource};
 
 const ATTACHMENTS_DIR: &str = "attachments";
-const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct AttachmentStore {

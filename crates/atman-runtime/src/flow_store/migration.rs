@@ -330,7 +330,15 @@ fn import_records(
             let mut output = Vec::with_capacity(batch.len());
             for record in batch {
                 let bytes = record.read(&mut file, inspection.source.bytes)?;
-                output.push(LegacyHistoryRecord::new((*record).clone(), &bytes));
+                let mut retained = LegacyHistoryRecord::new((*record).clone(), &bytes);
+                retained.retain_images(
+                    inspection
+                        .source
+                        .path
+                        .parent()
+                        .ok_or_else(|| invalid("source has no session directory"))?,
+                )?;
+                output.push(retained);
             }
             flow.append_legacy_history(output)?;
         }

@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- **Archived image retention** — History migration retains managed image contents with their original records. Images remain readable after the old session directory is removed; missing, damaged, or external managed attachments prevent publication of an incomplete archive.
+
 - **Concurrent watcher registration** — Creating or editing a Flow watcher accounts for source events already observed during admission. Earlier notifications stay intact, future events remain deliverable, and internal result routes retain their exact start position.
 
 - **Reply wait retries** — Identical continuation waits share ownership. Dropping a duplicate handle does not cancel an active wait, and delayed cleanup cannot cancel a replacement handle.

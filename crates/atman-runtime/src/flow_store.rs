@@ -10,6 +10,7 @@ pub mod continuation;
 mod deletion;
 pub mod goal;
 pub mod history;
+mod history_images;
 pub mod inbox;
 pub mod inbox_view;
 mod input;

@@ -1,6 +1,6 @@
 //! Retained legacy records in the same journal and view stream as executable instances.
 
-use std::io;
+use std::{collections::BTreeMap, io};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,9 @@ impl LegacyArchive {
 pub struct LegacyHistoryRecord {
     pub source: LegacyRecord,
     pub raw_base64: String,
+    /// Managed image contents in base64, keyed by the original artifact content ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub images: BTreeMap<String, String>,
 }
 
 impl LegacyHistoryRecord {
@@ -55,6 +58,7 @@ impl LegacyHistoryRecord {
         Self {
             source,
             raw_base64: STANDARD.encode(bytes),
+            images: BTreeMap::new(),
         }
     }
 
@@ -83,6 +87,9 @@ impl HistoryProgress {
         for record in records {
             let source = &record.source;
             let bytes = record.bytes()?;
+            if !record.images.is_empty() {
+                record.project_event()?;
+            }
             let end = source
                 .offset
                 .checked_add(source.bytes)

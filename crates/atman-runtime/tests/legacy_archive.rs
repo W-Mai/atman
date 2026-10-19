@@ -11,6 +11,148 @@ use atman_runtime::flow_store::{
 use uuid::Uuid;
 
 #[test]
+fn migrated_images_survive_source_removal_and_reject_unowned_or_damaged_content() {
+    use atman_runtime::{
+        TranscriptEntry,
+        attachment_store::{AttachmentStore, image_bytes},
+        message::{ImageData, Message, MessagePart},
+    };
+    for variant in [
+        "valid", "alias", "missing", "external", "damaged", "symlink",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("original");
+        std::fs::create_dir(&original).unwrap();
+        let original = original.canonicalize().unwrap();
+        let bytes = b"\x89PNG\r\n\x1a\n\0\0\0\r";
+        let mut image = AttachmentStore::at(&original)
+            .import_bytes(bytes, Some("retained.png"))
+            .unwrap();
+        let ImageData::Artifact { path, .. } = &mut image.data else {
+            panic!("managed artifact missing");
+        };
+        match variant {
+            "alias" => {
+                #[cfg(unix)]
+                {
+                    let alias = temp.path().join("session-alias");
+                    std::os::unix::fs::symlink(&original, &alias).unwrap();
+                    *path = alias.join("attachments").join(path.file_name().unwrap());
+                }
+                #[cfg(not(unix))]
+                continue;
+            }
+            "missing" => std::fs::remove_file(path).unwrap(),
+            "external" => {
+                let external = temp.path().join("external.png");
+                std::fs::rename(&*path, &external).unwrap();
+                *path = external;
+            }
+            "damaged" => std::fs::write(path, b"not the recorded image").unwrap(),
+            "symlink" => {
+                #[cfg(unix)]
+                {
+                    let external = temp.path().join("external.png");
+                    std::fs::rename(&*path, &external).unwrap();
+                    std::os::unix::fs::symlink(external, &*path).unwrap();
+                }
+                #[cfg(not(unix))]
+                continue;
+            }
+            _ => {}
+        }
+        let turn = atman_rt::TurnId::now();
+        let mut message = Message::user_text(turn.clone(), "retained image");
+        message.parts.push(MessagePart::Image { source: image });
+        let event = atman_runtime::event::EventEnvelope::new(
+            1,
+            atman_runtime::Event::UserMsg {
+                turn_id: turn,
+                flow_run_id: None,
+                message,
+                presentation: None,
+                injection_id: None,
+            },
+        );
+        let raw = format!("{}\n", serde_json::to_string(&event).unwrap()).into_bytes();
+        let source = original.join("events.jsonl");
+        std::fs::write(&source, &raw).unwrap();
+        let root = RuntimeStore::open(temp.path()).unwrap();
+        let id = Uuid::now_v7();
+        let descriptor = SessionDescriptor {
+            id,
+            project: None,
+            configuration: Default::default(),
+            title: "Images".into(),
+        };
+        let source_id = Uuid::now_v7();
+        let result = root.archive_legacy(&source, source_id, descriptor.clone(), true);
+        assert_eq!(std::fs::read(&source).unwrap(), raw);
+        if !matches!(variant, "valid" | "alias") {
+            assert!(result.is_err(), "{variant} image was accepted");
+            assert!(!root.root().join("sessions").join(id.to_string()).exists());
+            continue;
+        }
+        let receipt = result.unwrap();
+        assert_eq!(
+            root.archive_legacy(&source, source_id, descriptor, true)
+                .unwrap(),
+            receipt
+        );
+        std::fs::remove_dir_all(&original).unwrap();
+        let session = RuntimeStore::inspect_session(temp.path(), id).unwrap();
+        let view = session
+            .archived_view(&receipt.flows[0].instance)
+            .unwrap()
+            .unwrap();
+        let transcript = view.transcript().archived_transcript().unwrap();
+        let image = transcript
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                TranscriptEntry::Message { message, .. } => {
+                    message.parts.iter().find_map(|part| match part {
+                        MessagePart::Image { source } => Some(source),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(matches!(image.data, ImageData::Base64 { .. }));
+        assert_eq!(image_bytes(image).unwrap(), bytes);
+        let atman_runtime::projection::flow::FlowRecord::Legacy(record) =
+            &view.transcript().entries()[0].record
+        else {
+            panic!("missing raw record")
+        };
+        assert_eq!(record.bytes().unwrap(), raw);
+        let mut writer = root.open_session(id).unwrap();
+        let mut descriptor = writer
+            .open_flow(&receipt.flows[0].instance)
+            .unwrap()
+            .descriptor()
+            .clone();
+        descriptor.address.instance_id = FlowInstanceId::now();
+        descriptor.creation_request = Uuid::now_v7();
+        let mut rejected = writer.create_flow(descriptor).unwrap();
+        let cursor = rejected.cursor().clone();
+        for unrelated in [false, true] {
+            let mut corrupted = (**record).clone();
+            if unrelated {
+                corrupted
+                    .images
+                    .insert("unreferenced".into(), "AAAA".into());
+            } else {
+                *corrupted.images.values_mut().next().unwrap() = "AAAA".into();
+            }
+            assert!(rejected.append_legacy_history(vec![corrupted]).is_err());
+            assert_eq!(rejected.cursor(), &cursor);
+        }
+    }
+}
+
+#[test]
 fn direct_history_and_migration_share_partitions_and_display_without_writes() {
     use atman_runtime::{
         TranscriptEntry,
