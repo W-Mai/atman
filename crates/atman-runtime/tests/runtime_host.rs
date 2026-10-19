@@ -7850,6 +7850,198 @@ async fn flow_watch_expiry_survives_revocation_pause_and_reopen_without_source()
 }
 
 #[tokio::test]
+async fn cyclic_peer_waits_park_and_unwind_through_pause_cancel_and_close() {
+    use atman_runtime::{
+        RuntimeError,
+        flow_runtime::access::PeerControl,
+        flow_store::subscription::{FlowEventFilter, FlowSubscription, SubscriptionPurpose},
+        tool::{Tier, ToolDefinition},
+    };
+    for close in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(dir.path()).unwrap();
+        let host = RuntimeHost::default();
+        let info = session_descriptor();
+        let session = host
+            .attach_session(root.create_session(info.clone()).unwrap())
+            .unwrap();
+        let a = session
+            .create_flow(program_descriptor(
+                info.id,
+                "flow main() -> any { return peer_wait() }".into(),
+            ))
+            .await
+            .unwrap();
+        let b = session
+            .create_flow(program_descriptor(
+                info.id,
+                "flow main() -> any { return peer_wait() }".into(),
+            ))
+            .await
+            .unwrap();
+        for worker in [&a, &b] {
+            change(worker, FlowTransition::Activated).await;
+            worker
+                .accept_input(peer_request(worker.address(), worker.address()), |_| Ok(()))
+                .await
+                .unwrap();
+        }
+        let a_request = prepare(&a.snapshot().await.unwrap()).unwrap().unwrap();
+        let b_request = prepare(&b.snapshot().await.unwrap()).unwrap().unwrap();
+        let (entered, mut ready) = tokio::sync::mpsc::unbounded_channel();
+        let executor = |peer: FlowRef, turn: TurnId<_>| {
+            let executor = Executor::new();
+            let entered = entered.clone();
+            executor
+                .tools
+                .register_fn(
+                    ToolDefinition::new("peer_wait", Tier::Zero),
+                    move |_, ctx| {
+                        let peer = peer.clone();
+                        let turn = turn.clone();
+                        let entered = entered.clone();
+                        async move {
+                            let client = ctx.flow_client().unwrap();
+                            let failed =
+                                |error: io::Error| RuntimeError::ToolFailed(error.to_string());
+                            let sent = client
+                                .send(
+                                    peer.clone(),
+                                    Uuid::new_v4(),
+                                    "peer input".into(),
+                                    DeliveryMode::AtBoundary,
+                                )
+                                .await
+                                .map_err(failed)?;
+                            assert!(sent.pending_reason.is_none());
+                            let wait = client
+                                .prepare_reply(peer.clone(), Uuid::new_v4())
+                                .await
+                                .map_err(failed)?;
+                            client
+                                .watch_events(FlowSubscription {
+                                    id: Uuid::new_v4(),
+                                    source: peer,
+                                    filter: FlowEventFilter::TurnCompleted {
+                                        turn: Some(turn.clone()),
+                                    },
+                                    once: true,
+                                    purpose: SubscriptionPurpose::Watcher,
+                                    expires_at: None,
+                                    reply: Some(wait.waiter().clone()),
+                                })
+                                .await
+                                .map_err(failed)?;
+                            entered.send(()).unwrap();
+                            wait.completion(turn).await
+                        }
+                    },
+                )
+                .unwrap();
+            executor
+        };
+        let a_executor = executor(b.address().clone(), b_request.turn.clone());
+        let b_executor = executor(a.address().clone(), a_request.turn.clone());
+        let a_ticket = a.start_turn(a_executor, a_request).await.unwrap();
+        let b_ticket = b.start_turn(b_executor, b_request).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            ready.recv().await.unwrap();
+            ready.recv().await.unwrap();
+        })
+        .await
+        .unwrap();
+        for (worker, peer) in [(&a, &b), (&b, &a)] {
+            let subscriptions = worker.flow_subscriptions().await.unwrap();
+            assert_eq!(subscriptions.len(), 1);
+            assert_eq!(&subscriptions[0].subscription.source, peer.address());
+            assert_eq!(
+                &subscriptions[0].subscription.reply.as_ref().unwrap().sender,
+                &SenderIdentity::Flow(peer.address().clone())
+            );
+        }
+        let a_cursor = a.snapshot().await.unwrap().cursor;
+        let b_cursor = b.snapshot().await.unwrap().cursor;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(a.snapshot().await.unwrap().cursor, a_cursor);
+        assert_eq!(b.snapshot().await.unwrap().cursor, b_cursor);
+        let key = Uuid::new_v4().into();
+        for worker in [&a, &b] {
+            worker
+                .control(
+                    worker.state().await.unwrap().revision(),
+                    key,
+                    PeerControl::Pause,
+                    |_| Ok(()),
+                )
+                .await
+                .unwrap();
+        }
+        a.control(
+            a.state().await.unwrap().revision(),
+            key,
+            if close {
+                PeerControl::Close
+            } else {
+                PeerControl::CancelTurn
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        let a_completion = tokio::time::timeout(Duration::from_secs(5), a_ticket.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(a_completion.result.is_err());
+        if close {
+            wait_closed(&a).await;
+        }
+        // B keeps both ordinary input and the completion while its own gate is paused.
+        let pending = wait_inputs(&b, 2).await;
+        assert!(b.completion(None).await.unwrap().is_none());
+        assert!(matches!(
+            pending.state.state(),
+            InstanceState::Open(InstanceActivity::Active(_))
+        ));
+        assert_eq!(pending.state.pauses(), &[key]);
+        let reply = pending
+            .pending
+            .iter()
+            .find(|input| input.request.correlation.is_some())
+            .unwrap()
+            .id;
+        b.control(pending.state.revision(), key, PeerControl::Resume, |_| {
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let b_completion = tokio::time::timeout(Duration::from_secs(5), b_ticket.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(b_completion.result.is_err());
+        host.wait_quiescent().await.unwrap();
+        let remaining = b.snapshot().await.unwrap();
+        assert_eq!(remaining.pending.len(), 1);
+        assert_ne!(remaining.pending[0].id, reply);
+        assert!(matches!(
+            remaining.pending[0].request.payload,
+            InboxPayload::Interjection { .. }
+        ));
+        host.shutdown().await.unwrap();
+        let restored = root.open_session(info.id).unwrap();
+        let b = restored.open_flow(&b.address().instance_id).unwrap();
+        assert_eq!(
+            b.pending_inputs().cloned().collect::<Vec<_>>(),
+            remaining.pending
+        );
+        assert_eq!(b.committed_inputs().len(), 2);
+        let a = restored.open_flow(&a.address().instance_id).unwrap();
+        assert_eq!(matches!(a.state().state(), InstanceState::Closed), close);
+    }
+}
+
+#[tokio::test]
 async fn correlated_completions_share_inbox_ownership_and_resume_independent_continuations() {
     use atman_runtime::{
         Value,
