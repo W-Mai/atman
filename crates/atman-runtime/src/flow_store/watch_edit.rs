@@ -10,8 +10,7 @@ use super::{
     CommitReceipt, FlowFact, FlowStore, Inbox, invalid,
     process_watch::{ProcessWatch, ProcessWatchRecord, ProcessWatchStatus, ProcessWatches},
     subscription::{
-        FlowSubscription, ObservationAnchor, SubscriptionPurpose, SubscriptionRecord,
-        SubscriptionStatus, Subscriptions,
+        FlowSubscription, ObservationAnchor, SubscriptionPurpose, SubscriptionStatus, Subscriptions,
     },
     watch_view::WatchRegistration,
 };
@@ -169,7 +168,7 @@ impl FlowStore {
         self.watch_replacements.retry(expected, replacement)
     }
 
-    /// Replace a user watcher using a host-authenticated source anchor. New observations start after this anchor; previously accepted input remains intact.
+    /// Replace a user watcher using a host-authenticated source anchor and committed observation progress; previously accepted input remains intact.
     pub fn replace_flow_watch(
         &mut self,
         expected: WatchDefinition,
@@ -188,13 +187,9 @@ impl FlowStore {
         }
         self.replace_watcher(WatcherReplacement {
             expected,
-            replacement: WatchRegistration::Flow(SubscriptionRecord {
-                subscription,
-                registered_at: Utc::now(),
-                started_after: anchor.cursor().clone(),
-                cursor: anchor.cursor().sequence,
-                status: SubscriptionStatus::Active,
-            }),
+            replacement: WatchRegistration::Flow(
+                self.subscriptions.registration(subscription, anchor),
+            ),
         })
     }
 

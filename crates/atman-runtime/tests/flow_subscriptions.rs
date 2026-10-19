@@ -531,6 +531,109 @@ async fn operator_unwatch_preserves_paused_execution_pending_input_and_internal_
     );
 }
 
+#[test]
+fn registering_after_concurrent_observation_preserves_future_delivery_and_replay() {
+    use atman_runtime::flow_store::watch_edit::WatchDefinition;
+    for replace in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(dir.path()).unwrap();
+        let id = Uuid::now_v7();
+        let mut session = root
+            .create_session(SessionDescriptor {
+                id,
+                project: None,
+                configuration: Default::default(),
+                title: "Watch admission".into(),
+            })
+            .unwrap();
+        let mut source = session.create_flow(descriptor(id)).unwrap();
+        let mut recipient = session.create_flow(descriptor(id)).unwrap();
+        transition(&mut source, FlowTransition::Activated);
+        transition(&mut recipient, FlowTransition::Activated);
+        let old = subscription(&source, SubscriptionPurpose::Watcher, false);
+        let route = subscription(&source, SubscriptionPurpose::SpawnResult, false);
+        let anchor = source.observation_anchor();
+        recipient.subscribe_events(old.clone(), &anchor).unwrap();
+        recipient.subscribe_events(route, &anchor).unwrap();
+        let next = subscription(&source, SubscriptionPurpose::Watcher, true);
+        // The host captured this source snapshot before the recipient observed a newer fact.
+        let captured = source.observation_anchor();
+        answer(&mut source, "before registration commits", false);
+        let page = source
+            .events_after(anchor.cursor().sequence, NonZeroUsize::new(8).unwrap())
+            .unwrap();
+        recipient.observe_events(&page).unwrap();
+        let original = recipient.pending_inputs().next().unwrap().clone();
+        let position = recipient.flow_subscriptions().next().unwrap().cursor;
+        assert!(position > captured.cursor().sequence);
+        let expected = WatchDefinition::Flow(old);
+        let accepted = if replace {
+            recipient.replace_flow_watch(expected.clone(), next.clone(), &captured)
+        } else {
+            recipient.subscribe_events(next.clone(), &captured)
+        }
+        .unwrap();
+        let record = recipient
+            .flow_subscriptions()
+            .find(|record| record.subscription.id == next.id)
+            .unwrap();
+        assert_eq!(record.started_after, *captured.cursor());
+        assert_eq!(record.cursor, position);
+        assert_eq!(recipient.pending_inputs().count(), 1);
+        assert_eq!(recipient.pending_inputs().next(), Some(&original));
+        let address = recipient.descriptor().address.clone();
+        drop(recipient);
+        let mut recipient = session.open_flow(&address.instance_id).unwrap();
+        assert_eq!(recipient.cursor(), &accepted);
+        if replace {
+            assert_eq!(
+                recipient
+                    .replace_flow_watch(expected, next.clone(), &captured)
+                    .unwrap(),
+                accepted
+            );
+        } else {
+            recipient.subscribe_events(next.clone(), &captured).unwrap();
+        }
+        let before = recipient.cursor().clone();
+        assert_eq!(recipient.observe_events(&page).unwrap(), before);
+        answer(&mut source, "after registration commits", false);
+        let page = source
+            .events_after(position, NonZeroUsize::new(8).unwrap())
+            .unwrap();
+        recipient.observe_events(&page).unwrap();
+        let pending: Vec<_> = recipient.pending_inputs().cloned().collect();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0], original);
+        let InboxPayload::FlowEvent { content, .. } = &pending[1].request.payload else {
+            panic!("missing notification")
+        };
+        let matches = content["subscriptions"].as_array().unwrap();
+        assert_eq!(matches.len(), if replace { 2 } else { 3 });
+        assert!(
+            matches
+                .iter()
+                .any(|entry| entry["id"] == next.id.to_string())
+        );
+        assert_eq!(
+            recipient
+                .flow_subscriptions()
+                .find(|record| record.subscription.id == next.id)
+                .unwrap()
+                .status,
+            SubscriptionStatus::Matched
+        );
+        let cursor = recipient.cursor().clone();
+        assert_eq!(recipient.observe_events(&page).unwrap(), cursor);
+        drop(recipient);
+        let restored = session.open_flow(&address.instance_id).unwrap();
+        assert_eq!(
+            restored.pending_inputs().cloned().collect::<Vec<_>>(),
+            pending
+        );
+    }
+}
+
 #[tokio::test]
 async fn relation_inspection_preserves_direction_revocation_and_read_only_ownership() {
     use atman_runtime::flow_runtime::catalog::SessionCatalog;
@@ -1344,10 +1447,11 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
     let mut changed = result.clone();
     changed.once = true;
     assert!(recipient.subscribe_events(changed, &anchor).is_err());
+    // Internal result routes cannot skip an already observed result during admission.
     assert!(
         recipient
             .subscribe_events(
-                subscription(&source, SubscriptionPurpose::Watcher, false),
+                subscription(&source, SubscriptionPurpose::SpawnResult, false),
                 &anchor
             )
             .is_err()

@@ -280,6 +280,35 @@ pub(super) struct Subscriptions {
 }
 
 impl Subscriptions {
+    fn initial_cursor(&self, subscription: &FlowSubscription, anchor: &CommitReceipt) -> u64 {
+        // Watchers may linearize after concurrent recipient progress. Internal result
+        // routes retain their exact anchor so admission cannot skip a required result.
+        if subscription.purpose == SubscriptionPurpose::Watcher && subscription.reply.is_none() {
+            anchor.sequence.max(
+                self.observed
+                    .get(&subscription.source)
+                    .copied()
+                    .unwrap_or(0),
+            )
+        } else {
+            anchor.sequence
+        }
+    }
+
+    pub(super) fn registration(
+        &self,
+        subscription: FlowSubscription,
+        anchor: &ObservationAnchor,
+    ) -> SubscriptionRecord {
+        SubscriptionRecord {
+            cursor: self.initial_cursor(&subscription, &anchor.cursor),
+            subscription,
+            registered_at: Utc::now(),
+            started_after: anchor.cursor.clone(),
+            status: SubscriptionStatus::Active,
+        }
+    }
+
     pub(super) fn values(&self) -> impl Iterator<Item = &SubscriptionRecord> {
         self.records.values()
     }
@@ -298,7 +327,7 @@ impl Subscriptions {
         if record.subscription.id.is_nil()
             || record.started_after.journal_id != record.subscription.source.instance_id.0.0
             || record.started_after.sequence == 0
-            || record.cursor != record.started_after.sequence
+            || record.cursor != self.initial_cursor(&record.subscription, &record.started_after)
             || record.status != SubscriptionStatus::Active
             || self.records.contains_key(&record.subscription.id)
             || record.subscription.expires_at.is_some_and(|at| {
@@ -804,13 +833,7 @@ impl FlowStore {
         if self.process_watches.contains(subscription.id) {
             return Err(invalid("watcher identity is already assigned to a process"));
         }
-        let record = SubscriptionRecord {
-            subscription,
-            registered_at: Utc::now(),
-            started_after: anchor.cursor.clone(),
-            cursor: anchor.cursor.sequence,
-            status: SubscriptionStatus::Active,
-        };
+        let record = self.subscriptions.registration(subscription, anchor);
         self.subscriptions.validate_registration(&record)?;
         let mut facts = Vec::new();
         if let Some(reply) = &record.subscription.reply {
