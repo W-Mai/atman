@@ -195,6 +195,8 @@ Three input modes:
 - `/name arg` — run `<project>/.atman/commands/<name>.at`, falling back to `~/.config/atman/commands/<name>.at`; a project command with the same name takes precedence.
 - plain text — `routes.at` handles configured prefixes and its default route.
 
+`:suggest` examines up to 30 recent turns in the current flow's available message snapshot, including tool names, arguments, and shortened results. Watcher and child-result messages retain their source labels; internal control messages, system context, and private reasoning are excluded. Compacted-away messages are not reread from old logs. A proposal must pass flow validation before confirmation, and acceptance installs it in the session's configuration directory without executing it.
+
 When a completion menu is open, use `↑`/`↓` to select an item and `Enter` or `Tab` to place it in the input. Press `Enter` again to submit the completed command.
 
 In the TUI, `:panel` opens the `Ctrl+P` command palette without requiring the shortcut. Palette actions also have direct commands, displayed beside each menu item:

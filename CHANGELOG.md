@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- **Flow suggestions** — Suggestions use the current flow's message snapshot with tool-call evidence and source-labelled notifications. Validation rejects non-standalone source, confirmation includes the proposed source and destination, and accepted commands use the session's configuration directory.
+
 - **Project data ownership** — Project deletion checks persistent session ownership, closed flow lifecycles, and management bindings before removing shared data. Concurrent session opens and management changes cannot bypass these checks; interrupted directory removal can be retried.
 
 - **Terminal startup ownership** — Startup animation and interactive views stop and join their input reader before handing over the terminal. Persistent TUI attachment retains terminal cleanup through host shutdown, shows startup notices as toasts, and opens setup using the session's configuration when credentials or model selection are missing.

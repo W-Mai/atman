@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use atman_rt::Value as CoreValue;
 use atman_rt::ast::{FlowDecl, TypeExpr};
+#[cfg(test)]
 use atman_rt::parse_file;
 use atman_runtime::source_program::{LinkedProgram, SourceRoots, load_program};
 use atman_runtime::{Executor, Session, ValueJson};
@@ -5218,83 +5219,25 @@ async fn handle_suggest(
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ReplInput>,
     reporter: &Reporter,
 ) -> Result<()> {
-    let events = session
-        .events_path()
-        .context("session has no events path (dry-run?)")?;
-    let transcript = suggest::read_recent_events(&events, suggest::recent_turns_limit())?;
-    if transcript.trim().is_empty() {
-        reporter.info("[atman] :suggest — no recent turns yet; talk a bit first.");
+    let transcript =
+        suggest::recent_messages(&session.messages_full(), suggest::recent_turns_limit());
+    reporter.info("[atman] :suggest — examining recent flow messages…");
+    let Some(proposal) = suggest::prepare(executor, &transcript).await? else {
+        reporter.info("[atman] :suggest — no reusable pattern in recent messages.");
         return Ok(());
-    }
-
-    let model = load_suggest_model(executor);
-    let call_config = executor.providers.models().model_call_config(&model);
-    let provider = executor
-        .providers
-        .resolve_call(&call_config)?
-        .with_context(|| format!("no provider resolves model `{model}` — configure one first"))?;
-
+    };
+    let cfg = executor
+        .provider_lifecycle()
+        .context("suggestion configuration unavailable")?
+        .config_hub()
+        .config_dir()
+        .to_owned();
+    let confirmation = proposal.confirmation(&cfg);
+    let flow_name = proposal.name;
+    let dsl_src = proposal.source;
     reporter.info(format!(
-        "[atman] :suggest — reading {} turns, asking `{model}`…",
-        suggest::recent_turns_limit()
+        "[atman] suggested flow `{flow_name}`:\n```atman\n{dsl_src}\n```"
     ));
-
-    // Stream tokens to the reporter in real-time.
-    let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let stream_task = tokio::spawn(async move {
-        let mut buf = String::new();
-        while let Some(t) = token_rx.recv().await {
-            buf.push_str(&t);
-        }
-        buf
-    });
-    let reply = suggest::generate_suggestion(
-        provider,
-        &call_config.api_model,
-        &transcript,
-        Some(token_tx),
-    )
-    .await?;
-    let streamed = stream_task.await.unwrap_or_default();
-    if !streamed.is_empty() {
-        reporter.info(format!("---\n{streamed}\n---"));
-    }
-
-    if reply.trim() == "NO_SUGGESTION" {
-        reporter.info("[atman] :suggest — model saw no reusable pattern.");
-        return Ok(());
-    }
-    let Some(dsl_src) = suggest::extract_code_block(&reply) else {
-        reporter.info("[atman] :suggest — model reply did not contain a fenced code block.");
-        return Ok(());
-    };
-
-    let flow_name = match suggest::extract_flow_name(&dsl_src) {
-        Ok(n) => n,
-        Err(e) => {
-            reporter.info(format!(
-                "[atman] :suggest — suggested flow is not valid: {e}"
-            ));
-            return Ok(());
-        }
-    };
-    let parsed = parse_file(&dsl_src)?;
-    if let Err(errs) = atman_runtime::validate::validate(&parsed.flows[0], &executor.tools) {
-        reporter.info("[atman] :suggest — validation rejected the suggestion:");
-        for e in errs {
-            reporter.info(format!("  · {e:?}"));
-        }
-        return Ok(());
-    }
-
-    let has_shell = dsl_src.contains("bash.spawn")
-        || dsl_src.contains("term.spawn")
-        || dsl_src.contains("shell.");
-    reporter.info(format!("[atman] suggested flow `{flow_name}`:"));
-    reporter.info(format!("---\n{dsl_src}\n---"));
-    if has_shell {
-        reporter.info("[atman] note: this flow calls shell tools — accept only if you trust it.");
-    }
 
     // Accept/reject: use form modal in TUI, CLI prompt otherwise.
     let choice = if reporter.is_tui() {
@@ -5306,12 +5249,12 @@ async fn handle_suggest(
                 questions: vec![atman_runtime::form::FormQuestion {
                     id: "question".into(),
                     kind: atman_runtime::form::FormKind::Confirm {
-                        prompt: format!("accept suggested flow `{flow_name}`?"),
+                        prompt: confirmation.clone(),
                     },
                 }],
             },
             kind: atman_runtime::form::FormKind::Confirm {
-                prompt: format!("accept suggested flow `{flow_name}`?"),
+                prompt: confirmation.clone(),
             },
             emitted_at: chrono::Utc::now(),
         };
@@ -5352,7 +5295,6 @@ async fn handle_suggest(
         return Ok(());
     }
 
-    let cfg = config_dir()?;
     let (final_name, target) = install_suggested_flow(&cfg, &flow_name, &dsl_src)
         .with_context(|| "install suggested flow")?;
     let trigger = format!("{final_name} ");
