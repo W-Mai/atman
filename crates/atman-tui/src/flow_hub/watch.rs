@@ -364,6 +364,15 @@ impl Details {
                     return action.clone();
                 }
             }
+            KeyAction::Char('e') => {
+                if let Some((_, action)) = self
+                    .targets
+                    .iter()
+                    .find(|(_, action)| matches!(action, Action::EditWatcher { .. }))
+                {
+                    return action.clone();
+                }
+            }
             KeyAction::Submit | KeyAction::ToggleLastTool => {
                 if let Some((_, action)) = self.targets.get(self.selected) {
                     return if key == KeyAction::Submit {
@@ -520,6 +529,17 @@ impl Details {
         };
         if active {
             self.targets.push((
+                "Edit E",
+                if pending {
+                    Action::None
+                } else {
+                    Action::EditWatcher {
+                        owner: owner.clone(),
+                        expected: (&record.registration).into(),
+                    }
+                },
+            ));
+            self.targets.push((
                 "Cancel Del",
                 if pending {
                     Action::None
@@ -577,7 +597,15 @@ impl Details {
             .iter()
             .flat_map(|line| crate::width::word_wrap(line, width.saturating_sub(4) as usize))
             .collect();
-        let body = Rect::new(left, top + 4, width, bottom.saturating_sub(top + 9));
+        let count = self.targets.len();
+        let columns = if width < 70 { count.min(2) } else { count };
+        let actions_height = (count.div_ceil(columns) * 4 - 1) as u16;
+        let body = Rect::new(
+            left,
+            top + 4,
+            width,
+            bottom.saturating_sub(top + 6 + actions_height),
+        );
         let inner = Rect::new(
             body.x + 2,
             body.y + 1,
@@ -605,13 +633,12 @@ impl Details {
             ),
             inner,
         );
-        let count = self.targets.len();
         self.selected = self.selected.min(count - 1);
-        let button_w = (width - (count - 1) as u16 * 2) / count as u16;
+        let button_w = (width - (columns - 1) as u16 * 2) / columns as u16;
         for index in 0..count {
             let rect = Rect::new(
-                left + index as u16 * (button_w + 2),
-                bottom - 4,
+                left + (index % columns) as u16 * (button_w + 2),
+                bottom - actions_height - 1 + (index / columns) as u16 * 4,
                 button_w,
                 3,
             );
@@ -655,9 +682,9 @@ impl Details {
                     "↑↓ scroll · Tab target · Enter open · Ctrl+O window"
                 }
             } else if width < 60 {
-                "↑↓ scroll · Tab · Enter · Del cancel"
+                "↑↓ scroll · Tab · E edit · Del cancel"
             } else {
-                "↑↓ scroll · Tab · Enter select · Ctrl+O window · Del cancel"
+                "↑↓ scroll · Tab · Enter select · E edit · Del cancel"
             })
             .style(muted),
             Rect::new(left, bottom, width, 1),
@@ -994,14 +1021,23 @@ mod tests {
             );
             for (rect, index) in hub.watch_details.hits.clone() {
                 for row in rect.y..rect.bottom() {
-                    let action = hub.mouse(MouseEvent {
+                    let event = MouseEvent {
                         kind: MouseEventKind::Down(MouseButton::Left),
                         row,
                         column: rect.x + 1,
                         modifiers: crossterm::event::KeyModifiers::NONE,
-                    });
+                    };
+                    let action = if index == 2 {
+                        hub.watch_details.mouse(event)
+                    } else {
+                        hub.mouse(event)
+                    };
                     let expected = if index == 0 { &owner } else { &source };
                     if index == 2 {
+                        assert!(
+                            matches!(action, Action::EditWatcher { owner: target, expected } if target == owner && expected.id() == selected_id)
+                        );
+                    } else if index == 3 {
                         assert!(
                             matches!(action, Action::CancelWatcher { owner: target, id } if target == owner && id == selected_id)
                         );

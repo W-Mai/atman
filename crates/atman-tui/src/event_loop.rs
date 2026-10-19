@@ -3482,6 +3482,15 @@ fn dispatch_hub_action(
         crate::flow_hub::Action::CancelWatcher { owner, id } => {
             TuiControl::CancelWatcher { owner, id }
         }
+        crate::flow_hub::Action::ReplaceWatcher {
+            owner,
+            expected,
+            replacement,
+        } => TuiControl::ReplaceWatcher {
+            owner,
+            expected,
+            replacement,
+        },
         crate::flow_hub::Action::RegisterWatcher {
             owner,
             registration,

@@ -24,11 +24,7 @@ use crate::{
 
 const FIELDS: usize = 6;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WatchRegistration {
-    Flow(FlowSubscription),
-    Process(ProcessWatch),
-}
+pub use atman_runtime::flow_store::watch_edit::WatchDefinition;
 
 #[derive(Clone, PartialEq, Eq)]
 enum Source {
@@ -39,6 +35,10 @@ enum Source {
 pub(super) struct Draft {
     pub owner: FlowRef,
     pub picking: bool,
+    pub origin: Option<HubRequest>,
+    expected: Option<WatchDefinition>,
+    initial_expiry: Option<(String, Option<chrono::DateTime<Utc>>)>,
+    saving: bool,
     source: Option<(Source, String)>,
     event: usize,
     pattern: InputEditor,
@@ -46,7 +46,7 @@ pub(super) struct Draft {
     expiry: InputEditor,
     once: bool,
     selected: usize,
-    request: Option<WatchRegistration>,
+    request: Option<WatchDefinition>,
     error: Option<String>,
     hits: Vec<(usize, FieldHit)>,
     buttons: Vec<Rect>,
@@ -58,6 +58,10 @@ impl Draft {
         Self {
             owner,
             picking: true,
+            origin: None,
+            expected: None,
+            initial_expiry: None,
+            saving: false,
             source: None,
             event: 0,
             pattern: InputEditor::default(),
@@ -71,6 +75,53 @@ impl Draft {
             buttons: Vec::new(),
             hovered: None,
         }
+    }
+
+    pub fn edit(owner: FlowRef, expected: WatchDefinition, origin: HubRequest) -> Self {
+        let mut draft = Self::new(owner);
+        let expiry = match &expected {
+            WatchDefinition::Flow(watch) => {
+                draft.choose(watch.source.clone(), "Flow".into());
+                draft.once = watch.once;
+                match &watch.filter {
+                    FlowEventFilter::FinalAnswers => {}
+                    FlowEventFilter::AnswerContains(text) => draft.pattern.replace_with(text),
+                    FlowEventFilter::TurnCompleted { turn } => {
+                        draft.event = 1;
+                        if let Some(turn) = turn {
+                            draft.turn.paste_single_line(&turn.to_string());
+                        }
+                    }
+                    FlowEventFilter::InstanceClosed => draft.event = 2,
+                    FlowEventFilter::AnswersExceptTurn(turn) => {
+                        draft.event = 3;
+                        draft.turn.paste_single_line(&turn.to_string());
+                    }
+                }
+                watch.expires_at
+            }
+            WatchDefinition::Process(watch) => {
+                draft.choose_process(watch.source.clone(), "Process".into());
+                draft.pattern.replace_with(&watch.pattern);
+                draft.once = watch.once;
+                watch.expires_at
+            }
+        };
+        if let Some(expiry) = expiry {
+            draft
+                .expiry
+                .paste_single_line(&(expiry - Utc::now()).num_seconds().max(1).to_string());
+        }
+        draft.initial_expiry = Some((draft.expiry.buf().to_owned(), expiry));
+        draft.expected = Some(expected);
+        draft.origin = Some(origin);
+        draft
+    }
+
+    pub fn saved_id(&self) -> Option<Uuid> {
+        self.saving
+            .then(|| self.request.as_ref().map(WatchDefinition::id))
+            .flatten()
     }
 
     pub fn choose(&mut self, source: FlowRef, title: String) {
@@ -123,13 +174,14 @@ impl Draft {
 
     fn changed(&mut self) {
         self.request = None;
+        self.saving = false;
         self.error = None;
     }
 
     fn editor(&mut self) -> Option<&mut InputEditor> {
         match self.selected {
             2 if self.event == 0 || self.is_process() => Some(&mut self.pattern),
-            3 if self.event == 1 && !self.is_process() => Some(&mut self.turn),
+            3 if matches!(self.event, 1 | 3) && !self.is_process() => Some(&mut self.turn),
             5 => Some(&mut self.expiry),
             _ => None,
         }
@@ -145,7 +197,7 @@ impl Draft {
         }
     }
 
-    fn prepare(&mut self) -> Result<WatchRegistration, String> {
+    fn prepare(&mut self) -> Result<WatchDefinition, String> {
         if let Some(request) = &self.request {
             return Ok(request.clone());
         }
@@ -169,9 +221,18 @@ impl Draft {
                     ))
                 },
             },
-            _ => FlowEventFilter::InstanceClosed,
+            2 => FlowEventFilter::InstanceClosed,
+            _ => FlowEventFilter::AnswersExceptTurn(atman_rt::TurnId(
+                Uuid::parse_str(self.turn.buf().trim())
+                    .map_err(|_| "An excluded turn UUID is required")?
+                    .into(),
+            )),
         };
-        let expires_at = if self.expiry.buf().trim().is_empty() {
+        let expires_at = if let Some((text, expiry)) = &self.initial_expiry
+            && text == self.expiry.buf()
+        {
+            *expiry
+        } else if self.expiry.buf().trim().is_empty() {
             None
         } else {
             let seconds: i64 = self
@@ -190,7 +251,7 @@ impl Draft {
             )
         };
         let request = match source {
-            Source::Flow(source) => WatchRegistration::Flow(FlowSubscription {
+            Source::Flow(source) => WatchDefinition::Flow(FlowSubscription {
                 id: Uuid::now_v7(),
                 source,
                 filter,
@@ -203,7 +264,7 @@ impl Draft {
                 if self.pattern.buf().is_empty() {
                     return Err("Enter text to match in future process output".into());
                 }
-                WatchRegistration::Process(ProcessWatch {
+                WatchDefinition::Process(ProcessWatch {
                     id: Uuid::now_v7(),
                     source,
                     pattern: self.pattern.buf().to_owned(),
@@ -212,16 +273,36 @@ impl Draft {
                 })
             }
         };
+        if let Some(expected) = &self.expected {
+            let mut same_identity = request.clone();
+            match &mut same_identity {
+                WatchDefinition::Flow(watch) => watch.id = expected.id(),
+                WatchDefinition::Process(watch) => watch.id = expected.id(),
+            }
+            if &same_identity == expected {
+                return Err("No changes to save".into());
+            }
+        }
         self.request = Some(request.clone());
         Ok(request)
     }
 
     fn submit(&mut self) -> Action {
         match self.prepare() {
-            Ok(registration) => Action::RegisterWatcher {
-                owner: self.owner.clone(),
-                registration,
-            },
+            Ok(registration) => {
+                self.saving = true;
+                match &self.expected {
+                    Some(expected) => Action::ReplaceWatcher {
+                        owner: self.owner.clone(),
+                        expected: expected.clone(),
+                        replacement: Box::new(registration),
+                    },
+                    None => Action::RegisterWatcher {
+                        owner: self.owner.clone(),
+                        registration,
+                    },
+                }
+            }
             Err(error) => {
                 self.error = Some(error);
                 Action::None
@@ -231,6 +312,7 @@ impl Draft {
 
     pub fn key(&mut self, key: KeyAction, pending: bool) -> Action {
         if key == KeyAction::Escape {
+            self.saving = false;
             return Action::Load(HubRequest::Watchers {
                 owner: self.owner.clone(),
             });
@@ -260,7 +342,7 @@ impl Draft {
                     }
                     1 if !self.is_process() => {
                         self.event =
-                            (self.event + if key == KeyAction::CursorLeft { 2 } else { 1 }) % 3;
+                            (self.event + if key == KeyAction::CursorLeft { 3 } else { 1 }) % 4;
                     }
                     4 => self.once = !self.once,
                     _ => return Action::None,
@@ -344,7 +426,7 @@ impl Draft {
         self.hits.clear();
         self.buttons.clear();
         if area.width < 40 || area.height < 16 {
-            frame.render_widget(Paragraph::new("New watcher needs 40×16 · Esc back"), area);
+            frame.render_widget(Paragraph::new("Watcher form needs 40×16 · Esc back"), area);
             return;
         }
         let width = area.width.saturating_sub(4).min(100);
@@ -359,7 +441,9 @@ impl Draft {
             height,
         );
         frame.render_widget(
-            Paragraph::new(if self.is_process() {
+            Paragraph::new(if self.expected.is_some() {
+                "WatchHub / Edit watcher"
+            } else if self.is_process() {
                 "WatchHub / New process watcher"
             } else {
                 "WatchHub / New Flow watcher"
@@ -425,7 +509,12 @@ impl Draft {
                 ),
                 1 => (
                     "Event",
-                    ["Final answer", "Turn completed", "Instance closed"][self.event],
+                    [
+                        "Final answer",
+                        "Turn completed",
+                        "Instance closed",
+                        "Final answer except turn",
+                    ][self.event],
                     "",
                     None,
                     true,
@@ -454,10 +543,14 @@ impl Draft {
                 3 => (
                     "Turn UUID",
                     self.turn.buf(),
-                    "Blank matches any completed turn",
+                    if self.event == 3 {
+                        "Excluded turn UUID required"
+                    } else {
+                        "Blank matches any completed turn"
+                    },
                     Some(self.turn.cursor_display_col()),
                     false,
-                    self.event != 1,
+                    !matches!(self.event, 1 | 3),
                 ),
                 4 => (
                     "Delivery",
@@ -496,7 +589,9 @@ impl Draft {
         let feedback = if pending {
             "Waiting for host acknowledgement"
         } else {
-            self.error.as_deref().or(error.filter(|_| self.request.is_some())).unwrap_or(if self.is_process() {
+            self.error.as_deref().or(error.filter(|_| self.request.is_some())).unwrap_or(if self.expected.is_some() {
+                "Accepted notifications are kept. Unchanged expiry keeps its original deadline."
+            } else if self.is_process() {
                 "Observes future output from this process lifetime. Registration does not resume the recipient."
             } else {
                 "Observes future events. Existing Watch permissions apply; registration does not resume either Flow."
@@ -513,7 +608,13 @@ impl Draft {
                 frame,
                 rect,
                 &settings_form::Action {
-                    label: if index == 0 { "Create" } else { "Back" },
+                    label: if index != 0 {
+                        "Back"
+                    } else if self.expected.is_some() {
+                        "Save"
+                    } else {
+                        "Create"
+                    },
                     shortcut: if index == 0 { "Ctrl+S" } else { "Esc" },
                     focused: self.selected == FIELDS + index,
                     hovered: self.hovered == Some(FIELDS + index),
@@ -524,7 +625,7 @@ impl Draft {
         }
         self.buttons = layout.actions;
         frame.render_widget(
-            Paragraph::new("Tab field · ←→ value · Ctrl+S create · Esc back")
+            Paragraph::new("Tab field · ←→ value · Ctrl+S save · Esc back")
                 .style(Style::default().fg(t.meta_fg.into())),
             layout.help,
         );
@@ -551,6 +652,278 @@ mod tests {
         flow_store::FlowInstanceId,
     };
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn editing_preserves_exact_conditions_deadlines_and_retry_identity() {
+        let owner = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let expiry = Some(Utc::now() + TimeDelta::hours(1));
+        let filters = [
+            FlowEventFilter::FinalAnswers,
+            FlowEventFilter::AnswerContains("line one\n第二行".into()),
+            FlowEventFilter::TurnCompleted {
+                turn: Some(atman_rt::TurnId::now()),
+            },
+            FlowEventFilter::InstanceClosed,
+            FlowEventFilter::AnswersExceptTurn(atman_rt::TurnId::now()),
+        ];
+        let mut definitions: Vec<_> = filters
+            .into_iter()
+            .map(|filter| {
+                WatchDefinition::Flow(FlowSubscription {
+                    id: Uuid::now_v7(),
+                    source: owner.clone(),
+                    filter,
+                    once: false,
+                    purpose: SubscriptionPurpose::Watcher,
+                    expires_at: expiry,
+                    reply: None,
+                })
+            })
+            .collect();
+        definitions.push(WatchDefinition::Process(ProcessWatch {
+            id: Uuid::now_v7(),
+            source: ProcessSource::Bash {
+                incarnation: Uuid::now_v7(),
+                handle: "job".into(),
+            },
+            pattern: "ready\nnext".into(),
+            once: false,
+            expires_at: expiry,
+        }));
+        for expected in definitions {
+            let mut draft = Draft::edit(
+                owner.clone(),
+                expected.clone(),
+                HubRequest::Watchers {
+                    owner: owner.clone(),
+                },
+            );
+            assert!(draft.prepare().unwrap_err().contains("No changes"));
+            draft.selected = 4;
+            draft.key(KeyAction::CursorRight, false);
+            let Action::ReplaceWatcher {
+                expected: old,
+                replacement,
+                ..
+            } = draft.key(KeyAction::Save, false)
+            else {
+                panic!("missing replacement")
+            };
+            assert_eq!(old, expected);
+            assert_ne!(replacement.id(), expected.id());
+            let mut compared = *replacement.clone();
+            match &mut compared {
+                WatchDefinition::Flow(watch) => {
+                    watch.id = expected.id();
+                    watch.once = false;
+                }
+                WatchDefinition::Process(watch) => {
+                    watch.id = expected.id();
+                    watch.once = false;
+                }
+            }
+            assert_eq!(
+                compared, expected,
+                "editing delivery must preserve the exact condition and absolute deadline"
+            );
+            assert_eq!(draft.prepare().unwrap(), *replacement);
+            assert_eq!(draft.saved_id(), Some(replacement.id()));
+            draft.key(KeyAction::Escape, false);
+            assert_eq!(draft.saved_id(), None);
+        }
+    }
+
+    #[test]
+    fn editing_returns_to_global_directory_after_source_selection_and_scoped_ack() {
+        use atman_runtime::{
+            event_log::journal::CommitReceipt,
+            flow_runtime::catalog::{WatchCatalogEntry, WatchCatalogPage, WatchCatalogSnapshot},
+            flow_store::{
+                subscription::{SubscriptionRecord, SubscriptionStatus},
+                watch_view::{WatchProgress, WatchRecord, WatchRegistration},
+            },
+        };
+        let first = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let owner = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let original = FlowSubscription {
+            id: Uuid::now_v7(),
+            source: first.clone(),
+            filter: FlowEventFilter::FinalAnswers,
+            once: false,
+            purpose: SubscriptionPurpose::Watcher,
+            expires_at: None,
+            reply: None,
+        };
+        let receipt = CommitReceipt {
+            journal_id: Uuid::now_v7(),
+            sequence: 1,
+            digest: "test".into(),
+        };
+        let snapshot = |title: &str| WatchCatalogSnapshot {
+            title: title.into(),
+            cursor: receipt.clone(),
+            trailing_bytes: 0,
+            records: vec![WatchRecord {
+                registration: WatchRegistration::Flow(SubscriptionRecord {
+                    subscription: original.clone(),
+                    registered_at: Utc::now(),
+                    started_after: receipt.clone(),
+                    cursor: 1,
+                    status: SubscriptionStatus::Active,
+                }),
+                progress: WatchProgress::default(),
+            }],
+        };
+        for (width, height) in [(40, 24), (120, 45)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut ticket = ControlTicket {
+                binding: ViewBinding {
+                    view_id: Uuid::now_v7(),
+                    revision: 1,
+                    flow: first.clone().into(),
+                },
+                request_id: Uuid::now_v7(),
+            };
+            let mut history = History::default();
+            let mut hub = FlowHub {
+                pending: Some(ticket.clone()),
+                ..Default::default()
+            };
+            history.receive(
+                &mut hub,
+                Some(&ticket),
+                Ok(Box::new(FlowHubPage::Watchers(
+                    super::super::WatchDirectory::catalog(
+                        first.clone(),
+                        None,
+                        WatchCatalogPage {
+                            entries: vec![
+                                WatchCatalogEntry::Flow {
+                                    owner: first.clone(),
+                                    session_title: Some("Alpha".into()),
+                                    snapshot: Ok(snapshot("Alpha")),
+                                },
+                                WatchCatalogEntry::Flow {
+                                    owner: owner.clone(),
+                                    session_title: Some("Beta".into()),
+                                    snapshot: Ok(snapshot("Beta")),
+                                },
+                            ],
+                            next: None,
+                            total_sessions: 2,
+                            inspected: 2,
+                        },
+                    ),
+                ))),
+            );
+            hub.query = "beta".into();
+            hub.key(KeyAction::Submit);
+            terminal
+                .draw(|frame| hub.render(frame, &first.clone().into()))
+                .unwrap();
+            hub.key(KeyAction::Char('e'));
+            assert_eq!(hub.create_watch.as_ref().unwrap().owner, owner);
+            hub.create_watch.as_mut().unwrap().selected = 0;
+            assert!(matches!(hub.key(KeyAction::Submit), Action::Load(_)));
+            ticket.request_id = Uuid::now_v7();
+            hub.pending = Some(ticket.clone());
+            history.receive(
+                &mut hub,
+                Some(&ticket),
+                Ok(Box::new(FlowHubPage::ProcessSources {
+                    owner: owner.clone(),
+                    sources: vec![],
+                })),
+            );
+            let draft = hub.create_watch.as_mut().unwrap();
+            draft.choose_process(
+                ProcessSource::Bash {
+                    incarnation: Uuid::now_v7(),
+                    handle: "job".into(),
+                },
+                "Job".into(),
+            );
+            draft.paste("needle");
+            terminal
+                .draw(|frame| hub.render(frame, &first.clone().into()))
+                .unwrap();
+            let rect = hub.create_watch.as_ref().unwrap().buttons[0];
+            let action = if width == 40 {
+                hub.key(KeyAction::Save)
+            } else {
+                hub.mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x + 2,
+                    row: rect.y + 1,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                })
+            };
+            let Action::ReplaceWatcher {
+                owner: target,
+                expected,
+                replacement,
+            } = action
+            else {
+                panic!("missing replacement")
+            };
+            assert_eq!(target, owner);
+            assert_eq!(expected, WatchDefinition::Flow(original.clone()));
+            ticket.request_id = Uuid::now_v7();
+            hub.pending = Some(ticket.clone());
+            history.receive(&mut hub, Some(&ticket), Err("write failed".into()));
+            assert_eq!(
+                hub.create_watch.as_mut().unwrap().prepare().unwrap(),
+                *replacement
+            );
+            assert!(matches!(
+                hub.key(KeyAction::Save),
+                Action::ReplaceWatcher { .. }
+            ));
+            ticket.request_id = Uuid::now_v7();
+            hub.pending = Some(ticket.clone());
+            let incoming = || {
+                let mut fresh = snapshot("Beta");
+                if let WatchRegistration::Flow(old) = &mut fresh.records[0].registration {
+                    old.status = SubscriptionStatus::Cancelled;
+                }
+                let WatchDefinition::Process(watch) = &*replacement else {
+                    panic!("missing process")
+                };
+                fresh.records.push(WatchRecord { registration: WatchRegistration::Process(atman_runtime::flow_store::process_watch::ProcessWatchRecord { watch: watch.clone(), registered_at: Utc::now(), started_after: 0, status: atman_runtime::flow_store::process_watch::ProcessWatchStatus::Active }), progress: WatchProgress::default() });
+                Box::new(FlowHubPage::Watchers(super::super::WatchDirectory::flow(
+                    owner.clone(),
+                    fresh,
+                )))
+            };
+            let mut stale = ticket.clone();
+            stale.binding.revision += 1;
+            history.receive(&mut hub, Some(&stale), Ok(incoming()));
+            assert!(hub.create_watch.is_some());
+            history.receive(&mut hub, Some(&ticket), Ok(incoming()));
+            assert!(hub.create_watch.is_none());
+            assert_eq!(hub.query, "beta");
+            assert_eq!(hub.watch_details.id, Some(replacement.id()));
+            let Some(FlowHubPage::Watchers(directory)) = &hub.page else {
+                panic!("missing directory")
+            };
+            assert!(directory.global());
+            assert_eq!(directory.owner, first);
+            assert_eq!(directory.snapshot(&first).unwrap().records.len(), 1);
+            assert_eq!(directory.snapshot(&owner).unwrap().records.len(), 2);
+            terminal
+                .draw(|frame| hub.render(frame, &first.clone().into()))
+                .unwrap();
+        }
+    }
 
     #[test]
     fn process_picker_preserves_incarnation_retry_and_view_ownership() {
@@ -639,7 +1012,7 @@ mod tests {
                 hub.paste("3600");
                 let Action::RegisterWatcher {
                     owner: recipient,
-                    registration: WatchRegistration::Process(watch),
+                    registration: WatchDefinition::Process(watch),
                 } = hub.key(KeyAction::Save)
                 else {
                     panic!("missing process registration")
@@ -661,7 +1034,7 @@ mod tests {
                 let draft = hub.create_watch.as_mut().unwrap();
                 assert_eq!(
                     draft.prepare().unwrap(),
-                    WatchRegistration::Process(watch.clone())
+                    WatchDefinition::Process(watch.clone())
                 );
                 // A process never parses a leftover Flow-only turn filter or changes its kind.
                 draft.event = 1;
@@ -670,7 +1043,7 @@ mod tests {
                 draft.key(KeyAction::CursorRight, false);
                 assert_eq!(
                     draft.prepare().unwrap(),
-                    WatchRegistration::Process(watch.clone())
+                    WatchDefinition::Process(watch.clone())
                 );
                 draft.selected = 0;
                 assert!(
@@ -682,10 +1055,10 @@ mod tests {
                 hub.key(KeyAction::Submit);
                 assert_eq!(
                     hub.create_watch.as_mut().unwrap().prepare().unwrap(),
-                    WatchRegistration::Process(watch.clone())
+                    WatchDefinition::Process(watch.clone())
                 );
                 hub.key(KeyAction::Char('!'));
-                let WatchRegistration::Process(edited) =
+                let WatchDefinition::Process(edited) =
                     hub.create_watch.as_mut().unwrap().prepare().unwrap()
                 else {
                     panic!("expected process")
@@ -704,7 +1077,7 @@ mod tests {
                         modifiers: crossterm::event::KeyModifiers::NONE
                     }),
                     Action::RegisterWatcher {
-                        registration: WatchRegistration::Process(_),
+                        registration: WatchDefinition::Process(_),
                         ..
                     }
                 ));
@@ -835,7 +1208,7 @@ mod tests {
             hub.paste("3600");
             let Action::RegisterWatcher {
                 owner: recipient,
-                registration: WatchRegistration::Flow(subscription),
+                registration: WatchDefinition::Flow(subscription),
             } = hub.key(KeyAction::Save)
             else {
                 panic!("missing registration")
@@ -855,7 +1228,7 @@ mod tests {
             history.receive(&mut hub, Some(&ticket), Err("lost acknowledgement".into()));
             hub.key(KeyAction::CursorLeft); // Moving the cursor does not change identity.
             let Action::RegisterWatcher {
-                registration: WatchRegistration::Flow(retry),
+                registration: WatchDefinition::Flow(retry),
                 ..
             } = hub.key(KeyAction::Save)
             else {
@@ -870,11 +1243,11 @@ mod tests {
             hub.key(KeyAction::Submit); // Same source retains the request.
             assert_eq!(
                 hub.create_watch.as_mut().unwrap().prepare().unwrap(),
-                WatchRegistration::Flow(subscription.clone())
+                WatchDefinition::Flow(subscription.clone())
             );
             hub.key(KeyAction::Tab);
             hub.key(KeyAction::Char('x'));
-            let WatchRegistration::Flow(edited) =
+            let WatchDefinition::Flow(edited) =
                 hub.create_watch.as_mut().unwrap().prepare().unwrap()
             else {
                 panic!("expected Flow watcher")

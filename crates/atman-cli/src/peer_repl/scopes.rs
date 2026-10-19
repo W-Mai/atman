@@ -231,9 +231,56 @@ impl Scopes {
             subscription.purpose == SubscriptionPurpose::Watcher && subscription.reply.is_none(),
             "watcher controls cannot create internal result routes"
         );
+        self.prepare_watch_source(&owner, &subscription).await?;
+        self.host
+            .watch_events(owner.clone(), subscription, move |actual| {
+                if actual == &owner {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "watcher owner differs from selected flow",
+                    ))
+                }
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn replace_watcher(
+        &self,
+        owner: atman_runtime::flow_store::FlowRef,
+        expected: atman_runtime::flow_store::watch_edit::WatchDefinition,
+        replacement: atman_runtime::flow_store::watch_edit::WatchDefinition,
+    ) -> Result<()> {
+        if let atman_runtime::flow_store::watch_edit::WatchDefinition::Flow(subscription) =
+            &replacement
+        {
+            self.prepare_watch_source(&owner, subscription).await?;
+        }
+        self.host
+            .replace_watcher(owner.clone(), expected, replacement, move |actual| {
+                if actual == &owner {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "watcher owner differs from selected flow",
+                    ))
+                }
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn prepare_watch_source(
+        &self,
+        owner: &atman_runtime::flow_store::FlowRef,
+        subscription: &atman_runtime::flow_store::subscription::FlowSubscription,
+    ) -> Result<()> {
         let recorded = self
             .host
-            .flow(&owner)
+            .flow(owner)
             .await?
             .flow_subscriptions()
             .await?
@@ -264,18 +311,6 @@ impl Scopes {
             Err(error) => return Err(error.into()),
         }
         drop(_loaded);
-        self.host
-            .watch_events(owner.clone(), subscription, move |actual| {
-                if actual == &owner {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "watcher owner differs from selected flow",
-                    ))
-                }
-            })
-            .await?;
         Ok(())
     }
 
@@ -747,6 +782,23 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let original =
+            atman_runtime::flow_store::watch_edit::WatchDefinition::Flow(subscription.clone());
+        let subscription = FlowSubscription {
+            id: Uuid::now_v7(),
+            once: true,
+            ..subscription
+        };
+        let edited =
+            atman_runtime::flow_store::watch_edit::WatchDefinition::Flow(subscription.clone());
+        scopes
+            .replace_watcher(owner.clone(), original.clone(), edited.clone())
+            .await
+            .unwrap();
+        let registered = recipient.snapshot().await.unwrap();
+        assert_eq!(registered.state, before.state);
+        assert_eq!(registered.pending, before.pending);
+        assert!(scopes.loaded.lock().await.is_empty());
         session
             .revoke_access(session.snapshot().await.unwrap().cursor, grant)
             .await
@@ -760,7 +812,7 @@ mod tests {
             registered.cursor
         );
         let mut conflict = subscription.clone();
-        conflict.once = true;
+        conflict.once = !subscription.once;
         assert!(
             scopes
                 .register_watcher(owner.clone(), conflict)
@@ -774,6 +826,11 @@ mod tests {
         let cancelled = recipient.snapshot().await.unwrap().cursor;
         scopes
             .register_watcher(owner.clone(), subscription.clone())
+            .await
+            .unwrap();
+        assert_eq!(recipient.snapshot().await.unwrap().cursor, cancelled);
+        scopes
+            .replace_watcher(owner.clone(), original.clone(), edited.clone())
             .await
             .unwrap();
         assert_eq!(recipient.snapshot().await.unwrap().cursor, cancelled);
@@ -801,6 +858,10 @@ mod tests {
         );
         restored
             .register_watcher(owner.clone(), subscription)
+            .await
+            .unwrap();
+        restored
+            .replace_watcher(owner.clone(), original, edited)
             .await
             .unwrap();
         assert!(restored_host.session(source_id).is_err());

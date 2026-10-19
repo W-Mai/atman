@@ -549,13 +549,26 @@ impl Workspace {
                             });
                             continue;
                         }
+                        TuiControl::ReplaceWatcher { owner, expected, replacement } => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = async {
+                                    scopes.replace_watcher(owner.clone(), expected, *replacement).await?;
+                                    scopes.browse(atman_tui::flow_hub::HubRequest::Watchers { owner }).await
+                                        .context("Replacement committed, but reading updated details failed")
+                                        .map(Navigation::Catalog)
+                                }.await;
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::RegisterWatcher { owner, registration } => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
                                 let result = async {
                                     match registration {
-                                        atman_tui::flow_hub::WatchRegistration::Flow(subscription) => scopes.register_watcher(owner.clone(), subscription).await?,
-                                        atman_tui::flow_hub::WatchRegistration::Process(watch) => scopes.register_process_watcher(owner.clone(), watch).await?,
+                                        atman_tui::flow_hub::WatchDefinition::Flow(subscription) => scopes.register_watcher(owner.clone(), subscription).await?,
+                                        atman_tui::flow_hub::WatchDefinition::Process(watch) => scopes.register_process_watcher(owner.clone(), watch).await?,
                                     }
                                     scopes.browse(atman_tui::flow_hub::HubRequest::Watchers { owner }).await
                                         .context("Registration committed, but reading updated details failed")

@@ -121,7 +121,12 @@ pub enum TuiControl {
     },
     RegisterWatcher {
         owner: atman_runtime::flow_store::FlowRef,
-        registration: flow_hub::WatchRegistration,
+        registration: flow_hub::WatchDefinition,
+    },
+    ReplaceWatcher {
+        owner: atman_runtime::flow_store::FlowRef,
+        expected: flow_hub::WatchDefinition,
+        replacement: Box<flow_hub::WatchDefinition>,
     },
     FocusFlow {
         flow: control::ViewAddress,

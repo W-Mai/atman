@@ -18,7 +18,7 @@ mod focus;
 mod graph;
 pub(crate) use focus::{FocusLinks, NeighborSnapshot};
 mod create;
-pub use create::WatchRegistration;
+pub use create::WatchDefinition;
 mod page;
 mod watch;
 pub use page::{
@@ -38,7 +38,16 @@ pub(crate) enum Action {
     },
     RegisterWatcher {
         owner: atman_runtime::flow_store::FlowRef,
-        registration: WatchRegistration,
+        registration: WatchDefinition,
+    },
+    EditWatcher {
+        owner: atman_runtime::flow_store::FlowRef,
+        expected: WatchDefinition,
+    },
+    ReplaceWatcher {
+        owner: atman_runtime::flow_store::FlowRef,
+        expected: WatchDefinition,
+        replacement: Box<WatchDefinition>,
     },
     NewSession,
     OpenManagement,
@@ -104,6 +113,38 @@ impl History {
     ) {
         if !hub.owns_reply(ticket) {
             return;
+        }
+        // Editing returns to the original directory even after choosing a different source.
+        if let Some(draft) = &hub.create_watch
+            && let Some(origin) = &draft.origin
+            && let Ok(page) = &result
+            && let FlowHubPage::Watchers(incoming) = &**page
+        {
+            if incoming.owner != draft.owner {
+                hub.failed("Watcher edit returned a different owner".into());
+                return;
+            }
+            if hub.page.as_ref().is_none_or(|page| page.first() != *origin) {
+                let Some(index) = self.pages.iter().position(|saved| {
+                    saved
+                        .page
+                        .as_ref()
+                        .is_some_and(|page| page.first() == *origin)
+                }) else {
+                    hub.failed(
+                        "Original watcher directory is unavailable; close and reopen WatchHub"
+                            .into(),
+                    );
+                    return;
+                };
+                let draft = hub.create_watch.take();
+                *hub = self.pages.remove(index);
+                hub.create_watch = draft;
+                hub.pending = ticket.cloned();
+            }
+            if matches!(&hub.page, Some(FlowHubPage::Watchers(directory)) if directory.global()) {
+                hub.watch_refresh = Some(incoming.owner.clone());
+            }
         }
         if let Ok(page) = &result
             && hub.leaves_directory(&page.first())
@@ -219,6 +260,11 @@ impl FlowHub {
                     };
                     match result {
                         Ok(()) => {
+                            if let Some(draft) = self.create_watch.take()
+                                && let Some(id) = draft.saved_id()
+                            {
+                                self.watch_details.open(owner, id);
+                            }
                             self.rows = self.page.as_ref().unwrap().rows(None, self.endpoint);
                             self.selected =
                                 self.selected.min(self.filtered().len().saturating_sub(1));
@@ -236,6 +282,12 @@ impl FlowHub {
                     return;
                 }
                 if matches!(*page, FlowHubPage::Watchers(_)) {
+                    if let Some(draft) = &self.create_watch
+                        && draft.origin.is_some()
+                        && let Some(id) = draft.saved_id()
+                    {
+                        self.watch_details.open(draft.owner.clone(), id);
+                    }
                     self.create_watch = None;
                 }
                 let selected = self
@@ -397,6 +449,16 @@ impl FlowHub {
     }
 
     fn detail_action(&mut self, action: Action) -> Action {
+        if let Action::EditWatcher { owner, expected } = action {
+            if self.pending.is_none()
+                && let Some(FlowHubPage::Watchers(directory)) = &self.page
+            {
+                self.create_watch = Some(create::Draft::edit(owner, expected, directory.first()));
+                self.error = None;
+                self.watch_details.id = None;
+            }
+            return Action::None;
+        }
         if let Action::CancelWatcher { owner, .. } = &action {
             if self.pending.is_some() {
                 return Action::None;
@@ -415,6 +477,7 @@ impl FlowHub {
             .create_watch
             .as_ref()
             .is_some_and(|draft| draft.picking)
+            && !matches!(self.page, Some(FlowHubPage::Watchers(_)))
         {
             self.query.clear();
             self.selected = 0;
