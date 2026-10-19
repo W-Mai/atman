@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- **Workspace release recovery** — Explicit checkout removal records its intent before invoking Git. Pending releases retain their operation identity across retries, reject changed force options and live Flow references, and preserve one-sided filesystem or Git state for recovery. Completed explicit releases do not remove replacement paths.
+
 - **Long workspace properties** — Read-only workspace fields and catalog errors open a scrollable full-text view with keyboard and mouse controls. The same reader handles Inbox details and caches wrapping across scroll and hover events.
 
 - **Project catalog errors** — Unreadable project catalogs report their read failure instead of appearing empty. Missing catalogs remain an empty directory without creating files.

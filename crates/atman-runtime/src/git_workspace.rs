@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::git::{GitCli, GitError};
 
 mod inspection;
+mod release;
 pub use inspection::{WorkspaceCheckout, WorkspaceInspection, WorkspaceSnapshot};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -39,6 +40,7 @@ pub enum WorkspaceState {
     Active,
     Bound,
     TerminalPending,
+    Releasing,
     Retained,
     Dirty,
     Orphaned,
@@ -53,6 +55,7 @@ impl WorkspaceState {
             "active" => Self::Active,
             "bound" => Self::Bound,
             "terminal_pending" => Self::TerminalPending,
+            "releasing" => Self::Releasing,
             "retained" => Self::Retained,
             "dirty" => Self::Dirty,
             "orphaned" => Self::Orphaned,
@@ -67,6 +70,7 @@ impl WorkspaceState {
             Self::Active => "active",
             Self::Bound => "bound",
             Self::TerminalPending => "terminal_pending",
+            Self::Releasing => "releasing",
             Self::Retained => "retained",
             Self::Dirty => "dirty",
             Self::Orphaned => "orphaned",
@@ -121,6 +125,12 @@ pub enum WorkspaceError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceRelease {
+    pub request_id: uuid::Uuid,
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceRecord {
     pub id: String,
     pub repository_root: PathBuf,
@@ -130,6 +140,8 @@ pub struct WorkspaceRecord {
     pub owner_flow: Option<String>,
     pub state: String,
     pub retained: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<WorkspaceRelease>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allocation_base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -289,6 +301,7 @@ impl WorkspaceManager {
             owner_flow: owner_flow.map(str::to_owned),
             state: WorkspaceState::Active.as_str().into(),
             retained: false,
+            release: None,
             allocation_base: base.map(str::to_owned),
             allocation_policy: None,
             lease: None,
@@ -407,6 +420,7 @@ impl WorkspaceManager {
             owner_flow: Some(owner_flow.to_owned()),
             state: WorkspaceState::Allocating.as_str().into(),
             retained,
+            release: None,
             allocation_base: Some(base_oid.to_owned()),
             allocation_policy: Some(if retained { "retain" } else { "auto" }.into()),
             lease: Some(WorkspaceLease {
@@ -662,6 +676,11 @@ impl WorkspaceManager {
         }
 
         let state = registry.workspaces[index].lifecycle_state();
+        if state == WorkspaceState::Releasing {
+            return Err(WorkspaceError::Invalid(
+                "explicit release is pending; retry through its resource owner".into(),
+            ));
+        }
         if state == WorkspaceState::Released {
             return Ok(WorkspaceFinalizeOutcome::AlreadyReleased(
                 registry.workspaces[index].clone(),
@@ -674,13 +693,8 @@ impl WorkspaceManager {
                 ));
             }
             let record = &registry.workspaces[index];
-            let registered = GitCli::at(&self.repository_root)
-                .worktree_list()?
-                .iter()
-                .any(|worktree| {
-                    canonicalize(&worktree.path) == canonicalize(&record.worktree_path)
-                });
-            if !record.worktree_path.exists() && !registered {
+            let (present, registered) = self.checkout_presence(record)?;
+            if !present && !registered {
                 let record = &mut registry.workspaces[index];
                 record.state = WorkspaceState::Released.as_str().into();
                 record.lease = None;
@@ -714,12 +728,8 @@ impl WorkspaceManager {
         }
 
         if state == WorkspaceState::TerminalPending {
-            let path = &registry.workspaces[index].worktree_path;
-            let registered = GitCli::at(&self.repository_root)
-                .worktree_list()?
-                .iter()
-                .any(|worktree| canonicalize(&worktree.path) == canonicalize(path));
-            if !path.exists() && !registered {
+            let (present, registered) = self.checkout_presence(&registry.workspaces[index])?;
+            if !present && !registered {
                 registry.workspaces[index].state = WorkspaceState::Released.as_str().into();
                 registry.workspaces[index].lease = None;
                 release_instance_reference(&mut registry.workspaces[index]);
@@ -754,8 +764,7 @@ impl WorkspaceManager {
             return Ok(WorkspaceFinalizeOutcome::Retained(result));
         }
 
-        GitCli::at(&self.repository_root)
-            .worktree_remove(&registry.workspaces[index].worktree_path, false)?;
+        self.remove_recorded_checkout(&registry.workspaces[index], false)?;
         registry.workspaces[index].state = WorkspaceState::Released.as_str().into();
         registry.workspaces[index].lease = None;
         release_instance_reference(&mut registry.workspaces[index]);
@@ -945,51 +954,6 @@ impl WorkspaceManager {
         Ok(result)
     }
 
-    pub fn release(
-        &self,
-        id: &str,
-        owner_session: Option<&str>,
-        owner_flow: Option<&str>,
-        force: bool,
-    ) -> Result<WorkspaceRecord, WorkspaceError> {
-        let _lock = self.lock_registry()?;
-        let mut registry = self.load()?;
-        let index = registry
-            .workspaces
-            .iter()
-            .position(|w| w.id == id)
-            .ok_or_else(|| WorkspaceError::Invalid(format!("workspace {id} not found")))?;
-        let item = &registry.workspaces[index];
-        validate_ownership(item, owner_session, owner_flow)?;
-        if item.is_instance_bound() {
-            return Err(WorkspaceError::Invalid(
-                "workspace is still referenced by a flow instance".into(),
-            ));
-        }
-        let state = item.lifecycle_state();
-        if !matches!(state, WorkspaceState::Active | WorkspaceState::Retained) {
-            return Err(WorkspaceError::Invalid(format!(
-                "workspace {id} in state {} cannot be released",
-                state.as_str()
-            )));
-        }
-        if !force && crate::git::has_changes(&item.worktree_path)? {
-            return Err(WorkspaceError::Invalid(
-                "dirty workspace requires force=true".into(),
-            ));
-        }
-        GitCli::at(&self.repository_root).worktree_remove(&item.worktree_path, force)?;
-        let released = &mut registry.workspaces[index];
-        released.state = WorkspaceState::Released.as_str().into();
-        released.retained = false;
-        released.lease = None;
-        released.reconciled_at = Some(chrono::Utc::now());
-        released.reconciliation_reason = Some("released by explicit workspace action".into());
-        let result = released.clone();
-        self.save(&registry)?;
-        Ok(result)
-    }
-
     pub fn prune(&self, dry_run: bool) -> Result<Vec<WorkspaceRecord>, WorkspaceError> {
         let _lock = self.lock_registry()?;
         let mut registry = self.load()?;
@@ -1102,7 +1066,10 @@ impl WorkspaceManager {
                 });
                 let terminal = matches!(
                     item.lifecycle_state(),
-                    WorkspaceState::Released | WorkspaceState::Dirty | WorkspaceState::Retained
+                    WorkspaceState::Released
+                        | WorkspaceState::Dirty
+                        | WorkspaceState::Retained
+                        | WorkspaceState::Releasing
                 );
                 if invalid_owners
                     || (item.is_instance_bound() == terminal)
@@ -1120,7 +1087,24 @@ impl WorkspaceManager {
                     "bound workspace has no instance owner".into(),
                 ));
             }
-            if item.retained && item.allocation_policy.is_none() {
+            if let Some(intent) = &item.release {
+                if !matches!(
+                    item.lifecycle_state(),
+                    WorkspaceState::Releasing | WorkspaceState::Released
+                ) || item.is_instance_bound()
+                    || item.retained
+                    || intent.request_id.is_nil()
+                {
+                    return Err(WorkspaceError::Invalid(
+                        "inconsistent workspace release intent".into(),
+                    ));
+                }
+            } else if item.lifecycle_state() == WorkspaceState::Releasing {
+                return Err(WorkspaceError::Invalid(
+                    "workspace release intent is missing".into(),
+                ));
+            }
+            if item.release.is_none() && item.retained && item.allocation_policy.is_none() {
                 item.state = WorkspaceState::Retained.as_str().into();
             } else if item.lifecycle_state() == WorkspaceState::Retained {
                 item.retained = true;
@@ -1260,6 +1244,8 @@ mod tests {
             &["config", "user.email", "atman@example.invalid"],
         );
         git(tmp.path(), &["config", "commit.gpgsign", "false"]);
+        git(tmp.path(), &["config", "maintenance.auto", "false"]);
+        git(tmp.path(), &["config", "gc.auto", "0"]);
         fs::write(tmp.path().join("README.md"), "committed\n").unwrap();
         git(tmp.path(), &["add", "README.md"]);
         git(tmp.path(), &["commit", "-q", "-m", "initial"]);
@@ -1554,6 +1540,175 @@ mod tests {
         let leased = manager.get(&active.id).unwrap();
         assert!(WorkspaceManager::retain_observed(tmp.path(), tmp.path(), &leased, true).is_err());
         assert_eq!(manager.get(&active.id).unwrap(), leased);
+    }
+
+    #[test]
+    fn explicit_release_resumes_durable_intent_without_deleting_residual_data() {
+        use super::release::ReleaseStage;
+        for stage in [ReleaseStage::IntentSaved, ReleaseStage::CheckoutRemoved] {
+            let tmp = repo();
+            let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+            let record = manager
+                .create("recover", None, None, false, None, None)
+                .unwrap();
+            manager.retain(&record.id, true, None, None).unwrap();
+            assert!(
+                manager
+                    .release_with_hook(&record.id, None, None, false, |step| {
+                        if step == stage {
+                            Err(WorkspaceError::Io(std::io::Error::other(
+                                "injected persistence failure",
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .is_err()
+            );
+            let pending = manager.get(&record.id).unwrap();
+            assert_eq!(pending.lifecycle_state(), WorkspaceState::Releasing);
+            assert!(!pending.retained);
+            let intent = pending.release.clone().unwrap();
+            assert!(!intent.force);
+            let before = fs::read(&manager.registry_path).unwrap();
+            assert!(manager.release(&record.id, None, None, true).is_err());
+            assert!(manager.retain(&record.id, true, None, None).is_err());
+            assert_eq!(fs::read(&manager.registry_path).unwrap(), before);
+            match stage {
+                ReleaseStage::IntentSaved => {
+                    assert!(record.worktree_path.exists());
+                    fs::write(record.worktree_path.join("new-data"), "preserve").unwrap();
+                    assert!(manager.release(&record.id, None, None, false).is_err());
+                    assert_eq!(
+                        fs::read_to_string(record.worktree_path.join("new-data")).unwrap(),
+                        "preserve"
+                    );
+                    fs::remove_file(record.worktree_path.join("new-data")).unwrap();
+                }
+                ReleaseStage::CheckoutRemoved => {
+                    assert!(!record.worktree_path.exists());
+                    fs::create_dir(&record.worktree_path).unwrap();
+                    fs::write(record.worktree_path.join("replacement"), "preserve").unwrap();
+                    assert!(manager.release(&record.id, None, None, false).is_err());
+                    assert_eq!(
+                        fs::read_to_string(record.worktree_path.join("replacement")).unwrap(),
+                        "preserve"
+                    );
+                    fs::remove_dir_all(&record.worktree_path).unwrap();
+                }
+            }
+            let released = manager.release(&record.id, None, None, false).unwrap();
+            assert_eq!(released.lifecycle_state(), WorkspaceState::Released);
+            assert_eq!(released.release, Some(intent));
+            assert!(!record.worktree_path.exists());
+            let before = fs::read(&manager.registry_path).unwrap();
+            // An already acknowledged release cannot remove a replacement path.
+            fs::create_dir(&record.worktree_path).unwrap();
+            fs::write(record.worktree_path.join("replacement"), "preserve").unwrap();
+            assert_eq!(
+                manager.release(&record.id, None, None, false).unwrap(),
+                released
+            );
+            assert_eq!(fs::read(&manager.registry_path).unwrap(), before);
+            assert!(record.worktree_path.join("replacement").exists());
+        }
+    }
+
+    #[test]
+    fn release_intent_requires_closed_instance_references() {
+        use super::release::ReleaseStage;
+        let tmp = repo();
+        let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+        let owner = instance_owner();
+        let base = GitCli::at(tmp.path()).head_oid().unwrap();
+        let record = manager
+            .create_instance("references", &owner, "generation", true, &base)
+            .unwrap();
+        let session = owner.session_id.to_string();
+        let flow = owner.instance_id.to_string();
+        assert!(
+            manager
+                .release(&record.id, Some(&session), Some(&flow), false)
+                .is_err()
+        );
+        let before = fs::read(&manager.registry_path).unwrap();
+        let mut registry = manager.load().unwrap();
+        registry.workspaces[0].state = WorkspaceState::Releasing.as_str().into();
+        registry.workspaces[0].retained = false;
+        registry.workspaces[0].release = Some(WorkspaceRelease {
+            request_id: uuid::Uuid::new_v4(),
+            force: false,
+        });
+        manager.save(&registry).unwrap();
+        assert!(manager.get(&record.id).is_err());
+        fs::write(&manager.registry_path, before).unwrap();
+        manager.release_instance(&record.id, &owner).unwrap();
+        assert!(
+            manager
+                .release_with_hook(&record.id, Some(&session), Some(&flow), false, |stage| {
+                    if stage == ReleaseStage::CheckoutRemoved {
+                        Err(WorkspaceError::Io(std::io::Error::other(
+                            "injected failure",
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .is_err()
+        );
+        let pending = manager.get(&record.id).unwrap();
+        assert!(pending.instances.iter().all(|reference| reference.released));
+        let released = manager
+            .release(&record.id, Some(&session), Some(&flow), false)
+            .unwrap();
+        assert_eq!(released.instances, pending.instances);
+        assert_eq!(released.release, pending.release);
+        assert_eq!(released.lifecycle_state(), WorkspaceState::Released);
+    }
+
+    #[test]
+    fn forced_release_retry_rejects_a_recreated_registered_checkout() {
+        use super::release::ReleaseStage;
+        let tmp = repo();
+        let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+        let record = manager
+            .create("replacement", None, None, false, None, None)
+            .unwrap();
+        fs::write(
+            record.worktree_path.join("old-data"),
+            "explicitly discarded",
+        )
+        .unwrap();
+        assert!(
+            manager
+                .release_with_hook(&record.id, None, None, true, |stage| {
+                    if stage == ReleaseStage::CheckoutRemoved {
+                        Err(WorkspaceError::Io(std::io::Error::other(
+                            "injected failure",
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .is_err()
+        );
+        let before = fs::read(&manager.registry_path).unwrap();
+        git(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                record.worktree_path.to_str().unwrap(),
+            ],
+        );
+        fs::write(record.worktree_path.join("new-data"), "must survive").unwrap();
+        assert!(manager.release(&record.id, None, None, true).is_err());
+        assert_eq!(
+            fs::read_to_string(record.worktree_path.join("new-data")).unwrap(),
+            "must survive"
+        );
+        assert_eq!(fs::read(&manager.registry_path).unwrap(), before);
     }
 
     #[test]

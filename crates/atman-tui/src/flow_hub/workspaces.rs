@@ -714,6 +714,7 @@ mod tests {
             owner_flow: None,
             state: "bound".into(),
             retained: true,
+            release: None,
             allocation_base: None,
             allocation_policy: None,
             lease: None,
