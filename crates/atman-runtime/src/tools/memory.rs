@@ -1655,7 +1655,8 @@ impl Tool for MemorySpecDeviate {
 }
 
 pub struct MemoryFetchConfessions {
-    pub store: Arc<ConfessionStore>,
+    /// No project binding means an empty catalog, without a fallback storage location.
+    pub store: Option<Arc<ConfessionStore>>,
 }
 
 impl Tool for MemoryFetchConfessions {
@@ -1684,9 +1685,12 @@ impl Tool for MemoryFetchConfessions {
 
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
+            let Some(store) = &self.store else {
+                return Ok(Value::List(Vec::new()));
+            };
             let items = match args.named("trigger") {
-                Some(Value::Str(needle)) => self.store.find_by_trigger(needle).await?,
-                _ => self.store.list().await?,
+                Some(Value::Str(needle)) => store.find_by_trigger(needle).await?,
+                _ => store.list().await?,
             };
             let list = items
                 .into_iter()

@@ -904,7 +904,7 @@ async fn assert_final_answer_boundary_with_extraction(
             .unwrap();
     }
     executor.tools.register(Arc::new(
-        atman_runtime::tools::memory::MemoryFetchConfessions { store },
+        atman_runtime::tools::memory::MemoryFetchConfessions { store: Some(store) },
     ));
     executor.providers.register(provider);
     let selector = Arc::new(SelectionProvider {

@@ -286,7 +286,9 @@ Persistent execution binds relative tool paths and default cwd to the instance's
 
 ## Project knowledge
 
-Project knowledge is registered separately through `tools::register_project_memory`, using an explicit storage root, optional index, and confession redactor. `AtmanRuntime` supplies its bound `ProjectContext::storage_root()` and configuration source; projectless runtimes do not expose these project tools. Confessions and specs are shared by sessions and peers in that project and remain available after rebuilding the runtime. Registration itself does not create directories. CLI and daemon setup reuse this factory with their existing indexes. File-backed non-instance Goal, Plan, and Todo registration is available independently through `tools::register_file_memory`.
+Project knowledge is registered separately through `tools::register_project_memory`, using an explicit storage root, optional index, and confession redactor. `AtmanRuntime` supplies its bound `ProjectContext::storage_root()` and configuration source. Confessions and specs are shared by sessions and peers in that project and remain available after rebuilding the runtime. Registration itself does not create directories. CLI and daemon setup reuse this factory with their existing indexes. File-backed non-instance Goal, Plan, and Todo registration is available independently through `tools::register_file_memory`.
+
+Without a project binding, `memory.fetch_confessions` returns an empty catalog for both listing and trigger searches. It does not discover another project's records or create a fallback store. Project-bound readers retain the selected project's store, and projectless execution does not register confession writes or project spec operations.
 
 ## Instance plans and todos
 

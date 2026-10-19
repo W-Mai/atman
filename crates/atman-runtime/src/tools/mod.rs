@@ -255,13 +255,14 @@ fn register_confession_memory(
         store: confession_store.clone(),
     }));
     reg.register(Arc::new(memory::MemoryFetchConfessions {
-        store: confession_store,
+        store: Some(confession_store),
     }));
 }
 
 /// Register invocation-owned goals, planning, and history without legacy file stores.
 pub fn register_flow_memory(reg: &ToolRegistry) {
     register_flow_memory_with_stores(reg, None, None, None);
+    reg.register(Arc::new(memory::MemoryFetchConfessions { store: None }));
 }
 
 fn register_flow_memory_with_stores(

@@ -2993,13 +2993,29 @@ async fn runtime_project_knowledge_is_shared_by_peers_and_isolated_across_projec
         workspace_generation: "project-knowledge".into(),
     };
     let projectless = AtmanRuntime::build(options(None)).await.unwrap();
-    for name in [
-        "memory.confess",
-        "memory.fetch_confessions",
-        "memory.spec.read",
-    ] {
+    for name in ["memory.confess", "memory.spec.read"] {
         assert!(projectless.executor.tools.get(name).is_none());
     }
+    atman_runtime::templates::ensure_managed_agent_at(dir.path()).unwrap();
+    let program = atman_runtime::source_program::load_program(
+        dir.path().join("commands/agent.at"),
+        &atman_runtime::source_program::SourceRoots {
+            config_dir: Some(dir.path().to_owned()),
+            project_root: None,
+        },
+    )
+    .unwrap();
+    let entry = program.flow(&program.entry_flow("agent").unwrap()).unwrap();
+    atman_runtime::validate::validate(entry, &projectless.executor.tools).unwrap();
+    let empty = atman_rt::parse_file(
+        "flow read() -> any { return [memory.fetch_confessions(), memory.fetch_confessions(trigger: \"test\")] }",
+    ).unwrap();
+    let result = projectless
+        .executor
+        .run(&empty, "read", vec![])
+        .await
+        .unwrap();
+    assert_eq!(result.to_json().unwrap(), serde_json::json!([[], []]));
     let reader = r#"
         flow read() -> any {
             return [memory.fetch_confessions(), memory.spec.read(feature: "shared")]

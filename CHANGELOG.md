@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- **Projectless agent startup** — The confession reader returns an empty catalog when no project is bound, allowing the default agent entry to validate without creating a knowledge store or granting project write access.
+
 - **Explicit context compaction** — Hosts can compact paused contexts without resuming execution. The shared compaction API reports committed, unchanged, rejected, and failed outcomes; cancelled review waits release their pending request.
 
 - **Flow suggestions** — Suggestions use the current flow's message snapshot with tool-call evidence and source-labelled notifications. Validation rejects non-standalone source, confirmation includes the proposed source and destination, and accepted commands use the session's configuration directory.
