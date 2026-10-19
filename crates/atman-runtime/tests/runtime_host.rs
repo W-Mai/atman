@@ -4374,15 +4374,16 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
         invocation: [("effort".into(), "low".into())].into(),
     };
     worker.accept_input(next, |_| Ok(())).await.unwrap();
-    let mut commits = worker.subscribe_commits();
+    // A flow's commit channel does not acknowledge release of its session owner.
+    // This entry has not run; shut down the host before testing persisted binding recovery.
+    assert!(matches!(
+        worker.state().await.unwrap().state(),
+        InstanceState::Open(InstanceActivity::Idle)
+    ));
+    host.shutdown().await.unwrap();
     drop(worker);
     drop(session);
     drop(host);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while commits.changed().await.is_ok() {}
-    })
-    .await
-    .unwrap();
     let host = RuntimeHost::default();
     let session = host
         .attach_session(root.open_session(info.id).unwrap())
