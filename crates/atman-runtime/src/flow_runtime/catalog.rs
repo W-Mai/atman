@@ -171,7 +171,35 @@ impl SessionCatalog {
     /// Read the durable relation projection without opening a flow writer or scheduler.
     pub async fn relations(&self, id: Uuid) -> io::Result<Vec<FlowRelation>> {
         let read = self.recorded(id).await?;
-        read.relations()
+        let mut relations = read.relations()?;
+        if let Some(host) = &self.host
+            && let Some(view) = host.management_view().await
+            && view.unavailable.is_none()
+            && view
+                .profile
+                .management
+                .as_ref()
+                .is_some_and(|binding| binding.session.id == id)
+        {
+            let grants = view
+                .profile
+                .management
+                .as_ref()
+                .map(|binding| binding.grants.iter())
+                .into_iter()
+                .flatten();
+            relations.extend(crate::flow_store::relation::grant_relations(grants));
+        }
+        relations.sort_by_key(|relation| {
+            (
+                format!("{:?}", relation.source),
+                format!("{:?}", relation.target),
+                relation.kind,
+                relation.id,
+            )
+        });
+        relations.dedup();
+        Ok(relations)
     }
 
     pub async fn instances(

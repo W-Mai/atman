@@ -138,6 +138,11 @@ impl RuntimeHost {
             .map(|profile| profile.data_dir.clone());
         super::super::catalog::SessionCatalog::new(Some(self.clone()), data)
     }
+
+    pub(crate) async fn management_view(&self) -> Option<ProfileView> {
+        let profile = self.directory.profile.lock().unwrap().clone()?;
+        profile.snapshot().await.ok()
+    }
 }
 
 impl ProfileHandle {

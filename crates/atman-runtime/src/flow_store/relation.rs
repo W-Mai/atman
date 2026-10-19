@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::access::{AccessTarget, FlowAction};
+use super::access::{AccessTarget, FlowAction, FlowGrant};
 use super::{FlowRef, SessionProjection, subscription::SubscriptionStatus};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -63,27 +63,31 @@ impl FlowRelation {
 }
 
 pub(super) fn access_relations(projection: &SessionProjection) -> Vec<FlowRelation> {
+    grant_relations(
+        projection
+            .access
+            .grants()
+            .filter(|record| !record.revoked)
+            .map(|record| &record.grant),
+    )
+}
+
+pub(crate) fn grant_relations<'a>(
+    grants: impl IntoIterator<Item = &'a FlowGrant>,
+) -> Vec<FlowRelation> {
     let mut relations = Vec::new();
-    for record in projection.access.grants() {
-        if record.revoked {
-            continue;
-        }
-        for kind in record
-            .grant
-            .actions
-            .iter()
-            .filter_map(|action| match action {
-                FlowAction::ReadOutput | FlowAction::ReadContext => Some(RelationKind::Read),
-                FlowAction::Send => Some(RelationKind::Interject),
-                FlowAction::Watch => Some(RelationKind::Watch),
-                _ => None,
-            })
-        {
+    for grant in grants {
+        for kind in grant.actions.iter().filter_map(|action| match action {
+            FlowAction::ReadOutput | FlowAction::ReadContext => Some(RelationKind::Read),
+            FlowAction::Send => Some(RelationKind::Interject),
+            FlowAction::Watch => Some(RelationKind::Watch),
+            _ => None,
+        }) {
             relations.push(FlowRelation::access(
-                record.grant.grantee.clone(),
-                record.grant.target.clone(),
+                grant.grantee.clone(),
+                grant.target.clone(),
                 kind,
-                record.grant.id,
+                grant.id,
             ));
         }
     }
