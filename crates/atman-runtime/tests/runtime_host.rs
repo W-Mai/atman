@@ -4718,6 +4718,16 @@ async fn entry_authored_continuation_uses_the_same_scheduler_for_direct_and_spaw
         };
         worker.accept_input(submission, |_| Ok(())).await.unwrap();
         wait_answers(&worker, 3).await;
+        // Publication precedes entry completion and observer delivery. Settle both
+        // before testing a clean storage handoff rather than host-loss recovery.
+        tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            worker.state().await.unwrap().state(),
+            InstanceState::Open(InstanceActivity::Idle)
+        ));
         assert_eq!(
             worker.goal().await.unwrap().goal.unwrap().status,
             GoalStatus::Paused
