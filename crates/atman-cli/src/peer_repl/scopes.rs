@@ -105,6 +105,10 @@ impl Scopes {
         source: &Attachment,
         limit: usize,
     ) -> Result<Vec<atman_tui::app::StartupSessionEntry>> {
+        enum Candidate {
+            Instance(Uuid),
+            Legacy(crate::SessionRow),
+        }
         let ids = self.catalog.ids().await?;
         let root = self.root.clone();
         let current = source.session.id();
@@ -130,17 +134,46 @@ impl Scopes {
                 {
                     continue;
                 }
-                rows.push((read.activity_time(), id));
+                rows.push((
+                    read.activity_time(),
+                    id.to_string(),
+                    Candidate::Instance(id),
+                ));
             }
-            rows.sort_unstable_by(|left, right| right.cmp(left));
-            rows
+            if let Some(project) = project {
+                let query =
+                    atman_runtime::session_meta::SessionDiscoveryQuery::current_project(&project);
+                for row in crate::list_recent_sessions(&root, limit, Some(&query))? {
+                    if Uuid::parse_str(&row.sid).is_ok()
+                        && std::fs::symlink_metadata(root.join("sessions").join(&row.sid))
+                            .is_ok_and(|metadata| metadata.file_type().is_dir())
+                    {
+                        rows.push((Some(row.mtime), row.sid.clone(), Candidate::Legacy(row)));
+                    }
+                }
+            }
+            rows.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+            Ok::<_, anyhow::Error>(rows)
         })
-        .await?;
+        .await??;
         let mut recent = Vec::new();
-        for (activity, id) in rows {
+        for (activity, _, candidate) in rows {
             if recent.len() == limit {
                 break;
             }
+            let id = match candidate {
+                Candidate::Instance(id) => id,
+                Candidate::Legacy(row) => {
+                    let root = self.root.clone();
+                    recent.push(
+                        tokio::task::spawn_blocking(move || {
+                            crate::legacy_startup_entry(&root, row, std::time::SystemTime::now())
+                        })
+                        .await?,
+                    );
+                    continue;
+                }
+            };
             let Ok(view) = self.catalog.overview(id).await else {
                 continue;
             };

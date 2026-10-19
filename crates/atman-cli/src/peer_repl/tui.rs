@@ -622,29 +622,33 @@ impl scopes::Scopes {
                 .execution
                 .as_ref()
                 .context("created session has no execution services")?;
-            let recent = match self.startup_recent(&execution.scope, 5).await {
-                Ok(recent) => recent,
-                Err(error) => {
-                    handle.boot_toasts.push(atman_tui::app::ToastNote {
-                        id: "session-directory".into(),
-                        message: format!("Recent sessions unavailable: {error:#}"),
-                        level: atman_tui::app::NoteLevel::Warn,
-                        ttl: std::time::Duration::from_secs(10),
-                        created: std::time::Instant::now(),
-                        position: atman_tui::app::ToastPosition::BottomRight,
-                        fading: false,
-                        fade_started: None,
-                    });
-                    Vec::new()
-                }
-            };
-            handle.startup_card = Some(atman_tui::app::StartupCard {
-                version: env!("CARGO_PKG_VERSION").into(),
-                recent,
-                directory: atman_tui::app::StartupDirectory::Projects,
-            });
+            self.welcome(&execution.scope, handle).await;
         }
         Ok(navigation)
+    }
+
+    async fn welcome(&self, scope: &Attachment, handle: &mut TuiHandle) {
+        let recent = match self.startup_recent(scope, 5).await {
+            Ok(recent) => recent,
+            Err(error) => {
+                handle.boot_toasts.push(atman_tui::app::ToastNote {
+                    id: "session-directory".into(),
+                    message: format!("Recent sessions unavailable: {error:#}"),
+                    level: atman_tui::app::NoteLevel::Warn,
+                    ttl: std::time::Duration::from_secs(10),
+                    created: std::time::Instant::now(),
+                    position: atman_tui::app::ToastPosition::BottomRight,
+                    fading: false,
+                    fade_started: None,
+                });
+                Vec::new()
+            }
+        };
+        handle.startup_card = Some(atman_tui::app::StartupCard {
+            version: env!("CARGO_PKG_VERSION").into(),
+            recent,
+            directory: atman_tui::app::StartupDirectory::Projects,
+        });
     }
 
     async fn browse(

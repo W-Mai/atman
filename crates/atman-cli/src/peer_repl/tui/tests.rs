@@ -969,6 +969,40 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     assert_eq!(host.sessions(), owners);
     assert_eq!(worker.snapshot().await.unwrap().cursor, before.cursor);
     assert!(worker.context().messages_full().is_empty());
+    // Welcome cards merge original histories without conflating matching UUIDs or writing caches.
+    let legacy_dir = dir
+        .path()
+        .join("sessions")
+        .join(created.session_id.to_string());
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    let project_root = source.descriptor.project.as_ref().unwrap().root();
+    std::fs::write(
+        legacy_dir.join("meta.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "project_root":project_root,
+            "project_fingerprint":atman_runtime::session_meta::fingerprint_from_root(project_root),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let events = legacy_dir.join("events.jsonl");
+    std::fs::write(&events, "{}\n").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&events)
+        .unwrap()
+        .set_modified(activity + std::time::Duration::from_secs(60))
+        .unwrap();
+    let mixed = scopes.startup_recent(&source, 2).await.unwrap();
+    assert_eq!(mixed.len(), 2);
+    assert!(
+        matches!(&mixed[0].target, atman_tui::app::StartupSessionTarget::Legacy(id) if id == &created.session_id.to_string())
+    );
+    assert!(
+        matches!(&mixed[1].target, atman_tui::app::StartupSessionTarget::Flow(flow) if flow == &created)
+    );
+    assert_eq!(std::fs::read_dir(&legacy_dir).unwrap().count(), 2);
+    assert_eq!(host.sessions(), owners);
     assert_eq!(
         scopes
             .create_session(

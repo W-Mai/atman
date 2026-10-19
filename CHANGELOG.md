@@ -20,6 +20,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Recent session cards** — Persistent welcome views include original histories alongside persistent sessions, ordered by recorded activity within the same project. Matching UUIDs retain separate destinations, and original history statistics are read without updating caches.
+
 - **Persistent flow suggestions** — `:suggest` runs asynchronously in terminal and shared TUI views, with flow-bound confirmation, scoped installation, and request-bound replies. Duplicate requests for the same flow are rejected while confirmation is pending; errors leave flow execution unchanged.
 
 - **Unified session directory** — Browse persistent sessions and original histories from the same paged TUI directory, including histories without project metadata. Source-aware cursors preserve distinct entries with matching UUIDs without reading conversation bodies or updating history caches.

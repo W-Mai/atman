@@ -4751,26 +4751,30 @@ fn build_startup_recent(
     rows.into_iter()
         .filter(|r| r.sid != exclude_sid)
         .take(cap)
-        .map(|r| {
-            let age_secs = now
-                .duration_since(r.mtime)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let event_count = atman_runtime::session_meta::SessionStats::load_or_rebuild(
-                &root.join("sessions").join(&r.sid),
-            )
+        .map(|row| legacy_startup_entry(root, row, now))
+        .collect()
+}
+
+fn legacy_startup_entry(
+    root: &Path,
+    row: SessionRow,
+    now: std::time::SystemTime,
+) -> atman_tui::app::StartupSessionEntry {
+    let age_secs = now
+        .duration_since(row.mtime)
+        .map(|age| age.as_secs())
+        .unwrap_or(0);
+    let event_count =
+        atman_runtime::session_meta::SessionStats::inspect(&root.join("sessions").join(&row.sid))
             .map(|stats| stats.event_count)
             .unwrap_or(0);
-            let short_id: String = r.sid.chars().take(8).collect();
-            atman_tui::app::StartupSessionEntry {
-                target: atman_tui::app::StartupSessionTarget::Legacy(r.sid),
-                short_id,
-                goal: r.goal,
-                project: r.project,
-                activity: format!("{}  ·  {event_count} events", format_age(age_secs)),
-            }
-        })
-        .collect()
+    atman_tui::app::StartupSessionEntry {
+        short_id: row.sid.chars().take(8).collect(),
+        target: atman_tui::app::StartupSessionTarget::Legacy(row.sid),
+        goal: row.goal,
+        project: row.project,
+        activity: format!("{}  ·  {event_count} events", format_age(age_secs)),
+    }
 }
 
 fn list_recent_sessions(
