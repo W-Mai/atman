@@ -1,0 +1,3 @@
+flow peer(input: string) -> string {
+    return final.answer(message: input)
+}

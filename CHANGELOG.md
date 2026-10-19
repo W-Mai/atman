@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Persistent peer example** — A runnable host demonstrates bidirectional final-answer watches, batched input retained across restart, explicit scheduling restoration, and independent instance closure without model credentials.
+
 - **Standalone peer demo** — The runtime embedding fixture demonstrates independent instances, paused inbox batches, later-turn replies, stale lease rejection, and independent closure using only `atman-rt`.
 
 ### Added

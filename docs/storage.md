@@ -482,7 +482,19 @@ Journal history supports bounded `read_after` pages using a complete `CommitRece
 
 Inline calls share the instance context. Fanout calls retain isolated invocation contexts: their publications remain in the owning instance journal with `context_run`, and recovery does not merge them into the shared conversation. Message scheduling claims use the instance address rather than serializing every flow in a session.
 
-Worker binding covers message publication, model-window checkpoints, persistent spawn execution, and process resources. Process watcher tools use the instance inbox; generic flow watcher tool routing and product scheduling still require integration. Existing CLI run and REPL dispatch remain on the legacy path, while instance-addressed daemon operations use the persistent host.
+Worker binding covers message publication, model-window checkpoints, persistent spawn execution, and process resources. Process and flow watcher tools deliver through the instance inbox. CLI batch execution, persistent REPL attachments, and instance-addressed daemon operations use the persistent host; explicitly ephemeral execution and published legacy history retain separate entrypoints.
+
+### Runnable peer host
+
+The [peer host example](../crates/atman-runtime/examples/peer_flows.rs) executes [a shared `.at` entry](../crates/atman-runtime/examples/peer_flows.at) in two independent instances without model credentials or external tools:
+
+```sh
+cargo run -p atman-runtime --example peer_flows -- /tmp/atman-peer-demo
+```
+
+Each run creates a separate Session in the supplied data directory. Both peers register one-shot watches on the other's final answers. A completes while B is paused; B retains that notification and another input across host shutdown. Reopening preserves the original message IDs and pause key. Explicitly reinstalling the scheduling policy and resuming B consumes its two inputs in one turn, and its final answer starts another turn on A. Closing B leaves A available. Assertions verify the final-answer counts, pending input, recovered history, and closed state; the example prints the retained Session directory and instance IDs.
+
+The example's trusted local host supplies input preparation and authorization callbacks. It uses the production journal, scheduler, watcher, publication, and shutdown paths. Its ten-second waits bound the demonstration only; they do not configure instance execution budgets. Restoring an execution binding remains explicit, and the example does not replay interrupted external effects.
 
 ### Flow process resources
 
