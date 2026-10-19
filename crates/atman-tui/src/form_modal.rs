@@ -28,7 +28,11 @@ pub enum SubmitOutcome {
 #[derive(Default)]
 pub struct FormModal {
     pub open: bool,
-    pub pending: Option<PendingForm>,
+    form_id: Option<String>,
+    questions: Vec<FormQuestion>,
+    preference: Option<crate::settings::Preference>,
+    setting_request: Option<uuid::Uuid>,
+    queued_runtime_form: Option<PendingForm>,
     pub current_index: usize,
     pub draft_answers: Vec<Option<FormAnswer>>,
     pub phase: FormPhase,
@@ -50,10 +54,17 @@ pub struct FormModal {
 impl FormModal {
     pub fn attach(&mut self, form: PendingForm) {
         let questions = questions(&form);
-        self.pending = Some(form);
+        self.attach_content(form.form_id, questions);
+    }
+
+    fn attach_content(&mut self, id: String, questions: Vec<FormQuestion>) {
+        self.form_id = Some(id);
+        self.preference = None;
+        self.setting_request = None;
         self.open = true;
         self.current_index = 0;
         self.draft_answers = vec![None; questions.len()];
+        self.questions = questions;
         self.phase = FormPhase::Editing;
         self.confirm_focus = 0;
         self.error = None;
@@ -69,9 +80,13 @@ impl FormModal {
     }
 
     pub fn close(&mut self) {
+        let queued = self.queued_runtime_form.take();
+        self.preference = None;
+        self.setting_request = None;
         self.pending_submission = None;
         self.open = false;
-        self.pending = None;
+        self.form_id = None;
+        self.questions.clear();
         self.current_index = 0;
         self.draft_answers.clear();
         self.phase = FormPhase::Editing;
@@ -86,21 +101,71 @@ impl FormModal {
         self.follow_cursor = false;
         self.option_hits.clear();
         self.hovered_option = None;
+        if let Some(form) = queued {
+            self.attach(form);
+        }
     }
 
     pub fn active_form_id(&self) -> Option<&str> {
-        self.pending.as_ref().map(|p| p.form_id.as_str())
+        self.form_id.as_deref()
     }
 
     fn questions(&self) -> &[FormQuestion] {
-        self.pending.as_ref().map_or(&[], |p| &p.form.questions)
+        &self.questions
     }
 
-    fn current_kind(&self) -> Option<&FormKind> {
-        self.questions()
-            .get(self.current_index)
-            .map(|q| &q.kind)
-            .or_else(|| self.pending.as_ref().map(|p| &p.kind))
+    pub(crate) fn current_kind(&self) -> Option<&FormKind> {
+        self.questions().get(self.current_index).map(|q| &q.kind)
+    }
+
+    pub(crate) fn sync_runtime(&mut self, form: Option<&PendingForm>) {
+        if self.preference.is_some() {
+            self.queued_runtime_form = form.cloned();
+        } else if let Some(form) = form {
+            if self.active_form_id() != Some(&form.form_id) {
+                self.attach(form.clone());
+            }
+        } else {
+            self.close();
+        }
+    }
+
+    pub(crate) fn open_preference(
+        &mut self,
+        preference: crate::settings::Preference,
+        app: &mut crate::app::AppState,
+    ) {
+        let result = if self.open {
+            Err("Finish or close the current form first".into())
+        } else {
+            preference.selection(app)
+        };
+        match result {
+            Ok((kind, selected)) => {
+                self.attach_content(
+                    uuid::Uuid::now_v7().to_string(),
+                    vec![FormQuestion {
+                        id: "setting".into(),
+                        kind,
+                    }],
+                );
+                self.preference = Some(preference);
+                self.confirm_focus = selected;
+            }
+            Err(error) => app.push_note(error, crate::app::NoteLevel::Error),
+        }
+    }
+
+    pub(crate) fn settings_result(&mut self, id: uuid::Uuid, result: &Result<String, String>) {
+        if self.setting_request != Some(id) {
+            return;
+        }
+        self.setting_request = None;
+        self.pending_submission = None;
+        match result {
+            Ok(_) => self.close(),
+            Err(error) => self.error = Some(error.clone()),
+        }
     }
 
     fn clear_geometry(&mut self) {
@@ -323,7 +388,10 @@ impl FormModal {
         request_id: u64,
         result: Result<bool, String>,
     ) {
-        if self.active_form_id() != Some(form_id) || self.pending_submission != Some(request_id) {
+        if self.preference.is_some()
+            || self.active_form_id() != Some(form_id)
+            || self.pending_submission != Some(request_id)
+        {
             return;
         }
         self.pending_submission = None;
@@ -343,6 +411,25 @@ impl FormModal {
             submission,
         } = outcome
         {
+            if let Some(preference) = self.preference {
+                let FormSubmission::Submitted { answers } = submission else {
+                    self.close();
+                    return;
+                };
+                let result = match answers.first() {
+                    Some(FormAnswer::Selected { index, .. }) => preference.mutation(*index),
+                    _ => Err("Setting selection is missing".into()),
+                }
+                .and_then(|action| crate::settings::SettingsMutationRequest::send(action, tx));
+                match result {
+                    Ok(request) => self.setting_request = Some(request.id),
+                    Err(error) => {
+                        self.pending_submission = None;
+                        self.error = Some(error);
+                    }
+                }
+                return;
+            }
             let sent = tx.is_some_and(|tx| {
                 tx.send(crate::TuiControl::FormSubmit {
                     request_id,
@@ -994,6 +1081,70 @@ mod tests {
     use super::*;
     use crate::wm::modal::ModalOverlay;
     type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
+    #[test]
+    fn preferences_keep_configuration_receipts_and_runtime_forms_separate() {
+        use crate::settings::{Preference, SettingsMutation, SettingsSource};
+        let temp = tempfile::tempdir().unwrap();
+        let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(temp.path().join("config"));
+        hub.set_math_rendering_enabled(false).unwrap();
+        let mut app = crate::app::AppState::default();
+        app.settings = SettingsSource::from(hub);
+        let mut modal = FormModal::default();
+        modal.open_preference(Preference::MathRendering, &mut app);
+        assert_eq!(modal.confirm_focus, 1);
+        let local_id = modal.active_form_id().unwrap().to_owned();
+        let runtime = mk_questions(vec![FormKind::Confirm {
+            prompt: "Runtime question".into(),
+        }]);
+        modal.sync_runtime(Some(&runtime));
+        assert_eq!(modal.active_form_id(), Some(local_id.as_str()));
+        let (tx, mut rx) = crate::ControlSender::channel();
+        modal.handle_key(&KeyAction::Submit, &mut app, Some(&tx));
+        // Mouse and keyboard share the same submission and acknowledgement path.
+        modal.yes_rect = Some(Rect::new(1, 1, 8, 3));
+        modal.handle_mouse(
+            &MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: 2,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            Some(&tx),
+        );
+        let crate::TuiControl::MutateSettings(first) = rx.try_recv().unwrap() else {
+            panic!()
+        };
+        assert!(matches!(
+            first.action,
+            SettingsMutation::MathRendering { enabled: false }
+        ));
+        modal.settings_result(uuid::Uuid::now_v7(), &Ok("stale".into()));
+        modal.submission_result(&local_id, modal.pending_submission.unwrap(), Ok(true));
+        assert!(modal.open && modal.is_submitting());
+        modal.settings_result(first.id, &Err("write failed".into()));
+        assert_eq!(modal.error.as_deref(), Some("write failed"));
+        assert!(!modal.is_submitting());
+        assert_eq!(modal.draft_answers.len(), 1);
+        modal.handle_key(&KeyAction::Submit, &mut app, Some(&tx));
+        let crate::TuiControl::MutateSettings(second) = rx.try_recv().unwrap() else {
+            panic!()
+        };
+        modal.settings_result(first.id, &Ok("old success".into()));
+        assert!(modal.is_submitting());
+        modal.settings_result(second.id, &Ok("saved".into()));
+        assert_eq!(modal.active_form_id(), Some(runtime.form_id.as_str()));
+        assert!(modal.preference.is_none());
+        modal.sync_runtime(None);
+        modal.open_preference(Preference::MathRendering, &mut app);
+        modal.sync_runtime(Some(&runtime));
+        modal.sync_runtime(None);
+        modal.handle_key(&KeyAction::Escape, &mut app, Some(&tx));
+        assert!(!modal.open);
+        assert!(
+            rx.try_recv().is_err(),
+            "cancelling a setting must not submit a runtime answer"
+        );
+    }
     fn mk_questions(kinds: Vec<FormKind>) -> PendingForm {
         PendingForm {
             form_id: "f".into(),

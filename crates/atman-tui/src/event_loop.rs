@@ -177,14 +177,7 @@ fn refresh_instance_live(ui: &mut UiState, editor: &mut InputEditor, handle: &Tu
     }
     ui.app.sync_composer_images(editor);
     if let Some(rx) = &handle.form_rx {
-        let forms = rx.borrow();
-        if let Some(form) = forms.first() {
-            if ui.wm.modals.form_modal.active_form_id() != Some(&form.form_id) {
-                ui.wm.modals.form_modal.attach(form.clone());
-            }
-        } else {
-            ui.wm.modals.form_modal.close();
-        }
+        ui.wm.modals.form_modal.sync_runtime(rx.borrow().first());
     }
     if let Some(rx) = &handle.compact_review_rx {
         match rx.borrow().as_ref() {
@@ -1883,15 +1876,7 @@ pub(crate) async fn run_frames(
             }
             _ = wait_form_change(handle.form_rx.as_mut()) => {
                 if let Some(rx) = handle.form_rx.as_mut() {
-                    let latest = rx.borrow().clone();
-                    if let Some(target) = latest.first().cloned()
-                        && app.wm.modals.form_modal.active_form_id()
-                            != Some(target.form_id.as_str())
-                    {
-                        app.wm.modals.form_modal.attach(target);
-                    } else if latest.is_empty() {
-                        app.wm.modals.form_modal.close();
-                    }
+                    app.wm.modals.form_modal.sync_runtime(rx.borrow().first());
                 }
             }
             cmd = recv_cmd(&mut handle.cmd_rx, &mut handle.control_reply_rx, handle.control_tx.as_ref().and_then(|tx| tx.binding())) => {
@@ -1968,7 +1953,10 @@ fn apply_view_command(
         }
         TuiCommand::OpenProjectHub => app.app.startup_open_projects = true,
         TuiCommand::OpenProjectStorageScopePicker => {
-            key_handler::open_project_storage_scope_picker(&mut app.app);
+            app.wm
+                .modals
+                .form_modal
+                .open_preference(crate::settings::Preference::ProjectStorage, &mut app.app);
         }
         TuiCommand::SessionNameUpdated(name) => {
             app.app.session_name = Some(name);
@@ -2012,6 +2000,10 @@ fn apply_view_command(
             apply_model_mutation_result(app, request, result);
         }
         TuiCommand::SettingsMutationResult { request, result } => {
+            app.wm
+                .modals
+                .form_modal
+                .settings_result(request.id, &result);
             app.wm
                 .modals
                 .alias_manager

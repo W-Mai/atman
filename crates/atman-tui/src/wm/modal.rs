@@ -631,10 +631,9 @@ impl ModalManager {
                 let outer_width = (canvas.width.saturating_mul(3) / 4).clamp(50, 100);
                 let content_lines = self
                     .form_modal
-                    .pending
-                    .as_ref()
-                    .map(|f| {
-                        crate::form_modal::estimate_height(&f.kind, outer_width.saturating_sub(4))
+                    .current_kind()
+                    .map(|kind| {
+                        crate::form_modal::estimate_height(kind, outer_width.saturating_sub(4))
                     })
                     .unwrap_or(6);
                 let outer_height = (content_lines + 6).min(canvas.height.saturating_sub(4).max(6));
@@ -742,9 +741,8 @@ impl ModalManager {
             ModalKind::Form => {
                 let title = self
                     .form_modal
-                    .pending
-                    .as_ref()
-                    .map(|f| match f.kind.discriminator() {
+                    .current_kind()
+                    .map(|kind| match kind.discriminator() {
                         "text" => "Text Input",
                         "confirm" => "Confirm",
                         "select" => "Select",

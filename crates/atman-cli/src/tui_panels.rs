@@ -21,10 +21,28 @@ use crate::{
 
 fn mutate_settings(
     config: &atman_runtime::config_hub::ConfigHub,
+    project_root: Option<&std::path::Path>,
     action: &atman_tui::settings::SettingsMutation,
 ) -> Result<String> {
     use atman_tui::settings::SettingsMutation;
     match action {
+        SettingsMutation::ProjectStorage { scope } => {
+            let root = project_root.context("Current session has no project")?;
+            anyhow::ensure!(
+                root.is_dir(),
+                "Project path does not exist: {}",
+                root.display()
+            );
+            config.set_project_storage_scope(root, *scope)?;
+            Ok(format!(
+                "Project storage set to {}; applies to new sessions",
+                crate::storage_scope_name(*scope)
+            ))
+        }
+        SettingsMutation::MathRendering { enabled } => {
+            config.set_math_rendering_enabled(*enabled)?;
+            Ok("Formula display saved; restart Atman to apply".into())
+        }
         SettingsMutation::CreateAlias { name, model } => {
             config.add_alias(name, model)?;
             Ok(format!("Alias {name} saved"))
@@ -203,8 +221,9 @@ impl PanelServices {
     pub async fn dispatch(&mut self, command: TuiControl) -> Option<TuiControl> {
         match command {
             TuiControl::MutateSettings(request) => {
-                let result = mutate_settings(&self.config, &request.action)
-                    .map_err(|error| error.to_string());
+                let result =
+                    mutate_settings(&self.config, self.project_root.as_deref(), &request.action)
+                        .map_err(|error| error.to_string());
                 let reload = result.is_ok()
                     && matches!(
                         request.action,
@@ -617,6 +636,9 @@ mod tests {
         let mut services =
             PanelServices::for_scope(session.clone(), executor, tx, vec![], first.clone(), None)
                 .unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        services.project_root = Some(project.clone());
         let mut mcp = atman_runtime::mcp::McpServerConfig::stdio(
             "example",
             "example-mcp",
@@ -626,6 +648,10 @@ mod tests {
         );
         mcp.disabled = true;
         let actions = [
+            Mutation::MathRendering { enabled: false },
+            Mutation::ProjectStorage {
+                scope: atman_runtime::storage::StorageScope::Local,
+            },
             Mutation::CreateAlias {
                 name: "work".into(),
                 model: "model".into(),
@@ -665,6 +691,29 @@ mod tests {
             assert!(result.is_ok(), "{result:?}");
         }
         assert_eq!(first.models().resolve_alias("smart"), "model");
+        assert!(!first.math_rendering_enabled().unwrap());
+        assert!(second.math_rendering_enabled().unwrap());
+        assert_eq!(
+            first.try_storage_config(Some(&project)).unwrap().scope,
+            Some(atman_runtime::storage::StorageScope::Local)
+        );
+        let stored = std::fs::read(project.join(".atman/config.toml")).unwrap();
+        for invalid_root in [None, Some(temp.path().join("missing").as_path())] {
+            assert!(
+                mutate_settings(
+                    &first,
+                    invalid_root,
+                    &Mutation::ProjectStorage {
+                        scope: atman_runtime::storage::StorageScope::Global,
+                    }
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(
+            std::fs::read(project.join(".atman/config.toml")).unwrap(),
+            stored
+        );
         assert_eq!(first.models().resolve_alias("fast"), "model");
         assert_eq!(first.load_local_mcp().len(), 1);
         assert!(!first.load_local_mcp()[0].disabled);
@@ -674,6 +723,7 @@ mod tests {
         assert!(
             mutate_settings(
                 &first,
+                None,
                 &Mutation::CreateAlias {
                     name: "fast".into(),
                     model: "model".into()
@@ -687,6 +737,7 @@ mod tests {
         );
         mutate_settings(
             &first,
+            None,
             &Mutation::RemoveAlias {
                 name: "fast".into(),
             },
@@ -694,6 +745,7 @@ mod tests {
         .unwrap();
         mutate_settings(
             &first,
+            None,
             &Mutation::RemoveMcp {
                 name: "example".into(),
             },

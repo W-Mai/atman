@@ -3806,76 +3806,12 @@ fn set_session_project_storage_scope(
     Ok(root)
 }
 
-fn apply_project_storage_scope_submission(
-    session: &atman_runtime::Session,
-    submission: &atman_runtime::form::FormSubmission,
-) -> Result<Option<(atman_runtime::storage::StorageScope, PathBuf)>> {
-    let atman_runtime::form::FormSubmission::Submitted { answers } = submission else {
-        return Ok(None);
-    };
-    let Some(atman_runtime::form::FormAnswer::Selected { index, label }) = answers.first() else {
-        anyhow::bail!("storage scope selection is missing");
-    };
-    let scope = match (*index, label.as_str()) {
-        (0, "Global") => atman_runtime::storage::StorageScope::Global,
-        (1, "Local (.atman)") => atman_runtime::storage::StorageScope::Local,
-        _ => anyhow::bail!("invalid storage scope selection"),
-    };
-    let root = set_session_project_storage_scope(session, scope)?;
-    Ok(Some((scope, root)))
-}
-
-fn project_storage_scope_result_command(
-    result: Result<Option<(atman_runtime::storage::StorageScope, PathBuf)>>,
-) -> Option<atman_tui::TuiCommand> {
-    let (message, level) = match result {
-        Ok(Some((scope, root))) => (
-            format!(
-                "Project storage set to {} for {}; applies to new sessions",
-                storage_scope_name(scope),
-                root.display()
-            ),
-            atman_tui::app::NoteLevel::Success,
-        ),
-        Ok(None) => return None,
-        Err(error) => (
-            format!("Project storage update failed: {error}"),
-            atman_tui::app::NoteLevel::Error,
-        ),
-    };
-    Some(atman_tui::TuiCommand::Toast { message, level })
-}
-
-fn apply_formula_rendering_submission(
-    submission: &atman_runtime::form::FormSubmission,
-) -> Result<Option<bool>> {
-    let atman_runtime::form::FormSubmission::Submitted { answers } = submission else {
-        return Ok(None);
-    };
-    let Some(atman_runtime::form::FormAnswer::Selected { index, label }) = answers.first() else {
-        anyhow::bail!("formula display selection is missing");
-    };
-    let enabled = match (*index, label.as_str()) {
-        (0, "Rendered") => true,
-        (1, "Raw Markdown") => false,
-        _ => anyhow::bail!("invalid formula display selection"),
-    };
-    atman_runtime::config_hub::ConfigHub::global()?.set_math_rendering_enabled(enabled)?;
-    Ok(Some(enabled))
-}
-
 fn apply_form_settings(
     session: &atman_runtime::Session,
     form_id: &str,
     submission: &atman_runtime::form::FormSubmission,
 ) -> Result<Option<atman_tui::TuiCommand>> {
     match form_id {
-        atman_tui::PROJECT_STORAGE_SCOPE_FORM_ID => Ok(project_storage_scope_result_command(Ok(
-            apply_project_storage_scope_submission(session, submission)?,
-        ))),
-        atman_tui::FORMULA_RENDERING_FORM_ID => Ok(formula_rendering_result_command(Ok(
-            apply_formula_rendering_submission(submission)?,
-        ))),
         "session_move_path" => {
             if let atman_runtime::form::FormSubmission::Submitted { answers } = submission {
                 let Some(atman_runtime::form::FormAnswer::TextEntered { text }) = answers.first()
@@ -3915,25 +3851,6 @@ fn submit_form_to_tui(
             result,
         });
     });
-}
-
-fn formula_rendering_result_command(result: Result<Option<bool>>) -> Option<atman_tui::TuiCommand> {
-    let (message, level) = match result {
-        Ok(Some(true)) => (
-            "Formula rendering enabled; restart Atman to apply".to_string(),
-            atman_tui::app::NoteLevel::Success,
-        ),
-        Ok(Some(false)) => (
-            "Formula rendering disabled; restart Atman to apply".to_string(),
-            atman_tui::app::NoteLevel::Success,
-        ),
-        Ok(None) => return None,
-        Err(error) => (
-            format!("Formula display update failed: {error}"),
-            atman_tui::app::NoteLevel::Error,
-        ),
-    };
-    Some(atman_tui::TuiCommand::Toast { message, level })
 }
 
 fn execute_project_mutation(
@@ -8772,7 +8689,7 @@ mod tests {
             prompt: "Storage".into(),
             options: vec!["Global".into()],
         };
-        let id = atman_tui::PROJECT_STORAGE_SCOPE_FORM_ID;
+        let id = "session_move_path";
         let _answer = forms.request(PendingForm {
             form_id: id.into(),
             run_id: atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now(),

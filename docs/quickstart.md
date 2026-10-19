@@ -203,6 +203,8 @@ Persistent terminal, main, and floating views run suggestions asynchronously. On
 
 Persistent execution views accept `:copy last-message`, `:copy last-tool`, and `:sidebar on|off`. Copying reads the bound flow's original records rather than its compacted model window. Plain terminals receive an OSC 52 clipboard sequence; TUI requests use the existing clipboard handler and display the result in the requesting view. These commands do not submit user input or resume execution.
 
+The TUI's `:storage` and `:formula` selectors use the configuration bound to the current view. Storage changes apply to new sessions in that project; formula display changes take effect after restart. Settings stay open until saving succeeds, and failures retain the selected value. These dialogs do not add runtime prompts or conversation records; runtime questions received while a settings dialog is open appear after it closes.
+
 When a completion menu is open, use `↑`/`↓` to select an item and `Enter` or `Tab` to place it in the input. Press `Enter` again to submit the completed command.
 
 In the TUI, `:panel` opens the `Ctrl+P` command palette without requiring the shortcut. Palette actions also have direct commands, displayed beside each menu item:

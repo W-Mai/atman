@@ -6,6 +6,12 @@ use atman_runtime::{auth_store::AuthStore, config_hub::ConfigHub, model_registry
 
 #[derive(Clone, Debug)]
 pub enum SettingsMutation {
+    ProjectStorage {
+        scope: atman_runtime::storage::StorageScope,
+    },
+    MathRendering {
+        enabled: bool,
+    },
     CreateAlias {
         name: String,
         model: String,
@@ -31,6 +37,66 @@ pub enum SettingsMutation {
     ToggleMcp {
         name: String,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Preference {
+    ProjectStorage,
+    MathRendering,
+}
+
+impl Preference {
+    pub(crate) fn selection(
+        self,
+        app: &crate::app::AppState,
+    ) -> Result<(atman_runtime::form::FormKind, usize), String> {
+        use atman_runtime::{form::FormKind, storage::StorageScope};
+        let config = app.settings.config()?;
+        let (prompt, options, selected) = match self {
+            Self::ProjectStorage => {
+                let root = app
+                    .project_root
+                    .as_deref()
+                    .ok_or("Current session has no project")?;
+                let scope = config
+                    .try_storage_config(Some(std::path::Path::new(root)))
+                    .map_err(|error| error.to_string())?
+                    .scope
+                    .unwrap_or_default();
+                (
+                    format!("Store Atman data for {root} where? Applies to new sessions."),
+                    vec!["Global".into(), "Local (.atman)".into()],
+                    usize::from(scope == StorageScope::Local),
+                )
+            }
+            Self::MathRendering => (
+                "Formula display. Restart Atman to apply changes.".into(),
+                vec!["Rendered".into(), "Raw Markdown".into()],
+                usize::from(
+                    !config
+                        .math_rendering_enabled()
+                        .map_err(|error| error.to_string())?,
+                ),
+            ),
+        };
+        Ok((FormKind::SingleSelect { prompt, options }, selected))
+    }
+
+    pub(crate) fn mutation(self, index: usize) -> Result<SettingsMutation, String> {
+        use atman_runtime::storage::StorageScope;
+        match (self, index) {
+            (Self::ProjectStorage, 0) => Ok(SettingsMutation::ProjectStorage {
+                scope: StorageScope::Global,
+            }),
+            (Self::ProjectStorage, 1) => Ok(SettingsMutation::ProjectStorage {
+                scope: StorageScope::Local,
+            }),
+            (Self::MathRendering, 0..=1) => Ok(SettingsMutation::MathRendering {
+                enabled: index == 0,
+            }),
+            _ => Err("Invalid setting selection".into()),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

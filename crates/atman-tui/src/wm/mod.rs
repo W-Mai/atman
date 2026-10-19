@@ -903,10 +903,14 @@ impl WindowManager {
                 }
             }
             PaletteEntryId::SetProjectStorageScope => {
-                crate::key_handler::open_project_storage_scope_picker(app);
+                self.modals
+                    .form_modal
+                    .open_preference(crate::settings::Preference::ProjectStorage, app);
             }
             PaletteEntryId::SetFormulaRendering => {
-                crate::key_handler::open_formula_rendering_picker(app);
+                self.modals
+                    .form_modal
+                    .open_preference(crate::settings::Preference::MathRendering, app);
             }
             PaletteEntryId::SearchHistory => {
                 self.modals.history_search.open();

@@ -22,6 +22,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **View-scoped preferences** — Project storage and formula display settings use the requesting view's configuration and project. Save replies retain drafts on failure and close the editor on success; runtime questions remain independent of preference dialogs.
+
 - **Flow display commands** — Persistent terminals support `:copy last-message` and `:copy last-tool` from original conversation records. TUI clipboard and sidebar commands retain their source view and leave queued input and execution state unchanged.
 
 - **Asynchronous context operations** — Persistent terminals and shared TUI views support manual compaction with flow-bound review and completion replies. Compaction and suggestions keep independent request ownership, and operation failures leave the interface available.
