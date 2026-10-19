@@ -373,16 +373,20 @@ impl Observation {
 }
 
 impl FlowWorker {
+    /// Register observation of a live process owned by this instance without claiming a turn. Owner authorization runs before resource lookup and again at registration; registration captures the resource incarnation and initial source position before acknowledgement.
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn watch_process(
+    pub async fn watch_process(
         &self,
         id: Uuid,
         handle: String,
         pattern: String,
         once: bool,
         expires_at: Option<DateTime<Utc>>,
-        authorize: Authorize,
+        authorize_owner: impl Fn(&crate::flow_store::FlowRef) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<ProcessWatchRecord> {
+        authorize_owner(&self.address)?;
+        let owner = self.address.clone();
+        let authorize: Authorize = Box::new(move || authorize_owner(&owner));
         let session_id = self.address.session_id.to_string();
         let task = self
             .resources

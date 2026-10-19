@@ -1,6 +1,6 @@
 //! Host-owned flow event observation, independent of recipient execution.
 
-use std::{collections::HashMap, io, num::NonZeroUsize};
+use std::{collections::HashMap, io, num::NonZeroUsize, sync::Arc};
 
 use futures::{FutureExt, future::BoxFuture};
 use tokio::sync::watch;
@@ -12,8 +12,8 @@ use super::{
 };
 use crate::flow_store::access::FlowAction;
 use crate::flow_store::{
-    FlowRef,
-    subscription::{SubscriptionRecord, SubscriptionStatus},
+    FlowRef, FlowStore, invalid,
+    subscription::{FlowSubscription, SubscriptionRecord, SubscriptionStatus},
 };
 
 /// A retained subscription that could not advance. Retrying never resets its durable cursor.
@@ -72,6 +72,56 @@ impl FlowWorker {
 }
 
 impl RuntimeHost {
+    /// Register durable observation without claiming a turn. Owner authorization is rechecked at each storage boundary; new registrations also require current watch grants. Identical retries retain their original source cursor, including after cancellation or source access loss.
+    pub async fn watch_events(
+        &self,
+        owner: FlowRef,
+        subscription: FlowSubscription,
+        authorize_owner: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<SubscriptionRecord> {
+        authorize_owner(&owner)?;
+        let authorize_owner = Arc::new(authorize_owner);
+        let recipient = self.flow(&owner).await?;
+        let authorize = authorize_owner.clone();
+        let requested = subscription.clone();
+        if let Some(record) = recipient
+            .request(move |store| {
+                authorize(store.state().address())?;
+                existing_subscription(store, &requested)
+            })
+            .await?
+        {
+            return Ok(record);
+        }
+        self.authorize_observation(&owner, &subscription.source)?;
+        let host = self.clone();
+        let recipient_address = owner.clone();
+        let authorize = authorize_owner.clone();
+        let anchor = self
+            .flow(&subscription.source)
+            .await?
+            .request(move |store| {
+                authorize(&recipient_address)?;
+                host.authorize_observation(&recipient_address, store.state().address())?;
+                Ok(store.observation_anchor())
+            })
+            .await?;
+        let host = self.clone();
+        recipient
+            .request(move |store| {
+                authorize_owner(store.state().address())?;
+                // An identical concurrent request may already have committed an earlier anchor.
+                if let Some(record) = existing_subscription(store, &subscription)? {
+                    return Ok(record);
+                }
+                host.authorize_observation(store.state().address(), &subscription.source)?;
+                store.subscribe_events(subscription.clone(), &anchor)?;
+                existing_subscription(store, &subscription)?
+                    .ok_or_else(|| invalid("subscription was not committed"))
+            })
+            .await
+    }
+
     pub(super) fn authorize_observation(
         &self,
         recipient: &FlowRef,
@@ -85,6 +135,21 @@ impl RuntimeHost {
             ));
         }
         Ok(())
+    }
+}
+
+fn existing_subscription(
+    store: &FlowStore,
+    requested: &FlowSubscription,
+) -> io::Result<Option<SubscriptionRecord>> {
+    let existing = store
+        .flow_subscriptions()
+        .find(|record| record.subscription.id == requested.id);
+    match existing {
+        Some(record) if record.subscription != *requested => Err(invalid(
+            "subscription identity conflicts with recorded registration",
+        )),
+        other => Ok(other.cloned()),
     }
 }
 

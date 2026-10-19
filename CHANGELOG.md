@@ -28,6 +28,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Host watcher registration** — Hosts can register Flow and owned-process subscriptions without starting a turn. Agent tools share the same registration paths, preserving authorization checks, original source positions on retry, and cancelled registrations.
+
 - **WatchHub cancellation** — Active subscription details provide a padded cancel button with Delete and Tab/Enter controls. Changes appear after host acknowledgement, failures remain visible for retry, and closing the view does not cancel an accepted operation.
 
 - **Watcher control** — Hosts can cancel owned Flow and process subscriptions while execution is idle or paused. Operator controls and agent tools share serialized authorization, durable cancellation, and producer cleanup; accepted notifications and internal result routes remain intact.

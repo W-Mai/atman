@@ -220,14 +220,9 @@ impl FlowClient {
         self.host
             .flow(self.source())
             .await?
-            .watch_process(
-                id,
-                handle,
-                pattern,
-                once,
-                expires_at,
-                Box::new(move || client.authenticate()),
-            )
+            .watch_process(id, handle, pattern, once, expires_at, move |_| {
+                client.authenticate()
+            })
             .await
     }
 
@@ -618,41 +613,12 @@ impl FlowClient {
         subscription: FlowSubscription,
     ) -> io::Result<SubscriptionRecord> {
         self.authenticate()?;
-        let recipient = self.host.flow(self.source()).await?;
         let client = self.clone();
-        let requested = subscription.clone();
-        if let Some(record) = recipient
-            .request(move |store| {
+        self.host
+            .watch_events(self.source().clone(), subscription, move |_| {
                 client.authenticate()?;
-                existing_subscription(store, &requested)
-            })
-            .await?
-        {
-            return Ok(record);
-        }
-        self.authorize(&subscription.source, FlowAction::Watch)?;
-        let client = self.clone();
-        let anchor = self
-            .host
-            .flow(&subscription.source)
-            .await?
-            .request(move |store| {
-                client.authorize(store.state().address(), FlowAction::Watch)?;
-                Ok(store.observation_anchor())
-            })
-            .await?;
-        let client = self.clone();
-        recipient
-            .request(move |store| {
-                client.authenticate()?;
-                // Concurrent identical registrations can acquire different anchors. Preserve the first.
-                if let Some(record) = existing_subscription(store, &subscription)? {
-                    return Ok(record);
-                }
-                client.authorize(&subscription.source, FlowAction::Watch)?;
-                store.subscribe_events(subscription.clone(), &anchor)?;
-                existing_subscription(store, &subscription)?
-                    .ok_or_else(|| invalid("subscription was not committed"))
+                client.source_session()?;
+                Ok(())
             })
             .await
     }
@@ -804,21 +770,6 @@ impl super::FlowWorker {
             store.transition(expected_revision, transition)
         })
         .await
-    }
-}
-
-fn existing_subscription(
-    store: &crate::flow_store::FlowStore,
-    requested: &FlowSubscription,
-) -> io::Result<Option<SubscriptionRecord>> {
-    let existing = store
-        .flow_subscriptions()
-        .find(|record| record.subscription.id == requested.id);
-    match existing {
-        Some(record) if record.subscription != *requested => Err(invalid(
-            "subscription identity conflicts with recorded registration",
-        )),
-        other => Ok(other.cloned()),
     }
 }
 

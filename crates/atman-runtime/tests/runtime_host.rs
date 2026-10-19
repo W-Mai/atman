@@ -2131,6 +2131,68 @@ async fn process_watch_tools_share_instance_delivery_across_pause_turns_and_expl
     assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
     let owner = worker.address().clone();
     let before = worker.state().await.unwrap();
+    let operator_id = Uuid::now_v7();
+    let process_handle = setup[0]["handle"].as_str().unwrap().to_owned();
+    assert_eq!(
+        worker
+            .watch_process(
+                operator_id,
+                "unknown".into(),
+                "operator-only".into(),
+                false,
+                None,
+                |_| Err(io::ErrorKind::PermissionDenied.into())
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    let expected = owner.clone();
+    let registration = worker
+        .watch_process(
+            operator_id,
+            process_handle.clone(),
+            "operator-only".into(),
+            false,
+            None,
+            move |actual| {
+                assert_eq!(actual, &expected);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        worker
+            .watch_process(
+                operator_id,
+                process_handle.clone(),
+                "operator-only".into(),
+                false,
+                None,
+                |_| Ok(())
+            )
+            .await
+            .unwrap(),
+        registration
+    );
+    worker.unwatch(operator_id, |_| Ok(())).await.unwrap();
+    assert_eq!(
+        worker
+            .watch_process(
+                operator_id,
+                process_handle,
+                "operator-only".into(),
+                false,
+                None,
+                |_| Ok(())
+            )
+            .await
+            .unwrap()
+            .status,
+        atman_runtime::flow_store::process_watch::ProcessWatchStatus::Cancelled
+    );
     let cancelled = worker
         .unwatch(persistent, move |address| {
             assert_eq!(address, &owner);
@@ -6777,6 +6839,168 @@ fn answer_watch(source: &FlowWorker) -> atman_runtime::flow_store::subscription:
         expires_at: None,
         reply: None,
     }
+}
+
+#[tokio::test]
+async fn host_watch_registration_preserves_authority_cursor_and_idle_execution() {
+    use atman_runtime::flow_store::{
+        access::{AccessTarget, FlowAction, FlowGrant},
+        subscription::SubscriptionStatus,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let recipient = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let source = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    for worker in [&recipient, &source] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    change(
+        &recipient,
+        FlowTransition::ExecutionPaused {
+            key: Uuid::now_v7().into(),
+        },
+    )
+    .await;
+    let initial = recipient.snapshot().await.unwrap();
+    let watch = answer_watch(&source);
+    let owner = recipient.address().clone();
+    // Owner authority is checked again after capturing the source's anchor.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let expected = owner.clone();
+    let denied = host
+        .watch_events(owner.clone(), watch.clone(), move |actual| {
+            assert_eq!(actual, &expected);
+            if counter.fetch_add(1, Ordering::SeqCst) == 3 {
+                Err(io::ErrorKind::PermissionDenied.into())
+            } else {
+                Ok(())
+            }
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(recipient.snapshot().await.unwrap().cursor, initial.cursor);
+    invoke(&source, Executor::new()).await.result.unwrap();
+    let (first, retry) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            host.watch_events(owner.clone(), watch.clone(), |_| Ok(())),
+            host.watch_events(owner.clone(), watch.clone(), |_| Ok(()))
+        )
+    })
+    .await
+    .expect("registration must not hold source and recipient locks together");
+    let first = first.unwrap();
+    assert_eq!(first, retry.unwrap());
+    assert_eq!(recipient.flow_subscriptions().await.unwrap().len(), 1);
+    assert_eq!(recipient.state().await.unwrap(), initial.state);
+    assert!(
+        recipient.snapshot().await.unwrap().pending.is_empty(),
+        "registration must not replay earlier answers"
+    );
+    let mut conflict = watch.clone();
+    conflict.once = true;
+    assert!(
+        host.watch_events(owner.clone(), conflict, |_| Ok(()))
+            .await
+            .is_err()
+    );
+    invoke(&source, Executor::new()).await.result.unwrap();
+    wait_inputs(&recipient, 1).await;
+    assert_eq!(
+        host.watch_events(owner.clone(), watch.clone(), |_| Ok(()))
+            .await
+            .unwrap()
+            .started_after,
+        first.started_after
+    );
+    let (self_watch, reverse) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            host.watch_events(owner.clone(), answer_watch(&recipient), |_| Ok(())),
+            host.watch_events(source.address().clone(), answer_watch(&recipient), |_| Ok(
+                ()
+            ))
+        )
+    })
+    .await
+    .unwrap();
+    self_watch.unwrap();
+    reverse.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    let quiet = recipient.snapshot().await.unwrap().cursor;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        recipient.snapshot().await.unwrap().cursor,
+        quiet,
+        "self-observation must not spin on private registration facts"
+    );
+    recipient.unwatch(watch.id, |_| Ok(())).await.unwrap();
+    assert_eq!(
+        host.watch_events(owner.clone(), watch, |_| Ok(()))
+            .await
+            .unwrap()
+            .status,
+        SubscriptionStatus::Cancelled
+    );
+
+    let other_info = session_descriptor();
+    let other = host
+        .attach_session(root.create_session(other_info.clone()).unwrap())
+        .unwrap();
+    let remote = other
+        .create_flow(flow_descriptor(other_info.id))
+        .await
+        .unwrap();
+    let remote_watch = answer_watch(&remote);
+    assert_eq!(
+        host.watch_events(owner.clone(), remote_watch.clone(), |_| Ok(()))
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    let grant = FlowGrant {
+        id: Uuid::now_v7(),
+        grantee: owner.clone(),
+        target: AccessTarget::Flow(remote.address().clone()),
+        actions: [FlowAction::Watch].into(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
+        .await
+        .unwrap();
+    let registered = host
+        .watch_events(owner.clone(), remote_watch.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    session
+        .revoke_access(session.snapshot().await.unwrap().cursor, grant.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        host.watch_events(owner.clone(), remote_watch, |_| Ok(()))
+            .await
+            .unwrap(),
+        registered
+    );
+    assert!(
+        host.watch_events(owner, answer_watch(&remote), |_| Ok(()))
+            .await
+            .is_err()
+    );
+    assert_eq!(recipient.state().await.unwrap(), initial.state);
+    assert_eq!(recipient.snapshot().await.unwrap().pending.len(), 1);
+    host.shutdown().await.unwrap();
 }
 
 #[tokio::test]
