@@ -1,17 +1,58 @@
 use atman_runtime::event_log::legacy::LegacyFlowKey;
 use atman_runtime::flow_runtime::{
     access::InstancePage,
-    catalog::{CatalogStatus, SessionPage},
+    catalog::{CatalogStatus, SessionSummary},
 };
 use atman_runtime::flow_store::FlowInstanceId;
 use uuid::Uuid;
 
 use super::{Action, execution_label};
+use crate::project_hub::SessionTarget;
+
+/// Host-supplied directory rows retain their storage origin independently of display text.
+pub struct SessionDirectory {
+    pub sessions: Vec<SessionRow>,
+    pub next: Option<SessionTarget>,
+    pub total: usize,
+}
+
+pub struct SessionRow {
+    pub target: SessionTarget,
+    pub title: String,
+    pub detail: String,
+}
+
+impl From<SessionSummary> for SessionRow {
+    fn from(row: SessionSummary) -> Self {
+        let status = match row.status {
+            CatalogStatus::Running => "Running",
+            CatalogStatus::Idle => "Idle",
+            CatalogStatus::Closed => "Closed",
+            CatalogStatus::Detached => "Detached",
+            CatalogStatus::Unavailable => "Unavailable",
+        };
+        Self {
+            target: SessionTarget::Persistent(row.session_id),
+            title: row.title.unwrap_or_else(|| "Unavailable session".into()),
+            detail: row.unavailable.unwrap_or_else(|| {
+                format!(
+                    "{} · {status} · {} flows · {}",
+                    row.session_id,
+                    row.flow_count
+                        .map_or_else(|| "?".into(), |count| count.to_string()),
+                    row.project_root
+                        .as_ref()
+                        .map_or_else(|| "No project".into(), |path| path.display().to_string())
+                )
+            }),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
     Sessions {
-        before: Option<Uuid>,
+        before: Option<SessionTarget>,
     },
     Flows {
         session: Uuid,
@@ -24,7 +65,7 @@ pub enum HubRequest {
 }
 
 pub enum FlowHubPage {
-    Sessions(SessionPage),
+    Sessions(SessionDirectory),
     Flows {
         session: Uuid,
         title: String,
@@ -74,7 +115,7 @@ impl FlowHubPage {
     }
     pub fn next(&self) -> Option<HubRequest> {
         match self {
-            Self::Sessions(page) => page.next.map(|before| HubRequest::Sessions {
+            Self::Sessions(page) => page.next.clone().map(|before| HubRequest::Sessions {
                 before: Some(before),
             }),
             Self::Flows { session, page, .. } => {
@@ -126,35 +167,24 @@ impl FlowHubPage {
                 .sessions
                 .iter()
                 .map(|row| {
-                    let status = match row.status {
-                        CatalogStatus::Running => "Running",
-                        CatalogStatus::Idle => "Idle",
-                        CatalogStatus::Closed => "Closed",
-                        CatalogStatus::Detached => "Detached",
-                        CatalogStatus::Unavailable => "Unavailable",
-                    };
-                    let detail = row.unavailable.clone().unwrap_or_else(|| {
-                        format!(
-                            "{} · {status} · {} flows · {}",
-                            row.session_id,
-                            row.flow_count
-                                .map_or_else(|| "?".into(), |count| count.to_string()),
-                            row.project_root.as_ref().map_or_else(
-                                || "No project".into(),
-                                |path| path.display().to_string()
-                            )
-                        )
-                    });
-                    Row {
-                        title: row
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| "Unavailable session".into()),
-                        detail,
-                        action: Action::Load(HubRequest::Flows {
-                            session: row.session_id,
+                    let request = match &row.target {
+                        SessionTarget::Persistent(session) => Some(HubRequest::Flows {
+                            session: *session,
                             before: None,
                         }),
+                        SessionTarget::Legacy(id) => {
+                            Uuid::parse_str(id)
+                                .ok()
+                                .map(|session| HubRequest::LegacyFlows {
+                                    session,
+                                    after: None,
+                                })
+                        }
+                    };
+                    Row {
+                        title: row.title.clone(),
+                        detail: row.detail.clone(),
+                        action: request.map_or(Action::None, Action::Load),
                     }
                 })
                 .collect(),

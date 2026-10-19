@@ -15,7 +15,7 @@ use crate::{control::ControlTicket, keys::KeyAction};
 pub const PAGE_SIZE: usize = 50;
 
 mod page;
-pub use page::{FlowHubPage, HubRequest};
+pub use page::{FlowHubPage, HubRequest, SessionDirectory, SessionRow};
 
 #[derive(Clone)]
 pub(crate) enum Action {
@@ -433,6 +433,82 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn mixed_session_rows_keep_their_directory_targets_on_keyboard_and_mouse() {
+        use crate::{
+            control::{ViewAddress, ViewBinding},
+            project_hub::SessionTarget,
+        };
+        let id = Uuid::now_v7();
+        let address = ViewAddress::Legacy {
+            session: id,
+            owner: atman_runtime::event_log::legacy::LegacyFlowKey::Default,
+        };
+        let ticket = ControlTicket {
+            binding: ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: address.clone(),
+            },
+            request_id: Uuid::now_v7(),
+        };
+        let mut hub = FlowHub {
+            pending: Some(ticket.clone()),
+            ..Default::default()
+        };
+        hub.receive(
+            Some(&ticket),
+            Ok(Box::new(FlowHubPage::Sessions(SessionDirectory {
+                sessions: vec![
+                    SessionRow {
+                        target: SessionTarget::Persistent(id),
+                        title: "Same name".into(),
+                        detail: "Persistent".into(),
+                    },
+                    SessionRow {
+                        target: SessionTarget::Legacy(id.to_string()),
+                        title: "Same name".into(),
+                        detail: "Original history".into(),
+                    },
+                ],
+                next: Some(SessionTarget::Legacy(id.to_string())),
+                total: 51,
+            }))),
+        );
+        assert!(
+            matches!(hub.key(KeyAction::Submit),Action::Load(HubRequest::Flows {session,..}) if session==id)
+        );
+        hub.key(KeyAction::HistoryDown);
+        assert!(
+            matches!(hub.key(KeyAction::Submit),Action::Load(HubRequest::LegacyFlows {session,..}) if session==id)
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
+        terminal.draw(|f| hub.render(f, &address)).unwrap();
+        for (index, (rect, _)) in hub.hits.clone().into_iter().enumerate() {
+            let action = hub.mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + 1,
+                row: rect.y + 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            });
+            match action {
+                Action::Load(HubRequest::Flows { session, .. }) => {
+                    assert_eq!(index, 0);
+                    assert_eq!(session, id);
+                }
+                Action::Load(HubRequest::LegacyFlows { session, .. }) => {
+                    assert_eq!(index, 1);
+                    assert_eq!(session, id);
+                }
+                _ => panic!("wrong source"),
+            }
+        }
+        assert!(
+            matches!(hub.key(KeyAction::PageDown),Action::Load(HubRequest::Sessions {before:Some(SessionTarget::Legacy(cursor))}) if cursor==id.to_string())
+        );
+    }
+
+    #[test]
     fn legacy_pages_preserve_addresses_across_keyboard_mouse_and_pagination() {
         use crate::control::{ViewAddress, ViewBinding};
         use atman_runtime::event_log::legacy::LegacyFlowKey;
@@ -508,7 +584,8 @@ mod tests {
 
     #[test]
     fn session_directory_and_flow_pages_share_navigation_and_ignore_stale_replies() {
-        use atman_runtime::flow_runtime::catalog::{SessionPage, SessionSummary};
+        use crate::project_hub::SessionTarget;
+        use atman_runtime::flow_runtime::catalog::SessionSummary;
         let flow = FlowRef {
             session_id: Uuid::now_v7().into(),
             instance_id: FlowInstanceId::now(),
@@ -523,9 +600,9 @@ mod tests {
         };
         let session = Uuid::now_v7();
         let page = || {
-            Box::new(FlowHubPage::Sessions(SessionPage {
-                sessions: vec![SessionSummary::unavailable(session, "unavailable fixture")],
-                next: Some(session),
+            Box::new(FlowHubPage::Sessions(SessionDirectory {
+                sessions: vec![SessionSummary::unavailable(session, "unavailable fixture").into()],
+                next: Some(SessionTarget::Persistent(session)),
                 total: 51,
             }))
         };
@@ -538,7 +615,7 @@ mod tests {
             matches!(hub.key(KeyAction::Submit), Action::Load(HubRequest::Flows { session: id, before: None }) if id == session)
         );
         assert!(
-            matches!(hub.key(KeyAction::PageDown), Action::Load(HubRequest::Sessions { before: Some(id) }) if id == session)
+            matches!(hub.key(KeyAction::PageDown), Action::Load(HubRequest::Sessions { before: Some(SessionTarget::Persistent(id)) }) if id == session)
         );
         hub.pending = Some(ticket.clone());
         hub.receive(Some(&ticket), Ok(page()));

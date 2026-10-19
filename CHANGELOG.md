@@ -18,6 +18,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Unified session directory** — Browse persistent sessions and original histories from the same paged TUI directory, including histories without project metadata. Source-aware cursors preserve distinct entries with matching UUIDs without reading conversation bodies or updating history caches.
+
 - **Original history navigation** — Project Hub opens legacy flow histories in the shared main and floating views without migration. Typed view addresses preserve source identity, read-only controls, and request ownership alongside persistent sessions.
 
 - **Legacy history snapshots** — Read original session logs by flow ownership without migrating data or opening execution services. Direct history and imported archives share message projection, retain unsupported records, and reject changed sources.

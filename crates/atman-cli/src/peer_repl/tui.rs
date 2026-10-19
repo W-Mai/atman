@@ -1,6 +1,7 @@
 //! Interactive controls for a persistent view. Durable acceptance precedes every input ACK.
 
 use super::*;
+mod directory;
 use atman_tui::{
     TuiCommand, TuiControl, TuiHandle, TuiSubmission,
     control::{BoundControl, ControlReplies, ViewAddress, ViewBinding},
@@ -637,9 +638,9 @@ impl scopes::Scopes {
     ) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
         use atman_tui::flow_hub::{FlowHubPage, HubRequest, PAGE_SIZE};
         Ok(Box::new(match request {
-            HubRequest::Sessions { before } => {
-                FlowHubPage::Sessions(self.catalog.page(before, PAGE_SIZE, |_| Ok(true)).await?)
-            }
+            HubRequest::Sessions { before } => FlowHubPage::Sessions(
+                directory::sessions(&self.catalog, &self.root, before, PAGE_SIZE).await?,
+            ),
             HubRequest::Flows { session, before } => {
                 let overview = self.catalog.overview(session).await?;
                 let page = self
