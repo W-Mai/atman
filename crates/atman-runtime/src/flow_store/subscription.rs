@@ -185,6 +185,20 @@ struct EventNotification {
     event: ObservedEvent,
 }
 
+pub(super) fn watcher_matches(content: &serde_json::Value) -> io::Result<Vec<Uuid>> {
+    #[derive(Deserialize)]
+    struct Reasons {
+        subscriptions: Vec<SubscriptionMatch>,
+    }
+    Ok(Reasons::deserialize(content)
+        .map_err(invalid)?
+        .subscriptions
+        .into_iter()
+        .filter(|reason| reason.purpose == SubscriptionPurpose::Watcher)
+        .map(|reason| reason.id)
+        .collect())
+}
+
 pub(crate) fn is_watcher_notification(envelope: &AcceptedEnvelope) -> bool {
     match &envelope.request.payload {
         InboxPayload::Watcher { .. } | InboxPayload::ProcessEvent { .. } => true,

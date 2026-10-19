@@ -93,6 +93,90 @@ fn report(source: &ProcessSource, position: u64, watchers: &[Uuid]) -> ProcessRe
     }
 }
 
+#[tokio::test]
+async fn watcher_catalog_uses_observation_provenance_and_does_not_recover_or_consume() {
+    use atman_runtime::flow_runtime::catalog::SessionCatalog;
+    use atman_runtime::flow_store::inbox::{DeliveryMode, DeliveryRequest, SenderIdentity};
+    use std::io::Write;
+
+    let (dir, session, mut flow) = fixture();
+    let source = source();
+    let watch = watch(&source, false);
+    let address = flow.descriptor().address.clone();
+    flow.register_process_watch(watch.clone(), 0).unwrap();
+    flow.observe_process(report(&source, 1, &[watch.id]))
+        .unwrap();
+    let payload = flow
+        .pending_inputs()
+        .next()
+        .unwrap()
+        .request
+        .payload
+        .clone();
+    for payload in [
+        payload,
+        InboxPayload::ProcessEvent {
+            source,
+            content: serde_json::json!({"unrelated": true}),
+        },
+    ] {
+        flow.accept_input(
+            DeliveryRequest {
+                request_id: Uuid::new_v4(),
+                sender: SenderIdentity::Host(Uuid::new_v4()),
+                recipient: address.clone(),
+                delivery: DeliveryMode::AtBoundary,
+                cause: None,
+                correlation: None,
+                scope: None,
+                payload,
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+    }
+    let catalog = SessionCatalog::new(None, Some(dir.path().to_owned()));
+    let log = flow.dir().join("events.jsonl");
+    let bytes = std::fs::read(&log).unwrap();
+    let inspected = catalog.inspect_flow(&address, |_| Ok(())).await.unwrap();
+    assert_eq!(inspected.journal.cursor.as_ref(), Some(flow.cursor()));
+    assert_eq!(inspected.watchers.len(), 1);
+    assert_eq!(inspected.watchers[0].progress.matched, 1);
+    assert_eq!(inspected.watchers[0].progress.pending, 1);
+    assert_eq!(flow.pending_inputs().count(), 3);
+    let calls = std::cell::Cell::new(0);
+    let denied = catalog
+        .inspect_flow(&address, |_| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 3 {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+    assert!(matches!(denied, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied));
+    assert_eq!(std::fs::read(&log).unwrap(), bytes);
+    transition(&mut flow, FlowTransition::CloseRequested);
+    let closed = catalog.inspect_flow(&address, |_| Ok(())).await.unwrap();
+    assert_eq!(closed.watchers[0].progress.pending, 0);
+    assert_eq!(closed.watchers[0].progress.cancelled, 1);
+    let mut expected = std::fs::read(&log).unwrap();
+    drop(flow);
+    drop(session);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .unwrap()
+        .write_all(b"{partial")
+        .unwrap();
+    expected.extend_from_slice(b"{partial");
+    let inspected = catalog.inspect_flow(&address, |_| Ok(())).await.unwrap();
+    assert_eq!(inspected.journal.trailing_bytes, 8);
+    assert_eq!(inspected.watchers[0].progress.cancelled, 1);
+    assert_eq!(std::fs::read(&log).unwrap(), expected);
+}
+
 #[test]
 fn output_gap_retires_old_watches_without_replacing_the_live_process() {
     let (_dir, session, mut flow) = fixture();
@@ -122,6 +206,15 @@ fn output_gap_retires_old_watches_without_replacing_the_live_process() {
     };
     assert_eq!(content["subscriptions"].as_array().unwrap().len(), 1);
     let address = flow.descriptor().address.clone();
+    let inspection = session.inspect_flow(&address.instance_id).unwrap();
+    assert_eq!(inspection.watchers.len(), 2);
+    for record in &inspection.watchers {
+        assert_eq!(
+            record.progress.matched,
+            usize::from(record.registration.id() == fresh.id)
+        );
+        assert_eq!(record.progress.pending, 1);
+    }
     drop(flow);
     let flow = session.open_flow(&address.instance_id).unwrap();
     assert_eq!(flow.pending_inputs().cloned().collect::<Vec<_>>(), inputs);
@@ -160,6 +253,17 @@ fn source_matches_share_one_inbox_input_and_survive_pause_unwatch_and_reopen() {
     flow.observe_process(late).unwrap();
     assert_eq!(flow.pending_inputs().count(), 1);
     let address = flow.descriptor().address.clone();
+    let inspection = session.inspect_flow(&address.instance_id).unwrap();
+    assert_eq!(inspection.watchers.len(), 2);
+    for record in &inspection.watchers {
+        assert_eq!(record.progress.matched, 1);
+        assert_eq!(record.progress.pending, 1);
+        assert_eq!(record.progress.input_committed, 0);
+        assert_eq!(
+            record.progress.last_delivery.as_ref().unwrap().message_id,
+            input.id
+        );
+    }
     drop(flow);
     let mut flow = session.open_flow(&address.instance_id).unwrap();
     assert_eq!(flow.observe_process(report).unwrap(), receipt);
@@ -208,6 +312,11 @@ fn source_matches_share_one_inbox_input_and_survive_pause_unwatch_and_reopen() {
         flow.inbox_entries()[0].acceptance.disposition,
         InboxDisposition::InputCommitted { .. }
     ));
+    for record in session.inspect_flow(&address.instance_id).unwrap().watchers {
+        assert_eq!(record.progress.matched, 1);
+        assert_eq!(record.progress.pending, 0);
+        assert_eq!(record.progress.input_committed, 1);
+    }
 }
 
 #[test]
@@ -238,6 +347,18 @@ fn absolute_expiry_preserves_matches_and_never_extends_or_duplicates_deadlines()
     );
     assert_eq!(flow.pending_inputs().count(), 3);
     let address = flow.descriptor().address.clone();
+    let inspection = session.inspect_flow(&address.instance_id).unwrap();
+    let expired = inspection
+        .watchers
+        .iter()
+        .find(|record| record.registration.id() == bounded.id)
+        .unwrap();
+    assert_eq!(expired.progress.matched, 1);
+    assert_eq!(expired.progress.pending, 2);
+    assert_eq!(
+        expired.progress.last_delivery.as_ref().unwrap().event,
+        "expired"
+    );
     drop(flow);
     let mut flow = session.open_flow(&address.instance_id).unwrap();
     assert_eq!(flow.expire_process_watches(expires).unwrap(), receipt);

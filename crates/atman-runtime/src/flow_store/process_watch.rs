@@ -114,6 +114,9 @@ pub(super) struct ProcessWatches {
 }
 
 impl ProcessWatches {
+    pub(super) fn values(&self) -> impl Iterator<Item = &ProcessWatchRecord> {
+        self.records.values()
+    }
     pub fn contains(&self, id: Uuid) -> bool {
         self.records.contains_key(&id)
     }

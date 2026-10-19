@@ -912,6 +912,22 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
             .is_err()
     );
     let item = pending[0].id;
+    let recorded = session
+        .inspect_flow(&recipient_info.address.instance_id)
+        .unwrap();
+    assert_eq!(
+        recorded.watchers.len(),
+        1,
+        "internal result routes are not user watchers"
+    );
+    let watched = &recorded.watchers[0];
+    assert_eq!(watched.registration.id(), watcher.id);
+    assert_eq!(watched.progress.matched, 1);
+    assert_eq!(watched.progress.pending, 1);
+    assert_eq!(
+        watched.progress.last_delivery.as_ref().unwrap().message_id,
+        item
+    );
     assert!(!recipient.state().can_start_turn());
     drop(recipient);
     let mut recipient = session
@@ -969,6 +985,14 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
     else {
         panic!("event")
     };
+    let recorded = session
+        .inspect_flow(&recipient_info.address.instance_id)
+        .unwrap();
+    assert_eq!(recorded.watchers.len(), 1);
+    let watched = &recorded.watchers[0];
+    assert_eq!(watched.progress.matched, 1);
+    assert_eq!(watched.progress.pending, 0);
+    assert_eq!(watched.progress.input_committed, 1);
     assert_eq!(content["subscriptions"].as_array().unwrap().len(), 1);
     assert!(
         recipient

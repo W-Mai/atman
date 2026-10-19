@@ -24,6 +24,7 @@ pub mod subscription;
 pub mod trace;
 pub mod view;
 pub mod waiter;
+pub mod watch_view;
 pub mod workspace;
 
 pub(crate) use deletion::ProjectDeletion;
@@ -529,6 +530,7 @@ pub struct FlowInspection {
     pub state: FlowInstance<AtmanUuid>,
     pub journal: crate::event_log::journal::JournalInspection,
     pub relations: Vec<relation::FlowRelation>,
+    pub watchers: Vec<watch_view::WatchRecord>,
 }
 
 impl SessionInspection {
@@ -592,15 +594,19 @@ fn inspect_registered_flow_with(
         instance_id: id.clone(),
     };
     let mut replay = replay::FlowReplay::default();
+    let mut watch_deliveries = watch_view::WatchDeliveries::default();
     let journal = Journal::inspect(
         &dir.join("flows").join(id.to_string()).join("events.jsonl"),
         id.0.0,
         |receipt, facts| {
             observe(&receipt, &facts)?;
+            for fact in &facts {
+                watch_deliveries.observe(fact)?;
+            }
             replay.apply(&address, receipt, facts)
         },
     )?;
-    let (descriptor, state, _) = replay
+    let (descriptor, state, inbox) = replay
         .projection
         .ok_or_else(|| invalid("flow creation was not committed"))?;
     if descriptor.creation_request != registration.creation_request {
@@ -640,11 +646,18 @@ fn inspect_registered_flow_with(
         )
     });
     relations.dedup();
+    let watchers = watch_view::project(
+        &replay.subscriptions,
+        &replay.process_watches,
+        &inbox,
+        &watch_deliveries,
+    );
     Ok(FlowInspection {
         descriptor,
         state,
         journal,
         relations,
+        watchers,
     })
 }
 

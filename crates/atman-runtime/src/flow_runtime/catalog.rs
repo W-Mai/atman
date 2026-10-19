@@ -263,6 +263,23 @@ impl SessionCatalog {
         Ok(relations)
     }
 
+    /// Inspect one registered flow's committed facts without attaching an execution owner. Recorded activity does not imply a live worker.
+    pub async fn inspect_flow(
+        &self,
+        flow: &FlowRef,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<crate::flow_store::FlowInspection> {
+        authorize(flow)?;
+        let read = self.recorded(flow.session_id.0).await?;
+        authorize(flow)?;
+        let instance = flow.instance_id.clone();
+        let inspected = tokio::task::spawn_blocking(move || read.inspect_flow(&instance))
+            .await
+            .map_err(io::Error::other)??;
+        authorize(flow)?;
+        Ok(inspected)
+    }
+
     pub async fn instances(
         &self,
         id: Uuid,

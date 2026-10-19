@@ -28,6 +28,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Watcher inspection** — Read-only Flow inspection exposes subscription and process-watch registrations with distinct match, pending, input-committed, and cancelled counts. Delivery progress uses original observation and inbox facts, excludes internal result routes, and remains available without starting execution or consuming notifications.
+
 - **Shared Focus layout** — Main and floating conversations reserve separate regions for the auxiliary rail and transcript, including the composer, quotes, and pending queue. Overview shows planning, neighborhood, and context; Activity retains task and process controls. Padded mouse buttons, `:activity`, and Ctrl+Shift+A share view-local selection, and hidden controls lose their click targets.
 
 - **Focus neighborhood navigation** — Main and floating conversations expose `:links`, a palette action, and a shared shortcut. The Overview rail retains scoped neighborhood snapshots with padded mouse targets; full directory navigation remains available on narrow terminals.
