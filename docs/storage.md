@@ -464,6 +464,8 @@ Background processes use the resource owner's cancellation lifetime. Completing 
 
 `FlowWorker::shutdown` drains accepted storage commands, stops process resources, waits for their output readers to finish, and returns the journal. Retained context or resource readers do not keep those processes alive. Unexpected owner loss requests cleanup without inventing a durable terminal state. Reopening creates empty live registries and does not recreate processes from history.
 
+Host shutdown tracks physical execution separately from durable turn state. Execution claims and admission closure are serialized by the instance owner; cancellation reaches paused invocations through the same resource lifetime. The host waits for executor bodies and their completion attempts before releasing storage, including when the cancellation or terminal record cannot be written. A failed journal or missing durable completion remains an error. Reopening retains pending input and pause keys and records interrupted execution without replaying unknown effects.
+
 Process logs, attachments, and large tool output use the owning `FlowStore` directory under `sessions/<session>/flows/<flow>`. Legacy Plan/Todo refresh entry points leave journal-backed projections intact. Legacy invocations retain their existing turn cancellation behavior and process registration APIs.
 
 ### Invocation-owned interactions

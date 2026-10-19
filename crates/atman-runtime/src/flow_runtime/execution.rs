@@ -236,7 +236,9 @@ impl FlowWorker {
             }
             let (completed, observed) = oneshot::channel();
             let owned_lease = lease.clone();
+            let execution_owner = worker.resources.executions.token();
             runtime.spawn(async move {
+                let _execution_owner = execution_owner;
                 let result = std::panic::AssertUnwindSafe(executor.run_linked_with_invocation(
                     &program,
                     &flow_name,
@@ -281,30 +283,47 @@ impl FlowWorker {
     /// Stop admission under the writer, unwind active execution, then relinquish storage.
     pub(super) async fn stop_execution(self) -> io::Result<()> {
         let stopping = self.stopping.clone();
-        self.request(move |store| {
-            stopping.store(true, std::sync::atomic::Ordering::Release);
-            if let InstanceState::Open(InstanceActivity::Active(active)) = store.state().state()
-                && active.phase != TurnPhase::Cancelling
-            {
-                store.transition(
-                    store.state().revision(),
-                    crate::flow_store::FlowTransition::PhaseChanged {
-                        lease: active.lease.clone(),
-                        phase: TurnPhase::Cancelling,
-                    },
-                )?;
+        let resources = self.resources.clone();
+        let admission = self
+            .request(move |store| {
+                stopping.store(true, std::sync::atomic::Ordering::Release);
+                let result = if let InstanceState::Open(InstanceActivity::Active(active)) =
+                    store.state().state()
+                    && active.phase != TurnPhase::Cancelling
+                {
+                    store
+                        .transition(
+                            store.state().revision(),
+                            crate::flow_store::FlowTransition::PhaseChanged {
+                                lease: active.lease.clone(),
+                                phase: TurnPhase::Cancelling,
+                            },
+                        )
+                        .map(drop)
+                } else {
+                    Ok(())
+                };
+                // Close admission in the same owner that hands out execution tokens.
+                resources.close();
+                result
+            })
+            .await;
+        // Physical cancellation and ownership release cannot depend on a journal write.
+        self.resources.close();
+        self.resources.executions.wait().await;
+        let cleanup = async {
+            admission?;
+            match self.state().await?.state() {
+                InstanceState::Open(InstanceActivity::Active(_))
+                | InstanceState::Closing { active: Some(_) } => Err(io::Error::other(
+                    "execution stopped without a durable completion",
+                )),
+                InstanceState::Closing { active: None } => self.finish_close().await,
+                _ => Ok(()),
             }
-            Ok(())
-        })
-        .await?;
-        self.wait_execution_stopped().await?;
-        let closing = matches!(self.state().await?.state(), InstanceState::Closing { .. });
-        let cleanup = if closing {
-            self.finish_close().await
-        } else {
-            Ok(())
-        };
-        // A failed workspace release must not retain the journal across host shutdown.
+        }
+        .await;
+        // A failed terminal commit or workspace release must not retain the writer.
         let stopped = self.shutdown().await.map(drop);
         cleanup.and(stopped)
     }
@@ -322,6 +341,9 @@ pub(crate) async fn drive<T>(
     let mut state = worker.subscribe_state();
     tokio::pin!(execution);
     loop {
+        if worker.resources.lifetime.is_cancelled() {
+            cancellation.cancel();
+        }
         let paused = {
             let snapshot = state.borrow_and_update();
             match snapshot.state() {
@@ -359,6 +381,10 @@ pub(crate) async fn drive<T>(
                 }
             }
             _ = cancellation.cancelled() => return Ok(execution.await),
+            _ = worker.resources.lifetime.cancelled() => {
+                cancellation.cancel();
+                return Ok(execution.await);
+            },
             output = std::future::poll_fn(|cx| {
                 if worker.trace.poll_capacity(cx).is_pending() {
                     return std::task::Poll::Pending;

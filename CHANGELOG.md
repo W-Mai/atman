@@ -12,6 +12,8 @@ All notable changes to atman are documented in this file.
 
 - **Reply wait retries** — Identical continuation waits share ownership. Dropping a duplicate handle does not cancel an active wait, and delayed cleanup cannot cancel a replacement handle.
 
+- **Shutdown after storage errors** — Host shutdown cancels paused execution and releases instance storage even when lifecycle writes fail. Physical execution is joined independently of persisted completion, and storage errors remain visible to callers.
+
 - **Turn cleanup input isolation** — Entry return commits the finishing phase before lifecycle cleanup. Hook model calls leave new messages queued for the next turn, and execution pauses allow cleanup to finish without resuming queued work.
 
 - **Workspace snapshot controls** — Retention and explicit checkout removal share a locked comparison of the observed record. Stale snapshots and invocation leases reject resource changes before deletion.

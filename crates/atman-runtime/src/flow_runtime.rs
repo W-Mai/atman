@@ -73,7 +73,7 @@ enum Command {
     Stop(oneshot::Sender<FlowStore>),
     ClaimExecution {
         lease: TurnLease<AtmanUuid>,
-        reply: oneshot::Sender<io::Result<()>>,
+        reply: oneshot::Sender<io::Result<tokio_util::task::task_tracker::TaskTrackerToken>>,
     },
 }
 
@@ -216,12 +216,14 @@ impl FlowWorker {
                         continue;
                     }
                     Command::ClaimExecution { lease, reply } => {
-                        let result = if claimed.as_ref() == Some(&lease) {
+                        let result = if resource_owner.0.lifetime.is_cancelled() {
+                            Err(invalid("instance resources are stopping"))
+                        } else if claimed.as_ref() == Some(&lease) {
                             Err(invalid("instance turn execution was already claimed"))
                         } else if matches!(store.state().state(), atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) if active.lease == lease && active.phase == atman_rt::TurnPhase::Running)
                         {
                             claimed = Some(lease);
-                            Ok(())
+                            Ok(resource_owner.0.executions.token())
                         } else {
                             Err(invalid("instance execution is not admitted"))
                         };
@@ -419,7 +421,10 @@ impl FlowWorker {
             .await
     }
 
-    pub(crate) async fn validate_execution(&self, lease: TurnLease<AtmanUuid>) -> io::Result<()> {
+    pub(crate) async fn validate_execution(
+        &self,
+        lease: TurnLease<AtmanUuid>,
+    ) -> io::Result<tokio_util::task::task_tracker::TaskTrackerToken> {
         let (reply, received) = oneshot::channel();
         self.commands
             .send(Command::ClaimExecution { lease, reply })

@@ -1204,6 +1204,129 @@ async fn host_shutdown_unwinds_paused_execution_without_closing_instances_or_los
 }
 
 #[tokio::test]
+async fn failed_storage_shutdown_stops_execution_and_releases_retained_owners() {
+    use atman_runtime::tool::{Tier, ToolDefinition};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Stopped(Arc<AtomicBool>);
+    impl Drop for Stopped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let store = root.create_session(info.clone()).unwrap();
+    let session_path = store.dir().to_path_buf();
+    let session = host.attach_session(store).unwrap();
+    let worker = session
+        .create_flow(program_descriptor(
+            info.id,
+            "flow main() -> any { return await_stop() }".into(),
+        ))
+        .await
+        .unwrap();
+    change(&worker, FlowTransition::Activated).await;
+    worker
+        .accept_input(peer_request(worker.address(), worker.address()), |_| Ok(()))
+        .await
+        .unwrap();
+    let (started, mut entered) = tokio::sync::mpsc::unbounded_channel();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let observed_stop = stopped.clone();
+    let executor = Executor::new();
+    executor
+        .tools
+        .register_fn(
+            ToolDefinition::new("await_stop", Tier::Zero),
+            move |_, ctx| {
+                let started = started.clone();
+                let stopped = stopped.clone();
+                async move {
+                    let _stopped = Stopped(stopped);
+                    started.send(()).unwrap();
+                    ctx.cancel.cancelled().await;
+                    Err(atman_runtime::RuntimeError::Cancelled("stopped".into()))
+                }
+            },
+        )
+        .unwrap();
+    let ticket = worker
+        .start_turn(
+            executor,
+            prepare(&worker.snapshot().await.unwrap()).unwrap().unwrap(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let key = Uuid::now_v7().into();
+    change(&worker, FlowTransition::ExecutionPaused { key }).await;
+    let queued = worker
+        .accept_input(peer_request(worker.address(), worker.address()), |_| Ok(()))
+        .await
+        .unwrap();
+    let journal = session_path
+        .join("flows")
+        .join(worker.address().instance_id.to_string())
+        .join("events.jsonl");
+    // Force a real short read after all trace writes have reached the owner.
+    let saved = std::fs::read(&journal).unwrap();
+    std::fs::write(&journal, []).unwrap();
+    assert!(
+        worker
+            .read_updates(None, NonZeroUsize::new(1).unwrap())
+            .await
+            .is_err()
+    );
+    // Restore the bytes for recovery; the current writer remains poisoned.
+    std::fs::write(&journal, saved).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), host.shutdown())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert!(
+        worker.snapshot().await.is_err(),
+        "failed storage must relinquish its writer"
+    );
+    assert!(
+        observed_stop.load(Ordering::Acquire),
+        "paused tool execution must exit before shutdown returns"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), ticket.wait())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    let restored_session = root.open_session(info.id).unwrap();
+    let restored = restored_session
+        .open_flow(&worker.address().instance_id)
+        .unwrap();
+    assert!(matches!(
+        restored.state().state(),
+        InstanceState::Open(InstanceActivity::Interrupted { .. })
+    ));
+    assert_eq!(restored.state().pauses(), &[key]);
+    assert_eq!(
+        restored
+            .pending_inputs()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![queued.message_id]
+    );
+    assert!(
+        entered.try_recv().is_err(),
+        "recovery must not rerun the entry"
+    );
+}
+
+#[tokio::test]
 async fn late_form_replies_use_the_instance_inbox_and_commit_before_transport_acknowledgement() {
     use atman_runtime::form::{
         CompositeForm, DeferredFormAnswer, FormAnswer, FormKind, FormQuestion, FormSubmission,

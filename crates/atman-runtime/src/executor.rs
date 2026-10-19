@@ -326,13 +326,16 @@ impl Executor {
         if let Some(session) = &invocation.session {
             session.bind_executor(self)?;
         }
+        let mut _execution_owner = None;
         if let Some(binding) = &invocation.instance {
             binding.claim()?;
             if let Some(storage) = &binding.storage {
-                storage
-                    .validate_execution(binding.lease.clone())
-                    .await
-                    .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
+                _execution_owner = Some(
+                    storage
+                        .validate_execution(binding.lease.clone())
+                        .await
+                        .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?,
+                );
             }
         }
         let mut executor = self.clone();

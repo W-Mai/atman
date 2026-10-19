@@ -1,8 +1,9 @@
-//! Process resources owned by a persistent flow, independently of its turns.
+//! Execution and process resources owned by a persistent flow.
 
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::task_registry::{TaskFilter, TaskKind, TaskRegistry};
 use crate::tools::{bash_bg::BgRegistry, term::TermRegistry};
@@ -10,6 +11,7 @@ use crate::tools::{bash_bg::BgRegistry, term::TermRegistry};
 pub struct InstanceResources {
     pub(super) observers: super::process_watch::ProcessObservers,
     pub(super) lifetime: CancellationToken,
+    pub(super) executions: TaskTracker,
     tasks: TaskRegistry,
     background: Arc<BgRegistry>,
     terminals: Arc<TermRegistry>,
@@ -22,6 +24,7 @@ impl Default for InstanceResources {
         Self {
             observers: Default::default(),
             lifetime: lifetime.clone(),
+            executions: TaskTracker::new(),
             background: Arc::new(
                 BgRegistry::new()
                     .with_task_registry(tasks.clone())
@@ -58,6 +61,7 @@ impl InstanceResources {
 
     pub(super) fn close(&self) {
         self.lifetime.cancel();
+        self.executions.close();
         self.background.close();
         self.terminals.close();
     }
