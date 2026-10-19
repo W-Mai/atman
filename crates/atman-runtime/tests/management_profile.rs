@@ -6,6 +6,132 @@ use atman_runtime::flow_store::{
 use atman_runtime::source_program::RevisionBundle;
 use uuid::Uuid;
 
+#[tokio::test]
+async fn control_owner_retains_abandoned_requests_without_enabling_invalid_management() {
+    use atman_runtime::flow_runtime::host::RuntimeHost;
+    use atman_runtime::flow_store::{
+        control::{ControlAction, ControlRequest},
+        inbox::SenderIdentity,
+        profile::{ControlBatchRequest, ControlBatchUpdate, ControlProgress},
+    };
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let mut store = ProfileStore::open(&root).unwrap();
+    let missing = store
+        .bootstrap(Default::default())
+        .unwrap()
+        .management
+        .unwrap()
+        .session
+        .id;
+    let original = root.root().join("sessions").join(missing.to_string());
+    std::fs::rename(&original, data.path().join("missing-session")).unwrap();
+    let host = RuntimeHost::default();
+    let profile = host.attach_profile(store).unwrap();
+    let unavailable = profile.snapshot().await.unwrap();
+    assert!(unavailable.unavailable.is_some());
+    let sender = SenderIdentity::User(Uuid::new_v4());
+    let request = ControlBatchRequest {
+        id: Uuid::new_v4(),
+        sender: sender.clone(),
+        commands: vec![ControlRequest {
+            id: Uuid::new_v4(),
+            sender: sender.clone(),
+            target: FlowRef {
+                session_id: Uuid::new_v4().into(),
+                instance_id: FlowInstanceId::now(),
+            },
+            expected_revision: 1,
+            pause_key: Uuid::new_v4().into(),
+            action: ControlAction::Pause,
+        }],
+    };
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let submitted = request.clone();
+    let owner = profile.clone();
+    let waiting = tokio::spawn(async move {
+        owner
+            .submit_controls(submitted, move |_| {
+                let _ = sent.send(());
+                gate.recv().map_err(std::io::Error::other)?;
+                Ok(())
+            })
+            .await
+    });
+    received.await.unwrap();
+    waiting.abort();
+    let _ = waiting.await;
+    release.send(()).unwrap();
+    let accepted = profile
+        .control_batch(sender.clone(), request.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        profile.pending_controls().await.unwrap().as_slice(),
+        std::slice::from_ref(&accepted)
+    );
+    let after = profile.snapshot().await.unwrap();
+    assert_eq!(after.unavailable, unavailable.unavailable);
+    assert_eq!(after.profile.management.unwrap().session.id, missing);
+    assert!(after.profile.cursor.sequence > unavailable.profile.cursor.sequence);
+    assert!(
+        profile
+            .submit_controls(request.clone(), |_| Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "revoked"
+            )))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        profile.snapshot().await.unwrap().profile.cursor,
+        after.profile.cursor
+    );
+    assert_eq!(
+        profile
+            .submit_controls(request.clone(), |_| Ok(()))
+            .await
+            .unwrap(),
+        accepted
+    );
+    let update = ControlBatchUpdate {
+        batch_id: request.id,
+        sender: sender.clone(),
+        target: request.commands[0].target.clone(),
+        progress: ControlProgress::Failed {
+            reason: "target is unavailable".into(),
+        },
+    };
+    let receipt = profile.advance_control(update.clone()).await.unwrap();
+    assert_eq!(profile.advance_control(update).await.unwrap(), receipt);
+    assert!(profile.pending_controls().await.unwrap().is_empty());
+    assert_eq!(
+        profile.snapshot().await.unwrap().unavailable,
+        unavailable.unavailable
+    );
+    let finished = profile
+        .control_batch(sender.clone(), request.id)
+        .await
+        .unwrap()
+        .unwrap();
+    host.shutdown().await.unwrap();
+    assert!(
+        profile
+            .control_batch(sender.clone(), request.id)
+            .await
+            .is_err()
+    );
+    let store = ProfileStore::open(&root).unwrap();
+    assert_eq!(store.control_batch(&sender, request.id).unwrap(), &finished);
+    assert!(store.pending_controls().is_empty());
+    assert!(
+        !original.exists(),
+        "control progress must not repair missing management storage"
+    );
+}
+
 #[test]
 fn control_batches_reconcile_partial_delivery_and_preserve_terminal_receipts() {
     use atman_runtime::flow_store::{

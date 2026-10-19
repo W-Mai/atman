@@ -11,8 +11,12 @@ use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::{
     FlowRef, SessionConfiguration,
     access::{AccessTarget, FlowAction, FlowGrant},
+    inbox::SenderIdentity,
     invalid,
-    profile::{ProfileSnapshot, ProfileStore, ReplaceManagement},
+    profile::{
+        ControlBatchRecord, ControlBatchRequest, ControlBatchUpdate, ProfileSnapshot, ProfileStore,
+        ReplaceManagement,
+    },
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -31,6 +35,7 @@ pub struct ProfileHandle {
 }
 
 type ProfileEdit = Box<dyn FnOnce(&mut ProfileStore) -> io::Result<CommitReceipt> + Send>;
+type ControlWork = Box<dyn FnOnce(&mut ProfileStore) -> Box<dyn FnOnce() + Send> + Send>;
 
 enum Command {
     Snapshot(oneshot::Sender<io::Result<ProfileView>>),
@@ -39,6 +44,7 @@ enum Command {
         oneshot::Sender<io::Result<ProfileView>>,
     ),
     Edit(ProfileEdit, oneshot::Sender<io::Result<CommitReceipt>>),
+    Control(ControlWork),
     Shutdown(oneshot::Sender<io::Result<()>>),
 }
 
@@ -146,6 +152,56 @@ impl RuntimeHost {
 }
 
 impl ProfileHandle {
+    async fn control_work<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut ProfileStore) -> io::Result<T> + Send + 'static,
+    ) -> io::Result<T> {
+        self.request(|reply| {
+            Command::Control(Box::new(move |store| {
+                let result = work(store);
+                Box::new(move || {
+                    let _ = reply.send(result);
+                })
+            }))
+        })
+        .await
+    }
+
+    /// Authenticate admission under the profile owner, including matching retries. Queue acceptance survives a dropped waiting caller; this method does not deliver target commands.
+    pub async fn submit_controls(
+        &self,
+        request: ControlBatchRequest,
+        authorize: impl FnOnce(&ControlBatchRequest) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<ControlBatchRecord> {
+        self.control_work(move |store| {
+            authorize(&request)?;
+            store.submit_controls(request)
+        })
+        .await
+    }
+
+    /// Read one batch after the host has authorized access to its actor's control history.
+    pub async fn control_batch(
+        &self,
+        sender: SenderIdentity,
+        id: Uuid,
+    ) -> io::Result<Option<ControlBatchRecord>> {
+        self.control_work(move |store| Ok(store.control_batch(&sender, id).cloned()))
+            .await
+    }
+
+    /// Host reconciliation input, independent of whether the management flow is executable.
+    pub async fn pending_controls(&self) -> io::Result<Vec<ControlBatchRecord>> {
+        self.control_work(|store| Ok(store.pending_controls().into_iter().cloned().collect()))
+            .await
+    }
+
+    /// Persist trusted target evidence without changing or revalidating management grants.
+    pub async fn advance_control(&self, update: ControlBatchUpdate) -> io::Result<CommitReceipt> {
+        self.control_work(move |store| store.advance_control(update))
+            .await
+    }
+
     async fn request<T>(
         &self,
         make: impl FnOnce(oneshot::Sender<io::Result<T>>) -> Command,
@@ -246,6 +302,27 @@ async fn serve(
     publish(&store, error, &state, &host);
     while let Some(command) = commands.recv().await {
         match command {
+            Command::Control(work) => {
+                let published = state.clone();
+                let owner = host.clone();
+                let Ok((returned, acknowledge)) = tokio::task::spawn_blocking(move || {
+                    let acknowledge = work(&mut store);
+                    let unavailable = if store.write_failed() {
+                        Some("profile write failed; reopen to reconcile the journal".into())
+                    } else {
+                        // Control progress cannot repair or validate a broken management binding.
+                        published.borrow().unavailable.clone()
+                    };
+                    publish(&store, unavailable, &published, &owner);
+                    (store, acknowledge)
+                })
+                .await
+                else {
+                    return;
+                };
+                store = returned;
+                acknowledge();
+            }
             Command::Snapshot(reply) => {
                 let _ = reply.send(Ok(state.borrow().clone()));
             }

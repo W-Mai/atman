@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Added
 
+- **Control batch ownership** — Profile handles serialize batch admission and progress, retain accepted work after caller disconnection, and preserve management-authority diagnostics during unrelated control updates.
+
 - **Control batch storage** — The profile storage API retains immutable target snapshots and individual delivery progress. Recovery preserves pending operations, accepted receipts, completion evidence, and partial failures without rolling back other targets.
 
 - **Shared execution controls** — Peer tools, terminal views, and daemon RPC submit controls through the same instance owner. Identical request retries return recorded receipts after state changes; permissions are checked again, and accepted close cleanup survives a disconnected requester.
