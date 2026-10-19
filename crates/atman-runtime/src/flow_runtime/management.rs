@@ -214,6 +214,17 @@ impl ProfileHandle {
             .await
     }
 
+    /// Read a bounded control-history page after the host has authorized the actor.
+    pub async fn control_batches(
+        &self,
+        sender: SenderIdentity,
+        before: Option<Uuid>,
+        limit: usize,
+    ) -> io::Result<crate::flow_store::profile::ControlBatchPage> {
+        self.control_work(move |store| store.control_batches(&sender, before, limit))
+            .await
+    }
+
     /// Host reconciliation input, independent of whether the management flow is executable.
     pub async fn pending_controls(&self) -> io::Result<Vec<ControlBatchRecord>> {
         self.control_work(|store| Ok(store.pending_controls().into_iter().cloned().collect()))

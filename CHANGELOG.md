@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Added
 
+- **Control history pagination** — Profile storage and runtime handles expose actor-scoped batch summaries with stable submission ordering and current per-target outcome counts. Reads preserve journal contents and do not start target execution.
+
 - **FlowHub control review** — Main and floating views share cross-Session target selection, explicit execution controls, selective pause release, and durable per-target results. Retries retain the original target revisions; closing the review does not cancel accepted work.
 
 - **Peer batch control tools** — Persistent flows can submit revision-bound controls and query durable per-target outcomes from later turns. Requests retain authenticated caller identity, independent pause ownership, current access checks, and retry receipts across restart.

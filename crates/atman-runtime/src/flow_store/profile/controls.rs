@@ -59,6 +59,46 @@ pub struct ControlBatchRecord {
     pub items: Vec<ControlBatchItem>,
 }
 
+/// A batch's latest per-target outcomes, without copying its commands or receipt history.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ControlBatchSummary {
+    pub id: Uuid,
+    pub submitted: CommitReceipt,
+    pub pending: usize,
+    pub accepted: usize,
+    pub applied: usize,
+    pub failed: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ControlBatchPage {
+    pub batches: Vec<ControlBatchSummary>,
+    pub next: Option<Uuid>,
+    pub total: usize,
+}
+
+impl From<&ControlBatchRecord> for ControlBatchSummary {
+    fn from(record: &ControlBatchRecord) -> Self {
+        let mut summary = Self {
+            id: record.id,
+            submitted: record.submitted.clone(),
+            pending: 0,
+            accepted: 0,
+            applied: 0,
+            failed: 0,
+        };
+        for item in &record.items {
+            match item.history.last().map(|entry| &entry.progress) {
+                None => summary.pending += 1,
+                Some(ControlProgress::Accepted { .. }) => summary.accepted += 1,
+                Some(ControlProgress::Applied { .. }) => summary.applied += 1,
+                Some(ControlProgress::Failed { .. }) => summary.failed += 1,
+            }
+        }
+        summary
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ControlBatchUpdate {
     pub batch_id: Uuid,
@@ -216,6 +256,47 @@ impl ProfileStore {
 
     pub fn control_batch(&self, sender: &SenderIdentity, id: Uuid) -> Option<&ControlBatchRecord> {
         self.projection.controls.0.get(&(sender.clone(), id))
+    }
+
+    /// Read newest accepted batches for an authorized actor. A cursor must name that actor's existing batch; reads do not initiate delivery.
+    pub fn control_batches(
+        &self,
+        sender: &SenderIdentity,
+        before: Option<Uuid>,
+        limit: usize,
+    ) -> io::Result<ControlBatchPage> {
+        if !(1..=200).contains(&limit) {
+            return Err(invalid(
+                "control history page size must be between 1 and 200",
+            ));
+        }
+        let before = before
+            .map(|id| {
+                self.control_batch(sender, id)
+                    .map(|record| record.submitted.sequence)
+                    .ok_or_else(|| invalid("unknown control history cursor"))
+            })
+            .transpose()?;
+        let mut records: Vec<_> = self
+            .projection
+            .controls
+            .0
+            .values()
+            .filter(|record| &record.sender == sender)
+            .collect();
+        let total = records.len();
+        records.retain(|record| before.is_none_or(|before| record.submitted.sequence < before));
+        records.sort_unstable_by_key(|record| std::cmp::Reverse(record.submitted.sequence));
+        let next = (records.len() > limit).then(|| records[limit - 1].id);
+        Ok(ControlBatchPage {
+            batches: records
+                .into_iter()
+                .take(limit)
+                .map(ControlBatchSummary::from)
+                .collect(),
+            next,
+            total,
+        })
     }
 
     /// Unfinished batches in acceptance order, including targets waiting for execution cleanup.

@@ -7,6 +7,151 @@ use atman_runtime::source_program::RevisionBundle;
 use uuid::Uuid;
 
 #[tokio::test]
+async fn control_history_pages_preserve_actor_order_and_current_outcomes_across_restart() {
+    use atman_runtime::flow_store::{
+        control::{ControlAction, ControlRequest},
+        inbox::SenderIdentity,
+        profile::{ControlBatchRequest, ControlBatchUpdate, ControlProgress},
+    };
+    use atman_runtime::{event_log::journal::CommitReceipt, flow_runtime::host::RuntimeHost};
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let mut store = ProfileStore::open(&root).unwrap();
+    let sender = SenderIdentity::User(Uuid::new_v4());
+    let other = SenderIdentity::User(Uuid::new_v4());
+    let request = |sender: &SenderIdentity| {
+        let id = Uuid::new_v4();
+        ControlBatchRequest {
+            id,
+            sender: sender.clone(),
+            commands: (0..4)
+                .map(|_| ControlRequest {
+                    id,
+                    sender: sender.clone(),
+                    target: FlowRef {
+                        session_id: Uuid::new_v4().into(),
+                        instance_id: FlowInstanceId::now(),
+                    },
+                    expected_revision: 1,
+                    pause_key: Uuid::new_v4().into(),
+                    action: ControlAction::Pause,
+                })
+                .collect(),
+        }
+    };
+    let oldest = store.submit_controls(request(&sender)).unwrap();
+    let middle = store.submit_controls(request(&sender)).unwrap();
+    let newest = store.submit_controls(request(&sender)).unwrap();
+    let unrelated = store.submit_controls(request(&other)).unwrap();
+    let first = store.control_batches(&sender, None, 2).unwrap();
+    assert_eq!(
+        first
+            .batches
+            .iter()
+            .map(|batch| batch.id)
+            .collect::<Vec<_>>(),
+        [newest.id, middle.id]
+    );
+    assert_eq!(first.total, 3);
+    assert_eq!(first.next, Some(middle.id));
+    assert_eq!(first.batches[0].pending, 4);
+    // A later submission and progress update cannot move an older batch across pages.
+    store.submit_controls(request(&sender)).unwrap();
+    for index in 0..3 {
+        let target = oldest.items[index].request.target.clone();
+        let receipt = CommitReceipt {
+            journal_id: target.instance_id.0.0,
+            sequence: 3,
+            digest: "target-receipt".into(),
+        };
+        let update = |progress| ControlBatchUpdate {
+            batch_id: oldest.id,
+            sender: sender.clone(),
+            target: target.clone(),
+            progress,
+        };
+        if index < 2 {
+            store
+                .advance_control(update(ControlProgress::Accepted {
+                    receipt: receipt.clone(),
+                }))
+                .unwrap();
+            if index == 1 {
+                store
+                    .advance_control(update(ControlProgress::Applied { receipt }))
+                    .unwrap();
+            }
+        } else {
+            store
+                .advance_control(update(ControlProgress::Failed {
+                    reason: "revision conflict".into(),
+                }))
+                .unwrap();
+        }
+    }
+    let last = store.control_batches(&sender, first.next, 2).unwrap();
+    assert_eq!(last.batches.len(), 1);
+    assert_eq!(last.total, 4);
+    assert_eq!(last.next, None);
+    assert_eq!(last.batches[0].id, oldest.id);
+    assert_eq!(
+        (
+            last.batches[0].pending,
+            last.batches[0].accepted,
+            last.batches[0].applied,
+            last.batches[0].failed
+        ),
+        (1, 1, 1, 1)
+    );
+    let log = root.root().join("host/events.jsonl");
+    let before = std::fs::read(&log).unwrap();
+    assert!(
+        store
+            .control_batches(&sender, Some(unrelated.id), 2)
+            .is_err()
+    );
+    assert!(
+        store
+            .control_batches(&sender, Some(Uuid::new_v4()), 2)
+            .is_err()
+    );
+    assert!(store.control_batches(&sender, None, 0).is_err());
+    assert!(store.control_batches(&sender, None, 201).is_err());
+    assert_eq!(
+        store
+            .control_batches(&other, None, 10)
+            .unwrap()
+            .batches
+            .len(),
+        1
+    );
+    drop(store);
+    let host = RuntimeHost::default();
+    let profile = host
+        .attach_profile(ProfileStore::open(&root).unwrap())
+        .unwrap();
+    assert_eq!(
+        profile
+            .control_batches(sender.clone(), first.next, 2)
+            .await
+            .unwrap(),
+        last
+    );
+    assert_eq!(
+        profile
+            .control_batches(sender, None, 1)
+            .await
+            .unwrap()
+            .batches
+            .len(),
+        1
+    );
+    assert!(host.sessions().is_empty());
+    assert_eq!(std::fs::read(log).unwrap(), before);
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn control_service_keeps_uncertain_delivery_pending_and_wakes_on_identical_retry() {
     use atman_runtime::flow_runtime::host::RuntimeHost;
     use atman_runtime::flow_store::{

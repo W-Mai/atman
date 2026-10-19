@@ -16,8 +16,8 @@ const VERSION: u32 = 1;
 
 mod controls;
 pub use controls::{
-    ControlBatchItem, ControlBatchRecord, ControlBatchRequest, ControlBatchUpdate, ControlProgress,
-    ControlProgressRecord,
+    ControlBatchItem, ControlBatchPage, ControlBatchRecord, ControlBatchRequest,
+    ControlBatchSummary, ControlBatchUpdate, ControlProgress, ControlProgressRecord,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
