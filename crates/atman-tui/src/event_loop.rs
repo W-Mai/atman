@@ -1885,6 +1885,14 @@ pub(crate) async fn run_frames(
                         TuiCommand::FlowCatalog { result } => {
                             if let Some(hub) = hub.as_mut() { hub.receive(ticket.as_ref(), result); }
                         }
+                        TuiCommand::FlowResolved { flow } => {
+                            let Some(hub) = hub.as_mut().filter(|hub| ticket.is_some() && hub.pending.as_ref() == ticket.as_ref()) else { continue; };
+                            let key = ViewKey { flow: flow.clone(), placement: FlowPlacement::Main };
+                            let reuse = views.binding(&key, &handle);
+                            if let Some(tx) = &handle.control_tx {
+                                dispatch_hub_action(hub, crate::flow_hub::Action::Focus(flow), tx, reuse);
+                            }
+                        }
                         TuiCommand::FocusFlow { flow, placement, attachment } => {
                             // Closing the directory cancels navigation, never the submitted host work.
                             if !hub.as_ref().is_some_and(|hub| hub.pending.as_ref() == ticket.as_ref()) { continue; }
@@ -1916,7 +1924,9 @@ fn apply_view_command(
 ) {
     match command {
         // Navigation belongs to the workspace; a late response cannot move a background view.
-        TuiCommand::FlowCatalog { .. } | TuiCommand::FocusFlow { .. } => {}
+        TuiCommand::FlowCatalog { .. }
+        | TuiCommand::FocusFlow { .. }
+        | TuiCommand::FlowResolved { .. } => {}
         TuiCommand::SubmissionResult { result } => {
             app.app.submission_result(editor, ticket, result);
         }
@@ -3436,6 +3446,7 @@ fn dispatch_hub_action(
 ) {
     let command = match action {
         crate::flow_hub::Action::NewSession => TuiControl::NewSession,
+        crate::flow_hub::Action::OpenManagement => TuiControl::OpenManagement,
         crate::flow_hub::Action::Load(request) => TuiControl::BrowseFlows(request),
         crate::flow_hub::Action::Focus(flow) => TuiControl::FocusFlow {
             flow,

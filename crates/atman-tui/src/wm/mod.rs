@@ -798,6 +798,7 @@ impl WindowManager {
             && !matches!(
                 id,
                 PaletteEntryId::OpenFlowHub
+                    | PaletteEntryId::OpenManagement
                     | PaletteEntryId::SwitchSession
                     | PaletteEntryId::OpenProjectHub
                     | PaletteEntryId::SetFormulaRendering
@@ -898,6 +899,16 @@ impl WindowManager {
                 } else {
                     app.push_note(
                         "FlowHub requires a persistent session",
+                        crate::app::NoteLevel::Info,
+                    );
+                }
+            }
+            PaletteEntryId::OpenManagement => {
+                if control_tx.is_some_and(|tx| tx.binding().is_some()) {
+                    app.open_flow_hub = Some(crate::flow_hub::Action::OpenManagement);
+                } else {
+                    app.push_note(
+                        "Atman navigation requires a persistent workspace",
                         crate::app::NoteLevel::Info,
                     );
                 }
@@ -1624,6 +1635,39 @@ mod tests {
                     .is_running()
             );
         }
+    }
+
+    #[test]
+    fn management_command_and_palette_share_bound_navigation() {
+        let mut wm = WindowManager::default();
+        let mut app = crate::app::AppState::default();
+        let (host, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+        let binding = crate::control::ViewBinding {
+            view_id: uuid::Uuid::now_v7(),
+            revision: 0,
+            flow: atman_runtime::flow_store::FlowRef {
+                session_id: uuid::Uuid::now_v7().into(),
+                instance_id: atman_rt::FlowInstanceId(uuid::Uuid::now_v7().into()),
+            }
+            .into(),
+        };
+        let (tx, _replies) = crate::ControlSender::for_flow(binding, host);
+        assert!(wm.dispatch_meta_command(":atman", &mut app, Some(&tx)));
+        assert!(matches!(
+            app.open_flow_hub.take(),
+            Some(crate::flow_hub::Action::OpenManagement)
+        ));
+        wm.apply_palette_action(
+            crate::palette::PaletteEntryId::OpenManagement,
+            &mut app,
+            Some(&tx),
+        );
+        assert!(matches!(
+            app.open_flow_hub.take(),
+            Some(crate::flow_hub::Action::OpenManagement)
+        ));
+        assert!(incoming.try_recv().is_err());
+        assert!(!wm.modals.any_open());
     }
 
     #[test]

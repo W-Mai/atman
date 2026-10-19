@@ -219,6 +219,7 @@ In the TUI, `:panel` opens the `Ctrl+P` command palette without requiring the sh
 | All Projects; project storage scope | `:projects`, `:storage` |
 | Trust mode; display theme; formula rendering | `:mode`, `:mode-theme`, `:formula` |
 | Switch; create; move session | `:sessions`, `:new-session`, `:move-session` |
+| Open the profile's Atman Session | `:atman` |
 | Choose a session to delete; generate a name | `:delete-session`, `:name-session` |
 | Toggle sidebar; select transcript text | `:sidebar`, `:yank` |
 | Copy last assistant message or tool result | `:copy last-message`, `:copy last-tool` |
@@ -431,6 +432,8 @@ Persistent TUI attachment displays runtime initialization progress, carries star
 For a persistent session created by `atman run`, use `ATMAN_NO_TUI=1 atman --continue <session-id-or-prefix>` to attach a plain terminal. `:flows` lists its instances and `:focus <flow-prefix>` selects the recipient of subsequent input without stopping other flows. `:session`, `:sessions`, `:model`, and `:cost` inspect the attached session and flow; `:storage` reads or changes the project storage scope. Text uses the entry's declared `invocation { user_message: parameter }` mapping; `:invoke {"parameter":"value"}` supplies explicit arguments. Use `:help` for execution controls, Goal controls, prompts, and approvals. `:quit` detaches; EOF waits for runnable work. The session retains its source snapshot even if the original `.at` file is removed.
 
 In a persistent TUI, choose **New Session** from `Ctrl+P` or use `:new-session`. The new session uses the selected view's project and configuration, with an independent transcript and Goal. `on_session_start.at`, when present, runs once through the new flow; scripts publish visible replies with `final.answer`. Normal text uses that configuration's `routes.at`, and `/name args` invokes a command directly. Switching to the new session preserves the original view's draft and background work. Closing the creation window prevents automatic navigation without cancelling an accepted creation; the new session remains in FlowHub.
+
+Choose **Atman Session** from `Ctrl+P` or use `:atman` to open the profile's management conversation. First use creates a projectless Session and prepares its default agent using the current view's configuration. Later visits use the saved configuration and selected default flow. Navigation preserves drafts, does not start model work, and does not resume paused or closed execution. Cross-session access still requires explicit management grants.
 
 The new view opens a welcome screen with up to five recent persistent sessions and original histories from the same project. Use Shift+Tab, arrow keys or 1–9, then Enter to open a card; a mouse click selects it and a double-click opens it. Selection reuses an existing main view when available, retaining its draft. **All Projects** opens Project Hub; `:sessions` opens the complete Session and Flow directory. Recent activity is a filesystem timestamp hint from the stored logs; browsing these cards does not load other execution owners or write history caches. Original and persistent sessions with matching UUIDs retain separate destinations.
 

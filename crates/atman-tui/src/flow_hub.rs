@@ -23,6 +23,7 @@ pub(crate) enum Action {
     Close,
     Load(HubRequest),
     NewSession,
+    OpenManagement,
     Focus(crate::control::ViewAddress),
     Float(crate::control::ViewAddress),
 }

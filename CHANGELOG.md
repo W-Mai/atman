@@ -24,6 +24,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Atman Session navigation** — `:atman` and the command palette open the profile's management conversation, preserving its configuration, draft, and execution state. First use prepares a projectless default entry without starting model work or assigning cross-session grants.
+
 - **Durable flow relations** — Runtime catalog inspection exposes read-only `Created`, `Read`, `Watch`, and `Interject` relations from flow journals and session grants without opening execution owners. Watch edges point from the observer to the observed flow, and journal scans run outside asynchronous execution workers.
 
 - **Management relation projection** — The management Session's explicit profile grants appear in its relation snapshot with the same flow relation records and remain unavailable while profile validation is unresolved.

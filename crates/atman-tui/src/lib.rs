@@ -174,6 +174,7 @@ pub enum TuiControl {
         project_root: Option<std::path::PathBuf>,
     },
     NewSession,
+    OpenManagement,
     MoveSession,
     DeleteSession(String),
     Projects(project_hub::ProjectRequest),
@@ -267,6 +268,10 @@ pub struct SessionPickerRow {
 
 #[non_exhaustive]
 pub enum TuiCommand {
+    /// Resolve a logical destination before reusing or attaching its view.
+    FlowResolved {
+        flow: control::ViewAddress,
+    },
     FlowCatalog {
         result: Result<Box<flow_hub::FlowHubPage>, String>,
     },

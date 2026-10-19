@@ -475,6 +475,7 @@ impl Workspace {
                     let (replies, result): (ControlReplies, Result<Navigation>) = result?;
                     match result {
                         Ok(Navigation::Catalog(page)) => { let _ = replies.send(TuiCommand::FlowCatalog { result: Ok(page) }); }
+                        Ok(Navigation::Resolved(flow)) => { let _ = replies.send(TuiCommand::FlowResolved { flow }); }
                         Ok(Navigation::Projects(command)) => { let _ = replies.send(*command); }
                         Ok(Navigation::Focus { flow, placement, handle, service }) => {
                             views.insert(service.binding.view_id, *service);
@@ -514,6 +515,18 @@ impl Workspace {
                             let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
                             navigation.spawn(async move {
                                 let result = scopes.create_tui_session(seed, ticket.request_id, controls, forms).await;
+                                (replies, result)
+                            });
+                            continue;
+                        }
+                        TuiControl::OpenManagement => {
+                            let configuration = view.execution.as_ref().map(|execution| execution.scope.config.clone());
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = async {
+                                    let configuration = configuration.map(Ok).unwrap_or_else(ConfigHub::global)?;
+                                    scopes.open_management(configuration).await.map(|flow| Navigation::Resolved(flow.into()))
+                                }.await;
                                 (replies, result)
                             });
                             continue;
@@ -624,6 +637,7 @@ fn reject_archive_control(command: TuiControl, replies: &ControlReplies) {
 }
 
 enum Navigation {
+    Resolved(ViewAddress),
     Projects(Box<TuiCommand>),
     Catalog(Box<atman_tui::flow_hub::FlowHubPage>),
     Focus {

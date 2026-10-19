@@ -31,7 +31,8 @@ pub(super) struct Scopes {
     permissions: Option<Arc<PermissionClients>>,
     prompts: Arc<prompts::Prompts>,
     loaded: tokio::sync::Mutex<HashMap<Uuid, Attachment>>,
-    management: tokio::sync::OnceCell<()>,
+    management:
+        tokio::sync::OnceCell<Result<atman_runtime::flow_runtime::host::ProfileHandle, String>>,
     pub catalog: SessionCatalog,
 }
 
@@ -69,17 +70,82 @@ impl Scopes {
     }
 
     pub async fn enable_management(&self) {
+        let _ = self.profile().await;
+    }
+
+    async fn profile(&self) -> Result<&atman_runtime::flow_runtime::host::ProfileHandle> {
         self.management
             .get_or_init(|| async {
-                // Archive navigation never enters this path. Profile ownership may belong to another frontend.
-                let result = RuntimeStore::open(&self.root)
-                    .and_then(|store| ProfileStore::open(&store))
-                    .and_then(|profile| self.host.attach_profile(profile));
-                if let Err(error) = result {
+                let root = self.root.clone();
+                let result = async {
+                    let store = tokio::task::spawn_blocking(move || {
+                        ProfileStore::open(&RuntimeStore::open(&root)?)
+                    })
+                    .await??;
+                    Ok::<_, anyhow::Error>(self.host.attach_profile(store)?)
+                }
+                .await;
+                if let Err(error) = &result {
                     atman_runtime::notify!(warn, "profile management unavailable: {error}");
                 }
+                // Save ownership before awaiting validation so cancellation cannot orphan it.
+                result.map_err(|error| format!("{error:#}"))
             })
-            .await;
+            .await
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!(error.clone()))
+    }
+
+    /// Explicit operator navigation initializes only missing entry data, never scheduling or grants.
+    pub async fn open_management(
+        self: &Arc<Self>,
+        configuration: ConfigHub,
+    ) -> Result<atman_runtime::flow_store::FlowRef> {
+        let scopes = self.clone();
+        tokio::spawn(async move {
+            let profile = scopes.profile().await?;
+            let view = profile
+                .bootstrap(SessionConfiguration::Atman(configuration.source()))
+                .await?;
+            ensure!(
+                view.unavailable.is_none(),
+                "management profile unavailable: {}",
+                view.unavailable.as_deref().unwrap_or_default()
+            );
+            let descriptor = view.profile.management
+                .context("management binding is absent")?.session;
+            let catalog = scopes.catalog.overview(descriptor.id).await?;
+            let initial = atman_rt::FlowInstanceId(descriptor.id.into());
+            let address = if let Some(instance_id) = catalog.summary.default_flow
+                .filter(|id| id != &initial)
+            {
+                atman_runtime::flow_store::FlowRef {
+                    session_id: descriptor.id.into(), instance_id,
+                }
+            } else {
+                let SessionConfiguration::Atman(source) = &descriptor.configuration else {
+                    bail!("management session requires an Atman configuration source to initialize its entry");
+                };
+                scopes.initialize_session_entry(
+                    SessionSeed {
+                        config: ConfigHub::from_source(source)?,
+                        project: descriptor.project.clone(),
+                        prompt_resolver: None,
+                    },
+                    descriptor.id,
+                    descriptor,
+                    CreationMode::Deferred,
+                ).await?
+            };
+            let current = profile.snapshot().await?;
+            ensure!(
+                current.unavailable.is_none()
+                    && current.profile.management.as_ref().is_some_and(|binding|
+                        binding.session.id == address.session_id.0),
+                "management binding changed during navigation"
+            );
+            Ok(address)
+        }).await?
     }
 
     pub async fn open(&self, id: Uuid) -> Result<Attachment> {
@@ -233,6 +299,23 @@ impl Scopes {
         request: Uuid,
         mode: CreationMode,
     ) -> Result<atman_runtime::flow_store::FlowRef> {
+        let descriptor = SessionDescriptor {
+            id: request,
+            title: "New session".into(),
+            project: source.project.clone(),
+            configuration: SessionConfiguration::Atman(source.config.source()),
+        };
+        self.initialize_session_entry(source, request, descriptor, mode)
+            .await
+    }
+
+    async fn initialize_session_entry(
+        &self,
+        source: SessionSeed,
+        request: Uuid,
+        descriptor: SessionDescriptor,
+        mode: CreationMode,
+    ) -> Result<atman_runtime::flow_store::FlowRef> {
         use atman_runtime::flow_runtime::launch::EntryExecution;
         use atman_runtime::flow_store::{
             FlowDescriptor, FlowRef,
@@ -245,12 +328,6 @@ impl Scopes {
         let address = FlowRef {
             session_id: request.into(),
             instance_id: atman_rt::FlowInstanceId(request.into()),
-        };
-        let descriptor = SessionDescriptor {
-            id: request,
-            title: "New session".into(),
-            project: source.project,
-            configuration: SessionConfiguration::Atman(source.config.source()),
         };
         let mut loaded = self.loaded.lock().await;
         let prepared = if loaded.contains_key(&request) {
@@ -463,4 +540,172 @@ fn prepare_new_session(
         trust,
         authority,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atman_runtime::flow_store::FlowTransition;
+
+    #[tokio::test]
+    async fn projectless_management_entry_can_bind_without_model_work() {
+        let data = tempfile::tempdir().unwrap();
+        let config = ConfigHub::from_config_dir(data.path().join("config"));
+        std::fs::create_dir_all(config.config_dir()).unwrap();
+        std::fs::write(config.config_dir().join("config.toml"), "").unwrap();
+        let host = RuntimeHost::default();
+        let (notices, _received) = mpsc::unbounded_channel();
+        let scopes = Arc::new(Scopes::empty(
+            data.path(),
+            host.clone(),
+            None,
+            Arc::new(prompts::Prompts::new(notices)),
+        ));
+        let flow = scopes.open_management(config.clone()).await.unwrap();
+        let scope = scopes.open(flow.session_id.0).await.unwrap();
+        let worker = host.flow(&flow).await.unwrap();
+        scope.bind(&worker).await.unwrap();
+        assert!(worker.context().messages_full().is_empty());
+        let mut selected = worker.descriptor().await.unwrap();
+        selected.address.instance_id = atman_rt::FlowInstanceId(Uuid::now_v7().into());
+        selected.creation_request = Uuid::now_v7();
+        let selected_address = selected.address.clone();
+        let session = host.session(flow.session_id.0).unwrap();
+        session.create_flow(selected).await.unwrap();
+        session
+            .select_default(selected_address.instance_id.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            scopes.open_management(config).await.unwrap(),
+            selected_address
+        );
+        assert!(
+            session
+                .scheduling_status(selected_address.instance_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn management_navigation_retains_identity_configuration_and_execution_gates() {
+        let data = tempfile::tempdir().unwrap();
+        let config = ConfigHub::from_config_dir(data.path().join("config"));
+        std::fs::create_dir_all(config.config_dir()).unwrap();
+        std::fs::write(config.config_dir().join("config.toml"), "").unwrap();
+        std::fs::write(
+            config.config_dir().join("on_session_start.at"),
+            "flow startup() -> string { return final.answer(message: \"ready\") }",
+        )
+        .unwrap();
+        let host = RuntimeHost::default();
+        let (notices, _received) = mpsc::unbounded_channel();
+        let scopes = Arc::new(Scopes::empty(
+            data.path(),
+            host.clone(),
+            None,
+            Arc::new(prompts::Prompts::new(notices)),
+        ));
+        let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(
+                scopes.open_management(config.clone()),
+                scopes.open_management(config.clone())
+            )
+        })
+        .await
+        .unwrap();
+        let flow = first.unwrap();
+        assert_eq!(flow, second.unwrap());
+        let profile = scopes.profile().await.unwrap();
+        let initial_profile = profile.snapshot().await.unwrap();
+        let binding = initial_profile.profile.management.as_ref().unwrap();
+        assert_eq!(binding.session.id, flow.session_id.0);
+        assert!(binding.session.project.is_none());
+        assert!(binding.grants.is_empty());
+        assert_eq!(
+            binding.session.configuration,
+            SessionConfiguration::Atman(config.source())
+        );
+        let session = host.session(flow.session_id.0).unwrap();
+        let worker = host.flow(&flow).await.unwrap();
+        let snapshot = worker.snapshot().await.unwrap();
+        assert_eq!(snapshot.pending.len(), 1);
+        assert!(worker.context().messages_full().is_empty());
+        assert!(
+            session
+                .scheduling_status(flow.instance_id.clone())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(session.snapshot().await.unwrap().catalog.flows.len(), 1);
+        let pause = Uuid::now_v7().into();
+        worker
+            .transition(
+                snapshot.state.revision(),
+                FlowTransition::ExecutionPaused { key: pause },
+            )
+            .await
+            .unwrap();
+        let paused = worker.snapshot().await.unwrap();
+        // A different caller configuration and deleted source cannot reinitialize a committed entry.
+        std::fs::remove_file(config.config_dir().join("commands/agent.at")).unwrap();
+        let other_config = ConfigHub::from_config_dir(data.path().join("other-config"));
+        assert_eq!(
+            scopes.open_management(other_config.clone()).await.unwrap(),
+            flow
+        );
+        assert_eq!(worker.snapshot().await.unwrap().cursor, paused.cursor);
+        assert_eq!(
+            profile.snapshot().await.unwrap().profile.cursor,
+            initial_profile.profile.cursor
+        );
+        assert!(!other_config.config_dir().exists());
+        worker
+            .transition(paused.state.revision(), FlowTransition::CloseRequested)
+            .await
+            .unwrap();
+        worker
+            .transition(
+                worker.state().await.unwrap().revision(),
+                FlowTransition::Closed,
+            )
+            .await
+            .unwrap();
+        let closed = worker.snapshot().await.unwrap();
+        assert_eq!(scopes.open_management(config.clone()).await.unwrap(), flow);
+        assert_eq!(worker.snapshot().await.unwrap().cursor, closed.cursor);
+        host.shutdown().await.unwrap();
+        drop(worker);
+        drop(session);
+        drop(scopes);
+
+        let host = RuntimeHost::default();
+        let (notices, _received) = mpsc::unbounded_channel();
+        let scopes = Arc::new(Scopes::empty(
+            data.path(),
+            host.clone(),
+            None,
+            Arc::new(prompts::Prompts::new(notices)),
+        ));
+        assert_eq!(scopes.open_management(config).await.unwrap(), flow);
+        assert_eq!(
+            host.flow(&flow)
+                .await
+                .unwrap()
+                .snapshot()
+                .await
+                .unwrap()
+                .cursor,
+            closed.cursor
+        );
+        assert_eq!(
+            RuntimeStore::session_ids(data.path()).unwrap(),
+            [flow.session_id.0]
+        );
+        host.shutdown().await.unwrap();
+    }
 }

@@ -188,6 +188,12 @@ pub const META_COMMANDS: &[MetaCommand] = &[
         aliases: &[],
     },
     MetaCommand {
+        name: "atman",
+        desc: "open the profile management session",
+        usage: ":atman",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "projects",
         desc: "open all projects",
         usage: ":projects",
