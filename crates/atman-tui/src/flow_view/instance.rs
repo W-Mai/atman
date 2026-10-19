@@ -12,12 +12,15 @@ use atman_rt::TurnLease;
 use atman_runtime::{
     event::AtmanUuid,
     event_log::journal::CommitReceipt,
+    event_log::legacy::{LegacyFlowKey, LegacySource},
     flow_runtime::{FlowView, FlowViewSnapshot},
     flow_store::{
         FlowRef, completion::InvocationResult, trace::ExecutionScope, view::FlowContentSummary,
     },
     message::{Message, MessagePart, MessageRole},
-    projection::flow::{FlowRecord, FlowRecordId, FlowTranscript},
+    projection::flow::{
+        ArchiveTranscript, FlowRecord, FlowRecordId, FlowTranscript, LegacyFlowView,
+    },
     tools::tool_output::OutputStore,
 };
 
@@ -28,6 +31,19 @@ use crate::{
 };
 
 type FlowRunId = atman_rt::RunId<AtmanUuid>;
+
+#[derive(PartialEq, Eq)]
+struct LegacyBinding {
+    session: uuid::Uuid,
+    owner: LegacyFlowKey,
+    source: LegacySource,
+}
+
+#[derive(PartialEq, Eq)]
+enum SourceBinding {
+    Instance(FlowRef),
+    Legacy(LegacyBinding),
+}
 
 #[derive(Default)]
 struct TurnView {
@@ -56,7 +72,7 @@ pub struct FlowViewModel {
     pub(super) document: FlowDocument,
     pub(crate) work_folds: Vec<super::fold::WorkFoldState>,
     pub(super) legacy_fold_bindings: HashMap<(atman_rt::TurnId<AtmanUuid>, usize), u64>,
-    pub(super) flow: Option<FlowRef>,
+    binding: Option<SourceBinding>,
     pub(super) instance: InstanceDocument,
     pub(super) live: super::live::LiveDocument,
     snapshot: Option<Arc<FlowViewSnapshot>>,
@@ -90,6 +106,76 @@ impl FlowViewModel {
         self.instance.archive
     }
 
+    /// Bind an immutable original-log snapshot without execution state or a persistent cursor. Changed sources and external document replacements require a new view model; repeated reads preserve local disclosure.
+    pub fn sync_legacy(
+        &mut self,
+        source: &LegacyFlowView,
+        output_store: Option<&OutputStore>,
+    ) -> io::Result<bool> {
+        let binding = SourceBinding::Legacy(LegacyBinding {
+            session: source.session_id(),
+            owner: source.owner().clone(),
+            source: source.source().clone(),
+        });
+        if self
+            .binding
+            .as_ref()
+            .is_some_and(|current| current != &binding)
+            || (self.binding.is_none() && !self.document.is_empty())
+            || (self.binding.is_some()
+                && self.instance.structure_revision != self.document.structure_revision())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "legacy view binding does not match the source history",
+            ));
+        }
+        self.updated_workflows.clear();
+        if self.binding.is_some() {
+            return Ok(false);
+        }
+        self.replace_archive(source.transcript(), output_store)?;
+        self.restore_work_markers(0);
+        self.binding = Some(binding);
+        self.instance.archive = true;
+        self.instance.structure_revision = self.document.structure_revision();
+        Ok(true)
+    }
+
+    fn replace_archive(
+        &mut self,
+        archive: &ArchiveTranscript,
+        output_store: Option<&OutputStore>,
+    ) -> io::Result<()> {
+        let mut items = if let Some(store) = output_store {
+            crate::history::flatten_transcript_with_output_store(&archive.entries, store)
+        } else {
+            crate::history::flatten_transcript(&archive.entries)
+        };
+        for record in &archive.unparsed {
+            items.push(OutputItem::SystemNote {
+                text: format!(
+                    "Retained source record · line {} · {:?}\n{}",
+                    record.source.line,
+                    record.source.issues,
+                    String::from_utf8_lossy(&record.bytes()?).escape_debug()
+                ),
+                level: NoteLevel::Warn,
+            });
+        }
+        self.document.replace(items);
+        self.updated_workflows
+            .extend(
+                self.document
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, item)| {
+                        matches!(item, OutputItem::WorkflowPanel { .. }).then_some(index)
+                    }),
+            );
+        Ok(())
+    }
+
     pub(crate) fn updated_workflows(&self) -> &[usize] {
         &self.updated_workflows
     }
@@ -102,7 +188,10 @@ impl FlowViewModel {
     }
 
     pub fn flow(&self) -> Option<&FlowRef> {
-        self.flow.as_ref()
+        match &self.binding {
+            Some(SourceBinding::Instance(flow)) => Some(flow),
+            _ => None,
+        }
     }
 
     pub fn cursor(&self) -> Option<&CommitReceipt> {
@@ -146,15 +235,16 @@ impl FlowViewModel {
         source: &FlowTranscript,
         output_store: Option<&OutputStore>,
     ) -> io::Result<bool> {
-        if self.flow.as_ref().is_some_and(|flow| flow != source.flow())
+        if matches!(self.binding, Some(SourceBinding::Legacy(_)))
+            || self.flow().is_some_and(|flow| flow != source.flow())
             || self
                 .instance
                 .cursor
                 .as_ref()
                 .is_some_and(|cursor| !source.contains_cursor(cursor))
             || self.instance.entries > source.entries().len()
-            || (self.flow.is_none() && !self.document.is_empty())
-            || (self.flow.is_some()
+            || (self.binding.is_none() && !self.document.is_empty())
+            || (self.binding.is_some()
                 && self.instance.structure_revision != self.document.structure_revision())
         {
             return Err(io::Error::new(
@@ -164,7 +254,7 @@ impl FlowViewModel {
         }
         self.updated_workflows.clear();
         if source.cursor() == self.instance.cursor.as_ref() {
-            self.flow = Some(source.flow().clone());
+            self.binding = Some(SourceBinding::Instance(source.flow().clone()));
             return Ok(false);
         }
         let revision = self.document.revision_clock();
@@ -176,32 +266,7 @@ impl FlowViewModel {
                 ));
             }
             let archive = source.archived_transcript()?;
-            let mut items = if let Some(store) = output_store {
-                crate::history::flatten_transcript_with_output_store(&archive.entries, store)
-            } else {
-                crate::history::flatten_transcript(&archive.entries)
-            };
-            for record in archive.unparsed {
-                items.push(OutputItem::SystemNote {
-                    text: format!(
-                        "Retained source record · line {} · {:?}\n{}",
-                        record.source.line,
-                        record.source.issues,
-                        String::from_utf8_lossy(&record.bytes()?).escape_debug()
-                    ),
-                    level: NoteLevel::Warn,
-                });
-            }
-            self.document.replace(items);
-            self.updated_workflows
-                .extend(
-                    self.document
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(index, item)| {
-                            matches!(item, OutputItem::WorkflowPanel { .. }).then_some(index)
-                        }),
-                );
+            self.replace_archive(&archive, output_store)?;
             return Ok(self.finish_sync(source, 0, revision));
         }
         self.live.detach(&mut self.document);
@@ -317,6 +382,23 @@ impl FlowViewModel {
         document_start: usize,
         revision: u64,
     ) -> bool {
+        self.restore_work_markers(document_start);
+        self.binding = Some(SourceBinding::Instance(source.flow().clone()));
+        self.instance.entries = source.entries().len();
+        self.instance.archive = matches!(source.content(), Some(FlowContentSummary::History(_)));
+        self.instance.cursor = source.cursor().cloned();
+        self.instance.structure_revision = self.document.structure_revision();
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| Some(&snapshot.status.cursor) != self.cursor())
+        {
+            self.snapshot = None;
+        }
+        revision != self.document.revision_clock()
+    }
+
+    fn restore_work_markers(&mut self, document_start: usize) {
         let mut fallback_start = document_start;
         let markers = self.document[document_start..]
             .iter()
@@ -344,19 +426,6 @@ impl FlowViewModel {
         for (start, end, summary) in markers {
             self.upsert_work_fold(start..end, summary.as_deref(), true);
         }
-        self.flow = Some(source.flow().clone());
-        self.instance.entries = source.entries().len();
-        self.instance.archive = matches!(source.content(), Some(FlowContentSummary::History(_)));
-        self.instance.cursor = source.cursor().cloned();
-        self.instance.structure_revision = self.document.structure_revision();
-        if self
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| Some(&snapshot.status.cursor) != self.cursor())
-        {
-            self.snapshot = None;
-        }
-        revision != self.document.revision_clock()
     }
 }
 

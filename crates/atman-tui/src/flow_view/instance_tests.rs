@@ -115,6 +115,12 @@ fn archived_views_reuse_history_rendering_without_writers_or_execution() {
     }
     raw.extend_from_slice(b"invalid retained line\n\xfftorn");
     std::fs::write(&source, &raw).unwrap();
+    let history = atman_runtime::projection::flow::LegacyHistory::inspect(&source, old).unwrap();
+    let originals = history
+        .flows()
+        .iter()
+        .map(|key| history.read_flow(key).unwrap())
+        .collect::<Vec<_>>();
     let runtime = RuntimeStore::open(temp.path()).unwrap();
     let id = migration::destination_id(&source, old).unwrap();
     let migrated = runtime
@@ -159,6 +165,22 @@ fn archived_views_reuse_history_rendering_without_writers_or_execution() {
         let mut floating = FlowViewModel::default();
         main.sync_view(&view, None).unwrap();
         floating.sync_view(&view, None).unwrap();
+        let original = originals
+            .iter()
+            .find(|original| original.owner() == &mapping.owner)
+            .unwrap();
+        let mut original_main = FlowViewModel::default();
+        let mut original_floating = FlowViewModel::default();
+        assert!(original_main.sync_legacy(original, None).unwrap());
+        assert!(original_floating.sync_legacy(original, None).unwrap());
+        assert!(original_main.is_archive());
+        assert!(original_main.flow().is_none());
+        assert!(original_main.cursor().is_none());
+        assert!(original_main.snapshot().is_none());
+        assert!(original_main.sync_view(&view, None).is_err());
+        assert!(main.sync_legacy(original, None).is_err());
+        assert_eq!(original_main.len(), main.len());
+        assert_eq!(original_main.work_folds.len(), main.work_folds.len());
         assert!(
             !main
                 .iter()
@@ -169,14 +191,23 @@ fn archived_views_reuse_history_rendering_without_writers_or_execution() {
             assert!(main.toggle_latest_work_fold());
             assert!(main.work_folds.last().unwrap().is_expanded());
             assert!(!floating.work_folds.last().unwrap().is_expanded());
+            assert!(original_main.toggle_latest_work_fold());
+            assert!(original_main.work_folds.last().unwrap().is_expanded());
+            assert!(!original_floating.work_folds.last().unwrap().is_expanded());
         }
         if mapping.owner == LegacyFlowKey::Unassigned {
             assert_eq!(archive.unparsed.len(), 2);
             assert!(main.iter().any(|item| matches!(item, OutputItem::SystemNote { text, .. } if text.contains("invalid retained line"))));
+            assert!(original_main.iter().any(|item| matches!(item, OutputItem::SystemNote { text, .. } if text.contains("invalid retained line"))));
         }
         let revisions = main.revisions().to_vec();
         assert!(!main.sync_view(&view, None).unwrap());
         assert_eq!(main.revisions(), revisions);
+        let revisions = original_main.revisions().to_vec();
+        assert!(!original_main.sync_legacy(original, None).unwrap());
+        assert_eq!(original_main.revisions(), revisions);
+        original_main.document.replace(vec![]);
+        assert!(original_main.sync_legacy(original, None).is_err());
         assert_eq!(std::fs::read(path).unwrap(), before);
     }
 }
@@ -814,7 +845,7 @@ async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_res
 }
 
 #[test]
-fn empty_native_view_still_binds_to_its_source_identity() {
+fn empty_views_still_bind_to_their_source_identity() {
     let source = FlowTranscript::new(FlowRef {
         session_id: Uuid::now_v7().into(),
         instance_id: FlowInstanceId::now(),
@@ -828,4 +859,29 @@ fn empty_native_view_still_binds_to_its_source_identity() {
     });
     assert!(view.sync(&foreign, None).is_err());
     assert_eq!(view.flow(), Some(source.flow()));
+
+    use atman_runtime::{event_log::legacy::LegacyFlowKey, projection::flow::LegacyHistory};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("events.jsonl");
+    let session = Uuid::now_v7();
+    std::fs::write(&path, b"").unwrap();
+    let original = LegacyHistory::inspect(&path, session)
+        .unwrap()
+        .read_flow(&LegacyFlowKey::Default)
+        .unwrap();
+    assert!(view.sync_legacy(&original, None).is_err());
+    let mut legacy = FlowViewModel::default();
+    assert!(legacy.sync_legacy(&original, None).unwrap());
+    assert!(legacy.is_empty());
+    assert!(legacy.flow().is_none());
+    assert!(legacy.cursor().is_none());
+    assert!(legacy.snapshot().is_none());
+    assert!(legacy.sync(&source, None).is_err());
+    std::fs::write(&path, b"\n").unwrap();
+    let changed = LegacyHistory::inspect(&path, session)
+        .unwrap()
+        .read_flow(&LegacyFlowKey::Default)
+        .unwrap();
+    assert!(legacy.sync_legacy(&changed, None).is_err());
+    assert!(!legacy.sync_legacy(&original, None).unwrap());
 }

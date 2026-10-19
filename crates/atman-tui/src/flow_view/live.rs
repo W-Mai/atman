@@ -46,7 +46,7 @@ impl FlowViewModel {
     }
     /// Apply a complete active-call snapshot from this view's instance. Older snapshots cannot restore finished previews.
     pub fn sync_live(&mut self, snapshot: LiveOutputSnapshot) -> io::Result<bool> {
-        if self.flow.as_ref() != Some(&snapshot.flow)
+        if self.flow() != Some(&snapshot.flow)
             || self.instance.structure_revision != self.document.structure_revision()
         {
             return Err(io::Error::new(
