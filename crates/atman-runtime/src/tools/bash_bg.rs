@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
+use crate::stream::BashChunkStart;
 use crate::task_registry::{TaskDisplay, TaskKind, TaskRegistry, TaskStatus};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::tool_schedule::{AccessMode, ResourceAccess, ResourceKey, SchedulingClaims};
@@ -131,6 +132,8 @@ pub struct BgOutput {
     pub truncated: bool,
     buffer_start: usize,
     changes: tokio::sync::watch::Sender<()>,
+    framing: OutputFraming,
+    log_framing: OutputFraming,
 }
 
 impl Default for BgOutput {
@@ -141,22 +144,48 @@ impl Default for BgOutput {
             truncated: false,
             buffer_start: 0,
             changes: tokio::sync::watch::channel(()).0,
+            framing: OutputFraming::default(),
+            log_framing: OutputFraming::default(),
         }
     }
 }
 
-fn framed_output(kind: StreamKind, data: &[u8]) -> Vec<u8> {
-    let prefix: &[u8] = match kind {
-        StreamKind::Stdout => b"[out] ",
-        StreamKind::Stderr => b"[err] ",
-    };
-    let mut frame = Vec::with_capacity(prefix.len() + data.len() + 1);
-    frame.extend_from_slice(prefix);
-    frame.extend_from_slice(data);
-    if !data.ends_with(b"\n") {
-        frame.push(b'\n');
+#[derive(Debug, Default)]
+struct OutputFraming {
+    last: Option<StreamKind>,
+    line_start: bool,
+}
+
+impl OutputFraming {
+    fn start(&self, kind: StreamKind) -> BashChunkStart {
+        if self.last.is_none() || self.line_start {
+            BashChunkStart::Line
+        } else if self.last == Some(kind) {
+            BashChunkStart::Continuation
+        } else {
+            BashChunkStart::StreamSwitch
+        }
     }
-    frame
+
+    fn frame(&mut self, kind: StreamKind, data: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(data.len() + 7);
+        for part in data.split_inclusive(|byte| *byte == b'\n') {
+            let start = self.start(kind);
+            if start == BashChunkStart::StreamSwitch {
+                frame.push(b'\n');
+            }
+            if start != BashChunkStart::Continuation {
+                frame.extend_from_slice(match kind {
+                    StreamKind::Stdout => b"[out] ",
+                    StreamKind::Stderr => b"[err] ",
+                });
+            }
+            frame.extend_from_slice(part);
+            self.last = Some(kind);
+            self.line_start = part.ends_with(b"\n");
+        }
+        frame
+    }
 }
 
 impl BgOutput {
@@ -172,7 +201,7 @@ impl BgOutput {
         let frame = if to_write.is_empty() {
             Vec::new()
         } else {
-            framed_output(kind, to_write)
+            self.framing.frame(kind, to_write)
         };
         self.combined.extend_from_slice(&frame);
         self.total_bytes = new_total;
@@ -222,7 +251,7 @@ fn page_bytes(data: &[u8], cursor: usize, limit: usize) -> (Vec<u8>, usize, bool
     (chunk, next, eof)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamKind {
     Stdout,
     Stderr,
@@ -969,20 +998,16 @@ struct ReadStreamCtx {
 }
 
 async fn emit_stream_segment(ctx: &ReadStreamCtx, kind: &str, data: &[u8]) -> bool {
-    if ctx
-        .log_tx
-        .send(framed_output(ctx.kind, data))
-        .await
-        .is_err()
-    {
+    let Ok(permit) = ctx.log_tx.reserve().await else {
         return false;
-    }
-    let accepted = {
-        let mut output = ctx.output.lock().unwrap();
-        let before = output.total_bytes;
-        let _ = output.push(ctx.kind, data, ctx.max_output_bytes);
-        output.total_bytes.saturating_sub(before) as usize
     };
+    // Publish logs, retained output, watcher revisions and UI fragments in one source order.
+    let mut output = ctx.output.lock().unwrap();
+    permit.send(output.log_framing.frame(ctx.kind, data));
+    let start = output.framing.start(ctx.kind);
+    let before = output.total_bytes;
+    let _ = output.push(ctx.kind, data, ctx.max_output_bytes);
+    let accepted = output.total_bytes.saturating_sub(before) as usize;
     if accepted == 0 {
         return true;
     }
@@ -991,6 +1016,7 @@ async fn emit_stream_segment(ctx: &ReadStreamCtx, kind: &str, data: &[u8]) -> bo
             handle: ctx.handle.clone(),
             tool_use_id: ctx.tool_use_id.clone(),
             kind: kind.to_string(),
+            start,
             line: String::from_utf8_lossy(&data[..accepted]).into_owned(),
             call_intent: ctx.call_intent.clone(),
             run_id: ctx.flow_run_id.clone(),
@@ -1005,29 +1031,39 @@ async fn read_stream<R: AsyncRead + Unpin>(mut reader: R, ctx: ReadStreamCtx) {
         StreamKind::Stderr => "stderr",
     };
     let mut read_buf = [0_u8; STREAM_FRAME_BYTES];
-    let mut pending = Vec::with_capacity(STREAM_FRAME_BYTES);
+    let mut pending = 0;
     loop {
-        match reader.read(&mut read_buf).await {
+        match reader.read(&mut read_buf[pending..]).await {
             Ok(0) => break,
             Ok(read) => {
-                for &byte in &read_buf[..read] {
-                    pending.push(byte);
-                    if (byte == b'\n' || pending.len() == STREAM_FRAME_BYTES)
-                        && !emit_stream_segment(&ctx, kind_str, &pending).await
-                    {
+                let used = pending + read;
+                let ready = complete_utf8_prefix(&read_buf[..used]);
+                for part in read_buf[..ready].split_inclusive(|byte| *byte == b'\n') {
+                    if !emit_stream_segment(&ctx, kind_str, part).await {
                         return;
                     }
-                    if byte == b'\n' || pending.len() == STREAM_FRAME_BYTES {
-                        pending.clear();
-                    }
                 }
+                read_buf.copy_within(ready..used, 0);
+                pending = used - ready;
             }
             Err(_) => break,
         }
     }
-    if !pending.is_empty() {
-        let _ = emit_stream_segment(&ctx, kind_str, &pending).await;
+    if pending != 0 {
+        let _ = emit_stream_segment(&ctx, kind_str, &read_buf[..pending]).await;
     }
+}
+
+fn complete_utf8_prefix(bytes: &[u8]) -> usize {
+    let mut offset = 0;
+    while let Err(error) = std::str::from_utf8(&bytes[offset..]) {
+        offset += error.valid_up_to();
+        match error.error_len() {
+            Some(invalid) => offset += invalid,
+            None => return offset,
+        }
+    }
+    bytes.len()
 }
 
 enum ExitReason {
@@ -1823,10 +1859,7 @@ mod tests {
         let mut full = Vec::new();
         full.extend_from_slice(b"[out] ");
         full.extend_from_slice(&first_data);
-        full.push(b'\n');
-        full.extend_from_slice(b"[out] ");
         full.extend_from_slice(&second_data);
-        full.push(b'\n');
 
         let mut output = BgOutput::default();
         output.push(StreamKind::Stdout, &first_data, u64::MAX);
@@ -2656,6 +2689,135 @@ mod tests {
         };
         let err = BashStatus.call(status_args, &ctx_b).await.err().unwrap();
         assert!(format!("{err}").contains("does not belong to session"));
+    }
+
+    #[tokio::test]
+    async fn partial_output_reaches_observers_before_newline_or_process_exit() {
+        let output = Arc::new(Mutex::new(BgOutput::default()));
+        let mut changes = output.lock().unwrap().changes.subscribe();
+        let (log_tx, mut log_rx) = mpsc::channel(16);
+        let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(16);
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let task = tokio::spawn(read_stream(
+            reader,
+            ReadStreamCtx {
+                output: output.clone(),
+                log_tx,
+                kind: StreamKind::Stdout,
+                max_output_bytes: u64::MAX,
+                stream_tx: Some(stream_tx),
+                handle: "partial".into(),
+                flow_run_id: None,
+                call_intent: None,
+                tool_use_id: None,
+            },
+        ));
+        let mut cursor = crate::watch::OutputCursor::default();
+        for (bytes, expected, matched) in [
+            (&b"nee"[..], &b"[out] nee"[..], false),
+            (&b"dle"[..], &b"[out] needle"[..], true),
+        ] {
+            writer.write_all(bytes).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), changes.changed())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!task.is_finished());
+            let snapshot = output.lock().unwrap();
+            assert_eq!(snapshot.combined, expected);
+            assert_eq!(
+                cursor
+                    .find(&snapshot.combined, snapshot.buffer_start, "needle")
+                    .is_some(),
+                matched
+            );
+        }
+        // A split code point is the only short tail held until the next read.
+        writer.write_all(&[0xe4, 0xb8]).await.unwrap();
+        writer.write_all(&[0xad]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), changes.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!task.is_finished());
+        writer.write_all(&[0xff, 0xe4]).await.unwrap();
+        drop(writer);
+        task.await.unwrap();
+        let expected = [b"[out] needle".as_slice(), "中".as_bytes(), &[0xff, 0xe4]].concat();
+        assert_eq!(output.lock().unwrap().combined, expected);
+        let logs: Vec<Vec<u8>> = std::iter::from_fn(|| log_rx.try_recv().ok()).collect();
+        assert_eq!(logs.concat(), expected);
+        let mut text = String::new();
+        while let Ok(crate::stream::StreamFrame::BashChunk {
+            kind, start, line, ..
+        }) = stream_rx.try_recv()
+        {
+            text.push_str(start.display_prefix(&kind));
+            text.push_str(&line);
+        }
+        assert_eq!(text, "needle中��");
+    }
+
+    #[test]
+    fn output_framing_is_independent_of_read_boundaries_and_marks_stream_switches() {
+        for chunk in 1..16 {
+            let mut output = BgOutput::default();
+            for (kind, bytes) in [
+                (StreamKind::Stdout, "alpha中\nneedle".as_bytes()),
+                (StreamKind::Stderr, &b"error\nlast"[..]),
+                (StreamKind::Stdout, &b"end"[..]),
+            ] {
+                for part in bytes.chunks(chunk) {
+                    output.push(kind, part, u64::MAX);
+                }
+            }
+            assert_eq!(
+                output.combined,
+                "[out] alpha中\n[out] needle\n[err] error\n[err] last\n[out] end".as_bytes()
+            );
+        }
+        for bytes in [b"ok".as_slice(), &[0xff, b'x'], &[0xe4, 0xb8, 0xad]] {
+            assert_eq!(complete_utf8_prefix(bytes), bytes.len());
+        }
+        assert_eq!(complete_utf8_prefix(&[0xff, b'x', 0xe4, 0xb8]), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_streams_keep_log_and_observer_order_under_backpressure() {
+        let output = Arc::new(Mutex::new(BgOutput::default()));
+        let (log_tx, mut log_rx) = mpsc::channel(1);
+        let collector = tokio::spawn(async move {
+            let mut log = Vec::new();
+            while let Some(frame) = log_rx.recv().await {
+                log.extend(frame);
+                tokio::task::yield_now().await;
+            }
+            log
+        });
+        let readers = [StreamKind::Stdout, StreamKind::Stderr].map(|kind| {
+            let ctx = ReadStreamCtx {
+                output: output.clone(),
+                log_tx: log_tx.clone(),
+                kind,
+                max_output_bytes: u64::MAX,
+                stream_tx: None,
+                handle: "ordered".into(),
+                flow_run_id: None,
+                call_intent: None,
+                tool_use_id: None,
+            };
+            tokio::spawn(async move {
+                for _ in 0..20 {
+                    assert!(emit_stream_segment(&ctx, "unused", b"fragment").await);
+                }
+            })
+        });
+        for reader in readers {
+            reader.await.unwrap();
+        }
+        drop(log_tx);
+        assert_eq!(collector.await.unwrap(), output.lock().unwrap().combined);
+        assert_eq!(output.lock().unwrap().total_bytes, 40 * 8);
     }
 
     #[tokio::test]

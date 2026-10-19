@@ -1,6 +1,28 @@
 use crate::notify::{NotifyLevel, NotifyLifecycle, NotifyLocation, NotifyStack};
 use serde::{Deserialize, Serialize};
 
+/// A bounded Bash output fragment can continue a line or change its source stream.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BashChunkStart {
+    #[default]
+    Line,
+    Continuation,
+    StreamSwitch,
+}
+
+impl BashChunkStart {
+    /// Display framing for raw fragment text; stdout does not need a label.
+    pub fn display_prefix(self, kind: &str) -> &'static str {
+        match (self, kind == "stderr") {
+            (Self::Continuation, _) | (Self::Line, false) => "",
+            (Self::Line, true) => "[err] ",
+            (Self::StreamSwitch, false) => "\n",
+            (Self::StreamSwitch, true) => "\n[err] ",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationFrame {
     pub level: NotifyLevel,
@@ -251,6 +273,9 @@ pub enum StreamFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_use_id: Option<String>,
         kind: String,
+        #[serde(default)]
+        start: BashChunkStart,
+        /// Text fragment, which can end before a newline.
         line: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         call_intent: Option<crate::message::ToolCallIntent>,

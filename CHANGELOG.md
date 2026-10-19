@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- **Partial Bash output** — Output without a newline reaches watchers and live views before process exit. Fragment framing preserves matches across reads, UTF-8 characters, stdout/stderr ordering, and bounded retained output.
+
 - **Session restore visibility** — Restored user turns dismiss the welcome overlay through the shared flow view projection. Startup greetings alone retain the new-session welcome page.
 
 - **FlowHub navigation state** — Refresh preserves selection by identity, and returning from a conversation restores the directory page, filter, and scroll position. Failed page requests preserve the visible results; late replies cannot alter a reopened directory.

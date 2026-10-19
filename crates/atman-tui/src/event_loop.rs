@@ -5332,6 +5332,7 @@ mod tests {
         let (semantic_tx, mut semantic_rx) = tokio::sync::mpsc::channel(1);
         let (bulk_tx, _bulk_rx) = tokio::sync::mpsc::channel(1);
         let bulk = StreamFrame::BashChunk {
+            start: Default::default(),
             handle: "bg".into(),
             kind: "stdout".into(),
             line: "data".into(),

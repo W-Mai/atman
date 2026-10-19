@@ -6632,6 +6632,7 @@ async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {
     // 1. Bash task with output
     let bash_handle = "bg_s_demo_1".to_string();
     let _ = tx.send(StreamFrame::BashChunk {
+        start: Default::default(),
         handle: bash_handle.clone(),
         kind: "stdout".into(),
         line: "$ cargo test --workspace\n".into(),
@@ -6641,6 +6642,7 @@ async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {
     });
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let _ = tx.send(StreamFrame::BashChunk {
+        start: Default::default(),
         handle: bash_handle.clone(),
         kind: "stdout".into(),
         line: "    Finished test [unoptimized + debuginfo] target(s) in 0.52s\n".into(),
@@ -6649,6 +6651,7 @@ async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {
         run_id: None,
     });
     let _ = tx.send(StreamFrame::BashChunk {
+        start: Default::default(),
         handle: bash_handle.clone(),
         kind: "stdout".into(),
         line: "     Running unittests src/lib.rs\n".into(),
@@ -6657,6 +6660,7 @@ async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {
         run_id: None,
     });
     let _ = tx.send(StreamFrame::BashChunk {
+        start: Default::default(),
         handle: bash_handle.clone(),
         kind: "stdout".into(),
         line: "running 258 tests\ntest result: ok. 258 passed; 0 failed\n".into(),

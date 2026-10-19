@@ -2124,7 +2124,7 @@ async fn process_watch_tools_share_instance_delivery_across_pause_turns_and_expl
     let ready = project.path().join("ready");
     let later = project.path().join("later");
     let command = format!(
-        "while [ ! -f '{}' ]; do sleep 0.05; done; printf 'ready\\n'; while [ ! -f '{}' ]; do sleep 0.05; done; printf 'later\\n'; exec sleep 60",
+        "while [ ! -f '{}' ]; do sleep 0.05; done; printf rea; sleep 0.01; printf dy; while [ ! -f '{}' ]; do sleep 0.05; done; printf later; exec sleep 60",
         ready.display(),
         later.display()
     );

@@ -9620,6 +9620,7 @@ mod tests {
         let chunk = format!("{}\n", "x".repeat(63));
         let mut app = crate::app::AppState::new("bash-projection".into(), None);
         app.apply_stream_frame(atman_runtime::stream::StreamFrame::BashChunk {
+            start: Default::default(),
             handle: "bg_s_0".into(),
             kind: "stdout".into(),
             line: chunk.clone(),
@@ -9644,6 +9645,7 @@ mod tests {
         reset_perf_counters();
         for _ in 1..CHUNKS {
             app.apply_stream_frame(atman_runtime::stream::StreamFrame::BashChunk {
+                start: Default::default(),
                 handle: "bg_s_0".into(),
                 kind: "stdout".into(),
                 line: chunk.clone(),

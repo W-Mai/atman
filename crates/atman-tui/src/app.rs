@@ -4221,6 +4221,7 @@ impl AppState {
                 handle,
                 tool_use_id,
                 kind,
+                start,
                 line,
                 call_intent,
                 run_id,
@@ -4229,7 +4230,7 @@ impl AppState {
                     && self.sub_agent_run_ids.contains_key(rid)
                 {
                     let task_command = self.task_command(&handle);
-                    let prefix = if kind == "stderr" { "[err] " } else { "" };
+                    let prefix = start.display_prefix(&kind);
                     self.apply_detached_bash_chunk(
                         handle,
                         format!("{prefix}{line}"),
@@ -4239,7 +4240,7 @@ impl AppState {
                     return;
                 }
                 let task_command = self.task_command(&handle);
-                let prefix = if kind == "stderr" { "[err] " } else { "" };
+                let prefix = start.display_prefix(&kind);
                 if let Some(tool_use_id) = tool_use_id
                     && self.apply_bash_chunk_to_dispatch(
                         &tool_use_id,
@@ -6163,6 +6164,7 @@ mod tests {
             message: assistant,
         });
         app.apply_stream_frame(StreamFrame::BashChunk {
+            start: Default::default(),
             handle: "bg_s_0".into(),
             tool_use_id: Some("shell".into()),
             kind: "stdout".into(),
@@ -7956,6 +7958,84 @@ mod terminal_stream_tests {
     use super::*;
     use atman_runtime::tools::term::{TermStateSnapshot, TerminalScreen};
 
+    #[test]
+    fn bash_fragment_boundaries_are_shared_by_main_detached_and_tool_details() {
+        use atman_runtime::{
+            message::{Message, MessageOrigin, MessagePart, MessageRole},
+            stream::BashChunkStart,
+        };
+        let legacy: StreamFrame = serde_json::from_value(serde_json::json!({
+            "BashChunk": {"handle": "process", "kind": "stderr", "line": "old\n"}
+        }))
+        .unwrap();
+        assert!(matches!(
+            legacy,
+            StreamFrame::BashChunk {
+                start: BashChunkStart::Line,
+                ..
+            }
+        ));
+        for mode in 0..3 {
+            let mut app = AppState::new("fragments".into(), None);
+            if mode == 1 {
+                app.apply_stream_frame(StreamFrame::SubAgentStarted {
+                    handle: "agent".into(),
+                    goal: "observe".into(),
+                    child_run_id: "child".into(),
+                    model: "test".into(),
+                    tool_use_id: None,
+                });
+            } else if mode == 2 {
+                app.apply_stream_frame(StreamFrame::AssistantMsg {
+                    flow_run_id: None,
+                    message: Message {
+                        role: MessageRole::Assistant,
+                        parts: vec![MessagePart::ToolUse {
+                            id: "shell".into(),
+                            name: "bash.spawn".into(),
+                            input: serde_json::json!({}),
+                            intent: None,
+                        }],
+                        turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
+                        origin: MessageOrigin::User,
+                    },
+                });
+            }
+            for (kind, start, line) in [
+                ("stderr", BashChunkStart::Line, "err"),
+                ("stderr", BashChunkStart::Continuation, "or"),
+                ("stdout", BashChunkStart::StreamSwitch, "ok"),
+                ("stdout", BashChunkStart::Continuation, "ay\n"),
+                ("stderr", BashChunkStart::Line, "last"),
+            ] {
+                let frame = StreamFrame::BashChunk {
+                    handle: "process".into(),
+                    kind: kind.into(),
+                    start,
+                    line: line.into(),
+                    call_intent: None,
+                    tool_use_id: (mode == 2).then(|| "shell".into()),
+                    run_id: (mode == 1).then(|| "child".into()),
+                };
+                let encoded = serde_json::to_vec(&frame).unwrap();
+                app.apply_stream_frame(serde_json::from_slice(&encoded).unwrap());
+            }
+            let item = if mode == 1 {
+                &app.detached_task_details["process"].item
+            } else if mode == 2 {
+                let OutputItem::ToolDispatch { calls } = &app.items[0] else {
+                    panic!("missing tool")
+                };
+                calls[0].detail.as_deref().unwrap()
+            } else {
+                &app.items[0]
+            };
+            assert!(
+                matches!(item, OutputItem::Bash { output, .. } if output == "[err] error\nokay\n[err] last")
+            );
+        }
+    }
+
     fn dummy_screen() -> TerminalScreen {
         TerminalScreen {
             rows: 2,
@@ -8260,6 +8340,7 @@ mod terminal_stream_tests {
             run_id: None,
         });
         app.apply_stream_frame(StreamFrame::BashChunk {
+            start: Default::default(),
             handle: "bg_s_0".into(),
             kind: "stdout".into(),
             line: "main\n".into(),
@@ -8286,6 +8367,7 @@ mod terminal_stream_tests {
             run_id: Some("child_run".into()),
         });
         app.apply_stream_frame(StreamFrame::BashChunk {
+            start: Default::default(),
             handle: "bg_s_0".into(),
             kind: "stdout".into(),
             line: "sub\n".into(),
@@ -8571,6 +8653,7 @@ mod terminal_e2e_tests {
 
         // Simulate a completed bash task: item in items, snapshot in task_snapshots.
         app.apply_stream_frame(StreamFrame::BashChunk {
+            start: Default::default(),
             handle: "bg_s_0".into(),
             kind: "stdout".into(),
             line: "hello from bash\n".into(),
