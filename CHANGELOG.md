@@ -38,6 +38,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Worktree removal controls** — Resource details offer a shared checkout-removal confirmation in main and floating views. Keyboard and mouse controls show the target path, protect uncommitted files by default, and wait for the resource owner's result. Failed requests retain their snapshot and error for inspection and refresh.
+
 - **Workspace retention controls** — Resource details can retain a checkout or restore automatic cleanup for a live Flow binding. Changes validate the observed registry record under lock, preserve all references, and reject stale snapshots and invocation-owned leases.
 
 - **Focused workspace inspection** — `:workspace` and Flow Workspace in the panel menu show the requesting Flow's recorded checkout and acquisition source. Shared origins link to their Flow; resource details show current availability and references without changing execution or ownership.

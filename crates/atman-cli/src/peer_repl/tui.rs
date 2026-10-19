@@ -566,6 +566,18 @@ impl Workspace {
                             });
                             continue;
                         }
+                        TuiControl::ReleaseWorkspace(change) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = async {
+                                    let request = atman_tui::flow_hub::HubRequest::WorkspaceRecord { location: change.location.clone(), id: change.expected.id.clone() };
+                                    workspaces::release(*change).await?;
+                                    scopes.browse(request).await.context("Checkout removal committed, but reading updated details failed; refresh to inspect the current state").map(Navigation::Catalog)
+                                }.await;
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::CancelWatcher { owner, id } => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {

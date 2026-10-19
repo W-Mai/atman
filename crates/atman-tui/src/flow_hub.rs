@@ -21,6 +21,7 @@ mod create;
 pub use create::WatchDefinition;
 mod inbox;
 mod page;
+mod release;
 mod text;
 mod watch;
 mod workspaces;
@@ -30,11 +31,14 @@ pub use page::{
 pub use watch::WatchDirectory;
 pub use workspaces::{
     FlowWorkspacePage, WorkspaceCursor, WorkspaceDirectory, WorkspaceDirectoryEntry,
-    WorkspaceFlowReference, WorkspaceLocation, WorkspaceRecordPage, WorkspaceRetention,
+    WorkspaceFlowReference, WorkspaceLocation, WorkspaceRecordPage, WorkspaceRemoval,
+    WorkspaceRetention,
 };
 
 #[derive(Clone)]
 pub(crate) enum Action {
+    ReviewWorkspaceRelease(Box<WorkspaceRemoval>),
+    ReleaseWorkspace(Box<WorkspaceRemoval>),
     SetWorkspaceRetention(Box<WorkspaceRetention>),
     None,
     Close,
@@ -65,6 +69,7 @@ pub(crate) enum Action {
 
 #[derive(Default)]
 pub(crate) struct FlowHub {
+    release_workspace: Option<release::Confirmation>,
     create_watch: Option<create::Draft>,
     watch_details: watch::Details,
     inbox_details: inbox::Details,
@@ -322,6 +327,7 @@ impl FlowHub {
                 }
                 self.rows = page.rows(None, self.endpoint);
                 self.property_details = None;
+                self.release_workspace = None;
                 if changed_directory || changed_page {
                     self.watch_details = watch::Details::default();
                     self.inbox_details = inbox::Details::default();
@@ -452,6 +458,14 @@ impl FlowHub {
             self.inbox_details.open(*id);
             return Action::None;
         }
+        if let Some(Action::ReviewWorkspaceRelease(request)) = selected.map(|row| &row.action) {
+            if self.pending.is_some() {
+                return Action::None;
+            }
+            self.release_workspace = Some(release::Confirmation::new(*request.clone()));
+            self.error = None;
+            return Action::None;
+        }
         if let Some(row) = selected
             && row.has_text_details()
         {
@@ -561,6 +575,10 @@ impl FlowHub {
     }
 
     pub fn key(&mut self, key: KeyAction) -> Action {
+        if let Some(confirmation) = &mut self.release_workspace {
+            let action = confirmation.key(key, self.pending.is_some());
+            return self.release_action(action);
+        }
         if let Some(draft) = &mut self.create_watch {
             if !draft.picking {
                 let action = draft.key(key, self.pending.is_some());
@@ -791,6 +809,10 @@ impl FlowHub {
     }
 
     pub fn mouse(&mut self, event: MouseEvent) -> Action {
+        if let Some(confirmation) = &mut self.release_workspace {
+            let action = confirmation.mouse(event, self.pending.is_some());
+            return self.release_action(action);
+        }
         if let Some(details) = &mut self.property_details {
             if details.mouse(event) {
                 self.property_details = None;
@@ -889,6 +911,10 @@ impl FlowHub {
             Paragraph::new("").style(Style::default().bg(t.panel_bg.into())),
             area,
         );
+        if let Some(confirmation) = &mut self.release_workspace {
+            confirmation.render(frame, area, self.pending.is_some(), self.error.as_deref());
+            return;
+        }
         if let Some(details) = &mut self.property_details {
             details.render(frame, area);
             return;
@@ -1195,6 +1221,7 @@ impl FlowHub {
                         ) => Some("\nInspect Enter"),
                         Action::Load(HubRequest::Workspaces { .. }) => Some("\nBrowse Enter"),
                         Action::SetWorkspaceRetention(_) => Some("\nApply Enter"),
+                        Action::ReviewWorkspaceRelease(_) => Some("\nReview Enter"),
                         Action::Load(_) => Some("\nFlows  Enter"),
                         _ => None,
                     }
@@ -1428,6 +1455,9 @@ impl FlowHub {
     }
 
     pub fn paste(&mut self, text: &str) -> Action {
+        if self.release_workspace.is_some() {
+            return Action::None;
+        }
         if self.pending.is_none() {
             if let Some(draft) = &mut self.create_watch
                 && !draft.picking
@@ -1443,6 +1473,15 @@ impl FlowHub {
             }
         }
         Action::None
+    }
+
+    fn release_action(&mut self, action: Action) -> Action {
+        if matches!(action, Action::Return) {
+            self.release_workspace = None;
+            Action::None
+        } else {
+            action
+        }
     }
 }
 

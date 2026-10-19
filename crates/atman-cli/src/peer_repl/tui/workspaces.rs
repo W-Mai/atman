@@ -1,4 +1,4 @@
-//! Operator catalog reads; no execution services or workspace mutations are acquired.
+//! Operator resource reads and explicit mutations through the workspace owner.
 
 use std::path::PathBuf;
 
@@ -137,6 +137,19 @@ pub(super) async fn retain(change: atman_tui::flow_hub::WorkspaceRetention) -> R
             &change.location.storage,
             &change.expected,
             change.retained,
+        )
+    })
+    .await??;
+    Ok(())
+}
+
+pub(super) async fn release(change: atman_tui::flow_hub::WorkspaceRemoval) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        WorkspaceManager::release_observed(
+            &change.location.repository,
+            &change.location.storage,
+            &change.expected,
+            change.force,
         )
     })
     .await??;

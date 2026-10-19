@@ -1,4 +1,4 @@
-//! Read-only project resources and recorded Flow bindings.
+//! Project resources, recorded Flow bindings, and explicit owner controls.
 
 use std::path::PathBuf;
 
@@ -208,6 +208,13 @@ pub struct WorkspaceRetention {
     pub retained: bool,
 }
 
+#[derive(Clone)]
+pub struct WorkspaceRemoval {
+    pub location: WorkspaceLocation,
+    pub expected: atman_runtime::git_workspace::WorkspaceRecord,
+    pub force: bool,
+}
+
 pub struct FlowWorkspacePage {
     pub owner: FlowRef,
     pub request: Option<atman_runtime::flow_store::workspace::WorkspaceRequest>,
@@ -360,6 +367,42 @@ impl WorkspaceRecordPage {
             action: target.map_or(Action::None, |retained| Action::SetWorkspaceRetention(Box::new(WorkspaceRetention {
                 location: self.location.clone(), expected: record.clone(), retained,
             }))),
+        });
+        let releasable = record.lease.is_none()
+            && !record.is_instance_bound()
+            && matches!(
+                record.lifecycle_state(),
+                atman_runtime::git_workspace::WorkspaceState::Active
+                    | atman_runtime::git_workspace::WorkspaceState::Retained
+                    | atman_runtime::git_workspace::WorkspaceState::Releasing
+            );
+        rows.push(Row {
+            key: RowKey::WorkspaceField("release_control"),
+            title: if releasable {
+                "Remove checkout…"
+            } else {
+                "Checkout removal unavailable"
+            }
+            .into(),
+            detail: if record.is_instance_bound() {
+                "Close all live Flow references before removing this checkout"
+            } else if record.lease.is_some() {
+                "An invocation lease owns this checkout; use its execution owner"
+            } else if releasable {
+                "Review the path and deletion options before confirming · Flow history remains"
+            } else {
+                "This lifecycle does not permit checkout removal"
+            }
+            .into(),
+            action: if releasable {
+                Action::ReviewWorkspaceRelease(Box::new(WorkspaceRemoval {
+                    location: self.location.clone(),
+                    expected: record.clone(),
+                    force: record.release.as_ref().is_some_and(|intent| intent.force),
+                }))
+            } else {
+                Action::None
+            },
         });
         for reference in &record.instances {
             rows.push(Row {
