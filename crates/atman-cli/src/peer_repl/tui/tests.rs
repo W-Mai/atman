@@ -1153,6 +1153,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     ));
     let (notices, _rx) = mpsc::unbounded_channel();
     let attachment = Attachment {
+        data_root: dir.path().to_owned(),
         host,
         session,
         descriptor,

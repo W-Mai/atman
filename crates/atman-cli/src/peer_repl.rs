@@ -43,6 +43,7 @@ const USER: Uuid = Uuid::from_bytes(*b"atman-local-user");
 
 #[derive(Clone)]
 struct Attachment {
+    data_root: std::path::PathBuf,
     host: RuntimeHost,
     session: SessionHandle,
     descriptor: SessionDescriptor,
@@ -486,6 +487,7 @@ impl Attachment {
             Owner::Attached(session) => session,
         };
         Ok(Self {
+            data_root: root.to_owned(),
             host,
             session,
             descriptor,
@@ -725,6 +727,68 @@ impl Attachment {
         let (command, argument) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
         let argument = argument.trim();
         match command {
+            ":session" => Ok(format!("Session {}", self.session.id())),
+            ":model" => Ok(format!("Current model: {}", worker.context().last_model())),
+            ":storage" => {
+                let root = self
+                    .descriptor
+                    .project
+                    .as_ref()
+                    .context("current session has no project")?
+                    .root();
+                match argument {
+                    "" => Ok(format!(
+                        "Project storage: {}",
+                        crate::storage_scope_name(
+                            self.config
+                                .try_storage_config(Some(root))?
+                                .scope
+                                .unwrap_or_default()
+                        )
+                    )),
+                    "global" | "local" => {
+                        let scope = if argument == "local" {
+                            atman_runtime::storage::StorageScope::Local
+                        } else {
+                            atman_runtime::storage::StorageScope::Global
+                        };
+                        anyhow::ensure!(root.is_dir(), "project path does not exist: {}", root.display());
+                        self.config.set_project_storage_scope(root, scope)?;
+                        Ok(format!(
+                            "Project storage set to {}; applies to new sessions",
+                            crate::storage_scope_name(scope)
+                        ))
+                    }
+                    _ => bail!("use :storage [global|local]"),
+                }
+            }
+            ":sessions" => {
+                let mut rows = Vec::new();
+                for id in RuntimeStore::session_ids(&self.data_root)? {
+                    let read = RuntimeStore::inspect_session(&self.data_root, id)?;
+                    let marker = if id == self.session.id() { " *" } else { "" };
+                    rows.push(format!(
+                        "{}{} · {} · {} flows",
+                        id,
+                        marker,
+                        read.projection.title.as_deref().unwrap_or("Untitled session"),
+                        read.projection.flows.len()
+                    ));
+                }
+                Ok(if rows.is_empty() { "No persistent sessions".into() } else { rows.join("\n") })
+            }
+            ":cost" => {
+                let snapshot = worker.context().subscribe_context().borrow().clone();
+                Ok(format!(
+                    "{} · {} calls · input {} · output {} · cache read {} · cache write {}",
+                    snapshot.model,
+                    snapshot.primary_usage().map_or(0, |usage| usage.calls),
+                    snapshot.tokens_in,
+                    snapshot.tokens_out,
+                    snapshot.cache_read,
+                    snapshot.cache_write
+                ))
+            }
             ":copy" => {
                 let Some(payload) = crate::copy_payload(argument, &worker.context().messages_full())? else {
                     return Ok("Nothing to copy".into());
@@ -733,7 +797,7 @@ impl Attachment {
                 Ok(format!("Copied {} chars to terminal clipboard (OSC 52)", payload.chars().count()))
             }
             ":sidebar" => Ok("Sidebar controls are available in TUI mode".into()),
-            ":help" => Ok("Text submits to the focused flow; /command [arguments] queues a captured command in the same flow. :attach <path>|list|clear · :rename [<text>|clear] · :focus <flow-prefix> · :flows · :status · :suggest · :compact · :copy [last-message|last-tool] · :sidebar on|off · :invoke <JSON arguments> · :insert <text> · :pause/:resume (execution) · :recover · :cancel · :close · :goal [set <text>|pause|resume|clear] · :todo [list|done <id>|cancel <id>|clear] · :pending · :reply <prompt-id> <JSON> · :approve/:deny <flow-prefix> <request-id> · :quit. EOF waits for runnable work; :quit detaches immediately.".into()),
+            ":help" => Ok("Text submits to the focused flow; /command [arguments] queues a captured command in the same flow. :attach <path>|list|clear · :rename [<text>|clear] · :focus <flow-prefix> · :flows · :status · :session · :sessions · :model · :cost · :storage [global|local] · :suggest · :compact · :copy [last-message|last-tool] · :sidebar on|off · :invoke <JSON arguments> · :insert <text> · :pause/:resume (execution) · :recover · :cancel · :close · :goal [set <text>|pause|resume|clear] · :todo [list|done <id>|cancel <id>|clear] · :pending · :reply <prompt-id> <JSON> · :approve/:deny <flow-prefix> <request-id> · :quit. EOF waits for runnable work; :quit detaches immediately.".into()),
             ":rename" => {
                 let snapshot = self.session.snapshot().await?;
                 if argument.is_empty() {

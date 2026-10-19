@@ -28,6 +28,8 @@ All notable changes to atman are documented in this file.
 
 - **Flow display commands** — Persistent terminals support `:copy last-message` and `:copy last-tool` from original conversation records. TUI clipboard and sidebar commands retain their source view and leave queued input and execution state unchanged.
 
+- **Persistent terminal commands** — Persistent terminals expose flow-bound session, model, cost, storage scope, and session listing commands. Project settings and session catalogs are read through the attached flow and scoped configuration.
+
 - **Asynchronous context operations** — Persistent terminals and shared TUI views support manual compaction with flow-bound review and completion replies. Compaction and suggestions keep independent request ownership, and operation failures leave the interface available.
 
 - **Recent session cards** — Persistent welcome views include original histories alongside persistent sessions, ordered by recorded activity within the same project. Matching UUIDs retain separate destinations, and original history statistics are read without updating caches.

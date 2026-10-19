@@ -221,6 +221,7 @@ mod tests {
             ));
             let (notices, _rx) = mpsc::unbounded_channel();
             let attachment = Attachment {
+                data_root: dir.path().to_owned(),
                 host: host.clone(),
                 session,
                 descriptor,
