@@ -14,6 +14,7 @@ use crate::{control::ControlTicket, keys::KeyAction};
 
 pub const PAGE_SIZE: usize = 50;
 
+mod graph;
 mod page;
 pub use page::{FlowHubPage, HubRequest, SessionDirectory, SessionRow};
 
@@ -34,6 +35,10 @@ pub(crate) struct FlowHub {
     pub pending: Option<ControlTicket>,
     page: Option<FlowHubPage>,
     rows: Vec<page::Row>,
+    graph: graph::Layout,
+    graph_visible: bool,
+    graph_button: Rect,
+    graph_hovered: bool,
     cursors: Vec<HubRequest>,
     index: usize,
     requested_index: Option<usize>,
@@ -132,6 +137,12 @@ impl FlowHub {
                     self.query.clear();
                 }
                 self.rows = page.rows(None);
+                if changed_directory || changed_page {
+                    self.graph = graph::Layout::default();
+                }
+                if matches!(*page, FlowHubPage::Flows { .. }) {
+                    self.graph.sync(&self.rows);
+                }
                 self.page = Some(*page);
                 if let Some(index) = self.requested_index.take() {
                     self.index = index;
@@ -171,13 +182,28 @@ impl FlowHub {
 
     fn filtered(&self) -> Vec<usize> {
         let query = self.query.to_lowercase();
+        let links = match &self.page {
+            Some(FlowHubPage::Flows {
+                relations: Ok(relations),
+                ..
+            }) => relations.as_slice(),
+            _ => &[],
+        };
         self.rows
             .iter()
             .enumerate()
             .filter_map(|(i, row)| {
-                (row.title.to_lowercase().contains(&query)
-                    || row.detail.to_lowercase().contains(&query))
-                .then_some(i)
+                query
+                    .split_whitespace()
+                    .all(|term| {
+                        if let Some(kind) = term.strip_prefix("link:") {
+                            graph::has_link(row, links, kind)
+                        } else {
+                            row.title.to_lowercase().contains(term)
+                                || row.detail.to_lowercase().contains(term)
+                        }
+                    })
+                    .then_some(i)
             })
             .collect()
     }
@@ -227,6 +253,9 @@ impl FlowHub {
             return Action::None;
         }
         match key {
+            KeyAction::NudgePrefill if matches!(self.page, Some(FlowHubPage::Flows { .. })) => {
+                self.graph_visible = !self.graph_visible;
+            }
             KeyAction::RedirectPrefill => {
                 return self
                     .cursors
@@ -271,6 +300,7 @@ impl FlowHub {
         self.sessions_hovered = self.sessions.contains(point);
         self.relations_hovered = self.relations.contains(point);
         self.refresh_hovered = self.refresh.contains(point);
+        self.graph_hovered = self.graph_button.contains(point);
         self.hovered = self
             .hits
             .iter()
@@ -279,6 +309,9 @@ impl FlowHub {
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) if self.close.contains(point) => Action::Close,
             _ if self.pending.is_some() => Action::None,
+            MouseEventKind::Down(MouseButton::Left) if self.graph_button.contains(point) => {
+                self.key(KeyAction::NudgePrefill)
+            }
             MouseEventKind::Down(MouseButton::Left) if self.sessions.contains(point) => {
                 self.key(KeyAction::Save)
             }
@@ -331,6 +364,7 @@ impl FlowHub {
             self.refresh = Rect::default();
             self.relations = Rect::default();
             self.sessions = Rect::default();
+            self.graph_button = Rect::default();
             return;
         }
         let width = area.width.saturating_sub(4).min(112);
@@ -344,7 +378,6 @@ impl FlowHub {
         let muted = Style::default().fg(t.meta_fg.into());
         let session = self.page.as_ref().map_or("Loading", FlowHubPage::title);
         let is_flows = matches!(self.page, Some(FlowHubPage::Flows { .. }));
-        let compact_relations = is_flows && width < 72;
         frame.render_widget(
             Paragraph::new(format!("FlowHub  /  {session}")).style(fg),
             Rect::new(content.x, content.y, width.saturating_sub(12), 1),
@@ -364,10 +397,18 @@ impl FlowHub {
             button_width,
             3,
         );
-        self.relations = if compact_relations {
-            Rect::new(content.x, content.y + 5, width, 3)
-        } else if is_flows {
-            Rect::new(content.x + 22, content.y + 1, width - 44, 3)
+        self.relations = if is_flows {
+            Rect::new(
+                content.x + width / 2 + 1,
+                content.y + 5,
+                width - width / 2 - 1,
+                3,
+            )
+        } else {
+            Rect::default()
+        };
+        self.graph_button = if is_flows {
+            Rect::new(content.x, content.y + 5, width / 2 - 1, 3)
         } else {
             Rect::default()
         };
@@ -376,8 +417,21 @@ impl FlowHub {
             (self.refresh, "\nRefresh  Ctrl+R", self.refresh_hovered),
             (
                 self.relations,
-                "\nRelations  Ctrl+Shift+G",
+                if width < 72 {
+                    "\nLinks Ctrl+⇧G"
+                } else {
+                    "\nLinks Ctrl+Shift+G"
+                },
                 self.relations_hovered,
+            ),
+            (
+                self.graph_button,
+                if self.graph_visible {
+                    "\nList  Ctrl+G"
+                } else {
+                    "\nGraph  Ctrl+G"
+                },
+                self.graph_hovered,
             ),
         ] {
             if rect.is_empty() {
@@ -394,7 +448,7 @@ impl FlowHub {
                 rect,
             );
         }
-        let search_y = content.y + if compact_relations { 8 } else { 4 };
+        let search_y = content.y + if is_flows { 8 } else { 4 };
         frame.render_widget(
             Paragraph::new(format!("Search this page: {}", self.query)).style(muted),
             Rect::new(content.x, search_y, width, 1),
@@ -402,6 +456,7 @@ impl FlowHub {
         let rows_y = search_y + 2;
         let footer = content.bottom().saturating_sub(6);
         let rows = self.filtered();
+        let graph_visible = is_flows && self.graph_visible;
         let visible = usize::from(footer.saturating_sub(rows_y) / 4);
         if self.selected < self.offset {
             self.offset = self.selected;
@@ -411,14 +466,43 @@ impl FlowHub {
         }
         self.hits.clear();
         self.float_hits.clear();
-        for (pos, index) in rows.iter().enumerate().skip(self.offset).take(visible) {
-            let row = &self.rows[*index];
-            let rect = Rect::new(
-                content.x,
-                rows_y + ((pos - self.offset) * 4) as u16,
-                width,
-                4,
+        let cards = if graph_visible {
+            self.graph.cards(
+                Rect::new(content.x, rows_y, width, footer.saturating_sub(rows_y + 1)),
+                &self.rows,
+                &rows,
+                self.selected,
+            )
+        } else {
+            rows.iter()
+                .enumerate()
+                .skip(self.offset)
+                .take(visible)
+                .map(|(pos, _)| {
+                    (
+                        pos,
+                        Rect::new(
+                            content.x,
+                            rows_y + ((pos - self.offset) * 4) as u16,
+                            width,
+                            4,
+                        ),
+                    )
+                })
+                .collect()
+        };
+        if graph_visible {
+            graph::draw_links(
+                frame,
+                &cards,
+                self,
+                &rows,
+                Rect::new(content.x, footer.saturating_sub(1), width, 1),
             );
+        }
+        for (pos, rect) in cards {
+            let row = &self.rows[rows[pos]];
+            let width = rect.width;
             let selected = pos == self.selected;
             let bg = if selected {
                 t.work_hover_bg.into_inner()
@@ -455,8 +539,13 @@ impl FlowHub {
                 open,
             );
             self.float_hits.push((open, pos));
+            let detail = if graph_visible {
+                std::borrow::Cow::Owned(graph::compact_detail(row))
+            } else {
+                std::borrow::Cow::Borrowed(row.detail.as_str())
+            };
             frame.render_widget(
-                Paragraph::new(row.detail.as_str()).style(muted.bg(bg)),
+                Paragraph::new(detail).style(muted.bg(bg)),
                 Rect::new(rect.x + 2, rect.y + 2, width.saturating_sub(4), 1),
             );
             self.hits.push((rect, pos));
@@ -501,7 +590,7 @@ impl FlowHub {
         }
         frame.render_widget(
             Paragraph::new(if is_flows {
-                "↑↓ select · Enter open · Ctrl+O window · Ctrl+Shift+G relations · Esc back"
+                "↑↓ select · Enter open · Ctrl+O window · Ctrl+G graph/list · Esc back"
             } else {
                 "↑↓ select · Enter open · Ctrl+O window · Ctrl+S sessions · Esc back"
             })
@@ -873,6 +962,7 @@ mod tests {
                         digest: "test".into(),
                     },
                 },
+                relations: Ok(vec![]),
             })),
         );
         assert_eq!(hub.index, 0);
@@ -922,6 +1012,7 @@ mod tests {
                         digest: "test".into(),
                     },
                 },
+                relations: Ok(vec![]),
             })
         };
         let mut hub = FlowHub {

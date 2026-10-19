@@ -78,6 +78,7 @@ pub enum FlowHubPage {
         title: String,
         default_flow: Option<FlowInstanceId>,
         page: InstancePage,
+        relations: Result<Vec<FlowRelation>, String>,
     },
     LegacyFlows {
         session: Uuid,

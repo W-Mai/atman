@@ -727,6 +727,11 @@ impl scopes::Scopes {
                         .unwrap_or_else(|| session.to_string()),
                     default_flow: overview.summary.default_flow,
                     page,
+                    relations: self
+                        .catalog
+                        .relations(session)
+                        .await
+                        .map_err(|error| error.to_string()),
                 }
             }
             HubRequest::LegacyFlows { session, after } => {
