@@ -55,6 +55,19 @@ pub struct SessionPage {
     pub total: usize,
 }
 
+/// One Session's independently sampled relation records. Failure does not hide other Sessions.
+pub struct SessionRelations {
+    pub session_id: Uuid,
+    pub relations: Result<Vec<FlowRelation>, String>,
+}
+
+/// Incremental relation discovery, bounded by the number of inspected Sessions.
+pub struct RelationCatalogPage {
+    pub sessions: Vec<SessionRelations>,
+    pub next: Option<Uuid>,
+    pub total: usize,
+}
+
 #[derive(Clone)]
 pub struct SessionCatalog {
     host: Option<RuntimeHost>,
@@ -123,6 +136,52 @@ impl SessionCatalog {
             next: (eligible.len() > limit).then(|| eligible[limit - 1]),
             total: ids.len(),
             sessions,
+        })
+    }
+
+    /// Scan authorized Session relations without creating execution owners. The cursor advances past failed and empty Sessions as well.
+    pub async fn relation_page(
+        &self,
+        before: Option<Uuid>,
+        limit: usize,
+        visible: impl Fn(Uuid) -> io::Result<bool>,
+    ) -> io::Result<RelationCatalogPage> {
+        if !(1..=50).contains(&limit) {
+            return Err(invalid(
+                "relation page limit must be between 1 and 50 Sessions",
+            ));
+        }
+        let mut ids = Vec::new();
+        for id in self.ids().await? {
+            if visible(id)? {
+                ids.push(id);
+            }
+        }
+        let eligible: Vec<_> = ids
+            .iter()
+            .rev()
+            .copied()
+            .filter(|id| before.is_none_or(|before| *id < before))
+            .collect();
+        let mut sessions = Vec::new();
+        for &session_id in eligible.iter().take(limit) {
+            // A changing policy must not authorize disk access using an earlier snapshot.
+            require_visible(session_id, &visible)?;
+            sessions.push(SessionRelations {
+                session_id,
+                relations: self
+                    .relations(session_id)
+                    .await
+                    .map_err(|error| error.to_string()),
+            });
+        }
+        for &id in &ids {
+            require_visible(id, &visible)?;
+        }
+        Ok(RelationCatalogPage {
+            sessions,
+            next: (eligible.len() > limit).then(|| eligible[limit - 1]),
+            total: ids.len(),
         })
     }
 
@@ -244,6 +303,17 @@ impl SessionCatalog {
             }
         })
         .await
+    }
+}
+
+fn require_visible(id: Uuid, visible: &impl Fn(Uuid) -> io::Result<bool>) -> io::Result<()> {
+    if visible(id)? {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "relation discovery authority changed",
+        ))
     }
 }
 

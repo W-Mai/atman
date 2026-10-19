@@ -708,7 +708,9 @@ impl scopes::Scopes {
         &self,
         request: atman_tui::flow_hub::HubRequest,
     ) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
-        use atman_tui::flow_hub::{FlowHubPage, HubRequest, PAGE_SIZE};
+        use atman_tui::flow_hub::{
+            FlowHubPage, HubRequest, PAGE_SIZE, RelationProgress, RelationRange,
+        };
         Ok(Box::new(match request {
             HubRequest::Sessions { before } => FlowHubPage::Sessions(
                 directory::sessions(&self.catalog, &self.root, before, PAGE_SIZE).await?,
@@ -762,12 +764,41 @@ impl scopes::Scopes {
                 })
                 .await??
             }
-            HubRequest::Relations { session, focus } => {
-                let overview = self.catalog.overview(session).await?;
-                let title = overview
-                    .summary
-                    .title
-                    .unwrap_or_else(|| session.to_string());
+            HubRequest::Relations {
+                session,
+                focus,
+                range,
+            } => {
+                let (title, relations, progress) = match &range {
+                    RelationRange::Session => {
+                        let overview = self.catalog.overview(session).await?;
+                        (
+                            overview
+                                .summary
+                                .title
+                                .unwrap_or_else(|| session.to_string()),
+                            self.catalog.relations(session).await?,
+                            None,
+                        )
+                    }
+                    RelationRange::Catalog { before } => {
+                        let batch = self.catalog.relation_page(*before, 8, |_| Ok(true)).await?;
+                        let mut relations = Vec::new();
+                        let mut progress = RelationProgress {
+                            scanned: batch.sessions.len(),
+                            total: batch.total,
+                            next: batch.next,
+                            errors: Vec::new(),
+                        };
+                        for entry in batch.sessions {
+                            match entry.relations {
+                                Ok(records) => relations.extend(records),
+                                Err(error) => progress.errors.push((entry.session_id, error)),
+                            }
+                        }
+                        ("Global".into(), relations, Some(progress))
+                    }
+                };
                 let title = match &focus {
                     Some(flow) => format!(
                         "{title} / links for {}",
@@ -779,7 +810,9 @@ impl scopes::Scopes {
                     session,
                     focus,
                     title,
-                    relations: self.catalog.relations(session).await?,
+                    relations,
+                    range,
+                    progress,
                 }
             }
         }))

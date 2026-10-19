@@ -10,6 +10,122 @@ use atman_runtime::{
 };
 use uuid::Uuid;
 
+#[tokio::test]
+async fn relation_catalog_pages_recheck_visibility_and_advance_past_empty_or_broken_sessions() {
+    use atman_runtime::{
+        flow_runtime::catalog::SessionCatalog,
+        flow_store::access::{AccessTarget, FlowAction, FlowGrant},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = RuntimeStore::open(directory.path()).unwrap();
+    let mut owners = Vec::new();
+    let mut flows = Vec::new();
+    for index in 1..=4 {
+        let session = Uuid::from_u128(index);
+        let mut owner = runtime
+            .create_session(SessionDescriptor {
+                id: session,
+                project: None,
+                configuration: Default::default(),
+                title: format!("Session {index}"),
+            })
+            .unwrap();
+        if index <= 2 {
+            flows.push(
+                owner
+                    .create_flow(FlowDescriptor {
+                        address: FlowRef {
+                            session_id: session.into(),
+                            instance_id: FlowInstanceId::now(),
+                        },
+                        creation_request: Uuid::now_v7(),
+                        created_by: None,
+                        content: EntrySnapshot {
+                            name: "main".into(),
+                            path: "/missing/main.at".into(),
+                            bundle: RevisionBundle {
+                                entry: "entry:main.at".into(),
+                                sources: BTreeMap::from([(
+                                    "entry:main.at".into(),
+                                    "flow main() -> int { return 7 }".into(),
+                                )]),
+                                edges: BTreeMap::new(),
+                            },
+                        }
+                        .into(),
+                    })
+                    .unwrap(),
+            );
+        }
+        owners.push(owner);
+    }
+    let source = flows[0].descriptor().address.clone();
+    let target = flows[1].descriptor().address.clone();
+    let receipt = owners[0].cursor().clone();
+    owners[0]
+        .grant_access(
+            &receipt,
+            FlowGrant {
+                id: Uuid::now_v7(),
+                grantee: source.clone(),
+                target: AccessTarget::Flow(target.clone()),
+                actions: [FlowAction::Watch].into_iter().collect(),
+            },
+        )
+        .unwrap();
+    let broken = owners.pop().unwrap();
+    let broken_log = broken.dir().join("events.jsonl");
+    drop(broken);
+    std::fs::write(&broken_log, b"corrupt\n").unwrap();
+    let source_log = flows[0].dir().join("events.jsonl");
+    let source_bytes = std::fs::read(&source_log).unwrap();
+    let catalog = SessionCatalog::new(None, Some(directory.path().to_owned()));
+    let first = catalog.relation_page(None, 2, |_| Ok(true)).await.unwrap();
+    assert_eq!(first.total, 4);
+    assert_eq!(first.sessions.len(), 2);
+    assert!(first.sessions[0].relations.is_err());
+    assert!(first.sessions[1].relations.as_ref().unwrap().is_empty());
+    assert_eq!(first.next, Some(Uuid::from_u128(3)));
+    let last = catalog
+        .relation_page(first.next, 2, |_| Ok(true))
+        .await
+        .unwrap();
+    assert!(last.next.is_none());
+    let records: Vec<_> = last
+        .sessions
+        .iter()
+        .flat_map(|entry| entry.relations.as_ref().unwrap())
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].source, source);
+    assert_eq!(records[0].target, AccessTarget::Flow(target));
+    let hidden = catalog
+        .relation_page(None, 4, |id| Ok(id != source.session_id.0))
+        .await
+        .unwrap();
+    assert_eq!(hidden.total, 3);
+    assert!(
+        hidden
+            .sessions
+            .iter()
+            .all(|entry| entry.session_id != source.session_id.0)
+    );
+    let reads = std::cell::Cell::new(0);
+    let revoked = catalog
+        .relation_page(None, 2, |id| {
+            if id == source.session_id.0 {
+                reads.set(reads.get() + 1);
+                return Ok(reads.get() == 1);
+            }
+            Ok(true)
+        })
+        .await;
+    assert!(matches!(revoked, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied));
+    assert!(catalog.relation_page(None, 0, |_| Ok(true)).await.is_err());
+    assert_eq!(std::fs::read(&source_log).unwrap(), source_bytes);
+    assert_eq!(std::fs::read(&broken_log).unwrap(), b"corrupt\n");
+}
+
 #[test]
 fn inspection_is_bounded_while_the_writer_appends_and_leaves_incomplete_tails_untouched() {
     let dir = tempfile::tempdir().unwrap();

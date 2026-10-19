@@ -26,6 +26,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Global flow relations** — Discover incoming and outgoing links across Sessions through incremental catalog reads. Scope controls retain shared endpoint navigation, failed Sessions remain visible, and empty batches can advance without starting execution services.
+
 - **Flow relation navigation** — Inspect a selected flow's Session links and open either endpoint in the main workspace or a floating window. Scope and endpoint controls share keyboard and mouse handling; returning restores the Flow directory's page and filters, while failed navigation retains the visible directory.
 
 - **FlowHub relation graph** — Switch between a stable node layout and a list while retaining selection, filters, and shared focus/window actions. Directed links identify the selected flow's relations; relation filters and isolated nodes remain available without starting execution.

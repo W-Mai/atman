@@ -54,6 +54,19 @@ impl From<SessionSummary> for SessionRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RelationRange {
+    Session,
+    Catalog { before: Option<Uuid> },
+}
+
+pub struct RelationProgress {
+    pub scanned: usize,
+    pub total: usize,
+    pub next: Option<Uuid>,
+    pub errors: Vec<(Uuid, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
     Sessions {
         before: Option<SessionTarget>,
@@ -69,6 +82,7 @@ pub enum HubRequest {
     Relations {
         session: Uuid,
         focus: Option<atman_runtime::flow_store::FlowRef>,
+        range: RelationRange,
     },
 }
 
@@ -84,7 +98,18 @@ impl HubRequest {
                 session: *session,
                 after: None,
             },
-            Self::Relations { .. } => self.clone(),
+            Self::Relations {
+                session,
+                focus,
+                range,
+            } => Self::Relations {
+                session: *session,
+                focus: focus.clone(),
+                range: match range {
+                    RelationRange::Session => RelationRange::Session,
+                    RelationRange::Catalog { .. } => RelationRange::Catalog { before: None },
+                },
+            },
         }
     }
 }
@@ -110,6 +135,8 @@ pub enum FlowHubPage {
         title: String,
         focus: Option<atman_runtime::flow_store::FlowRef>,
         relations: Vec<FlowRelation>,
+        range: RelationRange,
+        progress: Option<RelationProgress>,
     },
 }
 
@@ -159,6 +186,45 @@ pub(super) enum RowKey {
 }
 
 impl FlowHubPage {
+    /// Append only the next requested catalog batch; refresh replaces the snapshot.
+    pub(super) fn append_catalog(&mut self, previous: Option<&mut Self>) -> Result<(), String> {
+        let Self::Relations {
+            range: RelationRange::Catalog {
+                before: Some(before),
+            },
+            session,
+            focus,
+            relations,
+            progress: Some(progress),
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        let Some(Self::Relations {
+            session: old_session,
+            focus: old_focus,
+            relations: old_relations,
+            progress: Some(old_progress),
+            ..
+        }) = previous
+        else {
+            return Err("Global relation snapshot changed; refresh to restart".into());
+        };
+        if session != old_session || focus != old_focus || old_progress.next != Some(*before) {
+            return Err("Global relation cursor changed; refresh to restart".into());
+        }
+        let batch = std::mem::replace(relations, std::mem::take(old_relations));
+        relations.extend(batch);
+        progress.scanned += old_progress.scanned;
+        let errors = std::mem::replace(
+            &mut progress.errors,
+            std::mem::take(&mut old_progress.errors),
+        );
+        progress.errors.extend(errors);
+        Ok(())
+    }
+
     pub fn title(&self) -> &str {
         match self {
             Self::Sessions(_) => "Sessions",
@@ -185,10 +251,17 @@ impl FlowHubPage {
                 session: *session,
                 after: None,
             },
-            Self::Relations { session, focus, .. } => HubRequest::Relations {
+            Self::Relations {
+                session,
+                focus,
+                range,
+                ..
+            } => HubRequest::Relations {
                 session: *session,
                 focus: focus.clone(),
-            },
+                range: range.clone(),
+            }
+            .first(),
         }
     }
     pub fn next(&self) -> Option<HubRequest> {
@@ -208,7 +281,21 @@ impl FlowHubPage {
                     after: Some(after),
                 })
             }
-            Self::Relations { .. } => None,
+            Self::Relations {
+                session,
+                focus,
+                progress,
+                ..
+            } => progress
+                .as_ref()
+                .and_then(|page| page.next)
+                .map(|before| HubRequest::Relations {
+                    session: *session,
+                    focus: focus.clone(),
+                    range: RelationRange::Catalog {
+                        before: Some(before),
+                    },
+                }),
         }
     }
     pub fn total(&self) -> usize {
@@ -317,7 +404,10 @@ impl FlowHubPage {
                 })
                 .collect(),
             Self::Relations {
-                relations, focus, ..
+                relations,
+                focus,
+                progress,
+                ..
             } => relations
                 .iter()
                 .filter(|relation| focus.as_ref().is_none_or(|flow| incident(relation, flow)))
@@ -388,6 +478,21 @@ impl FlowHubPage {
                         action,
                     }
                 })
+                .chain(
+                    progress
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(|progress| &progress.errors)
+                        .map(|(session, error)| Row {
+                            key: RowKey::Session(SessionTarget::Persistent(*session)),
+                            title: format!("Unavailable Session {}", &session.to_string()[28..]),
+                            detail: error.clone(),
+                            action: Action::Load(HubRequest::Flows {
+                                session: *session,
+                                before: None,
+                            }),
+                        }),
+                )
                 .collect(),
         }
     }
@@ -453,6 +558,8 @@ mod tests {
             session: observer.session_id.0,
             title: "Scope".into(),
             focus: Some(observed.clone()),
+            range: RelationRange::Session,
+            progress: None,
             relations,
         };
         let neighbors = page.rows(None, Endpoint::Neighbor);

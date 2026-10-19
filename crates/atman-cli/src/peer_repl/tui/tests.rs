@@ -336,6 +336,27 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         )
         .unwrap();
         session.select_default(instance.clone()).unwrap();
+        if index == 1 {
+            use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};
+            let cursor = session.cursor().clone();
+            session
+                .grant_access(
+                    &cursor,
+                    FlowGrant {
+                        id: Uuid::now_v7(),
+                        grantee: FlowRef {
+                            session_id: id.into(),
+                            instance_id: instance.clone(),
+                        },
+                        target: AccessTarget::Flow(FlowRef {
+                            session_id: ids[0].into(),
+                            instance_id: instance.clone(),
+                        }),
+                        actions: [FlowAction::Watch].into_iter().collect(),
+                    },
+                )
+                .unwrap();
+        }
     }
     std::fs::remove_dir(&missing_project).unwrap();
     let host = RuntimeHost::default();
@@ -398,6 +419,22 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         .await
         .unwrap();
     assert!(matches!(*directory, FlowHubPage::Flows { page, .. } if !page.instances[0].loaded));
+    let directory = scopes
+        .browse(HubRequest::Relations {
+            session: ids[0],
+            focus: Some(FlowRef {
+                session_id: ids[0].into(),
+                instance_id: instance.clone(),
+            }),
+            range: atman_tui::flow_hub::RelationRange::Catalog { before: None },
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(*directory, FlowHubPage::Relations { relations, progress: Some(progress), .. }
+        if relations.len() == 1 && relations[0].source.session_id.0 == ids[1]
+            && progress.scanned == 2 && progress.next.is_none() && progress.errors.is_empty())
+    );
     assert_eq!(
         host.sessions(),
         vec![ids[0]],
