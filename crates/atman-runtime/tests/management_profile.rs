@@ -55,6 +55,12 @@ async fn control_service_keeps_uncertain_delivery_pending_and_wakes_on_identical
         .unwrap()
         .unwrap();
     assert_eq!(pending, accepted);
+    let observation = host.subscribe_controls();
+    let progress = observation.borrow().clone();
+    assert_eq!(progress.active, 0);
+    assert!(matches!(progress.issues.as_slice(), [
+        atman_runtime::flow_runtime::host::ControlServiceIssue::Target { sender: actor, batch_id, target, message }
+    ] if actor == &sender && batch_id == &request.id && target == &address && !message.is_empty()));
     let cursor = profile.snapshot().await.unwrap().profile.cursor;
     tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     assert_eq!(profile.snapshot().await.unwrap().profile.cursor, cursor);
@@ -87,6 +93,7 @@ async fn control_service_keeps_uncertain_delivery_pending_and_wakes_on_identical
         .await
         .unwrap()
         .unwrap();
+    assert!(observation.borrow().issues.is_empty());
     assert_eq!(
         host.flow(&address)
             .await

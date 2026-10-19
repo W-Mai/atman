@@ -15,7 +15,7 @@ mod management;
 pub use management::{ProfileHandle, ProfileView};
 #[path = "control_service.rs"]
 mod control_service;
-pub use control_service::ControlServiceProgress;
+pub use control_service::{ControlServiceIssue, ControlServiceProgress};
 
 use super::{
     FlowSnapshot, FlowWorker,

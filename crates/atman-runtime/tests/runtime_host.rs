@@ -474,9 +474,9 @@ async fn host_batches_finish_other_targets_after_the_controller_pauses_or_closes
                     break record;
                 }
                 assert!(
-                    updates.borrow().errors.is_empty(),
+                    updates.borrow().issues.is_empty(),
                     "{:?}",
-                    updates.borrow().errors
+                    updates.borrow().issues
                 );
                 updates.changed().await.unwrap();
             }

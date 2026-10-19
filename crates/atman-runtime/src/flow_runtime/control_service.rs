@@ -30,7 +30,39 @@ use crate::flow_store::{
 pub struct ControlServiceProgress {
     pub through: Option<CommitReceipt>,
     pub active: usize,
-    pub errors: Vec<String>,
+    pub issues: Vec<ControlServiceIssue>,
+}
+
+/// Transient delivery diagnostics are separate from the batch's durable per-target outcome.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ControlServiceIssue {
+    Profile(String),
+    Target {
+        sender: SenderIdentity,
+        batch_id: Uuid,
+        target: FlowRef,
+        message: String,
+    },
+    Worker(String),
+}
+
+impl std::fmt::Display for ControlServiceIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Profile(message) => write!(f, "control profile: {message}"),
+            Self::Worker(message) => write!(f, "control worker: {message}"),
+            Self::Target {
+                sender,
+                batch_id,
+                target,
+                message,
+            } => write!(
+                f,
+                "control {batch_id} from {sender:?} for {}/{}: {message}",
+                target.session_id, target.instance_id
+            ),
+        }
+    }
 }
 
 pub(super) struct ControlService {
@@ -130,8 +162,15 @@ impl RuntimeHost {
             .clone()
             .ok_or_else(|| invalid("control profile is unavailable"))?;
         let view = profile.subscribe_profile();
-        if !progress.errors.is_empty() {
-            return Err(io::Error::other(progress.errors.join("; ")));
+        if !progress.issues.is_empty() {
+            return Err(io::Error::other(
+                progress
+                    .issues
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ));
         }
         if progress.through.as_ref() != Some(&view.borrow().profile.cursor) {
             return Ok(true);
@@ -216,11 +255,22 @@ async fn supervise(
                 }
                 failed.retain(|key, _| pending.contains(key));
             }
-            Err(error) => progress.errors.push(error.to_string()),
+            Err(error) => progress
+                .issues
+                .push(ControlServiceIssue::Profile(error.to_string())),
         }
         progress.active = running.len();
-        progress.errors.extend(failed.values().cloned());
-        progress.errors.sort();
+        progress
+            .issues
+            .extend(failed.iter().map(|((sender, batch_id, target), message)| {
+                ControlServiceIssue::Target {
+                    sender: sender.clone(),
+                    batch_id: *batch_id,
+                    target: target.clone(),
+                    message: message.clone(),
+                }
+            }));
+        progress.issues.sort_by_cached_key(ToString::to_string);
         published.send_if_modified(|old| {
             if *old == progress {
                 false
@@ -238,11 +288,10 @@ async fn supervise(
                     Some(Ok((key, result))) => {
                         running.remove(&key);
                         if let Err(error) = result {
-                            let message = format!("control {} for {}/{}: {error}", key.1, key.2.session_id, key.2.instance_id);
-                            failed.insert(key, message);
+                            failed.insert(key, error.to_string());
                         }
                     },
-                    Some(Err(error)) => { published.send_modify(|progress| progress.errors.push(error.to_string())); break; },
+                    Some(Err(error)) => { published.send_modify(|progress| progress.issues.push(ControlServiceIssue::Worker(error.to_string()))); break; },
                     None => (),
                 }
             }
