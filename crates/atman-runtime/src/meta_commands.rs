@@ -188,6 +188,12 @@ pub const META_COMMANDS: &[MetaCommand] = &[
         aliases: &[],
     },
     MetaCommand {
+        name: "links",
+        desc: "browse the focused flow's relations",
+        usage: ":links",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "atman",
         desc: "open the profile management session",
         usage: ":atman",

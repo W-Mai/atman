@@ -798,6 +798,7 @@ impl WindowManager {
             && !matches!(
                 id,
                 PaletteEntryId::OpenFlowHub
+                    | PaletteEntryId::OpenFlowLinks
                     | PaletteEntryId::OpenManagement
                     | PaletteEntryId::SwitchSession
                     | PaletteEntryId::OpenProjectHub
@@ -900,6 +901,27 @@ impl WindowManager {
                     app.push_note(
                         "FlowHub requires a persistent session",
                         crate::app::NoteLevel::Info,
+                    );
+                }
+            }
+            PaletteEntryId::OpenFlowLinks => {
+                if let Some(flow) = control_tx
+                    .and_then(|tx| tx.binding())
+                    .and_then(|binding| binding.flow.instance())
+                {
+                    app.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                        crate::flow_hub::HubRequest::Relations {
+                            session: flow.session_id.0,
+                            focus: Some(flow.clone()),
+                            range: crate::flow_hub::RelationRange::Session,
+                        },
+                    ));
+                } else {
+                    app.push_toast(
+                        "Flow links require a persistent instance",
+                        crate::app::NoteLevel::Info,
+                        std::time::Duration::from_secs(4),
+                        crate::app::ToastPosition::BottomRight,
                     );
                 }
             }
@@ -1635,6 +1657,43 @@ mod tests {
                     .is_running()
             );
         }
+    }
+
+    #[test]
+    fn links_command_and_palette_use_the_requesting_view_address() {
+        let mut wm = WindowManager::default();
+        let mut app = crate::app::AppState::default();
+        let instance_id = atman_rt::FlowInstanceId::now();
+        for _ in 0..2 {
+            let flow = atman_runtime::flow_store::FlowRef {
+                session_id: uuid::Uuid::now_v7().into(),
+                instance_id: instance_id.clone(),
+            };
+            let (host, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, _replies) = crate::ControlSender::for_flow(
+                crate::control::ViewBinding {
+                    view_id: uuid::Uuid::now_v7(),
+                    revision: 0,
+                    flow: flow.clone().into(),
+                },
+                host,
+            );
+            assert!(wm.dispatch_meta_command(":links", &mut app, Some(&tx)));
+            assert!(
+                matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Relations {focus:Some(target), ..})) if target == flow)
+            );
+            wm.apply_palette_action(
+                crate::palette::PaletteEntryId::OpenFlowLinks,
+                &mut app,
+                Some(&tx),
+            );
+            assert!(
+                matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Relations {focus:Some(target), ..})) if target == flow)
+            );
+            assert!(incoming.try_recv().is_err());
+        }
+        assert!(wm.dispatch_meta_command(":links", &mut app, None));
+        assert!(app.open_flow_hub.is_none());
     }
 
     #[test]

@@ -14,7 +14,9 @@ use crate::{control::ControlTicket, keys::KeyAction};
 
 pub const PAGE_SIZE: usize = 50;
 
+mod focus;
 mod graph;
+pub(crate) use focus::{FocusLinks, NeighborSnapshot};
 mod page;
 pub use page::{
     FlowHubPage, HubRequest, RelationProgress, RelationRange, SessionDirectory, SessionRow,
@@ -140,6 +142,17 @@ impl History {
 }
 
 impl FlowHub {
+    pub fn neighbors_for(
+        &self,
+        flow: &atman_runtime::flow_store::FlowRef,
+    ) -> Option<NeighborSnapshot> {
+        if self.error.is_some() {
+            return None;
+        }
+        self.page
+            .as_ref()
+            .and_then(|page| NeighborSnapshot::from_page(page, flow))
+    }
     pub fn leaves_directory(&self, request: &HubRequest) -> bool {
         self.page
             .as_ref()

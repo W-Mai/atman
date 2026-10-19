@@ -12,6 +12,7 @@ use crate::keys::KeyAction;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteEntryId {
     OpenFlowHub,
+    OpenFlowLinks,
     OpenManagement,
     SwitchSession,
     AutoNameSession,
@@ -97,6 +98,13 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         label: "FlowHub",
         hint: "Browse persistent flows and focus a conversation",
         keyword: "flows hub focus overview",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::OpenFlowLinks,
+        group: "Session",
+        label: "Flow Links",
+        hint: "Inspect this flow's neighbors (Ctrl+Shift+G)",
+        keyword: "links neighbors relations watch source target",
     },
     PaletteEntry {
         id: PaletteEntryId::OpenManagement,
@@ -242,6 +250,7 @@ impl PaletteEntryId {
     pub fn command(self) -> &'static str {
         match self {
             Self::OpenFlowHub => "flows",
+            Self::OpenFlowLinks => "links",
             Self::OpenManagement => "atman",
             Self::SwitchSession => "sessions",
             Self::AutoNameSession => "name-session",

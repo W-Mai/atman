@@ -26,6 +26,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Focus neighborhood navigation** — Main and floating conversations expose `:links`, a palette action, and a shared shortcut. The activity sidebar retains scoped neighborhood snapshots with padded mouse targets; full directory navigation remains available on narrow terminals.
+
 - **Global flow relations** — Discover incoming and outgoing links across Sessions through incremental catalog reads. Scope controls retain shared endpoint navigation, failed Sessions remain visible, and empty batches can advance without starting execution services.
 
 - **Flow relation navigation** — Inspect a selected flow's Session links and open either endpoint in the main workspace or a floating window. Scope and endpoint controls share keyboard and mouse handling; returning restores the Flow directory's page and filters, while failed navigation retains the visible directory.

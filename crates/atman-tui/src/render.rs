@@ -765,11 +765,19 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     } else {
         app.last_sidebar_popup_rect = None;
     }
-    if let Some(tp_area) = crate::task_panel::compute_task_panel_rect(
+    app.flow_links.clear_hits();
+    if let Some(mut tp_area) = crate::task_panel::compute_task_panel_rect(
         l.transcript,
         show_sidebar,
         app.task_panel_collapsed || app.task_panel_runtime_collapsed,
     ) {
+        if let Some(owner) = app
+            .items
+            .snapshot()
+            .map(|snapshot| snapshot.status.execution.address().clone())
+        {
+            tp_area = app.flow_links.render(f, tp_area, &owner);
+        }
         let hover = crate::task_panel::TaskPanelHover {
             hovered_task_id: app.hovered_task_id.clone(),
             hovered_kill_id: app.hovered_kill_id.clone(),

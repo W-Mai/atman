@@ -449,6 +449,12 @@ pub(crate) async fn run_frames(
                         && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none();
                     let mut clicked = false;
                     if let Some(Ok(CtEvent::Mouse(mouse))) = &key {
+                        if app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
+                            && let Some(flow) = handle.control_tx.as_ref().and_then(|tx| tx.binding()).and_then(|binding| binding.flow.instance())
+                            && let Some(action) = app.app.flow_links.mouse(*mouse, flow) {
+                            app.app.open_flow_hub = Some(action);
+                            continue;
+                        }
                         app.app.flow_hub_hovered = app.app.flow_hub_rect.is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()));
                         clicked = app.app.flow_hub_hovered && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && !app.wm.modals.any_open();
                     }
@@ -1893,7 +1899,15 @@ pub(crate) async fn run_frames(
                 if let Some((ticket, cmd)) = cmd {
                     match cmd {
                         TuiCommand::FlowCatalog { result } => {
-                            if let Some(hub) = hub.as_mut() { hub_history.receive(hub, ticket.as_ref(), result); }
+                            if let Some(hub) = hub.as_mut() {
+                                let accepted = hub.owns_reply(ticket.as_ref()) && result.is_ok();
+                                hub_history.receive(hub, ticket.as_ref(), result);
+                                if accepted
+                                    && let Some(flow) = handle.control_tx.as_ref().and_then(|tx| tx.binding()).and_then(|binding| binding.flow.instance())
+                                    && let Some(snapshot) = hub.neighbors_for(flow) {
+                                    app.app.flow_links.update(snapshot);
+                                }
+                            }
                         }
                         TuiCommand::FlowResolved { flow } => {
                             let Some(hub) = hub.as_mut().filter(|hub| hub.owns_reply(ticket.as_ref())) else { continue; };

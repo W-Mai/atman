@@ -1540,7 +1540,10 @@ pub(crate) fn handle_key(
         KeyAction::MoveItemUp | KeyAction::MoveItemDown => {}
         KeyAction::CyclePanelForward | KeyAction::CyclePanelBackward => {}
         KeyAction::OpenProjectHub => {}
-        KeyAction::OpenRelations => {}
+        KeyAction::OpenRelations => {
+            app.wm
+                .dispatch_meta_command(":links", &mut app.app, control_tx);
+        }
     }
     if edited {
         app.prune_composer_images(editor);
