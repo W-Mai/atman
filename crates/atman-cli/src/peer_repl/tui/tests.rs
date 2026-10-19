@@ -447,13 +447,31 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         .await
         .unwrap();
     assert!(
-        matches!(*directory, FlowHubPage::Watchers(page) if page.owner == watched_owner && page.records.is_empty())
+        matches!(*directory, FlowHubPage::Watchers(page) if page.owner == watched_owner && page.snapshot(&watched_owner).unwrap().records.is_empty())
     );
     assert_eq!(
         host.sessions(),
         vec![ids[0]],
         "watcher inspection cannot attach an executor"
     );
+    let directory = scopes
+        .browse(HubRequest::WatchCatalog {
+            owner: watched_owner.clone(),
+            after: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(*directory, FlowHubPage::Watchers(page) if page.snapshot(&watched_owner).is_some())
+    );
+    assert_eq!(
+        host.sessions(),
+        vec![ids[0]],
+        "global watcher discovery cannot attach execution"
+    );
+    let after_global = host.session(ids[0]).unwrap().observe().await.unwrap();
+    assert_eq!(before.snapshot.cursor, after_global.snapshot.cursor);
+    assert_eq!(before.loaded.len(), after_global.loaded.len());
     let directory = scopes
         .browse(HubRequest::Relations {
             session: ids[0],

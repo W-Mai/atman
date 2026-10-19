@@ -738,13 +738,15 @@ mod tests {
             digest: "test".into(),
         };
         let watchers = || {
-            Box::new(FlowHubPage::Watchers(WatchDirectory {
-                owner: owner.clone(),
-                title: "WatchHub".into(),
-                cursor: receipt.clone(),
-                trailing_bytes: 0,
-                records: vec![],
-            }))
+            Box::new(FlowHubPage::Watchers(WatchDirectory::flow(
+                owner.clone(),
+                atman_runtime::flow_runtime::catalog::WatchCatalogSnapshot {
+                    title: "WatchHub".into(),
+                    cursor: receipt.clone(),
+                    trailing_bytes: 0,
+                    records: vec![],
+                },
+            )))
         };
         let flows = || {
             Box::new(FlowHubPage::Flows {

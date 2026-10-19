@@ -50,6 +50,7 @@ pub(crate) enum Action {
 pub(crate) struct FlowHub {
     create_watch: Option<create::Draft>,
     watch_details: watch::Details,
+    watch_refresh: Option<atman_runtime::flow_store::FlowRef>,
     pub pending: Option<ControlTicket>,
     page: Option<FlowHubPage>,
     rows: Vec<page::Row>,
@@ -137,6 +138,7 @@ impl History {
             .retain(|saved| saved.page.as_ref().unwrap().first() != directory);
         // Accepted host work continues, but its late reply no longer owns navigation.
         hub.pending = None;
+        hub.watch_refresh = None;
         hub.requested_index = None;
         self.pages.push(hub);
     }
@@ -179,6 +181,9 @@ impl FlowHub {
             .and_then(|page| NeighborSnapshot::from_page(page, flow))
     }
     pub fn leaves_directory(&self, request: &HubRequest) -> bool {
+        if self.watch_refresh.is_some() {
+            return false;
+        }
         self.page
             .as_ref()
             .is_some_and(|page| page.first() != request.first())
@@ -203,6 +208,29 @@ impl FlowHub {
         self.pending = None;
         match result {
             Ok(mut page) => {
+                if let Some(owner) = self.watch_refresh.take() {
+                    let result = match (&mut self.page, &mut *page) {
+                        (Some(FlowHubPage::Watchers(current)), FlowHubPage::Watchers(incoming))
+                            if incoming.owner == owner =>
+                        {
+                            current.refresh_owner(incoming)
+                        }
+                        _ => Err("Watcher refresh returned a different owner".into()),
+                    };
+                    match result {
+                        Ok(()) => {
+                            self.rows = self.page.as_ref().unwrap().rows(None, self.endpoint);
+                            self.selected =
+                                self.selected.min(self.filtered().len().saturating_sub(1));
+                            self.offset = self.offset.min(self.selected);
+                            self.hits.clear();
+                            self.float_hits.clear();
+                            self.error = None;
+                        }
+                        Err(error) => self.failed(error),
+                    }
+                    return;
+                }
                 if let Err(error) = page.append_catalog(self.page.as_mut()) {
                     self.failed(error);
                     return;
@@ -263,6 +291,7 @@ impl FlowHub {
                 self.error = None;
             }
             Err(error) => {
+                self.watch_refresh = None;
                 self.requested_index = None;
                 self.error = Some(error);
             }
@@ -270,6 +299,7 @@ impl FlowHub {
     }
 
     pub fn failed(&mut self, message: String) {
+        self.watch_refresh = None;
         self.pending = None;
         self.requested_index = None;
         self.error = Some(message);
@@ -354,12 +384,12 @@ impl FlowHub {
                 }
             };
         }
-        if let Some(page::RowKey::Watcher { id, .. }) = self
+        if let Some(page::RowKey::Watcher { owner, id }) = self
             .filtered()
             .get(self.selected)
             .map(|index| &self.rows[*index].key)
         {
-            self.watch_details.open(*id);
+            self.watch_details.open(owner.clone(), *id);
             Action::None
         } else {
             self.focus()
@@ -367,12 +397,15 @@ impl FlowHub {
     }
 
     fn detail_action(&mut self, action: Action) -> Action {
-        if matches!(action, Action::CancelWatcher { .. }) {
+        if let Action::CancelWatcher { owner, .. } = &action {
             if self.pending.is_some() {
                 return Action::None;
             }
             self.error = None;
             self.watch_details.feedback();
+            if matches!(&self.page, Some(FlowHubPage::Watchers(directory)) if directory.global()) {
+                self.watch_refresh = Some(owner.clone());
+            }
         }
         action
     }
@@ -484,6 +517,21 @@ impl FlowHub {
             return Action::None;
         }
         match key {
+            KeyAction::NudgePrefill if matches!(self.page, Some(FlowHubPage::Watchers(_))) => {
+                let Some(FlowHubPage::Watchers(directory)) = &self.page else {
+                    unreachable!()
+                };
+                return Action::Load(if directory.global() {
+                    HubRequest::Watchers {
+                        owner: directory.owner.clone(),
+                    }
+                } else {
+                    HubRequest::WatchCatalog {
+                        owner: directory.owner.clone(),
+                        after: None,
+                    }
+                });
+            }
             KeyAction::CoursePrefill if matches!(self.page, Some(FlowHubPage::Watchers(_))) => {
                 let Some(FlowHubPage::Watchers(directory)) = &self.page else {
                     unreachable!()
@@ -658,13 +706,15 @@ impl FlowHub {
                     KeyAction::Save
                 },
             ),
-            MouseEventKind::Down(MouseButton::Left) if self.relations.contains(point) => self.key(
-                if matches!(self.page, Some(FlowHubPage::Relations { .. })) {
+            MouseEventKind::Down(MouseButton::Left) if self.relations.contains(point) => {
+                self.key(if matches!(self.page, Some(FlowHubPage::Watchers(_))) {
+                    KeyAction::NudgePrefill
+                } else if matches!(self.page, Some(FlowHubPage::Relations { .. })) {
                     KeyAction::Tab
                 } else {
                     KeyAction::OpenRelations
-                },
-            ),
+                })
+            }
             MouseEventKind::ScrollDown => self.key(KeyAction::HistoryDown),
             MouseEventKind::ScrollUp => self.key(KeyAction::HistoryUp),
             MouseEventKind::Down(MouseButton::Left) if self.previous.contains(point) => {
@@ -778,7 +828,7 @@ impl FlowHub {
             button_width,
             3,
         );
-        self.relations = if (is_flows || is_relations) && !picking {
+        self.relations = if (is_flows || is_relations || is_watchers) && !picking {
             Rect::new(
                 content.x + width / 2 + 1,
                 content.y + 5,
@@ -816,7 +866,14 @@ impl FlowHub {
             (self.refresh, "\nRefresh  Ctrl+R", self.refresh_hovered),
             (
                 self.relations,
-                if is_relations {
+                if is_watchers {
+                    if matches!(&self.page, Some(FlowHubPage::Watchers(directory)) if directory.global())
+                    {
+                        "\nThis Flow Ctrl+G"
+                    } else {
+                        "\nGlobal Ctrl+G"
+                    }
+                } else if is_relations {
                     self.endpoint.label()
                 } else if width < 72 {
                     "\nLinks Ctrl+⇧G"
@@ -870,7 +927,7 @@ impl FlowHub {
                 4
             };
         frame.render_widget(
-            Paragraph::new(format!("Search this page: {}", self.query)).style(muted),
+            Paragraph::new(format!("Search {}: {}", if matches!(&self.page, Some(FlowHubPage::Watchers(directory)) if directory.global()) { "loaded records" } else { "this page" }, self.query)).style(muted),
             Rect::new(content.x, search_y, width, 1),
         );
         let rows_y = search_y + 2;
@@ -951,6 +1008,8 @@ impl FlowHub {
             frame.render_widget(
                 Paragraph::new(if picking && matches!(row.action, Action::Focus(_)) {
                     "\nSelect Enter"
+                } else if matches!(row.key, page::RowKey::WatchFailure { .. }) {
+                    "\nUnavailable"
                 } else if is_watchers {
                     "\nDetails Enter"
                 } else if matches!(row.action, Action::Focus(_)) {
@@ -991,9 +1050,14 @@ impl FlowHub {
                     rows.len()
                 )
             } else if is_watchers {
+                let Some(FlowHubPage::Watchers(directory)) = &self.page else {
+                    unreachable!()
+                };
                 format!(
-                    "Recorded snapshot · {total} subscriptions · {} matches",
-                    rows.len()
+                    "Page {}/{} · {}",
+                    self.selected / visible.max(1) + 1,
+                    rows.len().div_ceil(visible.max(1)).max(1),
+                    directory.status(rows.len(), width < 90)
                 )
             } else if is_relations {
                 match &self.page {
@@ -1067,11 +1131,21 @@ impl FlowHub {
                 rect,
             );
         }
+        if let Some(FlowHubPage::Watchers(directory)) = &self.page {
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "New recipient: {}",
+                    page::short_flow(&directory.owner)
+                ))
+                .style(muted),
+                Rect::new(content.x, footer + 4, width, 1),
+            );
+        }
         frame.render_widget(
             Paragraph::new(if picking {
                 "↑↓ select · Enter choose · Ctrl+B sources · Esc back"
             } else if is_watchers {
-                "↑↓ select · Enter details · Ctrl+B new · Esc back"
+                "↑↓ select · Enter details · Ctrl+B new · Ctrl+G scope · Esc back"
             } else if is_flows {
                 "↑↓ select · Enter open · Ctrl+O window · Ctrl+G graph/list · Esc back"
             } else if is_relations {

@@ -741,22 +741,33 @@ impl scopes::Scopes {
             FlowHubPage, HubRequest, PAGE_SIZE, RelationProgress, RelationRange,
         };
         Ok(Box::new(match request {
+            HubRequest::WatchCatalog { owner, after } => {
+                let page = self
+                    .catalog
+                    .watch_page(after.clone(), 8, |_| Ok(true), |_| Ok(()))
+                    .await?;
+                FlowHubPage::Watchers(atman_tui::flow_hub::WatchDirectory::catalog(
+                    owner, after, page,
+                ))
+            }
             HubRequest::ProcessSources { owner } => {
                 let sources = self.process_watch_sources(&owner).await?;
                 FlowHubPage::ProcessSources { owner, sources }
             }
             HubRequest::Watchers { owner } => {
                 let inspected = self.catalog.inspect_flow(&owner, |_| Ok(())).await?;
-                FlowHubPage::Watchers(atman_tui::flow_hub::WatchDirectory {
-                    title: format!("WatchHub / {}", inspected.descriptor.content.title()),
+                FlowHubPage::Watchers(atman_tui::flow_hub::WatchDirectory::flow(
                     owner,
-                    cursor: inspected
-                        .journal
-                        .cursor
-                        .ok_or_else(|| anyhow::anyhow!("flow journal has no creation"))?,
-                    trailing_bytes: inspected.journal.trailing_bytes,
-                    records: inspected.watchers,
-                })
+                    atman_runtime::flow_runtime::catalog::WatchCatalogSnapshot {
+                        title: inspected.descriptor.content.title().into(),
+                        cursor: inspected
+                            .journal
+                            .cursor
+                            .ok_or_else(|| anyhow::anyhow!("flow journal has no creation"))?,
+                        trailing_bytes: inspected.journal.trailing_bytes,
+                        records: inspected.watchers,
+                    },
+                ))
             }
             HubRequest::Sessions { before } => FlowHubPage::Sessions(
                 directory::sessions(&self.catalog, &self.root, before, PAGE_SIZE).await?,

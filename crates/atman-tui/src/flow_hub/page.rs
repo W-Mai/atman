@@ -68,6 +68,10 @@ pub struct RelationProgress {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
+    WatchCatalog {
+        owner: atman_runtime::flow_store::FlowRef,
+        after: Option<atman_runtime::flow_runtime::catalog::WatchCatalogCursor>,
+    },
     ProcessSources {
         owner: atman_runtime::flow_store::FlowRef,
     },
@@ -95,6 +99,10 @@ pub enum HubRequest {
 impl HubRequest {
     pub(super) fn first(&self) -> Self {
         match self {
+            Self::WatchCatalog { owner, .. } => Self::WatchCatalog {
+                owner: owner.clone(),
+                after: None,
+            },
             Self::Watchers { .. } | Self::ProcessSources { .. } => self.clone(),
             Self::Sessions { .. } => Self::Sessions { before: None },
             Self::Flows { session, .. } => Self::Flows {
@@ -187,6 +195,10 @@ impl Endpoint {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum RowKey {
+    WatchFailure {
+        session: Uuid,
+        flow: Option<FlowInstanceId>,
+    },
     Process(atman_runtime::flow_store::process_watch::ProcessSource),
     Watcher {
         owner: atman_runtime::flow_store::FlowRef,
@@ -205,6 +217,12 @@ pub(super) enum RowKey {
 impl FlowHubPage {
     /// Append only the next requested catalog batch; refresh replaces the snapshot.
     pub(super) fn append_catalog(&mut self, previous: Option<&mut Self>) -> Result<(), String> {
+        if let Self::Watchers(directory) = self {
+            return directory.append(match previous {
+                Some(Self::Watchers(old)) => Some(old),
+                _ => None,
+            });
+        }
         let Self::Relations {
             range: RelationRange::Catalog {
                 before: Some(before),
@@ -266,9 +284,7 @@ impl FlowHubPage {
             Self::ProcessSources { owner, .. } => HubRequest::ProcessSources {
                 owner: owner.clone(),
             },
-            Self::Watchers(directory) => HubRequest::Watchers {
-                owner: directory.owner.clone(),
-            },
+            Self::Watchers(directory) => directory.first(),
             Self::Sessions(_) => HubRequest::Sessions { before: None },
             Self::Flows { session, .. } => HubRequest::Flows {
                 session: *session,
@@ -293,7 +309,8 @@ impl FlowHubPage {
     }
     pub fn next(&self) -> Option<HubRequest> {
         match self {
-            Self::Watchers(_) | Self::ProcessSources { .. } => None,
+            Self::Watchers(directory) => directory.next(),
+            Self::ProcessSources { .. } => None,
             Self::Sessions(page) => page.next.clone().map(|before| HubRequest::Sessions {
                 before: Some(before),
             }),
@@ -329,7 +346,7 @@ impl FlowHubPage {
     pub fn total(&self) -> usize {
         match self {
             Self::ProcessSources { sources, .. } => sources.len(),
-            Self::Watchers(directory) => directory.records.len(),
+            Self::Watchers(directory) => directory.total(),
             Self::Sessions(page) => page.total,
             Self::Flows { page, .. } => page.total,
             Self::LegacyFlows { total, .. } => *total,
