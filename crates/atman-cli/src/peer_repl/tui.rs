@@ -712,6 +712,19 @@ impl scopes::Scopes {
             FlowHubPage, HubRequest, PAGE_SIZE, RelationProgress, RelationRange,
         };
         Ok(Box::new(match request {
+            HubRequest::Watchers { owner } => {
+                let inspected = self.catalog.inspect_flow(&owner, |_| Ok(())).await?;
+                FlowHubPage::Watchers(atman_tui::flow_hub::WatchDirectory {
+                    title: format!("WatchHub / {}", inspected.descriptor.content.title()),
+                    owner,
+                    cursor: inspected
+                        .journal
+                        .cursor
+                        .ok_or_else(|| anyhow::anyhow!("flow journal has no creation"))?,
+                    trailing_bytes: inspected.journal.trailing_bytes,
+                    records: inspected.watchers,
+                })
+            }
             HubRequest::Sessions { before } => FlowHubPage::Sessions(
                 directory::sessions(&self.catalog, &self.root, before, PAGE_SIZE).await?,
             ),

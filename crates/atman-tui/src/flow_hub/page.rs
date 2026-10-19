@@ -68,6 +68,9 @@ pub struct RelationProgress {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
+    Watchers {
+        owner: atman_runtime::flow_store::FlowRef,
+    },
     Sessions {
         before: Option<SessionTarget>,
     },
@@ -89,6 +92,7 @@ pub enum HubRequest {
 impl HubRequest {
     pub(super) fn first(&self) -> Self {
         match self {
+            Self::Watchers { .. } => self.clone(),
             Self::Sessions { .. } => Self::Sessions { before: None },
             Self::Flows { session, .. } => Self::Flows {
                 session: *session,
@@ -115,6 +119,7 @@ impl HubRequest {
 }
 
 pub enum FlowHubPage {
+    Watchers(super::WatchDirectory),
     Sessions(SessionDirectory),
     Flows {
         session: Uuid,
@@ -175,6 +180,10 @@ impl Endpoint {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum RowKey {
+    Watcher {
+        owner: atman_runtime::flow_store::FlowRef,
+        id: Uuid,
+    },
     Session(SessionTarget),
     Flow(crate::control::ViewAddress),
     Relation {
@@ -227,6 +236,7 @@ impl FlowHubPage {
 
     pub fn title(&self) -> &str {
         match self {
+            Self::Watchers(directory) => &directory.title,
             Self::Sessions(_) => "Sessions",
             Self::Flows { title, .. }
             | Self::LegacyFlows { title, .. }
@@ -235,6 +245,7 @@ impl FlowHubPage {
     }
     pub fn unit(&self) -> &str {
         match self {
+            Self::Watchers(_) => "subscriptions",
             Self::Sessions(_) => "sessions",
             Self::Flows { .. } | Self::LegacyFlows { .. } => "flows",
             Self::Relations { .. } => "relations",
@@ -242,6 +253,9 @@ impl FlowHubPage {
     }
     pub fn first(&self) -> HubRequest {
         match self {
+            Self::Watchers(directory) => HubRequest::Watchers {
+                owner: directory.owner.clone(),
+            },
             Self::Sessions(_) => HubRequest::Sessions { before: None },
             Self::Flows { session, .. } => HubRequest::Flows {
                 session: *session,
@@ -266,6 +280,7 @@ impl FlowHubPage {
     }
     pub fn next(&self) -> Option<HubRequest> {
         match self {
+            Self::Watchers(_) => None,
             Self::Sessions(page) => page.next.clone().map(|before| HubRequest::Sessions {
                 before: Some(before),
             }),
@@ -300,6 +315,7 @@ impl FlowHubPage {
     }
     pub fn total(&self) -> usize {
         match self {
+            Self::Watchers(directory) => directory.records.len(),
             Self::Sessions(page) => page.total,
             Self::Flows { page, .. } => page.total,
             Self::LegacyFlows { total, .. } => *total,
@@ -312,6 +328,7 @@ impl FlowHubPage {
         endpoint: Endpoint,
     ) -> Vec<Row> {
         match self {
+            Self::Watchers(directory) => directory.rows(),
             Self::LegacyFlows { session, flows, .. } => flows
                 .iter()
                 .map(|owner| {

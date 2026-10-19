@@ -799,6 +799,7 @@ impl WindowManager {
                 id,
                 PaletteEntryId::OpenFlowHub
                     | PaletteEntryId::OpenFlowLinks
+                    | PaletteEntryId::OpenWatchHub
                     | PaletteEntryId::ToggleActivity
                     | PaletteEntryId::OpenManagement
                     | PaletteEntryId::SwitchSession
@@ -905,21 +906,27 @@ impl WindowManager {
                     );
                 }
             }
-            PaletteEntryId::OpenFlowLinks => {
+            PaletteEntryId::OpenFlowLinks | PaletteEntryId::OpenWatchHub => {
                 if let Some(flow) = control_tx
                     .and_then(|tx| tx.binding())
                     .and_then(|binding| binding.flow.instance())
                 {
                     app.open_flow_hub = Some(crate::flow_hub::Action::Load(
-                        crate::flow_hub::HubRequest::Relations {
-                            session: flow.session_id.0,
-                            focus: Some(flow.clone()),
-                            range: crate::flow_hub::RelationRange::Session,
+                        if id == PaletteEntryId::OpenWatchHub {
+                            crate::flow_hub::HubRequest::Watchers {
+                                owner: flow.clone(),
+                            }
+                        } else {
+                            crate::flow_hub::HubRequest::Relations {
+                                session: flow.session_id.0,
+                                focus: Some(flow.clone()),
+                                range: crate::flow_hub::RelationRange::Session,
+                            }
                         },
                     ));
                 } else {
                     app.push_toast(
-                        "Flow links require a persistent instance",
+                        "Flow inspection requires a persistent instance",
                         crate::app::NoteLevel::Info,
                         std::time::Duration::from_secs(4),
                         crate::app::ToastPosition::BottomRight,
@@ -1696,6 +1703,19 @@ mod tests {
             );
             assert!(
                 matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Relations {focus:Some(target), ..})) if target == flow)
+            );
+            assert!(incoming.try_recv().is_err());
+            assert!(wm.dispatch_meta_command(":watchers", &mut app, Some(&tx)));
+            assert!(
+                matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Watchers { owner })) if owner == flow)
+            );
+            wm.apply_palette_action(
+                crate::palette::PaletteEntryId::OpenWatchHub,
+                &mut app,
+                Some(&tx),
+            );
+            assert!(
+                matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Watchers { owner })) if owner == flow)
             );
             assert!(incoming.try_recv().is_err());
         }

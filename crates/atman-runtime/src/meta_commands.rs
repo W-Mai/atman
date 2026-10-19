@@ -200,6 +200,12 @@ pub const META_COMMANDS: &[MetaCommand] = &[
         aliases: &[],
     },
     MetaCommand {
+        name: "watchers",
+        desc: "inspect the focused flow's subscriptions and notification progress",
+        usage: ":watchers",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "atman",
         desc: "open the profile management session",
         usage: ":atman",

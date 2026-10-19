@@ -13,6 +13,7 @@ use crate::keys::KeyAction;
 pub enum PaletteEntryId {
     OpenFlowHub,
     OpenFlowLinks,
+    OpenWatchHub,
     ToggleActivity,
     OpenManagement,
     SwitchSession,
@@ -113,6 +114,13 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         label: "Toggle Activity",
         hint: "Switch Overview / Activity (Ctrl+Shift+A)",
         keyword: "activity tasks processes overview",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::OpenWatchHub,
+        group: "Session",
+        label: "WatchHub",
+        hint: "Inspect this flow's subscriptions and notification progress",
+        keyword: "watchers subscriptions watch hub notifications",
     },
     PaletteEntry {
         id: PaletteEntryId::OpenManagement,
@@ -259,6 +267,7 @@ impl PaletteEntryId {
         match self {
             Self::OpenFlowHub => "flows",
             Self::OpenFlowLinks => "links",
+            Self::OpenWatchHub => "watchers",
             Self::ToggleActivity => "activity",
             Self::OpenManagement => "atman",
             Self::SwitchSession => "sessions",

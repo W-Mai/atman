@@ -18,9 +18,11 @@ mod focus;
 mod graph;
 pub(crate) use focus::{FocusLinks, NeighborSnapshot};
 mod page;
+mod watch;
 pub use page::{
     FlowHubPage, HubRequest, RelationProgress, RelationRange, SessionDirectory, SessionRow,
 };
+pub use watch::WatchDirectory;
 
 #[derive(Clone)]
 pub(crate) enum Action {
@@ -36,6 +38,7 @@ pub(crate) enum Action {
 
 #[derive(Default)]
 pub(crate) struct FlowHub {
+    watch_details: watch::Details,
     pub pending: Option<ControlTicket>,
     page: Option<FlowHubPage>,
     rows: Vec<page::Row>,
@@ -200,6 +203,7 @@ impl FlowHub {
                 }
                 self.rows = page.rows(None, self.endpoint);
                 if changed_directory || changed_page {
+                    self.watch_details = watch::Details::default();
                     self.graph = graph::Layout::default();
                 }
                 if matches!(*page, FlowHubPage::Flows { .. }) {
@@ -284,11 +288,27 @@ impl FlowHub {
         }
     }
 
+    fn activate(&mut self) -> Action {
+        if let Some(page::RowKey::Watcher { id, .. }) = self
+            .filtered()
+            .get(self.selected)
+            .map(|index| &self.rows[*index].key)
+        {
+            self.watch_details.open(*id);
+            Action::None
+        } else {
+            self.focus()
+        }
+    }
+
     fn page(&mut self, forward: bool) -> Action {
         if self.pending.is_some() {
             return Action::None;
         }
-        if matches!(self.page, Some(FlowHubPage::Relations { .. })) {
+        if matches!(
+            self.page,
+            Some(FlowHubPage::Relations { .. } | FlowHubPage::Watchers(_))
+        ) {
             let step = self.hits.len().max(1);
             if forward
                 && self.selected + step >= self.filtered().len()
@@ -323,6 +343,9 @@ impl FlowHub {
     }
 
     pub fn key(&mut self, key: KeyAction) -> Action {
+        if self.watch_details.id.is_some() {
+            return self.watch_details.key(key);
+        }
         if key == KeyAction::Escape {
             if let Some(FlowHubPage::Relations { session, .. }) = self.page {
                 return Action::Load(HubRequest::Flows {
@@ -435,7 +458,7 @@ impl FlowHub {
                     _ => Action::None,
                 };
             }
-            KeyAction::Submit => return self.focus(),
+            KeyAction::Submit => return self.activate(),
             KeyAction::ToggleLastTool => return self.float(),
             KeyAction::HistoryUp => self.selected = self.selected.saturating_sub(1),
             KeyAction::HistoryDown => {
@@ -459,6 +482,9 @@ impl FlowHub {
     }
 
     pub fn mouse(&mut self, event: MouseEvent) -> Action {
+        if self.watch_details.id.is_some() {
+            return self.watch_details.mouse(event);
+        }
         let point = (event.column, event.row).into();
         self.sessions_hovered = self.sessions.contains(point);
         self.relations_hovered = self.relations.contains(point);
@@ -507,11 +533,15 @@ impl FlowHub {
                     .find(|(rect, _)| rect.contains(point))
                 {
                     self.selected = *index;
-                    return self.float();
+                    return if matches!(self.page, Some(FlowHubPage::Watchers(_))) {
+                        self.activate()
+                    } else {
+                        self.float()
+                    };
                 }
                 if let Some(index) = self.hovered {
                     self.selected = index;
-                    self.focus()
+                    self.activate()
                 } else {
                     Action::None
                 }
@@ -527,6 +557,12 @@ impl FlowHub {
             Paragraph::new("").style(Style::default().bg(t.panel_bg.into())),
             area,
         );
+        if self.watch_details.id.is_some()
+            && let Some(FlowHubPage::Watchers(directory)) = &self.page
+        {
+            self.watch_details.render(frame, area, directory);
+            return;
+        }
         if area.width < 40 || area.height < 24 {
             frame.render_widget(Paragraph::new("FlowHub needs 40×24 · Esc back"), area);
             self.hits.clear();
@@ -552,6 +588,7 @@ impl FlowHub {
         let session = self.page.as_ref().map_or("Loading", FlowHubPage::title);
         let is_flows = matches!(self.page, Some(FlowHubPage::Flows { .. }));
         let is_relations = matches!(self.page, Some(FlowHubPage::Relations { .. }));
+        let is_watchers = matches!(self.page, Some(FlowHubPage::Watchers(_)));
         let scoped_links = matches!(
             self.page,
             Some(FlowHubPage::Relations { focus: Some(_), .. })
@@ -733,7 +770,9 @@ impl FlowHub {
             );
             let open = Rect::new(rect.right().saturating_sub(20), rect.y, 18, 3);
             frame.render_widget(
-                Paragraph::new(if matches!(row.action, Action::Focus(_)) {
+                Paragraph::new(if is_watchers {
+                    "\nDetails Enter"
+                } else if matches!(row.action, Action::Focus(_)) {
                     "\nWindow Ctrl+O"
                 } else {
                     "\nFlows  Enter"
@@ -754,7 +793,7 @@ impl FlowHub {
             );
             self.hits.push((rect, pos));
         }
-        let total = if is_relations {
+        let total = if is_relations || is_watchers {
             self.rows.len()
         } else {
             self.page.as_ref().map_or(0, FlowHubPage::total)
@@ -763,6 +802,11 @@ impl FlowHub {
         let message = self.error.clone().unwrap_or_else(|| {
             if self.pending.is_some() {
                 "Loading…".into()
+            } else if is_watchers {
+                format!(
+                    "Recorded snapshot · {total} subscriptions · {} matches",
+                    rows.len()
+                )
             } else if is_relations {
                 match &self.page {
                     Some(FlowHubPage::Relations {
@@ -809,7 +853,7 @@ impl FlowHub {
         for (rect, label) in [
             (
                 self.previous,
-                if is_relations {
+                if is_relations || is_watchers {
                     "\n‹ Earlier PgUp"
                 } else {
                     "\n‹ Previous  PgUp"
@@ -817,7 +861,7 @@ impl FlowHub {
             ),
             (
                 self.next,
-                if is_relations {
+                if is_relations || is_watchers {
                     if self.page.as_ref().and_then(FlowHubPage::next).is_some() {
                         "\nMore PgDn ›"
                     } else {
@@ -836,7 +880,9 @@ impl FlowHub {
             );
         }
         frame.render_widget(
-            Paragraph::new(if is_flows {
+            Paragraph::new(if is_watchers {
+                "↑↓ select · Enter details · PgUp/PgDn scroll · Esc back"
+            } else if is_flows {
                 "↑↓ select · Enter open · Ctrl+O window · Ctrl+G graph/list · Esc back"
             } else if is_relations {
                 "↑↓ select · Tab endpoint · Enter open · Ctrl+O window · Esc flows"
