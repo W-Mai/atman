@@ -6,7 +6,7 @@ use tokio::sync::watch;
 use super::{FlowWorker, InstanceStatus};
 use crate::{
     event_log::journal::{CommitReceipt, JournalPage},
-    flow_store::{inbox::AcceptedEnvelope, planning::PlanningSnapshot, view::FlowUpdate},
+    flow_store::{inbox::InboxEntry, planning::PlanningSnapshot, view::FlowUpdate},
     projection::flow::FlowTranscript,
 };
 
@@ -15,7 +15,7 @@ use crate::{
 pub struct FlowViewSnapshot {
     pub status: InstanceStatus,
     pub planning: PlanningSnapshot,
-    pub pending: Vec<AcceptedEnvelope>,
+    pub pending: Vec<InboxEntry>,
 }
 
 /// Conversation and state from the same committed boundary, shared by all kinds of flow views.
@@ -170,7 +170,7 @@ impl FlowWorker {
             Ok(FlowViewSnapshot {
                 status: InstanceStatus::from_store(store),
                 planning: store.planning().clone(),
-                pending: store.pending_inputs().cloned().collect(),
+                pending: store.pending_input_entries().cloned().collect(),
             })
         })
         .await

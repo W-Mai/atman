@@ -1176,6 +1176,11 @@ impl FlowStore {
         self.inbox.pending()
     }
 
+    /// Pending entries in delivery order, including their current edit revisions.
+    pub fn pending_input_entries(&self) -> impl Iterator<Item = &InboxEntry> {
+        self.inbox.pending_entries()
+    }
+
     /// Authenticate the sender before this call; authorize only new delivery after checking accepted retries.
     pub fn accept_input(
         &mut self,

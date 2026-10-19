@@ -30,6 +30,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Inbox host controls** — Pending-input edits share the instance owner and view snapshot. Direct insertion checks the active invocation's settings; image input waits for a capable model call. Receipt retries do not consume input or trigger another scheduling notification.
+
 - **Durable inbox editing** — Storage supports versioned replacement, ordering, and cancellation of pending user input. Edits preserve original delivery receipts and invocation settings, reject active reservations and stale revisions, and replay atomically after restart.
 
 - **WatchHub editing** — Main and floating views can edit subscription sources, conditions, delivery mode, and expiry through a shared form. Failed saves retain the draft, unchanged deadlines stay fixed, and global-directory edits preserve filtering and recipient identity.

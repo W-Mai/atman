@@ -436,15 +436,21 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
  {
     use atman_runtime::flow_runtime::FlowWorker;
     use atman_runtime::message::MessageOrigin;
-    let _registry = common::ModelRegistryGuard::mock("mock").await;
+    let mut text_model = common::model_for_provider("mock-text", "mock", 8_192, None);
+    text_model.1.input_modalities = vec![atman_runtime::provider::InputModality::Text];
+    let _registry = common::ModelRegistryGuard::acquire(common::config([
+        common::mock_model("mock"),
+        text_model,
+    ]))
+    .await;
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();
     let info = session_descriptor();
     let mut session = root.create_session(info.clone()).unwrap();
     let mut description = descriptor(info.id);
     description.entry_mut().unwrap().bundle.sources.insert("entry:main.at".into(), r#"
-        flow shared() {
-            llm.call(model: "mock", prompt: "shared", context: "session", record: false)
+        flow shared(model: string) {
+            llm.call(model: model, prompt: "shared", context: "session", record: false)
         }
         flow branch() {
             llm.call(model: "mock", prompt: "branch", context: "session", record: false)
@@ -454,8 +460,8 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
             llm.extract(model: "mock", prompt: "extract", context: "session", fields: { value: string -- "value" })
             fanout [branch()]
             llm.call(model: "mock", prompt: "isolated", context: "none", record: false)
-            shared().await
-            shared().await
+            shared("mock-text").await
+            shared("mock").await
             return final.answer(message: "finished")
         }
     "#.into());
@@ -504,13 +510,14 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
         .unwrap();
     let mut accepted = Vec::new();
     let mut pending = Vec::new();
+    let mut successful_edit = None;
     for (text, mode, marker) in [
         ("boundary-one", DeliveryMode::AtBoundary, None),
-        ("boundary-two", DeliveryMode::AtBoundary, Some("recorded")),
+        ("boundary-two", DeliveryMode::NextTurn, Some("recorded")),
         ("next-turn-only", DeliveryMode::NextTurn, None),
         (
             "different-config",
-            DeliveryMode::AtBoundary,
+            DeliveryMode::NextTurn,
             Some("different"),
         ),
     ] {
@@ -530,13 +537,91 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
                 invocation: [("marker".into(), serde_json::json!(marker))].into(),
             };
         }
-        let receipt = worker.accept_input(request, |_| Ok(())).await.unwrap();
+        let receipt = worker
+            .accept_input(request.clone(), |_| Ok(()))
+            .await
+            .unwrap();
+        if let InboxPayload::UserSubmission { content, .. } = &request.payload {
+            let edit = atman_runtime::flow_store::inbox::InboxEditRequest {
+                id: Uuid::new_v4(),
+                sender: request.sender.clone(),
+                message: receipt.message_id,
+                expected: receipt.receipt.clone(),
+                change: atman_runtime::flow_store::inbox::InboxChange::Replace {
+                    content: content.clone(),
+                    delivery: DeliveryMode::AtBoundary,
+                },
+            };
+            let before = worker.view_snapshot().await.unwrap();
+            let outcome = worker.edit_input(edit.clone(), |_| Ok(())).await;
+            let after = worker.view_snapshot().await.unwrap();
+            assert_eq!(after.status.execution, before.status.execution);
+            let entry = after
+                .pending
+                .iter()
+                .find(|entry| entry.envelope.id == receipt.message_id)
+                .unwrap();
+            if text == "boundary-two" {
+                let committed = outcome.unwrap();
+                assert_eq!(entry.revision, committed);
+                assert_eq!(entry.acceptance.receipt, receipt.receipt);
+                assert_eq!(entry.envelope.request.delivery, DeliveryMode::AtBoundary);
+                successful_edit = Some((edit, committed));
+            } else {
+                assert!(
+                    outcome
+                        .unwrap_err()
+                        .to_string()
+                        .contains("invocation settings")
+                );
+                assert_eq!(after.status.cursor, before.status.cursor);
+                assert_eq!(entry.envelope.request.delivery, DeliveryMode::NextTurn);
+            }
+        }
         if text.starts_with("boundary") {
             accepted.push(receipt.message_id);
         } else {
             pending.push(receipt.message_id);
         }
     }
+    let image_content = atman_runtime::flow_store::inbox::UserContent {
+        text: "image-boundary".into(),
+        images: vec![atman_runtime::message::ImageSource {
+            media_type: "image/png".into(),
+            data: atman_runtime::message::ImageData::Base64 { data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7p8AAAAASUVORK5CYII=".into() },
+            detail: Default::default(),
+        }],
+        presentation: None,
+    };
+    let mut image_request = delivery(
+        &description.address,
+        SenderIdentity::User(Uuid::new_v4()),
+        "",
+    );
+    image_request.delivery = DeliveryMode::NextTurn;
+    image_request.payload = InboxPayload::UserSubmission {
+        content: image_content.clone(),
+        invocation: BTreeMap::new(),
+    };
+    let image_input = worker
+        .accept_input(image_request.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    let image_edit = atman_runtime::flow_store::inbox::InboxEditRequest {
+        id: Uuid::new_v4(),
+        sender: image_request.sender,
+        message: image_input.message_id,
+        expected: image_input.receipt,
+        change: atman_runtime::flow_store::inbox::InboxChange::Replace {
+            content: image_content,
+            delivery: DeliveryMode::AtBoundary,
+        },
+    };
+    let (left, right) = tokio::join!(
+        worker.edit_input(image_edit.clone(), |_| Ok(())),
+        worker.edit_input(image_edit, |_| Ok(()))
+    );
+    assert_eq!(left.unwrap(), right.unwrap());
     let peer = descriptor(info.id).address;
     let peer_receipt = worker
         .accept_input(
@@ -564,9 +649,37 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
         .unwrap()
         .unwrap();
     assert!(done.result.is_ok(), "{:?}", done.result);
+    let (edit, edit_receipt) = successful_edit.unwrap();
+    let mut changes = worker.subscribe_commits();
+    changes.borrow_and_update();
+    assert_eq!(
+        worker.edit_input(edit.clone(), |_| Ok(())).await.unwrap(),
+        edit_receipt
+    );
+    assert!(
+        !changes.has_changed().unwrap(),
+        "edit receipt retry must not wake scheduling"
+    );
+    assert!(
+        worker
+            .edit_input(edit, |_| Err(std::io::Error::other("revoked")))
+            .await
+            .is_err()
+    );
     let requests = provider.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 5);
     for (index, request) in requests.iter().enumerate() {
+        let images: Vec<_> = request
+            .messages
+            .iter()
+            .flat_map(|message| message.parts.iter())
+            .filter(|part| matches!(part, atman_runtime::message::MessagePart::Image { .. }))
+            .collect();
+        assert_eq!(
+            images.len(),
+            usize::from(index == 4),
+            "images must wait for a capable shared call"
+        );
         for text in ["boundary-one", "boundary-two", "peer-not-user"] {
             let messages: Vec<_> = request
                 .messages
@@ -598,8 +711,9 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
         pending
     );
     let inputs = store.committed_inputs();
-    assert_eq!(inputs.len(), 2);
+    assert_eq!(inputs.len(), 3);
     assert_eq!(inputs[1].input.message_ids, accepted);
+    assert_eq!(inputs[2].input.message_ids, [image_input.message_id]);
     assert_eq!(store.context_messages(), messages);
     drop(store);
     let restored = session.open_flow(&description.address.instance_id).unwrap();

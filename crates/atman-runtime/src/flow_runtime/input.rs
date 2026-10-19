@@ -4,13 +4,78 @@ use std::io;
 
 use super::FlowWorker;
 use crate::event::AtmanUuid;
-use crate::flow_store::inbox::{AcceptedEnvelope, InboxPayload, InputContent, SenderIdentity};
+use crate::flow_store::inbox::{
+    AcceptedEnvelope, DeliveryMode, DeliveryRequest, InboxChange, InboxEditRequest, InboxPayload,
+    InputContent, SenderIdentity,
+};
 use crate::flow_store::invalid;
 use crate::message::{Message, MessageOrigin, MessagePart};
 use crate::tool::{HistorySegment, ToolCtx};
 use crate::value::ValueJson;
 
 impl FlowWorker {
+    /// Edit pending human input through the storage owner without consuming it or changing execution gates.
+    ///
+    /// The caller authenticates the sender; authorization is checked inside the owner for new edits and retries. Promotion uses the admitted turn's explicit configuration. Actual model boundaries retain incompatible attachments until a capable call or a later turn receives them.
+    pub async fn edit_input(
+        &self,
+        edit: InboxEditRequest,
+        authorize: impl FnOnce(&InboxEditRequest) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<crate::event_log::journal::CommitReceipt> {
+        self.request(move |store| {
+            authorize(&edit)?;
+            if let Some(receipt) = store.input_edit_receipt(&edit)? {
+                return Ok(receipt);
+            }
+            if let InboxChange::Replace {
+                delivery: DeliveryMode::AtBoundary,
+                ..
+            } = &edit.change
+            {
+                let entry = store
+                    .pending_input_entries()
+                    .find(|entry| entry.envelope.id == edit.message)
+                    .ok_or_else(|| invalid("inbox message is no longer pending"))?;
+                if entry.envelope.request.delivery == DeliveryMode::NextTurn {
+                    let atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) =
+                        store.state().state()
+                    else {
+                        return Err(invalid(
+                            "no active turn; input remains queued for the next turn",
+                        ));
+                    };
+                    if matches!(
+                        active.phase,
+                        atman_rt::TurnPhase::Finishing | atman_rt::TurnPhase::Cancelling
+                    ) {
+                        return Err(invalid(
+                            "turn is finishing; input remains queued for the next turn",
+                        ));
+                    }
+                    let admitted = store
+                        .last_invocation_input()
+                        .filter(|record| record.input.lease == active.lease)
+                        .ok_or_else(|| invalid("current invocation settings are unavailable"))?;
+                    let InputContent::InvocationInput { invocation, .. } = &admitted.input.content
+                    else {
+                        unreachable!("last invocation is an invocation input")
+                    };
+                    if !compatible(
+                        &entry.envelope.request,
+                        |key| invocation.get(key).cloned(),
+                        true,
+                    ) {
+                        return Err(invalid(
+                            "input requires a separate turn with its invocation settings",
+                        ));
+                    }
+                }
+            }
+            store.edit_input(edit, |_| Ok(()))
+        })
+        .await
+    }
+
     /// Commit compatible input before projecting it into the shared model context.
     ///
     /// The worker owns reservation, commit, and projection even if the caller disappears. Isolated invocation contexts never claim shared input.
@@ -58,9 +123,17 @@ impl FlowWorker {
                 return Ok((0, compact_guard));
             }
             let Some(reserved) = store.reserve_context_input(&lease, |envelope| {
-                compatible(envelope, &context.invocation_env, accepts_images)
-                    && (!notifications_only
-                        || crate::flow_store::subscription::is_watcher_notification(envelope))
+                compatible(
+                    &envelope.request,
+                    |key| {
+                        context
+                            .invocation_env
+                            .get(key)
+                            .and_then(|value| value.to_json().ok())
+                    },
+                    accepts_images,
+                ) && (!notifications_only
+                    || crate::flow_store::subscription::is_watcher_notification(envelope))
             })?
             else {
                 return Ok((0, compact_guard));
@@ -143,15 +216,15 @@ impl FlowWorker {
 }
 
 fn compatible(
-    envelope: &AcceptedEnvelope,
-    invocation: &crate::InvocationEnv,
+    request: &DeliveryRequest,
+    invocation: impl Fn(&str) -> Option<serde_json::Value>,
     accepts_images: bool,
 ) -> bool {
     // Scoped work requires the host's active scope resolver; unbound scopes must not become global input.
-    if envelope.request.scope.is_some() {
+    if request.scope.is_some() {
         return false;
     }
-    match &envelope.request.payload {
+    match &request.payload {
         InboxPayload::Invocation { .. } | InboxPayload::Command { .. } => false,
         InboxPayload::UserSubmission {
             content,
@@ -159,11 +232,9 @@ fn compatible(
             ..
         } => {
             (content.images.is_empty() || accepts_images)
-                && requested.iter().all(|(key, value)| {
-                    invocation
-                        .get(key)
-                        .is_some_and(|actual| actual.to_json().is_ok_and(|actual| actual == *value))
-                })
+                && requested
+                    .iter()
+                    .all(|(key, value)| invocation(key).as_ref() == Some(value))
         }
         _ => true,
     }

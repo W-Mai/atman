@@ -631,6 +631,78 @@ mod tests {
         let worker = FlowWorker::start(store).await.unwrap();
         let context = worker.context();
         let ctx = ToolCtx::new().with_session_runtime(context.clone());
+        use crate::flow_store::inbox::{
+            DeliveryMode, DeliveryRequest, InboxChange, InboxEditRequest, InboxPayload,
+            SenderIdentity, UserContent,
+        };
+        let editor = SenderIdentity::User(Uuid::new_v4());
+        let input = worker
+            .accept_input(
+                DeliveryRequest {
+                    request_id: Uuid::new_v4(),
+                    sender: editor.clone(),
+                    recipient: address.clone(),
+                    delivery: DeliveryMode::NextTurn,
+                    cause: None,
+                    correlation: None,
+                    scope: None,
+                    payload: InboxPayload::Interjection {
+                        text: "queued".into(),
+                    },
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        let edit = InboxEditRequest {
+            id: Uuid::new_v4(),
+            sender: editor,
+            message: input.message_id,
+            expected: input.receipt,
+            change: InboxChange::Replace {
+                content: UserContent {
+                    text: "edited".into(),
+                    images: vec![],
+                    presentation: None,
+                },
+                delivery: DeliveryMode::NextTurn,
+            },
+        };
+        let editing_worker = worker.clone();
+        let abandoned_edit = edit.clone();
+        cancel_queued(&worker, async move {
+            editing_worker.edit_input(abandoned_edit, |_| Ok(())).await
+        })
+        .await;
+        let snapshot = worker.view_snapshot().await.unwrap();
+        assert!(
+            matches!(&snapshot.pending[0].envelope.request.payload, InboxPayload::Interjection { text } if text == "edited")
+        );
+        let receipt = snapshot.pending[0].revision.clone();
+        let mut commits = worker.subscribe_commits();
+        commits.borrow_and_update();
+        assert_eq!(
+            worker.edit_input(edit.clone(), |_| Ok(())).await.unwrap(),
+            receipt
+        );
+        assert!(!commits.has_changed().unwrap());
+        let editing_worker = worker.clone();
+        let rejected = InboxEditRequest {
+            id: Uuid::new_v4(),
+            expected: receipt.clone(),
+            change: InboxChange::Cancel,
+            ..edit
+        };
+        cancel_queued(&worker, async move {
+            editing_worker
+                .edit_input(rejected, |_| Err(io::Error::other("revoked while queued")))
+                .await
+        })
+        .await;
+        assert_eq!(
+            worker.view_snapshot().await.unwrap().pending[0].revision,
+            receipt
+        );
         let publication = MessagePublication {
             id: Uuid::new_v4(),
             lease: lease.clone(),

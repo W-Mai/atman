@@ -1462,11 +1462,11 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     let view = expect_instance(source.refresh().await.unwrap());
     assert_eq!(view.snapshot().pending.len(), 1);
     assert_eq!(
-        view.snapshot().pending[0].request.request_id,
+        view.snapshot().pending[0].envelope.request.request_id,
         ticket.request_id
     );
     let InboxPayload::UserSubmission { invocation, .. } =
-        &view.snapshot().pending[0].request.payload
+        &view.snapshot().pending[0].envelope.request.payload
     else {
         panic!("wrong payload")
     };

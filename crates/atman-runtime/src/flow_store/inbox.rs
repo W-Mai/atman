@@ -646,9 +646,13 @@ impl Inbox {
     }
 
     pub fn pending(&self) -> impl Iterator<Item = &AcceptedEnvelope> {
+        self.pending_entries().map(|entry| &entry.envelope)
+    }
+
+    pub fn pending_entries(&self) -> impl Iterator<Item = &InboxEntry> {
         self.pending
             .iter()
-            .map(|id| &self.entries[self.messages[id]].envelope)
+            .map(|id| &self.entries[self.messages[id]])
     }
 
     pub fn previous(&self, request: &DeliveryRequest) -> io::Result<Option<Acceptance>> {

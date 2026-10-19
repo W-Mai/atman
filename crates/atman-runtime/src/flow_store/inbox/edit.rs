@@ -200,9 +200,14 @@ fn editable(request: &DeliveryRequest) -> bool {
 }
 
 impl FlowStore {
+    /// Look up an exact committed edit without reapplying it. Authenticate and authorize before returning this receipt to a caller.
+    pub fn input_edit_receipt(&self, edit: &InboxEditRequest) -> io::Result<Option<CommitReceipt>> {
+        self.inbox.previous_edit(edit)
+    }
+
     /// Persist a user queue change without starting a turn or consuming input.
     ///
-    /// The host must authenticate `sender`. Authorization runs before receipt lookup; changing delivery to `AtBoundary` also requires host validation of invocation and attachment compatibility. A successful edit only changes eligibility at a later safe point.
+    /// The host must authenticate `sender`. Authorization runs before receipt lookup; changing delivery to `AtBoundary` also requires host validation of invocation compatibility. Attachment capability is checked at the actual model boundary. A successful edit only changes eligibility at a later safe point.
     pub fn edit_input(
         &mut self,
         edit: InboxEditRequest,

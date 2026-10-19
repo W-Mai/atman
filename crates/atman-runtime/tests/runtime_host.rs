@@ -1505,6 +1505,33 @@ async fn consistent_views_bound_catch_up_and_preserve_cancelled_observation() {
         view.snapshot().status.goal.as_ref().unwrap().status,
         atman_runtime::memory::goal::GoalStatus::Active
     );
+    let entry = view.snapshot().pending[0].clone();
+    let edit = atman_runtime::flow_store::inbox::InboxEditRequest {
+        id: Uuid::new_v4(),
+        sender: entry.envelope.request.sender.clone(),
+        message: entry.envelope.id,
+        expected: entry.revision,
+        change: atman_runtime::flow_store::inbox::InboxChange::Replace {
+            content: atman_runtime::flow_store::inbox::UserContent {
+                text: "Edited unread".into(),
+                images: vec![],
+                presentation: None,
+            },
+            delivery: DeliveryMode::NextTurn,
+        },
+    };
+    let paused_state = view.snapshot().status.execution.clone();
+    let committed = worker.edit_input(edit, |_| Ok(())).await.unwrap();
+    let view = reader.next().await.unwrap();
+    assert_eq!(view.transcript().cursor(), Some(&committed));
+    assert_eq!(view.transcript().entries().len(), entries);
+    assert_eq!(view.snapshot().status.cursor, committed);
+    assert_eq!(view.snapshot().status.execution, paused_state);
+    assert_eq!(view.snapshot().pending[0].revision, committed);
+    assert_eq!(view.snapshot().pending[0].acceptance, entry.acceptance);
+    assert!(
+        matches!(&view.snapshot().pending[0].envelope.request.payload, InboxPayload::Interjection { text } if text == "Edited unread")
+    );
     let paused = view.snapshot().status.cursor.clone();
     drop(reader);
     assert_eq!(worker.status().await.unwrap().cursor, paused);
@@ -1519,6 +1546,7 @@ async fn consistent_views_bound_catch_up_and_preserve_cancelled_observation() {
     assert_eq!(view.snapshot().status.cursor, paused);
     assert_eq!(view.transcript().entries().len(), entries);
     assert_eq!(view.snapshot().pending.len(), 1);
+    assert_eq!(view.snapshot().pending[0].revision, committed);
     assert_eq!(view.snapshot().planning.plans.len(), 1);
     host.shutdown().await.unwrap();
 }
