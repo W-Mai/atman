@@ -20,6 +20,201 @@ use uuid::Uuid;
 mod common;
 
 #[tokio::test]
+async fn entry_exit_fences_hook_input_and_resumes_one_pending_batch() {
+    use atman_runtime::{Value, flow_runtime::FlowWorker, message::MessageOrigin};
+    use std::{sync::Arc, time::Duration};
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::mock_model("mock")])).await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut description = descriptor(info.id);
+    description.entry_mut().unwrap().bundle.sources.insert(
+        "entry:main.at".into(),
+        r#"flow main(input: int) -> string {
+            answer = final.answer(message: to_json_string(input))
+            execution_probe()
+            return answer
+        }"#
+        .into(),
+    );
+    let mut store = session.create_flow(description.clone()).unwrap();
+    change(&mut store, FlowTransition::Activated);
+    let worker = FlowWorker::start(store).await.unwrap();
+    let mut executor = atman_runtime::Executor::new();
+    let mut hooks = atman_runtime::lifecycle::LifecycleRunner::new();
+    hooks.absorb(&atman_rt::parse_file(r#"on turn.end {
+        execution_probe()
+        llm.call(model: "mock", prompt: "summarize the completed turn", context: "session", record: false)
+    }"#).unwrap());
+    executor.tool_ctx.lifecycle_hooks = Some(Arc::new(hooks));
+    let provider = Arc::new(InboxRecordingProvider {
+        requests: Default::default(),
+        inner: atman_runtime::providers::mock::MockProvider::new("mock")
+            .with_fallback(Value::Str("summary".into())),
+    });
+    executor.providers.register(provider.clone());
+    let probe = Arc::new(ExecutionProbe {
+        entered: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    executor.tools.register(probe.clone());
+    let scheduler = worker
+        .schedule(executor, |snapshot| {
+            let mut request = turn_request(snapshot.pending[0].id, snapshot.pending.len() as i64);
+            request.messages = snapshot.pending.iter().map(|input| input.id).collect();
+            request.context = snapshot
+                .pending
+                .iter()
+                .map(|input| {
+                    atman_runtime::flow_runtime::input::context_message(input, &request.turn)
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(Some(request))
+        })
+        .unwrap();
+    worker
+        .accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::User(Uuid::new_v4()),
+                "initial",
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), probe.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    assert!(
+        matches!(worker.state().await.unwrap().state(), InstanceState::Open(InstanceActivity::Active(active)) if active.phase == TurnPhase::Running)
+    );
+    assert_eq!(
+        worker
+            .context()
+            .messages()
+            .iter()
+            .filter(|message| message.origin == MessageOrigin::FinalAnswer)
+            .count(),
+        1
+    );
+    // Publication alone does not finish the entry or release its lease.
+    probe.release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), probe.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    assert!(
+        matches!(worker.state().await.unwrap().state(), InstanceState::Open(InstanceActivity::Active(active)) if active.phase == TurnPhase::Finishing)
+    );
+    let key = Uuid::new_v4().into();
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::ExecutionPaused { key },
+        )
+        .await
+        .unwrap();
+    let (left, right) = tokio::join!(
+        worker.accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::Flow(descriptor(info.id).address),
+                "peer-left"
+            ),
+            |_| Ok(())
+        ),
+        worker.accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::Flow(descriptor(info.id).address),
+                "peer-right"
+            ),
+            |_| Ok(())
+        ),
+    );
+    let expected = [left.unwrap().message_id, right.unwrap().message_id];
+    probe.release.add_permits(1);
+    let mut commits = worker.subscribe_commits();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            commits.borrow_and_update();
+            if matches!(
+                worker.state().await.unwrap().state(),
+                InstanceState::Open(InstanceActivity::Idle)
+            ) {
+                break;
+            }
+            commits.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let snapshot = worker.snapshot().await.unwrap();
+    assert_eq!(snapshot.pending.len(), 2);
+    assert!(
+        expected
+            .iter()
+            .all(|id| snapshot.pending.iter().any(|input| &input.id == id))
+    );
+    assert_eq!(snapshot.state.pauses(), &[key]);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            !requests[0]
+                .messages
+                .iter()
+                .any(|message| message.text_concat().contains("peer-"))
+        );
+    }
+    worker
+        .transition(
+            snapshot.state.revision(),
+            FlowTransition::ExecutionResumed { key },
+        )
+        .await
+        .unwrap();
+    probe.release.add_permits(2);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            commits.borrow_and_update();
+            let snapshot = worker.snapshot().await.unwrap();
+            if snapshot.pending.is_empty() && snapshot.state.can_start_turn() {
+                break;
+            }
+            commits.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    scheduler.stop().await.unwrap();
+    let store = worker.shutdown().await.unwrap();
+    assert_eq!(store.committed_inputs().len(), 2);
+    assert_eq!(store.committed_inputs()[1].input.message_ids.len(), 2);
+    assert_eq!(store.completions().len(), 2);
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    let answers: Vec<_> = store
+        .context_messages()
+        .iter()
+        .filter(|message| message.origin == MessageOrigin::FinalAnswer)
+        .map(Message::text_concat)
+        .collect();
+    assert_eq!(answers, ["1", "2"]);
+    let history = store.context_messages();
+    drop(store);
+    let restored = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(restored.context_messages(), history);
+    assert_eq!(restored.committed_inputs().len(), 2);
+    assert!(restored.pending_inputs().next().is_none());
+}
+
+#[tokio::test]
 async fn activity_is_derived_from_the_same_commits_in_live_inspection_and_recovery() {
     use atman_runtime::{
         event::Event,

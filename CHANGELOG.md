@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- **Turn cleanup input isolation** — Entry return commits the finishing phase before lifecycle cleanup. Hook model calls leave new messages queued for the next turn, and execution pauses allow cleanup to finish without resuming queued work.
+
 - **Workspace snapshot controls** — Retention and explicit checkout removal share a locked comparison of the observed record. Stale snapshots and invocation leases reject resource changes before deletion.
 
 - **Workspace release recovery** — Explicit checkout removal records its intent before invoking Git. Pending releases retain their operation identity across retries, reject changed force options and live Flow references, and preserve one-sided filesystem or Git state for recovery. Completed explicit releases do not remove replacement paths.

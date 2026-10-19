@@ -283,7 +283,7 @@ impl FlowClient {
         expected_revision: Option<u64>,
         edit: crate::flow_store::planning::PlanningEdit,
     ) -> io::Result<crate::flow_store::planning::CommittedPlanningUpdate> {
-        self.authenticate()?;
+        self.authenticate_context()?;
         let client = self.clone();
         self.host
             .flow(self.source())
@@ -295,7 +295,7 @@ impl FlowClient {
                     expected_revision,
                     edit,
                 },
-                move |_| client.authenticate(),
+                move |_| client.authenticate_context(),
             )
             .await
     }
@@ -471,8 +471,28 @@ impl FlowClient {
     }
 
     fn authorize(&self, target: &FlowRef, action: FlowAction) -> io::Result<()> {
-        self.authenticate()?;
+        if target == self.source()
+            && matches!(
+                action,
+                FlowAction::ReadContext | FlowAction::ReadOutput | FlowAction::ManageGoal
+            )
+        {
+            self.authenticate_context()?;
+        } else {
+            self.authenticate()?;
+        }
         self.authorize_delivery(target, action)
+    }
+
+    /// Owned cleanup may settle its conversation and planning without admitting peer work.
+    fn authenticate_context(&self) -> io::Result<()> {
+        if self.state.has_changed().is_ok()
+            && matches!(self.state.borrow().state(), InstanceState::Open(InstanceActivity::Active(active)) if active.lease == self.lease && active.phase == atman_rt::TurnPhase::Finishing)
+        {
+            self.source_session()?;
+            return Ok(());
+        }
+        self.authenticate()
     }
 
     fn authorize_delivery(&self, target: &FlowRef, action: FlowAction) -> io::Result<()> {

@@ -1000,6 +1000,11 @@ pub flow shell_gate() {{ contract {{ capabilities {{ shell: true }} }} bash(comm
 
 #[tokio::test]
 async fn turn_hook_pause_and_cancel_share_the_entry_lease() {
+    cancel_paused_hook("turn.start").await;
+    cancel_paused_hook("turn.end").await;
+}
+
+async fn cancel_paused_hook(event: &str) {
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();
     let host = RuntimeHost::default();
@@ -1011,8 +1016,10 @@ async fn turn_hook_pause_and_cancel_share_the_entry_lease() {
     change(&worker, FlowTransition::Activated).await;
     let mut hooks = atman_runtime::lifecycle::LifecycleRunner::new();
     hooks.absorb(
-        &atman_rt::parse_file("on turn.start { loop { yield } }\non turn.end { missing_tool() }")
-            .unwrap(),
+        &atman_rt::parse_file(&format!(
+            "on {event} {{ loop {{ yield }} }}\non turn.end {{ missing_tool() }}"
+        ))
+        .unwrap(),
     );
     let mut executor = Executor::new();
     executor.tool_ctx.lifecycle_hooks = Some(Arc::new(hooks));
@@ -1031,13 +1038,24 @@ async fn turn_hook_pause_and_cancel_share_the_entry_lease() {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             commits.borrow_and_update();
-            if worker.execution_events().await.unwrap().iter().flat_map(|batch| &batch.events).any(|event| matches!(&event.event,
-                atman_runtime::Event::FlowStart { flow_name, .. } if flow_name.contains("turn.start"))) {
+            if worker
+                .execution_events()
+                .await
+                .unwrap()
+                .iter()
+                .flat_map(|batch| &batch.events)
+                .any(|record| {
+                    matches!(&record.event,
+                atman_runtime::Event::FlowStart { flow_name, .. } if flow_name.contains(event))
+                })
+            {
                 break;
             }
             commits.changed().await.unwrap();
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let key = Uuid::now_v7().into();
     change(&worker, FlowTransition::ExecutionPaused { key }).await;
     assert!(worker.completion(None).await.unwrap().is_none());
@@ -1054,17 +1072,20 @@ async fn turn_hook_pause_and_cancel_share_the_entry_lease() {
         complete.outcome,
         TurnOutcome::Interrupted(atman_rt::Interruption::Cancelled)
     );
-    assert!(worker.read_output(|_| Ok(())).await.unwrap().is_empty());
-    assert!(
-        !worker
-            .execution_events()
-            .await
-            .unwrap()
-            .iter()
-            .flat_map(|batch| &batch.events)
-            .any(|event| matches!(&event.event,
-        atman_runtime::Event::FlowStart { flow_name, .. } if flow_name.contains("turn.end")))
+    assert_eq!(
+        worker.read_output(|_| Ok(())).await.unwrap().len(),
+        usize::from(event == "turn.end")
     );
+    let trace = worker.execution_events().await.unwrap();
+    let end_hooks = trace
+        .iter()
+        .flat_map(|batch| &batch.events)
+        .filter(|record| {
+            matches!(&record.event,
+        atman_runtime::Event::FlowStart { flow_name, .. } if flow_name.contains("turn.end"))
+        })
+        .count();
+    assert_eq!(end_hooks, usize::from(event == "turn.end"));
     host.shutdown().await.unwrap();
 }
 
@@ -7112,12 +7133,84 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
 
     change(
         &a,
+        FlowTransition::PhaseChanged {
+            lease: lease.clone(),
+            phase: atman_rt::TurnPhase::Finishing,
+        },
+    )
+    .await;
+    let cleanup_pause = Uuid::new_v4().into();
+    change(&a, FlowTransition::ExecutionPaused { key: cleanup_pause }).await;
+    client
+        .edit_planning(
+            Uuid::new_v4(),
+            None,
+            atman_runtime::flow_store::planning::PlanningEdit::ClearTodos,
+        )
+        .await
+        .unwrap();
+    client
+        .edit_goal(
+            a_info.address.clone(),
+            Uuid::new_v4(),
+            None,
+            atman_runtime::memory::goal::GoalEdit::Create {
+                text: "saved during cleanup".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        client
+            .read_goal(a_info.address.clone())
+            .await
+            .unwrap()
+            .goal
+            .is_some()
+    );
+    assert!(client.read_context(a_info.address.clone()).await.is_ok());
+    assert!(client.read_output(b_info.address.clone()).await.is_err());
+    assert!(
+        client
+            .send(
+                b_info.address.clone(),
+                Uuid::new_v4(),
+                "late work".into(),
+                DeliveryMode::AtBoundary,
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .control(
+                a_info.address.clone(),
+                a.state().await.unwrap().revision(),
+                PeerControl::CancelTurn
+            )
+            .await
+            .is_err()
+    );
+    change(
+        &a,
         FlowTransition::TurnFinished {
             lease,
             outcome: TurnOutcome::Completed,
         },
     )
     .await;
+    assert!(client.read_context(a_info.address.clone()).await.is_err());
+    assert!(
+        client
+            .edit_planning(
+                Uuid::new_v4(),
+                None,
+                atman_runtime::flow_store::planning::PlanningEdit::ClearTodos
+            )
+            .await
+            .is_err()
+    );
+    change(&a, FlowTransition::ExecutionResumed { key: cleanup_pause }).await;
     let next = host.bind_invocation(start(&a).await).await.unwrap();
     assert!(client.inspect(b_info.address.clone()).await.is_err());
     assert!(next.inspect(b_info.address).await.is_ok());
@@ -7968,6 +8061,7 @@ async fn owned_observation_survives_turn_end_pause_and_reopen_without_duplicate_
     invoke(&a, Executor::new()).await.result.unwrap();
     // Existing inputs are consumed by the invocation; its self-observed final answer is the only new input.
     wait_inputs(&a, 1).await;
+    host.wait_quiescent().await.unwrap();
     let before = a.snapshot().await.unwrap().cursor;
     a.retry_observations();
     tokio::time::sleep(Duration::from_millis(40)).await;

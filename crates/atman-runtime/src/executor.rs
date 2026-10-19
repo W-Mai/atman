@@ -421,7 +421,16 @@ impl Executor {
                     invocation.first_run_id.clone(),
                 )
                 .await;
-            if persistent {
+            if let Some(binding) = &invocation.instance
+                && let Some(storage) = &binding.storage
+            {
+                if !storage
+                    .begin_finishing(binding.lease.clone())
+                    .await
+                    .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?
+                {
+                    return result;
+                }
                 while let Ok(event) = lifecycle_rx.try_recv() {
                     if event == atman_rt::ast::LifecycleEvent::ContextCompact {
                         executor.fire_invocation_hook(&invocation, event).await;

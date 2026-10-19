@@ -57,6 +57,34 @@ impl TurnTicket {
 }
 
 impl FlowWorker {
+    /// Fence inbox pickup after entry return, retaining the lease for owned cleanup.
+    pub(crate) async fn begin_finishing(&self, lease: TurnLease<AtmanUuid>) -> io::Result<bool> {
+        self.request(move |store| {
+            match store.state().state() {
+                InstanceState::Open(InstanceActivity::Active(active)) if active.lease == lease => {
+                    if active.phase == TurnPhase::Cancelling {
+                        return Ok(false);
+                    }
+                }
+                InstanceState::Closing {
+                    active: Some(active),
+                } if active.lease == lease => {
+                    return Ok(false);
+                }
+                _ => return Err(invalid("entry no longer owns the turn lease")),
+            }
+            store.transition(
+                store.state().revision(),
+                crate::flow_store::FlowTransition::PhaseChanged {
+                    lease,
+                    phase: TurnPhase::Finishing,
+                },
+            )?;
+            Ok(true)
+        })
+        .await
+    }
+
     /// Read a recorded entry result without rerunning the entry or publishing an answer.
     pub async fn completion(
         &self,
