@@ -94,9 +94,22 @@ pub enum FlowHubPage {
 }
 
 pub(super) struct Row {
+    pub key: RowKey,
     pub title: String,
     pub detail: String,
     pub action: Action,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum RowKey {
+    Session(SessionTarget),
+    Flow(crate::control::ViewAddress),
+    Relation {
+        id: Uuid,
+        source: atman_runtime::flow_store::FlowRef,
+        target: AccessTarget,
+        kind: RelationKind,
+    },
 }
 
 impl FlowHubPage {
@@ -167,6 +180,7 @@ impl FlowHubPage {
                         owner: owner.clone(),
                     };
                     Row {
+                        key: RowKey::Flow(address.clone()),
                         title: format!(
                             "{}{}",
                             address.label(),
@@ -200,6 +214,7 @@ impl FlowHubPage {
                         }
                     };
                     Row {
+                        key: RowKey::Session(row.target.clone()),
                         title: row.title.clone(),
                         detail: row.detail.clone(),
                         action: request.map_or(Action::None, Action::Load),
@@ -232,6 +247,7 @@ impl FlowHubPage {
                         .as_ref()
                         .is_some_and(|state| !state.pauses().is_empty());
                     Row {
+                        key: RowKey::Flow(row.address.clone().into()),
                         title: format!(
                             "{}{marker}",
                             row.entry.as_deref().unwrap_or("Unavailable flow")
@@ -275,6 +291,12 @@ impl FlowHubPage {
                         AccessTarget::AllSessions => ("all sessions".into(), Action::None),
                     };
                     Row {
+                        key: RowKey::Relation {
+                            id: relation.id,
+                            source: relation.source.clone(),
+                            target: relation.target.clone(),
+                            kind: relation.kind,
+                        },
                         title: format!("{kind} · {target}"),
                         detail: format!(
                             "{source} → {target} · {} · relation {}",

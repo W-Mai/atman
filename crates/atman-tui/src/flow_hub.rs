@@ -21,6 +21,7 @@ pub use page::{FlowHubPage, HubRequest, SessionDirectory, SessionRow};
 pub(crate) enum Action {
     None,
     Close,
+    Return,
     Load(HubRequest),
     NewSession,
     OpenManagement,
@@ -32,6 +33,7 @@ pub(crate) enum Action {
 pub(crate) struct FlowHub {
     pub pending: Option<ControlTicket>,
     page: Option<FlowHubPage>,
+    rows: Vec<page::Row>,
     cursors: Vec<HubRequest>,
     index: usize,
     requested_index: Option<usize>,
@@ -53,34 +55,105 @@ pub(crate) struct FlowHub {
     hovered: Option<usize>,
 }
 
+/// Retain directory presentation independently of focused conversations and host requests.
+#[derive(Default)]
+pub(crate) struct History {
+    pages: Vec<FlowHub>,
+}
+
+impl History {
+    pub fn save(&mut self, mut hub: FlowHub) {
+        let Some(page) = &hub.page else { return };
+        let directory = page.first();
+        self.pages
+            .retain(|saved| saved.page.as_ref().unwrap().first() != directory);
+        // Accepted host work continues, but its late reply no longer owns navigation.
+        hub.pending = None;
+        hub.requested_index = None;
+        self.pages.push(hub);
+    }
+
+    pub fn open(&mut self, action: Action, fallback: HubRequest) -> (FlowHub, Action) {
+        if matches!(action, Action::Return) {
+            return match self.pages.pop() {
+                Some(saved) => (saved, Action::None),
+                None => (FlowHub::default(), Action::Load(fallback)),
+            };
+        }
+        if let Action::Load(request) = &action
+            && let Some(index) = self
+                .pages
+                .iter()
+                .position(|saved| saved.page.as_ref().unwrap().first() == *request)
+        {
+            let saved = self.pages.remove(index);
+            let request = saved
+                .cursors
+                .get(saved.index)
+                .cloned()
+                .unwrap_or_else(|| request.clone());
+            return (saved, Action::Load(request));
+        }
+        (FlowHub::default(), action)
+    }
+}
+
 impl FlowHub {
+    pub fn owns_reply(&self, ticket: Option<&ControlTicket>) -> bool {
+        ticket.is_some() && ticket == self.pending.as_ref()
+    }
+
     pub fn receive(
         &mut self,
         ticket: Option<&ControlTicket>,
         result: Result<Box<FlowHubPage>, String>,
     ) {
-        if ticket != self.pending.as_ref() || ticket.is_none() {
+        if !self.owns_reply(ticket) {
             return;
         }
         self.pending = None;
         match result {
             Ok(page) => {
-                if self
+                let selected = self
+                    .filtered()
+                    .get(self.selected)
+                    .map(|index| self.rows[*index].key.clone());
+                let changed_directory = self
                     .page
                     .as_ref()
-                    .is_none_or(|current| current.first() != page.first())
-                {
+                    .is_none_or(|current| current.first() != page.first());
+                let changed_page = self
+                    .requested_index
+                    .is_some_and(|index| index != self.index);
+                if changed_directory {
                     self.cursors = vec![page.first()];
                     self.index = 0;
                     self.requested_index = None;
                     self.query.clear();
                 }
+                self.rows = page.rows(None);
                 self.page = Some(*page);
                 if let Some(index) = self.requested_index.take() {
                     self.index = index;
                 }
-                self.selected = 0;
-                self.offset = 0;
+                if changed_directory || changed_page {
+                    self.selected = 0;
+                    self.offset = 0;
+                    self.query.clear();
+                } else {
+                    let filtered = self.filtered();
+                    self.selected = selected
+                        .and_then(|key| {
+                            filtered
+                                .iter()
+                                .position(|index| self.rows[*index].key == key)
+                        })
+                        .unwrap_or(self.selected.min(filtered.len().saturating_sub(1)));
+                    self.offset = self.offset.min(self.selected);
+                }
+                self.hits.clear();
+                self.float_hits.clear();
+                self.hovered = None;
                 self.error = None;
             }
             Err(error) => {
@@ -98,30 +171,21 @@ impl FlowHub {
 
     fn filtered(&self) -> Vec<usize> {
         let query = self.query.to_lowercase();
-        self.page
-            .as_ref()
-            .map(|page| {
-                page.rows(None)
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, row)| {
-                        (row.title.to_lowercase().contains(&query)
-                            || row.detail.to_lowercase().contains(&query))
-                        .then_some(i)
-                    })
-                    .collect()
+        self.rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, row)| {
+                (row.title.to_lowercase().contains(&query)
+                    || row.detail.to_lowercase().contains(&query))
+                .then_some(i)
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     fn focus(&self) -> Action {
         let rows = self.filtered();
-        self.page
-            .as_ref()
-            .and_then(|page| {
-                rows.get(self.selected)
-                    .map(|index| page.rows(None)[*index].action.clone())
-            })
+        rows.get(self.selected)
+            .map(|index| self.rows[*index].action.clone())
             .unwrap_or(Action::None)
     }
 
@@ -152,7 +216,6 @@ impl FlowHub {
             return Action::None;
         };
         self.requested_index = Some(target);
-        self.query.clear();
         Action::Load(self.cursors[target].clone())
     }
 
@@ -348,13 +411,8 @@ impl FlowHub {
         }
         self.hits.clear();
         self.float_hits.clear();
-        let page_rows = self
-            .page
-            .as_ref()
-            .map(|page| page.rows(Some(focused)))
-            .unwrap_or_default();
         for (pos, index) in rows.iter().enumerate().skip(self.offset).take(visible) {
-            let row = &page_rows[*index];
+            let row = &self.rows[*index];
             let rect = Rect::new(
                 content.x,
                 rows_y + ((pos - self.offset) * 4) as u16,
@@ -376,8 +434,13 @@ impl FlowHub {
                     Rect::new(rect.x, rect.y, 1, 4),
                 );
             }
+            let title = if matches!(&row.action, Action::Focus(address) if address == focused) {
+                std::borrow::Cow::Owned(format!("{} · focused", row.title))
+            } else {
+                std::borrow::Cow::Borrowed(row.title.as_str())
+            };
             frame.render_widget(
-                Paragraph::new(row.title.as_str()).style(fg.bg(bg)),
+                Paragraph::new(title).style(fg.bg(bg)),
                 Rect::new(rect.x + 2, rect.y + 1, width.saturating_sub(23), 1),
             );
             let open = Rect::new(rect.right().saturating_sub(20), rect.y, 18, 3);
@@ -472,6 +535,102 @@ mod tests {
         flow_store::FlowInstanceId,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn refreshed_directory_retains_identity_and_return_state_without_reusing_requests() {
+        use crate::control::{ViewAddress, ViewBinding};
+        use crate::project_hub::SessionTarget;
+        let flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let address = ViewAddress::Instance(flow);
+        let ticket = ControlTicket {
+            binding: ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: address.clone(),
+            },
+            request_id: Uuid::now_v7(),
+        };
+        let ids: Vec<_> = (0..20).map(|_| Uuid::now_v7()).collect();
+        let page = |ids: &[Uuid]| {
+            Box::new(FlowHubPage::Sessions(SessionDirectory {
+                sessions: ids
+                    .iter()
+                    .map(|id| SessionRow {
+                        target: SessionTarget::Persistent(*id),
+                        title: "Same title".into(),
+                        detail: id.to_string(),
+                    })
+                    .collect(),
+                next: Some(SessionTarget::Persistent(ids[ids.len() - 1])),
+                total: 60,
+            }))
+        };
+        let mut hub = FlowHub {
+            pending: Some(ticket.clone()),
+            ..Default::default()
+        };
+        hub.receive(Some(&ticket), Ok(page(&ids)));
+        hub.query = "same".into();
+        hub.selected = 7;
+        hub.offset = 4;
+        let mut refreshed = vec![Uuid::now_v7()];
+        refreshed.extend_from_slice(&ids);
+        hub.pending = Some(ticket.clone());
+        hub.receive(Some(&ticket), Ok(page(&refreshed)));
+        assert_eq!(hub.query, "same");
+        assert_eq!(hub.offset, 4);
+        assert_eq!(hub.selected, 8);
+        assert!(
+            matches!(hub.focus(), Action::Load(HubRequest::Flows {session,..}) if session == ids[7])
+        );
+        assert!(matches!(hub.key(KeyAction::PageDown), Action::Load(_)));
+        hub.pending = Some(ticket.clone());
+        hub.receive(Some(&ticket), Err("retry later".into()));
+        assert_eq!(hub.query, "same");
+        assert_eq!(hub.selected, 8);
+        let mut history = History::default();
+        hub.pending = Some(ticket.clone());
+        history.save(hub);
+        let (mut restored, action) = history.open(Action::Return, address.directory());
+        assert!(matches!(action, Action::None));
+        assert!(restored.pending.is_none());
+        assert_eq!(restored.offset, 4);
+        assert_eq!(restored.selected, 8);
+        assert_eq!(restored.query, "same");
+        restored.receive(Some(&ticket), Ok(page(&ids)));
+        assert_eq!(
+            restored.selected, 8,
+            "a reply from the closed directory cannot mutate its restored view"
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
+        terminal
+            .draw(|frame| restored.render(frame, &address))
+            .unwrap();
+        let rect = restored
+            .hits
+            .iter()
+            .find(|(_, index)| *index == restored.selected)
+            .unwrap()
+            .0;
+        assert!(matches!(restored.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left), column: rect.x + 1, row: rect.y + 1,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }), Action::Load(HubRequest::Flows {session,..}) if session == ids[7]));
+        history.save(restored);
+        let (restored, action) = history.open(
+            Action::Load(HubRequest::Sessions { before: None }),
+            address.directory(),
+        );
+        assert_eq!(restored.query, "same");
+        assert!(matches!(
+            action,
+            Action::Load(HubRequest::Sessions { before: None })
+        ));
+    }
 
     #[test]
     fn mixed_session_rows_keep_their_directory_targets_on_keyboard_and_mouse() {

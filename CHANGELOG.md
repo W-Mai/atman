@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- **FlowHub navigation state** — Refresh preserves selection by identity, and returning from a conversation restores the directory page, filter, and scroll position. Failed page requests preserve the visible results; late replies cannot alter a reopened directory.
+
 - **Projectless agent startup** — The confession reader returns an empty catalog when no project is bound, allowing the default agent entry to validate without creating a knowledge store or granting project write access.
 
 - **Explicit context compaction** — Hosts can compact paused contexts without resuming execution. The shared compaction API reports committed, unchanged, rejected, and failed outcomes; cancelled review waits release their pending request.

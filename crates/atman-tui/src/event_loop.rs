@@ -223,6 +223,7 @@ pub(crate) async fn run_frames(
     let persistent = handle.flow_view.is_some();
     let mut views = Workspace::new(&handle);
     let mut hub: Option<crate::flow_hub::FlowHub> = None;
+    let mut hub_history = crate::flow_hub::History::default();
     let (mut key_events, _reader_guard) = spawn_event_reader();
     // Flush stale input events accumulated during boot animation.
     // Without this, mouse events from the boot phase flood the first
@@ -291,12 +292,17 @@ pub(crate) async fn run_frames(
             );
         }
         if let Some(action) = app.app.open_flow_hub.take() {
-            let mut opened = crate::flow_hub::FlowHub::default();
-            if let Some(tx) = handle.control_tx.as_ref() {
+            if let Some(tx) = handle.control_tx.as_ref()
+                && let Some(binding) = tx.binding()
+            {
+                if let Some(previous) = hub.take() {
+                    hub_history.save(previous);
+                }
+                let (mut opened, action) = hub_history.open(action, binding.flow.directory());
                 let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle));
                 dispatch_hub_action(&mut opened, action, tx, reuse);
+                hub = Some(opened);
             }
-            hub = Some(opened);
         }
         app.app.tick_toasts();
         terminal.backend_mut().queue(BeginSynchronizedUpdate)?;
@@ -415,7 +421,7 @@ pub(crate) async fn run_frames(
                         Some(Ok(CtEvent::Mouse(mouse))) => opened.mouse(mouse),
                         _ => crate::flow_hub::Action::None,
                     };
-                    if matches!(action, crate::flow_hub::Action::Close) { hub = None; }
+                    if matches!(action, crate::flow_hub::Action::Close) { hub_history.save(hub.take().unwrap()); }
                     else if let Some(tx) = handle.control_tx.as_ref() { let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle)); dispatch_hub_action(opened, action, tx, reuse); }
                     continue;
                 }
@@ -443,7 +449,7 @@ pub(crate) async fn run_frames(
                         clicked = app.app.flow_hub_hovered && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && !app.wm.modals.any_open();
                     }
                     if escape || clicked {
-                        app.app.open_flow_hub = handle.control_tx.as_ref().and_then(|tx| tx.binding()).map(|binding| crate::flow_hub::Action::Load(binding.flow.directory()));
+                        app.app.open_flow_hub = Some(crate::flow_hub::Action::Return);
                         continue;
                     }
                 }
@@ -1886,7 +1892,7 @@ pub(crate) async fn run_frames(
                             if let Some(hub) = hub.as_mut() { hub.receive(ticket.as_ref(), result); }
                         }
                         TuiCommand::FlowResolved { flow } => {
-                            let Some(hub) = hub.as_mut().filter(|hub| ticket.is_some() && hub.pending.as_ref() == ticket.as_ref()) else { continue; };
+                            let Some(hub) = hub.as_mut().filter(|hub| hub.owns_reply(ticket.as_ref())) else { continue; };
                             let key = ViewKey { flow: flow.clone(), placement: FlowPlacement::Main };
                             let reuse = views.binding(&key, &handle);
                             if let Some(tx) = &handle.control_tx {
@@ -1895,16 +1901,16 @@ pub(crate) async fn run_frames(
                         }
                         TuiCommand::FocusFlow { flow, placement, attachment } => {
                             // Closing the directory cancels navigation, never the submitted host work.
-                            if !hub.as_ref().is_some_and(|hub| hub.pending.as_ref() == ticket.as_ref()) { continue; }
+                            if !hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) { continue; }
                             match views.focus(&mut app, &mut editor, &mut handle, ViewKey { flow, placement }, attachment).await {
-                                Ok(()) => { interrupt_prompt = None; hub = None; }
+                                Ok(()) => { interrupt_prompt = None; hub_history.save(hub.take().unwrap()); }
                                 Err(error) => hub.as_mut().unwrap().failed(error.to_string()),
                             }
                         }
                         command => {
                             if let TuiCommand::Toast { message, .. } = &command
                                 && let Some(hub) = hub.as_mut()
-                                && hub.pending.as_ref() == ticket.as_ref()
+                                && hub.owns_reply(ticket.as_ref())
                             { hub.failed(message.clone()); }
                             apply_view_command(&mut app, &mut editor, ticket.as_ref(), command);
                         }
