@@ -175,6 +175,8 @@ async fn instance_sse_and_rpc_share_atomic_history_across_pause_and_reconnection
     let default_uri = format!("/events?session_id={id}&token=secret");
     let stream = events(&app, &default_uri, Some(&initial.to_string())).await;
     assert_eq!(stream.status(), StatusCode::OK);
+    let independent = events(&app, &uri, Some(&initial.to_string())).await;
+    assert_eq!(independent.status(), StatusCode::OK);
     // Default selection is resolved before headers, never again while this stream is connected.
     let catalog = rpc(&app, methods::SESSION_FLOWS, json!({"session_id": id})).await;
     let peer = json!({"session_id": id, "instance_id": Uuid::now_v7()});
@@ -217,7 +219,11 @@ async fn instance_sse_and_rpc_share_atomic_history_across_pause_and_reconnection
         Some(&first["last_completion"]["lease"]["turn"]),
     )
     .await;
-    let live = batches_through(stream, &second["cursor"]).await;
+    let (live, independent) = tokio::join!(
+        batches_through(stream, &second["cursor"]),
+        batches_through(independent, &second["cursor"]),
+    );
+    assert_eq!(live, independent);
     assert!(
         live.iter()
             .any(|batch| batch["facts"].as_array().unwrap().len() > 1)
