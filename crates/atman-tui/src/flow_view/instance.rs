@@ -147,6 +147,11 @@ impl FlowViewModel {
         archive: &ArchiveTranscript,
         output_store: Option<&OutputStore>,
     ) -> io::Result<()> {
+        let output_store = archive
+            .outputs
+            .has_retained_outputs()
+            .then_some(&archive.outputs)
+            .or(output_store);
         let mut items = if let Some(store) = output_store {
             crate::history::flatten_transcript_with_output_store(&archive.entries, store)
         } else {

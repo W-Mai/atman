@@ -1305,14 +1305,29 @@ pub(crate) fn restore_tool_item_with_output_store(
     is_error: bool,
     output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
 ) -> Option<OutputItem> {
+    let retained = output_store.and_then(|store| store.retained_content(content));
+    let content = retained.unwrap_or(content);
     let tool_name = tool_meta.map(|meta| meta.name.as_str()).unwrap_or("");
     let title = tool_meta.and_then(|meta| meta.call_intent.clone());
+    let retained_detail = || {
+        retained.map(|content| OutputItem::FsDetail {
+            view: FsDetail::Raw {
+                tool: tool_name.to_owned(),
+                path: None,
+                content: content.to_owned(),
+                is_error,
+            },
+            expanded: false,
+        })
+    };
     if let Some(item) =
         tool_meta.and_then(|meta| restore_fs_item(meta, content, is_error, output_store))
     {
         return Some(item);
     }
-    let parsed = serde_json::from_str::<serde_json::Value>(content).ok()?;
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) else {
+        return retained_detail();
+    };
     if tool_name.starts_with("bash.") {
         let handle = parsed
             .get("handle")
@@ -1422,7 +1437,7 @@ pub(crate) fn restore_tool_item_with_output_store(
             level: NoteLevel::Warn,
         })
     } else {
-        None
+        retained_detail()
     }
 }
 

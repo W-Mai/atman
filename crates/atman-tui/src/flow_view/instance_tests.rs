@@ -90,6 +90,129 @@ fn welcome_card() -> crate::app::StartupCard {
 }
 
 #[test]
+fn archived_tool_details_share_retained_outputs_with_independent_disclosure() {
+    use atman_runtime::{
+        event::EventEnvelope,
+        tools::tool_output::{
+            OutputStore, ToolOutputBudget, truncate_tool_result_content_with_budget,
+        },
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let old_dir = temp.path().join("original");
+    std::fs::create_dir(&old_dir).unwrap();
+    let full = "Retained line\n".repeat(300);
+    let notice = truncate_tool_result_content_with_budget(
+        &full,
+        "test",
+        Some(&OutputStore::at(&old_dir)),
+        ToolOutputBudget {
+            max_lines: 1,
+            max_bytes: 100,
+            max_line_bytes: 100,
+        },
+    );
+    let turn = TurnId::now();
+    let mut calls = Message::assistant_text(turn.clone(), "");
+    calls.parts.clear();
+    let mut results = Message {
+        role: MessageRole::Tool,
+        parts: vec![],
+        turn_id: turn.clone(),
+        origin: MessageOrigin::default(),
+    };
+    for name in ["fs.read", "example.tool"] {
+        calls.parts.push(MessagePart::ToolUse {
+            id: name.into(),
+            name: name.into(),
+            input: serde_json::json!({"path":"read.txt"}),
+            intent: None,
+        });
+        results.parts.push(MessagePart::ToolResult {
+            tool_use_id: name.into(),
+            content: notice.clone(),
+            is_error: false,
+        });
+    }
+    let events = [
+        Event::AssistantMsg {
+            turn_id: turn.clone(),
+            flow_run_id: None,
+            message: calls,
+        },
+        Event::ToolResultMsg {
+            turn_id: turn,
+            flow_run_id: None,
+            message: results,
+        },
+    ];
+    let source = old_dir.join("events.jsonl");
+    let raw = events
+        .into_iter()
+        .enumerate()
+        .map(|(i, event)| {
+            format!(
+                "{}\n",
+                serde_json::to_string(&EventEnvelope::new(i as u64 + 1, event)).unwrap()
+            )
+        })
+        .collect::<String>();
+    std::fs::write(&source, &raw).unwrap();
+    let runtime = RuntimeStore::open(temp.path()).unwrap();
+    let id = Uuid::now_v7();
+    let receipt = runtime
+        .archive_legacy(
+            &source,
+            Uuid::now_v7(),
+            SessionDescriptor {
+                id,
+                title: "Retained outputs".into(),
+                project: None,
+                configuration: Default::default(),
+            },
+            true,
+        )
+        .unwrap();
+    std::fs::remove_dir_all(old_dir).unwrap();
+    let inspection = RuntimeStore::inspect_session(temp.path(), id).unwrap();
+    let view = inspection
+        .archived_view(&receipt.flows[0].instance)
+        .unwrap()
+        .unwrap();
+    let mut main = FlowViewModel::default();
+    let mut floating = FlowViewModel::default();
+    main.sync_view(&view, None).unwrap();
+    floating.sync_view(&view, None).unwrap();
+    let index = main
+        .iter()
+        .position(|item| matches!(item, OutputItem::ToolDispatch { .. }))
+        .unwrap();
+    for model in [&main, &floating] {
+        for name in ["fs.read", "example.tool"] {
+            let Some(OutputItem::FsDetail { view, .. }) = model.tool_detail(index, name) else {
+                panic!("missing archived detail")
+            };
+            let text = match view {
+                crate::app::FsDetail::Read { content, .. }
+                | crate::app::FsDetail::Raw { content, .. } => content,
+                _ => panic!("unexpected detail"),
+            };
+            assert_eq!(text, &full);
+        }
+    }
+    assert!(main.toggle_tool_disclosure(index, "example.tool", ToolDisclosureAction::Content));
+    assert!(
+        matches!(&main[index], OutputItem::ToolDispatch { calls } if calls[1].disclosure != Disclosure::Summary)
+    );
+    assert!(
+        matches!(&floating[index], OutputItem::ToolDispatch { calls } if calls[1].disclosure == Disclosure::Summary)
+    );
+    assert!(!main.sync_view(&view, None).unwrap());
+    assert!(
+        matches!(&main[index], OutputItem::ToolDispatch { calls } if calls[1].disclosure != Disclosure::Summary)
+    );
+}
+
+#[test]
 fn archived_views_reuse_history_rendering_without_writers_or_execution() {
     use atman_runtime::{event_log::legacy::LegacyFlowKey, flow_store::migration};
     use serde_json::json;
