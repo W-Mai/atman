@@ -22,6 +22,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Durable flow relations** — Runtime catalog inspection exposes read-only `Created`, `Read`, `Watch`, and `Interject` relations from flow journals and session grants without opening execution owners.
+
 - **Persistent default entry** — Launching `atman` creates and attaches a project-bound persistent Session through the shared host. The welcome view exposes recent sessions and the project directory before normal flow input; the same lifecycle is used when attaching an existing Session.
 
 - **View-scoped preferences** — Project storage and formula display settings use the requesting view's configuration and project. Save replies retain drafts on failure and close the editor on success; runtime questions remain independent of preference dialogs.

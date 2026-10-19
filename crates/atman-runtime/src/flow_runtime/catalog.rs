@@ -12,7 +12,9 @@ use super::{
 };
 use crate::{
     event_log::journal::CommitReceipt,
-    flow_store::{FlowInstanceId, FlowRef, RuntimeStore, SessionProjection, invalid},
+    flow_store::{
+        FlowInstanceId, FlowRef, RuntimeStore, SessionProjection, invalid, relation::FlowRelation,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -164,6 +166,12 @@ impl SessionCatalog {
             ),
             default_goal: None,
         })
+    }
+
+    /// Read the durable relation projection without opening a flow writer or scheduler.
+    pub async fn relations(&self, id: Uuid) -> io::Result<Vec<FlowRelation>> {
+        let read = self.recorded(id).await?;
+        read.relations()
     }
 
     pub async fn instances(

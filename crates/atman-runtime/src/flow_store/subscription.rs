@@ -263,6 +263,10 @@ pub(super) struct Subscriptions {
 }
 
 impl Subscriptions {
+    pub(super) fn values(&self) -> impl Iterator<Item = &SubscriptionRecord> {
+        self.records.values()
+    }
+
     pub fn contains(&self, id: Uuid) -> bool {
         self.records.contains_key(&id)
     }

@@ -18,6 +18,7 @@ pub mod planning;
 pub mod process_watch;
 pub mod profile;
 pub mod publication;
+pub mod relation;
 mod replay;
 pub mod subscription;
 pub mod trace;
@@ -527,6 +528,7 @@ pub struct FlowInspection {
     pub descriptor: FlowDescriptor,
     pub state: FlowInstance<AtmanUuid>,
     pub journal: crate::event_log::journal::JournalInspection,
+    pub relations: Vec<relation::FlowRelation>,
 }
 
 impl SessionInspection {
@@ -545,6 +547,24 @@ impl SessionInspection {
 
     pub fn inspect_flow(&self, id: &FlowInstanceId) -> io::Result<FlowInspection> {
         inspect_registered_flow(&self.dir, &self.projection, id)
+    }
+
+    /// Read all durable relations from the session and its flow journals without opening writers.
+    pub fn relations(&self) -> io::Result<Vec<relation::FlowRelation>> {
+        let mut relations = relation::access_relations(&self.projection);
+        for registration in &self.projection.flows {
+            relations.extend(self.inspect_flow(&registration.id)?.relations);
+        }
+        relations.sort_by_key(|relation| {
+            (
+                format!("{:?}", relation.source),
+                format!("{:?}", relation.target),
+                relation.kind,
+                relation.id,
+            )
+        });
+        relations.dedup();
+        Ok(relations)
     }
 }
 
@@ -586,10 +606,45 @@ fn inspect_registered_flow_with(
     if descriptor.creation_request != registration.creation_request {
         return Err(invalid("flow creation does not match session registration"));
     }
+    let target = descriptor.address.clone();
+    let mut relations = Vec::new();
+    if let Some(source) = descriptor.created_by.clone() {
+        relations.push(relation::FlowRelation::created(
+            source,
+            target.clone(),
+            descriptor.creation_request,
+        ));
+    }
+    relations.extend(
+        replay
+            .subscriptions
+            .values()
+            .filter(|record| {
+                record.subscription.purpose == subscription::SubscriptionPurpose::Watcher
+            })
+            .map(|record| {
+                relation::FlowRelation::watch(
+                    record.subscription.source.clone(),
+                    target.clone(),
+                    record.subscription.id,
+                    relation::watch_active(record.status),
+                )
+            }),
+    );
+    relations.sort_by_key(|relation| {
+        (
+            format!("{:?}", relation.source),
+            format!("{:?}", relation.target),
+            relation.kind,
+            relation.id,
+        )
+    });
+    relations.dedup();
     Ok(FlowInspection {
         descriptor,
         state,
         journal,
+        relations,
     })
 }
 
