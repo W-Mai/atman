@@ -88,7 +88,7 @@ pub(crate) async fn create(root: &Path) -> Result<Uuid> {
     Ok(created.session_id.0)
 }
 
-pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
+pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     let tui = crate::tui_mode_requested();
     let _terminal = if tui {
         Some(atman_tui::terminal_guard::TerminalGuard::install()?)
@@ -112,6 +112,29 @@ pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
             Some(permissions),
             prompts.clone(),
         ));
+        let id = match requested_id {
+            Some(id) => id,
+            None => {
+                let config = ConfigHub::global()?;
+                let project_root =
+                    std::env::current_dir().context("reading current project root")?;
+                let project =
+                    atman_runtime::storage::ProjectContext::resolve(&config, &project_root, root)?;
+                scopes
+                    .create_session(
+                        scopes::SessionSeed {
+                            config,
+                            project: Some(project),
+                            prompt_resolver: None,
+                        },
+                        Uuid::now_v7(),
+                        scopes::CreationMode::Deferred,
+                    )
+                    .await?
+                    .session_id
+                    .0
+            }
+        };
         if tui {
             use atman_tui::boot_animation::{BootStepId, run_boot_animation};
             let (progress, updates) = mpsc::unbounded_channel();

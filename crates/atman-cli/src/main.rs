@@ -1749,12 +1749,15 @@ async fn boot_first_session(
 }
 
 async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
+    let root = data_dir()?;
     if let Some(sid) = &resume_sid {
-        let root = data_dir()?;
         let sid = resolve_session_prefix(&root, sid)?;
         if let Some(recorded) = session_catalog::inspect(&root, &sid)? {
-            return peer_repl::run(&root, recorded.projection.descriptor.id).await;
+            return peer_repl::run(&root, Some(recorded.projection.descriptor.id)).await;
         }
+    }
+    if resume_sid.is_none() {
+        return peer_repl::run(&root, None).await;
     }
     // Hold the terminal guard across every session switch so the
     // alternate screen stays alive between one cmd_repl_once and the

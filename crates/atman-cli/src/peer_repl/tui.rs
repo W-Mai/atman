@@ -34,6 +34,7 @@ impl Attachment {
             .await?;
         handle.onboarding_recommended =
             self.config.models().is_first_run(&self.config.load_auth()?);
+        scopes.welcome(&self, &mut handle).await;
         for row in catalog.catalog.flows {
             let result = async {
                 let peer = self.session.open_flow(row.id.clone()).await?;
