@@ -199,6 +199,8 @@ Three input modes:
 
 Persistent terminal, main, and floating views run suggestions asynchronously. One suggestion may be pending per flow; other flow controls remain available. Confirmation belongs to the requesting flow and expires after five minutes without installing anything. The plain terminal uses `:reply <prompt-id> {"Submitted":{"answers":[{"kind":"confirmed","value":true}]}}` to accept or `:reply <prompt-id> "Rejected"` to discard. Switching views does not redirect the result, and detaching the terminal cancels suggestions still awaiting generation or confirmation. Suggestion errors do not fail or resume a flow.
 
+`:compact` and the TUI's Compact Transcript action use the same explicit context operation. Persistent views keep the operation attached to its original flow while allowing navigation and other controls; repeated requests for the same flow are rejected until the operation finishes. TUI review uses `[compaction].review`, and the result distinguishes a committed compression, no smaller window, rejection, or failure. A paused flow stays paused, and full conversation history remains available. The summary uses the flow's latest model, or its configured `smart` alias before any model call.
+
 When a completion menu is open, use `↑`/`↓` to select an item and `Enter` or `Tab` to place it in the input. Press `Enter` again to submit the completed command.
 
 In the TUI, `:panel` opens the `Ctrl+P` command palette without requiring the shortcut. Palette actions also have direct commands, displayed beside each menu item:

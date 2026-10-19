@@ -22,6 +22,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Asynchronous context operations** — Persistent terminals and shared TUI views support manual compaction with flow-bound review and completion replies. Compaction and suggestions keep independent request ownership, and operation failures leave the interface available.
+
 - **Recent session cards** — Persistent welcome views include original histories alongside persistent sessions, ordered by recorded activity within the same project. Matching UUIDs retain separate destinations, and original history statistics are read without updating caches.
 
 - **Persistent flow suggestions** — `:suggest` runs asynchronously in terminal and shared TUI views, with flow-bound confirmation, scoped installation, and request-bound replies. Duplicate requests for the same flow are rejected while confirmation is pending; errors leave flow execution unchanged.

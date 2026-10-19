@@ -2393,33 +2393,11 @@ async fn cmd_repl_once(
                         }
                     }
                     atman_tui::TuiControl::CompactNow => {
-                        session_for_ctrl.request_manual_compact();
-                        let session_for_compact = std::sync::Arc::clone(&session_for_ctrl);
-                        let providers_for_compact = providers_for_ctrl.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let rt = match tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build()
-                            {
-                                Ok(rt) => rt,
-                                Err(e) => {
-                                    atman_runtime::notify!(
-                                        error,
-                                        "compact runtime init failed: {e}"
-                                    );
-                                    return;
-                                }
-                            };
-                            rt.block_on(async {
-                                let model = session_for_compact.last_model();
-                                atman_runtime::compaction::maybe_auto_compact(
-                                    &session_for_compact,
-                                    &model,
-                                    &providers_for_compact,
-                                )
-                                .await;
-                            });
-                        });
+                        handle_compact_builtin(
+                            &session_for_ctrl,
+                            &reporter_for_ctrl,
+                            &providers_for_ctrl,
+                        );
                     }
                     atman_tui::TuiControl::CompactReviewAccept { review_id, edited } => {
                         let decision = match edited {
@@ -5117,52 +5095,37 @@ fn handle_attach_builtin(arg: &str, session: &Session, reporter: &Reporter) {
     }
 }
 
+async fn compact_context(
+    session: &Session,
+    providers: &atman_runtime::provider::ProviderRegistry,
+) -> Result<String> {
+    use atman_runtime::compaction::{CompactOutcome, compact_now};
+    let model = session.last_model();
+    let model = if model.is_empty() { "smart" } else { &model };
+    Ok(match compact_now(session, model, providers).await? {
+        CompactOutcome::Applied(result) => format!(
+            "Compacted context: {} → {} tokens",
+            result.before_tokens, result.after_tokens
+        ),
+        CompactOutcome::Unchanged => "Context unchanged: no smaller window available".into(),
+        CompactOutcome::Rejected => "Compaction rejected; context unchanged".into(),
+    })
+}
+
 fn handle_compact_builtin(
     session: &Arc<Session>,
     reporter: &Reporter,
     providers: &atman_runtime::provider::ProviderRegistry,
 ) {
-    let model = session.last_model();
-    let model = if model.is_empty() {
-        "claude-opus-4.7".to_string()
-    } else {
-        model
-    };
-    session.request_manual_compact();
-    let before = session.messages().len();
-    let tok_before = atman_runtime::compaction::estimate_tokens_for_messages(&session.messages());
-    reporter.info(format!(
-        ":compact — running LLM summary on {before} messages ({tok_before} tokens)…"
-    ));
-    let session_for_compact = Arc::clone(session);
-    let providers_for_compact = providers.clone();
-    let reporter_for_compact = reporter.clone();
-    tokio::task::spawn_blocking(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                reporter_for_compact.error(format!(":compact — runtime init failed: {e}"));
-                return;
-            }
-        };
-        rt.block_on(async {
-            atman_runtime::compaction::maybe_auto_compact(
-                &session_for_compact,
-                &model,
-                &providers_for_compact,
-            )
-            .await;
-        });
-        let after = session_for_compact.messages().len();
-        let tok_after = atman_runtime::compaction::estimate_tokens_for_messages(
-            &session_for_compact.messages(),
-        );
-        reporter_for_compact.info(format!(
-            ":compact — {before} → {after} messages · {tok_before} → {tok_after} tokens"
-        ));
+    reporter.info("Compacting context…");
+    let session = session.clone();
+    let providers = providers.clone();
+    let reporter = reporter.clone();
+    tokio::spawn(async move {
+        match compact_context(&session, &providers).await {
+            Ok(message) => reporter.info(message),
+            Err(error) => reporter.error(format!("Compaction failed: {error:#}")),
+        }
     });
 }
 

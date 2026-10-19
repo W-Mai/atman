@@ -32,9 +32,9 @@ use atman_runtime::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+mod operations;
 mod prompts;
 mod scopes;
-mod suggestion;
 mod tui;
 
 const PAGE: NonZeroUsize = NonZeroUsize::new(64).unwrap();
@@ -620,13 +620,13 @@ impl Attachment {
         );
         let mut views = HashMap::<FlowInstanceId, TerminalView>::new();
         let mut draining = false;
-        let mut suggestions = suggestion::Suggestions::new();
+        let mut operations = operations::Operations::new();
         let mut drain = std::pin::pin!(self.host.wait_quiescent());
         loop {
             tokio::select! {
-                result = suggestions.next() => {
-                    let (address, result) = result?;
-                    let message = result.unwrap_or_else(|error| format!("Suggestion failed: {error:#}"));
+                result = operations.next() => {
+                    let (address, result) = result;
+                    let message = result.unwrap_or_else(|error| format!("Operation failed: {error:#}"));
                     crate::render_note(&mut printer, format!("Flow {address} · {message}"));
                 }
                 view = focused_view.reader.next() => {
@@ -650,9 +650,9 @@ impl Attachment {
                     let line = input.text.trim();
                     if line.is_empty() { continue; }
                     if matches!(line, ":quit" | ":q" | ":exit") { break; }
-                    if line == ":suggest" {
-                        match suggestions.start(&self, &focus, Uuid::now_v7(), focus.address().instance_id.clone()) {
-                            Ok(()) => crate::render_note(&mut printer, "Examining recent flow messages; confirmation will arrive as a prompt".into()),
+                    if let Some(operation) = operations::Operation::parse(line) {
+                        match operations.start(&self, &focus, operation, Uuid::now_v7(), focus.address().instance_id.clone()) {
+                            Ok(()) => crate::render_note(&mut printer, operation.notice().into()),
                             Err(error) => crate::render_note(&mut printer, format!("{error:#}")),
                         }
                         continue;

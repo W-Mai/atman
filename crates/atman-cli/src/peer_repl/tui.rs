@@ -424,7 +424,7 @@ impl Workspace {
             .extend(atman_tui::boot_animation::toasts(notifications));
         let mut views = HashMap::from([(service.binding.view_id, service)]);
         let mut navigation = tokio::task::JoinSet::new();
-        let mut suggestions = suggestion::Suggestions::new();
+        let mut operations = operations::Operations::new();
         let ui = atman_tui::run_tui_ex(handle, Some(terminal));
         tokio::pin!(ui);
         loop {
@@ -434,12 +434,16 @@ impl Workspace {
             }
             tokio::select! {
                 result = &mut ui => return result,
-                result = suggestions.next() => {
-                    let (replies, result): (ControlReplies, Result<String>) = result?;
-                    let result = result.map(|message| {
-                        let _ = replies.send(TuiCommand::Toast { message, level: atman_tui::app::NoteLevel::Info });
-                    }).map_err(|error| format!("{error:#}"));
-                    let _ = replies.send(TuiCommand::SubmissionResult { result });
+                result = operations.next() => {
+                    let ((replies, submitted), result): ((ControlReplies, bool), Result<String>) = result;
+                    let (message, level) = match &result {
+                        Ok(message) => (message.clone(), atman_tui::app::NoteLevel::Info),
+                        Err(error) => (format!("{error:#}"), atman_tui::app::NoteLevel::Error),
+                    };
+                    let _ = replies.send(TuiCommand::Toast { message, level });
+                    if submitted {
+                        let _ = replies.send(TuiCommand::SubmissionResult { result: result.map(|_| ()).map_err(|error| format!("{error:#}")) });
+                    }
                 }
                 Some(result) = navigation.join_next() => {
                     let (replies, result): (ControlReplies, Result<Navigation>) = result?;
@@ -510,10 +514,19 @@ impl Workspace {
                                 reject_archive_control(command, &replies);
                                 continue;
                             };
-                            if matches!(&command, TuiControl::Submit(submission) if submission.control_command().is_some_and(|command| command.trim() == ":suggest")) {
-                                match suggestions.start(&execution.scope, &execution.worker, ticket.request_id, replies.clone()) {
-                                    Ok(()) => { let _ = replies.send(TuiCommand::Toast { message: "Examining recent flow messages…".into(), level: atman_tui::app::NoteLevel::Info }); }
-                                    Err(error) => { let _ = replies.send(TuiCommand::SubmissionResult { result: Err(format!("{error:#}")) }); }
+                            let operation = match &command {
+                                TuiControl::CompactNow => Some((operations::Operation::Compact, false)),
+                                TuiControl::Submit(submission) => submission.control_command().and_then(operations::Operation::parse).map(|operation| (operation, true)),
+                                _ => None,
+                            };
+                            if let Some((operation, submitted)) = operation {
+                                match operations.start(&execution.scope, &execution.worker, operation, ticket.request_id, (replies.clone(), submitted)) {
+                                    Ok(()) => { let _ = replies.send(TuiCommand::Toast { message: operation.notice().into(), level: atman_tui::app::NoteLevel::Info }); }
+                                    Err(error) => {
+                                        let message = format!("{error:#}");
+                                        let _ = replies.send(TuiCommand::Toast { message: message.clone(), level: atman_tui::app::NoteLevel::Error });
+                                        if submitted { let _ = replies.send(TuiCommand::SubmissionResult { result: Err(message) }); }
+                                    }
                                 }
                                 continue;
                             }
