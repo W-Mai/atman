@@ -6,6 +6,31 @@ const KEEP_RECENT_TOKEN_FRACTION: f64 = 0.05;
 const COMPACTION_SAFETY_MARGIN_MIN: u64 = 2_000;
 const COMPACTION_SAFETY_MARGIN_MAX_RATIO: f64 = 0.05;
 
+/// Result of a completed compaction attempt. Applied values describe committed state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactOutcome {
+    Applied(crate::session::CompactResult),
+    Unchanged,
+    Rejected,
+}
+
+/// Compact an explicitly selected context without resuming its execution or Goal.
+pub async fn compact_now(
+    session: &crate::session::Session,
+    model: &str,
+    providers: &crate::provider::ProviderRegistry,
+) -> Result<CompactOutcome, crate::RuntimeError> {
+    let _guard = session.acquire_compact_lock().await;
+    compact_locked(
+        session,
+        model,
+        providers,
+        CompactionBudgetContext::default(),
+        true,
+    )
+    .await
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CompactionBudgetContext {
     pub fixed_input_tokens: Option<u64>,
@@ -293,7 +318,7 @@ pub async fn maybe_auto_compact_with_budget(
         return;
     };
     let _compact_guard = session.acquire_compact_lock().await;
-    maybe_auto_compact_locked(session, model, providers, budget_context).await;
+    let _ = compact_locked(session, model, providers, budget_context, false).await;
 }
 
 pub fn spawn_auto_compact(
@@ -350,23 +375,24 @@ pub async fn start_auto_compact_with_budget(
             return;
         };
         rt.block_on(async move {
-            maybe_auto_compact_locked(&session, &model, &providers, budget_context).await;
+            let _ = compact_locked(&session, &model, &providers, budget_context, false).await;
             drop(compact_guard);
         });
     });
 }
 
-async fn maybe_auto_compact_locked(
+async fn compact_locked(
     session: &crate::session::Session,
     model: &str,
     providers: &crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
-) {
+    force: bool,
+) -> Result<CompactOutcome, crate::RuntimeError> {
     if let Err(error) = session.bind_provider_registry(providers) {
         session.emit_compact_warning(model, 0, 0, 0, &error.to_string());
-        return;
+        return Err(error);
     }
-    let forced = session.take_manual_compact_request();
+    let forced = session.take_manual_compact_request() || force;
     let info = providers.models().model_info(model);
     let trigger = info.compaction_trigger_threshold();
     let target = budget_context
@@ -380,10 +406,10 @@ async fn maybe_auto_compact_locked(
         session.calibrated_context_input_estimate(provider.name(), model, estimate)
     });
     if !forced && current <= trigger {
-        return;
+        return Ok(CompactOutcome::Unchanged);
     }
     if !forced && !session.approval_cooldown_ok_for_compact() {
-        return;
+        return Ok(CompactOutcome::Unchanged);
     }
     let Some(range) = find_compact_range(&msgs, target) else {
         let (replacement, rewritten_count) =
@@ -397,13 +423,13 @@ async fn maybe_auto_compact_locked(
                 info.context_budget,
                 "no compactible span — retained user content cannot fit the history budget",
             );
-            return;
+            return Ok(CompactOutcome::Unchanged);
         }
         match session
             .commit_rewritten_window(&msgs, replacement, window_tokens, rewritten_count)
             .await
         {
-            Ok(Some(_)) => {}
+            Ok(Some(result)) => return Ok(CompactOutcome::Applied(result)),
             Ok(None) => {
                 session.emit_compact_warning(
                     model,
@@ -413,15 +439,13 @@ async fn maybe_auto_compact_locked(
                     "retained turn output rewrite did not shrink the transcript",
                 );
             }
-            Err(error) => session.emit_compact_warning(
-                model,
-                current,
-                trigger,
-                info.context_budget,
-                &format!("context checkpoint failed: {error}"),
-            ),
+            Err(error) => {
+                let reason = format!("context checkpoint failed: {error}");
+                session.emit_compact_warning(model, current, trigger, info.context_budget, &reason);
+                return Err(crate::RuntimeError::ToolFailed(reason));
+            }
         }
-        return;
+        return Ok(CompactOutcome::Unchanged);
     };
     let _ = session
         .stream_tx()
@@ -481,7 +505,7 @@ async fn maybe_auto_compact_locked(
                 info.context_budget,
                 &format!("LLM summary failed: {err}; keeping full transcript"),
             );
-            return;
+            return Err(err);
         }
     };
     let final_summary =
@@ -496,7 +520,7 @@ async fn maybe_auto_compact_locked(
                 session.push_system_note(
                     "compaction rejected by user; keeping full transcript".into(),
                 );
-                return;
+                return Ok(CompactOutcome::Rejected);
             }
         };
     let replacement =
@@ -514,7 +538,7 @@ async fn maybe_auto_compact_locked(
             "compaction skipped: replacement would not shrink transcript ({} >= {} tokens)",
             after_tokens, window_tokens
         ));
-        return;
+        return Ok(CompactOutcome::Unchanged);
     }
     match session
         .commit_compacted_window(
@@ -528,12 +552,13 @@ async fn maybe_auto_compact_locked(
     {
         Ok(Some(result)) => {
             session.push_system_note(format!(
-                "auto-compacted {}..{} — {} → {} tokens",
+                "compacted {}..{} — {} → {} tokens",
                 result.compacted_start,
                 result.compacted_end,
                 result.before_tokens,
                 result.after_tokens
             ));
+            Ok(CompactOutcome::Applied(result))
         }
         Ok(None) => {
             session.emit_compact_warning(
@@ -543,11 +568,13 @@ async fn maybe_auto_compact_locked(
                 info.context_budget,
                 "no compactible span — history too short or already fully compacted",
             );
+            Ok(CompactOutcome::Unchanged)
         }
         Err(error) => {
             let reason = format!("context checkpoint failed: {error}");
             send_failed(session, &reason);
             session.emit_compact_warning(model, current, trigger, info.context_budget, &reason);
+            Err(crate::RuntimeError::ToolFailed(reason))
         }
     }
 }
@@ -581,6 +608,20 @@ async fn request_review_if_enabled(
         range_end: range.end,
         tokens_before,
         emitted_at: chrono::Utc::now(),
+    };
+    struct ReviewGuard {
+        registry: std::sync::Arc<crate::session::CompactReviewRegistry>,
+        id: String,
+    }
+    impl Drop for ReviewGuard {
+        fn drop(&mut self) {
+            self.registry
+                .decide(&self.id, crate::session::CompactReviewDecision::Reject);
+        }
+    }
+    let _guard = ReviewGuard {
+        registry: reviews.clone(),
+        id: pending.review_id.clone(),
     };
     let rx = reviews.request(pending);
     match rx.await {
@@ -1202,6 +1243,235 @@ mod tests {
     }
     fn system(text: &str) -> Message {
         Message::system_text(TurnId::now(), text)
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_preserves_execution_and_commits_only_accepted_context() {
+        use crate::flow_runtime::FlowWorker;
+        use crate::flow_store::{
+            EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowTransition, RuntimeStore,
+            SessionDescriptor, publication::MessagePublication,
+        };
+        use crate::model_registry::{ModelEntry, ModelRegistry};
+        use crate::provider::ProviderRegistry;
+        use crate::session::CompactReviewDecision;
+        use std::sync::Arc;
+        use uuid::Uuid;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(dir.path()).unwrap();
+        let id = Uuid::now_v7();
+        let mut session = root
+            .create_session(SessionDescriptor {
+                id,
+                configuration: Default::default(),
+                project: None,
+                title: "Compact".into(),
+            })
+            .unwrap();
+        let address = FlowRef {
+            session_id: id.into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let mut store = session
+            .create_flow(FlowDescriptor {
+                address: address.clone(),
+                creation_request: Uuid::now_v7(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: "main".into(),
+                    path: "main.at".into(),
+                    bundle: crate::source_program::RevisionBundle {
+                        entry: "main.at".into(),
+                        sources: [("main.at".into(), "flow main() {}".into())].into(),
+                        edges: Default::default(),
+                    },
+                }
+                .into(),
+            })
+            .unwrap();
+        store
+            .transition(store.state().revision(), FlowTransition::Activated)
+            .unwrap();
+        let lease = store
+            .state()
+            .clone()
+            .begin_turn(TurnId::now(), atman_rt::RunId::now())
+            .unwrap();
+        store
+            .transition(
+                store.state().revision(),
+                FlowTransition::TurnStarted {
+                    turn: lease.turn.clone(),
+                    run: lease.run.clone(),
+                },
+            )
+            .unwrap();
+        for index in 0..30 {
+            let message = if index % 2 == 0 {
+                Message::user_text(lease.turn.clone(), "question")
+            } else {
+                Message::assistant_text(lease.turn.clone(), "answer ".repeat(1000))
+            };
+            store
+                .publish_message(MessagePublication {
+                    id: Uuid::now_v7(),
+                    lease: lease.clone(),
+                    run: lease.run.clone(),
+                    context_run: None,
+                    message,
+                })
+                .unwrap();
+        }
+        store
+            .transition(
+                store.state().revision(),
+                FlowTransition::TurnFinished {
+                    lease,
+                    outcome: atman_rt::TurnOutcome::Completed,
+                },
+            )
+            .unwrap();
+        store
+            .transition(
+                store.state().revision(),
+                FlowTransition::ExecutionPaused {
+                    key: Uuid::now_v7().into(),
+                },
+            )
+            .unwrap();
+        let worker = FlowWorker::start(store).await.unwrap();
+        let context = worker.context();
+        let state = worker.state().await.unwrap();
+        let original = context.messages().to_vec();
+        let models = Arc::new(ModelRegistry::new());
+        models.register_model_entries(vec![(
+            "summary".into(),
+            ModelEntry {
+                model: "summary".into(),
+                context_budget: Some(4000),
+                ..Default::default()
+            },
+        )]);
+        let providers = ProviderRegistry::with_models(models);
+        assert!(compact_now(&context, "summary", &providers).await.is_err());
+        assert_eq!(context.messages().as_ref(), original.as_slice());
+        providers.register(Arc::new(
+            crate::providers::mock::MockProvider::new("summary")
+                .with_fallback(crate::value::Value::Str("retained summary".into())),
+        ));
+        let reviews = context.compact_reviews();
+        let mut updates = reviews.subscribe();
+        for accepted in [false, true] {
+            let operation = compact_now(&context, "summary", &providers);
+            tokio::pin!(operation);
+            tokio::select! {
+                result = &mut operation => panic!("must await review: {result:?}"),
+                _ = updates.changed() => {},
+            }
+            let pending = updates.borrow_and_update().clone().unwrap();
+            assert_eq!(context.messages().as_ref(), original.as_slice());
+            assert!(reviews.decide(
+                &pending.review_id,
+                if accepted {
+                    CompactReviewDecision::AcceptAsIs
+                } else {
+                    CompactReviewDecision::Reject
+                }
+            ));
+            let outcome = operation.await.unwrap();
+            if accepted {
+                assert!(matches!(outcome, CompactOutcome::Applied(_)));
+            } else {
+                assert_eq!(outcome, CompactOutcome::Rejected);
+                assert_eq!(context.messages().as_ref(), original.as_slice());
+            }
+            updates.borrow_and_update();
+        }
+        let compacted = context.messages().to_vec();
+        assert!(estimate_tokens_for_messages(&compacted) < estimate_tokens_for_messages(&original));
+        assert_eq!(context.messages_full().as_ref(), &original);
+        assert_eq!(worker.state().await.unwrap(), state);
+        let store = worker.shutdown().await.unwrap();
+        assert_eq!(store.context_checkpoints().len(), 1);
+        drop(store);
+        let reopened = session.open_flow(&address.instance_id).unwrap();
+        assert_eq!(reopened.context_messages(), compacted);
+        assert_eq!(reopened.history_messages(), original);
+        assert_eq!(reopened.state(), &state);
+
+        let local = crate::Session::open_ephemeral();
+        for message in context.messages_full().iter() {
+            local.append_message(message.clone(), None);
+        }
+        local.goal_control.set("retained objective", None).unwrap();
+        local
+            .goal_control
+            .pause(
+                crate::memory::goal::GoalActor::User,
+                crate::memory::goal::GoalPauseReason::UserRequested,
+                String::new(),
+                None,
+            )
+            .unwrap();
+        let goal = local.goal_control.record();
+        assert!(local.goal_control.try_enter().is_none());
+        let before = local.messages().to_vec();
+        maybe_auto_compact(&local, "summary", &providers).await;
+        assert_eq!(local.messages().as_ref(), before.as_slice());
+        assert!(matches!(
+            compact_now(&local, "summary", &providers).await.unwrap(),
+            CompactOutcome::Applied(_)
+        ));
+        assert!(local.goal_control.try_enter().is_none());
+        assert_eq!(local.goal_control.record(), goal);
+    }
+
+    #[tokio::test]
+    async fn abandoned_compaction_review_releases_only_its_own_request() {
+        let session = crate::Session::open_ephemeral();
+        let reviews = session.compact_reviews();
+        let mut updates = reviews.subscribe();
+        let range = CompactRange {
+            start: 0,
+            end: 1,
+            tokens_saved_estimate: 1,
+        };
+        for replace in [false, true] {
+            let mut operation = Box::pin(request_review_if_enabled(
+                &session,
+                true,
+                &[],
+                &range,
+                10,
+                "summary".into(),
+            ));
+            tokio::select! {
+                _ = &mut operation => panic!("must await review"),
+                _ = updates.changed() => {},
+            }
+            let mut pending = updates.borrow_and_update().clone().unwrap();
+            let receiver = if replace {
+                pending.review_id = uuid::Uuid::now_v7().to_string();
+                Some(reviews.request(pending.clone()))
+            } else {
+                None
+            };
+            drop(operation);
+            if let Some(receiver) = receiver {
+                assert_eq!(reviews.list_pending().unwrap().review_id, pending.review_id);
+                assert!(reviews.decide(
+                    &pending.review_id,
+                    crate::session::CompactReviewDecision::AcceptAsIs
+                ));
+                assert!(matches!(
+                    receiver.await.unwrap(),
+                    crate::session::CompactReviewDecision::AcceptAsIs
+                ));
+            }
+            assert!(reviews.list_pending().is_none());
+            updates.borrow_and_update();
+        }
     }
 
     fn context_record(key: &str, revision: u64, text: &str) -> Message {

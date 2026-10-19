@@ -187,6 +187,8 @@ The trigger uses a preflight estimate of the current materialized messages plus 
 
 The summary call resolves the same configured model ID as a normal `llm.call`. If the anchored summary request fails, the selected range remains in place and a failed compaction event is emitted; an unavailable anchored summary is never committed as a placeholder. A successful summary replaces the selected range only when the replacement is smaller. Tool use/result parts are sanitized without dropping valid text or valid pairs from a mixed message, the replacement is checkpointed, and the live session window is updated. Depending on `[compaction].review`, manual or all compactions may be reviewed before commit. If the provider reports an actual context overflow, the runtime can compact and rebuild the request once before normal retry handling continues.
 
+Hosts can call `compaction::compact_now` for an explicit user request, including when execution is paused. It acquires the same context lock and uses the same summary, review, and checkpoint path as automatic compaction without resuming execution or changing the Goal. `CompactOutcome` distinguishes a committed replacement, an unchanged window, and a rejected review; provider and storage errors are returned to the caller. Dropping a pending review releases only that request. Persistent contexts commit through their existing flow writer and retain the complete original transcript for history and restart recovery.
+
 Compaction is lossy by design. It preserves an operational handoff, not every detail.
 Use history search for older evidence and durable memory for facts that must remain
 prominent.

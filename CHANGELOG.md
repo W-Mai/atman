@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- **Explicit context compaction** — Hosts can compact paused contexts without resuming execution. The shared compaction API reports committed, unchanged, rejected, and failed outcomes; cancelled review waits release their pending request.
+
 - **Flow suggestions** — Suggestions use the current flow's message snapshot with tool-call evidence and source-labelled notifications. Validation rejects non-standalone source, confirmation includes the proposed source and destination, and accepted commands use the session's configuration directory.
 
 - **Project data ownership** — Project deletion checks persistent session ownership, closed flow lifecycles, and management bindings before removing shared data. Concurrent session opens and management changes cannot bypass these checks; interrupted directory removal can be retried.
