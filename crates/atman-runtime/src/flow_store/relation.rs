@@ -62,7 +62,7 @@ impl FlowRelation {
     }
 }
 
-pub(super) fn access_relations(projection: &SessionProjection) -> Vec<FlowRelation> {
+pub(crate) fn access_relations(projection: &SessionProjection) -> Vec<FlowRelation> {
     grant_relations(
         projection
             .access

@@ -1,8 +1,10 @@
 //! Shared session and instance discovery without opening execution owners.
 
+mod overview;
 mod scan;
 mod watches;
 mod workspaces;
+pub use overview::{OverviewCatalogPage, OverviewCatalogSnapshot, OverviewExecution};
 pub use scan::{FlowCatalogCursor, FlowCatalogEntry, FlowCatalogPage};
 pub use watches::{WatchCatalogEntry, WatchCatalogPage, WatchCatalogSnapshot};
 pub use workspaces::{WorkspaceCatalogEntry, WorkspaceCatalogPage, WorkspaceCatalogSnapshot};

@@ -41,6 +41,7 @@ fn session(root: &RuntimeStore) -> (atman_runtime::flow_store::SessionStore, Flo
 
 #[tokio::test]
 async fn management_relation_inspection_uses_the_current_acknowledged_grants() {
+    use atman_runtime::flow_runtime::catalog::{FlowCatalogEntry, OverviewExecution};
     use atman_runtime::flow_runtime::host::RuntimeHost;
     use atman_runtime::flow_store::relation::RelationKind;
 
@@ -94,6 +95,28 @@ async fn management_relation_inspection_uses_the_current_acknowledged_grants() {
     );
     assert!(host.sessions().is_empty());
 
+    let overview = catalog
+        .overview_page(None, 50, |_| Ok(true), |_| Ok(()))
+        .await
+        .unwrap();
+    for entry in &overview.entries {
+        let FlowCatalogEntry::Flow {
+            owner,
+            snapshot: Ok(snapshot),
+            ..
+        } = entry
+        else {
+            panic!("missing overview record")
+        };
+        assert!(matches!(snapshot.execution, OverviewExecution::Detached));
+        if owner == &source {
+            assert_eq!(snapshot.relations, relations);
+        } else {
+            assert!(snapshot.relations.is_empty());
+        }
+    }
+    assert_eq!(overview.entries.len(), 2);
+
     profile
         .select(
             Uuid::new_v4(),
@@ -111,6 +134,11 @@ async fn management_relation_inspection_uses_the_current_acknowledged_grants() {
             .is_empty()
     );
     assert!(host.sessions().is_empty());
+    let overview = catalog
+        .overview_page(None, 50, |_| Ok(true), |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(overview.entries.iter().all(|entry| matches!(entry, FlowCatalogEntry::Flow { snapshot: Ok(snapshot), .. } if snapshot.relations.is_empty())));
     host.shutdown().await.unwrap();
 }
 

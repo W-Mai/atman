@@ -14,7 +14,8 @@ use uuid::Uuid;
 async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boundaries() {
     use atman_runtime::{
         flow_runtime::catalog::{
-            FlowCatalogCursor, SessionCatalog, WatchCatalogEntry, WorkspaceCatalogEntry,
+            FlowCatalogCursor, FlowCatalogEntry, OverviewExecution, SessionCatalog,
+            WatchCatalogEntry, WorkspaceCatalogEntry,
         },
         flow_store::subscription::{FlowEventFilter, FlowSubscription, SubscriptionPurpose},
         flow_store::workspace::{WorkspaceRequest, WorkspaceSource},
@@ -167,6 +168,21 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
             },
         )
         .unwrap();
+    flows[1]
+        .edit_goal(
+            atman_runtime::flow_store::goal::GoalRequest {
+                id: Uuid::now_v7(),
+                sender: atman_runtime::flow_store::inbox::SenderIdentity::User(Uuid::now_v7()),
+                expected: None,
+                edit: atman_runtime::memory::goal::GoalEdit::Set {
+                    text: "Inspect all sessions".into(),
+                    replace_completed: false,
+                },
+                start_turn: false,
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
     let active_state = flows[1].state().clone();
     let active_cursor = flows[1].cursor().clone();
     let active_address = flows[1].descriptor().address.clone();
@@ -189,6 +205,7 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
     let mut cursor = None;
     let mut entries = Vec::new();
     let mut workspaces = Vec::new();
+    let mut overview = Vec::new();
     let mut steps = 0;
     loop {
         let page = catalog
@@ -206,6 +223,14 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
         assert_eq!(bindings.total_sessions, page.total_sessions);
         assert_eq!(bindings.inspected, page.inspected);
         workspaces.extend(bindings.entries);
+        let nodes = catalog
+            .overview_page(cursor.clone(), 1, |_| Ok(true), |_| Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(nodes.next, page.next);
+        assert_eq!(nodes.total_sessions, page.total_sessions);
+        assert_eq!(nodes.inspected, page.inspected);
+        overview.extend(nodes.entries);
         entries.extend(page.entries);
         steps += 1;
         assert!(steps <= 6, "pagination did not advance");
@@ -215,6 +240,18 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
     assert_eq!(steps, 6); // Four Flows, one empty Session, one failed Session.
     assert_eq!(entries.len(), 5);
     assert_eq!(workspaces.len(), entries.len());
+    assert_eq!(overview.len(), entries.len());
+    assert!(matches!(
+        &overview[0],
+        FlowCatalogEntry::SessionUnavailable { .. }
+    ));
+    assert!(matches!(
+        &overview[1],
+        FlowCatalogEntry::Flow {
+            snapshot: Err(_),
+            ..
+        }
+    ));
     assert!(matches!(
         &workspaces[0],
         WorkspaceCatalogEntry::SessionUnavailable { .. }
@@ -230,6 +267,35 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
         .into_iter()
         .enumerate()
     {
+        let FlowCatalogEntry::Flow {
+            owner: node_owner,
+            snapshot: Ok(node),
+            ..
+        } = &overview[offset + 2]
+        else {
+            panic!("missing overview snapshot")
+        };
+        assert_eq!(node_owner, address);
+        assert_eq!(node.title, "main");
+        assert!(matches!(node.execution, OverviewExecution::Detached));
+        assert_eq!(node.pending_inputs, usize::from(offset != 2));
+        if offset == 1 {
+            assert_eq!(
+                node.goal.as_ref().unwrap().objective,
+                "Inspect all sessions"
+            );
+            assert_eq!(node.recorded_state, active_state);
+            assert_eq!(node.cursor, active_cursor);
+            assert_eq!(node.trailing_bytes, 11);
+        }
+        if offset != 2 {
+            assert!(
+                node.relations
+                    .iter()
+                    .any(|relation| relation.id == watcher_id)
+            );
+            assert_eq!(node.project_root.as_deref(), Some(project.root()));
+        }
         let WorkspaceCatalogEntry::Flow {
             owner,
             snapshot: Ok(snapshot),
@@ -273,6 +339,25 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
     let checks = std::cell::Cell::new(0);
     let denied = catalog
         .workspace_page(
+            None,
+            50,
+            |_| Ok(true),
+            |owner| {
+                if owner == &active_address {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == 3 {
+                        return Err(std::io::ErrorKind::PermissionDenied.into());
+                    }
+                }
+                Ok(())
+            },
+        )
+        .await;
+    assert!(matches!(denied, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied));
+    assert_eq!(checks.get(), 3);
+    checks.set(0);
+    let denied = catalog
+        .overview_page(
             None,
             50,
             |_| Ok(true),
@@ -420,6 +505,81 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
         active_state
     );
     assert_eq!(std::fs::read(&active_log).unwrap(), active_bytes);
+    // Merely attaching a Session must not recover or load its recorded active Flow.
+    let host = atman_runtime::flow_runtime::host::RuntimeHost::default();
+    let session = host
+        .attach_session(runtime.open_session(active_address.session_id.0).unwrap())
+        .unwrap();
+    let attached_catalog =
+        SessionCatalog::new(Some(host.clone()), Some(directory.path().to_owned()));
+    let attached = attached_catalog
+        .overview_page(
+            None,
+            50,
+            |id| Ok(id == active_address.session_id.0),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let snapshot = attached
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            FlowCatalogEntry::Flow {
+                owner,
+                snapshot: Ok(snapshot),
+                ..
+            } if owner == &active_address => Some(snapshot),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(snapshot.execution, OverviewExecution::Detached));
+    assert_eq!(snapshot.recorded_state, active_state);
+    assert_eq!(snapshot.cursor, active_cursor);
+    assert_eq!(snapshot.trailing_bytes, 11);
+    assert!(session.observe().await.unwrap().loaded.is_empty());
+    assert_eq!(std::fs::read(&active_log).unwrap(), active_bytes);
+
+    // Only explicit opening owns recovery; the next directory sample acknowledges that writer.
+    let worker = session
+        .open_flow(active_address.instance_id.clone())
+        .await
+        .unwrap();
+    session
+        .select_default(active_address.instance_id.clone())
+        .await
+        .unwrap();
+    let loaded = attached_catalog
+        .overview_page(
+            None,
+            50,
+            |id| Ok(id == active_address.session_id.0),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let loaded = loaded
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            FlowCatalogEntry::Flow {
+                owner,
+                snapshot: Ok(snapshot),
+                ..
+            } if owner == &active_address => Some(snapshot),
+            _ => None,
+        })
+        .unwrap();
+    let OverviewExecution::Loaded { state } = &loaded.execution else {
+        panic!("missing live observation")
+    };
+    assert_eq!(*state, worker.status().await.unwrap().execution);
+    assert_eq!(*state, loaded.recorded_state);
+    assert!(loaded.default_flow);
+    assert_ne!(loaded.cursor, active_cursor);
+    assert_eq!(loaded.trailing_bytes, 0);
+    assert_eq!(loaded.pending_inputs, 1);
+    host.shutdown().await.unwrap();
 }
 
 #[tokio::test]

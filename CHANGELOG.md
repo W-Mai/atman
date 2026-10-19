@@ -38,6 +38,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Bounded Flow overview** — Cross-Session catalog pages combine recorded execution, Goals, pending input, and relations with separately acknowledged live state. Reads preserve journal boundaries, advance past corrupt records, and recheck authorization without starting or recovering Flows.
+
 - **Worktree removal controls** — Resource details offer a shared checkout-removal confirmation in main and floating views. Keyboard and mouse controls show the target path, protect uncommitted files by default, and wait for the resource owner's result. Failed requests retain their snapshot and error for inspection and refresh.
 
 - **Workspace retention controls** — Resource details can retain a checkout or restore automatic cleanup for a live Flow binding. Changes validate the observed registry record under lock, preserve all references, and reject stale snapshots and invocation-owned leases.

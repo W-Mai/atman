@@ -573,27 +573,38 @@ impl SessionHandle {
 
     /// Read a registered instance without retaining its conversation or installing observers. Live writers provide acknowledged state; inactive journals are inspected without recovery or mutation.
     pub async fn describe_flow(&self, id: FlowInstanceId) -> io::Result<InstanceObservation> {
+        if let Some(observation) = self.describe_loaded_flow(&id).await? {
+            return Ok(observation);
+        }
+        self.request(|reply| CatalogCommand::Describe { id, reply })
+            .await
+    }
+
+    /// Observe only an existing writer; detached records remain the caller's snapshot.
+    pub(crate) async fn describe_loaded_flow(
+        &self,
+        id: &FlowInstanceId,
+    ) -> io::Result<Option<InstanceObservation>> {
         let existing = self
             .flows
             .lock()
             .unwrap()
-            .get(&id)
+            .get(id)
             .filter(|worker| !worker.is_stopped())
             .cloned();
         if let Some(worker) = existing {
             return worker
                 .request(|store| {
-                    Ok(InstanceObservation {
+                    Ok(Some(InstanceObservation {
                         entry: store.descriptor().content.title().to_owned(),
                         state: store.state().clone(),
                         loaded: true,
                         trailing_bytes: 0,
-                    })
+                    }))
                 })
                 .await;
         }
-        self.request(|reply| CatalogCommand::Describe { id, reply })
-            .await
+        Ok(None)
     }
 
     /// Change only the default view binding; this does not start, pause, or privilege a flow.

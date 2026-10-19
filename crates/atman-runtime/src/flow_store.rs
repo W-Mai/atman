@@ -547,6 +547,8 @@ pub struct FlowInspection {
     pub relations: Vec<relation::FlowRelation>,
     pub watchers: Vec<watch_view::WatchRecord>,
     pub workspace: Option<workspace::WorkspaceRequest>,
+    pub goal: Option<crate::memory::goal::GoalRecord>,
+    pub pending_inputs: usize,
 }
 
 impl SessionInspection {
@@ -701,6 +703,8 @@ fn inspect_registered_flow_with(
         relations,
         watchers,
         workspace: replay.workspace,
+        goal: replay.goals.current().cloned(),
+        pending_inputs: inbox.pending_entries().count(),
     })
 }
 

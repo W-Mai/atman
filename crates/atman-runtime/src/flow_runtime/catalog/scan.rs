@@ -50,6 +50,28 @@ impl SessionCatalog {
             &crate::flow_store::SessionProjection,
         ) -> io::Result<T>,
     ) -> io::Result<FlowCatalogPage<T>> {
+        self.scan_page_observed(cursor, limit, visible, authorize, project, |_, snapshot| {
+            std::future::ready(Ok(snapshot))
+        })
+        .await
+    }
+
+    /// Additional host observations finish before the same authorization checks as recorded reads.
+    pub(super) async fn scan_page_observed<
+        T: Send + 'static,
+        F: std::future::Future<Output = io::Result<T>>,
+    >(
+        &self,
+        cursor: Option<FlowCatalogCursor>,
+        limit: usize,
+        visible: impl Fn(Uuid) -> io::Result<bool>,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+        project: fn(
+            crate::flow_store::FlowInspection,
+            &crate::flow_store::SessionProjection,
+        ) -> io::Result<T>,
+        observe: impl Fn(FlowRef, T) -> F,
+    ) -> io::Result<FlowCatalogPage<T>> {
         if !(1..=50).contains(&limit) {
             return Err(invalid("flow catalog page limit must be between 1 and 50"));
         }
@@ -120,6 +142,10 @@ impl SessionCatalog {
                             })
                             .await
                             .map_err(io::Error::other)?
+                        };
+                        let snapshot = match snapshot {
+                            Ok(snapshot) => observe(owner.clone(), snapshot).await,
+                            Err(error) => Err(error),
                         };
                         require_visible(session_id, &visible)?;
                         authorize(&owner)?;
