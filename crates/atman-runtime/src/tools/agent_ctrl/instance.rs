@@ -8,7 +8,7 @@ use crate::flow_runtime::access::{FlowClient, PeerControl};
 use crate::flow_store::FlowRef;
 use crate::flow_store::inbox::DeliveryMode;
 
-pub(super) const HANDLE_DESCRIPTION: &str = "Flow handle. Persistent instances use an instance UUID in the current session or session UUID/instance UUID across sessions.";
+pub(in crate::tools) const HANDLE_DESCRIPTION: &str = "Flow handle. Persistent instances use an instance UUID in the current session or session UUID/instance UUID across sessions.";
 
 fn request_id(args: &ToolArgs) -> Result<Uuid, RuntimeError> {
     match args.named("request_id") {

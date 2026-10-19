@@ -102,6 +102,21 @@ impl RuntimeHost {
         self.directory.controls.progress.subscribe()
     }
 
+    pub(in crate::flow_runtime) async fn control_batch(
+        &self,
+        sender: SenderIdentity,
+        id: Uuid,
+    ) -> io::Result<Option<ControlBatchRecord>> {
+        let profile = self
+            .directory
+            .profile
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| invalid("control batches require an attached profile"))?;
+        profile.control_batch(sender, id).await
+    }
+
     pub(in crate::flow_runtime) fn control_work_pending(&self) -> io::Result<bool> {
         if !self.directory.controls.started.load(Ordering::Acquire) {
             return Ok(false);

@@ -10,6 +10,7 @@ pub mod context;
 pub mod dispatch;
 pub mod final_answer;
 pub mod flow_check;
+pub mod flow_control;
 pub mod flow_list;
 pub mod flow_source;
 pub mod form;
@@ -106,6 +107,8 @@ pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stub
     reg.register(Arc::new(agent_ctrl::FlowResult));
     reg.register(Arc::new(agent_ctrl::AgentKill));
     reg.register(Arc::new(agent_ctrl::FlowClose));
+    reg.register(Arc::new(flow_control::FlowControlBatch));
+    reg.register(Arc::new(flow_control::FlowControlStatus));
     reg.register(Arc::new(agent_ctrl::FlowInterject));
     reg.register(Arc::new(form::FormAsk));
     reg.register(Arc::new(session::SessionPush));

@@ -753,6 +753,30 @@ impl FlowClient {
             )
             .await
     }
+
+    /// Read this flow's durable control history from any admitted turn, subject to current target control grants. Reading does not start delivery or open targets.
+    pub async fn control_status(
+        &self,
+        request_id: Uuid,
+    ) -> io::Result<Option<crate::flow_store::profile::ControlBatchRecord>> {
+        self.authenticate()?;
+        self.source_session()?;
+        if request_id.is_nil() {
+            return Err(invalid("control request identity must not be nil"));
+        }
+        let record = self
+            .host
+            .control_batch(SenderIdentity::Flow(self.source().clone()), request_id)
+            .await?;
+        self.authenticate()?;
+        self.source_session()?;
+        if let Some(record) = &record {
+            for item in &record.items {
+                self.authorize(&item.request.target, FlowAction::Control)?;
+            }
+        }
+        Ok(record)
+    }
 }
 
 impl super::FlowWorker {

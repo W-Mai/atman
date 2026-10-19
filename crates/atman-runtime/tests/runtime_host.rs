@@ -96,6 +96,250 @@ async fn session_opening_retains_one_owner_after_caller_cancellation() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn registered_batch_tools_retain_actor_scope_receipts_and_grants_across_turns_and_restart() {
+    use atman_runtime::flow_store::{
+        access::{AccessTarget, FlowAction, FlowGrant},
+        profile::{ControlBatchRecord, ControlProgress, ProfileStore},
+    };
+    use atman_runtime::value::ValueJson;
+
+    async fn call(
+        worker: &FlowWorker,
+        query: bool,
+        id: Uuid,
+        commands: serde_json::Value,
+    ) -> Result<serde_json::Value, atman_runtime::RuntimeError> {
+        worker
+            .context()
+            .update_trust(
+                atman_runtime::trust::TrustConfig {
+                    mode: atman_runtime::trust::TrustMode::Reckless,
+                    ..Default::default()
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+        worker
+            .accept_input(peer_request(worker.address(), worker.address()), |_| Ok(()))
+            .await
+            .unwrap();
+        let mut request = prepare(&worker.snapshot().await.unwrap()).unwrap().unwrap();
+        request.arguments = BTreeMap::from([
+            ("query".into(), query.into()),
+            ("request_id".into(), id.to_string().into()),
+            ("commands".into(), commands),
+        ]);
+        request.authority = EffectiveAuthority::root(&Default::default(), true, None);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            worker
+                .start_turn(Executor::new(), request)
+                .await
+                .unwrap()
+                .wait(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .result
+        .and_then(|value| value.to_json())
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let profile = host
+        .attach_profile(ProfileStore::open(&root).unwrap())
+        .unwrap();
+    let info = session_descriptor();
+    let remote_info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let remote = host
+        .attach_session(root.create_session(remote_info.clone()).unwrap())
+        .unwrap();
+    let program = r#"flow main(query: bool, request_id: string, commands: any) -> any {
+        contract { capabilities { shell: true } }
+        when query { return flow.control_status(request_id: request_id) }
+        return flow.control_batch(request_id: request_id, commands: commands)
+    }"#;
+    let source = session
+        .create_flow(program_descriptor(info.id, program.into()))
+        .await
+        .unwrap();
+    let stranger = session
+        .create_flow(program_descriptor(info.id, program.into()))
+        .await
+        .unwrap();
+    let target = remote
+        .create_flow(flow_descriptor(remote_info.id))
+        .await
+        .unwrap();
+    let stale = remote
+        .create_flow(flow_descriptor(remote_info.id))
+        .await
+        .unwrap();
+    for worker in [&source, &stranger, &target, &stale] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    let grant = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: source.address().clone(),
+        target: AccessTarget::Session(remote_info.id),
+        actions: [FlowAction::Control].into(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
+        .await
+        .unwrap();
+    let id = Uuid::new_v4();
+    let commands = serde_json::json!([
+        {"handle": format!("{}/{}", remote_info.id, target.address().instance_id),
+         "expected_revision": target.state().await.unwrap().revision(), "action": "pause"},
+        {"handle": format!("{}/{}", remote_info.id, stale.address().instance_id),
+         "expected_revision": stale.state().await.unwrap().revision() + 10, "action": "pause"}
+    ]);
+    let profile_before = profile.snapshot().await.unwrap().profile.cursor;
+    let target_before = target.snapshot().await.unwrap().cursor;
+    let mut forged = commands[0].clone();
+    forged["sender"] = serde_json::json!({ "user": Uuid::new_v4() });
+    let mut release = commands[0].clone();
+    release["action"] = "release_pause".into();
+    for (request, invalid, reason) in [
+        (Uuid::nil(), commands.clone(), "non-nil"),
+        (
+            Uuid::new_v4(),
+            serde_json::json!([]),
+            "at least one command",
+        ),
+        (
+            Uuid::new_v4(),
+            serde_json::json!([commands[0], commands[0]]),
+            "unique non-nil target",
+        ),
+        (Uuid::new_v4(), serde_json::json!([forged]), "unknown field"),
+        (
+            Uuid::new_v4(),
+            serde_json::json!([release]),
+            "explicit operator action",
+        ),
+    ] {
+        let error = call(&source, false, request, invalid).await.unwrap_err();
+        assert!(error.to_string().contains(reason), "{error}");
+        assert_eq!(
+            profile.snapshot().await.unwrap().profile.cursor,
+            profile_before
+        );
+        assert_eq!(target.snapshot().await.unwrap().cursor, target_before);
+        change(&source, FlowTransition::InterruptionRecovered).await;
+    }
+    let accepted: ControlBatchRecord =
+        serde_json::from_value(call(&source, false, id, commands.clone()).await.unwrap()).unwrap();
+    assert_eq!(
+        accepted.sender,
+        SenderIdentity::Flow(source.address().clone())
+    );
+    assert_eq!(accepted.id, id);
+    tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    let record = call(&source, true, id, serde_json::json!([]))
+        .await
+        .unwrap();
+    let finished: ControlBatchRecord = serde_json::from_value(record.clone()).unwrap();
+    assert!(matches!(
+        finished.items[0].history.last().unwrap().progress,
+        ControlProgress::Applied { .. }
+    ));
+    assert!(matches!(
+        finished.items[1].history.last().unwrap().progress,
+        ControlProgress::Failed { .. }
+    ));
+    let target_cursor = target.snapshot().await.unwrap().cursor;
+    let profile_cursor = profile.snapshot().await.unwrap().profile.cursor;
+    assert_eq!(call(&source, false, id, commands).await.unwrap(), record);
+    assert_eq!(target.snapshot().await.unwrap().cursor, target_cursor);
+    assert_eq!(
+        profile.snapshot().await.unwrap().profile.cursor,
+        profile_cursor
+    );
+    assert!(
+        call(&stranger, true, id, serde_json::json!([]))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("does not exist for this flow")
+    );
+    assert_eq!(
+        profile.snapshot().await.unwrap().profile.cursor,
+        profile_cursor
+    );
+
+    let lease = start(&source).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    session
+        .revoke_access(session.snapshot().await.unwrap().cursor, grant.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        client.control_status(id).await.unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    session
+        .grant_access(
+            session.snapshot().await.unwrap().cursor,
+            FlowGrant {
+                id: Uuid::new_v4(),
+                ..grant
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(client.control_status(id).await.unwrap(), Some(finished));
+    change(
+        &source,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    assert!(
+        client.control_status(id).await.is_err(),
+        "an old lease cannot query later turns"
+    );
+    let address = source.address().clone();
+    host.shutdown().await.unwrap();
+
+    let host = RuntimeHost::default();
+    let profile = host
+        .attach_profile(ProfileStore::open(&root).unwrap())
+        .unwrap();
+    let session = host
+        .attach_session(root.open_session(info.id).unwrap())
+        .unwrap();
+    let source = session.open_flow(address.instance_id).await.unwrap();
+    assert_eq!(
+        call(&source, true, id, serde_json::json!([]))
+            .await
+            .unwrap(),
+        record
+    );
+    assert_eq!(
+        host.sessions(),
+        vec![info.id],
+        "status must not load target sessions"
+    );
+    assert_eq!(
+        profile.snapshot().await.unwrap().profile.cursor,
+        profile_cursor
+    );
+    host.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_opening_releases_its_writer_before_shutdown_returns() {
     use atman_runtime::flow_runtime::host::HostServices;

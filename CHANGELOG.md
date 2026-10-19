@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Added
 
+- **Peer batch control tools** — Persistent flows can submit revision-bound controls and query durable per-target outcomes from later turns. Requests retain authenticated caller identity, independent pause ownership, current access checks, and retry receipts across restart.
+
 - **Selective pause release** — Operators can release a selected flow pause without removing other controllers' gates or replacing the active invocation. Individual and batch RPC controls share revision checks and durable retry receipts; peer callers cannot use the operator override.
 
 - **Host control reconciliation** — Persistent control batches execute independently of their invoking flows, recover missing acknowledgements, and report individual target outcomes. New effects recheck current permissions; closure and cancellation retain separate acceptance and completion evidence.
