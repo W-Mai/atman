@@ -18,6 +18,68 @@ fn command(root: &Path) -> Command {
     command
 }
 
+#[test]
+fn archive_attachment_reads_without_configuration_or_journal_ownership() {
+    use atman_runtime::{
+        flow_store::{SessionDescriptor, migration},
+        message::{Message, MessageOrigin},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let data = root.join("data");
+    let source = root.join("old.jsonl");
+    let old = uuid::Uuid::now_v7();
+    let run = uuid::Uuid::now_v7();
+    let turn = atman_rt::TurnId::now();
+    let mut message = Message::assistant_text(turn.clone(), "Archived reply\n\u{1b}[2Jretained");
+    message.origin = MessageOrigin::FinalAnswer;
+    let raw = [
+        serde_json::json!({"seq":1,"type":"flow_start","run_id":run,"flow_name":"agent","spawned":false}),
+        serde_json::json!({"seq":2,"type":"assistant_msg","turn_id":turn,"flow_run_id":run,"message":message}),
+    ].map(|value| format!("{value}\n")).concat();
+    std::fs::write(&source, raw).unwrap();
+    let store = RuntimeStore::open(&data).unwrap();
+    let id = migration::destination_id(&source, old).unwrap();
+    store
+        .archive_legacy(
+            &source,
+            old,
+            SessionDescriptor {
+                id,
+                project: None,
+                title: "Archive".into(),
+                configuration: Default::default(),
+            },
+            true,
+        )
+        .unwrap();
+    std::fs::remove_file(source).unwrap();
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    std::fs::write(root.join("config/config.toml"), "invalid [ config").unwrap();
+    // Neither a locked writer nor unusable execution configuration prevents inspection.
+    let session = store.open_session(id).unwrap();
+    let instance = session.projection().default_flow.as_ref().unwrap();
+    let writer = session.open_flow(instance).unwrap();
+    let journal = writer.dir().join("events.jsonl");
+    let before = std::fs::read(&journal).unwrap();
+    let output = command(root)
+        .args(["--continue", &id.to_string()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("Archived reply"), "{text}");
+    assert!(text.contains("\\u{1b}[2Jretained"), "{text}");
+    assert!(!text.contains('\u{1b}'));
+    assert_eq!(std::fs::read(journal).unwrap(), before);
+    assert!(!data.join("runtime-v1/host").exists());
+    assert!(!data.join("runtime-v1/.profile.lock").exists());
+}
+
 fn finish(mut child: std::process::Child) -> Output {
     let deadline = Instant::now() + Duration::from_secs(20);
     while child.try_wait().unwrap().is_none() {

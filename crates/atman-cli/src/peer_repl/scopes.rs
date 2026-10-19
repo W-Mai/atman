@@ -31,10 +31,12 @@ pub(super) struct Scopes {
     permissions: Option<Arc<PermissionClients>>,
     prompts: Arc<prompts::Prompts>,
     loaded: tokio::sync::Mutex<HashMap<Uuid, Attachment>>,
+    management: tokio::sync::OnceCell<()>,
     pub catalog: SessionCatalog,
 }
 
 impl Scopes {
+    #[cfg(test)]
     pub fn new(root: &Path, initial: Attachment) -> Self {
         let mut scopes = Self::empty(
             root,
@@ -62,7 +64,22 @@ impl Scopes {
             permissions,
             prompts,
             loaded: Default::default(),
+            management: Default::default(),
         }
+    }
+
+    pub async fn enable_management(&self) {
+        self.management
+            .get_or_init(|| async {
+                // Archive navigation never enters this path. Profile ownership may belong to another frontend.
+                let result = RuntimeStore::open(&self.root)
+                    .and_then(|store| ProfileStore::open(&store))
+                    .and_then(|profile| self.host.attach_profile(profile));
+                if let Err(error) = result {
+                    atman_runtime::notify!(warn, "profile management unavailable: {error}");
+                }
+            })
+            .await;
     }
 
     pub async fn open(&self, id: Uuid) -> Result<Attachment> {

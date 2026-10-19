@@ -94,7 +94,6 @@ pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
     } else {
         None
     };
-    let store = RuntimeStore::open(root)?;
     let permissions = Arc::new(PermissionClients::default());
     let host = RuntimeHost::with_services(HostServices {
         redactor: None,
@@ -104,11 +103,6 @@ pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
     let mut notification_sink =
         tui.then(|| atman_runtime::notify::ScopedSink::replace_with(Arc::new(collector)));
     let outcome = async {
-        // Profile ownership can belong to another frontend; local interaction remains available.
-        match ProfileStore::open(&store).and_then(|profile| host.attach_profile(profile)) {
-            Ok(_) => {}
-            Err(error) => atman_runtime::notify!(warn, "profile management unavailable: {error}"),
-        }
         let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
         let prompts = Arc::new(prompts::Prompts::new(prompt_tx));
         let scopes = Arc::new(scopes::Scopes::empty(
@@ -129,7 +123,7 @@ pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
                         recent: vec![],
                         directory: atman_tui::app::StartupDirectory::Sessions,
                     },
-                    &[BootStepId::BuildExecutor, BootStepId::Ready],
+                    &[BootStepId::OpenSession, BootStepId::Ready],
                     notifications,
                 ),
             );
@@ -137,10 +131,21 @@ pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
             notification_sink = Some(atman_runtime::notify::ScopedSink::tui());
             let attachment = prepared?;
             let (terminal, notifications) = animation?;
-            attachment.interact_tui(root, terminal, notifications).await
+            match attachment {
+                Prepared::Live(attachment) => {
+                    attachment
+                        .interact_tui(scopes, terminal, notifications)
+                        .await
+                }
+                Prepared::Archive(view, descriptor) => {
+                    tui::interact_archive(*view, descriptor, scopes, terminal, notifications).await
+                }
+            }
         } else {
-            let attachment = scopes.open(id).await?;
-            attachment.interact(prompt_rx).await
+            match prepare(&scopes, id).await? {
+                Prepared::Live(attachment) => attachment.interact(prompt_rx).await,
+                Prepared::Archive(view, _) => print_archive(&view),
+            }
         }
     }
     .await;
@@ -151,19 +156,99 @@ pub(crate) async fn run(root: &Path, id: Uuid) -> Result<()> {
     Ok(())
 }
 
+enum Prepared {
+    Live(Box<Attachment>),
+    Archive(Box<FlowView>, SessionDescriptor),
+}
+
+async fn archived_selection(
+    root: &Path,
+    id: Uuid,
+    instance: Option<FlowInstanceId>,
+) -> Result<Option<(FlowView, SessionDescriptor)>> {
+    let root = root.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let read = RuntimeStore::inspect_session(&root, id)?;
+        let instance = instance
+            .or_else(|| read.projection.default_flow.clone())
+            .context("session has no default flow")?;
+        Ok(read
+            .archived_view(&instance)?
+            .map(|view| (view, read.projection.descriptor)))
+    })
+    .await?
+}
+
+async fn prepare(scopes: &Arc<scopes::Scopes>, id: Uuid) -> Result<Prepared> {
+    if let Some((view, descriptor)) = archived_selection(&scopes.root, id, None).await? {
+        return Ok(Prepared::Archive(Box::new(view), descriptor));
+    }
+    scopes.enable_management().await;
+    Ok(Prepared::Live(Box::new(scopes.open(id).await?)))
+}
+
+fn print_archive(view: &FlowView) -> Result<()> {
+    use atman_runtime::{
+        TranscriptEntry,
+        message::{MessageOrigin, MessageRole},
+    };
+    let archive = view.transcript().archived_transcript()?;
+    let mut printer = None;
+    crate::render_note(&mut printer, "Archived flow · read-only".into());
+    for entry in archive.entries {
+        if let TranscriptEntry::Message { message, .. } = entry {
+            if message.is_visible_assistant_reply()
+                || (message.role == MessageRole::User && message.origin == MessageOrigin::User)
+            {
+                // Historical text must not execute terminal control sequences.
+                crate::emit(
+                    &mut printer,
+                    format!(
+                        "{:?}: {}\n",
+                        message.role,
+                        message
+                            .text_concat()
+                            .chars()
+                            .flat_map(|c| {
+                                if c.is_control() && c != '\n' && c != '\t' {
+                                    c.escape_default().collect::<Vec<_>>()
+                                } else {
+                                    vec![c]
+                                }
+                            })
+                            .collect::<String>()
+                    ),
+                );
+            }
+        }
+    }
+    for record in archive.unparsed {
+        crate::render_note(
+            &mut printer,
+            format!(
+                "Retained source record · line {} · {:?}\n{}",
+                record.source.line,
+                record.source.issues,
+                String::from_utf8_lossy(&record.bytes()?).escape_debug()
+            ),
+        );
+    }
+    Ok(())
+}
+
 async fn prepare_attachment(
     scopes: &Arc<scopes::Scopes>,
     id: Uuid,
     progress: mpsc::UnboundedSender<atman_tui::boot_animation::BootProgress>,
-) -> Result<Attachment> {
+) -> Result<Prepared> {
     use atman_tui::boot_animation::{BootProgress, BootStepId};
     let emit = |event| {
         let _ = progress.send(event);
     };
-    emit(BootProgress::Start(BootStepId::BuildExecutor));
-    let attachment = scopes.open(id).await?;
+    emit(BootProgress::Start(BootStepId::OpenSession));
+    let attachment = prepare(scopes, id).await?;
     emit(BootProgress::Finish(
-        BootStepId::BuildExecutor,
+        BootStepId::OpenSession,
         atman_runtime::workflow::NodeStatus::Ok,
     ));
     emit(BootProgress::Finish(

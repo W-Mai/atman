@@ -9,7 +9,7 @@ use atman_tui::{
 impl Attachment {
     pub(super) async fn interact_tui(
         mut self,
-        root: &Path,
+        scopes: Arc<scopes::Scopes>,
         terminal: atman_tui::InheritedTerminal,
         notifications: Vec<atman_runtime::notify::Notification>,
     ) -> Result<()> {
@@ -27,16 +27,12 @@ impl Attachment {
         self.executor.tool_ctx.prompt_resolver = Some(Arc::new(
             atman_runtime::rendezvous::FormPromptResolver::new(forms.clone()),
         ));
-        let (controls, mut input) = mpsc::unbounded_channel();
+        let (controls, input) = mpsc::unbounded_channel();
         let (mut handle, service, commands) = self
             .prepare_tui_view(&worker, controls.clone(), &forms)
             .await?;
         handle.onboarding_recommended =
             self.config.models().is_first_run(&self.config.load_auth()?);
-        handle
-            .boot_toasts
-            .extend(atman_tui::boot_animation::toasts(notifications));
-        let mut views = HashMap::from([(service.binding.view_id, service)]);
         for row in catalog.catalog.flows {
             let result = async {
                 let peer = self.session.open_flow(row.id.clone()).await?;
@@ -56,96 +52,16 @@ impl Attachment {
                 });
             }
         }
-        let scopes = Arc::new(scopes::Scopes::new(root, self));
-        let mut navigation = tokio::task::JoinSet::new();
-        let ui = atman_tui::run_tui_ex(handle, Some(terminal));
-        tokio::pin!(ui);
-        loop {
-            // Drain controls already submitted by a closed view before releasing its services.
-            if input.is_empty() {
-                views.retain(|_, view| !view.can_detach());
-            }
-            tokio::select! {
-                result = &mut ui => return result,
-                Some(result) = navigation.join_next() => {
-                    let (replies, result): (ControlReplies, Result<Navigation>) = result?;
-                    match result {
-                        Ok(Navigation::Catalog(page)) => { let _ = replies.send(TuiCommand::FlowCatalog { result: Ok(page) }); }
-                        Ok(Navigation::Projects(command)) => { let _ = replies.send(*command); }
-                        Ok(Navigation::Focus { flow, placement, handle, service }) => {
-                            views.insert(service.binding.view_id, *service);
-                            let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: Some(handle) });
-                        }
-                        Err(error) => { let _ = replies.send(TuiCommand::Toast { message: format!("{error:#}"), level: atman_tui::app::NoteLevel::Error }); }
-                    }
-                }
-                result = next_panel_completion(&mut views) => { result?; }
-                Some(control) = input.recv() => {
-                    let BoundControl { ticket, command, replies } = control;
-                    let Some(view) = views.get_mut(&ticket.binding.view_id).filter(|view| view.binding == ticket.binding) else {
-                        let _ = replies.send(TuiCommand::SubmissionResult { result: Err("view is no longer attached to this flow".into()) });
-                        continue;
-                    };
-                    let result = match command {
-                        TuiControl::Projects(request) => {
-                            let current = view.binding.flow.session_id.0.to_string();
-                            let project = view.descriptor.project.as_ref().map(|p| p.root().to_owned());
-                            let config = view.execution.as_ref().map(|execution| execution.scope.config.clone());
-                            let scopes = scopes.clone();
-                            navigation.spawn(async move {
-                                let command = crate::tui_projects::request(
-                                    scopes.root.clone(), current, project,
-                                    config, Some(&scopes.catalog), request,
-                                ).await;
-                                (replies, Ok(Navigation::Projects(Box::new(command))))
-                            });
-                            continue;
-                        }
-                        TuiControl::NewSession => {
-                            let Some(execution) = &view.execution else {
-                                reject_archive_control(command, &replies);
-                                continue;
-                            };
-                            let seed = (&execution.scope).into();
-                            let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
-                            navigation.spawn(async move {
-                                let result = scopes.create_tui_session(seed, ticket.request_id, controls, forms).await;
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::BrowseFlows(request) => {
-                            let scopes = scopes.clone();
-                            navigation.spawn(async move { let result = scopes.browse(request).await.map(Navigation::Catalog); (replies, result) });
-                            continue;
-                        }
-                        TuiControl::FocusFlow { flow, placement, reuse } => {
-                            if let Some(binding) = reuse {
-                                if binding.flow == flow && views.get(&binding.view_id).is_some_and(|view| view.binding == binding) {
-                                    let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: None });
-                                    Ok(())
-                                } else { Err(anyhow::anyhow!("view binding is no longer attached")) }
-                            } else {
-                                let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
-                                navigation.spawn(async move { let result = scopes.focus(flow, placement, controls, forms).await; (replies, result) });
-                                continue;
-                            }
-                        }
-                        command => {
-                            let Some(execution) = view.execution.as_mut() else {
-                                reject_archive_control(command, &replies);
-                                continue;
-                            };
-                            let Some(command) = execution.panels.dispatch(command).await else { continue; };
-                            execution.scope.tui_control(&execution.worker, ticket.request_id, command, &replies, &forms).await
-                        },
-                    };
-                    if let Err(error) = result {
-                        let _ = replies.send(TuiCommand::Toast { message: format!("{error:#}"), level: atman_tui::app::NoteLevel::Error });
-                    }
-                }
-            }
+        Workspace {
+            scopes,
+            controls,
+            input,
+            forms,
+            handle,
+            service,
         }
+        .run(terminal, notifications)
+        .await
     }
 
     async fn prepare_tui_view(
@@ -427,6 +343,170 @@ impl Attachment {
     }
 }
 
+pub(super) async fn interact_archive(
+    view: FlowView,
+    descriptor: SessionDescriptor,
+    scopes: Arc<scopes::Scopes>,
+    terminal: atman_tui::InheritedTerminal,
+    notifications: Vec<atman_runtime::notify::Notification>,
+) -> Result<()> {
+    let (controls, input) = mpsc::unbounded_channel();
+    let (handle, service) = archive_attachment(view, descriptor, controls.clone())?;
+    Workspace {
+        scopes,
+        controls,
+        input,
+        forms: Arc::default(),
+        handle,
+        service,
+    }
+    .run(terminal, notifications)
+    .await
+}
+
+fn archive_attachment(
+    view: FlowView,
+    descriptor: SessionDescriptor,
+    controls: mpsc::UnboundedSender<BoundControl>,
+) -> Result<(TuiHandle, ViewServices)> {
+    let binding = ViewBinding {
+        view_id: Uuid::now_v7(),
+        revision: 1,
+        flow: view.transcript().flow().clone(),
+    };
+    let mut handle = TuiHandle::from_archive(view, binding.clone(), controls, &descriptor)?;
+    let (commands, rx) = mpsc::unbounded_channel();
+    handle.cmd_rx = Some(rx);
+    Ok((
+        handle,
+        ViewServices {
+            binding,
+            descriptor,
+            commands,
+            execution: None,
+        },
+    ))
+}
+
+struct Workspace {
+    scopes: Arc<scopes::Scopes>,
+    controls: mpsc::UnboundedSender<BoundControl>,
+    input: mpsc::UnboundedReceiver<BoundControl>,
+    forms: Arc<atman_runtime::session::FormRegistry>,
+    handle: TuiHandle,
+    service: ViewServices,
+}
+
+impl Workspace {
+    async fn run(
+        self,
+        terminal: atman_tui::InheritedTerminal,
+        notifications: Vec<atman_runtime::notify::Notification>,
+    ) -> Result<()> {
+        let Self {
+            scopes,
+            controls,
+            mut input,
+            forms,
+            mut handle,
+            service,
+        } = self;
+        handle
+            .boot_toasts
+            .extend(atman_tui::boot_animation::toasts(notifications));
+        let mut views = HashMap::from([(service.binding.view_id, service)]);
+        let mut navigation = tokio::task::JoinSet::new();
+        let ui = atman_tui::run_tui_ex(handle, Some(terminal));
+        tokio::pin!(ui);
+        loop {
+            // Drain controls already submitted by a closed view before releasing its services.
+            if input.is_empty() {
+                views.retain(|_, view| !view.can_detach());
+            }
+            tokio::select! {
+                result = &mut ui => return result,
+                Some(result) = navigation.join_next() => {
+                    let (replies, result): (ControlReplies, Result<Navigation>) = result?;
+                    match result {
+                        Ok(Navigation::Catalog(page)) => { let _ = replies.send(TuiCommand::FlowCatalog { result: Ok(page) }); }
+                        Ok(Navigation::Projects(command)) => { let _ = replies.send(*command); }
+                        Ok(Navigation::Focus { flow, placement, handle, service }) => {
+                            views.insert(service.binding.view_id, *service);
+                            let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: Some(handle) });
+                        }
+                        Err(error) => { let _ = replies.send(TuiCommand::Toast { message: format!("{error:#}"), level: atman_tui::app::NoteLevel::Error }); }
+                    }
+                }
+                result = next_panel_completion(&mut views) => { result?; }
+                Some(control) = input.recv() => {
+                    let BoundControl { ticket, command, replies } = control;
+                    let Some(view) = views.get_mut(&ticket.binding.view_id).filter(|view| view.binding == ticket.binding) else {
+                        let _ = replies.send(TuiCommand::SubmissionResult { result: Err("view is no longer attached to this flow".into()) });
+                        continue;
+                    };
+                    let result = match command {
+                        TuiControl::Projects(request) => {
+                            let current = view.binding.flow.session_id.0.to_string();
+                            let project = view.descriptor.project.as_ref().map(|p| p.root().to_owned());
+                            let config = view.execution.as_ref().map(|execution| execution.scope.config.clone());
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let command = crate::tui_projects::request(
+                                    scopes.root.clone(), current, project,
+                                    config, Some(&scopes.catalog), request,
+                                ).await;
+                                (replies, Ok(Navigation::Projects(Box::new(command))))
+                            });
+                            continue;
+                        }
+                        TuiControl::NewSession => {
+                            let Some(execution) = &view.execution else {
+                                reject_archive_control(command, &replies);
+                                continue;
+                            };
+                            let seed = (&execution.scope).into();
+                            let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
+                            navigation.spawn(async move {
+                                let result = scopes.create_tui_session(seed, ticket.request_id, controls, forms).await;
+                                (replies, result)
+                            });
+                            continue;
+                        }
+                        TuiControl::BrowseFlows(request) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move { let result = scopes.browse(request).await.map(Navigation::Catalog); (replies, result) });
+                            continue;
+                        }
+                        TuiControl::FocusFlow { flow, placement, reuse } => {
+                            if let Some(binding) = reuse {
+                                if binding.flow == flow && views.get(&binding.view_id).is_some_and(|view| view.binding == binding) {
+                                    let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: None });
+                                    Ok(())
+                                } else { Err(anyhow::anyhow!("view binding is no longer attached")) }
+                            } else {
+                                let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
+                                navigation.spawn(async move { let result = scopes.focus(flow, placement, controls, forms).await; (replies, result) });
+                                continue;
+                            }
+                        }
+                        command => {
+                            let Some(execution) = view.execution.as_mut() else {
+                                reject_archive_control(command, &replies);
+                                continue;
+                            };
+                            let Some(command) = execution.panels.dispatch(command).await else { continue; };
+                            execution.scope.tui_control(&execution.worker, ticket.request_id, command, &replies, &forms).await
+                        },
+                    };
+                    if let Err(error) = result {
+                        let _ = replies.send(TuiCommand::Toast { message: format!("{error:#}"), level: atman_tui::app::NoteLevel::Error });
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct ViewServices {
     binding: ViewBinding,
     descriptor: SessionDescriptor,
@@ -579,45 +659,22 @@ impl scopes::Scopes {
         controls: mpsc::UnboundedSender<BoundControl>,
         forms: Arc<atman_runtime::session::FormRegistry>,
     ) -> Result<Navigation> {
-        let root = self.root.clone();
-        let address = flow.clone();
-        let archive = tokio::task::spawn_blocking(move || {
-            let read = RuntimeStore::inspect_session(&root, address.session_id.0)?;
-            let flow = read.inspect_flow(&address.instance_id)?;
-            if matches!(
-                flow.descriptor.content,
-                atman_runtime::flow_store::FlowContent::History(_)
-            ) {
-                Ok::<_, std::io::Error>(Some((
-                    read.archived_view(&address.instance_id)?,
-                    read.projection.descriptor,
-                )))
-            } else {
-                Ok(None)
-            }
-        })
-        .await??;
-        if let Some((view, descriptor)) = archive {
-            let binding = ViewBinding {
-                view_id: Uuid::now_v7(),
-                revision: 1,
-                flow: flow.clone(),
-            };
-            let mut handle = TuiHandle::from_archive(view, binding.clone(), controls, &descriptor)?;
-            let (commands, rx) = mpsc::unbounded_channel();
-            handle.cmd_rx = Some(rx);
+        if let Some((view, descriptor)) = archived_selection(
+            &self.root,
+            flow.session_id.0,
+            Some(flow.instance_id.clone()),
+        )
+        .await?
+        {
+            let (handle, service) = archive_attachment(view, descriptor, controls)?;
             return Ok(Navigation::Focus {
                 flow,
                 placement,
                 handle: Box::new(handle),
-                service: Box::new(ViewServices {
-                    binding,
-                    descriptor,
-                    commands,
-                    execution: None,
-                }),
+                service: Box::new(service),
             });
         }
+        self.enable_management().await;
         let mut scope = self.open(flow.session_id.0).await?;
         scope.executor.tool_ctx.prompt_resolver = Some(Arc::new(
             atman_runtime::rendezvous::FormPromptResolver::new(forms.clone()),

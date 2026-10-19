@@ -138,7 +138,10 @@ fn archived_views_reuse_history_rendering_without_writers_or_execution() {
         let writer = session.open_flow(&mapping.instance).unwrap();
         let path = writer.dir().join("events.jsonl");
         let before = std::fs::read(&path).unwrap();
-        let view = inspection.archived_view(&mapping.instance).unwrap();
+        let view = inspection
+            .archived_view(&mapping.instance)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             view.snapshot().status.execution.state(),
             &InstanceState::Closed

@@ -18,6 +18,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Direct archive browsing** — `--continue` opens imported sessions without execution configuration or writer ownership. Archived and executable TUI views share navigation; non-TUI mode prints archived conversation text and exits. Archive selection and projection read the journal once.
+
 - **Archived FlowHub navigation** — Open imported histories in the main view or floating windows without loading execution services. Read-only controls preserve drafts, and session and project navigation remain available.
 
 - **Read-only archived views** — Read complete imported flow history without execution configuration or writer ownership. Shared view models retain final-answer folding, original timestamps, and unsupported source records in main and floating views.

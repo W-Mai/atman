@@ -51,36 +51,43 @@ impl super::SessionInspection {
         .map(|read| read.journal)
     }
 
-    /// Read a complete archived flow without opening a writer, execution services, or the original source. Incomplete imports and journal tails are rejected; retained malformed source records remain readable.
+    /// Read a complete archived flow without opening a writer, execution services, or the original source. Executable flows return `None` after fact validation without building a transcript. Incomplete imports and journal tails are rejected; retained malformed source records remain readable.
     pub fn archived_view(
         &self,
         id: &super::FlowInstanceId,
-    ) -> io::Result<crate::flow_runtime::FlowView> {
+    ) -> io::Result<Option<crate::flow_runtime::FlowView>> {
         let flow = FlowRef {
             session_id: self.projection.descriptor.id.into(),
             instance_id: id.clone(),
         };
-        let mut transcript = crate::projection::flow::FlowTranscript::new(flow);
+        let mut transcript = None;
         let read = super::inspect_registered_flow_with(
             &self.dir,
             &self.projection,
             id,
             |receipt, facts| {
-                transcript.apply(CommittedBatch {
-                    receipt: receipt.clone(),
-                    facts: facts.iter().cloned().map(FlowUpdate::from).collect(),
-                })?;
+                if matches!(facts.first(), Some(FlowFact::Created(descriptor)) if matches!(descriptor.content, FlowContent::History(_)))
+                {
+                    transcript = Some(crate::projection::flow::FlowTranscript::new(flow.clone()));
+                }
+                if let Some(transcript) = &mut transcript {
+                    transcript.apply(CommittedBatch {
+                        receipt: receipt.clone(),
+                        facts: facts.iter().cloned().map(FlowUpdate::from).collect(),
+                    })?;
+                }
                 Ok(())
             },
         )?;
         let FlowContent::History(archive) = read.descriptor.content else {
-            return Err(super::invalid("flow is executable, not an archive"));
+            return Ok(None);
         };
+        let transcript = transcript.ok_or_else(|| super::invalid("archive has no creation"))?;
         if read.journal.trailing_bytes != 0 || transcript.entries().len() as u64 != archive.records
         {
             return Err(super::invalid("archived flow is incomplete"));
         }
-        crate::flow_runtime::FlowView::from_archive(transcript, read.state)
+        crate::flow_runtime::FlowView::from_archive(transcript, read.state).map(Some)
     }
 }
 

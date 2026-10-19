@@ -24,7 +24,7 @@ async fn archive_navigation_uses_no_execution_owner_and_retains_bound_rejections
         .unwrap();
     std::fs::remove_file(source).unwrap();
     // Both writer leases remain owned elsewhere; browsing must not acquire either.
-    let session = runtime.open_session(id).unwrap();
+    let mut session = runtime.open_session(id).unwrap();
     let instance = receipt
         .flows
         .iter()
@@ -33,15 +33,23 @@ async fn archive_navigation_uses_no_execution_owner_and_retains_bound_rejections
         .instance
         .clone();
     let writer = session.open_flow(&instance).unwrap();
+    session.select_default(instance.clone()).unwrap();
     let before = std::fs::read(writer.dir().join("events.jsonl")).unwrap();
     let host = RuntimeHost::default();
     let (notices, _rx) = mpsc::unbounded_channel();
-    let scopes = scopes::Scopes::empty(
+    let scopes = Arc::new(scopes::Scopes::empty(
         dir.path(),
         host.clone(),
         None,
         Arc::new(prompts::Prompts::new(notices)),
-    );
+    ));
+    let Prepared::Archive(view, descriptor) = prepare(&scopes, id).await.unwrap() else {
+        panic!("archive startup acquired execution services")
+    };
+    assert_eq!(view.transcript().flow().instance_id, instance);
+    assert_eq!(descriptor.id, id);
+    assert!(!dir.path().join("runtime-v1/host").exists());
+    assert!(!dir.path().join("runtime-v1/.profile.lock").exists());
     let forms = Arc::new(atman_runtime::session::FormRegistry::default());
     let (commands, mut controls) = mpsc::unbounded_channel();
     for placement in [
