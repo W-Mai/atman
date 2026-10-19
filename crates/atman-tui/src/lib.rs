@@ -114,6 +114,7 @@ impl TuiNote {
 
 #[non_exhaustive]
 pub enum TuiControl {
+    SetWorkspaceRetention(Box<flow_hub::WorkspaceRetention>),
     EditInbox(Box<atman_runtime::flow_store::inbox::InboxEditRequest>),
     BrowseFlows(flow_hub::HubRequest),
     CancelWatcher {

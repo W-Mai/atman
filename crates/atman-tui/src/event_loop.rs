@@ -3479,6 +3479,9 @@ fn dispatch_hub_action(
     reuse: Option<crate::control::ViewBinding>,
 ) {
     let command = match action {
+        crate::flow_hub::Action::SetWorkspaceRetention(change) => {
+            TuiControl::SetWorkspaceRetention(change)
+        }
         crate::flow_hub::Action::NewSession => TuiControl::NewSession,
         crate::flow_hub::Action::OpenManagement => TuiControl::OpenManagement,
         crate::flow_hub::Action::Load(request) => TuiControl::BrowseFlows(request),

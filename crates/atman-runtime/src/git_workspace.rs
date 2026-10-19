@@ -848,6 +848,67 @@ impl WorkspaceManager {
     ) -> Result<WorkspaceRecord, WorkspaceError> {
         let _lock = self.lock_registry()?;
         let mut registry = self.load()?;
+        self.retain_locked(&mut registry, id, retained, owner_session, owner_flow)
+    }
+
+    /// Change retention only if the observed record still matches under the registry lock. Callers authorize both resource roots; this never releases instance references or takes over a live invocation lease. A stale request must refresh before retrying.
+    pub fn retain_observed(
+        repository_root: &Path,
+        storage_root: &Path,
+        expected: &WorkspaceRecord,
+        retained: bool,
+    ) -> Result<WorkspaceRecord, WorkspaceError> {
+        let manager = Self::at_recorded_location(repository_root, storage_root)?;
+        manager.validate_record_scope(expected)?;
+        if manager.load_existing()?.is_none() {
+            return Err(WorkspaceError::Invalid(
+                "workspace registry is missing".into(),
+            ));
+        }
+        let _lock = manager.lock_registry()?;
+        let mut registry = manager
+            .load_existing()?
+            .ok_or_else(|| WorkspaceError::Invalid("workspace registry is missing".into()))?;
+        let mut identities = std::collections::HashSet::new();
+        for record in &registry.workspaces {
+            manager.validate_record_scope(record)?;
+            if !identities.insert(&record.id) {
+                return Err(WorkspaceError::Invalid(
+                    "duplicate workspace identity".into(),
+                ));
+            }
+        }
+        let current = registry
+            .workspaces
+            .iter()
+            .find(|record| record.id == expected.id);
+        if current != Some(expected) {
+            return Err(WorkspaceError::Invalid(
+                "workspace changed; refresh before changing retention".into(),
+            ));
+        }
+        if expected.lease.is_some() {
+            return Err(WorkspaceError::Invalid(
+                "workspace has an invocation lease; release it through its execution owner".into(),
+            ));
+        }
+        manager.retain_locked(
+            &mut registry,
+            &expected.id,
+            retained,
+            expected.owner_session.as_deref(),
+            expected.owner_flow.as_deref(),
+        )
+    }
+
+    fn retain_locked(
+        &self,
+        registry: &mut WorkspaceRegistry,
+        id: &str,
+        retained: bool,
+        owner_session: Option<&str>,
+        owner_flow: Option<&str>,
+    ) -> Result<WorkspaceRecord, WorkspaceError> {
         let item = registry
             .workspaces
             .iter_mut()
@@ -857,7 +918,7 @@ impl WorkspaceManager {
         if item.is_instance_bound() && item.lifecycle_state() == WorkspaceState::Bound {
             item.retained = retained;
             let result = item.clone();
-            self.save(&registry)?;
+            self.save(registry)?;
             return Ok(result);
         }
         match (item.lifecycle_state(), retained) {
@@ -880,7 +941,7 @@ impl WorkspaceManager {
             }
         }
         let result = item.clone();
-        self.save(&registry)?;
+        self.save(registry)?;
         Ok(result)
     }
 
@@ -1439,6 +1500,60 @@ mod tests {
                 .create_instance("peer", &owner, "new", false, &base)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn observed_retention_checks_scope_references_and_invocation_ownership() {
+        let tmp = repo();
+        let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+        let owner = instance_owner();
+        let peer = instance_owner();
+        let base = GitCli::at(tmp.path()).head_oid().unwrap();
+        let initial = manager
+            .create_instance("observed", &owner, "generation", false, &base)
+            .unwrap();
+        let shared = manager
+            .share_instance(&initial.binding(), &owner, &peer)
+            .unwrap();
+        let before = fs::read(&manager.registry_path).unwrap();
+        assert!(WorkspaceManager::retain_observed(tmp.path(), tmp.path(), &initial, true).is_err());
+        assert_eq!(fs::read(&manager.registry_path).unwrap(), before);
+        let retained =
+            WorkspaceManager::retain_observed(tmp.path(), tmp.path(), &shared, true).unwrap();
+        assert!(retained.retained);
+        assert_eq!(retained.instances, shared.instances);
+        assert_eq!(retained.lifecycle_state(), WorkspaceState::Bound);
+        assert!(retained.worktree_path.exists());
+        let before = fs::read(&manager.registry_path).unwrap();
+        assert!(WorkspaceManager::retain_observed(tmp.path(), tmp.path(), &shared, false).is_err());
+        assert_eq!(fs::read(&manager.registry_path).unwrap(), before);
+        let automatic =
+            WorkspaceManager::retain_observed(tmp.path(), tmp.path(), &retained, false).unwrap();
+        assert!(!automatic.retained);
+        assert_eq!(automatic.instances, shared.instances);
+        let mut forged = automatic.clone();
+        forged.worktree_path = tmp.path().to_owned();
+        assert!(WorkspaceManager::retain_observed(tmp.path(), tmp.path(), &forged, true).is_err());
+        let missing = tmp.path().join("missing");
+        assert!(WorkspaceManager::retain_observed(&missing, &missing, &automatic, true).is_err());
+        assert!(!missing.exists());
+        let active = manager
+            .create("leased", None, None, false, None, None)
+            .unwrap();
+        let mut registry = manager.load().unwrap();
+        registry
+            .workspaces
+            .iter_mut()
+            .find(|item| item.id == active.id)
+            .unwrap()
+            .lease = Some(WorkspaceLease {
+            daemon_generation: "generation".into(),
+            acquired_at: chrono::Utc::now(),
+        });
+        manager.save(&registry).unwrap();
+        let leased = manager.get(&active.id).unwrap();
+        assert!(WorkspaceManager::retain_observed(tmp.path(), tmp.path(), &leased, true).is_err());
+        assert_eq!(manager.get(&active.id).unwrap(), leased);
     }
 
     #[test]

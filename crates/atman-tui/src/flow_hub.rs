@@ -30,11 +30,12 @@ pub use page::{
 pub use watch::WatchDirectory;
 pub use workspaces::{
     FlowWorkspacePage, WorkspaceCursor, WorkspaceDirectory, WorkspaceDirectoryEntry,
-    WorkspaceFlowReference, WorkspaceLocation, WorkspaceRecordPage,
+    WorkspaceFlowReference, WorkspaceLocation, WorkspaceRecordPage, WorkspaceRetention,
 };
 
 #[derive(Clone)]
 pub(crate) enum Action {
+    SetWorkspaceRetention(Box<WorkspaceRetention>),
     None,
     Close,
     Return,
@@ -1193,6 +1194,7 @@ impl FlowHub {
                             HubRequest::Workspace { .. } | HubRequest::WorkspaceRecord { .. },
                         ) => Some("\nInspect Enter"),
                         Action::Load(HubRequest::Workspaces { .. }) => Some("\nBrowse Enter"),
+                        Action::SetWorkspaceRetention(_) => Some("\nApply Enter"),
                         Action::Load(_) => Some("\nFlows  Enter"),
                         _ => None,
                     }

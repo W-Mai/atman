@@ -43,26 +43,9 @@ impl WorkspaceManager {
         repository_root: &Path,
         storage_root: &Path,
     ) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        for path in [repository_root, storage_root] {
-            if !path.is_absolute()
-                || path
-                    .components()
-                    .any(|part| matches!(part, Component::ParentDir))
-            {
-                return Err(WorkspaceError::Invalid(
-                    "workspace inspection requires absolute root paths without parent traversal"
-                        .into(),
-                ));
-            }
-        }
-        let repository_root = canonicalize(repository_root);
+        let manager = Self::at_recorded_location(repository_root, storage_root)?;
+        let repository_root = manager.repository_root.clone();
         let storage_root = canonicalize(storage_root);
-        let manager = Self {
-            repository_root: repository_root.clone(),
-            managed_root: storage_root.join(".atman/worktrees"),
-            registry_path: storage_root.join(".atman/workspaces.json"),
-            registry_lock_path: storage_root.join(".atman/workspaces.lock"),
-        };
         let registry = manager.load_existing()?;
         let registry_present = registry.is_some();
         let mut identities = std::collections::HashSet::new();
@@ -71,13 +54,10 @@ impl WorkspaceManager {
             .into_iter()
             .flat_map(|registry| registry.workspaces)
         {
-            validate_id(&record.id)?;
-            if !identities.insert(record.id.clone())
-                || record.repository_root != repository_root
-                || record.worktree_path != manager.managed_root.join(&record.id)
-            {
+            manager.validate_record_scope(&record)?;
+            if !identities.insert(record.id.clone()) {
                 return Err(WorkspaceError::Invalid(
-                    "workspace registry identity or path does not match inspection scope".into(),
+                    "duplicate workspace identity".into(),
                 ));
             }
             let checkout = match fs::metadata(&record.worktree_path) {
@@ -102,6 +82,47 @@ impl WorkspaceManager {
             registry_present,
             workspaces,
         })
+    }
+
+    pub(super) fn at_recorded_location(
+        repository_root: &Path,
+        storage_root: &Path,
+    ) -> Result<Self, WorkspaceError> {
+        for path in [repository_root, storage_root] {
+            if !path.is_absolute()
+                || path
+                    .components()
+                    .any(|part| matches!(part, Component::ParentDir))
+            {
+                return Err(WorkspaceError::Invalid(
+                    "workspace inspection requires absolute root paths without parent traversal"
+                        .into(),
+                ));
+            }
+        }
+        let repository_root = canonicalize(repository_root);
+        let storage_root = canonicalize(storage_root);
+        Ok(Self {
+            repository_root: repository_root.clone(),
+            managed_root: storage_root.join(".atman/worktrees"),
+            registry_path: storage_root.join(".atman/workspaces.json"),
+            registry_lock_path: storage_root.join(".atman/workspaces.lock"),
+        })
+    }
+
+    pub(super) fn validate_record_scope(
+        &self,
+        record: &WorkspaceRecord,
+    ) -> Result<(), WorkspaceError> {
+        validate_id(&record.id)?;
+        if record.repository_root != self.repository_root
+            || record.worktree_path != self.managed_root.join(&record.id)
+        {
+            return Err(WorkspaceError::Invalid(
+                "workspace registry identity or path does not match inspection scope".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn inspect_checkout(

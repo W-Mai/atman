@@ -201,6 +201,13 @@ pub struct WorkspaceRecordPage {
     pub workspace: WorkspaceInspection,
 }
 
+#[derive(Clone)]
+pub struct WorkspaceRetention {
+    pub location: WorkspaceLocation,
+    pub expected: atman_runtime::git_workspace::WorkspaceRecord,
+    pub retained: bool,
+}
+
 pub struct FlowWorkspacePage {
     pub owner: FlowRef,
     pub request: Option<atman_runtime::flow_store::workspace::WorkspaceRequest>,
@@ -327,6 +334,33 @@ impl WorkspaceRecordPage {
                 ),
             );
         }
+        let target = if record.lease.is_some() {
+            None
+        } else {
+            use atman_runtime::git_workspace::WorkspaceState;
+            match record.lifecycle_state() {
+                WorkspaceState::Bound if record.is_instance_bound() => Some(!record.retained),
+                WorkspaceState::Active => Some(true),
+                _ => None,
+            }
+        };
+        rows.push(Row {
+            key: RowKey::WorkspaceField("retention_control"),
+            title: match target {
+                Some(true) => "Retain checkout".into(),
+                Some(false) => "Use automatic cleanup".into(),
+                None => "Retention control unavailable".into(),
+            },
+            detail: match target {
+                Some(true) => "Keep the checkout after the final Flow reference closes".into(),
+                Some(false) => "Clean up after the final reference closes; uncommitted changes remain protected".into(),
+                None if record.lease.is_some() => "An invocation lease owns this checkout; use its execution owner".into(),
+                None => "This lifecycle does not permit a retention change; existing data and references are preserved".into(),
+            },
+            action: target.map_or(Action::None, |retained| Action::SetWorkspaceRetention(Box::new(WorkspaceRetention {
+                location: self.location.clone(), expected: record.clone(), retained,
+            }))),
+        });
         for reference in &record.instances {
             rows.push(Row {
                 key: RowKey::Flow(reference.owner.clone().into()),
@@ -728,6 +762,16 @@ mod tests {
             )))),
         );
         assert_eq!(hub.rows[0].title, "Checkout missing");
+        let retention = hub
+            .rows
+            .iter()
+            .position(|row| matches!(row.action, Action::SetWorkspaceRetention(_)))
+            .unwrap();
+        hub.selected = retention;
+        assert!(
+            matches!(hub.key(KeyAction::Submit), Action::SetWorkspaceRetention(change) if !change.retained && change.expected.instances.len() == 2 && change.location == location)
+        );
+        hub.selected = 0;
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 30)).unwrap();
         terminal
@@ -736,7 +780,11 @@ mod tests {
         assert!(hub.hits[0].0.height > 4);
         assert!(hub.float_hits.iter().all(|(_, index)| {
             let row = &hub.rows[hub.filtered()[*index]];
-            row.has_text_details() || matches!(row.action, Action::Focus(_))
+            row.has_text_details()
+                || matches!(
+                    row.action,
+                    Action::Focus(_) | Action::SetWorkspaceRetention(_)
+                )
         }));
         let rendered: String = terminal
             .backend()

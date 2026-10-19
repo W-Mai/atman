@@ -130,6 +130,19 @@ pub(super) async fn inspect(location: WorkspaceLocation) -> Result<WorkspaceSnap
     .await??)
 }
 
+pub(super) async fn retain(change: atman_tui::flow_hub::WorkspaceRetention) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        WorkspaceManager::retain_observed(
+            &change.location.repository,
+            &change.location.storage,
+            &change.expected,
+            change.retained,
+        )
+    })
+    .await??;
+    Ok(())
+}
+
 pub(super) async fn binding(
     catalog: &SessionCatalog,
     owner: atman_runtime::flow_store::FlowRef,

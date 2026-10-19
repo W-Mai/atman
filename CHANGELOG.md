@@ -34,6 +34,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Workspace retention controls** — Resource details can retain a checkout or restore automatic cleanup for a live Flow binding. Changes validate the observed registry record under lock, preserve all references, and reject stale snapshots and invocation-owned leases.
+
 - **Focused workspace inspection** — `:workspace` and Flow Workspace in the panel menu show the requesting Flow's recorded checkout and acquisition source. Shared origins link to their Flow; resource details show current availability and references without changing execution or ownership.
 
 - **Worktrees directory** — The `:worktrees` command and panel menu browse project checkouts, current Git observations, retention, and typed Flow references through shared main and floating navigation. Discovery includes recorded external and missing locations; returning from details preserves loaded rows and filters. Resource inspection leaves execution and ownership unchanged.
