@@ -688,6 +688,7 @@ impl FlowClient {
 
     pub async fn control(
         &self,
+        request_id: Uuid,
         target: FlowRef,
         expected_revision: u64,
         control: PeerControl,
@@ -698,10 +699,19 @@ impl FlowClient {
         self.host
             .flow(&target)
             .await?
-            .control(expected_revision, key, control, move |address| {
-                client.authorize(address, FlowAction::Control)
-            })
+            .control(
+                crate::flow_store::control::ControlRequest {
+                    id: request_id,
+                    sender: SenderIdentity::Flow(self.lease.flow.clone()),
+                    target,
+                    expected_revision,
+                    pause_key: key,
+                    action: control,
+                },
+                move |address| client.authorize(address, FlowAction::Control),
+            )
             .await
+            .map(|record| record.receipt)
     }
 }
 
@@ -748,42 +758,6 @@ impl super::FlowWorker {
                 })
                 .cloned()
                 .collect())
-        })
-        .await
-    }
-
-    /// Apply an authenticated host control under the instance writer. The pause key belongs to the controller, not the target or its Goal.
-    pub async fn control(
-        &self,
-        expected_revision: u64,
-        key: AtmanUuid,
-        control: PeerControl,
-        authorize: impl FnOnce(&FlowRef) -> io::Result<()> + Send + 'static,
-    ) -> io::Result<CommitReceipt> {
-        if matches!(control, PeerControl::Close) {
-            return self.request_close(expected_revision, authorize).await;
-        }
-        self.request(move |store| {
-            authorize(store.state().address())?;
-            if store.state().revision() != expected_revision {
-                return Err(invalid("target execution revision changed"));
-            }
-            let transition = match control {
-                PeerControl::Pause => FlowTransition::ExecutionPaused { key },
-                PeerControl::Resume => FlowTransition::ExecutionResumed { key },
-                PeerControl::Recover => FlowTransition::InterruptionRecovered,
-                PeerControl::Close => unreachable!("closure is owned by the lifecycle coordinator"),
-                PeerControl::CancelTurn => match store.state().state() {
-                    InstanceState::Open(InstanceActivity::Active(active)) => {
-                        FlowTransition::PhaseChanged {
-                            lease: active.lease.clone(),
-                            phase: TurnPhase::Cancelling,
-                        }
-                    }
-                    _ => return Ok(store.cursor().clone()),
-                },
-            };
-            store.transition(expected_revision, transition)
         })
         .await
     }

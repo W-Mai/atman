@@ -87,7 +87,7 @@ fn waiting_launch_records_configuration_without_input_and_preserves_gates_on_res
         let mut conflict = launch.clone();
         conflict["start"] = json!("invoke");
         assert!(dispatch(state.clone(), JsonRpcRequest::new(1, methods::FLOW_LAUNCH, conflict)).await.error.is_some());
-        rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "action": "pause", "expected_revision": view["execution"]["revision"]})).await;
+        rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "action": "pause", "expected_revision": view["execution"]["revision"]})).await;
         std::fs::remove_file(dir.path().join("main.at")).unwrap();
         state.shutdown().await.unwrap();
         (flow, launch, accepted)
@@ -101,7 +101,7 @@ fn waiting_launch_records_configuration_without_input_and_preserves_gates_on_res
         let paused = rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await;
         assert!(paused["last_completion"].is_null());
         assert_eq!(paused["execution"]["pause_count"], 1);
-        rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "action": "resume", "expected_revision": paused["execution"]["revision"]})).await;
+        rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "action": "resume", "expected_revision": paused["execution"]["revision"]})).await;
         wait_completion(&state, &flow, None).await;
         let output = rpc(&state, methods::FLOW_OUTPUT, json!({"flow": flow})).await;
         assert_eq!(output["messages"].as_array().unwrap().len(), 1);
@@ -142,11 +142,11 @@ async fn close_rpc_stops_paused_execution_and_preserves_history_across_restart()
     })
     .await
     .unwrap();
-    rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "action": "pause", "expected_revision": active["execution"]["revision"]})).await;
+    rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "action": "pause", "expected_revision": active["execution"]["revision"]})).await;
     let queued = json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"label": "cancelled input"}});
     let acceptance = rpc(&state, methods::FLOW_INVOKE, queued.clone()).await;
     let paused = rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await;
-    let close = json!({"flow": flow, "action": "close", "expected_revision": paused["execution"]["revision"]});
+    let close = json!({"request_id": Uuid::now_v7(), "flow": flow, "action": "close", "expected_revision": paused["execution"]["revision"]});
     let denied = dispatch_as(
         state.clone(),
         JsonRpcRequest::new(1, methods::FLOW_CONTROL, close.clone()),
@@ -241,7 +241,7 @@ async fn daemon_shutdown_drains_execution_and_ends_connected_streams_without_los
     })
     .await
     .unwrap();
-    rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "action": "pause", "expected_revision": active["execution"]["revision"]})).await;
+    rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "action": "pause", "expected_revision": active["execution"]["revision"]})).await;
     let queued = rpc(
         &state,
         methods::FLOW_INVOKE,
@@ -430,7 +430,7 @@ async fn rpc_entries_retain_source_and_identity_across_turns_and_pauses() {
         .is_some()
     );
 
-    rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": first["execution"]["revision"], "action": "pause"})).await;
+    rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "expected_revision": first["execution"]["revision"], "action": "pause"})).await;
     let invocation = json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"label": "second"}, "invocation": {"effort": "high"}});
     let accepted = rpc(&state, methods::FLOW_INVOKE, invocation.clone()).await;
     assert_eq!(
@@ -447,7 +447,7 @@ async fn rpc_entries_retain_source_and_identity_across_turns_and_pauses() {
     .await;
     assert_eq!(empty["messages"], json!([]));
     assert_eq!(empty["next"], page["next"]);
-    rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": paused["execution"]["revision"], "action": "resume"})).await;
+    rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "expected_revision": paused["execution"]["revision"], "action": "resume"})).await;
     let second = wait_completion(
         &state,
         &flow,
@@ -622,7 +622,7 @@ async fn persistent_goal_controls_resume_once_without_bypassing_execution_or_rep
         .is_some()
     );
     // Pausing execution does not change the objective; resuming the objective does not remove that gate.
-    rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "action": "pause", "expected_revision": first["execution"]["revision"]})).await;
+    rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "action": "pause", "expected_revision": first["execution"]["revision"]})).await;
     let accepted = rpc(&state, methods::GOAL_RESUME, resume.clone()).await;
     assert_eq!(accepted["goal"]["status"], "active");
     assert_eq!(accepted["execution"]["pause_count"], 1);
@@ -663,7 +663,7 @@ async fn persistent_goal_controls_resume_once_without_bypassing_execution_or_rep
     rpc(&reopened, methods::FLOW_BIND, json!({"flow": flow})).await;
     let bound = rpc(&reopened, methods::FLOW_GET, json!({"flow": flow})).await;
     assert_eq!(bound["last_completion"], first["last_completion"]);
-    rpc(&reopened, methods::FLOW_CONTROL, json!({"flow": flow, "action": "resume", "expected_revision": bound["execution"]["revision"]})).await;
+    rpc(&reopened, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "action": "resume", "expected_revision": bound["execution"]["revision"]})).await;
     let second = wait_completion(
         &reopened,
         &flow,
@@ -875,7 +875,7 @@ fn reopening_requires_explicit_binding_and_preserves_paused_input() {
         assert_eq!(catalog["catalog"]["sequence"], launch["expected_catalog_sequence"]);
         let accepted = rpc(&state, methods::FLOW_LAUNCH, launch.clone()).await;
         let first = wait_completion(&state, &flow, None).await;
-        rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": first["execution"]["revision"], "action": "pause"})).await;
+        rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "expected_revision": first["execution"]["revision"], "action": "pause"})).await;
         let invocation = json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"label": "second"}, "user": {"text": "second human request", "images": []}});
         rpc(&state, methods::FLOW_INVOKE, invocation.clone()).await;
         std::fs::remove_file(dir.path().join("main.at")).unwrap();
@@ -905,7 +905,7 @@ fn reopening_requires_explicit_binding_and_preserves_paused_input() {
         let paused = rpc(&state, methods::FLOW_GET, request.clone()).await;
         assert_eq!(paused["execution"], opened["execution"]);
         assert_eq!(paused["last_completion"], first["last_completion"]);
-        rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": paused["execution"]["revision"], "action": "resume"})).await;
+        rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "expected_revision": paused["execution"]["revision"], "action": "resume"})).await;
         let second = wait_completion(&state, &flow, Some(&first["last_completion"]["lease"]["turn"])).await;
         let page = rpc(&state, methods::FLOW_OUTPUT, request.clone()).await;
         assert_eq!(page["messages"].as_array().unwrap().len(), 2);
@@ -1109,7 +1109,7 @@ async fn permission_rpc_targets_instances_through_real_tool_execution() {
         second_requests
     );
     let status = rpc(&state, methods::FLOW_GET, json!({"flow": second})).await;
-    rpc(&state, methods::FLOW_CONTROL, json!({"flow": second, "expected_revision": status["execution"]["revision"], "action": "cancel_turn"})).await;
+    rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": second, "expected_revision": status["execution"]["revision"], "action": "cancel_turn"})).await;
     wait_permissions(&state, &second, 0).await;
     let mut late = second;
     late["selector"] =
@@ -1140,7 +1140,7 @@ fn rebinding_does_not_recover_lost_turns_or_replay_their_consumed_input() {
         rpc(&state, methods::FLOW_LAUNCH, launch).await;
         wait_prompt(&state).await;
         let active = rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await;
-        rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": active["execution"]["revision"], "action": "pause"})).await;
+        rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "expected_revision": active["execution"]["revision"], "action": "pause"})).await;
         rpc(&state, methods::FLOW_INVOKE, json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"label": "after recovery"}})).await;
         flow
     });
@@ -1155,14 +1155,14 @@ fn rebinding_does_not_recover_lost_turns_or_replay_their_consumed_input() {
         let bound = rpc(&state, methods::FLOW_GET, request.clone()).await;
         assert_eq!(bound["execution"], opened["execution"]);
         assert_eq!(bound["last_completion"], opened["last_completion"]);
-        rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": bound["execution"]["revision"], "action": "recover"})).await;
+        rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "expected_revision": bound["execution"]["revision"], "action": "recover"})).await;
         let recovered = rpc(&state, methods::FLOW_GET, request.clone()).await;
         assert_eq!(recovered["execution"]["state"]["open"], "idle");
         assert_eq!(recovered["execution"]["pause_count"], 1);
         assert_eq!(recovered["execution"]["can_start_turn"], false);
-        let stale = dispatch(state.clone(), JsonRpcRequest::new(1, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": bound["execution"]["revision"], "action": "recover"}))).await;
+        let stale = dispatch(state.clone(), JsonRpcRequest::new(1, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "expected_revision": bound["execution"]["revision"], "action": "recover"}))).await;
         assert!(stale.error.is_some());
-        rpc(&state, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": recovered["execution"]["revision"], "action": "resume"})).await;
+        rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "expected_revision": recovered["execution"]["revision"], "action": "resume"})).await;
         wait_completion(&state, &flow, Some(&opened["last_completion"]["lease"]["turn"])).await;
         let output = rpc(&state, methods::FLOW_OUTPUT, request).await;
         assert_eq!(output["messages"].as_array().unwrap().len(), 1);

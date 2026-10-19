@@ -194,7 +194,7 @@ async fn instance_sse_and_rpc_share_atomic_history_across_pause_and_reconnection
         StatusCode::BAD_REQUEST
     );
     // Registration has completed; no body polling is needed to retain later commits.
-    rpc(&app, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": first["execution"]["revision"], "action": "pause"})).await;
+    rpc(&app, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "expected_revision": first["execution"]["revision"], "action": "pause"})).await;
     rpc(
         &app,
         methods::FLOW_INVOKE,
@@ -212,7 +212,7 @@ async fn instance_sse_and_rpc_share_atomic_history_across_pause_and_reconnection
         rpc(&app, methods::FLOW_GET, json!({"flow": flow})).await["execution"],
         paused["execution"]
     );
-    rpc(&app, methods::FLOW_CONTROL, json!({"flow": flow, "expected_revision": paused["execution"]["revision"], "action": "resume"})).await;
+    rpc(&app, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flow, "expected_revision": paused["execution"]["revision"], "action": "resume"})).await;
     let second = completed(
         &app,
         &flow,

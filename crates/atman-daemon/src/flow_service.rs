@@ -509,9 +509,21 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
             // Stable across process restarts, distinct from peer-generated controller keys.
             let user_pause = Uuid::from_bytes(*b"atman-user-pause").into();
             let receipt = worker
-                .control(request.expected_revision, user_pause, control, |_| Ok(()))
+                .control(
+                    atman_runtime::flow_store::control::ControlRequest {
+                        id: request.request_id,
+                        sender: atman_runtime::flow_store::inbox::SenderIdentity::User(
+                            Uuid::from_bytes(*b"atman-local-user"),
+                        ),
+                        target: worker.address().clone(),
+                        expected_revision: request.expected_revision,
+                        pause_key: user_pause,
+                        action: control,
+                    },
+                    |_| Ok(()),
+                )
                 .await?;
-            Ok(json!({"receipt": receipt}))
+            Ok(json!({"request_id": request.request_id, "receipt": receipt.receipt}))
         }
     }
 }

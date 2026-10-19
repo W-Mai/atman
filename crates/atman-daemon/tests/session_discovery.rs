@@ -236,7 +236,7 @@ async fn discovery_observes_all_peer_execution_and_keeps_missing_projects_select
         flows[0]["instance_id"]
     );
     let active = rpc(&state, methods::FLOW_GET, json!({"flow": flows[1]})).await;
-    rpc(&state, methods::FLOW_CONTROL, json!({"flow": flows[1], "action": "cancel_turn", "expected_revision": active["execution"]["revision"]})).await;
+    rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": flows[1], "action": "cancel_turn", "expected_revision": active["execution"]["revision"]})).await;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let list = rpc(&state, methods::LIST_SESSIONS, json!({})).await;

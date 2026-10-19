@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, io, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use atman_rt::{InstanceActivity, InstanceState, RunId, TurnId, TurnOutcome};
+use atman_runtime::flow_runtime::access::PeerControl;
 use atman_runtime::flow_runtime::{
     FlowSnapshot, FlowWorker, execution::TurnRequest, host::RuntimeHost,
 };
@@ -15,6 +16,22 @@ use atman_runtime::message::MessageOrigin;
 use atman_runtime::source_program::RevisionBundle;
 use atman_runtime::{Executor, flow_authority::EffectiveAuthority};
 use uuid::Uuid;
+
+fn control_request(
+    worker: &FlowWorker,
+    expected_revision: u64,
+    pause_key: atman_runtime::event::AtmanUuid,
+    action: atman_runtime::flow_runtime::access::PeerControl,
+) -> atman_runtime::flow_store::control::ControlRequest {
+    atman_runtime::flow_store::control::ControlRequest {
+        id: Uuid::new_v4(),
+        sender: SenderIdentity::User(Uuid::from_bytes(*b"atman-local-user")),
+        target: worker.address().clone(),
+        expected_revision,
+        pause_key,
+        action,
+    }
+}
 
 fn session_descriptor() -> SessionDescriptor {
     SessionDescriptor {
@@ -590,7 +607,6 @@ async fn wait_closed(worker: &FlowWorker) {
 
 #[tokio::test]
 async fn accepted_close_unwinds_paused_execution_and_outlives_its_waiter() {
-    use atman_runtime::flow_runtime::access::PeerControl;
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();
     let host = RuntimeHost::default();
@@ -625,16 +641,29 @@ async fn accepted_close_unwinds_paused_execution_and_outlives_its_waiter() {
     let before = worker.state().await.unwrap();
     assert!(
         worker
-            .request_close(before.revision(), |_| Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "denied"
-            )))
+            .control(
+                control_request(
+                    &worker,
+                    before.revision(),
+                    Uuid::from_bytes(*b"atman-user-pause").into(),
+                    PeerControl::Close
+                ),
+                |_| Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+            )
             .await
             .is_err()
     );
     assert!(
         worker
-            .request_close(before.revision() - 1, |_| Ok(()))
+            .control(
+                control_request(
+                    &worker,
+                    before.revision() - 1,
+                    Uuid::from_bytes(*b"atman-user-pause").into(),
+                    PeerControl::Close
+                ),
+                |_| Ok(())
+            )
             .await
             .is_err()
     );
@@ -642,9 +671,11 @@ async fn accepted_close_unwinds_paused_execution_and_outlives_its_waiter() {
 
     let (sent, received) = tokio::sync::oneshot::channel();
     let owned = worker.clone();
+    let close_request = control_request(&worker, before.revision(), key, PeerControl::Close);
+    let submitted = close_request.clone();
     let closing = tokio::spawn(async move {
         owned
-            .control(before.revision(), key, PeerControl::Close, move |_| {
+            .control(submitted, move |_| {
                 let _ = sent.send(());
                 Ok(())
             })
@@ -678,26 +709,53 @@ async fn accepted_close_unwinds_paused_execution_and_outlives_its_waiter() {
         InboxDisposition::Cancelled { .. }
     ));
     let closed = worker.state().await.unwrap();
+    let accepted_close = worker
+        .control(close_request.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        accepted_close.execution.state(),
+        InstanceState::Closing { .. }
+    ));
+    assert_eq!(worker.state().await.unwrap(), closed);
+    assert!(
+        worker
+            .control(close_request.clone(), |_| {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "revoked"))
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(worker.state().await.unwrap(), closed);
     let receipt = worker
-        .request_close(closed.revision(), |_| Ok(()))
+        .control(
+            control_request(
+                &worker,
+                closed.revision(),
+                Uuid::from_bytes(*b"atman-user-pause").into(),
+                PeerControl::Close,
+            ),
+            |_| Ok(()),
+        )
         .await
         .unwrap();
     assert_eq!(
         worker
-            .request_close(closed.revision(), |_| Ok(()))
+            .control(receipt.update.request.clone(), |_| Ok(()))
             .await
             .unwrap(),
         receipt
     );
     assert!(peer.state().await.unwrap().can_start_turn());
     host.shutdown().await.unwrap();
-    let saved = root
+    let mut saved = root
         .open_session(info.id)
         .unwrap()
         .open_flow(&worker.address().instance_id)
         .unwrap();
     assert_eq!(saved.state().state(), &InstanceState::Closed);
     assert_eq!(saved.completions().len(), 1);
+    assert_eq!(saved.control(close_request).unwrap(), accepted_close);
 }
 
 #[tokio::test]
@@ -2889,7 +2947,15 @@ async fn structured_watch_tools_observe_answers_completions_and_closure_through_
         .unwrap();
     wait_inputs(&observer, 2).await;
     source
-        .request_close(source.state().await.unwrap().revision(), |_| Ok(()))
+        .control(
+            control_request(
+                &source,
+                source.state().await.unwrap().revision(),
+                Uuid::from_bytes(*b"atman-user-pause").into(),
+                PeerControl::Close,
+            ),
+            |_| Ok(()),
+        )
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
@@ -3278,7 +3344,15 @@ async fn process_resources_belong_to_flow_instances_across_turns_and_storage_han
     let context = first.context();
     let resources = first.resources().clone();
     first
-        .request_close(first.state().await.unwrap().revision(), |_| Ok(()))
+        .control(
+            control_request(
+                &first,
+                first.state().await.unwrap().revision(),
+                Uuid::from_bytes(*b"atman-user-pause").into(),
+                PeerControl::Close,
+            ),
+            |_| Ok(()),
+        )
         .await
         .unwrap();
     wait_closed(&first).await;
@@ -5436,7 +5510,15 @@ async fn persistent_workspaces_share_across_peers_turns_and_host_restarts() {
         WorkspaceState::Bound
     );
     child
-        .request_close(child.state().await.unwrap().revision(), |_| Ok(()))
+        .control(
+            control_request(
+                &child,
+                child.state().await.unwrap().revision(),
+                Uuid::from_bytes(*b"atman-user-pause").into(),
+                PeerControl::Close,
+            ),
+            |_| Ok(()),
+        )
         .await
         .unwrap();
     wait_closed(&child).await;
@@ -5506,9 +5588,17 @@ async fn persistent_workspaces_share_across_peers_turns_and_host_restarts() {
             atman_runtime::flow_store::completion::StoredValue::String("preserved".into())
         )
     );
-    leaf.request_close(leaf.state().await.unwrap().revision(), |_| Ok(()))
-        .await
-        .unwrap();
+    leaf.control(
+        control_request(
+            &leaf,
+            leaf.state().await.unwrap().revision(),
+            Uuid::from_bytes(*b"atman-user-pause").into(),
+            PeerControl::Close,
+        ),
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
     wait_closed(&leaf).await;
     let record = manager.get(&binding.workspace_id).unwrap();
     assert!(!record.is_instance_bound());
@@ -5627,7 +5717,18 @@ async fn persistent_workspace_failed_launch_keeps_intent_and_close_retries_do_no
             .await
             .is_err()
     );
-    worker.request_close(revision, |_| Ok(())).await.unwrap();
+    worker
+        .control(
+            control_request(
+                &worker,
+                revision,
+                Uuid::from_bytes(*b"atman-user-pause").into(),
+                PeerControl::Close,
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
     let error = tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
         .await
         .unwrap()
@@ -7106,7 +7207,6 @@ async fn abandoned_host_send_preserves_intent_and_cross_session_retry_survives_s
 
 #[tokio::test]
 async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_ownership() {
-    use atman_runtime::flow_runtime::access::PeerControl;
     use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();
@@ -7192,6 +7292,7 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
     assert!(
         client
             .control(
+                Uuid::new_v4(),
                 b_info.address.clone(),
                 b.state().await.unwrap().revision(),
                 PeerControl::Pause
@@ -7243,17 +7344,28 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
     change(&b, FlowTransition::ExecutionPaused { key: user_key }).await;
     let stale = b.state().await.unwrap().revision();
     client
-        .control(b_info.address.clone(), stale, PeerControl::Pause)
+        .control(
+            Uuid::new_v4(),
+            b_info.address.clone(),
+            stale,
+            PeerControl::Pause,
+        )
         .await
         .unwrap();
     assert!(
         client
-            .control(b_info.address.clone(), stale, PeerControl::Resume)
+            .control(
+                Uuid::new_v4(),
+                b_info.address.clone(),
+                stale,
+                PeerControl::Resume
+            )
             .await
             .is_err()
     );
     controller
         .control(
+            Uuid::new_v4(),
             b_info.address.clone(),
             b.state().await.unwrap().revision(),
             PeerControl::Pause,
@@ -7263,6 +7375,7 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
     assert_eq!(b.state().await.unwrap().pauses().len(), 3);
     client
         .control(
+            Uuid::new_v4(),
             b_info.address.clone(),
             b.state().await.unwrap().revision(),
             PeerControl::Resume,
@@ -7272,6 +7385,7 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
     assert_eq!(b.state().await.unwrap().pauses().len(), 2);
     controller
         .control(
+            Uuid::new_v4(),
             b_info.address.clone(),
             b.state().await.unwrap().revision(),
             PeerControl::Resume,
@@ -7398,6 +7512,7 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
     assert!(
         client
             .control(
+                Uuid::new_v4(),
                 a_info.address.clone(),
                 a.state().await.unwrap().revision(),
                 PeerControl::CancelTurn
@@ -8048,22 +8163,28 @@ async fn cyclic_peer_waits_park_and_unwind_through_pause_cancel_and_close() {
         for worker in [&a, &b] {
             worker
                 .control(
-                    worker.state().await.unwrap().revision(),
-                    key,
-                    PeerControl::Pause,
+                    control_request(
+                        worker,
+                        worker.state().await.unwrap().revision(),
+                        key,
+                        PeerControl::Pause,
+                    ),
                     |_| Ok(()),
                 )
                 .await
                 .unwrap();
         }
         a.control(
-            a.state().await.unwrap().revision(),
-            key,
-            if close {
-                PeerControl::Close
-            } else {
-                PeerControl::CancelTurn
-            },
+            control_request(
+                &a,
+                a.state().await.unwrap().revision(),
+                key,
+                if close {
+                    PeerControl::Close
+                } else {
+                    PeerControl::CancelTurn
+                },
+            ),
             |_| Ok(()),
         )
         .await
@@ -8090,9 +8211,10 @@ async fn cyclic_peer_waits_park_and_unwind_through_pause_cancel_and_close() {
             .find(|input| input.request.correlation.is_some())
             .unwrap()
             .id;
-        b.control(pending.state.revision(), key, PeerControl::Resume, |_| {
-            Ok(())
-        })
+        b.control(
+            control_request(&b, pending.state.revision(), key, PeerControl::Resume),
+            |_| Ok(()),
+        )
         .await
         .unwrap();
         let b_completion = tokio::time::timeout(Duration::from_secs(5), b_ticket.wait())

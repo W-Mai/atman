@@ -6,6 +6,7 @@ use atman_rt::{InstanceActivity, InstanceState};
 
 use super::{FlowWorker, resources::InstanceResources};
 use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::control::{CommittedControl, ControlAction, ControlRequest};
 use crate::flow_store::{FlowRef, FlowStore, FlowTransition, invalid};
 
 impl FlowWorker {
@@ -14,12 +15,12 @@ impl FlowWorker {
         self.close_error.subscribe()
     }
 
-    /// Commit closure under the writer's authorization boundary. The receipt acknowledges Closing; observe the instance state for completed cleanup. Cancelling the caller does not cancel an accepted close, and a flow can request its own closure without waiting on itself.
-    pub async fn request_close(
+    /// Authenticate and commit one control under the writer. Identical retries return the original receipt. Accepted closure owns its cleanup independently of the caller; observing Closing does not imply that cleanup has finished.
+    pub async fn control(
         &self,
-        expected_revision: u64,
+        request: ControlRequest,
         authorize: impl FnOnce(&FlowRef) -> io::Result<()> + Send + 'static,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<CommittedControl> {
         let worker = self.clone();
         let runtime = tokio::runtime::Handle::current();
         self.request(move |store| {
@@ -27,8 +28,9 @@ impl FlowWorker {
             if worker.is_stopping() {
                 return Err(invalid("instance host is stopping"));
             }
-            let receipt = store.transition(expected_revision, FlowTransition::CloseRequested)?;
-            if matches!(store.state().state(), InstanceState::Closing { .. }) {
+            let close = request.action == ControlAction::Close;
+            let receipt = store.control(request)?;
+            if close && matches!(store.state().state(), InstanceState::Closing { .. }) {
                 // Establish ownership before acknowledgement, even if the request waiter vanished.
                 worker.start_close(&runtime);
             }

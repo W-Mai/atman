@@ -10,6 +10,14 @@ use crate::flow_store::inbox::DeliveryMode;
 
 pub(super) const HANDLE_DESCRIPTION: &str = "Flow handle. Persistent instances use an instance UUID in the current session or session UUID/instance UUID across sessions.";
 
+fn request_id(args: &ToolArgs) -> Result<Uuid, RuntimeError> {
+    match args.named("request_id") {
+        None => Ok(Uuid::now_v7()),
+        Some(Value::Str(id)) => Uuid::parse_str(id).map_err(failed),
+        _ => Err(failed("request_id must be a UUID string")),
+    }
+}
+
 pub(in crate::tools) struct Target<'a> {
     pub(in crate::tools) client: &'a FlowClient,
     pub(in crate::tools) address: FlowRef,
@@ -77,12 +85,15 @@ impl Target<'_> {
                 ));
             }
         };
+        let request_id = request_id(args)?;
         let receipt = self
             .client
-            .control(self.address, revision, action)
+            .control(request_id, self.address, revision, action)
             .await
             .map_err(failed)?;
-        Ok(Value::from_json(serde_json::json!({ "receipt": receipt })))
+        Ok(Value::from_json(
+            serde_json::json!({ "request_id": request_id, "receipt": receipt }),
+        ))
     }
 
     pub async fn interject(self, args: &ToolArgs, text: String) -> ToolResult {
@@ -107,11 +118,7 @@ impl Target<'_> {
             Some(Value::Str(mode)) if mode == "next_turn" => DeliveryMode::NextTurn,
             _ => return Err(failed("delivery must be at_boundary or next_turn")),
         };
-        let request_id = match args.named("request_id") {
-            None => Uuid::now_v7(),
-            Some(Value::Str(id)) => Uuid::parse_str(id).map_err(failed)?,
-            _ => return Err(failed("request_id must be a UUID string")),
-        };
+        let request_id = request_id(args)?;
         let attempt = self
             .client
             .send(self.address, request_id, text, delivery)

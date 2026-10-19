@@ -1858,7 +1858,8 @@ impl Tool for AgentKill {
             "type": "object",
             "properties": {
                 "handle": {"type": "string", "description": instance::HANDLE_DESCRIPTION},
-                "expected_revision": {"type": "integer", "minimum": 0}
+                "expected_revision": {"type": "integer", "minimum": 0},
+                "request_id": {"type": "string", "description": "Stable UUID for identical persistent control retries. Returned when omitted."}
             },
             "required": ["handle"]
         })
@@ -1905,7 +1906,8 @@ impl Tool for FlowClose {
             "type": "object",
             "properties": {
                 "handle": {"type": "string", "description": instance::HANDLE_DESCRIPTION},
-                "expected_revision": {"type": "integer", "minimum": 0}
+                "expected_revision": {"type": "integer", "minimum": 0},
+                "request_id": {"type": "string", "description": "Stable UUID for identical persistent control retries. Returned when omitted."}
             },
             "required": ["handle", "expected_revision"]
         })

@@ -305,9 +305,14 @@ impl Attachment {
             TuiControl::CancelFlow | TuiControl::HardStop => {
                 worker
                     .control(
-                        worker.state().await?.revision(),
-                        Uuid::from_bytes(*b"atman-user-pause").into(),
-                        PeerControl::CancelTurn,
+                        atman_runtime::flow_store::control::ControlRequest {
+                            id: request,
+                            sender: SenderIdentity::User(USER),
+                            target: worker.address().clone(),
+                            expected_revision: worker.state().await?.revision(),
+                            pause_key: Uuid::from_bytes(*b"atman-user-pause").into(),
+                            action: PeerControl::CancelTurn,
+                        },
                         |_| Ok(()),
                     )
                     .await?;

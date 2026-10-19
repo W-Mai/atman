@@ -230,6 +230,11 @@ async fn broken_profile_does_not_fail_unrelated_execution() {
     drop(atman_runtime::flow_store::profile::ProfileStore::open(&root).unwrap());
     std::fs::write(root.root().join("host/identity.json"), "broken").unwrap();
     let state = Arc::new(DaemonState::new(dir.path().to_path_buf()));
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    state.set_launcher(Arc::new(
+        RunLauncher::new(dir.path().to_path_buf(), Some(config), None).unwrap(),
+    ));
     assert!(
         dispatch(
             state.clone(),
@@ -346,18 +351,26 @@ async fn persistent_management_shares_catalog_pages_and_independent_pause_contro
         before,
         "view selection must not change execution"
     );
-    let control = json!({"flow": second.address, "expected_revision": before["execution"]["revision"], "action": "pause"});
-    rpc(&state, methods::FLOW_CONTROL, control.clone()).await;
+    let control = json!({"request_id": Uuid::now_v7(), "flow": second.address, "expected_revision": before["execution"]["revision"], "action": "pause"});
+    let receipt = rpc(&state, methods::FLOW_CONTROL, control.clone()).await;
+    assert_eq!(
+        rpc(&state, methods::FLOW_CONTROL, control.clone()).await,
+        receipt
+    );
+    let mut stale_request = control.clone();
+    stale_request["request_id"] = json!(Uuid::now_v7());
     let stale = dispatch(
         state.clone(),
-        JsonRpcRequest::new(1, methods::FLOW_CONTROL, control),
+        JsonRpcRequest::new(1, methods::FLOW_CONTROL, stale_request),
     )
     .await;
     assert!(stale.error.is_some());
     let paused = rpc(&state, methods::FLOW_GET, request.clone()).await;
     assert_eq!(paused["execution"]["pause_count"], 2);
-    rpc(&state, methods::FLOW_CONTROL, json!({"flow": second.address, "expected_revision": paused["execution"]["revision"], "action": "resume"})).await;
-    let resumed = rpc(&state, methods::FLOW_GET, request).await;
+    rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": second.address, "expected_revision": paused["execution"]["revision"], "action": "resume"})).await;
+    let resumed = rpc(&state, methods::FLOW_GET, request.clone()).await;
+    assert_eq!(rpc(&state, methods::FLOW_CONTROL, control).await, receipt);
+    assert_eq!(rpc(&state, methods::FLOW_GET, request).await, resumed);
     assert_eq!(resumed["execution"]["pause_count"], 1);
     assert_eq!(resumed["execution"]["can_start_turn"], false);
     assert_eq!(
@@ -395,6 +408,10 @@ async fn session_creation_is_idempotent_and_unknown_principals_never_acquire_sto
         (
             methods::FLOW_CONTROL,
             json!({"flow": {"session_id": id, "instance_id": Uuid::now_v7()}, "action": "pause"}),
+        ),
+        (
+            methods::FLOW_CONTROL,
+            json!({"flow": {"session_id": id, "instance_id": Uuid::now_v7()}, "action": "pause", "expected_revision": 0}),
         ),
         (
             methods::SESSION_FLOWS,
@@ -463,7 +480,7 @@ fn daemon_reopening_preserves_selection_and_pause_without_starting_work() {
             rpc(&state, methods::SESSION_OPEN, json!({"session_id": id})).await;
             rpc(&state, methods::SESSION_SELECT_FLOW, json!({"flow": second.address})).await;
             let before = rpc(&state, methods::FLOW_GET, json!({"flow": second.address})).await;
-            rpc(&state, methods::FLOW_CONTROL, json!({"flow": second.address, "expected_revision": before["execution"]["revision"], "action": "pause"})).await;
+            rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": second.address, "expected_revision": before["execution"]["revision"], "action": "pause"})).await;
             rpc(&state, methods::FLOW_GET, json!({"flow": second.address})).await
         })
     };
@@ -477,7 +494,7 @@ fn daemon_reopening_preserves_selection_and_pause_without_starting_work() {
         assert_eq!(summary["default_flow"], json!(second.address.instance_id));
         let reopened = rpc(&state, methods::FLOW_GET, json!({"flow": second.address})).await;
         assert_eq!(reopened, before);
-        rpc(&state, methods::FLOW_CONTROL, json!({"flow": second.address, "expected_revision": reopened["execution"]["revision"], "action": "resume"})).await;
+        rpc(&state, methods::FLOW_CONTROL, json!({"request_id": Uuid::now_v7(), "flow": second.address, "expected_revision": reopened["execution"]["revision"], "action": "resume"})).await;
         let resumed = rpc(&state, methods::FLOW_GET, json!({"flow": second.address})).await;
         assert_eq!(resumed["execution"]["pause_count"], 0);
         assert_eq!(resumed["execution"]["state"], reopened["execution"]["state"]);

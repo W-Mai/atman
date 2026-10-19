@@ -96,6 +96,8 @@ pub enum FlowControl {
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct ControlFlowRequest {
     pub flow: FlowAddress,
+    /// Reuse with identical parameters to retrieve the original committed receipt.
+    pub request_id: Uuid,
     pub expected_revision: u64,
     pub action: FlowControl,
 }

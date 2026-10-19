@@ -848,7 +848,10 @@ impl Attachment {
             ":pause" | ":resume" | ":cancel" | ":close" | ":recover" => {
                 let control = match command { ":pause" => PeerControl::Pause, ":resume" => PeerControl::Resume, ":cancel" => PeerControl::CancelTurn, ":recover" => PeerControl::Recover, _ => PeerControl::Close };
                 let state = worker.state().await?;
-                worker.control(state.revision(), Uuid::from_bytes(*b"atman-user-pause").into(), control, |_| Ok(())).await?;
+                worker.control(atman_runtime::flow_store::control::ControlRequest {
+                    id: request_id, sender: SenderIdentity::User(USER), target: worker.address().clone(),
+                    expected_revision: state.revision(), pause_key: Uuid::from_bytes(*b"atman-user-pause").into(), action: control,
+                }, |_| Ok(())).await?;
                 if matches!(control, PeerControl::Resume | PeerControl::Recover) { self.bind(worker).await?; }
                 Ok(format!("{control:?} acknowledged"))
             }
