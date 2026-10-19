@@ -8507,7 +8507,11 @@ async fn cross_session_observation_retains_cursor_on_revocation_and_recovers_aft
         .unwrap();
     wait_inputs(&a, 1).await;
     let address = a.address().clone();
-    let mut changes = a.subscribe_commits();
+    // Reopening session storage requires its owner's shutdown receipt, not a flow notification close.
+    tokio::time::timeout(Duration::from_secs(5), host.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
     drop(issues);
     drop(client);
     drop(a);
@@ -8515,11 +8519,6 @@ async fn cross_session_observation_retains_cursor_on_revocation_and_recovers_aft
     drop(session);
     drop(remote);
     drop(host);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while changes.changed().await.is_ok() {}
-    })
-    .await
-    .unwrap();
     let host = RuntimeHost::default();
     let session = host
         .attach_session(root.open_session(a_info.id).unwrap())
