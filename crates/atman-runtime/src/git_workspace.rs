@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::git::{GitCli, GitError};
 
+mod inspection;
+pub use inspection::{WorkspaceCheckout, WorkspaceInspection, WorkspaceSnapshot};
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum WorkspacePolicy {
     #[default]
@@ -1004,14 +1007,19 @@ impl WorkspaceManager {
     }
 
     fn load(&self) -> Result<WorkspaceRegistry, WorkspaceError> {
-        if !self.registry_path.exists() {
-            return Ok(WorkspaceRegistry {
-                version: REGISTRY_VERSION,
-                workspaces: Vec::new(),
-            });
-        }
-        let mut registry: WorkspaceRegistry =
-            serde_json::from_slice(&fs::read(&self.registry_path)?)?;
+        Ok(self.load_existing()?.unwrap_or_else(|| WorkspaceRegistry {
+            version: REGISTRY_VERSION,
+            workspaces: Vec::new(),
+        }))
+    }
+
+    fn load_existing(&self) -> Result<Option<WorkspaceRegistry>, WorkspaceError> {
+        let bytes = match fs::read(&self.registry_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut registry: WorkspaceRegistry = serde_json::from_slice(&bytes)?;
         if registry.version != REGISTRY_VERSION {
             return Err(WorkspaceError::Invalid(format!(
                 "unsupported registry version {}",
@@ -1057,7 +1065,7 @@ impl WorkspaceManager {
                 item.retained = true;
             }
         }
-        Ok(registry)
+        Ok(Some(registry))
     }
 
     fn save(&self, registry: &WorkspaceRegistry) -> Result<(), WorkspaceError> {
@@ -1202,6 +1210,177 @@ mod tests {
             session_id: uuid::Uuid::new_v4().into(),
             instance_id: crate::flow_store::FlowInstanceId::now(),
         }
+    }
+
+    #[test]
+    fn inspection_preserves_shared_ownership_and_missing_checkout_history() {
+        fn files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+            fn walk(
+                root: &Path,
+                path: &Path,
+                out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+            ) {
+                for entry in fs::read_dir(path).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    if entry.file_type().unwrap().is_dir() {
+                        walk(root, &path, out);
+                    } else if entry.file_type().unwrap().is_file() {
+                        out.insert(
+                            path.strip_prefix(root).unwrap().to_owned(),
+                            fs::read(&path).unwrap(),
+                        );
+                    }
+                }
+            }
+            let mut result = Default::default();
+            walk(root, root, &mut result);
+            result
+        }
+        let tmp = repo();
+        let before = files(tmp.path());
+        let empty = WorkspaceManager::inspect(tmp.path(), tmp.path()).unwrap();
+        assert!(!empty.registry_present);
+        assert!(empty.workspaces.is_empty());
+        assert_eq!(files(tmp.path()), before);
+        assert!(!tmp.path().join(".atman").exists());
+        let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+        let creator = instance_owner();
+        let peer = instance_owner();
+        let base = GitCli::at(tmp.path()).head_oid().unwrap();
+        let record = manager
+            .create_instance("shared", &creator, "host", false, &base)
+            .unwrap();
+        let shared = manager
+            .share_instance(&record.binding(), &creator, &peer)
+            .unwrap();
+        let before = files(tmp.path());
+        let snapshot = WorkspaceManager::inspect(tmp.path(), tmp.path()).unwrap();
+        assert!(snapshot.registry_present);
+        assert_eq!(snapshot.workspaces.len(), 1);
+        assert_eq!(snapshot.workspaces[0].record, shared);
+        assert_eq!(
+            snapshot.workspaces[0].checkout,
+            WorkspaceCheckout::Available {
+                head: base.clone(),
+                branch: None,
+                dirty: false
+            }
+        );
+        assert_eq!(
+            files(tmp.path()),
+            before,
+            "inspection must not write registry, index, refs, or lock files"
+        );
+        git(&record.worktree_path, &["checkout", "-q", "-b", "topic"]);
+        fs::write(record.worktree_path.join("README.md"), "changed\n").unwrap();
+        let before = files(tmp.path());
+        let snapshot = WorkspaceManager::inspect(tmp.path(), tmp.path()).unwrap();
+        assert_eq!(
+            snapshot.workspaces[0].record.branch, None,
+            "recorded allocation remains distinct from current branch"
+        );
+        assert_eq!(
+            snapshot.workspaces[0].checkout,
+            WorkspaceCheckout::Available {
+                head: base,
+                branch: Some("topic".into()),
+                dirty: true
+            }
+        );
+        assert_eq!(files(tmp.path()), before);
+        fs::remove_dir_all(&record.worktree_path).unwrap();
+        let before = files(tmp.path());
+        let snapshot = WorkspaceManager::inspect(tmp.path(), tmp.path()).unwrap();
+        assert_eq!(snapshot.workspaces[0].checkout, WorkspaceCheckout::Missing);
+        assert_eq!(snapshot.workspaces[0].record, shared);
+        assert_eq!(files(tmp.path()), before);
+        fs::create_dir(&record.worktree_path).unwrap();
+        let before = files(tmp.path());
+        let snapshot = WorkspaceManager::inspect(tmp.path(), tmp.path()).unwrap();
+        assert!(matches!(
+            snapshot.workspaces[0].checkout,
+            WorkspaceCheckout::Unavailable { .. }
+        ));
+        assert_eq!(snapshot.workspaces[0].record, shared);
+        assert_eq!(files(tmp.path()), before);
+        fs::rename(tmp.path().join(".git"), tmp.path().join("hidden-git")).unwrap();
+        let before = files(tmp.path());
+        let snapshot = WorkspaceManager::inspect(tmp.path(), tmp.path()).unwrap();
+        assert!(matches!(
+            snapshot.workspaces[0].checkout,
+            WorkspaceCheckout::Unavailable { .. }
+        ));
+        assert_eq!(snapshot.workspaces[0].record, shared);
+        assert_eq!(files(tmp.path()), before);
+    }
+
+    #[test]
+    fn inspection_validates_scope_and_keeps_external_registry_without_repository() {
+        let tmp = repo();
+        let external = tempfile::tempdir().unwrap();
+        let bare = external.path().canonicalize().unwrap().join("repo.git");
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                tmp.path().to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        let manager = WorkspaceManager::at(&bare, Some(external.path())).unwrap();
+        let record = manager
+            .create_instance(
+                "external",
+                &instance_owner(),
+                "host",
+                true,
+                &GitCli::at(&bare).head_oid().unwrap(),
+            )
+            .unwrap();
+        let snapshot = WorkspaceManager::inspect(&bare, external.path()).unwrap();
+        assert!(matches!(
+            snapshot.workspaces[0].checkout,
+            WorkspaceCheckout::Available { dirty: false, .. }
+        ));
+        fs::rename(&bare, external.path().join("moved.git")).unwrap();
+        let snapshot = WorkspaceManager::inspect(&bare, external.path()).unwrap();
+        assert_eq!(snapshot.workspaces[0].record, record);
+        assert!(matches!(
+            snapshot.workspaces[0].checkout,
+            WorkspaceCheckout::Unavailable { .. }
+        ));
+        assert!(WorkspaceManager::inspect(Path::new("relative"), external.path()).is_err());
+        assert!(WorkspaceManager::inspect(&bare.join("../other"), external.path()).is_err());
+        assert!(WorkspaceManager::inspect(tmp.path(), external.path()).is_err());
+        let original = fs::read(&manager.registry_path).unwrap();
+        let mut registry: WorkspaceRegistry = serde_json::from_slice(&original).unwrap();
+        registry.workspaces.push(record.clone());
+        fs::write(
+            &manager.registry_path,
+            serde_json::to_vec(&registry).unwrap(),
+        )
+        .unwrap();
+        assert!(WorkspaceManager::inspect(&bare, external.path()).is_err());
+        registry.workspaces.pop();
+        registry.workspaces[0].worktree_path = tmp.path().into();
+        fs::write(
+            &manager.registry_path,
+            serde_json::to_vec(&registry).unwrap(),
+        )
+        .unwrap();
+        assert!(WorkspaceManager::inspect(&bare, external.path()).is_err());
+        fs::write(&manager.registry_path, b"corrupt").unwrap();
+        assert!(WorkspaceManager::inspect(&bare, external.path()).is_err());
+        assert_eq!(fs::read(&manager.registry_path).unwrap(), b"corrupt");
+        fs::remove_file(&manager.registry_path).unwrap();
+        fs::create_dir(&manager.registry_path).unwrap();
+        assert!(
+            WorkspaceManager::inspect(&bare, external.path()).is_err(),
+            "unreadable registry is not an empty snapshot"
+        );
     }
 
     #[test]

@@ -546,6 +546,7 @@ pub struct FlowInspection {
     pub journal: crate::event_log::journal::JournalInspection,
     pub relations: Vec<relation::FlowRelation>,
     pub watchers: Vec<watch_view::WatchRecord>,
+    pub workspace: Option<workspace::WorkspaceRequest>,
 }
 
 impl SessionInspection {
@@ -699,6 +700,7 @@ fn inspect_registered_flow_with(
         journal,
         relations,
         watchers,
+        workspace: replay.workspace,
     })
 }
 

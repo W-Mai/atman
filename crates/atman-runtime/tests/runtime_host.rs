@@ -5478,6 +5478,20 @@ async fn persistent_workspace_failed_launch_keeps_intent_and_close_retries_do_no
     let recorded = session.open_flow(&descriptor.address.instance_id).unwrap();
     assert_eq!(recorded.workspace_request(), Some(&workspace));
     assert_eq!(recorded.state().state(), &InstanceState::Closed);
+    let before = std::fs::read(recorded.dir().join("events.jsonl")).unwrap();
+    let inspected = RuntimeStore::inspect_session(data.path(), info.id)
+        .unwrap()
+        .inspect_flow(&descriptor.address.instance_id)
+        .unwrap();
+    assert_eq!(inspected.workspace.as_ref(), Some(&workspace));
+    assert_eq!(
+        std::fs::read(recorded.dir().join("events.jsonl")).unwrap(),
+        before
+    );
+    assert!(
+        !path.exists(),
+        "read-only workspace intent must not recreate a checkout"
+    );
 }
 
 #[tokio::test]
