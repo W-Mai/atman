@@ -75,21 +75,45 @@ struct Window {
 }
 
 impl Window {
-    fn content(&self) -> Rect {
+    fn area(&self, canvas: Rect) -> Rect {
+        if compact_window(canvas) || self.restore.is_some() {
+            canvas
+        } else {
+            bounded(self.rect, canvas)
+        }
+    }
+
+    fn content(&self, canvas: Rect) -> Rect {
+        let rect = self.area(canvas);
+        let (padding, header) = if compact_window(canvas) {
+            (0, 9)
+        } else {
+            (2, 6)
+        };
         Rect::new(
-            self.rect.x.saturating_add(2),
-            self.rect.y.saturating_add(6),
-            self.rect.width.saturating_sub(4),
-            self.rect.height.saturating_sub(8),
+            rect.x.saturating_add(padding),
+            rect.y.saturating_add(header),
+            rect.width.saturating_sub(padding * 2),
+            rect.height.saturating_sub(header + 2),
         )
     }
 
-    fn buttons(&self) -> [Rect; 5] {
-        let width = self.rect.width.saturating_sub(4) / 5;
+    fn buttons(&self, canvas: Rect) -> [Rect; 5] {
+        let rect = self.area(canvas);
         std::array::from_fn(|index| {
+            let (padding, row, column, columns) = if compact_window(canvas) {
+                if index < 3 {
+                    (1, 0, index, 3)
+                } else {
+                    (1, 1, index - 3, 2)
+                }
+            } else {
+                (2, 0, index, 5)
+            };
+            let width = rect.width.saturating_sub(padding * 2) / columns;
             Rect::new(
-                self.rect.x + 2 + index as u16 * width,
-                self.rect.y + 2,
+                rect.x + padding + column as u16 * width,
+                rect.y + 2 + row * 3,
                 width.saturating_sub(1),
                 3,
             )
@@ -97,11 +121,13 @@ impl Window {
     }
 
     fn draw(&self, frame: &mut Frame, active: bool, geometry: Option<bool>) {
+        let canvas = frame.area();
+        let rect = self.area(canvas);
         let t = crate::theme::theme();
-        crate::wm::shadow::render_shadow(frame, self.rect, &t);
+        crate::wm::shadow::render_shadow(frame, rect, &t);
         let bg = crate::wm::shell::surface_bg(&t);
-        frame.render_widget(ratatui::widgets::Clear, self.rect);
-        frame.render_widget(Paragraph::new("").style(Style::default().bg(bg)), self.rect);
+        frame.render_widget(ratatui::widgets::Clear, rect);
+        frame.render_widget(Paragraph::new("").style(Style::default().bg(bg)), rect);
         frame.render_widget(
             Paragraph::new(format!("  {}", self.key.flow.label())).style(
                 Style::default()
@@ -112,16 +138,18 @@ impl Window {
                     })
                     .bg(bg),
             ),
-            Rect::new(self.rect.x, self.rect.y, self.rect.width, 1),
+            Rect::new(rect.x, rect.y, rect.width, 1),
         );
         for (index, (rect, label)) in self
-            .buttons()
+            .buttons(canvas)
             .into_iter()
             .zip(["Close Esc", "Max F10", "Main ^Enter", "Move F6", "Size F7"])
             .enumerate()
         {
-            let fill = if self.hover == Some(index)
-                || geometry.is_some_and(|resize| index == if resize { 4 } else { 3 })
+            let disabled = compact_window(canvas) && matches!(index, 1 | 3 | 4);
+            let fill = if !disabled
+                && (self.hover == Some(index)
+                    || geometry.is_some_and(|resize| index == if resize { 4 } else { 3 }))
             {
                 t.work_bg.lerp(t.work_hover_bg, 0.5)
             } else {
@@ -130,33 +158,44 @@ impl Window {
             frame.render_widget(
                 Paragraph::new(format!("\n{label}"))
                     .alignment(ratatui::layout::Alignment::Center)
-                    .style(Style::default().fg(t.tinted_fg.into()).bg(fill)),
+                    .style(
+                        Style::default()
+                            .fg(if disabled {
+                                t.meta_fg.into()
+                            } else {
+                                t.tinted_fg.into()
+                            })
+                            .bg(fill),
+                    ),
                 rect,
             );
         }
         frame.render_widget(
             Paragraph::new(match geometry {
+                _ if compact_window(canvas) => " Full page · widen to move/resize",
                 Some(false) => " Move: arrows · Enter apply · Esc cancel",
                 Some(true) => " Size: arrows · Enter apply · Esc cancel",
                 None => " Ctrl+Tab switch view · drag title / corner",
             })
             .style(Style::default().fg(t.meta_fg.into()).bg(bg)),
             Rect::new(
-                self.rect.x + 1,
-                self.rect.bottom().saturating_sub(1),
-                self.rect.width.saturating_sub(4),
+                rect.x + 1,
+                rect.bottom().saturating_sub(1),
+                rect.width.saturating_sub(4),
                 1,
             ),
         );
-        frame.render_widget(
-            Paragraph::new("⇲").style(Style::default().fg(t.meta_fg.into()).bg(bg)),
-            Rect::new(
-                self.rect.right().saturating_sub(2),
-                self.rect.bottom().saturating_sub(1),
-                2,
-                1,
-            ),
-        );
+        if !compact_window(canvas) {
+            frame.render_widget(
+                Paragraph::new("⇲").style(Style::default().fg(t.meta_fg.into()).bg(bg)),
+                Rect::new(
+                    rect.right().saturating_sub(2),
+                    rect.bottom().saturating_sub(1),
+                    2,
+                    1,
+                ),
+            );
+        }
     }
 }
 
@@ -368,12 +407,7 @@ impl Workspace {
             if window.rect.width == 0 {
                 window.rect = centered(self.canvas);
             }
-            window.rect = if window.restore.is_some() {
-                self.canvas
-            } else {
-                bounded(window.rect, self.canvas)
-            };
-            layers.push((window.key.clone(), window.content()));
+            layers.push((window.key.clone(), window.content(self.canvas)));
         }
         let mut cursor = None;
         for (key, area) in layers {
@@ -412,7 +446,7 @@ impl Workspace {
             if focused {
                 cursor = position;
             } else if let Some(window) = self.windows.iter().find(|window| window.key == key)
-                && cursor.is_some_and(|point| window.rect.contains(point))
+                && cursor.is_some_and(|point| window.area(self.canvas).contains(point))
             {
                 cursor = None;
             }
@@ -510,6 +544,17 @@ impl Workspace {
         }
         if matches!(event, Event::Key(key) if map_key(*key) == KeyAction::Quit) {
             return Action::Pass;
+        }
+        if compact_window(self.canvas)
+            && let Some(geometry) = self.geometry.take()
+        {
+            if let Some(window) = self
+                .windows
+                .iter_mut()
+                .find(|window| window.key == geometry.key)
+            {
+                window.rect = geometry.original;
+            }
         }
         if let Some(geometry) = self.geometry.as_mut() {
             let Some(window) = self
@@ -610,11 +655,11 @@ impl Workspace {
                 let top = self
                     .windows
                     .iter()
-                    .rposition(|window| window.rect.contains(point));
+                    .rposition(|window| window.area(self.canvas).contains(point));
                 for (index, window) in self.windows.iter_mut().enumerate() {
                     window.hover = if Some(index) == top {
                         window
-                            .buttons()
+                            .buttons(self.canvas)
                             .iter()
                             .position(|rect| rect.contains(point))
                     } else {
@@ -647,9 +692,10 @@ impl Workspace {
                             }
                             _ => {}
                         }
-                        let resize = point.y == window.rect.bottom().saturating_sub(1)
-                            && point.x >= window.rect.right().saturating_sub(3);
-                        if point.y == window.rect.y || resize {
+                        let area = window.area(self.canvas);
+                        let resize = point.y == area.bottom().saturating_sub(1)
+                            && point.x >= area.right().saturating_sub(3);
+                        if !compact_window(self.canvas) && (point.y == area.y || resize) {
                             self.begin_geometry(&key, resize, Some(point));
                             return Action::Focus {
                                 key,
@@ -657,7 +703,7 @@ impl Workspace {
                             };
                         }
                     }
-                    if !window.content().contains(point) {
+                    if !window.content(self.canvas).contains(point) {
                         return Action::Consume;
                     }
                 }
@@ -679,9 +725,12 @@ impl Workspace {
     }
 
     fn maximize(&mut self, key: &ViewKey) {
+        if compact_window(self.canvas) {
+            return;
+        }
         if let Some(window) = self.windows.iter_mut().find(|window| &window.key == key) {
             if let Some(rect) = window.restore.take() {
-                window.rect = bounded(rect, self.canvas);
+                window.rect = rect;
             } else {
                 window.restore = Some(window.rect);
                 window.rect = self.canvas;
@@ -690,8 +739,13 @@ impl Workspace {
     }
 
     fn begin_geometry(&mut self, key: &ViewKey, resize: bool, pointer: Option<Position>) {
+        if compact_window(self.canvas) {
+            return;
+        }
         if let Some(window) = self.windows.iter_mut().find(|window| &window.key == key) {
+            let area = window.area(self.canvas);
             window.restore = None;
+            window.rect = area;
             self.geometry = Some(Geometry {
                 key: key.clone(),
                 resize,
@@ -702,8 +756,12 @@ impl Workspace {
     }
 }
 
+fn compact_window(canvas: Rect) -> bool {
+    canvas.width < 64
+}
+
 fn centered(canvas: Rect) -> Rect {
-    let width = (canvas.width * 4 / 5).max(60).min(canvas.width);
+    let width = (canvas.width * 4 / 5).max(64).min(canvas.width);
     let height = (canvas.height * 4 / 5).max(20).min(canvas.height);
     Rect::new(
         canvas.x + (canvas.width - width) / 2,
@@ -714,7 +772,7 @@ fn centered(canvas: Rect) -> Rect {
 }
 
 fn bounded(rect: Rect, canvas: Rect) -> Rect {
-    let width = rect.width.max(60).min(canvas.width);
+    let width = rect.width.max(64).min(canvas.width);
     let height = rect.height.max(20).min(canvas.height);
     Rect::new(
         rect.x.clamp(canvas.x, canvas.right().saturating_sub(width)),
@@ -775,6 +833,113 @@ async fn permission_change(rx: &mut Option<tokio::sync::broadcast::Receiver<Stre
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn window() -> Window {
+        Window {
+            key: ViewKey {
+                flow: ViewAddress::Instance(atman_runtime::flow_store::FlowRef {
+                    session_id: uuid::Uuid::new_v4().into(),
+                    instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+                }),
+                placement: FlowPlacement::Floating,
+            },
+            rect: Rect::new(16, 5, 108, 35),
+            restore: None,
+            hover: None,
+        }
+    }
+
+    #[test]
+    fn window_layout_keeps_controls_readable_and_content_usable_across_canvas_sizes() {
+        let window = window();
+        let preferred = window.rect;
+        for width in 40..=160 {
+            let canvas = Rect::new(0, 0, width, 24);
+            let content = window.content(canvas);
+            assert!(content.width >= 40 && content.height >= 8);
+            let buttons = window.buttons(canvas);
+            for (index, button) in buttons.iter().enumerate() {
+                assert_eq!(button.height, 3);
+                assert_eq!(button.intersection(canvas), *button);
+                assert!(button.intersection(content).is_empty());
+                assert!(
+                    buttons[..index]
+                        .iter()
+                        .all(|other| other.intersection(*button).is_empty())
+                );
+            }
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            terminal
+                .draw(|frame| window.draw(frame, true, None))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let lines: Vec<String> = (0..24)
+                .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect();
+            for label in ["Close Esc", "Max F10", "Main ^Enter", "Move F6", "Size F7"] {
+                assert!(
+                    lines.iter().any(|line| line.contains(label)),
+                    "{width}: {label}"
+                );
+            }
+        }
+        assert_eq!(window.rect, preferred);
+        assert_eq!(window.area(Rect::new(0, 0, 140, 45)), preferred);
+    }
+
+    #[test]
+    fn compact_window_controls_preserve_geometry_and_escape_only_closes_the_view() {
+        let window = window();
+        let key = window.key.clone();
+        let preferred = window.rect;
+        let mut workspace = Workspace {
+            active: Some(key.clone()),
+            main: Some(key.clone()),
+            views: HashMap::new(),
+            windows: vec![window],
+            surfaces: HashMap::new(),
+            canvas: Rect::new(0, 0, 40, 24),
+            geometry: None,
+            background_start: 0,
+            cursor_visible: false,
+        };
+        for code in [KeyCode::F(6), KeyCode::F(7), KeyCode::F(10)] {
+            assert!(matches!(
+                workspace.event(
+                    &Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)),
+                    true
+                ),
+                Action::Consume
+            ));
+            assert!(workspace.geometry.is_none());
+            assert_eq!(workspace.windows[0].rect, preferred);
+        }
+        let close = workspace.windows[0].buttons(workspace.canvas)[0];
+        let click = Event::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: close.x,
+            row: close.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(matches!(workspace.event(&click, true), Action::Close(target) if target == key));
+        assert!(
+            matches!(workspace.event(&Event::Key(crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)), true), Action::Close(target) if target == key)
+        );
+        workspace.canvas = Rect::new(0, 0, 140, 45);
+        workspace.maximize(&key);
+        assert_eq!(
+            workspace.windows[0].area(workspace.canvas),
+            workspace.canvas
+        );
+        workspace.canvas = Rect::new(0, 0, 40, 24);
+        assert_eq!(
+            workspace.windows[0].area(workspace.canvas),
+            workspace.canvas
+        );
+        workspace.canvas = Rect::new(0, 0, 140, 45);
+        workspace.maximize(&key);
+        assert_eq!(workspace.windows[0].area(workspace.canvas), preferred);
+    }
 
     #[test]
     fn complete_view_rendering_is_independent_of_surface_origin() {
