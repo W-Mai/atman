@@ -38,7 +38,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
-- **Management grant controls** — The shared Session directory displays profile bindings and explicit Flow permissions. Grant details support full-text inspection and revision-checked removal, with stable retries and view-bound acknowledgements in main and floating conversations.
+- **Management grant controls** — The shared Session directory displays profile bindings and explicit Flow permissions. Searchable source and target pickers support grant creation and editing with individually selected permissions. Grant details support full-text inspection and revision-checked removal, with stable retries and view-bound acknowledgements in main and floating conversations.
 
 - **Cross-Session FlowHub** — Sessions provides an All flows entry with grouped graph and list views, progressive loading, search, Goal summaries, and pending-input counts. Main and floating conversations share full-address navigation, stable node positions, and return state; browsing leaves execution unchanged.
 

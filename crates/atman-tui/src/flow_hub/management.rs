@@ -5,6 +5,9 @@ use atman_runtime::flow_store::{
 };
 use uuid::Uuid;
 
+mod edit;
+pub(super) use edit::Draft;
+
 use super::{
     Action, HubRequest,
     page::{Row, RowKey},
@@ -49,13 +52,13 @@ impl ManagementPage {
     pub(super) fn total(&self) -> usize {
         usize::from(self.view.unavailable.is_some())
             + if self.grant.is_some() {
-                7
+                8
             } else {
                 self.view
                     .profile
                     .management
                     .as_ref()
-                    .map_or(2, |binding| 3 + binding.grants.len())
+                    .map_or(2, |binding| 4 + binding.grants.len())
             }
     }
 
@@ -86,6 +89,7 @@ impl ManagementPage {
         if let Some(id) = self.grant {
             let grant = binding.grants.iter().find(|grant| grant.id == id).unwrap();
             rows.extend([
+                Row { key: RowKey::ManagementField("Edit"), title: "Edit grant".into(), detail: "Change source, target or permissions".into(), action: if self.view.unavailable.is_none() { Action::EditManagement } else { Action::None } },
                 field("Grant", grant.id.to_string()),
                 field("Source flow", format!("Flow {}\nSession {}", grant.grantee.instance_id, grant.grantee.session_id)),
                 field("Target", target(&grant.target)),
@@ -117,6 +121,16 @@ impl ManagementPage {
                     binding.grants.len()
                 ),
             ));
+            rows.push(Row {
+                key: RowKey::ManagementField("New"),
+                title: "New grant".into(),
+                detail: "Choose a Flow, target scope and permissions".into(),
+                action: if self.view.unavailable.is_none() {
+                    Action::EditManagement
+                } else {
+                    Action::None
+                },
+            });
             rows.extend(binding.grants.iter().map(|grant| Row {
                 key: RowKey::ManagementGrant(grant.id),
                 title: format!("Flow {}", grant.grantee.instance_id),
