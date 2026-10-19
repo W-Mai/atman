@@ -515,6 +515,28 @@ impl SessionHandle {
         Ok(SessionObservation { snapshot, loaded })
     }
 
+    /// Read live process sources without opening a flow journal or installing scheduling. An unloaded recorded instance has no live resources in this host; an unknown instance is rejected.
+    pub async fn process_watch_sources(
+        &self,
+        id: FlowInstanceId,
+    ) -> io::Result<Vec<super::ProcessWatchSource>> {
+        let snapshot = self.snapshot().await?;
+        if !snapshot.catalog.flows.iter().any(|flow| flow.id == id) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "flow is not in the session catalog",
+            ));
+        }
+        let worker = self
+            .flows
+            .lock()
+            .unwrap()
+            .get(&id)
+            .filter(|worker| !worker.is_stopped())
+            .cloned();
+        Ok(worker.map_or_else(Vec::new, |worker| worker.process_watch_sources()))
+    }
+
     pub async fn create_flow(&self, descriptor: FlowDescriptor) -> io::Result<FlowWorker> {
         self.create_flow_at(descriptor, None).await
     }

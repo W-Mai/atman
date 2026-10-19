@@ -14,6 +14,7 @@ pub mod live;
 pub mod observation;
 pub mod planning;
 mod process_watch;
+pub use process_watch::ProcessWatchSource;
 mod quiescence;
 pub mod reply;
 pub mod resources;

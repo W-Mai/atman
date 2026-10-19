@@ -23,6 +23,13 @@ pub enum ProcessSource {
 }
 
 impl ProcessSource {
+    /// Registry handle associated with this process incarnation.
+    pub fn handle(&self) -> &str {
+        match self {
+            Self::Bash { handle, .. } | Self::Terminal { handle, .. } => handle,
+        }
+    }
+
     fn valid(&self) -> bool {
         let (incarnation, handle) = match self {
             Self::Bash {

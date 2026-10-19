@@ -604,6 +604,8 @@ Unwatch cancels the owned Flow or process registration while retaining accepted 
 
 `FlowWorker::watch_process` provides the corresponding host operation for a live process owned by the instance. Authorization runs before resource lookup and at the registration commit. The existing producer captures the process incarnation, source subscription, and initial snapshot before acknowledgement; it continues to own matching and inbox delivery. Paused or idle hosts and executing agents use the same registration mechanism without changing execution gates.
 
+Hosts selecting a process from a directory use `SessionHandle::process_watch_sources` or `FlowWorker::process_watch_sources`. Entries retain the resource kind, handle, incarnation, label, and execution status. Session reads inspect only already loaded resources; recorded instances are not opened, recovered, or scheduled. `FlowWorker::watch_process_source` accepts the selected `ProcessWatch` and rejects a replaced incarnation before registering with the shared producer. Authorization is rechecked inside storage requests. Identical retries preserve the original registration even after cancellation, resource loss, or host restart; changed parameters under the same ID are rejected.
+
 ## Owned send attempts
 
 `RuntimeHost::send` uses the sender's admitted lease to commit an outbox intent, routes its recorded request to the receiver, and commits the authenticated acceptance receipt back to the sender. A reply waiter, when supplied, is registered with the intent before receiver contact. Send admission and new receiver delivery have separate authorization callbacks. The caller authenticates the invoking flow before entering this host API.

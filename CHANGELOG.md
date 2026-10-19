@@ -28,6 +28,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Process observation identity** — Hosts can list live process sources without loading Flow execution and register against an exact process incarnation. Reused handles cannot redirect a selection; retries retain recorded registrations after cancellation or resource loss.
+
 - **WatchHub creation** — Main and floating views can select a source Flow and register final-reply, turn-completion, or instance-closure subscriptions. Shared forms support text matching, delivery mode, optional expiry, keyboard controls, mouse editing, and paste. Failed requests retain their registration identity and deadline for retry.
 
 - **Host watcher registration** — Hosts can register Flow and owned-process subscriptions without starting a turn. Agent tools share the same registration paths, preserving authorization checks, original source positions on retry, and cancelled registrations.

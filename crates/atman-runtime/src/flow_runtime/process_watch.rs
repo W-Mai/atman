@@ -19,7 +19,7 @@ use crate::flow_store::{
         ProcessWatchRecord, ProcessWatchStatus,
     },
 };
-use crate::task_registry::TaskKind;
+use crate::task_registry::{TaskFilter, TaskKind, TaskStatus};
 use crate::tools::{
     bash_bg::BgEntry,
     term::{TermEntry, TermStreamEvent, TerminalScreen, find_pattern_columns},
@@ -27,6 +27,14 @@ use crate::tools::{
 use crate::watch::OutputCursor;
 
 type Authorize = Box<dyn FnOnce() -> io::Result<()> + Send>;
+
+/// A live resource-directory entry. Registration rechecks the selected incarnation; listing does not subscribe to output or claim execution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessWatchSource {
+    pub source: ProcessSource,
+    pub label: String,
+    pub status: TaskStatus,
+}
 
 struct Registration {
     watch: ProcessWatch,
@@ -373,6 +381,78 @@ impl Observation {
 }
 
 impl FlowWorker {
+    /// Snapshot process resources owned by this loaded instance. Only running task records from open resource owners are included; selection is revalidated when registering a watch.
+    pub fn process_watch_sources(&self) -> Vec<ProcessWatchSource> {
+        if self.resources.lifetime.is_cancelled() {
+            return Vec::new();
+        }
+        let mut sources: Vec<_> = self
+            .resources
+            .tasks()
+            .list(&TaskFilter::running())
+            .into_iter()
+            .filter_map(|task| {
+                let source = match task.kind {
+                    TaskKind::Bash => ProcessSource::Bash {
+                        incarnation: task.id.0,
+                        handle: task.source_handle,
+                    },
+                    TaskKind::Terminal => ProcessSource::Terminal {
+                        incarnation: task.id.0,
+                        handle: task.source_handle,
+                    },
+                    TaskKind::Flow => return None,
+                };
+                Some(ProcessWatchSource {
+                    source,
+                    label: task.label,
+                    status: task.status,
+                })
+            })
+            .collect();
+        sources.sort_by(|left, right| left.source.cmp(&right.source));
+        sources
+    }
+
+    /// Register against the exact resource selected by a host. Identical retries return the recorded registration even after resource loss or cancellation; changed content and reused handles cannot redirect it to another process lifetime.
+    pub async fn watch_process_source(
+        &self,
+        watch: ProcessWatch,
+        authorize_owner: impl Fn(&crate::flow_store::FlowRef) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<ProcessWatchRecord> {
+        authorize_owner(&self.address)?;
+        let authorize_owner = Arc::new(authorize_owner);
+        let authorize = authorize_owner.clone();
+        let requested = watch.clone();
+        if let Some(record) = self
+            .request(move |store| {
+                authorize(store.state().address())?;
+                match store
+                    .process_watches()
+                    .find(|record| record.watch.id == requested.id)
+                {
+                    Some(record) if record.watch == requested => Ok(Some(record.clone())),
+                    Some(_) => Err(invalid(
+                        "process watch identity was reused with different content",
+                    )),
+                    None => Ok(None),
+                }
+            })
+            .await?
+        {
+            return Ok(record);
+        }
+        let (source, feed) = self.process_feed(watch.source.handle())?;
+        if source != watch.source {
+            return Err(invalid(
+                "selected process incarnation is no longer available; refresh the resource list",
+            ));
+        }
+        let owner = self.address.clone();
+        self.register_process_feed(watch, feed, Box::new(move || authorize_owner(&owner)))
+            .await
+    }
+
     /// Register observation of a live process owned by this instance without claiming a turn. Owner authorization runs before resource lookup and again at registration; registration captures the resource incarnation and initial source position before acknowledgement.
     #[allow(clippy::too_many_arguments)]
     pub async fn watch_process(
@@ -387,18 +467,34 @@ impl FlowWorker {
         authorize_owner(&self.address)?;
         let owner = self.address.clone();
         let authorize: Authorize = Box::new(move || authorize_owner(&owner));
+        let (source, feed) = self.process_feed(&handle)?;
+        self.register_process_feed(
+            ProcessWatch {
+                id,
+                source,
+                pattern,
+                once,
+                expires_at,
+            },
+            feed,
+            authorize,
+        )
+        .await
+    }
+
+    fn process_feed(&self, handle: &str) -> io::Result<(ProcessSource, Feed)> {
         let session_id = self.address.session_id.to_string();
         let task = self
             .resources
             .tasks()
-            .lookup_by_handle(&handle)
+            .lookup_by_handle(handle)
             .ok_or_else(|| invalid("process handle is not owned by this instance"))?;
         let (source, feed) = match task.kind {
             TaskKind::Bash => {
                 let entry = self
                     .resources
                     .background()
-                    .lookup(&handle, &session_id)
+                    .lookup(handle, &session_id)
                     .map_err(invalid)?;
                 let incarnation = entry
                     .task_id
@@ -409,7 +505,7 @@ impl FlowWorker {
                 (
                     ProcessSource::Bash {
                         incarnation,
-                        handle,
+                        handle: handle.to_owned(),
                     },
                     Feed::Bash { entry, changes },
                 )
@@ -418,7 +514,7 @@ impl FlowWorker {
                 let entry = self
                     .resources
                     .terminals()
-                    .lookup(&handle, &session_id)
+                    .lookup(handle, &session_id)
                     .map_err(invalid)?;
                 let incarnation = entry
                     .task_id
@@ -431,13 +527,23 @@ impl FlowWorker {
                 (
                     ProcessSource::Terminal {
                         incarnation,
-                        handle,
+                        handle: handle.to_owned(),
                     },
                     Feed::Terminal { entry, changes },
                 )
             }
             TaskKind::Flow => return Err(invalid("flow events require a flow subscription")),
         };
+        Ok((source, feed))
+    }
+
+    async fn register_process_feed(
+        &self,
+        watch: ProcessWatch,
+        feed: Feed,
+        authorize: Authorize,
+    ) -> io::Result<ProcessWatchRecord> {
+        let source = watch.source.clone();
         let sender = {
             let mut producers = self.resources.observers.0.lock().unwrap();
             if self.resources.lifetime.is_cancelled() {
@@ -475,13 +581,7 @@ impl FlowWorker {
         let (reply, response) = oneshot::channel();
         sender
             .send(Registration {
-                watch: ProcessWatch {
-                    id,
-                    source,
-                    pattern,
-                    once,
-                    expires_at,
-                },
+                watch,
                 authorize,
                 reply,
             })

@@ -26,6 +26,57 @@ fn session_descriptor() -> SessionDescriptor {
 }
 
 #[tokio::test]
+async fn process_source_directory_does_not_open_or_recover_detached_instances() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut store = root.create_session(info.clone()).unwrap();
+    let mut flow = store.create_flow(flow_descriptor(info.id)).unwrap();
+    let id = flow.descriptor().address.instance_id.clone();
+    flow.transition(flow.state().revision(), FlowTransition::Activated)
+        .unwrap();
+    flow.transition(
+        flow.state().revision(),
+        FlowTransition::TurnStarted {
+            turn: TurnId::now(),
+            run: RunId::now(),
+        },
+    )
+    .unwrap();
+    let log = flow.dir().join("events.jsonl");
+    drop(flow);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .unwrap()
+        .write_all(b"unfinished tail")
+        .unwrap();
+    let before = std::fs::read(&log).unwrap();
+    let host = RuntimeHost::default();
+    let session = host.attach_session(store).unwrap();
+    assert!(
+        session
+            .process_watch_sources(id.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(session.observe().await.unwrap().loaded.is_empty());
+    assert!(session.scheduling_status(id).await.unwrap().is_none());
+    assert_eq!(
+        session
+            .process_watch_sources(FlowInstanceId::now())
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    host.shutdown().await.unwrap();
+    assert_eq!(std::fs::read(log).unwrap(), before);
+}
+
+#[tokio::test]
 async fn session_titles_publish_only_committed_changes_without_loading_flows() {
     use atman_runtime::flow_runtime::catalog::SessionCatalog;
     let dir = tempfile::tempdir().unwrap();
@@ -2133,6 +2184,63 @@ async fn process_watch_tools_share_instance_delivery_across_pause_turns_and_expl
     let before = worker.state().await.unwrap();
     let operator_id = Uuid::now_v7();
     let process_handle = setup[0]["handle"].as_str().unwrap().to_owned();
+    let sources = session
+        .process_watch_sources(worker.address().instance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(sources.len(), 2);
+    assert!(sources.iter().any(|entry| matches!(
+        entry.source,
+        atman_runtime::flow_store::process_watch::ProcessSource::Terminal { .. }
+    )));
+    let selected = sources
+        .iter()
+        .find(|entry| entry.source.handle() == process_handle)
+        .unwrap()
+        .source
+        .clone();
+    let exact = atman_runtime::flow_store::process_watch::ProcessWatch {
+        id: operator_id,
+        source: selected,
+        pattern: "operator-only".into(),
+        once: false,
+        expires_at: None,
+    };
+    for entry in &sources {
+        use atman_runtime::flow_store::process_watch::ProcessSource;
+        let mut stale = exact.clone();
+        stale.source = entry.source.clone();
+        match &mut stale.source {
+            ProcessSource::Bash { incarnation, .. }
+            | ProcessSource::Terminal { incarnation, .. } => *incarnation = Uuid::now_v7(),
+        }
+        assert!(
+            worker
+                .watch_process_source(stale, |_| Ok(()))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("incarnation")
+        );
+    }
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = attempts.clone();
+    assert_eq!(
+        worker
+            .watch_process_source(exact.clone(), move |_| {
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 2 {
+                    Err(io::ErrorKind::PermissionDenied.into())
+                } else {
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
     assert_eq!(
         worker
             .watch_process(
@@ -2150,17 +2258,10 @@ async fn process_watch_tools_share_instance_delivery_across_pause_turns_and_expl
     );
     let expected = owner.clone();
     let registration = worker
-        .watch_process(
-            operator_id,
-            process_handle.clone(),
-            "operator-only".into(),
-            false,
-            None,
-            move |actual| {
-                assert_eq!(actual, &expected);
-                Ok(())
-            },
-        )
+        .watch_process_source(exact.clone(), move |actual| {
+            assert_eq!(actual, &expected);
+            Ok(())
+        })
         .await
         .unwrap();
     assert_eq!(
@@ -2178,6 +2279,22 @@ async fn process_watch_tools_share_instance_delivery_across_pause_turns_and_expl
         registration
     );
     worker.unwatch(operator_id, |_| Ok(())).await.unwrap();
+    let mut conflict = exact.clone();
+    conflict.pattern = "different".into();
+    assert!(
+        worker
+            .watch_process_source(conflict, |_| Ok(()))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        worker
+            .watch_process_source(exact.clone(), |_| Ok(()))
+            .await
+            .unwrap()
+            .status,
+        atman_runtime::flow_store::process_watch::ProcessWatchStatus::Cancelled
+    );
     assert_eq!(
         worker
             .watch_process(
@@ -2250,6 +2367,7 @@ async fn process_watch_tools_share_instance_delivery_across_pause_turns_and_expl
         .await
         .unwrap()
         .unwrap();
+    assert!(worker.process_watch_sources().is_empty());
     let stored = root
         .open_session(info.id)
         .unwrap()
@@ -2264,6 +2382,26 @@ async fn process_watch_tools_share_instance_delivery_across_pause_turns_and_expl
             .count(),
         4
     );
+    drop(stored);
+    let reopened_host = RuntimeHost::default();
+    let reopened = reopened_host
+        .attach_session(root.open_session(info.id).unwrap())
+        .unwrap()
+        .open_flow(address.instance_id)
+        .await
+        .unwrap();
+    assert!(reopened.process_watch_sources().is_empty());
+    let restored_cursor = reopened.snapshot().await.unwrap().cursor;
+    assert_eq!(
+        reopened
+            .watch_process_source(exact, |_| Ok(()))
+            .await
+            .unwrap()
+            .status,
+        atman_runtime::flow_store::process_watch::ProcessWatchStatus::Cancelled
+    );
+    assert_eq!(reopened.snapshot().await.unwrap().cursor, restored_cursor);
+    reopened_host.shutdown().await.unwrap();
 }
 
 #[tokio::test]
