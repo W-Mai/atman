@@ -2595,6 +2595,301 @@ fn delivery(recipient: &FlowRef, sender: SenderIdentity, text: &str) -> Delivery
     }
 }
 
+#[test]
+fn inbox_edits_preserve_delivery_identity_order_and_receipts_across_recovery() {
+    use atman_runtime::flow_store::inbox::{InboxChange, InboxEditRequest, InboxMove, UserContent};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let sender = SenderIdentity::User(Uuid::new_v4());
+    let mut original = delivery(&description.address, sender.clone(), "first");
+    original.delivery = DeliveryMode::NextTurn;
+    let first = flow.accept_input(original.clone(), |_| Ok(())).unwrap();
+    let background = flow
+        .accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::Flow(description.address.clone()),
+                "notice",
+            ),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let mut second_request = original.clone();
+    second_request.request_id = Uuid::new_v4();
+    let second = flow
+        .accept_input(second_request.clone(), |_| Ok(()))
+        .unwrap();
+    let state = flow.state().clone();
+    let reorder = InboxEditRequest {
+        id: Uuid::new_v4(),
+        sender: sender.clone(),
+        message: second.message_id,
+        expected: second.receipt.clone(),
+        change: InboxChange::Move {
+            direction: InboxMove::Earlier,
+            expected_order: vec![first.message_id, second.message_id],
+        },
+    };
+    let moved = flow.edit_input(reorder.clone(), |_| Ok(())).unwrap();
+    assert_eq!(
+        flow.pending_inputs()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        [second.message_id, background.message_id, first.message_id]
+    );
+    assert_eq!(flow.inbox_entries()[0].revision, moved);
+    let replace = InboxEditRequest {
+        id: Uuid::new_v4(),
+        sender: sender.clone(),
+        message: second.message_id,
+        expected: moved.clone(),
+        change: InboxChange::Replace {
+            content: UserContent {
+                text: "edited".into(),
+                images: vec![],
+                presentation: None,
+            },
+            delivery: DeliveryMode::AtBoundary,
+        },
+    };
+    let reserved = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    assert!(flow.edit_input(replace.clone(), |_| Ok(())).is_err());
+    assert_eq!(flow.cursor(), &moved);
+    drop(reserved);
+    let replaced = flow.edit_input(replace.clone(), |_| Ok(())).unwrap();
+    assert_eq!(
+        flow.accept_input(second_request.clone(), |_| panic!(
+            "accepted delivery must not be readmitted"
+        ))
+        .unwrap(),
+        second
+    );
+    let mut tampered = second_request.clone();
+    tampered.payload = InboxPayload::Interjection {
+        text: "edited".into(),
+    };
+    assert!(flow.accept_input(tampered, |_| Ok(())).is_err());
+    let mut stale = replace.clone();
+    stale.id = Uuid::new_v4();
+    assert!(flow.edit_input(stale, |_| Ok(())).is_err());
+    assert_eq!(flow.state(), &state);
+    let lease = start(&mut flow);
+    let batch = flow
+        .reserve_context_input(&lease, |_| true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        batch.message_ids(),
+        [second.message_id, background.message_id]
+    );
+    let messages = flow
+        .pending_inputs()
+        .filter(|item| batch.message_ids().contains(&item.id))
+        .map(|item| atman_runtime::flow_runtime::input::context_message(item, &lease.turn).unwrap())
+        .collect();
+    flow.commit_input(&batch, InputContent::Context { messages })
+        .unwrap();
+    assert!(matches!(
+        flow.accept_input(second_request.clone(), |_| Ok(()))
+            .unwrap()
+            .disposition,
+        InboxDisposition::InputCommitted { .. }
+    ));
+    assert_eq!(
+        flow.edit_input(replace.clone(), |_| Ok(())).unwrap(),
+        replaced
+    );
+    let cancel = InboxEditRequest {
+        id: Uuid::new_v4(),
+        sender,
+        message: first.message_id,
+        expected: moved,
+        change: InboxChange::Cancel,
+    };
+    let cancelled = flow.edit_input(cancel.clone(), |_| Ok(())).unwrap();
+    assert!(flow.pending_inputs().next().is_none());
+    assert!(
+        flow.edit_input(cancel.clone(), |_| Err(std::io::Error::other("revoked")))
+            .is_err()
+    );
+    change(
+        &mut flow,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    );
+    let cursor = flow.cursor().clone();
+    drop(flow);
+    drop(session);
+    let inspection = RuntimeStore::inspect_session(dir.path(), info.id).unwrap();
+    assert_eq!(
+        inspection
+            .inspect_flow(&description.address.instance_id)
+            .unwrap()
+            .journal
+            .cursor,
+        Some(cursor.clone())
+    );
+    let session = root.open_session(info.id).unwrap();
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(
+        flow.edit_input(reorder, |_| Ok(())).unwrap(),
+        replace.expected
+    );
+    assert_eq!(flow.edit_input(replace, |_| Ok(())).unwrap(), replaced);
+    assert_eq!(flow.edit_input(cancel, |_| Ok(())).unwrap(), cancelled);
+    assert_eq!(flow.cursor(), &cursor);
+    assert!(flow.pending_inputs().next().is_none());
+    assert!(matches!(
+        flow.accept_input(original, |_| Ok(())).unwrap().disposition,
+        InboxDisposition::Cancelled { .. }
+    ));
+    assert_eq!(
+        flow.accept_input(second_request, |_| Ok(()))
+            .unwrap()
+            .receipt,
+        second.receipt
+    );
+}
+
+#[test]
+fn inbox_edit_validation_preserves_configuration_and_rejects_replayed_mutations() {
+    use atman_runtime::flow_store::inbox::{InboxChange, InboxEditRequest, InboxMove, UserContent};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    change(
+        &mut flow,
+        FlowTransition::ExecutionPaused {
+            key: Uuid::new_v4().into(),
+        },
+    );
+    let sender = SenderIdentity::User(Uuid::new_v4());
+    let original_content = UserContent {
+        text: "original".into(),
+        images: vec![],
+        presentation: None,
+    };
+    let invocation = BTreeMap::from([("effort".into(), serde_json::json!("high"))]);
+    let mut request = delivery(&description.address, sender.clone(), "");
+    request.delivery = DeliveryMode::NextTurn;
+    request.payload = InboxPayload::UserSubmission {
+        content: original_content.clone(),
+        invocation: invocation.clone(),
+    };
+    let accepted = flow.accept_input(request.clone(), |_| Ok(())).unwrap();
+    let state = flow.state().clone();
+    let edit = InboxEditRequest {
+        id: Uuid::new_v4(),
+        sender: sender.clone(),
+        message: accepted.message_id,
+        expected: accepted.receipt.clone(),
+        change: InboxChange::Replace {
+            content: UserContent {
+                text: "changed".into(),
+                ..original_content.clone()
+            },
+            delivery: DeliveryMode::AtBoundary,
+        },
+    };
+    let mut invalid = edit.clone();
+    invalid.sender = SenderIdentity::User(Uuid::new_v4());
+    assert!(flow.edit_input(invalid, |_| Ok(())).is_err());
+    let mut invalid = edit.clone();
+    invalid.change = InboxChange::Move {
+        direction: InboxMove::Later,
+        expected_order: vec![accepted.message_id],
+    };
+    assert!(flow.edit_input(invalid, |_| Ok(())).is_err());
+    assert_eq!(flow.cursor(), &accepted.receipt);
+    let changed = flow.edit_input(edit.clone(), |_| Ok(())).unwrap();
+    assert!(
+        matches!(&flow.pending_inputs().next().unwrap().request.payload, InboxPayload::UserSubmission { invocation: value, .. } if *value == invocation)
+    );
+    let restore = InboxEditRequest {
+        id: Uuid::new_v4(),
+        expected: changed,
+        change: InboxChange::Replace {
+            content: original_content,
+            delivery: DeliveryMode::NextTurn,
+        },
+        ..edit.clone()
+    };
+    flow.edit_input(restore.clone(), |_| Ok(())).unwrap();
+    let mut stale = edit.clone();
+    stale.id = Uuid::new_v4();
+    assert!(flow.edit_input(stale, |_| Ok(())).is_err());
+    let mut conflict = edit.clone();
+    conflict.change = InboxChange::Cancel;
+    assert!(flow.edit_input(conflict, |_| Ok(())).is_err());
+    assert_eq!(flow.state(), &state);
+    assert_eq!(flow.accept_input(request, |_| Ok(())).unwrap(), accepted);
+
+    // Control input and peers cannot be rewritten as human-authored text.
+    let notice = flow
+        .accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::Flow(description.address.clone()),
+                "notice",
+            ),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(
+        flow.edit_input(
+            InboxEditRequest {
+                id: Uuid::new_v4(),
+                message: notice.message_id,
+                expected: notice.receipt,
+                ..edit.clone()
+            },
+            |_| Ok(())
+        )
+        .is_err()
+    );
+    let path = flow.dir().join("events.jsonl");
+    drop(flow);
+    let (mut journal, _) = atman_runtime::event_log::journal::Journal::open::<serde_json::Value>(
+        &path,
+        description.address.instance_id.0.0,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    journal
+        .commit(&[serde_json::json!({"type": "inbox_edited", "data": restore})])
+        .unwrap();
+    drop(journal);
+    let bytes = std::fs::read(&path).unwrap();
+    let inspection_error = session
+        .inspect_flow(&description.address.instance_id)
+        .unwrap_err();
+    let recovery_error = session
+        .open_flow(&description.address.instance_id)
+        .err()
+        .unwrap();
+    assert_eq!(inspection_error.to_string(), recovery_error.to_string());
+    assert!(
+        inspection_error
+            .to_string()
+            .contains("duplicate inbox edit")
+    );
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+}
+
 #[tokio::test]
 async fn committed_readiness_includes_inbox_arrival_without_spinning_on_reads_or_retries() {
     use atman_runtime::flow_runtime::FlowWorker;

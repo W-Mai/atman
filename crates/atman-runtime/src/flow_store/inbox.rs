@@ -17,6 +17,9 @@ use crate::event_log::journal::CommitReceipt;
 use crate::message::{ImageSource, Message};
 use crate::user_input::UserInputPresentation;
 
+mod edit;
+pub use edit::{InboxChange, InboxEditRequest, InboxMove};
+
 /// Authenticated provenance supplied by the host, never an authorization grant by itself.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "identity", rename_all = "snake_case")]
@@ -323,6 +326,8 @@ pub struct Acceptance {
 pub struct InboxEntry {
     pub envelope: AcceptedEnvelope,
     pub acceptance: Acceptance,
+    /// Last content or ordering mutation, initially the acceptance receipt.
+    pub revision: CommitReceipt,
 }
 
 #[derive(Default)]
@@ -334,6 +339,8 @@ pub(super) struct Inbox {
     inputs: Vec<InputRecord>,
     last_invocation: Option<usize>,
     pub(super) waiters: ReplyWaiters,
+    original_requests: HashMap<Uuid, DeliveryRequest>,
+    edits: HashMap<(SenderIdentity, Uuid), (InboxEditRequest, CommitReceipt)>,
 }
 
 impl Inbox {
@@ -652,7 +659,12 @@ impl Inbox {
             return Ok(None);
         };
         let entry = &self.entries[index];
-        if entry.envelope.request != *request {
+        if self
+            .original_requests
+            .get(&entry.envelope.id)
+            .unwrap_or(&entry.envelope.request)
+            != request
+        {
             return Err(invalid(
                 "delivery request ID was reused with different data",
             ));
@@ -683,6 +695,7 @@ impl Inbox {
         self.messages.insert(id, self.entries.len());
         self.entries.push(InboxEntry {
             envelope,
+            revision: acceptance.receipt.clone(),
             acceptance: acceptance.clone(),
         });
         self.pending.push_back(id);

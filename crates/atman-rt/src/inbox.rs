@@ -79,8 +79,18 @@ impl<T> PendingBatch<T> {
             .is_some_and(|token| Arc::ptr_eq(&token, &batch.token))
     }
 
-    fn has_reservation(&self) -> bool {
+    /// Whether an outstanding receipt owns a batch in this queue.
+    pub fn has_reservation(&self) -> bool {
         self.reserved.as_ref().and_then(Weak::upgrade).is_some()
+    }
+
+    /// Exchange pending positions; reject changes while a receipt owns a reservation.
+    pub fn swap(&mut self, first: usize, second: usize) -> bool {
+        if self.has_reservation() || first >= self.pending.len() || second >= self.pending.len() {
+            return false;
+        }
+        self.pending.swap(first, second);
+        true
     }
 
     pub fn release(&mut self, batch: &Batch<T>) -> bool {
@@ -177,6 +187,7 @@ mod tests {
         queue.push_back(2);
         let batch = queue.reserve().unwrap();
         assert_eq!(batch.items(), &[1, 2]);
+        assert!(!queue.swap(0, 1));
         queue.push_back(3);
         assert!(queue.reserve().is_none());
         assert!(queue.pop_front().is_none());
@@ -189,6 +200,7 @@ mod tests {
         assert!(queue.owns(&batch));
         assert_eq!(queue.commit(&batch, || Ok::<_, ()>(())), Ok(true));
         assert_eq!(queue.pop_front(), Some(3));
+        assert!(!queue.swap(0, 1));
         assert!(
             !queue
                 .commit(&batch, || -> Result<(), ()> {
@@ -242,5 +254,19 @@ mod tests {
         let after_clear = a.reserve().unwrap();
         assert!(!a.release(&newest));
         assert!(a.owns(&after_clear));
+    }
+
+    #[test]
+    fn queue_reordering_preserves_batch_positions_and_rejects_active_ownership() {
+        let mut queue = PendingBatch::default();
+        for value in 0..3 {
+            queue.push_back(value);
+        }
+        assert!(queue.swap(0, 2));
+        let batch = queue.reserve_matching(|value| *value != 1).unwrap();
+        assert_eq!(batch.items(), &[2, 0]);
+        assert!(!queue.swap(0, 1));
+        queue.commit(&batch, || Ok::<_, ()>(())).unwrap();
+        assert_eq!(queue.pop_front(), Some(1));
     }
 }

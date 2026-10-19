@@ -225,6 +225,7 @@ enum FlowFact {
     Transition(FlowTransition),
     TurnCompleted(Box<completion::Completion>),
     EnvelopeAccepted(Box<AcceptedEnvelope>),
+    InboxEdited(Box<inbox::InboxEditRequest>),
     InputCommitted(Box<CommittedInput>),
     ReplyWaiterRegistered(Box<waiter::ReplyWaiter>),
     ReplyWaiterCancelled {
@@ -289,6 +290,16 @@ impl FlowJournal {
 
 impl FlowFact {
     fn validate_batch(facts: &[Self]) -> io::Result<()> {
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, Self::InboxEdited(_)))
+        {
+            return if matches!(facts, [Self::InboxEdited(_)]) {
+                Ok(())
+            } else {
+                Err(invalid("inbox edits require a dedicated batch"))
+            };
+        }
         if facts.iter().any(|fact| {
             matches!(
                 fact,

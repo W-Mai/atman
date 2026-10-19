@@ -114,6 +114,12 @@ impl FlowReplay {
                 (Some((_, state, inbox)), FlowFact::InputCommitted(input)) => {
                     inbox.replay_input(state, *input, receipt.clone())?;
                 }
+                (Some((_, state, inbox)), FlowFact::InboxEdited(edit)) => {
+                    if !state.accepts_input() {
+                        return Err(invalid("inbox edit targets an unavailable flow"));
+                    }
+                    inbox.replay_edit(*edit, receipt.clone())?;
+                }
                 (Some((_, state, _)), FlowFact::MessagePublished(publication)) => {
                     self.publications.validate(state, &publication)?;
                     self.publications.apply(*publication, receipt.clone());
