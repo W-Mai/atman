@@ -20,6 +20,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Persistent flow suggestions** — `:suggest` runs asynchronously in terminal and shared TUI views, with flow-bound confirmation, scoped installation, and request-bound replies. Duplicate requests for the same flow are rejected while confirmation is pending; errors leave flow execution unchanged.
+
 - **Unified session directory** — Browse persistent sessions and original histories from the same paged TUI directory, including histories without project metadata. Source-aware cursors preserve distinct entries with matching UUIDs without reading conversation bodies or updating history caches.
 
 - **Original history navigation** — Project Hub opens legacy flow histories in the shared main and floating views without migration. Typed view addresses preserve source identity, read-only controls, and request ownership alongside persistent sessions.

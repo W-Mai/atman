@@ -195,7 +195,9 @@ Three input modes:
 - `/name arg` — run `<project>/.atman/commands/<name>.at`, falling back to `~/.config/atman/commands/<name>.at`; a project command with the same name takes precedence.
 - plain text — `routes.at` handles configured prefixes and its default route.
 
-`:suggest` examines up to 30 recent turns in the current flow's available message snapshot, including tool names, arguments, and shortened results. Watcher and child-result messages retain their source labels; internal control messages, system context, and private reasoning are excluded. Compacted-away messages are not reread from old logs. A proposal must pass flow validation before confirmation, and acceptance installs it in the session's configuration directory without executing it.
+`:suggest` examines up to 30 recent turns in the current flow's message snapshot, including tool names, arguments, and shortened results. Watcher and child-result messages retain their source labels; internal control messages, system context, and private reasoning are excluded. It does not scan event files or merge other flows. A proposal must pass flow validation before confirmation, and acceptance installs it in the session's configuration directory without executing it.
+
+Persistent terminal, main, and floating views run suggestions asynchronously. One suggestion may be pending per flow; other flow controls remain available. Confirmation belongs to the requesting flow and expires after five minutes without installing anything. The plain terminal uses `:reply <prompt-id> {"Submitted":{"answers":[{"kind":"confirmed","value":true}]}}` to accept or `:reply <prompt-id> "Rejected"` to discard. Switching views does not redirect the result, and detaching the terminal cancels suggestions still awaiting generation or confirmation. Suggestion errors do not fail or resume a flow.
 
 When a completion menu is open, use `↑`/`↓` to select an item and `Enter` or `Tab` to place it in the input. Press `Enter` again to submit the completed command.
 

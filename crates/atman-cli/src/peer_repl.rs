@@ -34,6 +34,7 @@ use uuid::Uuid;
 
 mod prompts;
 mod scopes;
+mod suggestion;
 mod tui;
 
 const PAGE: NonZeroUsize = NonZeroUsize::new(64).unwrap();
@@ -619,9 +620,15 @@ impl Attachment {
         );
         let mut views = HashMap::<FlowInstanceId, TerminalView>::new();
         let mut draining = false;
+        let mut suggestions = suggestion::Suggestions::new();
         let mut drain = std::pin::pin!(self.host.wait_quiescent());
         loop {
             tokio::select! {
+                result = suggestions.next() => {
+                    let (address, result) = result?;
+                    let message = result.unwrap_or_else(|error| format!("Suggestion failed: {error:#}"));
+                    crate::render_note(&mut printer, format!("Flow {address} · {message}"));
+                }
                 view = focused_view.reader.next() => {
                     render_view(&mut printer, &mut focused_view.rendered, view?);
                 }
@@ -643,6 +650,13 @@ impl Attachment {
                     let line = input.text.trim();
                     if line.is_empty() { continue; }
                     if matches!(line, ":quit" | ":q" | ":exit") { break; }
+                    if line == ":suggest" {
+                        match suggestions.start(&self, &focus, Uuid::now_v7(), focus.address().instance_id.clone()) {
+                            Ok(()) => crate::render_note(&mut printer, "Examining recent flow messages; confirmation will arrive as a prompt".into()),
+                            Err(error) => crate::render_note(&mut printer, format!("{error:#}")),
+                        }
+                        continue;
+                    }
                     if let Some(prefix) = line.strip_prefix(":focus ") {
                         match self.select(prefix.trim()).await {
                             Ok(worker) => {
@@ -688,7 +702,7 @@ impl Attachment {
         let (command, argument) = line.split_once(' ').unwrap_or((line, ""));
         let argument = argument.trim();
         match command {
-            ":help" => Ok("Text submits to the focused flow; /command [arguments] queues a captured command in the same flow. :attach <path>|list|clear · :rename [<text>|clear] · :focus <flow-prefix> · :flows · :status · :invoke <JSON arguments> · :insert <text> · :pause/:resume (execution) · :recover · :cancel · :close · :goal [set <text>|pause|resume|clear] · :todo [list|done <id>|cancel <id>|clear] · :pending · :reply <prompt-id> <JSON> · :approve/:deny <flow-prefix> <request-id> · :quit. EOF waits for runnable work; :quit detaches immediately.".into()),
+            ":help" => Ok("Text submits to the focused flow; /command [arguments] queues a captured command in the same flow. :attach <path>|list|clear · :rename [<text>|clear] · :focus <flow-prefix> · :flows · :status · :suggest · :invoke <JSON arguments> · :insert <text> · :pause/:resume (execution) · :recover · :cancel · :close · :goal [set <text>|pause|resume|clear] · :todo [list|done <id>|cancel <id>|clear] · :pending · :reply <prompt-id> <JSON> · :approve/:deny <flow-prefix> <request-id> · :quit. EOF waits for runnable work; :quit detaches immediately.".into()),
             ":rename" => {
                 let snapshot = self.session.snapshot().await?;
                 if argument.is_empty() {

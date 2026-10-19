@@ -424,6 +424,7 @@ impl Workspace {
             .extend(atman_tui::boot_animation::toasts(notifications));
         let mut views = HashMap::from([(service.binding.view_id, service)]);
         let mut navigation = tokio::task::JoinSet::new();
+        let mut suggestions = suggestion::Suggestions::new();
         let ui = atman_tui::run_tui_ex(handle, Some(terminal));
         tokio::pin!(ui);
         loop {
@@ -433,6 +434,13 @@ impl Workspace {
             }
             tokio::select! {
                 result = &mut ui => return result,
+                result = suggestions.next() => {
+                    let (replies, result): (ControlReplies, Result<String>) = result?;
+                    let result = result.map(|message| {
+                        let _ = replies.send(TuiCommand::Toast { message, level: atman_tui::app::NoteLevel::Info });
+                    }).map_err(|error| format!("{error:#}"));
+                    let _ = replies.send(TuiCommand::SubmissionResult { result });
+                }
                 Some(result) = navigation.join_next() => {
                     let (replies, result): (ControlReplies, Result<Navigation>) = result?;
                     match result {
@@ -502,6 +510,13 @@ impl Workspace {
                                 reject_archive_control(command, &replies);
                                 continue;
                             };
+                            if matches!(&command, TuiControl::Submit(submission) if submission.control_command().is_some_and(|command| command.trim() == ":suggest")) {
+                                match suggestions.start(&execution.scope, &execution.worker, ticket.request_id, replies.clone()) {
+                                    Ok(()) => { let _ = replies.send(TuiCommand::Toast { message: "Examining recent flow messages…".into(), level: atman_tui::app::NoteLevel::Info }); }
+                                    Err(error) => { let _ = replies.send(TuiCommand::SubmissionResult { result: Err(format!("{error:#}")) }); }
+                                }
+                                continue;
+                            }
                             let Some(command) = execution.panels.dispatch(command).await else { continue; };
                             execution.scope.tui_control(&execution.worker, ticket.request_id, command, &replies, &forms).await
                         },
