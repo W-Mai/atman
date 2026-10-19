@@ -3345,6 +3345,11 @@ async fn peer_flows_share_runtime_mcp_without_owning_connections() {
     use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};
     let dir = tempfile::tempdir().unwrap();
     let config = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
+    let project_path = dir.path().join("alpha");
+    std::fs::create_dir(&project_path).unwrap();
+    let project =
+        atman_runtime::storage::ProjectContext::resolve(&config, &project_path, dir.path())
+            .unwrap();
     let script = dir.path().join("server.py");
     std::fs::write(
         &script,
@@ -3360,7 +3365,7 @@ for line in sys.stdin:
     elif method == "tools/list":
         result = {"tools": [{"name": "identify", "inputSchema": {"type": "object"}}]}
     else:
-        result = {"content": [{"type": "text", "text": str(os.getpid())}]}
+        result = {"content": [{"type": "text", "text": json.dumps({"pid": os.getpid(), "cwd": os.getcwd()})}]}
     print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": result}), flush=True)
 "#,
     )
@@ -3378,7 +3383,7 @@ for line in sys.stdin:
         events: atman_runtime::event::EventSink::new(),
         mock: false,
         config: config.clone(),
-        project: None,
+        project: Some(project.clone()),
         home_dir: None,
         workspace_generation: "peer-mcp".into(),
     })
@@ -3417,12 +3422,13 @@ for line in sys.stdin:
     let root = RuntimeStore::open(dir.path()).unwrap();
     let host = RuntimeHost::default();
     let mut info = session_descriptor();
+    info.project = Some(project.clone());
     info.configuration = atman_runtime::flow_store::SessionConfiguration::Atman(config.source());
     let session = host
         .attach_session(root.create_session(info.clone()).unwrap())
         .unwrap();
     let parent = session
-        .create_flow(program_descriptor(info.id, source))
+        .create_flow(program_descriptor(info.id, source.clone()))
         .await
         .unwrap();
     change(&parent, FlowTransition::Activated).await;
@@ -3438,6 +3444,13 @@ for line in sys.stdin:
     .unwrap();
     assert_eq!(result[0], result[1]);
     assert_eq!(result[0], result[2]);
+    let identity = |result: &serde_json::Value| {
+        serde_json::from_str::<serde_json::Value>(result[0]["text"].as_str().unwrap()).unwrap()
+    };
+    assert_eq!(
+        identity(&result)["cwd"],
+        project.root().to_string_lossy().as_ref()
+    );
     assert!(parent.context().subscribe_context().borrow().mcp_servers[0].is_ok());
     let catalog = session.snapshot().await.unwrap();
     let child_id = catalog
@@ -3450,6 +3463,53 @@ for line in sys.stdin:
         .clone();
     let child = session.open_flow(child_id).await.unwrap();
     assert!(child.context().subscribe_context().borrow().mcp_servers[0].is_ok());
+    let other_config =
+        atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path().join("other-config"));
+    other_config.save_mcp(&config.load_mcp()).unwrap();
+    let other_path = dir.path().join("beta");
+    std::fs::create_dir(&other_path).unwrap();
+    let other_project =
+        atman_runtime::storage::ProjectContext::resolve(&other_config, &other_path, dir.path())
+            .unwrap();
+    let other_runtime = AtmanRuntime::build(AtmanRuntimeOptions {
+        events: atman_runtime::event::EventSink::new(),
+        mock: false,
+        config: other_config.clone(),
+        project: Some(other_project.clone()),
+        home_dir: None,
+        workspace_generation: "isolated-peer-mcp".into(),
+    })
+    .await
+    .unwrap();
+    let mut other_info = session_descriptor();
+    other_info.project = Some(other_project.clone());
+    other_info.configuration =
+        atman_runtime::flow_store::SessionConfiguration::Atman(other_config.source());
+    let other_session = host
+        .attach_session(root.create_session(other_info.clone()).unwrap())
+        .unwrap();
+    let other = other_session
+        .create_flow(program_descriptor(other_info.id, source))
+        .await
+        .unwrap();
+    change(&other, FlowTransition::Activated).await;
+    let isolated = tokio::time::timeout(
+        Duration::from_secs(10),
+        invoke(&other, other_runtime.executor.clone()),
+    )
+    .await
+    .unwrap()
+    .result
+    .unwrap()
+    .to_json()
+    .unwrap();
+    assert_eq!(isolated[0], isolated[1]);
+    assert_eq!(isolated[0], isolated[2]);
+    assert_ne!(identity(&isolated)["pid"], identity(&result)["pid"]);
+    assert_eq!(
+        identity(&isolated)["cwd"],
+        other_project.root().to_string_lossy().as_ref()
+    );
     runtime
         .executor
         .tool_ctx
@@ -3463,6 +3523,26 @@ for line in sys.stdin:
             atman_runtime::mcp::McpServerState::Disconnected { .. }
         ));
     }
+    assert!(other.context().subscribe_context().borrow().mcp_servers[0].is_ok());
+    let after = tokio::time::timeout(
+        Duration::from_secs(10),
+        invoke(&other, other_runtime.executor.clone()),
+    )
+    .await
+    .unwrap()
+    .result
+    .unwrap()
+    .to_json()
+    .unwrap();
+    assert_eq!(after, isolated);
+    other_runtime
+        .executor
+        .tool_ctx
+        .mcp_service()
+        .unwrap()
+        .shutdown()
+        .await;
+    host.shutdown().await.unwrap();
 }
 
 #[tokio::test]
