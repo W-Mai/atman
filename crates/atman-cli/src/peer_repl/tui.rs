@@ -559,6 +559,14 @@ impl Workspace {
                             navigation.spawn(async move { let result = scopes.browse(request).await.map(Navigation::Catalog); (replies, result) });
                             continue;
                         }
+                        TuiControl::SubmitControls(request) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = scopes.submit_controls(*request).await.map(Navigation::Catalog);
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::UpdateManagement(change) => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
@@ -841,6 +849,66 @@ impl scopes::Scopes {
         });
     }
 
+    async fn submit_controls(
+        &self,
+        request: atman_tui::flow_hub::OperatorControls,
+    ) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
+        use atman_runtime::flow_store::{
+            control::{ControlAction, ControlRequest},
+            inbox::SenderIdentity,
+            profile::ControlBatchRequest,
+        };
+        let sender = SenderIdentity::User(super::USER);
+        anyhow::ensure!(
+            !request.id.is_nil() && !request.commands.is_empty(),
+            "Control batch needs an identity and targets"
+        );
+        let mut targets = std::collections::HashSet::new();
+        let mut commands = Vec::with_capacity(request.commands.len());
+        for command in request.commands {
+            anyhow::ensure!(
+                !command.target.session_id.0.is_nil()
+                    && !command.target.instance_id.0.0.is_nil()
+                    && targets.insert(command.target.clone()),
+                "Control targets must be distinct valid instances"
+            );
+            let pause_key = match (command.action, command.pause_key) {
+                (ControlAction::ReleasePause, Some(key)) if !key.is_nil() => key,
+                (ControlAction::ReleasePause, _) => {
+                    anyhow::bail!("Release pause requires a selected pause key")
+                }
+                (_, Some(_)) => anyhow::bail!("Only Release pause accepts a pause key"),
+                (_, None) => uuid::Uuid::from_bytes(*b"atman-user-pause"),
+            };
+            commands.push(ControlRequest {
+                id: request.id,
+                sender: sender.clone(),
+                target: command.target,
+                expected_revision: command.expected_revision,
+                pause_key: pause_key.into(),
+                action: command.action,
+            });
+        }
+        self.profile().await?;
+        self.host
+            .submit_controls(
+                ControlBatchRequest {
+                    id: request.id,
+                    sender,
+                    commands,
+                },
+                |_| Ok(()),
+            )
+            .await?;
+        self.browse(atman_tui::flow_hub::HubRequest::ControlBatch {
+            request_id: request.id,
+        })
+        .await
+        .context(
+            "Controls accepted, but reading results failed; retry retains the original request",
+        )
+    }
+
     async fn browse(
         &self,
         request: atman_tui::flow_hub::HubRequest,
@@ -849,6 +917,22 @@ impl scopes::Scopes {
             FlowHubPage, HubRequest, PAGE_SIZE, RelationProgress, RelationRange,
         };
         Ok(Box::new(match request {
+            HubRequest::ControlBatch { request_id } => {
+                let record = self
+                    .profile()
+                    .await?
+                    .control_batch(
+                        atman_runtime::flow_store::inbox::SenderIdentity::User(super::USER),
+                        request_id,
+                    )
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("Control batch not found"))?;
+                let issues = self.host.subscribe_controls().borrow().issues.clone();
+                FlowHubPage::ControlBatch(Box::new(atman_tui::flow_hub::ControlBatchPage {
+                    record,
+                    issues,
+                }))
+            }
             HubRequest::Management { grant } => {
                 let view = self.profile().await?.snapshot().await?;
                 FlowHubPage::Management(Box::new(

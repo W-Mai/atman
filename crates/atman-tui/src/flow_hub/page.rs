@@ -68,6 +68,9 @@ pub struct RelationProgress {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
+    ControlBatch {
+        request_id: Uuid,
+    },
     Management {
         grant: Option<Uuid>,
     },
@@ -123,6 +126,7 @@ pub enum HubRequest {
 impl HubRequest {
     pub(super) fn first(&self) -> Self {
         match self {
+            Self::ControlBatch { .. } => self.clone(),
             Self::Management { .. } => self.clone(),
             Self::Overview { .. } => Self::Overview { after: None },
             Self::Workspaces { .. } => Self::Workspaces { after: None },
@@ -165,6 +169,7 @@ impl HubRequest {
 }
 
 pub enum FlowHubPage {
+    ControlBatch(Box<super::ControlBatchPage>),
     Management(Box<super::ManagementPage>),
     Overview(super::OverviewDirectory),
     FlowWorkspace(super::FlowWorkspacePage),
@@ -213,7 +218,10 @@ impl Row {
     pub fn has_text_details(&self) -> bool {
         matches!(
             self.key,
-            RowKey::WorkspaceField(_) | RowKey::WorkspaceError(_) | RowKey::ManagementField(_)
+            RowKey::WorkspaceField(_)
+                | RowKey::WorkspaceError(_)
+                | RowKey::ManagementField(_)
+                | RowKey::ControlField(_)
         ) && matches!(self.action, Action::None)
     }
 }
@@ -246,6 +254,7 @@ impl Endpoint {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum RowKey {
+    ControlField(String),
     ManagementField(&'static str),
     ManagementGrant(Uuid),
     Overview,
@@ -282,6 +291,44 @@ pub(super) enum RowKey {
 }
 
 impl FlowHubPage {
+    pub(super) fn control_state(
+        &self,
+        address: &atman_runtime::flow_store::FlowRef,
+    ) -> Option<atman_rt::FlowInstance<atman_runtime::event::AtmanUuid>> {
+        match self {
+            Self::Flows { page, .. } => page
+                .instances
+                .iter()
+                .find(|row| &row.address == address)?
+                .state
+                .clone(),
+            Self::Overview(directory) => directory.page.entries.iter().find_map(|entry| {
+                let atman_runtime::flow_runtime::catalog::FlowCatalogEntry::Flow {
+                    owner,
+                    snapshot: Ok(snapshot),
+                    ..
+                } = entry
+                else {
+                    return None;
+                };
+                if owner != address {
+                    return None;
+                }
+                Some(match &snapshot.execution {
+                    atman_runtime::flow_runtime::catalog::OverviewExecution::Loaded { state } => {
+                        state.clone()
+                    }
+                    atman_runtime::flow_runtime::catalog::OverviewExecution::Detached => {
+                        snapshot.recorded_state.clone()
+                    }
+                    atman_runtime::flow_runtime::catalog::OverviewExecution::Unavailable {
+                        ..
+                    } => return None,
+                })
+            }),
+            _ => None,
+        }
+    }
     pub(super) fn nodes(&self) -> bool {
         matches!(self, Self::Flows { .. } | Self::Overview(_))
     }
@@ -353,6 +400,7 @@ impl FlowHubPage {
 
     pub fn title(&self) -> &str {
         match self {
+            Self::ControlBatch(_) => "Control results",
             Self::Management(page) => {
                 if page.grant.is_some() {
                     "Management grant"
@@ -383,6 +431,7 @@ impl FlowHubPage {
     }
     pub fn unit(&self) -> &str {
         match self {
+            Self::ControlBatch(_) => "results",
             Self::Management(_) => "details",
             Self::Overview(_) => "flows",
             Self::FlowWorkspace(_) => "details",
@@ -399,6 +448,9 @@ impl FlowHubPage {
     }
     pub fn first(&self) -> HubRequest {
         match self {
+            Self::ControlBatch(page) => HubRequest::ControlBatch {
+                request_id: page.record.id,
+            },
             Self::Management(page) => HubRequest::Management { grant: page.grant },
             Self::Overview(_) => HubRequest::Overview { after: None },
             Self::FlowWorkspace(page) => HubRequest::FlowWorkspace {
@@ -445,6 +497,7 @@ impl FlowHubPage {
     }
     pub fn next(&self) -> Option<HubRequest> {
         match self {
+            Self::ControlBatch(_) => None,
             Self::Management(_) => None,
             Self::Overview(directory) => directory.next(),
             Self::FlowWorkspace(_) => None,
@@ -494,6 +547,7 @@ impl FlowHubPage {
     }
     pub fn total(&self) -> usize {
         match self {
+            Self::ControlBatch(page) => page.rows().len(),
             Self::Management(page) => page.total(),
             Self::Overview(directory) => directory.page.entries.len(),
             Self::FlowWorkspace(page) => page.rows().len(),
@@ -515,6 +569,7 @@ impl FlowHubPage {
         endpoint: Endpoint,
     ) -> Vec<Row> {
         match self {
+            Self::ControlBatch(page) => page.rows(),
             Self::Management(page) => page.rows(),
             Self::Overview(directory) => directory.rows(),
             Self::FlowWorkspace(page) => page.rows(),

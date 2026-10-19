@@ -27,7 +27,7 @@ pub(super) enum CreationMode {
 
 pub(super) struct Scopes {
     pub(super) root: std::path::PathBuf,
-    host: RuntimeHost,
+    pub(super) host: RuntimeHost,
     permissions: Option<Arc<PermissionClients>>,
     prompts: Arc<prompts::Prompts>,
     loaded: tokio::sync::Mutex<HashMap<Uuid, Attachment>>,

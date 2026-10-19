@@ -6,6 +6,172 @@ use atman_runtime::flow_store::{
 use atman_runtime::source_program::RevisionBundle;
 
 #[tokio::test]
+async fn operator_control_batches_keep_identity_partial_results_and_selective_resume() {
+    use atman_runtime::flow_store::{
+        FlowTransition, control::ControlAction, profile::ControlProgress,
+    };
+    use atman_tui::flow_hub::{FlowHubPage, HubRequest, OperatorControl, OperatorControls};
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let host = RuntimeHost::default();
+    let (notices, _received) = mpsc::unbounded_channel();
+    let scopes = scopes::Scopes::empty(
+        data.path(),
+        host.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(notices)),
+    );
+    let mut commands = Vec::new();
+    let peer_key = Uuid::new_v4();
+    for index in 0..2 {
+        let mut session = root
+            .create_session(SessionDescriptor {
+                id: Uuid::new_v4(),
+                project: None,
+                configuration: Default::default(),
+                title: "Operator target".into(),
+            })
+            .unwrap();
+        let address = FlowRef {
+            session_id: session.projection().descriptor.id.into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let mut flow = session
+            .create_flow(FlowDescriptor {
+                address: address.clone(),
+                creation_request: Uuid::new_v4(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: "main".into(),
+                    path: "main.at".into(),
+                    bundle: RevisionBundle {
+                        entry: "entry:main.at".into(),
+                        sources: [("entry:main.at".into(), "flow main() { return 1 }".into())]
+                            .into(),
+                        edges: Default::default(),
+                    },
+                }
+                .into(),
+            })
+            .unwrap();
+        flow.transition(flow.state().revision(), FlowTransition::Activated)
+            .unwrap();
+        flow.transition(
+            flow.state().revision(),
+            FlowTransition::ExecutionPaused {
+                key: peer_key.into(),
+            },
+        )
+        .unwrap();
+        commands.push(OperatorControl {
+            target: address,
+            expected_revision: flow.state().revision() + index,
+            action: ControlAction::Pause,
+            pause_key: None,
+        });
+    }
+    let request = OperatorControls {
+        id: Uuid::new_v4(),
+        commands,
+    };
+    let mut invalid = request.clone();
+    invalid.commands[0].pause_key = Some(peer_key);
+    assert!(scopes.submit_controls(invalid).await.is_err());
+    assert!(!data.path().join("runtime-v1/host/events.jsonl").exists());
+    scopes.submit_controls(request.clone()).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    let FlowHubPage::ControlBatch(page) = *scopes
+        .browse(HubRequest::ControlBatch {
+            request_id: request.id,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("missing results")
+    };
+    assert_eq!(page.record.sender, SenderIdentity::User(USER));
+    assert!(matches!(
+        page.record.items[0].history.last().unwrap().progress,
+        ControlProgress::Applied { .. }
+    ));
+    assert!(matches!(
+        page.record.items[1].history.last().unwrap().progress,
+        ControlProgress::Failed { .. }
+    ));
+    let worker = host.flow(&request.commands[0].target).await.unwrap();
+    let paused = worker.state().await.unwrap();
+    assert_eq!(paused.pauses().len(), 2);
+    let operator_key = Uuid::from_bytes(*b"atman-user-pause");
+    let release = OperatorControls {
+        id: Uuid::new_v4(),
+        commands: vec![OperatorControl {
+            target: request.commands[0].target.clone(),
+            expected_revision: paused.revision(),
+            action: ControlAction::ReleasePause,
+            pause_key: Some(peer_key),
+        }],
+    };
+    scopes.submit_controls(release.clone()).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    let released = worker.state().await.unwrap();
+    assert_eq!(released.pauses(), &[operator_key.into()]);
+    let resume = OperatorControls {
+        id: Uuid::new_v4(),
+        commands: vec![OperatorControl {
+            expected_revision: released.revision(),
+            action: ControlAction::Resume,
+            pause_key: None,
+            ..request.commands[0].clone()
+        }],
+    };
+    scopes.submit_controls(resume).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(worker.state().await.unwrap().pauses().is_empty());
+    let cursor = worker.snapshot().await.unwrap().cursor;
+    let FlowHubPage::ControlBatch(retry) = *scopes.submit_controls(request.clone()).await.unwrap()
+    else {
+        panic!("missing retry")
+    };
+    assert_eq!(retry.record, page.record);
+    tokio::time::timeout(std::time::Duration::from_secs(5), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
+    host.shutdown().await.unwrap();
+    drop(scopes);
+    let restarted = RuntimeHost::default();
+    let (notices, _received) = mpsc::unbounded_channel();
+    let scopes = scopes::Scopes::empty(
+        data.path(),
+        restarted.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(notices)),
+    );
+    let FlowHubPage::ControlBatch(restored) = *scopes
+        .browse(HubRequest::ControlBatch {
+            request_id: request.id,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("missing history")
+    };
+    assert_eq!(restored.record, page.record);
+    assert!(restarted.sessions().is_empty());
+    restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn management_directory_and_edits_share_profile_cas_without_scheduling() {
     use atman_runtime::flow_store::{
         access::{AccessTarget, FlowAction, FlowGrant},

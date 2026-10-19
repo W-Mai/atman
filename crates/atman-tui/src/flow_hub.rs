@@ -14,7 +14,9 @@ use crate::{control::ControlTicket, keys::KeyAction};
 
 pub const PAGE_SIZE: usize = 50;
 
+mod controls;
 mod focus;
+pub use controls::{ControlBatchPage, OperatorControl, OperatorControls};
 mod graph;
 pub(crate) use focus::{FocusLinks, NeighborSnapshot};
 mod create;
@@ -41,6 +43,7 @@ pub use workspaces::{
 
 #[derive(Clone)]
 pub(crate) enum Action {
+    SubmitControls(Box<OperatorControls>),
     EditManagement,
     EditManagementBinding,
     SelectManagement(Box<ManagementSelection>),
@@ -77,6 +80,9 @@ pub(crate) enum Action {
 
 #[derive(Default)]
 pub(crate) struct FlowHub {
+    controls: Option<controls::Draft>,
+    controls_button: Rect,
+    controls_hovered: bool,
     edit_management: Option<management::Draft>,
     release_workspace: Option<release::Confirmation>,
     create_watch: Option<create::Draft>,
@@ -175,6 +181,7 @@ impl History {
         {
             let draft = hub.create_watch.take();
             let management = hub.edit_management.take();
+            let controls = hub.controls.take();
             let returning_to_management = matches!(&**page, FlowHubPage::Management(page) if page.grant.is_none())
                 && (management.is_some()
                     || matches!(&hub.page, Some(FlowHubPage::Management(page)) if page.grant.is_some()));
@@ -185,9 +192,15 @@ impl History {
             let leaving_picker = (draft.is_some()
                 && !matches!(hub.page, Some(FlowHubPage::Watchers(_))))
                 || (management.is_some() && !matches!(hub.page, Some(FlowHubPage::Management(_))))
-                || returning_to_management;
+                || returning_to_management
+                || controls.as_ref().is_some_and(|draft| {
+                    hub.page
+                        .as_ref()
+                        .is_none_or(|page| page.first() != draft.origin)
+                });
             let entering_picker = (draft.is_some() && !matches!(**page, FlowHubPage::Watchers(_)))
-                || (management.is_some() && !matches!(**page, FlowHubPage::Management(_)));
+                || (management.is_some() && !matches!(**page, FlowHubPage::Management(_)))
+                || (controls.is_some() && !matches!(**page, FlowHubPage::ControlBatch(_)));
             let next = if entering_picker {
                 FlowHub::default()
             } else {
@@ -203,6 +216,7 @@ impl History {
             }
             hub.create_watch = draft;
             hub.edit_management = management;
+            hub.controls = controls;
             hub.pending = ticket.cloned();
         }
         hub.receive(ticket, result);
@@ -269,6 +283,7 @@ impl FlowHub {
     pub fn restores_directory(&self, request: &HubRequest) -> bool {
         (self.create_watch.is_none() || matches!(request, HubRequest::Watchers { .. }))
             && (self.edit_management.is_none() || matches!(request, HubRequest::Management { .. }))
+            && (self.controls.is_none() || matches!(request, HubRequest::ControlBatch { .. }))
     }
 
     pub fn owns_reply(&self, ticket: Option<&ControlTicket>) -> bool {
@@ -286,6 +301,9 @@ impl FlowHub {
         self.pending = None;
         match result {
             Ok(mut page) => {
+                if matches!(*page, FlowHubPage::ControlBatch(_)) {
+                    self.controls = None;
+                }
                 if matches!(*page, FlowHubPage::Management(_)) {
                     self.edit_management = None;
                 }
@@ -440,7 +458,8 @@ impl FlowHub {
     }
 
     fn float(&mut self) -> Action {
-        if self.create_watch.is_some() || self.edit_management.is_some() {
+        if self.create_watch.is_some() || self.edit_management.is_some() || self.controls.is_some()
+        {
             return self.activate();
         }
         match self.focus() {
@@ -450,6 +469,32 @@ impl FlowHub {
     }
 
     fn activate(&mut self) -> Action {
+        if self.controls.as_ref().is_some_and(|draft| draft.picking) {
+            if let Some(index) = self.filtered().get(self.selected).copied()
+                && let page::RowKey::Flow(address) = &self.rows[index].key
+                && let Some(address) = address.instance()
+                && self.controls.as_mut().unwrap().remove(address)
+            {
+                self.error = None;
+                return Action::None;
+            }
+            if let Some(target) = self.control_target() {
+                self.controls.as_mut().unwrap().toggle(target);
+                self.error = None;
+                return Action::None;
+            }
+            return match self.focus() {
+                action @ Action::Load(
+                    HubRequest::Flows { .. }
+                    | HubRequest::Overview { .. }
+                    | HubRequest::Sessions { .. },
+                ) => action,
+                _ => {
+                    self.error = Some("This record has no readable execution snapshot".into());
+                    Action::None
+                }
+            };
+        }
         let selected = self
             .filtered()
             .get(self.selected)
@@ -623,6 +668,7 @@ impl FlowHub {
                     | FlowHubPage::WorkspaceRecord(_)
                     | FlowHubPage::FlowWorkspace(_)
                     | FlowHubPage::Management(_)
+                    | FlowHubPage::ControlBatch(_)
             )
         ) {
             let step = self.hits.len().max(1);
@@ -659,6 +705,29 @@ impl FlowHub {
     }
 
     pub fn key(&mut self, key: KeyAction) -> Action {
+        if let Some(draft) = &mut self.controls {
+            if !draft.picking {
+                let identity = draft.identity();
+                let action = draft.key(key, self.pending.is_some());
+                if identity != draft.identity() {
+                    self.error = None;
+                }
+                if matches!(action, Action::Return) {
+                    return self.close_controls();
+                }
+                return action;
+            }
+            if matches!(key, KeyAction::Escape | KeyAction::CycleReasoning) {
+                draft.picking = false;
+                return Action::None;
+            }
+            if key == KeyAction::CoursePrefill && self.pending.is_none() {
+                return Action::Load(HubRequest::Overview { after: None });
+            }
+            if matches!(key, KeyAction::NudgePrefill | KeyAction::OpenRelations) {
+                return Action::None;
+            }
+        }
         if let Some(draft) = &mut self.edit_management {
             if !draft.picking() || key == KeyAction::Escape {
                 let action = draft.key(key, self.pending.is_some());
@@ -737,6 +806,7 @@ impl FlowHub {
                         | FlowHubPage::Management(_)
                         | FlowHubPage::Workspace(_)
                         | FlowHubPage::FlowWorkspace(_)
+                        | FlowHubPage::ControlBatch(_)
                 )
             ) {
                 return Action::Return;
@@ -759,6 +829,17 @@ impl FlowHub {
             return Action::None;
         }
         match key {
+            KeyAction::CycleReasoning
+                if self.page.as_ref().is_some_and(FlowHubPage::nodes)
+                    && self.create_watch.is_none()
+                    && self.edit_management.is_none() =>
+            {
+                self.controls = Some(controls::Draft::new(
+                    self.control_target(),
+                    self.page.as_ref().unwrap().first(),
+                ));
+                self.error = None;
+            }
             KeyAction::CoursePrefill if matches!(self.page, Some(FlowHubPage::Sessions(_))) => {
                 return Action::Load(HubRequest::Overview { after: None });
             }
@@ -937,6 +1018,19 @@ impl FlowHub {
     }
 
     pub fn mouse(&mut self, event: MouseEvent) -> Action {
+        if let Some(draft) = &mut self.controls
+            && !draft.picking
+        {
+            let identity = draft.identity();
+            let action = draft.mouse(event, self.pending.is_some());
+            if identity != draft.identity() {
+                self.error = None;
+            }
+            if matches!(action, Action::Return) {
+                return self.close_controls();
+            }
+            return action;
+        }
         if let Some(draft) = &mut self.edit_management
             && !draft.picking()
         {
@@ -971,6 +1065,7 @@ impl FlowHub {
         self.relations_hovered = self.relations.contains(point);
         self.refresh_hovered = self.refresh.contains(point);
         self.graph_hovered = self.graph_button.contains(point);
+        self.controls_hovered = self.controls_button.contains(point);
         self.hovered = self
             .hits
             .iter()
@@ -981,6 +1076,9 @@ impl FlowHub {
                 self.key(KeyAction::Escape)
             }
             _ if self.pending.is_some() => Action::None,
+            MouseEventKind::Down(MouseButton::Left) if self.controls_button.contains(point) => {
+                self.key(KeyAction::CycleReasoning)
+            }
             MouseEventKind::Down(MouseButton::Left) if self.graph_button.contains(point) => self
                 .key(
                     if self.create_watch.is_some()
@@ -1046,6 +1144,13 @@ impl FlowHub {
             Paragraph::new("").style(Style::default().bg(t.panel_bg.into())),
             area,
         );
+        self.controls_button = Rect::default();
+        if let Some(draft) = &mut self.controls
+            && !draft.picking
+        {
+            draft.render(frame, area, self.pending.is_some(), self.error.as_deref());
+            return;
+        }
         if let Some(confirmation) = &mut self.release_workspace {
             confirmation.render(frame, area, self.pending.is_some(), self.error.as_deref());
             return;
@@ -1126,7 +1231,9 @@ impl FlowHub {
             Some(FlowHubPage::WorkspaceRecord(_) | FlowHubPage::FlowWorkspace(_))
         );
         let is_processes = matches!(self.page, Some(FlowHubPage::ProcessSources { .. }));
-        let picking = self.create_watch.is_some() || self.edit_management.is_some();
+        let picking = self.create_watch.is_some()
+            || self.edit_management.is_some()
+            || self.controls.is_some();
         let scoped_links = matches!(
             self.page,
             Some(FlowHubPage::Relations { focus: Some(_), .. })
@@ -1136,6 +1243,8 @@ impl FlowHub {
                 "{}  /  {session}",
                 if let Some(draft) = &self.edit_management {
                     draft.picker_label()
+                } else if self.controls.is_some() {
+                    "Select control targets"
                 } else if picking {
                     "Select source"
                 } else {
@@ -1231,7 +1340,7 @@ impl FlowHub {
             ),
             (
                 self.graph_button,
-                if self.edit_management.is_some() {
+                if self.edit_management.is_some() || self.controls.is_some() {
                     "\nAll flows Ctrl+B"
                 } else if picking {
                     if is_processes {
@@ -1383,7 +1492,10 @@ impl FlowHub {
                     Rect::new(rect.x, rect.y, 1, rect.height),
                 );
             }
-            let title = if matches!(&row.action, Action::Focus(address) if address == focused) {
+            let checked = self.controls.as_ref().is_some_and(|draft| matches!(&row.key, page::RowKey::Flow(address) if address.instance().is_some_and(|address| draft.contains(address))));
+            let title = if checked {
+                std::borrow::Cow::Owned(format!("✓ {}", row.title))
+            } else if matches!(&row.action, Action::Focus(address) if address == focused) {
                 std::borrow::Cow::Owned(format!("{} · focused", row.title))
             } else {
                 std::borrow::Cow::Borrowed(row.title.as_str())
@@ -1392,7 +1504,11 @@ impl FlowHub {
                 && matches!(row.key, page::RowKey::Process(_) | page::RowKey::Flow(_))
                 || self.edit_management.is_some() && matches!(row.key, page::RowKey::Session(_))
             {
-                Some("\nSelect Enter")
+                Some(if checked {
+                    "\nSelected Enter"
+                } else {
+                    "\nSelect Enter"
+                })
             } else if matches!(
                 row.key,
                 page::RowKey::Watcher { .. } | page::RowKey::Delivery { .. }
@@ -1479,6 +1595,12 @@ impl FlowHub {
         let message = self.error.clone().unwrap_or_else(|| {
             if self.pending.is_some() {
                 "Loading…".into()
+            } else if matches!(self.page, Some(FlowHubPage::ControlBatch(_))) {
+                format!(
+                    "Snapshot · Page {} / {} · Ctrl+R refresh",
+                    self.selected / visible.max(1) + 1,
+                    rows.len().div_ceil(visible.max(1)).max(1)
+                )
             } else if let Some(FlowHubPage::Overview(directory)) = &self.page {
                 format!(
                     "{} · Item {} / {}",
@@ -1599,10 +1721,48 @@ impl FlowHub {
             width.saturating_sub(width / 2 + 1),
             3,
         );
+        if (self.page.as_ref().is_some_and(FlowHubPage::nodes) || self.controls.is_some())
+            && self.create_watch.is_none()
+            && self.edit_management.is_none()
+        {
+            let cell = (width - 2) / 3;
+            self.previous.width = cell;
+            self.controls_button = Rect::new(content.x + cell + 1, footer + 1, cell, 3);
+            self.next = Rect::new(
+                content.x + 2 * (cell + 1),
+                footer + 1,
+                width - 2 * (cell + 1),
+                3,
+            );
+            crate::settings_form::render_action(
+                frame,
+                self.controls_button,
+                &crate::settings_form::Action {
+                    label: if cell < 17 {
+                        "Ctrl+T"
+                    } else if self.controls.is_some() {
+                        "Review Ctrl+T"
+                    } else {
+                        "Controls Ctrl+T"
+                    },
+                    hovered: self.controls_hovered,
+                    disabled: self.pending.is_some(),
+                    ..Default::default()
+                },
+                &t,
+            );
+        }
         for (rect, label) in [
             (
                 self.previous,
-                if is_overview || is_relations || is_watchers || is_processes || is_workspaces {
+                if self.previous.width < 17 {
+                    "\n‹ PgUp"
+                } else if is_overview
+                    || is_relations
+                    || is_watchers
+                    || is_processes
+                    || is_workspaces
+                {
                     "\n‹ Earlier PgUp"
                 } else {
                     "\n‹ Previous  PgUp"
@@ -1610,7 +1770,14 @@ impl FlowHub {
             ),
             (
                 self.next,
-                if is_overview || is_relations || is_watchers || is_processes || is_workspaces {
+                if self.next.width < 17 {
+                    "\nPgDn ›"
+                } else if is_overview
+                    || is_relations
+                    || is_watchers
+                    || is_processes
+                    || is_workspaces
+                {
                     if self.page.as_ref().and_then(FlowHubPage::next).is_some() {
                         "\nMore PgDn ›"
                     } else {
@@ -1656,7 +1823,9 @@ impl FlowHub {
         }
         frame.render_widget(
             Paragraph::new(if picking {
-                if self
+                if self.controls.is_some() {
+                    "Enter toggle · Ctrl+T review controls · Esc back"
+                } else if self
                     .edit_management
                     .as_ref()
                     .is_some_and(|draft| !draft.allows_overview())
@@ -1665,14 +1834,16 @@ impl FlowHub {
                 } else {
                     "↑↓ select · Enter choose · Ctrl+B sources · Esc back"
                 }
+            } else if matches!(self.page, Some(FlowHubPage::ControlBatch(_))) {
+                "Enter details · Ctrl+R refresh · Esc back"
             } else if is_workspaces {
                 "↑↓ select · Enter inspect / focus · Ctrl+O float · Esc back"
             } else if is_inbox {
                 "↑↓ select · Enter details · Tab side · Esc back"
             } else if is_watchers {
                 "↑↓ select · Enter details · Ctrl+B new · Ctrl+G scope · Esc back"
-            } else if is_flows {
-                "↑↓ select · Enter open · Ctrl+O window · Ctrl+G graph/list · Esc back"
+            } else if self.controls_button.width > 0 {
+                "Enter open · Ctrl+O window · Ctrl+T controls · Esc back"
             } else if is_relations {
                 "↑↓ select · Tab endpoint · Enter open · Ctrl+O window · Esc back"
             } else {
@@ -1684,6 +1855,9 @@ impl FlowHub {
     }
 
     pub fn paste(&mut self, text: &str) -> Action {
+        if self.controls.as_ref().is_some_and(|draft| !draft.picking) {
+            return Action::None;
+        }
         if self
             .edit_management
             .as_ref()
@@ -1718,6 +1892,37 @@ impl FlowHub {
         } else {
             action
         }
+    }
+
+    fn close_controls(&mut self) -> Action {
+        let Some(draft) = self.controls.take() else {
+            return Action::None;
+        };
+        self.pending = None;
+        self.error = None;
+        if self
+            .page
+            .as_ref()
+            .is_some_and(|page| page.first() == draft.origin)
+        {
+            Action::None
+        } else {
+            Action::Load(draft.origin)
+        }
+    }
+
+    fn control_target(&self) -> Option<controls::Target> {
+        let row = &self.rows[*self.filtered().get(self.selected)?];
+        let page::RowKey::Flow(address) = &row.key else {
+            return None;
+        };
+        self.page
+            .as_ref()?
+            .control_state(address.instance()?)
+            .map(|state| controls::Target {
+                title: row.title.clone(),
+                state,
+            })
     }
 }
 
