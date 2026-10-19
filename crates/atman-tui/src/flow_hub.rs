@@ -277,30 +277,44 @@ impl FlowHub {
         let fg = Style::default().fg(t.heading.into());
         let muted = Style::default().fg(t.meta_fg.into());
         let session = self.page.as_ref().map_or("Loading", FlowHubPage::title);
+        let is_flows = matches!(self.page, Some(FlowHubPage::Flows { .. }));
+        let compact_relations = is_flows && width < 72;
         frame.render_widget(
             Paragraph::new(format!("FlowHub  /  {session}")).style(fg),
             Rect::new(content.x, content.y, width.saturating_sub(34), 1),
         );
-        let is_flows = matches!(self.page, Some(FlowHubPage::Flows { .. }));
         self.relations = if is_flows {
-            Rect::new(
-                content.right().saturating_sub(52),
-                content.y,
-                18.min(width),
-                3,
-            )
+            if compact_relations {
+                Rect::new(
+                    content.x + 22,
+                    content.y + 1,
+                    18.min(width.saturating_sub(22)),
+                    1,
+                )
+            } else {
+                Rect::new(
+                    content.right().saturating_sub(52),
+                    content.y,
+                    18.min(width),
+                    3,
+                )
+            }
         } else {
             Rect::default()
         };
         if is_flows {
             frame.render_widget(
-                Paragraph::new("\nRelations  Ctrl+Shift+G")
-                    .style(muted.bg(if self.relations_hovered {
-                        t.work_bg.lerp(t.work_hover_bg, 0.5)
-                    } else {
-                        t.work_bg.into_inner()
-                    }))
-                    .alignment(Alignment::Center),
+                Paragraph::new(if compact_relations {
+                    "Relations  Ctrl+Shift+G"
+                } else {
+                    "\nRelations  Ctrl+Shift+G"
+                })
+                .style(muted.bg(if self.relations_hovered {
+                    t.work_bg.lerp(t.work_hover_bg, 0.5)
+                } else {
+                    t.work_bg.into_inner()
+                }))
+                .alignment(Alignment::Center),
                 self.relations,
             );
         }
@@ -336,14 +350,22 @@ impl FlowHub {
         );
         frame.render_widget(
             Paragraph::new(format!("Search this page: {}", self.query)).style(muted),
-            Rect::new(content.x + 22, content.y + 2, width.saturating_sub(22), 1),
+            Rect::new(
+                content.x + 22,
+                content.y + if compact_relations { 3 } else { 2 },
+                width.saturating_sub(22),
+                1,
+            ),
         );
         let rows = self.filtered();
         let visible = usize::from(
-            content
-                .height
-                .saturating_sub(if is_flows { 13 } else { 11 })
-                / 4,
+            content.height.saturating_sub(if compact_relations {
+                14
+            } else if is_flows {
+                13
+            } else {
+                11
+            }) / 4,
         );
         if self.selected < self.offset {
             self.offset = self.selected;
@@ -362,7 +384,9 @@ impl FlowHub {
             let row = &page_rows[*index];
             let rect = Rect::new(
                 content.x,
-                content.y + 4 + ((pos - self.offset) * 4) as u16,
+                content.y
+                    + if compact_relations { 5 } else { 4 }
+                    + ((pos - self.offset) * 4) as u16,
                 width,
                 4,
             );
@@ -852,7 +876,7 @@ mod tests {
                 session: source.session_id.0,
                 title: "Example".into(),
                 relations: vec![FlowRelation {
-                    source,
+                    source: source.clone(),
                     target: atman_runtime::flow_store::access::AccessTarget::Flow(target.clone()),
                     kind: RelationKind::Watch,
                     id: Uuid::now_v7(),
@@ -881,5 +905,41 @@ mod tests {
             Action::Focus(crate::control::ViewAddress::Instance(address))
                 if address.instance_id == target.instance_id
         ));
+        let mut compact_hub = FlowHub {
+            pending: Some(ticket.clone()),
+            ..Default::default()
+        };
+        compact_hub.receive(
+            Some(&ticket),
+            Ok(Box::new(FlowHubPage::Flows {
+                session: source.session_id.0,
+                title: "Example".into(),
+                default_flow: Some(target.instance_id.clone()),
+                page: InstancePage {
+                    instances: vec![InstanceSummary {
+                        address: target.clone(),
+                        entry: Some("Example flow".into()),
+                        state: None,
+                        unavailable: None,
+                        loaded: false,
+                        trailing_bytes: None,
+                    }],
+                    next: None,
+                    total: 1,
+                    catalog: CommitReceipt {
+                        journal_id: Uuid::now_v7(),
+                        sequence: 1,
+                        digest: "test".into(),
+                    },
+                },
+            })),
+        );
+        let mut compact =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 24)).unwrap();
+        compact
+            .draw(|frame| compact_hub.render(frame, &target.clone().into()))
+            .unwrap();
+        assert!(compact_hub.relations.width > 0);
+        assert!(compact_hub.hits[0].0.y > compact_hub.relations.bottom());
     }
 }
