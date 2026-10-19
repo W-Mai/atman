@@ -1209,6 +1209,23 @@ async fn management_authority_is_explicit_revocable_and_shared_with_observers() 
     };
     profile.replace(request.clone()).await.unwrap();
     assert!(client.inspect(source.address().clone()).await.is_ok());
+    let binding_cursor = profile.snapshot().await.unwrap().profile.cursor;
+    session
+        .set_title(
+            session.snapshot().await.unwrap().cursor,
+            Some("Renamed workspace".into()),
+        )
+        .await
+        .unwrap();
+    session
+        .select_default(sibling.address().instance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        profile.snapshot().await.unwrap().profile.cursor,
+        binding_cursor
+    );
+    assert!(client.inspect(source.address().clone()).await.is_ok());
     assert!(
         sibling_client
             .inspect(source.address().clone())
@@ -1297,6 +1314,25 @@ async fn management_authority_is_explicit_revocable_and_shared_with_observers() 
         )
         .await;
     }
+    let binding = profile.snapshot().await.unwrap().profile;
+    change(&manager, FlowTransition::CloseRequested).await;
+    change(&manager, FlowTransition::Closed).await;
+    assert!(client.inspect(source.address().clone()).await.is_err());
+    assert!(invoke(&source, Executor::new()).await.result.is_ok());
+    assert!(invoke(&sibling, Executor::new()).await.result.is_ok());
+    assert_eq!(
+        manager.snapshot().await.unwrap().state.state(),
+        &InstanceState::Closed
+    );
+    assert_eq!(session.snapshot().await.unwrap().catalog.flows.len(), 2);
+    assert_eq!(
+        profile.snapshot().await.unwrap().profile.cursor,
+        binding.cursor
+    );
+    assert_eq!(
+        profile.snapshot().await.unwrap().profile.management,
+        binding.management
+    );
     host.shutdown().await.unwrap();
     assert!(profile.snapshot().await.is_err());
     let store = ProfileStore::open(&root).unwrap();

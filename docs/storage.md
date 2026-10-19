@@ -578,6 +578,8 @@ Input policy, instance directory ownership, management authorization, and CLI/da
 
 `flow_store::profile::ProfileStore` owns `runtime-v1/host/identity.json` and its fact journal under an exclusive profile lock. The identity records the schema version and profile UUID. The journal records a management Session binding and explicit per-flow grants in one replacement transaction; display names and Session membership confer no management authority.
 
+Renaming a Session or selecting its default flow leaves management grants unchanged. Pausing or closing a management flow does not pause its siblings or flows in other Sessions, replace the management binding, or create another flow. Closed callers cannot use an earlier invocation's grants; the authenticated operator retains the host's management interfaces.
+
 `bootstrap` prepares a stable Session descriptor before creating its projectless container. Recovery completes that same creation across either crash boundary. Bootstrap does not create flows or schedule work. Once bound, a missing, corrupt, or mismatched Session is an error and requires explicit repair or replacement. Existing catalog writers may remain active during profile validation.
 
 `replace` requires a request UUID, the current profile receipt, and a binding whose grantees are registered in that Session. Binding and grants change atomically. Identical retries return the original receipt even after subsequent replacements; conflicting reuse and stale new requests fail. Replacing management does not close either Session or delete history. The store is a trusted-host primitive; frontends must authenticate management commands before calling it.
