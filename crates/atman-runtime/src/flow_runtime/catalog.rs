@@ -1,5 +1,8 @@
 //! Shared session and instance discovery without opening execution owners.
 
+mod watches;
+pub use watches::{WatchCatalogCursor, WatchCatalogEntry, WatchCatalogPage, WatchCatalogSnapshot};
+
 use std::{io, path::PathBuf, sync::Arc};
 
 use atman_rt::{InstanceActivity, InstanceState};

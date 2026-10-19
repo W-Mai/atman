@@ -11,6 +11,301 @@ use atman_runtime::{
 use uuid::Uuid;
 
 #[tokio::test]
+async fn watch_catalog_pages_preserve_owner_identity_authority_and_read_only_boundaries() {
+    use atman_runtime::{
+        flow_runtime::catalog::{SessionCatalog, WatchCatalogCursor, WatchCatalogEntry},
+        flow_store::subscription::{FlowEventFilter, FlowSubscription, SubscriptionPurpose},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = RuntimeStore::open(directory.path()).unwrap();
+    let mut sessions = Vec::new();
+    let mut flows = Vec::new();
+    for (index, count) in [(1, 1), (2, 3), (3, 0), (4, 0)] {
+        let id = Uuid::from_u128(index);
+        let mut session = runtime
+            .create_session(SessionDescriptor {
+                id,
+                project: None,
+                configuration: Default::default(),
+                title: format!("Session {index}"),
+            })
+            .unwrap();
+        for _ in 0..count {
+            let mut flow = session
+                .create_flow(FlowDescriptor {
+                    address: FlowRef {
+                        session_id: id.into(),
+                        instance_id: FlowInstanceId::now(),
+                    },
+                    creation_request: Uuid::now_v7(),
+                    created_by: None,
+                    content: EntrySnapshot {
+                        name: "main".into(),
+                        path: "/missing/main.at".into(),
+                        bundle: RevisionBundle {
+                            entry: "entry:main.at".into(),
+                            sources: BTreeMap::from([(
+                                "entry:main.at".into(),
+                                "flow main() -> int { return 7 }".into(),
+                            )]),
+                            edges: BTreeMap::new(),
+                        },
+                    }
+                    .into(),
+                })
+                .unwrap();
+            flow.transition(flow.state().revision(), FlowTransition::Activated)
+                .unwrap();
+            flows.push(flow);
+        }
+        sessions.push(session);
+    }
+    let source = flows[0].descriptor().address.clone();
+    let anchor = flows[0].observation_anchor();
+    let watcher_id = Uuid::now_v7();
+    // IDs belong to an owning Flow, so the same ID in two recipients must survive discovery.
+    for flow in &mut flows[1..3] {
+        flow.subscribe_events(
+            FlowSubscription {
+                id: watcher_id,
+                source: source.clone(),
+                filter: FlowEventFilter::FinalAnswers,
+                once: false,
+                purpose: SubscriptionPurpose::Watcher,
+                expires_at: None,
+                reply: None,
+            },
+            &anchor,
+        )
+        .unwrap();
+    }
+    let lease = flows[0]
+        .state()
+        .clone()
+        .begin_turn(atman_rt::TurnId::now(), atman_rt::RunId::now())
+        .unwrap();
+    let revision = flows[0].state().revision();
+    flows[0]
+        .transition(
+            revision,
+            FlowTransition::TurnStarted {
+                turn: lease.turn.clone(),
+                run: lease.run.clone(),
+            },
+        )
+        .unwrap();
+    let mut message = atman_runtime::message::Message::assistant_text(lease.turn.clone(), "ready");
+    message.origin = atman_runtime::message::MessageOrigin::FinalAnswer;
+    flows[0]
+        .publish_message(atman_runtime::flow_store::publication::MessagePublication {
+            id: Uuid::now_v7(),
+            run: lease.run.clone(),
+            context_run: None,
+            message,
+            lease: lease.clone(),
+        })
+        .unwrap();
+    let revision = flows[0].state().revision();
+    flows[0]
+        .transition(
+            revision,
+            FlowTransition::TurnFinished {
+                lease,
+                outcome: atman_rt::TurnOutcome::Completed,
+            },
+        )
+        .unwrap();
+    for index in 1..3 {
+        let observed = flows[0]
+            .events_after(
+                anchor.cursor().sequence,
+                std::num::NonZeroUsize::new(10).unwrap(),
+            )
+            .unwrap();
+        flows[index].observe_events(&observed).unwrap();
+    }
+    let revision = flows[1].state().revision();
+    flows[1]
+        .transition(
+            revision,
+            FlowTransition::TurnStarted {
+                turn: atman_rt::TurnId::now(),
+                run: atman_rt::RunId::now(),
+            },
+        )
+        .unwrap();
+    let active_state = flows[1].state().clone();
+    let active_cursor = flows[1].cursor().clone();
+    let active_address = flows[1].descriptor().address.clone();
+    let other_address = flows[2].descriptor().address.clone();
+    let session_log = sessions[3].dir().join("events.jsonl");
+    let broken_flow_log = flows[3].dir().join("events.jsonl");
+    let active_log = flows[1].dir().join("events.jsonl");
+    drop(flows.pop());
+    drop(sessions.pop());
+    std::fs::write(&session_log, b"corrupt\n").unwrap();
+    std::fs::write(&broken_flow_log, b"corrupt\n").unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&active_log)
+        .unwrap()
+        .write_all(b"{unfinished")
+        .unwrap();
+    let active_bytes = std::fs::read(&active_log).unwrap();
+    let catalog = SessionCatalog::new(None, Some(directory.path().to_owned()));
+    let mut cursor = None;
+    let mut entries = Vec::new();
+    let mut steps = 0;
+    loop {
+        let page = catalog
+            .watch_page(cursor.clone(), 1, |_| Ok(true), |_| Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(page.total_sessions, 4);
+        assert_eq!(page.inspected, 1);
+        assert!(page.next.is_none() || page.next != cursor);
+        entries.extend(page.entries);
+        steps += 1;
+        assert!(steps <= 6, "pagination did not advance");
+        let Some(next) = page.next else { break };
+        cursor = Some(next);
+    }
+    assert_eq!(steps, 6); // Four Flows, one empty Session, one failed Session.
+    assert_eq!(entries.len(), 5);
+    assert!(
+        matches!(&entries[0], WatchCatalogEntry::SessionUnavailable { session_id, .. } if *session_id == Uuid::from_u128(4))
+    );
+    assert!(matches!(
+        &entries[1],
+        WatchCatalogEntry::Flow {
+            snapshot: Err(_),
+            ..
+        }
+    ));
+    let records: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            WatchCatalogEntry::Flow {
+                owner,
+                session_title,
+                snapshot: Ok(snapshot),
+            } if !snapshot.records.is_empty() => {
+                assert_eq!(session_title.as_deref(), Some("Session 2"));
+                assert_eq!(snapshot.title, "main");
+                assert_eq!(snapshot.records[0].registration.id(), watcher_id);
+                Some((owner, snapshot))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].0, &other_address);
+    assert_eq!(records[1].0, &active_address);
+    assert_eq!(records[1].1.cursor, active_cursor);
+    assert_eq!(records[1].1.trailing_bytes, 11);
+    for (_, snapshot) in records {
+        assert_eq!(snapshot.records[0].progress.matched, 1);
+        assert_eq!(snapshot.records[0].progress.pending, 1);
+        assert_eq!(snapshot.records[0].progress.input_committed, 0);
+    }
+    let hidden = catalog
+        .watch_page(None, 50, |id| Ok(id == Uuid::from_u128(1)), |_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(hidden.total_sessions, 1);
+    assert_eq!(hidden.entries.len(), 1);
+    assert!(hidden.next.is_none());
+    let authorizations = std::cell::Cell::new(0);
+    let denied = catalog
+        .watch_page(
+            None,
+            50,
+            |_| Ok(true),
+            |owner| {
+                if owner == &active_address {
+                    authorizations.set(authorizations.get() + 1);
+                    if authorizations.get() == 3 {
+                        return Err(std::io::ErrorKind::PermissionDenied.into());
+                    }
+                }
+                Ok(())
+            },
+        )
+        .await;
+    assert!(matches!(denied, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied));
+    assert_eq!(authorizations.get(), 3);
+    let checks = std::cell::Cell::new(0);
+    let revoked = catalog
+        .watch_page(
+            None,
+            50,
+            |id| {
+                if id == Uuid::from_u128(4) {
+                    checks.set(checks.get() + 1);
+                    return Ok(checks.get() < 3);
+                }
+                Ok(true)
+            },
+            |_| Ok(()),
+        )
+        .await;
+    assert!(matches!(revoked, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied));
+    for invalid_limit in [0, 51] {
+        assert!(
+            catalog
+                .watch_page(None, invalid_limit, |_| Ok(true), |_| Ok(()))
+                .await
+                .is_err()
+        );
+    }
+    let beyond = catalog
+        .watch_page(
+            Some(WatchCatalogCursor {
+                session_id: Uuid::nil(),
+                before: None,
+            }),
+            1,
+            |_| Ok(true),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(beyond.inspected, 0);
+    assert!(beyond.entries.is_empty() && beyond.next.is_none());
+    let exhausted = catalog
+        .watch_page(
+            Some(WatchCatalogCursor {
+                session_id: Uuid::from_u128(2),
+                before: Some(active_address.instance_id.clone()),
+            }),
+            1,
+            |_| Ok(true),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exhausted.inspected, 1);
+    assert!(exhausted.entries.is_empty());
+    assert_eq!(exhausted.next.unwrap().session_id, Uuid::from_u128(1));
+    assert_eq!(*flows[1].state(), active_state);
+    assert_eq!(std::fs::read(&active_log).unwrap(), active_bytes);
+    assert_eq!(std::fs::read(&session_log).unwrap(), b"corrupt\n");
+    assert_eq!(std::fs::read(&broken_flow_log).unwrap(), b"corrupt\n");
+    drop(flows);
+    drop(sessions);
+    let inspection =
+        RuntimeStore::inspect_session(directory.path(), active_address.session_id.0).unwrap();
+    assert_eq!(
+        inspection
+            .inspect_flow(&active_address.instance_id)
+            .unwrap()
+            .state,
+        active_state
+    );
+    assert_eq!(std::fs::read(&active_log).unwrap(), active_bytes);
+}
+
+#[tokio::test]
 async fn relation_catalog_pages_recheck_visibility_and_advance_past_empty_or_broken_sessions() {
     use atman_runtime::{
         flow_runtime::catalog::SessionCatalog,

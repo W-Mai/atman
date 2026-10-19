@@ -30,6 +30,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Watcher catalog inspection** — Hosts can page through committed subscriptions across Sessions without starting Flow execution. Each result retains its owner and journal boundary; unavailable records remain visible, and access is rechecked before results are returned.
+
 - **Process watcher creation** — WatchHub selects running Bash and Terminal resources through the shared source directory. Main and floating views use the same form, exact process identity, keyboard and mouse controls, and acknowledged registration retries.
 
 - **Process observation identity** — Hosts can list live process sources without loading Flow execution and register against an exact process incarnation. Reused handles cannot redirect a selection; retries retain recorded registrations after cancellation or resource loss.
