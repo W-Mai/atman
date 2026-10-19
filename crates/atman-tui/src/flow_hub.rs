@@ -44,8 +44,10 @@ pub(crate) struct FlowHub {
     next: Rect,
     close: Rect,
     refresh: Rect,
+    relations: Rect,
     sessions: Rect,
     sessions_hovered: bool,
+    relations_hovered: bool,
     hovered: Option<usize>,
 }
 
@@ -168,6 +170,14 @@ impl FlowHub {
                     .map_or(Action::None, Action::Load);
             }
             KeyAction::Save => return Action::Load(HubRequest::Sessions { before: None }),
+            KeyAction::OpenRelations => {
+                return match self.page.as_ref() {
+                    Some(FlowHubPage::Flows { session, .. }) => {
+                        Action::Load(HubRequest::Relations { session: *session })
+                    }
+                    _ => Action::None,
+                };
+            }
             KeyAction::Submit => return self.focus(),
             KeyAction::ToggleLastTool => return self.float(),
             KeyAction::HistoryUp => self.selected = self.selected.saturating_sub(1),
@@ -194,6 +204,7 @@ impl FlowHub {
     pub fn mouse(&mut self, event: MouseEvent) -> Action {
         let point = (event.column, event.row).into();
         self.sessions_hovered = self.sessions.contains(point);
+        self.relations_hovered = self.relations.contains(point);
         self.hovered = self
             .hits
             .iter()
@@ -204,6 +215,9 @@ impl FlowHub {
             _ if self.pending.is_some() => Action::None,
             MouseEventKind::Down(MouseButton::Left) if self.sessions.contains(point) => {
                 self.key(KeyAction::Save)
+            }
+            MouseEventKind::Down(MouseButton::Left) if self.relations.contains(point) => {
+                self.key(KeyAction::OpenRelations)
             }
             MouseEventKind::ScrollDown => self.key(KeyAction::HistoryDown),
             MouseEventKind::ScrollUp => self.key(KeyAction::HistoryUp),
@@ -249,6 +263,7 @@ impl FlowHub {
             self.next = Rect::default();
             self.close = Rect::default();
             self.refresh = Rect::default();
+            self.relations = Rect::default();
             self.sessions = Rect::default();
             return;
         }
@@ -266,12 +281,35 @@ impl FlowHub {
             Paragraph::new(format!("FlowHub  /  {session}")).style(fg),
             Rect::new(content.x, content.y, width.saturating_sub(34), 1),
         );
-        self.refresh = Rect::new(
-            content.right().saturating_sub(32),
-            content.y,
-            18.min(width),
-            1,
-        );
+        let is_flows = matches!(self.page, Some(FlowHubPage::Flows { .. }));
+        self.relations = if is_flows {
+            Rect::new(
+                content.right().saturating_sub(52),
+                content.y,
+                18.min(width),
+                3,
+            )
+        } else {
+            Rect::default()
+        };
+        if is_flows {
+            frame.render_widget(
+                Paragraph::new("\nRelations  Ctrl+Shift+G")
+                    .style(muted.bg(if self.relations_hovered {
+                        t.work_bg.lerp(t.work_hover_bg, 0.5)
+                    } else {
+                        t.work_bg.into_inner()
+                    }))
+                    .alignment(Alignment::Center),
+                self.relations,
+            );
+        }
+        let refresh_x = if is_flows {
+            content.right().saturating_sub(72)
+        } else {
+            content.right().saturating_sub(32)
+        };
+        self.refresh = Rect::new(refresh_x, content.y, 18.min(width), 1);
         frame.render_widget(Paragraph::new("Refresh  Ctrl+R").style(muted), self.refresh);
         self.close = Rect::new(
             content.right().saturating_sub(12),
@@ -301,7 +339,12 @@ impl FlowHub {
             Rect::new(content.x + 22, content.y + 2, width.saturating_sub(22), 1),
         );
         let rows = self.filtered();
-        let visible = usize::from(content.height.saturating_sub(11) / 4);
+        let visible = usize::from(
+            content
+                .height
+                .saturating_sub(if is_flows { 13 } else { 11 })
+                / 4,
+        );
         if self.selected < self.offset {
             self.offset = self.selected;
         }
@@ -400,8 +443,12 @@ impl FlowHub {
             );
         }
         frame.render_widget(
-            Paragraph::new("↑↓ select · Enter open · Ctrl+O window · Ctrl+S sessions · Esc back")
-                .style(muted),
+            Paragraph::new(if is_flows {
+                "↑↓ select · Enter open · Ctrl+O window · Ctrl+Shift+G relations · Esc back"
+            } else {
+                "↑↓ select · Enter open · Ctrl+O window · Ctrl+S sessions · Esc back"
+            })
+            .style(muted),
             Rect::new(content.x, footer + 5, width, 1),
         );
     }
@@ -773,5 +820,66 @@ mod tests {
         let mut tiny = ratatui::Terminal::new(ratatui::backend::TestBackend::new(2, 2)).unwrap();
         tiny.draw(|f| hub.render(f, &flow.clone().into())).unwrap();
         assert!(hub.hits.is_empty());
+    }
+
+    #[test]
+    fn relation_page_opens_flow_targets_from_keyboard_and_mouse() {
+        use atman_runtime::flow_store::relation::{FlowRelation, RelationKind};
+
+        let source = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let target = FlowRef {
+            session_id: source.session_id,
+            instance_id: FlowInstanceId::now(),
+        };
+        let ticket = ControlTicket {
+            binding: crate::control::ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: source.clone().into(),
+            },
+            request_id: Uuid::now_v7(),
+        };
+        let mut hub = FlowHub {
+            pending: Some(ticket.clone()),
+            ..Default::default()
+        };
+        hub.receive(
+            Some(&ticket),
+            Ok(Box::new(FlowHubPage::Relations {
+                session: source.session_id.0,
+                title: "Example".into(),
+                relations: vec![FlowRelation {
+                    source,
+                    target: atman_runtime::flow_store::access::AccessTarget::Flow(target.clone()),
+                    kind: RelationKind::Watch,
+                    id: Uuid::now_v7(),
+                    active: true,
+                }],
+            })),
+        );
+        assert!(matches!(
+            hub.key(KeyAction::Submit),
+            Action::Focus(crate::control::ViewAddress::Instance(address))
+                if address.instance_id == target.instance_id
+        ));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
+        terminal
+            .draw(|frame| hub.render(frame, &target.clone().into()))
+            .unwrap();
+        let row = hub.hits[0].0;
+        assert!(matches!(
+            hub.mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: row.x + 1,
+                row: row.y + 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+            Action::Focus(crate::control::ViewAddress::Instance(address))
+                if address.instance_id == target.instance_id
+        ));
     }
 }

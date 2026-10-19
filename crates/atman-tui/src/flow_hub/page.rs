@@ -3,7 +3,11 @@ use atman_runtime::flow_runtime::{
     access::InstancePage,
     catalog::{CatalogStatus, SessionSummary},
 };
-use atman_runtime::flow_store::FlowInstanceId;
+use atman_runtime::flow_store::{
+    FlowInstanceId,
+    access::AccessTarget,
+    relation::{FlowRelation, RelationKind},
+};
 use uuid::Uuid;
 
 use super::{Action, execution_label};
@@ -62,6 +66,9 @@ pub enum HubRequest {
         session: Uuid,
         after: Option<LegacyFlowKey>,
     },
+    Relations {
+        session: Uuid,
+    },
 }
 
 pub enum FlowHubPage {
@@ -79,6 +86,11 @@ pub enum FlowHubPage {
         next: Option<LegacyFlowKey>,
         total: usize,
     },
+    Relations {
+        session: Uuid,
+        title: String,
+        relations: Vec<FlowRelation>,
+    },
 }
 
 pub(super) struct Row {
@@ -91,13 +103,16 @@ impl FlowHubPage {
     pub fn title(&self) -> &str {
         match self {
             Self::Sessions(_) => "Sessions",
-            Self::Flows { title, .. } | Self::LegacyFlows { title, .. } => title,
+            Self::Flows { title, .. }
+            | Self::LegacyFlows { title, .. }
+            | Self::Relations { title, .. } => title,
         }
     }
     pub fn unit(&self) -> &str {
         match self {
             Self::Sessions(_) => "sessions",
             Self::Flows { .. } | Self::LegacyFlows { .. } => "flows",
+            Self::Relations { .. } => "relations",
         }
     }
     pub fn first(&self) -> HubRequest {
@@ -111,6 +126,7 @@ impl FlowHubPage {
                 session: *session,
                 after: None,
             },
+            Self::Relations { session, .. } => HubRequest::Relations { session: *session },
         }
     }
     pub fn next(&self) -> Option<HubRequest> {
@@ -130,6 +146,7 @@ impl FlowHubPage {
                     after: Some(after),
                 })
             }
+            Self::Relations { .. } => None,
         }
     }
     pub fn total(&self) -> usize {
@@ -137,6 +154,7 @@ impl FlowHubPage {
             Self::Sessions(page) => page.total,
             Self::Flows { page, .. } => page.total,
             Self::LegacyFlows { total, .. } => *total,
+            Self::Relations { relations, .. } => relations.len(),
         }
     }
     pub(super) fn rows(&self, focused: Option<&crate::control::ViewAddress>) -> Vec<Row> {
@@ -226,6 +244,48 @@ impl FlowHubPage {
                             )
                         }),
                         action: Action::Focus(row.address.clone().into()),
+                    }
+                })
+                .collect(),
+            Self::Relations { relations, .. } => relations
+                .iter()
+                .map(|relation| {
+                    let kind = match relation.kind {
+                        RelationKind::Created => "Created",
+                        RelationKind::Read => "Read",
+                        RelationKind::Watch => "Watch",
+                        RelationKind::Interject => "Interject",
+                    };
+                    let source = format!(
+                        "{}/{}",
+                        relation.source.session_id, relation.source.instance_id
+                    );
+                    let (target, action) = match &relation.target {
+                        AccessTarget::Flow(flow) => (
+                            format!("{}/{}", flow.session_id, flow.instance_id),
+                            Action::Focus(flow.clone().into()),
+                        ),
+                        AccessTarget::Session(session) => (
+                            format!("session {session}"),
+                            Action::Load(HubRequest::Flows {
+                                session: *session,
+                                before: None,
+                            }),
+                        ),
+                        AccessTarget::AllSessions => ("all sessions".into(), Action::None),
+                    };
+                    Row {
+                        title: format!("{kind} · {target}"),
+                        detail: format!(
+                            "{source} → {target} · {} · relation {}",
+                            if relation.active {
+                                "active"
+                            } else {
+                                "inactive"
+                            },
+                            relation.id
+                        ),
+                        action,
                     }
                 })
                 .collect(),

@@ -37,6 +37,7 @@ pub enum KeyAction {
     ToggleLastWork,
     OpenCommandPalette,
     OpenProjectHub,
+    OpenRelations,
     ToggleGoal,
     SearchHistory,
     NudgePrefill,
@@ -62,6 +63,7 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (Char('c'), true, _, _) => KeyAction::Interrupt,
         (Char('s' | 'S'), true, _, _) | (Char('\u{13}'), _, _, _) => KeyAction::Save,
         (Char('d'), true, _, _) => KeyAction::Quit,
+        (Char('g'), true, true, _) => KeyAction::OpenRelations,
         (Char('g'), true, _, _) => KeyAction::NudgePrefill,
         (Char('b'), true, _, false) => KeyAction::CoursePrefill,
         (Char('r'), true, _, _) => KeyAction::RedirectPrefill,
@@ -297,6 +299,21 @@ mod tests {
         assert_eq!(
             map(ke(KeyCode::Char('p'), KeyModifiers::ALT)),
             KeyAction::Char('p')
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_g_opens_flow_relations() {
+        assert_eq!(
+            map(ke(
+                KeyCode::Char('g'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )),
+            KeyAction::OpenRelations
+        );
+        assert_eq!(
+            map(ke(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            KeyAction::NudgePrefill
         );
     }
 }

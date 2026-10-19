@@ -743,6 +743,17 @@ impl scopes::Scopes {
                 })
                 .await??
             }
+            HubRequest::Relations { session } => {
+                let overview = self.catalog.overview(session).await?;
+                FlowHubPage::Relations {
+                    session,
+                    title: overview
+                        .summary
+                        .title
+                        .unwrap_or_else(|| session.to_string()),
+                    relations: self.catalog.relations(session).await?,
+                }
+            }
         }))
     }
 

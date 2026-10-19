@@ -1540,6 +1540,7 @@ pub(crate) fn handle_key(
         KeyAction::MoveItemUp | KeyAction::MoveItemDown => {}
         KeyAction::CyclePanelForward | KeyAction::CyclePanelBackward => {}
         KeyAction::OpenProjectHub => {}
+        KeyAction::OpenRelations => {}
     }
     if edited {
         app.prune_composer_images(editor);
