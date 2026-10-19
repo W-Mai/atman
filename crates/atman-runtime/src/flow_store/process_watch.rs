@@ -140,7 +140,7 @@ impl ProcessWatches {
         Ok(())
     }
 
-    fn validate_registration(&self, record: &ProcessWatchRecord) -> io::Result<()> {
+    pub(super) fn validate_registration(&self, record: &ProcessWatchRecord) -> io::Result<()> {
         if record.watch.id.is_nil()
             || !record.watch.source.valid()
             || record.watch.pattern.is_empty()

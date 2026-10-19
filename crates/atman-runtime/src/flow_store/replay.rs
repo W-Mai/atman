@@ -13,6 +13,7 @@ pub(super) struct FlowReplay {
     pub(super) publications: publication::Publications,
     pub(super) subscriptions: subscription::Subscriptions,
     pub(super) process_watches: process_watch::ProcessWatches,
+    pub(super) watch_replacements: super::watch_edit::WatchReplacements,
     pub(super) activation: Option<(launch::Activation, CommitReceipt)>,
     pub(super) workspace: Option<workspace::WorkspaceRequest>,
     pub(super) closed: Option<CommitReceipt>,
@@ -181,6 +182,18 @@ impl FlowReplay {
                 }
                 (Some(_), FlowFact::ProcessWatchCancelled(id)) => {
                     self.process_watches.cancel(id)?
+                }
+                (Some((_, state, inbox)), FlowFact::WatcherReplaced(edit)) => {
+                    if !state.accepts_input() {
+                        return Err(invalid("watcher replacement recipient is unavailable"));
+                    }
+                    self.watch_replacements.apply(
+                        *edit,
+                        &mut self.subscriptions,
+                        &mut self.process_watches,
+                        inbox,
+                        &receipt,
+                    )?;
                 }
                 (Some((_, state, inbox)), FlowFact::ProcessObserved(observation)) => {
                     if !state.accepts_input() {

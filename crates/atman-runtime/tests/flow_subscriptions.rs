@@ -90,6 +90,355 @@ fn subscription(source: &FlowStore, purpose: SubscriptionPurpose, once: bool) ->
     }
 }
 
+#[test]
+fn watcher_replacement_is_one_commit_preserves_pending_and_retries_after_recovery() {
+    use atman_runtime::flow_store::{
+        view::FlowUpdate, watch_edit::WatchDefinition, watch_view::WatchRegistration,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let session_id = Uuid::now_v7();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            id: session_id,
+            project: None,
+            configuration: Default::default(),
+            title: "Watch edits".into(),
+        })
+        .unwrap();
+    let mut source = session.create_flow(descriptor(session_id)).unwrap();
+    let mut recipient = session.create_flow(descriptor(session_id)).unwrap();
+    transition(&mut source, FlowTransition::Activated);
+    transition(&mut recipient, FlowTransition::Activated);
+    let old = subscription(&source, SubscriptionPurpose::Watcher, false);
+    let anchor = source.observation_anchor();
+    recipient.subscribe_events(old.clone(), &anchor).unwrap();
+    answer(&mut source, "already received", false);
+    recipient
+        .observe_events(
+            &source
+                .events_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    transition(
+        &mut recipient,
+        FlowTransition::ExecutionPaused {
+            key: Uuid::now_v7().into(),
+        },
+    );
+    let state = recipient.state().clone();
+    let pending = recipient.pending_inputs().cloned().collect::<Vec<_>>();
+    assert_eq!(pending.len(), 1);
+    let mut new = subscription(&source, SubscriptionPurpose::Watcher, false);
+    new.filter = FlowEventFilter::AnswerContains("next".into());
+    let expected = WatchDefinition::Flow(old.clone());
+    let address = recipient.descriptor().address.clone();
+    let log = recipient.dir().join("events.jsonl");
+    let before = std::fs::read(&log).unwrap();
+    let sequence = recipient.cursor().sequence;
+    let changed = recipient
+        .replace_flow_watch(expected.clone(), new.clone(), &source.observation_anchor())
+        .unwrap();
+    assert_eq!(changed.sequence, sequence + 1);
+    assert_eq!(
+        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
+        pending
+    );
+    assert_eq!(*recipient.state(), state);
+    assert_eq!(
+        recipient
+            .flow_subscriptions()
+            .find(|record| record.subscription.id == old.id)
+            .unwrap()
+            .status,
+        SubscriptionStatus::Cancelled
+    );
+    assert_eq!(
+        recipient
+            .flow_subscriptions()
+            .find(|record| record.subscription.id == new.id)
+            .unwrap()
+            .status,
+        SubscriptionStatus::Active
+    );
+    let complete = std::fs::read(&log).unwrap();
+    drop(recipient);
+    // A torn replacement cannot expose only its cancellation half.
+    std::fs::write(
+        &log,
+        &complete[..before.len() + (complete.len() - before.len()) / 2],
+    )
+    .unwrap();
+    let inspected = session.inspect_flow(&address.instance_id).unwrap();
+    assert!(inspected.journal.trailing_bytes > 0);
+    assert_eq!(inspected.watchers.len(), 1);
+    assert!(
+        matches!(&inspected.watchers[0].registration, WatchRegistration::Flow(record) if record.status == SubscriptionStatus::Active)
+    );
+    std::fs::write(&log, &complete).unwrap();
+    let inspection = RuntimeStore::inspect_session(dir.path(), session_id).unwrap();
+    let mut replacements = 0;
+    inspection.inspect_flow_updates(&address.instance_id, |receipt, facts| {
+        if receipt == changed {
+            assert_eq!(facts.len(), 1);
+            assert!(matches!(&facts[0], FlowUpdate::WatcherReplaced(edit) if edit.expected == expected && edit.replacement.id() == new.id));
+            replacements += 1;
+        }
+        Ok(())
+    }).unwrap();
+    assert_eq!(replacements, 1);
+    let mut recipient = session.open_flow(&address.instance_id).unwrap();
+    assert_eq!(
+        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
+        pending
+    );
+    assert_eq!(
+        recipient
+            .replace_flow_watch(expected.clone(), new.clone(), &source.observation_anchor())
+            .unwrap(),
+        changed
+    );
+    let retry_cursor = recipient.cursor().clone();
+    let mut conflicting = new.clone();
+    conflicting.once = true;
+    assert!(
+        recipient
+            .replace_flow_watch(expected.clone(), conflicting, &source.observation_anchor())
+            .is_err()
+    );
+    assert_eq!(recipient.cursor(), &retry_cursor);
+    recipient.unsubscribe_events(new.id).unwrap();
+    let cancelled = recipient.cursor().clone();
+    transition(&mut source, FlowTransition::CloseRequested);
+    transition(&mut source, FlowTransition::Closed);
+    assert_eq!(
+        recipient
+            .replace_flow_watch(expected.clone(), new.clone(), &source.observation_anchor())
+            .unwrap(),
+        changed
+    );
+    assert_eq!(recipient.cursor(), &cancelled);
+    assert_eq!(
+        recipient
+            .flow_subscriptions()
+            .find(|record| record.subscription.id == new.id)
+            .unwrap()
+            .status,
+        SubscriptionStatus::Cancelled
+    );
+    assert_eq!(
+        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
+        pending
+    );
+    drop(recipient);
+    let recipient = session.open_flow(&address.instance_id).unwrap();
+    assert_eq!(
+        recipient
+            .watcher_replacement(&expected, &WatchDefinition::Flow(new))
+            .unwrap(),
+        Some(changed)
+    );
+    assert_eq!(
+        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
+        pending
+    );
+}
+
+#[test]
+fn watcher_replacement_validates_both_kinds_before_retiring_the_original() {
+    use atman_runtime::flow_store::{
+        process_watch::{
+            ProcessMatch, ProcessReport, ProcessSignal, ProcessSource, ProcessWatch,
+            ProcessWatchStatus,
+        },
+        watch_edit::WatchDefinition,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let session_id = Uuid::now_v7();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            id: session_id,
+            project: None,
+            configuration: Default::default(),
+            title: "Replacement validation".into(),
+        })
+        .unwrap();
+    let mut source = session.create_flow(descriptor(session_id)).unwrap();
+    let mut recipient = session.create_flow(descriptor(session_id)).unwrap();
+    transition(&mut source, FlowTransition::Activated);
+    transition(&mut recipient, FlowTransition::Activated);
+    let old = subscription(&source, SubscriptionPurpose::Watcher, false);
+    recipient
+        .subscribe_events(old.clone(), &source.observation_anchor())
+        .unwrap();
+    let process = ProcessWatch {
+        id: Uuid::now_v7(),
+        source: ProcessSource::Bash {
+            incarnation: Uuid::now_v7(),
+            handle: "process".into(),
+        },
+        pattern: "ready".into(),
+        once: false,
+        expires_at: None,
+    };
+    let before = recipient.cursor().clone();
+    for invalid in [
+        ProcessWatch {
+            pattern: String::new(),
+            ..process.clone()
+        },
+        ProcessWatch {
+            id: old.id,
+            ..process.clone()
+        },
+        ProcessWatch {
+            expires_at: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+            ..process.clone()
+        },
+    ] {
+        assert!(
+            recipient
+                .replace_process_watch(WatchDefinition::Flow(old.clone()), invalid, 0)
+                .is_err()
+        );
+    }
+    let mut stale = old.clone();
+    stale.once = true;
+    assert!(
+        recipient
+            .replace_process_watch(WatchDefinition::Flow(stale), process.clone(), 0)
+            .is_err()
+    );
+    assert_eq!(recipient.cursor(), &before);
+    assert_eq!(
+        recipient
+            .flow_subscriptions()
+            .find(|record| record.subscription.id == old.id)
+            .unwrap()
+            .status,
+        SubscriptionStatus::Active
+    );
+    let receipt = recipient
+        .replace_process_watch(WatchDefinition::Flow(old.clone()), process.clone(), 0)
+        .unwrap();
+    assert_eq!(receipt.sequence, before.sequence + 1);
+    recipient
+        .observe_process(ProcessReport {
+            source: process.source.clone(),
+            position: 1,
+            observed_at: chrono::Utc::now(),
+            signal: ProcessSignal::Matches(vec![ProcessMatch {
+                watcher: process.id,
+                text: "ready".into(),
+                row: None,
+                col: None,
+            }]),
+        })
+        .unwrap();
+    let observed = recipient.cursor().clone();
+    let pending = recipient.pending_inputs().cloned().collect::<Vec<_>>();
+    assert_eq!(pending.len(), 1);
+    assert!(
+        recipient
+            .replace_process_watch(
+                WatchDefinition::Process(process.clone()),
+                ProcessWatch {
+                    id: Uuid::now_v7(),
+                    ..process.clone()
+                },
+                0
+            )
+            .is_err()
+    );
+    assert_eq!(recipient.cursor(), &observed);
+    let next = subscription(&source, SubscriptionPurpose::Watcher, false);
+    let expected = WatchDefinition::Process(process.clone());
+    let mut internal = next.clone();
+    internal.purpose = SubscriptionPurpose::SpawnResult;
+    assert!(
+        recipient
+            .replace_flow_watch(expected.clone(), internal, &source.observation_anchor())
+            .is_err()
+    );
+    assert_eq!(recipient.cursor(), &observed);
+    let finished = recipient
+        .replace_flow_watch(expected.clone(), next.clone(), &source.observation_anchor())
+        .unwrap();
+    assert_eq!(finished.sequence, observed.sequence + 1);
+    assert_eq!(
+        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
+        pending
+    );
+    assert_eq!(
+        recipient.process_watches().next().unwrap().status,
+        ProcessWatchStatus::Cancelled
+    );
+    assert!(
+        recipient
+            .replace_process_watch(
+                WatchDefinition::Flow(old.clone()),
+                ProcessWatch {
+                    id: Uuid::now_v7(),
+                    ..process.clone()
+                },
+                0
+            )
+            .is_err()
+    );
+    assert_eq!(
+        recipient
+            .replace_process_watch(WatchDefinition::Flow(old), process.clone(), 999)
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(recipient.cursor(), &finished);
+    let address = recipient.descriptor().address.clone();
+    drop(recipient);
+    let mut recipient = session.open_flow(&address.instance_id).unwrap();
+    assert_eq!(
+        recipient
+            .replace_flow_watch(expected, next, &source.observation_anchor())
+            .unwrap(),
+        finished
+    );
+    let inspection = session.inspect_flow(&address.instance_id).unwrap();
+    assert_eq!(inspection.watchers.len(), 3);
+    assert_eq!(inspection.journal.cursor.as_ref(), Some(&finished));
+    // Replaying an otherwise well-formed duplicate edit must fail, not silently replay an ACK.
+    let log = recipient.dir().join("events.jsonl");
+    drop(recipient);
+    let mut edit = None;
+    RuntimeStore::inspect_session(dir.path(), session_id)
+        .unwrap()
+        .inspect_flow_updates(&address.instance_id, |receipt, updates| {
+            if receipt == finished
+                && let atman_runtime::flow_store::view::FlowUpdate::WatcherReplaced(value) =
+                    updates.into_iter().next().unwrap()
+            {
+                edit = Some(value);
+            }
+            Ok(())
+        })
+        .unwrap();
+    let (mut journal, _) = atman_runtime::event_log::journal::Journal::open::<serde_json::Value>(
+        &log,
+        address.instance_id.0.0,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    journal
+        .commit(&[serde_json::json!({"type": "watcher_replaced", "data": edit.unwrap()})])
+        .unwrap();
+    drop(journal);
+    let before = std::fs::read(&log).unwrap();
+    let inspect_error = session.inspect_flow(&address.instance_id).unwrap_err();
+    let recover_error = session.open_flow(&address.instance_id).err().unwrap();
+    assert_eq!(inspect_error.to_string(), recover_error.to_string());
+    assert_eq!(std::fs::read(&log).unwrap(), before);
+}
+
 #[tokio::test]
 async fn operator_unwatch_preserves_paused_execution_pending_input_and_internal_routes() {
     use atman_runtime::flow_runtime::FlowWorker;

@@ -30,6 +30,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Atomic watcher replacement** — Flow storage can replace user subscriptions in one commit, preserving accepted notifications and earlier registrations. Stale edits and invalid replacements leave the original active; identical retries retain their receipt after recovery.
+
 - **Global WatchHub** — Main and floating views can browse subscriptions across Sessions, load additional records, filter results, inspect delivery details, and cancel subscriptions without losing their directory position. Unavailable records remain visible, and creation retains the original recipient.
 
 - **Watcher catalog inspection** — Hosts can page through committed subscriptions across Sessions without starting Flow execution. Each result retains its owner and journal boundary; unavailable records remain visible, and access is rechecked before results are returned.

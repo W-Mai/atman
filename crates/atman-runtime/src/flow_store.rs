@@ -24,6 +24,7 @@ pub mod subscription;
 pub mod trace;
 pub mod view;
 pub mod waiter;
+pub mod watch_edit;
 pub mod watch_view;
 pub mod workspace;
 
@@ -241,6 +242,7 @@ enum FlowFact {
     FlowWatchesExpired(Box<subscription::FlowWatchExpiry>),
     ProcessWatchRegistered(Box<process_watch::ProcessWatchRecord>),
     ProcessWatchCancelled(Uuid),
+    WatcherReplaced(Box<watch_edit::WatcherReplacement>),
     ProcessObserved(Box<process_watch::ProcessObservation>),
     ProcessWatchesExpired(Box<process_watch::ProcessWatchExpiry>),
     DeliveryConfirmed {
@@ -356,6 +358,7 @@ impl FlowFact {
                     | Self::FlowWatchesExpired(_)
                     | Self::ProcessWatchRegistered(_)
                     | Self::ProcessWatchCancelled(_)
+                    | Self::WatcherReplaced(_)
                     | Self::ProcessObserved(_)
                     | Self::ProcessWatchesExpired(_)
             )
@@ -1014,6 +1017,7 @@ pub struct FlowStore {
     publications: publication::Publications,
     subscriptions: subscription::Subscriptions,
     process_watches: process_watch::ProcessWatches,
+    watch_replacements: watch_edit::WatchReplacements,
     activation: Option<(launch::Activation, CommitReceipt)>,
     workspace: Option<workspace::WorkspaceRequest>,
     completions: completion::Completions,
@@ -1062,6 +1066,7 @@ impl FlowStore {
             publications: publication::Publications::default(),
             subscriptions: subscription::Subscriptions::default(),
             process_watches: process_watch::ProcessWatches::default(),
+            watch_replacements: watch_edit::WatchReplacements::default(),
             activation: None,
             workspace: None,
             completions: Default::default(),
@@ -1089,6 +1094,7 @@ impl FlowStore {
             publications,
             subscriptions,
             process_watches,
+            watch_replacements,
             activation,
             workspace,
             closed,
@@ -1118,6 +1124,7 @@ impl FlowStore {
             publications,
             subscriptions,
             process_watches,
+            watch_replacements,
             activation,
             workspace,
             completions,

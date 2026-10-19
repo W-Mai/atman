@@ -175,6 +175,7 @@ pub enum FlowUpdate {
     FlowWatchesExpired(Box<subscription::FlowWatchExpiry>),
     ProcessWatchRegistered(Box<process_watch::ProcessWatchRecord>),
     ProcessWatchCancelled(Uuid),
+    WatcherReplaced(Box<super::watch_edit::WatcherReplacement>),
     ProcessObserved(Box<process_watch::ProcessObservation>),
     ProcessWatchesExpired(Box<process_watch::ProcessWatchExpiry>),
 }
@@ -223,6 +224,7 @@ impl From<FlowFact> for FlowUpdate {
             FlowFact::FlowWatchesExpired(value) => Self::FlowWatchesExpired(value),
             FlowFact::ProcessWatchRegistered(value) => Self::ProcessWatchRegistered(value),
             FlowFact::ProcessWatchCancelled(value) => Self::ProcessWatchCancelled(value),
+            FlowFact::WatcherReplaced(value) => Self::WatcherReplaced(value),
             FlowFact::ProcessObserved(value) => Self::ProcessObserved(value),
             FlowFact::ProcessWatchesExpired(value) => Self::ProcessWatchesExpired(value),
         }

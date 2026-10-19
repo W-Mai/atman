@@ -31,6 +31,9 @@ pub struct ObservationAnchor {
 }
 
 impl ObservationAnchor {
+    pub(super) fn is_closed(&self) -> bool {
+        self.closed
+    }
     pub fn source(&self) -> &FlowRef {
         &self.source
     }
@@ -291,7 +294,7 @@ impl Subscriptions {
         Ok(())
     }
 
-    fn validate_registration(&self, record: &SubscriptionRecord) -> io::Result<()> {
+    pub(super) fn validate_registration(&self, record: &SubscriptionRecord) -> io::Result<()> {
         if record.subscription.id.is_nil()
             || record.started_after.journal_id != record.subscription.source.instance_id.0.0
             || record.started_after.sequence == 0
