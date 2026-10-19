@@ -30,7 +30,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
-- **Worktree inspection** — Read-only snapshots retain shared Flow ownership and distinguish recorded lifecycle state from current branch, HEAD, changes, and path availability. Missing repositories preserve recorded workspace information; inspection does not create metadata, reconcile leases, or release references.
+- **Worktree inspection** — Read-only snapshots retain shared Flow ownership and distinguish recorded lifecycle state from current branch, HEAD, changes, and path availability. Bounded cross-Session discovery preserves recorded bindings to external storage and missing checkouts. Inspection does not create metadata, reconcile leases, or release references.
 
 - **Inbox history views** — Main and floating conversations share received and sent history, searchable pages, and scrollable message details. The `:inbox` command, panel menu, and pending-queue header open the same view. Status labels distinguish delivery acknowledgement from committed input; browsing leaves messages and execution unchanged.
 

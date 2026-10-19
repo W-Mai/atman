@@ -1,7 +1,11 @@
 //! Shared session and instance discovery without opening execution owners.
 
+mod scan;
 mod watches;
-pub use watches::{WatchCatalogCursor, WatchCatalogEntry, WatchCatalogPage, WatchCatalogSnapshot};
+mod workspaces;
+pub use scan::{FlowCatalogCursor, FlowCatalogEntry, FlowCatalogPage};
+pub use watches::{WatchCatalogEntry, WatchCatalogPage, WatchCatalogSnapshot};
+pub use workspaces::{WorkspaceCatalogEntry, WorkspaceCatalogPage, WorkspaceCatalogSnapshot};
 
 use std::{io, path::PathBuf, sync::Arc};
 
@@ -354,7 +358,7 @@ fn require_visible(id: Uuid, visible: &impl Fn(Uuid) -> io::Result<bool>) -> io:
     } else {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "relation discovery authority changed",
+            "catalog discovery authority changed",
         ))
     }
 }

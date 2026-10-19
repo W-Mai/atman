@@ -11,21 +11,32 @@ use atman_runtime::{
 use uuid::Uuid;
 
 #[tokio::test]
-async fn watch_catalog_pages_preserve_owner_identity_authority_and_read_only_boundaries() {
+async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boundaries() {
     use atman_runtime::{
-        flow_runtime::catalog::{SessionCatalog, WatchCatalogCursor, WatchCatalogEntry},
+        flow_runtime::catalog::{
+            FlowCatalogCursor, SessionCatalog, WatchCatalogEntry, WorkspaceCatalogEntry,
+        },
         flow_store::subscription::{FlowEventFilter, FlowSubscription, SubscriptionPurpose},
+        flow_store::workspace::{WorkspaceRequest, WorkspaceSource},
+        git_workspace::WorkspaceBinding,
     };
     let directory = tempfile::tempdir().unwrap();
     let runtime = RuntimeStore::open(directory.path()).unwrap();
+    let project_root = directory.path().join("missing-repository");
+    let external_root = directory.path().join("external-storage");
+    let config =
+        atman_runtime::config_hub::ConfigHub::from_config_dir(directory.path().join("config"));
+    let project =
+        atman_runtime::storage::ProjectContext::resolve(&config, &project_root, directory.path())
+            .unwrap();
     let mut sessions = Vec::new();
-    let mut flows = Vec::new();
+    let mut flows: Vec<atman_runtime::flow_store::FlowStore> = Vec::new();
     for (index, count) in [(1, 1), (2, 3), (3, 0), (4, 0)] {
         let id = Uuid::from_u128(index);
         let mut session = runtime
             .create_session(SessionDescriptor {
                 id,
-                project: None,
+                project: (index == 2).then(|| project.clone()),
                 configuration: Default::default(),
                 title: format!("Session {index}"),
             })
@@ -54,6 +65,28 @@ async fn watch_catalog_pages_preserve_owner_identity_authority_and_read_only_bou
                     .into(),
                 })
                 .unwrap();
+            if index == 2 && flows.len() < 3 {
+                let source = if flows.len() == 1 {
+                    WorkspaceSource::Allocate {
+                        base: "a".repeat(40),
+                        retained: true,
+                    }
+                } else {
+                    WorkspaceSource::Share {
+                        sponsor: flows[1].descriptor().address.clone(),
+                    }
+                };
+                flow.request_workspace(WorkspaceRequest {
+                    binding: WorkspaceBinding {
+                        workspace_id: "shared".into(),
+                        repository_root: project.root().to_owned(),
+                        path: external_root.join(".atman/worktrees/shared"),
+                        branch: None,
+                    },
+                    source,
+                })
+                .unwrap();
+            }
             flow.transition(flow.state().revision(), FlowTransition::Activated)
                 .unwrap();
             flows.push(flow);
@@ -155,6 +188,7 @@ async fn watch_catalog_pages_preserve_owner_identity_authority_and_read_only_bou
     let catalog = SessionCatalog::new(None, Some(directory.path().to_owned()));
     let mut cursor = None;
     let mut entries = Vec::new();
+    let mut workspaces = Vec::new();
     let mut steps = 0;
     loop {
         let page = catalog
@@ -164,6 +198,14 @@ async fn watch_catalog_pages_preserve_owner_identity_authority_and_read_only_bou
         assert_eq!(page.total_sessions, 4);
         assert_eq!(page.inspected, 1);
         assert!(page.next.is_none() || page.next != cursor);
+        let bindings = catalog
+            .workspace_page(cursor.clone(), 1, |_| Ok(true), |_| Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(bindings.next, page.next);
+        assert_eq!(bindings.total_sessions, page.total_sessions);
+        assert_eq!(bindings.inspected, page.inspected);
+        workspaces.extend(bindings.entries);
         entries.extend(page.entries);
         steps += 1;
         assert!(steps <= 6, "pagination did not advance");
@@ -172,6 +214,81 @@ async fn watch_catalog_pages_preserve_owner_identity_authority_and_read_only_bou
     }
     assert_eq!(steps, 6); // Four Flows, one empty Session, one failed Session.
     assert_eq!(entries.len(), 5);
+    assert_eq!(workspaces.len(), entries.len());
+    assert!(matches!(
+        &workspaces[0],
+        WorkspaceCatalogEntry::SessionUnavailable { .. }
+    ));
+    assert!(matches!(
+        &workspaces[1],
+        WorkspaceCatalogEntry::Flow {
+            snapshot: Err(_),
+            ..
+        }
+    ));
+    for (offset, address) in [&other_address, &active_address, &source]
+        .into_iter()
+        .enumerate()
+    {
+        let WorkspaceCatalogEntry::Flow {
+            owner,
+            snapshot: Ok(snapshot),
+            ..
+        } = &workspaces[offset + 2]
+        else {
+            panic!("missing workspace snapshot")
+        };
+        assert_eq!(owner, address);
+        if offset == 2 {
+            assert!(snapshot.workspace.is_none() && snapshot.project_root.is_none());
+        } else {
+            assert_eq!(snapshot.title, "main");
+            assert_eq!(snapshot.project_root.as_deref(), Some(project.root()));
+            let request = snapshot.workspace.as_ref().unwrap();
+            assert_eq!(
+                request.binding.path,
+                external_root.join(".atman/worktrees/shared")
+            );
+            if offset == 1 {
+                assert_eq!(snapshot.cursor, active_cursor);
+                assert_eq!(snapshot.trailing_bytes, 11);
+                assert!(matches!(
+                    request.source,
+                    WorkspaceSource::Allocate { retained: true, .. }
+                ));
+            } else {
+                assert!(
+                    matches!(&request.source, WorkspaceSource::Share { sponsor } if sponsor == &active_address)
+                );
+            }
+        }
+    }
+    assert!(!project_root.exists() && !external_root.exists());
+    assert!(
+        catalog
+            .workspace_page(None, 0, |_| Ok(true), |_| Ok(()))
+            .await
+            .is_err()
+    );
+    let checks = std::cell::Cell::new(0);
+    let denied = catalog
+        .workspace_page(
+            None,
+            50,
+            |_| Ok(true),
+            |owner| {
+                if owner == &active_address {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == 3 {
+                        return Err(std::io::ErrorKind::PermissionDenied.into());
+                    }
+                }
+                Ok(())
+            },
+        )
+        .await;
+    assert!(matches!(denied, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied));
+    assert_eq!(checks.get(), 3);
     assert!(
         matches!(&entries[0], WatchCatalogEntry::SessionUnavailable { session_id, .. } if *session_id == Uuid::from_u128(4))
     );
@@ -260,7 +377,7 @@ async fn watch_catalog_pages_preserve_owner_identity_authority_and_read_only_bou
     }
     let beyond = catalog
         .watch_page(
-            Some(WatchCatalogCursor {
+            Some(FlowCatalogCursor {
                 session_id: Uuid::nil(),
                 before: None,
             }),
@@ -274,7 +391,7 @@ async fn watch_catalog_pages_preserve_owner_identity_authority_and_read_only_bou
     assert!(beyond.entries.is_empty() && beyond.next.is_none());
     let exhausted = catalog
         .watch_page(
-            Some(WatchCatalogCursor {
+            Some(FlowCatalogCursor {
                 session_id: Uuid::from_u128(2),
                 before: Some(active_address.instance_id.clone()),
             }),

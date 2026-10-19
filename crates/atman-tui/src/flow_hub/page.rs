@@ -75,7 +75,7 @@ pub enum HubRequest {
     },
     WatchCatalog {
         owner: atman_runtime::flow_store::FlowRef,
-        after: Option<atman_runtime::flow_runtime::catalog::WatchCatalogCursor>,
+        after: Option<atman_runtime::flow_runtime::catalog::FlowCatalogCursor>,
     },
     ProcessSources {
         owner: atman_runtime::flow_store::FlowRef,

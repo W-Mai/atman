@@ -2,7 +2,7 @@
 
 use atman_runtime::{
     flow_runtime::catalog::{
-        WatchCatalogCursor, WatchCatalogEntry, WatchCatalogPage, WatchCatalogSnapshot,
+        FlowCatalogCursor, WatchCatalogEntry, WatchCatalogPage, WatchCatalogSnapshot,
     },
     flow_store::{
         FlowRef,
@@ -33,7 +33,7 @@ pub struct WatchDirectory {
 enum Scope {
     Flow(WatchCatalogSnapshot),
     Catalog {
-        after: Option<WatchCatalogCursor>,
+        after: Option<FlowCatalogCursor>,
         page: WatchCatalogPage,
     },
 }
@@ -49,7 +49,7 @@ impl WatchDirectory {
 
     pub fn catalog(
         owner: FlowRef,
-        after: Option<WatchCatalogCursor>,
+        after: Option<FlowCatalogCursor>,
         page: WatchCatalogPage,
     ) -> Self {
         Self {
@@ -753,11 +753,11 @@ mod tests {
                 },
             }],
         };
-        let next = WatchCatalogCursor {
+        let next = FlowCatalogCursor {
             session_id: second.session_id.0,
             before: None,
         };
-        let page = |after: Option<WatchCatalogCursor>| {
+        let page = |after: Option<FlowCatalogCursor>| {
             Box::new(FlowHubPage::Watchers(WatchDirectory::catalog(
                 first.clone(),
                 after.clone(),
@@ -913,7 +913,7 @@ mod tests {
             FlowHubPage::Watchers(directory) => directory,
             _ => unreachable!(),
         };
-        let mut wrong = match *page(Some(WatchCatalogCursor {
+        let mut wrong = match *page(Some(FlowCatalogCursor {
             session_id: Uuid::nil(),
             before: None,
         })) {
