@@ -32,6 +32,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Focused workspace inspection** — `:workspace` and Flow Workspace in the panel menu show the requesting Flow's recorded checkout and acquisition source. Shared origins link to their Flow; resource details show current availability and references without changing execution or ownership.
+
 - **Worktrees directory** — The `:worktrees` command and panel menu browse project checkouts, current Git observations, retention, and typed Flow references through shared main and floating navigation. Discovery includes recorded external and missing locations; returning from details preserves loaded rows and filters. Resource inspection leaves execution and ownership unchanged.
 
 - **Worktree inspection** — Read-only snapshots retain shared Flow ownership and distinguish recorded lifecycle state from current branch, HEAD, changes, and path availability. Bounded cross-Session discovery preserves recorded bindings to external storage and missing checkouts. Inspection does not create metadata, reconcile leases, or release references.

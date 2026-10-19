@@ -802,6 +802,7 @@ impl WindowManager {
                     | PaletteEntryId::OpenWatchHub
                     | PaletteEntryId::OpenInbox
                     | PaletteEntryId::OpenWorktrees
+                    | PaletteEntryId::OpenWorkspace
                     | PaletteEntryId::ToggleActivity
                     | PaletteEntryId::OpenManagement
                     | PaletteEntryId::SwitchSession
@@ -922,13 +923,18 @@ impl WindowManager {
             }
             PaletteEntryId::OpenFlowLinks
             | PaletteEntryId::OpenWatchHub
+            | PaletteEntryId::OpenWorkspace
             | PaletteEntryId::OpenInbox => {
                 if let Some(flow) = control_tx
                     .and_then(|tx| tx.binding())
                     .and_then(|binding| binding.flow.instance())
                 {
                     app.open_flow_hub = Some(crate::flow_hub::Action::Load(
-                        if id == PaletteEntryId::OpenInbox {
+                        if id == PaletteEntryId::OpenWorkspace {
+                            crate::flow_hub::HubRequest::FlowWorkspace {
+                                owner: flow.clone(),
+                            }
+                        } else if id == PaletteEntryId::OpenInbox {
                             crate::flow_hub::HubRequest::Inbox {
                                 owner: flow.clone(),
                                 side: atman_runtime::flow_store::inbox_view::InboxSide::Received,
@@ -1742,6 +1748,21 @@ mod tests {
             assert!(incoming.try_recv().is_err());
             assert!(wm.dispatch_meta_command(":inbox", &mut app, Some(&tx)));
             app.open_flow_hub.take();
+            assert!(wm.dispatch_meta_command(":workspace", &mut app, Some(&tx)));
+            assert!(matches!(
+                app.open_flow_hub.take(),
+                Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::FlowWorkspace { owner })) if owner == flow
+            ));
+            wm.apply_palette_action(
+                crate::palette::PaletteEntryId::OpenWorkspace,
+                &mut app,
+                Some(&tx),
+            );
+            assert!(matches!(
+                app.open_flow_hub.take(),
+                Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::FlowWorkspace { owner })) if owner == flow
+            ));
+            assert!(incoming.try_recv().is_err());
             assert!(wm.dispatch_meta_command(":worktrees", &mut app, Some(&tx)));
             assert!(matches!(
                 app.open_flow_hub.take(),

@@ -68,6 +68,9 @@ pub struct RelationProgress {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
+    FlowWorkspace {
+        owner: atman_runtime::flow_store::FlowRef,
+    },
     Workspaces {
         after: Option<super::WorkspaceCursor>,
     },
@@ -115,7 +118,9 @@ impl HubRequest {
     pub(super) fn first(&self) -> Self {
         match self {
             Self::Workspaces { .. } => Self::Workspaces { after: None },
-            Self::Workspace { .. } | Self::WorkspaceRecord { .. } => self.clone(),
+            Self::Workspace { .. } | Self::WorkspaceRecord { .. } | Self::FlowWorkspace { .. } => {
+                self.clone()
+            }
             Self::Inbox { owner, side, .. } => Self::Inbox {
                 owner: owner.clone(),
                 side: *side,
@@ -152,6 +157,7 @@ impl HubRequest {
 }
 
 pub enum FlowHubPage {
+    FlowWorkspace(super::FlowWorkspacePage),
     Workspaces(super::WorkspaceDirectory),
     Workspace(atman_runtime::git_workspace::WorkspaceSnapshot),
     WorkspaceRecord(Box<super::WorkspaceRecordPage>),
@@ -306,6 +312,7 @@ impl FlowHubPage {
 
     pub fn title(&self) -> &str {
         match self {
+            Self::FlowWorkspace(_) => "Flow workspace",
             Self::Workspaces(_) => "Worktrees",
             Self::Workspace(snapshot) => snapshot
                 .repository_root
@@ -327,6 +334,7 @@ impl FlowHubPage {
     }
     pub fn unit(&self) -> &str {
         match self {
+            Self::FlowWorkspace(_) => "details",
             Self::Workspaces(_) => "sources",
             Self::Workspace(_) => "worktrees",
             Self::WorkspaceRecord(_) => "details",
@@ -340,6 +348,9 @@ impl FlowHubPage {
     }
     pub fn first(&self) -> HubRequest {
         match self {
+            Self::FlowWorkspace(page) => HubRequest::FlowWorkspace {
+                owner: page.owner.clone(),
+            },
             Self::Workspaces(_) => HubRequest::Workspaces { after: None },
             Self::Workspace(snapshot) => HubRequest::Workspace {
                 location: super::workspaces::location(snapshot),
@@ -381,6 +392,7 @@ impl FlowHubPage {
     }
     pub fn next(&self) -> Option<HubRequest> {
         match self {
+            Self::FlowWorkspace(_) => None,
             Self::Workspaces(directory) => directory
                 .next
                 .clone()
@@ -427,6 +439,7 @@ impl FlowHubPage {
     }
     pub fn total(&self) -> usize {
         match self {
+            Self::FlowWorkspace(page) => page.rows().len(),
             Self::Workspaces(directory) => directory.rows().len(),
             Self::Workspace(snapshot) => snapshot.workspaces.len(),
             Self::WorkspaceRecord(page) => page.rows().len(),
@@ -445,6 +458,7 @@ impl FlowHubPage {
         endpoint: Endpoint,
     ) -> Vec<Row> {
         match self {
+            Self::FlowWorkspace(page) => page.rows(),
             Self::Workspaces(directory) => directory.rows(),
             Self::Workspace(snapshot) => super::workspaces::resource_rows(snapshot),
             Self::WorkspaceRecord(page) => page.rows(),

@@ -28,8 +28,8 @@ pub use page::{
 };
 pub use watch::WatchDirectory;
 pub use workspaces::{
-    WorkspaceCursor, WorkspaceDirectory, WorkspaceDirectoryEntry, WorkspaceFlowReference,
-    WorkspaceLocation, WorkspaceRecordPage,
+    FlowWorkspacePage, WorkspaceCursor, WorkspaceDirectory, WorkspaceDirectoryEntry,
+    WorkspaceFlowReference, WorkspaceLocation, WorkspaceRecordPage,
 };
 
 #[derive(Clone)]
@@ -511,6 +511,7 @@ impl FlowHub {
                     | FlowHubPage::Workspaces(_)
                     | FlowHubPage::Workspace(_)
                     | FlowHubPage::WorkspaceRecord(_)
+                    | FlowHubPage::FlowWorkspace(_)
             )
         ) {
             let step = self.hits.len().max(1);
@@ -588,7 +589,11 @@ impl FlowHub {
         if key == KeyAction::Escape {
             if matches!(
                 &self.page,
-                Some(FlowHubPage::WorkspaceRecord(_) | FlowHubPage::Workspace(_))
+                Some(
+                    FlowHubPage::WorkspaceRecord(_)
+                        | FlowHubPage::Workspace(_)
+                        | FlowHubPage::FlowWorkspace(_)
+                )
             ) {
                 return Action::Return;
             }
@@ -922,10 +927,14 @@ impl FlowHub {
                 FlowHubPage::Workspaces(_)
                     | FlowHubPage::Workspace(_)
                     | FlowHubPage::WorkspaceRecord(_)
+                    | FlowHubPage::FlowWorkspace(_)
             )
         );
         let is_inbox = matches!(self.page, Some(FlowHubPage::Inbox(_)));
-        let is_workspace_record = matches!(self.page, Some(FlowHubPage::WorkspaceRecord(_)));
+        let is_workspace_record = matches!(
+            self.page,
+            Some(FlowHubPage::WorkspaceRecord(_) | FlowHubPage::FlowWorkspace(_))
+        );
         let is_processes = matches!(self.page, Some(FlowHubPage::ProcessSources { .. }));
         let picking = self.create_watch.is_some();
         let scoped_links = matches!(
@@ -1160,6 +1169,7 @@ impl FlowHub {
                         Action::Load(
                             HubRequest::Workspace { .. } | HubRequest::WorkspaceRecord { .. },
                         ) => Some("\nInspect Enter"),
+                        Action::Load(HubRequest::Workspaces { .. }) => Some("\nBrowse Enter"),
                         Action::Load(_) => Some("\nFlows  Enter"),
                         _ => None,
                     }

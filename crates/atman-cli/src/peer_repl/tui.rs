@@ -776,6 +776,9 @@ impl scopes::Scopes {
             FlowHubPage, HubRequest, PAGE_SIZE, RelationProgress, RelationRange,
         };
         Ok(Box::new(match request {
+            HubRequest::FlowWorkspace { owner } => {
+                FlowHubPage::FlowWorkspace(workspaces::binding(&self.catalog, owner).await?)
+            }
             HubRequest::Workspaces { after } => FlowHubPage::Workspaces(
                 workspaces::directory(&self.catalog, self.root.clone(), after).await?,
             ),

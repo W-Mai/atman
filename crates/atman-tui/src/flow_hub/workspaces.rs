@@ -201,6 +201,85 @@ pub struct WorkspaceRecordPage {
     pub workspace: WorkspaceInspection,
 }
 
+pub struct FlowWorkspacePage {
+    pub owner: FlowRef,
+    pub request: Option<atman_runtime::flow_store::workspace::WorkspaceRequest>,
+}
+
+impl FlowWorkspacePage {
+    pub(super) fn rows(&self) -> Vec<Row> {
+        use atman_runtime::flow_store::workspace::WorkspaceSource;
+        let mut rows = vec![Row {
+            key: RowKey::WorkspaceField("flow"),
+            title: "Flow workspace".into(),
+            detail: format!(
+                "{} / {}",
+                self.owner.session_id.0, self.owner.instance_id.0.0
+            ),
+            action: Action::None,
+        }];
+        if let Some(request) = &self.request {
+            let binding = &request.binding;
+            rows.push(Row {
+                key: RowKey::WorkspaceField("binding"),
+                title: "Recorded checkout binding".into(),
+                detail: binding.path.display().to_string(),
+                action: Action::None,
+            });
+            rows.push(Row {
+                key: RowKey::WorkspaceField("source"),
+                title: "Acquisition source".into(),
+                detail: match &request.source {
+                    WorkspaceSource::Allocate { base, retained } => format!(
+                        "Allocated at {base} · Initial retention: {}",
+                        if *retained { "Retain" } else { "Automatic" }
+                    ),
+                    WorkspaceSource::Share { sponsor } => format!(
+                        "Shared from {} / {} · Enter focus · Ctrl+O float",
+                        sponsor.session_id.0, sponsor.instance_id.0.0
+                    ),
+                },
+                action: match &request.source {
+                    WorkspaceSource::Share { sponsor } => Action::Focus(sponsor.clone().into()),
+                    _ => Action::None,
+                },
+            });
+            // The durable request has passed replay's managed-path validation.
+            if let Some(storage) = binding.path.ancestors().nth(3) {
+                rows.push(Row {
+                    key: RowKey::WorkspaceField("resource"),
+                    title: "Inspect resource".into(),
+                    detail: format!(
+                        "{} · Check availability and current references",
+                        binding.workspace_id
+                    ),
+                    action: Action::Load(HubRequest::WorkspaceRecord {
+                        location: WorkspaceLocation {
+                            repository: binding.repository_root.clone(),
+                            storage: storage.to_owned(),
+                        },
+                        id: binding.workspace_id.clone(),
+                    }),
+                });
+            }
+        } else {
+            rows.push(Row {
+                key: RowKey::WorkspaceField("binding"),
+                title: "No managed checkout binding".into(),
+                detail: "This flow has no recorded worktree allocation or shared reference.".into(),
+                action: Action::None,
+            });
+        }
+        rows.push(Row {
+            key: RowKey::WorkspaceField("directory"),
+            title: "All worktrees".into(),
+            detail: "Browse project resources and recorded Flow bindings".into(),
+            action: Action::Load(HubRequest::Workspaces { after: None }),
+        });
+        rows
+    }
+}
+
 impl WorkspaceRecordPage {
     pub(super) fn rows(&self) -> Vec<Row> {
         let record = &self.workspace.record;
@@ -325,6 +404,93 @@ mod tests {
         keys::KeyAction,
     };
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    #[test]
+    fn focused_workspace_preserves_binding_identity_and_navigation() {
+        use atman_runtime::{
+            flow_store::workspace::{WorkspaceRequest, WorkspaceSource},
+            git_workspace::WorkspaceBinding,
+        };
+        let owner = FlowRef {
+            session_id: Uuid::new_v4().into(),
+            instance_id: atman_rt::FlowInstanceId::now(),
+        };
+        let sponsor = FlowRef {
+            session_id: Uuid::new_v4().into(),
+            instance_id: owner.instance_id.clone(),
+        };
+        let mut page = FlowWorkspacePage {
+            owner: owner.clone(),
+            request: None,
+        };
+        assert!(
+            page.rows()
+                .iter()
+                .any(|row| row.title == "No managed checkout binding")
+        );
+        page.request = Some(WorkspaceRequest {
+            binding: WorkspaceBinding {
+                workspace_id: "checkout".into(),
+                repository_root: "/missing/repository".into(),
+                path: "/external/.atman/worktrees/checkout".into(),
+                branch: None,
+            },
+            source: WorkspaceSource::Share {
+                sponsor: sponsor.clone(),
+            },
+        });
+        let ticket = ControlTicket {
+            binding: ViewBinding {
+                view_id: Uuid::new_v4(),
+                revision: 1,
+                flow: owner.clone().into(),
+            },
+            request_id: Uuid::new_v4(),
+        };
+        let mut hub = FlowHub {
+            pending: Some(ticket.clone()),
+            ..Default::default()
+        };
+        hub.receive(
+            Some(&ticket),
+            Ok(Box::new(FlowHubPage::FlowWorkspace(page))),
+        );
+        assert_eq!(
+            hub.page.as_ref().unwrap().first(),
+            HubRequest::FlowWorkspace {
+                owner: owner.clone()
+            }
+        );
+        hub.selected = 2;
+        assert!(
+            matches!(hub.key(KeyAction::Submit), Action::Focus(address) if address.instance() == Some(&sponsor))
+        );
+        assert!(
+            matches!(hub.key(KeyAction::ToggleLastTool), Action::Float(address) if address.instance() == Some(&sponsor))
+        );
+        hub.selected = 3;
+        assert!(
+            matches!(hub.key(KeyAction::Submit), Action::Load(HubRequest::WorkspaceRecord { location, id }) if location.storage == std::path::Path::new("/external") && location.repository == std::path::Path::new("/missing/repository") && id == "checkout")
+        );
+        for width in [40, 120] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 30)).unwrap();
+            terminal
+                .draw(|frame| hub.render(frame, &owner.clone().into()))
+                .unwrap();
+            let (rect, _) = hub.hits.iter().find(|(_, index)| *index == 3).unwrap();
+            assert!(matches!(
+                hub.mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x + 2,
+                    row: rect.y + 1,
+                    modifiers: KeyModifiers::NONE
+                }),
+                Action::Load(HubRequest::WorkspaceRecord { .. })
+            ));
+        }
+        assert!(matches!(hub.key(KeyAction::Escape), Action::Return));
+    }
 
     #[test]
     fn workspace_navigation_preserves_catalog_progress_and_typed_references() {

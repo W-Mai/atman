@@ -206,6 +206,12 @@ pub const META_COMMANDS: &[MetaCommand] = &[
         aliases: &[],
     },
     MetaCommand {
+        name: "workspace",
+        desc: "inspect the focused flow's recorded checkout binding",
+        usage: ":workspace",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "inbox",
         desc: "inspect the focused flow's received and sent messages",
         usage: ":inbox",

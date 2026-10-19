@@ -130,6 +130,17 @@ pub(super) async fn inspect(location: WorkspaceLocation) -> Result<WorkspaceSnap
     .await??)
 }
 
+pub(super) async fn binding(
+    catalog: &SessionCatalog,
+    owner: atman_runtime::flow_store::FlowRef,
+) -> Result<atman_tui::flow_hub::FlowWorkspacePage> {
+    let inspected = catalog.inspect_flow(&owner, |_| Ok(())).await?;
+    Ok(atman_tui::flow_hub::FlowWorkspacePage {
+        owner,
+        request: inspected.workspace,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +266,14 @@ mod tests {
         assert_eq!(refs.len(), 2);
         assert_ne!(refs[0], refs[1]);
         assert_eq!(refs[0].instance_id, refs[1].instance_id);
+        for owner in &refs {
+            let page = binding(&catalog, owner.clone()).await.unwrap();
+            assert_eq!(&page.owner, owner);
+            assert_eq!(
+                page.request.unwrap().binding.path,
+                external.join(".atman/worktrees/shared")
+            );
+        }
         let snapshot = inspect(WorkspaceLocation {
             repository: project.root().to_owned(),
             storage: external.clone(),
