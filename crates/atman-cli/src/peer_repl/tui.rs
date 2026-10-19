@@ -562,6 +562,14 @@ impl Workspace {
                             });
                             continue;
                         }
+                        TuiControl::SelectManagement(change) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = scopes.select_management(*change).await.map(Navigation::Catalog);
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::SetWorkspaceRetention(change) => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
@@ -745,6 +753,24 @@ enum Navigation {
 }
 
 impl scopes::Scopes {
+    async fn select_management(
+        &self,
+        change: atman_tui::flow_hub::ManagementSelection,
+    ) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
+        self.profile()
+            .await?
+            .select(
+                change.request_id,
+                change.expected,
+                change.session_id,
+                vec![],
+            )
+            .await?;
+        self.browse(atman_tui::flow_hub::HubRequest::Management { grant: None })
+            .await
+            .context("Management saved, but reading updated details failed; refresh to inspect the current state")
+    }
+
     async fn update_management(
         &self,
         change: atman_runtime::flow_store::profile::ReplaceManagement,

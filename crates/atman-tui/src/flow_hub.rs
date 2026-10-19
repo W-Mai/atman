@@ -21,7 +21,7 @@ mod create;
 pub use create::WatchDefinition;
 mod inbox;
 mod management;
-pub use management::ManagementPage;
+pub use management::{ManagementPage, ManagementSelection};
 mod overview;
 pub use overview::OverviewDirectory;
 mod page;
@@ -42,6 +42,8 @@ pub use workspaces::{
 #[derive(Clone)]
 pub(crate) enum Action {
     EditManagement,
+    EditManagementBinding,
+    SelectManagement(Box<ManagementSelection>),
     UpdateManagement(Box<atman_runtime::flow_store::profile::ReplaceManagement>),
     ReviewWorkspaceRelease(Box<WorkspaceRemoval>),
     ReleaseWorkspace(Box<WorkspaceRemoval>),
@@ -409,6 +411,11 @@ impl FlowHub {
         self.rows
             .iter()
             .enumerate()
+            .filter(|(_, row)| {
+                self.edit_management
+                    .as_ref()
+                    .is_none_or(|draft| draft.allows_row(&row.key))
+            })
             .filter_map(|(i, row)| {
                 query
                     .split_whitespace()
@@ -473,10 +480,17 @@ impl FlowHub {
         }
         if matches!(
             selected.map(|row| &row.action),
-            Some(Action::EditManagement)
+            Some(Action::EditManagement | Action::EditManagementBinding)
         ) && let Some(FlowHubPage::Management(page)) = &self.page
         {
-            match management::Draft::new(page) {
+            match if matches!(
+                selected.map(|row| &row.action),
+                Some(Action::EditManagementBinding)
+            ) {
+                Ok(management::Draft::binding(page))
+            } else {
+                management::Draft::new(page)
+            } {
                 Ok(draft) => {
                     self.edit_management = Some(draft);
                     self.error = None;
@@ -660,7 +674,11 @@ impl FlowHub {
                 return Action::Load(request);
             }
             if key == KeyAction::CoursePrefill && self.pending.is_none() {
-                return Action::Load(HubRequest::Overview { after: None });
+                return if draft.allows_overview() {
+                    Action::Load(HubRequest::Overview { after: None })
+                } else {
+                    Action::None
+                };
             }
         }
         if let Some(confirmation) = &mut self.release_workspace {
@@ -1152,7 +1170,12 @@ impl FlowHub {
         } else {
             Rect::default()
         };
-        self.graph_button = if picking || is_flows || is_relations || is_watchers {
+        self.graph_button = if (picking || is_flows || is_relations || is_watchers)
+            && self
+                .edit_management
+                .as_ref()
+                .is_none_or(management::Draft::allows_overview)
+        {
             Rect::new(content.x, content.y + 5, width / 2 - 1, 3)
         } else {
             Rect::default()
@@ -1385,7 +1408,7 @@ impl FlowHub {
                         | HubRequest::Management { .. },
                     ) => Some("\nInspect Enter"),
                     Action::UpdateManagement(_) => Some("\nRevoke Enter"),
-                    Action::EditManagement => Some("\nEdit Enter"),
+                    Action::EditManagement | Action::EditManagementBinding => Some("\nEdit Enter"),
                     Action::OpenManagement => Some("\nOpen Enter"),
                     Action::Load(HubRequest::Workspaces { .. }) => Some("\nBrowse Enter"),
                     Action::SetWorkspaceRetention(_) => Some("\nApply Enter"),
@@ -1632,7 +1655,15 @@ impl FlowHub {
         }
         frame.render_widget(
             Paragraph::new(if picking {
-                "↑↓ select · Enter choose · Ctrl+B sources · Esc back"
+                if self
+                    .edit_management
+                    .as_ref()
+                    .is_some_and(|draft| !draft.allows_overview())
+                {
+                    "↑↓ select · Enter choose · Esc back"
+                } else {
+                    "↑↓ select · Enter choose · Ctrl+B sources · Esc back"
+                }
             } else if is_workspaces {
                 "↑↓ select · Enter inspect / focus · Ctrl+O float · Esc back"
             } else if is_inbox {

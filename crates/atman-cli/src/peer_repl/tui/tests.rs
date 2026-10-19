@@ -133,6 +133,142 @@ fn expect_instance(content: atman_tui::FlowViewContent<'_>) -> &FlowView {
 }
 
 #[tokio::test]
+async fn management_selection_is_atomic_retryable_and_does_not_schedule_sessions() {
+    use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};
+    use atman_runtime::flow_store::profile::ReplaceManagement;
+    use atman_tui::flow_hub::ManagementSelection;
+    let data = tempfile::tempdir().unwrap();
+    let config = ConfigHub::from_config_dir(data.path().join("config"));
+    std::fs::create_dir_all(config.config_dir()).unwrap();
+    std::fs::write(config.config_dir().join("config.toml"), "").unwrap();
+    let host = RuntimeHost::default();
+    let (notices, _received) = mpsc::unbounded_channel();
+    let scopes = Arc::new(scopes::Scopes::empty(
+        data.path(),
+        host.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(notices)),
+    ));
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let destination = Uuid::now_v7();
+    let detached = root
+        .create_session(SessionDescriptor {
+            id: destination,
+            project: None,
+            title: "Existing session".into(),
+            configuration: atman_runtime::flow_store::SessionConfiguration::Atman(config.source()),
+        })
+        .unwrap();
+    let profile = scopes.profile().await.unwrap();
+    let initial = profile.snapshot().await.unwrap();
+    scopes
+        .select_management(ManagementSelection {
+            request_id: Uuid::now_v7(),
+            expected: initial.profile.cursor,
+            session_id: destination,
+        })
+        .await
+        .unwrap();
+    assert!(
+        host.sessions().is_empty(),
+        "Selecting a binding must not load its Session"
+    );
+    drop(detached);
+    let source = scopes.open_management(config).await.unwrap();
+    let worker = host.flow(&source).await.unwrap();
+    let before = worker.snapshot().await.unwrap().cursor;
+    let view = profile.snapshot().await.unwrap();
+    let mut binding = view.profile.management.unwrap();
+    binding.grants.push(FlowGrant {
+        id: Uuid::now_v7(),
+        grantee: source.clone(),
+        target: AccessTarget::AllSessions,
+        actions: [FlowAction::Discover].into(),
+    });
+    profile
+        .replace(ReplaceManagement {
+            request_id: Uuid::now_v7(),
+            expected: view.profile.cursor,
+            binding,
+        })
+        .await
+        .unwrap();
+    let replacement = Uuid::now_v7();
+    let other = root
+        .create_session(SessionDescriptor {
+            id: replacement,
+            project: None,
+            title: "Replacement".into(),
+            configuration: Default::default(),
+        })
+        .unwrap();
+    let request = ManagementSelection {
+        request_id: Uuid::now_v7(),
+        expected: profile.snapshot().await.unwrap().profile.cursor,
+        session_id: replacement,
+    };
+    let missing = ManagementSelection {
+        request_id: Uuid::now_v7(),
+        session_id: Uuid::now_v7(),
+        ..request.clone()
+    };
+    assert!(scopes.select_management(missing).await.is_err());
+    assert_eq!(
+        profile.snapshot().await.unwrap().profile.cursor,
+        request.expected
+    );
+    assert_eq!(
+        profile
+            .snapshot()
+            .await
+            .unwrap()
+            .profile
+            .management
+            .unwrap()
+            .grants
+            .len(),
+        1
+    );
+    scopes.select_management(request.clone()).await.unwrap();
+    let saved = profile.snapshot().await.unwrap();
+    let binding = saved.profile.management.unwrap();
+    assert_eq!(binding.session.id, replacement);
+    assert!(binding.grants.is_empty());
+    let stale = ManagementSelection {
+        request_id: Uuid::now_v7(),
+        ..request.clone()
+    };
+    assert!(scopes.select_management(stale).await.is_err());
+    scopes
+        .select_management(ManagementSelection {
+            request_id: Uuid::now_v7(),
+            expected: saved.profile.cursor,
+            session_id: destination,
+        })
+        .await
+        .unwrap();
+    let current = profile.snapshot().await.unwrap();
+    scopes.select_management(request).await.unwrap();
+    assert_eq!(
+        profile.snapshot().await.unwrap().profile.cursor,
+        current.profile.cursor
+    );
+    assert_eq!(worker.snapshot().await.unwrap().cursor, before);
+    assert!(worker.context().messages_full().is_empty());
+    assert!(host.session(replacement).is_err());
+    assert!(
+        host.session(source.session_id.0)
+            .unwrap()
+            .scheduling_status(source.instance_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    drop(other);
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn original_history_navigation_is_read_only_and_keeps_owner_and_reply_identity() {
     use atman_runtime::event_log::legacy::LegacyFlowKey;
     use atman_tui::{

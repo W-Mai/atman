@@ -5,8 +5,93 @@ use atman_runtime::flow_store::{
 };
 use uuid::Uuid;
 
+mod binding;
 mod edit;
-pub(super) use edit::Draft;
+pub use binding::ManagementSelection;
+
+pub(super) enum Draft {
+    Grant(Box<edit::Draft>),
+    Binding(Box<binding::Draft>),
+}
+
+impl Draft {
+    pub fn new(page: &ManagementPage) -> Result<Self, String> {
+        edit::Draft::new(page).map(|draft| Self::Grant(Box::new(draft)))
+    }
+
+    pub fn binding(page: &ManagementPage) -> Self {
+        Self::Binding(Box::new(binding::Draft::new(page)))
+    }
+
+    pub fn picking(&self) -> bool {
+        match self {
+            Self::Grant(draft) => draft.picking(),
+            Self::Binding(draft) => draft.picking(),
+        }
+    }
+
+    pub fn picker_request(&self) -> Option<HubRequest> {
+        match self {
+            Self::Grant(draft) => draft.picker_request(),
+            Self::Binding(draft) => draft.picker_request(),
+        }
+    }
+
+    pub fn picker_label(&self) -> &str {
+        match self {
+            Self::Grant(draft) => draft.picker_label(),
+            Self::Binding(_) => "Select management session",
+        }
+    }
+
+    pub fn allows_overview(&self) -> bool {
+        matches!(self, Self::Grant(_))
+    }
+
+    pub fn allows_row(&self, key: &RowKey) -> bool {
+        match self {
+            Self::Grant(_) => true,
+            Self::Binding(_) => matches!(
+                key,
+                RowKey::Session(crate::project_hub::SessionTarget::Persistent(_))
+            ),
+        }
+    }
+
+    pub fn choose(&mut self, key: &RowKey) -> Result<bool, String> {
+        match self {
+            Self::Grant(draft) => draft.choose(key),
+            Self::Binding(draft) => draft.choose(key),
+        }
+    }
+
+    pub fn key(&mut self, key: crate::keys::KeyAction, pending: bool) -> Action {
+        match self {
+            Self::Grant(draft) => draft.key(key, pending),
+            Self::Binding(draft) => draft.key(key, pending),
+        }
+    }
+
+    pub fn mouse(&mut self, event: crossterm::event::MouseEvent, pending: bool) -> Action {
+        match self {
+            Self::Grant(draft) => draft.mouse(event, pending),
+            Self::Binding(draft) => draft.mouse(event, pending),
+        }
+    }
+
+    pub fn render(
+        &mut self,
+        frame: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+        pending: bool,
+        error: Option<&str>,
+    ) {
+        match self {
+            Self::Grant(draft) => draft.render(frame, area, pending, error),
+            Self::Binding(draft) => draft.render(frame, area, pending, error),
+        }
+    }
+}
 
 use super::{
     Action, HubRequest,
@@ -58,7 +143,7 @@ impl ManagementPage {
                     .profile
                     .management
                     .as_ref()
-                    .map_or(2, |binding| 4 + binding.grants.len())
+                    .map_or(3, |binding| 5 + binding.grants.len())
             }
     }
 
@@ -74,6 +159,7 @@ impl ManagementPage {
             rows.push(field("Authority unavailable", error.clone()));
         }
         let Some(binding) = &self.view.profile.management else {
+            rows.push(binding_row(false));
             rows.push(Row {
                 key: RowKey::ManagementField("Initialize"),
                 title: "Open management".into(),
@@ -105,6 +191,7 @@ impl ManagementPage {
                 },
             ]);
         } else {
+            rows.push(binding_row(true));
             rows.push(Row {
                 key: RowKey::ManagementField("Session"),
                 title: "Management session".into(),
@@ -151,6 +238,20 @@ impl ManagementPage {
             }));
         }
         rows
+    }
+}
+
+fn binding_row(configured: bool) -> Row {
+    Row {
+        key: RowKey::ManagementField("Binding"),
+        title: if configured {
+            "Change session"
+        } else {
+            "Select existing session"
+        }
+        .into(),
+        detail: "Review the Session binding and explicit grant removal before saving".into(),
+        action: Action::EditManagementBinding,
     }
 }
 

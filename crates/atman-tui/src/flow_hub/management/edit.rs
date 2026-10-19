@@ -724,7 +724,9 @@ mod tests {
         );
         hub.query = "Edit grant".into();
         hub.key(KeyAction::Submit);
-        let draft = hub.edit_management.as_mut().unwrap();
+        let super::super::Draft::Grant(draft) = hub.edit_management.as_mut().unwrap() else {
+            panic!("expected grant editor")
+        };
         draft.selected = 4;
         draft.key(KeyAction::Submit, false);
         let Action::UpdateManagement(edit) = hub.key(KeyAction::Save) else {
