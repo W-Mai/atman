@@ -18,6 +18,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Read-only archived views** — Read complete imported flow history without execution configuration or writer ownership. Shared view models retain final-answer folding, original timestamps, and unsupported source records in main and floating views.
+
 - **Project Hub navigation** — Load project directories asynchronously, refresh with keyboard or mouse, and retain selection after project actions. Persistent Session rows open their flow catalog without leaving the TUI. Late replies cannot reopen closed panels, and missing workspace paths remain browsable.
 
 - **Persistent project discovery** — Project catalog discovery includes persistent session bindings alongside legacy metadata while preserving pin and archive settings. Projects with missing source directories remain listed.

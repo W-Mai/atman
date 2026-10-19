@@ -157,18 +157,48 @@ impl FlowViewModel {
                 "flow view binding does not match the source history",
             ));
         }
-        if matches!(source.content(), Some(FlowContentSummary::History(_))) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "archived records require the legacy history reader",
-            ));
-        }
         self.updated_workflows.clear();
         if source.cursor() == self.instance.cursor.as_ref() {
             self.flow = Some(source.flow().clone());
             return Ok(false);
         }
         let revision = self.document.revision_clock();
+        if matches!(source.content(), Some(FlowContentSummary::History(_))) {
+            if self.instance.cursor.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "an archived view cannot acquire additional records",
+                ));
+            }
+            let archive = source.archived_transcript()?;
+            let mut items = if let Some(store) = output_store {
+                crate::history::flatten_transcript_with_output_store(&archive.entries, store)
+            } else {
+                crate::history::flatten_transcript(&archive.entries)
+            };
+            for record in archive.unparsed {
+                items.push(OutputItem::SystemNote {
+                    text: format!(
+                        "Retained source record · line {} · {:?}\n{}",
+                        record.source.line,
+                        record.source.issues,
+                        String::from_utf8_lossy(&record.bytes()?).escape_debug()
+                    ),
+                    level: NoteLevel::Warn,
+                });
+            }
+            self.document.replace(items);
+            self.updated_workflows
+                .extend(
+                    self.document
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, item)| {
+                            matches!(item, OutputItem::WorkflowPanel { .. }).then_some(index)
+                        }),
+                );
+            return Ok(self.finish_sync(source, 0, revision));
+        }
         self.live.detach(&mut self.document);
         let document_start = self.document.len();
         for entry in &source.entries()[self.instance.entries..] {
@@ -273,18 +303,36 @@ impl FlowViewModel {
             view.graph_revision = Some(turn.workflow().revision());
             view.completion = completion;
         }
+        Ok(self.finish_sync(source, document_start, revision))
+    }
+
+    fn finish_sync(
+        &mut self,
+        source: &FlowTranscript,
+        document_start: usize,
+        revision: u64,
+    ) -> bool {
+        let mut fallback_start = document_start;
         let markers = self.document[document_start..]
             .iter()
             .enumerate()
             .filter_map(|(offset, item)| {
-                if let OutputItem::WorkFoldMarker {
-                    start_index: Some(start),
-                    summary,
-                } = item
-                {
-                    Some((*start, document_start + offset, summary.clone()))
-                } else {
-                    None
+                let index = document_start + offset;
+                match item {
+                    OutputItem::UserTurn { .. } | OutputItem::Divider => {
+                        fallback_start = index + 1;
+                        None
+                    }
+                    OutputItem::WorkFoldMarker {
+                        start_index,
+                        summary,
+                    } => {
+                        let start = start_index.unwrap_or(fallback_start);
+                        // A fold marker precedes its final answer in every document source.
+                        fallback_start = index + 2;
+                        Some((start, index, summary.clone()))
+                    }
+                    _ => None,
                 }
             })
             .collect::<Vec<_>>();
@@ -302,7 +350,7 @@ impl FlowViewModel {
         {
             self.snapshot = None;
         }
-        Ok(revision != self.document.revision_clock())
+        revision != self.document.revision_clock()
     }
 }
 

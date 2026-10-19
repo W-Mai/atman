@@ -81,6 +81,103 @@ fn call_status(view: &FlowViewModel, index: usize) -> ToolCallStatus {
     calls[0].status
 }
 
+#[test]
+fn archived_views_reuse_history_rendering_without_writers_or_execution() {
+    use atman_runtime::{event_log::legacy::LegacyFlowKey, flow_store::migration};
+    use serde_json::json;
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("old.jsonl");
+    let old = Uuid::now_v7();
+    let root_run = RunId::<AtmanUuid>::now();
+    let child_run = RunId::<AtmanUuid>::now();
+    let turn = TurnId::now();
+    let mut final_message = Message::assistant_text(turn.clone(), "Child final reply");
+    final_message.origin = MessageOrigin::FinalAnswer;
+    let mut raw = Vec::new();
+    for (index, event) in [
+        json!({"type":"flow_start", "run_id":root_run, "flow_name":"agent", "spawned":false}),
+        json!({"type":"user_msg", "turn_id":turn, "message": Message::user_text(turn.clone(), "Parent request")}),
+        json!({"type":"flow_start", "run_id":child_run, "flow_name":"child", "parent_run_id":root_run, "spawned":true}),
+        json!({"type":"assistant_msg", "turn_id":turn, "flow_run_id":child_run, "message":Message::assistant_text(turn.clone(), "Child working reply")}),
+        json!({"type":"assistant_msg", "turn_id":turn, "flow_run_id":child_run, "message":final_message}),
+        serde_json::to_value(Event::FlowEnd {
+            run_id: child_run,
+            flow_name: "child".into(),
+            status: atman_runtime::event::FlowStatus::Ok,
+        }).unwrap(),
+    ].into_iter().enumerate() {
+        let mut event = event;
+        event["seq"] = json!(index + 1);
+        // Missing timestamps are intentional and must not become the current time.
+        serde_json::to_writer(&mut raw, &event).unwrap();
+        raw.push(b'\n');
+    }
+    raw.extend_from_slice(b"invalid retained line\n\xfftorn");
+    std::fs::write(&source, &raw).unwrap();
+    let runtime = RuntimeStore::open(temp.path()).unwrap();
+    let id = migration::destination_id(&source, old).unwrap();
+    let migrated = runtime
+        .archive_legacy(
+            &source,
+            old,
+            SessionDescriptor {
+                id,
+                title: "Archive".into(),
+                project: None,
+                configuration: Default::default(),
+            },
+            true,
+        )
+        .unwrap();
+    std::fs::remove_file(&source).unwrap();
+    let session = runtime.open_session(id).unwrap();
+    let inspection = RuntimeStore::inspect_session(temp.path(), id).unwrap();
+    for mapping in &migrated.flows {
+        // A reader must work even while another holder owns both journals.
+        let writer = session.open_flow(&mapping.instance).unwrap();
+        let path = writer.dir().join("events.jsonl");
+        let before = std::fs::read(&path).unwrap();
+        let view = inspection.archived_view(&mapping.instance).unwrap();
+        assert_eq!(
+            view.snapshot().status.execution.state(),
+            &InstanceState::Closed
+        );
+        assert!(view.snapshot().pending.is_empty());
+        assert!(view.snapshot().status.goal.is_none());
+        let archive = view.transcript().archived_transcript().unwrap();
+        for entry in &archive.entries {
+            if let atman_runtime::TranscriptEntry::FlowStart { spawned, ts, .. } = entry {
+                assert!(!spawned);
+                assert_eq!(*ts, None);
+            }
+        }
+        let mut main = FlowViewModel::default();
+        let mut floating = FlowViewModel::default();
+        main.sync_view(&view, None).unwrap();
+        floating.sync_view(&view, None).unwrap();
+        assert!(
+            !main
+                .iter()
+                .any(|item| matches!(item, OutputItem::SubAgentActivity { .. }))
+        );
+        if matches!(mapping.owner, LegacyFlowKey::SpawnedRun { .. }) {
+            assert!(main.iter().any(|item| matches!(item, OutputItem::AssistantMd { md, .. } if md == "Child final reply")));
+            assert!(main.toggle_latest_work_fold());
+            assert!(main.work_folds.last().unwrap().is_expanded());
+            assert!(!floating.work_folds.last().unwrap().is_expanded());
+        }
+        if mapping.owner == LegacyFlowKey::Unassigned {
+            assert_eq!(archive.unparsed.len(), 2);
+            assert!(main.iter().any(|item| matches!(item, OutputItem::SystemNote { text, .. } if text.contains("invalid retained line"))));
+        }
+        let revisions = main.revisions().to_vec();
+        assert!(!main.sync_view(&view, None).unwrap());
+        assert_eq!(main.revisions(), revisions);
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+}
+
 #[tokio::test]
 async fn live_output_preserves_committed_state_and_each_views_disclosure() {
     use atman_runtime::flow_runtime::{

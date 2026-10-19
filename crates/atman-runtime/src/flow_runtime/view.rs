@@ -25,6 +25,29 @@ pub struct FlowView {
 }
 
 impl FlowView {
+    pub(crate) fn from_archive(
+        transcript: FlowTranscript,
+        execution: atman_rt::FlowInstance<crate::event::AtmanUuid>,
+    ) -> io::Result<Self> {
+        let cursor = transcript
+            .cursor()
+            .cloned()
+            .ok_or_else(|| io::Error::other("archive has no committed cursor"))?;
+        Ok(Self {
+            transcript,
+            snapshot: Some(Arc::new(FlowViewSnapshot {
+                status: InstanceStatus {
+                    execution,
+                    goal: None,
+                    completion: None,
+                    cursor,
+                },
+                planning: Default::default(),
+                pending: Vec::new(),
+            })),
+        })
+    }
+
     pub fn transcript(&self) -> &FlowTranscript {
         &self.transcript
     }

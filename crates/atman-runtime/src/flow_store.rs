@@ -211,7 +211,7 @@ impl FlowTransition {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 enum FlowFact {
     LegacyRecords(Vec<history::LegacyHistoryRecord>),
@@ -553,6 +553,15 @@ fn inspect_registered_flow(
     catalog: &SessionProjection,
     id: &FlowInstanceId,
 ) -> io::Result<FlowInspection> {
+    inspect_registered_flow_with(dir, catalog, id, |_, _| Ok(()))
+}
+
+fn inspect_registered_flow_with(
+    dir: &Path,
+    catalog: &SessionProjection,
+    id: &FlowInstanceId,
+    mut observe: impl FnMut(&CommitReceipt, &[FlowFact]) -> io::Result<()>,
+) -> io::Result<FlowInspection> {
     let registration = catalog
         .flows
         .iter()
@@ -566,7 +575,10 @@ fn inspect_registered_flow(
     let journal = Journal::inspect(
         &dir.join("flows").join(id.to_string()).join("events.jsonl"),
         id.0.0,
-        |receipt, facts| replay.apply(&address, receipt, facts),
+        |receipt, facts| {
+            observe(&receipt, &facts)?;
+            replay.apply(&address, receipt, facts)
+        },
     )?;
     let (descriptor, state, _) = replay
         .projection

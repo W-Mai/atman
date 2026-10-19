@@ -42,20 +42,45 @@ impl super::SessionInspection {
         id: &super::FlowInstanceId,
         mut apply: impl FnMut(CommitReceipt, Vec<FlowUpdate>) -> io::Result<()>,
     ) -> io::Result<crate::event_log::journal::JournalInspection> {
-        if !self.projection.flows.iter().any(|flow| &flow.id == id) {
-            return Err(super::invalid("flow is not registered in this session"));
-        }
-        crate::event_log::journal::Journal::inspect(
-            &self
-                .dir
-                .join("flows")
-                .join(id.to_string())
-                .join("events.jsonl"),
-            id.0.0,
-            |receipt, facts: Vec<FlowFact>| {
-                apply(receipt, facts.into_iter().map(FlowUpdate::from).collect())
+        super::inspect_registered_flow_with(&self.dir, &self.projection, id, |receipt, facts| {
+            apply(
+                receipt.clone(),
+                facts.iter().cloned().map(FlowUpdate::from).collect(),
+            )
+        })
+        .map(|read| read.journal)
+    }
+
+    /// Read a complete archived flow without opening a writer, execution services, or the original source. Incomplete imports and journal tails are rejected; retained malformed source records remain readable.
+    pub fn archived_view(
+        &self,
+        id: &super::FlowInstanceId,
+    ) -> io::Result<crate::flow_runtime::FlowView> {
+        let flow = FlowRef {
+            session_id: self.projection.descriptor.id.into(),
+            instance_id: id.clone(),
+        };
+        let mut transcript = crate::projection::flow::FlowTranscript::new(flow);
+        let read = super::inspect_registered_flow_with(
+            &self.dir,
+            &self.projection,
+            id,
+            |receipt, facts| {
+                transcript.apply(CommittedBatch {
+                    receipt: receipt.clone(),
+                    facts: facts.iter().cloned().map(FlowUpdate::from).collect(),
+                })?;
+                Ok(())
             },
-        )
+        )?;
+        let FlowContent::History(archive) = read.descriptor.content else {
+            return Err(super::invalid("flow is executable, not an archive"));
+        };
+        if read.journal.trailing_bytes != 0 || transcript.entries().len() as u64 != archive.records
+        {
+            return Err(super::invalid("archived flow is incomplete"));
+        }
+        crate::flow_runtime::FlowView::from_archive(transcript, read.state)
     }
 }
 
@@ -216,5 +241,84 @@ impl FlowStore {
             next: page.next,
             has_more: page.has_more,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        event_log::legacy,
+        flow_store::{FlowDescriptor, FlowInstanceId, RuntimeStore, SessionDescriptor},
+    };
+
+    #[test]
+    fn archived_views_validate_facts_and_never_repair_incomplete_history() {
+        for corrupt in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("old.jsonl");
+            std::fs::write(&source, b"invalid\n").unwrap();
+            let old = Uuid::now_v7();
+            let inspected = legacy::inspect(&source, old).unwrap();
+            let runtime = RuntimeStore::open(temp.path()).unwrap();
+            let id = Uuid::now_v7();
+            let mut session = runtime
+                .create_session(SessionDescriptor {
+                    id,
+                    project: None,
+                    configuration: Default::default(),
+                    title: "History".into(),
+                })
+                .unwrap();
+            let instance = FlowInstanceId::now();
+            let mut flow = session
+                .create_flow(FlowDescriptor {
+                    address: FlowRef {
+                        session_id: id.into(),
+                        instance_id: instance.clone(),
+                    },
+                    creation_request: Uuid::now_v7(),
+                    created_by: None,
+                    content: FlowContent::History(history::LegacyArchive {
+                        session_id: old,
+                        source: inspected.source,
+                        owner: legacy::LegacyFlowKey::Unassigned,
+                        records: 1,
+                    }),
+                })
+                .unwrap();
+            let read = RuntimeStore::inspect_session(temp.path(), id).unwrap();
+            assert!(read.archived_view(&instance).is_err());
+            let mut record =
+                history::LegacyHistoryRecord::new(inspected.records[0].clone(), b"invalid\n");
+            let path = flow.dir().join("events.jsonl");
+            if corrupt {
+                record.raw_base64 = "Y29ycnVwdA==".into();
+                // Valid journal framing must not bypass retained-record validation.
+                flow.journal
+                    .inner
+                    .commit(&[FlowFact::LegacyRecords(vec![record])])
+                    .unwrap();
+                assert!(read.inspect_flow_updates(&instance, |_, _| Ok(())).is_err());
+            } else {
+                flow.append_legacy_history(vec![record]).unwrap();
+                assert!(read.archived_view(&instance).is_ok());
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap();
+                file.write_all(b"unfinished journal tail").unwrap();
+                assert!(
+                    read.inspect_flow_updates(&instance, |_, _| Ok(()))
+                        .unwrap()
+                        .trailing_bytes
+                        > 0
+                );
+            }
+            let before = std::fs::read(&path).unwrap();
+            assert!(read.archived_view(&instance).is_err());
+            assert_eq!(std::fs::read(path).unwrap(), before);
+        }
     }
 }
