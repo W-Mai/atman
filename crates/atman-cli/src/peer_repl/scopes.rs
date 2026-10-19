@@ -188,6 +188,39 @@ impl Scopes {
         Ok(())
     }
 
+    pub async fn register_process_watcher(
+        &self,
+        owner: atman_runtime::flow_store::FlowRef,
+        watch: atman_runtime::flow_store::process_watch::ProcessWatch,
+    ) -> Result<()> {
+        self.host
+            .flow(&owner)
+            .await?
+            .watch_process_source(watch, move |actual| {
+                if actual == &owner {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "watcher owner differs from selected flow",
+                    ))
+                }
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn process_watch_sources(
+        &self,
+        owner: &atman_runtime::flow_store::FlowRef,
+    ) -> Result<Vec<atman_runtime::flow_runtime::ProcessWatchSource>> {
+        Ok(self
+            .host
+            .session(owner.session_id.0)?
+            .process_watch_sources(owner.instance_id.clone())
+            .await?)
+    }
+
     pub async fn register_watcher(
         &self,
         owner: atman_runtime::flow_store::FlowRef,

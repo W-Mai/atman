@@ -3484,10 +3484,10 @@ fn dispatch_hub_action(
         }
         crate::flow_hub::Action::RegisterWatcher {
             owner,
-            subscription,
+            registration,
         } => TuiControl::RegisterWatcher {
             owner,
-            subscription,
+            registration,
         },
         crate::flow_hub::Action::Focus(flow) => TuiControl::FocusFlow {
             flow,

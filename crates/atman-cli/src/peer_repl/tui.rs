@@ -549,11 +549,14 @@ impl Workspace {
                             });
                             continue;
                         }
-                        TuiControl::RegisterWatcher { owner, subscription } => {
+                        TuiControl::RegisterWatcher { owner, registration } => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
                                 let result = async {
-                                    scopes.register_watcher(owner.clone(), subscription).await?;
+                                    match registration {
+                                        atman_tui::flow_hub::WatchRegistration::Flow(subscription) => scopes.register_watcher(owner.clone(), subscription).await?,
+                                        atman_tui::flow_hub::WatchRegistration::Process(watch) => scopes.register_process_watcher(owner.clone(), watch).await?,
+                                    }
                                     scopes.browse(atman_tui::flow_hub::HubRequest::Watchers { owner }).await
                                         .context("Registration committed, but reading updated details failed")
                                         .map(Navigation::Catalog)
@@ -738,6 +741,10 @@ impl scopes::Scopes {
             FlowHubPage, HubRequest, PAGE_SIZE, RelationProgress, RelationRange,
         };
         Ok(Box::new(match request {
+            HubRequest::ProcessSources { owner } => {
+                let sources = self.process_watch_sources(&owner).await?;
+                FlowHubPage::ProcessSources { owner, sources }
+            }
             HubRequest::Watchers { owner } => {
                 let inspected = self.catalog.inspect_flow(&owner, |_| Ok(())).await?;
                 FlowHubPage::Watchers(atman_tui::flow_hub::WatchDirectory {

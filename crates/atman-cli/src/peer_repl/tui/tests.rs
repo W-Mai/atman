@@ -419,6 +419,23 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         .await
         .unwrap();
     assert!(matches!(*directory, FlowHubPage::Flows { page, .. } if !page.instances[0].loaded));
+    let process_owner = FlowRef {
+        session_id: ids[0].into(),
+        instance_id: instance.clone(),
+    };
+    let before = host.session(ids[0]).unwrap().observe().await.unwrap();
+    let directory = scopes
+        .browse(HubRequest::ProcessSources {
+            owner: process_owner.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(*directory, FlowHubPage::ProcessSources { owner, sources } if owner == process_owner && sources.is_empty())
+    );
+    let after = host.session(ids[0]).unwrap().observe().await.unwrap();
+    assert_eq!(before.snapshot.cursor, after.snapshot.cursor);
+    assert_eq!(before.loaded.len(), after.loaded.len());
     let watched_owner = FlowRef {
         session_id: ids[1].into(),
         instance_id: instance.clone(),

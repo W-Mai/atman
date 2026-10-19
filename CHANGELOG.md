@@ -28,6 +28,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Process watcher creation** — WatchHub selects running Bash and Terminal resources through the shared source directory. Main and floating views use the same form, exact process identity, keyboard and mouse controls, and acknowledged registration retries.
+
 - **Process observation identity** — Hosts can list live process sources without loading Flow execution and register against an exact process incarnation. Reused handles cannot redirect a selection; retries retain recorded registrations after cancellation or resource loss.
 
 - **WatchHub creation** — Main and floating views can select a source Flow and register final-reply, turn-completion, or instance-closure subscriptions. Shared forms support text matching, delivery mode, optional expiry, keyboard controls, mouse editing, and paste. Failed requests retain their registration identity and deadline for retry.

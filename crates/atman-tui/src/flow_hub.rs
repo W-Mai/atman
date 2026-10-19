@@ -18,6 +18,7 @@ mod focus;
 mod graph;
 pub(crate) use focus::{FocusLinks, NeighborSnapshot};
 mod create;
+pub use create::WatchRegistration;
 mod page;
 mod watch;
 pub use page::{
@@ -37,7 +38,7 @@ pub(crate) enum Action {
     },
     RegisterWatcher {
         owner: atman_runtime::flow_store::FlowRef,
-        subscription: atman_runtime::flow_store::subscription::FlowSubscription,
+        registration: WatchRegistration,
     },
     NewSession,
     OpenManagement,
@@ -326,6 +327,16 @@ impl FlowHub {
             .get(self.selected)
             .map(|index| &self.rows[*index]);
         if let Some(draft) = &mut self.create_watch {
+            if let Some(page::Row {
+                key: page::RowKey::Process(source),
+                title,
+                ..
+            }) = selected
+            {
+                draft.choose_process(source.clone(), title.clone());
+                self.error = None;
+                return Action::None;
+            }
             let action = selected.map_or(Action::None, |row| row.action.clone());
             return match action {
                 Action::Focus(address) => {
@@ -385,7 +396,11 @@ impl FlowHub {
         }
         if matches!(
             self.page,
-            Some(FlowHubPage::Relations { .. } | FlowHubPage::Watchers(_))
+            Some(
+                FlowHubPage::Relations { .. }
+                    | FlowHubPage::Watchers(_)
+                    | FlowHubPage::ProcessSources { .. }
+            )
         ) {
             let step = self.hits.len().max(1);
             if forward
@@ -437,6 +452,19 @@ impl FlowHub {
             }
             if matches!(key, KeyAction::NudgePrefill | KeyAction::OpenRelations) {
                 return Action::None;
+            }
+            if key == KeyAction::CoursePrefill && self.pending.is_none() {
+                let request = if matches!(self.page, Some(FlowHubPage::ProcessSources { .. })) {
+                    HubRequest::Flows {
+                        session: draft.owner.session_id.0,
+                        before: None,
+                    }
+                } else {
+                    HubRequest::ProcessSources {
+                        owner: draft.owner.clone(),
+                    }
+                };
+                return self.create_action(Action::Load(request));
             }
         }
         if self.watch_details.id.is_some() {
@@ -614,11 +642,15 @@ impl FlowHub {
             }
             _ if self.pending.is_some() => Action::None,
             MouseEventKind::Down(MouseButton::Left) if self.graph_button.contains(point) => self
-                .key(if matches!(self.page, Some(FlowHubPage::Watchers(_))) {
-                    KeyAction::CoursePrefill
-                } else {
-                    KeyAction::NudgePrefill
-                }),
+                .key(
+                    if self.create_watch.is_some()
+                        || matches!(self.page, Some(FlowHubPage::Watchers(_)))
+                    {
+                        KeyAction::CoursePrefill
+                    } else {
+                        KeyAction::NudgePrefill
+                    },
+                ),
             MouseEventKind::Down(MouseButton::Left) if self.sessions.contains(point) => self.key(
                 if matches!(self.page, Some(FlowHubPage::Relations { .. })) {
                     KeyAction::CoursePrefill
@@ -717,6 +749,7 @@ impl FlowHub {
         let is_flows = matches!(self.page, Some(FlowHubPage::Flows { .. }));
         let is_relations = matches!(self.page, Some(FlowHubPage::Relations { .. }));
         let is_watchers = matches!(self.page, Some(FlowHubPage::Watchers(_)));
+        let is_processes = matches!(self.page, Some(FlowHubPage::ProcessSources { .. }));
         let picking = self.create_watch.is_some();
         let scoped_links = matches!(
             self.page,
@@ -755,7 +788,7 @@ impl FlowHub {
         } else {
             Rect::default()
         };
-        self.graph_button = if (is_flows || is_relations || is_watchers) && !picking {
+        self.graph_button = if picking || is_flows || is_relations || is_watchers {
             Rect::new(content.x, content.y + 5, width / 2 - 1, 3)
         } else {
             Rect::default()
@@ -794,7 +827,13 @@ impl FlowHub {
             ),
             (
                 self.graph_button,
-                if is_watchers {
+                if picking {
+                    if is_processes {
+                        "\nFlows Ctrl+B"
+                    } else {
+                        "\nProcesses Ctrl+B"
+                    }
+                } else if is_watchers {
                     "\nNew  Ctrl+B"
                 } else if is_relations {
                     if scoped_links {
@@ -825,7 +864,7 @@ impl FlowHub {
             );
         }
         let search_y = content.y
-            + if (is_flows || is_relations || is_watchers) && !picking {
+            + if picking || is_flows || is_relations || is_watchers {
                 8
             } else {
                 4
@@ -935,7 +974,7 @@ impl FlowHub {
             );
             self.hits.push((rect, pos));
         }
-        let total = if is_relations || is_watchers {
+        let total = if is_relations || is_watchers || is_processes {
             self.rows.len()
         } else {
             self.page.as_ref().map_or(0, FlowHubPage::total)
@@ -944,6 +983,13 @@ impl FlowHub {
         let message = self.error.clone().unwrap_or_else(|| {
             if self.pending.is_some() {
                 "Loading…".into()
+            } else if is_processes && total == 0 {
+                "No running Bash/Terminal resources · Ctrl+R refresh".into()
+            } else if is_processes {
+                format!(
+                    "Live resource snapshot · {total} processes · {} matches",
+                    rows.len()
+                )
             } else if is_watchers {
                 format!(
                     "Recorded snapshot · {total} subscriptions · {} matches",
@@ -995,7 +1041,7 @@ impl FlowHub {
         for (rect, label) in [
             (
                 self.previous,
-                if is_relations || is_watchers {
+                if is_relations || is_watchers || is_processes {
                     "\n‹ Earlier PgUp"
                 } else {
                     "\n‹ Previous  PgUp"
@@ -1003,7 +1049,7 @@ impl FlowHub {
             ),
             (
                 self.next,
-                if is_relations || is_watchers {
+                if is_relations || is_watchers || is_processes {
                     if self.page.as_ref().and_then(FlowHubPage::next).is_some() {
                         "\nMore PgDn ›"
                     } else {
@@ -1023,7 +1069,7 @@ impl FlowHub {
         }
         frame.render_widget(
             Paragraph::new(if picking {
-                "↑↓ select · Enter choose · Ctrl+S sessions · Esc back"
+                "↑↓ select · Enter choose · Ctrl+B sources · Esc back"
             } else if is_watchers {
                 "↑↓ select · Enter details · Ctrl+B new · Esc back"
             } else if is_flows {

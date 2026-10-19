@@ -68,6 +68,9 @@ pub struct RelationProgress {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
+    ProcessSources {
+        owner: atman_runtime::flow_store::FlowRef,
+    },
     Watchers {
         owner: atman_runtime::flow_store::FlowRef,
     },
@@ -92,7 +95,7 @@ pub enum HubRequest {
 impl HubRequest {
     pub(super) fn first(&self) -> Self {
         match self {
-            Self::Watchers { .. } => self.clone(),
+            Self::Watchers { .. } | Self::ProcessSources { .. } => self.clone(),
             Self::Sessions { .. } => Self::Sessions { before: None },
             Self::Flows { session, .. } => Self::Flows {
                 session: *session,
@@ -119,6 +122,10 @@ impl HubRequest {
 }
 
 pub enum FlowHubPage {
+    ProcessSources {
+        owner: atman_runtime::flow_store::FlowRef,
+        sources: Vec<atman_runtime::flow_runtime::ProcessWatchSource>,
+    },
     Watchers(super::WatchDirectory),
     Sessions(SessionDirectory),
     Flows {
@@ -180,6 +187,7 @@ impl Endpoint {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum RowKey {
+    Process(atman_runtime::flow_store::process_watch::ProcessSource),
     Watcher {
         owner: atman_runtime::flow_store::FlowRef,
         id: Uuid,
@@ -236,6 +244,7 @@ impl FlowHubPage {
 
     pub fn title(&self) -> &str {
         match self {
+            Self::ProcessSources { .. } => "Processes",
             Self::Watchers(directory) => &directory.title,
             Self::Sessions(_) => "Sessions",
             Self::Flows { title, .. }
@@ -245,6 +254,7 @@ impl FlowHubPage {
     }
     pub fn unit(&self) -> &str {
         match self {
+            Self::ProcessSources { .. } => "processes",
             Self::Watchers(_) => "subscriptions",
             Self::Sessions(_) => "sessions",
             Self::Flows { .. } | Self::LegacyFlows { .. } => "flows",
@@ -253,6 +263,9 @@ impl FlowHubPage {
     }
     pub fn first(&self) -> HubRequest {
         match self {
+            Self::ProcessSources { owner, .. } => HubRequest::ProcessSources {
+                owner: owner.clone(),
+            },
             Self::Watchers(directory) => HubRequest::Watchers {
                 owner: directory.owner.clone(),
             },
@@ -280,7 +293,7 @@ impl FlowHubPage {
     }
     pub fn next(&self) -> Option<HubRequest> {
         match self {
-            Self::Watchers(_) => None,
+            Self::Watchers(_) | Self::ProcessSources { .. } => None,
             Self::Sessions(page) => page.next.clone().map(|before| HubRequest::Sessions {
                 before: Some(before),
             }),
@@ -315,6 +328,7 @@ impl FlowHubPage {
     }
     pub fn total(&self) -> usize {
         match self {
+            Self::ProcessSources { sources, .. } => sources.len(),
             Self::Watchers(directory) => directory.records.len(),
             Self::Sessions(page) => page.total,
             Self::Flows { page, .. } => page.total,
@@ -328,6 +342,15 @@ impl FlowHubPage {
         endpoint: Endpoint,
     ) -> Vec<Row> {
         match self {
+            Self::ProcessSources { sources, .. } => sources
+                .iter()
+                .map(|source| Row {
+                    key: RowKey::Process(source.source.clone()),
+                    title: source.label.clone(),
+                    detail: format!("{} · {:?}", source.source.handle(), source.status),
+                    action: Action::None,
+                })
+                .collect(),
             Self::Watchers(directory) => directory.rows(),
             Self::LegacyFlows { session, flows, .. } => flows
                 .iter()
