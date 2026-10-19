@@ -114,6 +114,7 @@ impl TuiNote {
 
 #[non_exhaustive]
 pub enum TuiControl {
+    EditInbox(Box<atman_runtime::flow_store::inbox::InboxEditRequest>),
     BrowseFlows(flow_hub::HubRequest),
     CancelWatcher {
         owner: atman_runtime::flow_store::FlowRef,
@@ -297,6 +298,10 @@ pub enum TuiCommand {
     /// Returned through the captured flow reply mailbox after the host accepts or rejects input.
     SubmissionResult {
         result: Result<(), String>,
+    },
+    InboxEdited {
+        request_id: uuid::Uuid,
+        result: Result<atman_runtime::event_log::journal::CommitReceipt, String>,
     },
     /// A captured file import returned to the requesting composer without accepting a message.
     AttachmentImported {

@@ -290,10 +290,12 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         // title + N items + 2 for block borders
         (app.pending_injections.len() as u16).min(5) + 3
     };
-    let submission_base_rows: u16 = if app.queued_submissions.is_empty() {
+    let submission_base_rows: u16 = if app.queued_submission_edit.is_some() {
+        11
+    } else if app.queued_submissions.is_empty() {
         0
     } else {
-        (app.queued_submissions.len() as u16).min(5) + 2
+        (app.queued_submissions.len() as u16).min(3) * 3 + 2
     };
     let attachment_rows: u16 = if editor.pending_images().is_empty() {
         0
@@ -387,14 +389,21 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             app.selected_submission
                 .min(app.queued_submissions.len().saturating_sub(1)),
             app.submission_focus,
-            app.session
-                .as_ref()
-                .and_then(|session| session.current_turn())
-                .is_some(),
+            app.queue_active_turn(),
             layout::stacked_rect_width(input_rect.width),
         )
         .len() as u16;
-        let expanded = submission_base_rows.saturating_add(reason_rows);
+        let footer_rows = if app.submission_focus
+            && layout::stacked_rect_width(input_rect.width) < 80
+            && app.queued_submission_edit.is_none()
+        {
+            3
+        } else {
+            0
+        };
+        let expanded = submission_base_rows
+            .saturating_add(reason_rows)
+            .saturating_add(footer_rows);
         let base_y = approvals_rect
             .or(quote_rect)
             .or(attachments_rect)
@@ -956,12 +965,10 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                 selected: app.selected_submission,
                 focused: app.submission_focus,
                 hovered: app.hovered_submission,
+                hovered_action: app.hovered_submission_action,
                 edit: app.queued_submission_edit.as_ref(),
-                active_turn: app
-                    .session
-                    .as_ref()
-                    .and_then(|session| session.current_turn())
-                    .is_some(),
+                active_turn: app.queue_active_turn(),
+                saving: app.queue_saving(),
             },
         );
     } else {

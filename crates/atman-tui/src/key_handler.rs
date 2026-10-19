@@ -926,7 +926,9 @@ pub(crate) fn handle_key(
         handle_submission_queue_key(&action, app, control_tx);
         return;
     }
-    if matches!(action, KeyAction::BackTab) && !app.queued_submissions.is_empty() {
+    if matches!(action, KeyAction::BackTab)
+        && (!app.queued_submissions.is_empty() || app.queued_submission_edit.is_some())
+    {
         app.submission_focus = true;
         app.selected_submission = app
             .selected_submission
@@ -1566,69 +1568,7 @@ pub(crate) fn dispatch_submission_queue_action(
     action: crate::submission_queue::QueueAction,
     control_tx: Option<&crate::ControlSender>,
 ) {
-    let Some(submission) = app.queued_submissions.get(index).cloned() else {
-        return;
-    };
-    app.selected_submission = index;
-    app.submission_focus = true;
-    match action {
-        crate::submission_queue::QueueAction::Insert => {
-            let reason = submission.insert_block_reason.clone().or_else(|| {
-                app.session
-                    .as_ref()
-                    .and_then(|session| session.current_turn())
-                    .is_none()
-                    .then(|| "no active flow".to_owned())
-            });
-            if let Some(reason) = reason {
-                app.push_toast(
-                    reason,
-                    app::NoteLevel::Warn,
-                    std::time::Duration::from_secs(3),
-                    app::ToastPosition::TopRight,
-                );
-                return;
-            }
-            if let Some(tx) = control_tx {
-                let _ = tx.send(TuiControl::InsertQueuedSubmission {
-                    id: submission.id,
-                    expected_revision: submission.revision,
-                });
-            }
-        }
-        crate::submission_queue::QueueAction::Edit => {
-            let mut editor = InputEditor::default();
-            editor.replace_with(&submission.text);
-            app.queued_submission_edit = Some(crate::app::QueuedSubmissionEdit {
-                id: submission.id,
-                revision: submission.revision,
-                editor,
-            });
-        }
-        crate::submission_queue::QueueAction::MoveUp
-        | crate::submission_queue::QueueAction::MoveDown => {
-            let direction = if matches!(action, crate::submission_queue::QueueAction::MoveUp) {
-                atman_runtime::SubmissionMove::Up
-            } else {
-                atman_runtime::SubmissionMove::Down
-            };
-            if let Some(tx) = control_tx {
-                let _ = tx.send(TuiControl::MoveQueuedSubmission {
-                    id: submission.id,
-                    expected_revision: submission.revision,
-                    direction,
-                });
-            }
-        }
-        crate::submission_queue::QueueAction::Delete => {
-            if let Some(tx) = control_tx {
-                let _ = tx.send(TuiControl::DeleteQueuedSubmission {
-                    id: submission.id,
-                    expected_revision: submission.revision,
-                });
-            }
-        }
-    }
+    app.queue_action(index, action, control_tx);
 }
 
 fn handle_submission_queue_key(
@@ -1636,46 +1576,36 @@ fn handle_submission_queue_key(
     app: &mut AppState,
     control_tx: Option<&crate::ControlSender>,
 ) {
-    if let Some(edit) = app.queued_submission_edit.as_mut() {
+    if app.queued_submission_edit.is_some() {
         match action {
-            KeyAction::Submit => {
-                let text = edit.editor.buf().trim().to_owned();
-                if text.is_empty()
-                    && !app.queued_submissions.iter().any(|submission| {
-                        submission.id == edit.id
-                            && submission
-                                .presentation
-                                .as_ref()
-                                .and_then(|value| value.quote.as_ref())
-                                .is_some()
-                    })
-                {
-                    app.push_toast(
-                        "queued message cannot be empty",
-                        app::NoteLevel::Warn,
-                        std::time::Duration::from_secs(3),
-                        app::ToastPosition::TopRight,
-                    );
-                } else if let Some(tx) = control_tx {
-                    let _ = tx.send(TuiControl::EditQueuedSubmission {
-                        id: edit.id.clone(),
-                        expected_revision: edit.revision,
-                        text,
-                    });
-                    app.queued_submission_edit = None;
-                }
-            }
+            KeyAction::Submit | KeyAction::Save => app.save_queue_edit(control_tx),
             KeyAction::Escape => app.queued_submission_edit = None,
             KeyAction::Tab | KeyAction::BackTab => {
-                app.queued_submission_edit = None;
                 app.submission_focus = false;
             }
-            _ => {
-                edit.editor.handle_key(action);
+            _ if !app.queue_saving() => {
+                let width = app
+                    .submission_queue_hitmap
+                    .edit_area
+                    .map_or(1, |(rect, _)| rect.width as usize);
+                let editor = &mut app.queued_submission_edit.as_mut().unwrap().editor;
+                match action {
+                    KeyAction::HistoryUp => {
+                        editor.move_line_up_visual(width);
+                    }
+                    KeyAction::HistoryDown => {
+                        editor.move_line_down_visual(width);
+                    }
+                    _ => {
+                        editor.handle_key(action);
+                    }
+                }
             }
+            _ => {}
         }
         return;
     }
+
     match action {
         KeyAction::Tab | KeyAction::BackTab | KeyAction::Escape => {
             app.submission_focus = false;
@@ -2885,7 +2815,13 @@ mod tests {
             .unwrap();
         let cancel = session.flow_cancel_token();
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
-        state.app.queued_submissions = session.queued_submissions();
+        state.app.sync_queue(
+            session
+                .queued_submissions()
+                .into_iter()
+                .map(crate::submission_queue::QueueItem::Session)
+                .collect(),
+        );
         let mut editor = InputEditor::default();
         let mut interrupt_prompt = None;
         let (tx, mut rx) = crate::ControlSender::channel();
@@ -2934,7 +2870,13 @@ mod tests {
             .unwrap();
         let cancel = session.flow_cancel_token();
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
-        state.app.queued_submissions = session.queued_submissions();
+        state.app.sync_queue(
+            session
+                .queued_submissions()
+                .into_iter()
+                .map(crate::submission_queue::QueueItem::Session)
+                .collect(),
+        );
         state.app.submission_focus = true;
         let mut editor = InputEditor::default();
         let mut interrupt_prompt = None;

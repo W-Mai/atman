@@ -1,9 +1,14 @@
 #[cfg(test)]
 use atman_rt::Value as CoreValue;
+mod model;
+#[cfg(test)]
+#[path = "submission_queue/tests.rs"]
+mod ownership_tests;
+pub use model::QueueItem;
+pub(crate) use model::QueueRequest;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
+use ratatui::style::Style;
+use ratatui::widgets::{Block, Paragraph, Wrap};
 
 #[cfg(test)]
 type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
@@ -15,6 +20,8 @@ pub enum QueueAction {
     MoveUp,
     MoveDown,
     Delete,
+    Save,
+    Cancel,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -22,18 +29,21 @@ pub struct QueueHitMap {
     pub rows: Vec<(usize, Rect)>,
     pub actions: Vec<(usize, QueueAction, Rect)>,
     pub edit_origin: Option<(u16, u16)>,
+    pub edit_area: Option<(Rect, usize)>,
 }
 
 pub struct QueueRenderState<'a> {
     pub selected: usize,
     pub focused: bool,
     pub hovered: Option<usize>,
+    pub hovered_action: Option<QueueAction>,
     pub edit: Option<&'a crate::app::QueuedSubmissionEdit>,
     pub active_turn: bool,
+    pub saving: bool,
 }
 
 pub(crate) fn unavailable_lines(
-    submissions: &[atman_runtime::QueuedSubmissionView],
+    submissions: &[QueueItem],
     selected: usize,
     focused: bool,
     active_turn: bool,
@@ -42,10 +52,10 @@ pub(crate) fn unavailable_lines(
     let reason = focused
         .then(|| submissions.get(selected))
         .flatten()
+        .filter(|submission| submission.editable())
         .and_then(|submission| {
             submission
-                .insert_block_reason
-                .as_deref()
+                .insert_block_reason()
                 .or((!active_turn).then_some("no active flow"))
         });
     reason.map_or_else(Vec::new, |reason| {
@@ -73,175 +83,267 @@ impl QueueHitMap {
 pub fn render(
     f: &mut ratatui::Frame,
     area: Rect,
-    submissions: &[atman_runtime::QueuedSubmissionView],
+    submissions: &[QueueItem],
     state: QueueRenderState<'_>,
 ) -> QueueHitMap {
     let QueueRenderState {
         selected,
         focused,
         hovered,
+        hovered_action,
         edit,
         active_turn,
+        saving,
     } = state;
-    if submissions.is_empty() || area.height < 3 {
-        return QueueHitMap::default();
+    let mut hitmap = QueueHitMap::default();
+    if (submissions.is_empty() && edit.is_none()) || area.height < 3 || area.width < 8 {
+        return hitmap;
     }
     let t = crate::theme::theme();
-    let border = if focused { t.accent } else { t.subtle_fg };
-    let selected = selected.min(submissions.len().saturating_sub(1));
-    let reason_lines = unavailable_lines(submissions, selected, focused, active_turn, area.width);
-    let show_reason =
-        !reason_lines.is_empty() && area.height.saturating_sub(2) as usize > reason_lines.len();
-    let hint = if focused && show_reason {
-        " Enter/e edit · ↑/↓ select · Del remove · Tab input "
-    } else if focused && !reason_lines.is_empty() {
-        " i unavailable · click insert for reason "
-    } else if focused {
-        " i insert (flow settings) · Enter/e edit · ↑/↓ select · Del remove · Tab input "
+    f.render_widget(
+        Block::default().style(Style::default().bg(t.work_bg.into())),
+        area,
+    );
+    let inner = Rect::new(
+        area.x + 1,
+        area.y + 1,
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    let title = if edit.is_some() {
+        " Edit queued input ".to_owned()
     } else {
-        " Shift+Tab focus "
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(border.into()))
-        .title(Span::styled(
-            format!(" next · {} ", submissions.len()),
-            Style::default()
-                .fg(t.accent.into())
-                .add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(
-            Line::from(Span::styled(hint, Style::default().fg(t.subtle_fg.into()))).right_aligned(),
+        format!(
+            " Inbox · {} · {} / {} ",
+            submissions.len(),
+            selected.saturating_add(1).min(submissions.len()),
+            submissions.len()
         )
-        .padding(Padding::horizontal(1));
-    let inner = block.inner(area);
-    let reason_rows = if show_reason { reason_lines.len() } else { 0 };
-    let visible = inner.height as usize - reason_rows;
+    };
+    f.render_widget(
+        Paragraph::new(crate::width::truncate(&title, area.width as usize))
+            .style(Style::default().fg(t.accent.into())),
+        Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1),
+    );
+    if let Some(edit) = edit {
+        let error = edit.error.as_deref().unwrap_or("");
+        let error_lines = crate::width::word_wrap(error, inner.width as usize);
+        let error_height = if error.is_empty() {
+            0
+        } else {
+            error_lines
+                .len()
+                .min(3)
+                .min(inner.height.saturating_sub(4) as usize) as u16
+        };
+        let button_height = 3.min(inner.height.saturating_sub(error_height).saturating_sub(1));
+        let editor_height = inner
+            .height
+            .saturating_sub(button_height + error_height)
+            .max(1);
+        let text_area = Rect::new(
+            inner.x + 2,
+            inner.y,
+            inner.width.saturating_sub(4).max(1),
+            editor_height,
+        );
+        let width = text_area.width as usize;
+        let (row, col) =
+            crate::input::wrapped_cursor_position(edit.editor.buf(), edit.editor.cursor(), width);
+        let scroll = row.saturating_sub(editor_height.saturating_sub(1) as usize);
+        f.render_widget(
+            Paragraph::new(edit.editor.buf())
+                .wrap(Wrap { trim: false })
+                .scroll((scroll.min(u16::MAX as usize) as u16, 0))
+                .style(
+                    Style::default()
+                        .fg(t.heading.into())
+                        .bg(t.work_detail_bg.into()),
+                ),
+            text_area,
+        );
+        hitmap.edit_area = Some((text_area, scroll));
+        hitmap.edit_origin = Some((
+            text_area.x + col.min(width.saturating_sub(1)) as u16,
+            text_area.y + row.saturating_sub(scroll) as u16,
+        ));
+        let y = text_area.bottom();
+        for (index, line) in error_lines.iter().take(error_height as usize).enumerate() {
+            f.render_widget(
+                Paragraph::new(line.as_str()).style(Style::default().fg(t.subtle_fg.into())),
+                Rect::new(inner.x, y + index as u16, inner.width, 1),
+            );
+        }
+        let buttons_y = y + error_height;
+        let half = inner.width.saturating_sub(1) / 2;
+        for (action, label, x, width) in [
+            (
+                QueueAction::Save,
+                if saving {
+                    "Saving…"
+                } else if half < 12 {
+                    "Save ^S"
+                } else if half < 20 {
+                    "Save Ctrl+S"
+                } else {
+                    "Save  Ctrl+S / Enter"
+                },
+                inner.x,
+                half,
+            ),
+            (
+                QueueAction::Cancel,
+                "Cancel  Esc",
+                inner.x + half + 1,
+                inner.width.saturating_sub(half + 1),
+            ),
+        ] {
+            if button_height == 0 || width == 0 {
+                continue;
+            }
+            let rect = Rect::new(x, buttons_y, width, button_height);
+            f.render_widget(
+                Block::default().style(Style::default().bg(if hovered_action == Some(action) {
+                    t.work_hover_bg.into()
+                } else {
+                    t.work_detail_bg.into()
+                })),
+                rect,
+            );
+            f.render_widget(
+                Paragraph::new(crate::width::truncate(label, width as usize))
+                    .centered()
+                    .style(Style::default().fg(t.tinted_fg.into())),
+                Rect::new(x, buttons_y + button_height / 2, width, 1),
+            );
+            hitmap.actions.push((selected, action, rect));
+        }
+        return hitmap;
+    }
+    let selected = selected.min(submissions.len().saturating_sub(1));
+    let reason = unavailable_lines(submissions, selected, focused, active_turn, inner.width);
+    let footer_rows = if focused && submissions[selected].editable() && area.width < 80 {
+        3.min(inner.height.saturating_sub(1))
+    } else {
+        0
+    };
+    let reason_rows = reason
+        .len()
+        .min(inner.height.saturating_sub(footer_rows + 1) as usize);
+    let list_height = inner
+        .height
+        .saturating_sub(footer_rows + reason_rows as u16);
+    let visible = (list_height / 3).max(1) as usize;
     let start = selected
         .saturating_sub(visible.saturating_sub(1))
         .min(submissions.len().saturating_sub(visible));
     let end = (start + visible).min(submissions.len());
-    let mut lines = Vec::with_capacity(visible);
-    let mut hitmap = QueueHitMap::default();
-
     for (row, index) in (start..end).enumerate() {
-        let submission = &submissions[index];
+        let item = &submissions[index];
         let active = focused && index == selected;
-        let hovered = hovered == Some(index);
-        let row_bg = if active || hovered {
-            t.work_hover_bg.into()
-        } else {
-            ratatui::style::Color::Reset
-        };
-        let marker = if active { "●" } else { "○" };
-        let editing = edit.filter(|editing| editing.id == submission.id);
-        let mut text = editing
-            .map(|editing| editing.editor.buf())
-            .unwrap_or(&submission.text)
-            .replace(['\n', '\r'], " ");
-        if let Some(quote) = submission
-            .presentation
-            .as_ref()
-            .and_then(|value| value.quote.as_ref())
-        {
-            let preview = quote.text.lines().next().unwrap_or_default();
-            if text.trim().is_empty() {
-                text = format!("quote: {preview}");
-            } else {
-                text = format!("{text}  · quote: {preview}");
-            }
-        }
-        let prefix = format!(" {marker} {}. ", index + 1);
-        let actions = if active && edit.is_none() {
-            "  insert  edit  ↑  ↓  delete "
+        let bg = if hovered == Some(index) {
+            t.work_hover_bg
         } else if active {
-            "  Enter save · Esc cancel "
+            t.work_detail_bg
         } else {
-            ""
+            t.work_bg
         };
-        let text_width = inner
-            .width
-            .saturating_sub(crate::width::width(&prefix) as u16)
-            .saturating_sub(crate::width::width(actions) as u16) as usize;
-        let (display_text, edit_cursor_col) = if let Some(editing) = editing {
-            let cursor_col = editing.editor.cursor_display_col();
-            let offset = cursor_col.saturating_sub(text_width.saturating_sub(1));
-            (
-                crate::width::trim_display_offset(&text, offset, text_width),
-                Some(cursor_col.saturating_sub(offset)),
-            )
-        } else {
-            (crate::width::truncate(&text, text_width), None)
-        };
-        let mut spans = vec![
-            Span::styled(
-                prefix,
-                Style::default()
-                    .fg(if active { t.accent } else { t.subtle_fg }.into())
-                    .bg(row_bg),
-            ),
-            Span::styled(
-                crate::width::pad_right(&display_text, text_width),
-                Style::default()
-                    .fg(if active { t.heading } else { t.tinted_fg }.into())
-                    .bg(row_bg)
-                    .add_modifier(if active {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-            ),
-        ];
-        if !actions.is_empty() {
-            spans.push(Span::styled(
-                actions,
-                Style::default().fg(t.subtle_fg.into()).bg(row_bg),
-            ));
+        let rect = Rect::new(
+            inner.x,
+            inner.y + row as u16 * 3,
+            inner.width,
+            3.min(list_height.saturating_sub(row as u16 * 3)),
+        );
+        f.render_widget(Block::default().style(Style::default().bg(bg.into())), rect);
+        if active {
+            f.render_widget(
+                Paragraph::new("▌\n▌\n▌").style(Style::default().fg(t.accent.into()).bg(bg.into())),
+                Rect::new(rect.x, rect.y, 1, rect.height),
+            );
         }
-        lines.push(Line::from(spans));
-
-        let row_rect = Rect::new(inner.x, inner.y + row as u16, inner.width, 1);
-        hitmap.rows.push((index, row_rect));
-        if active && edit.is_none() {
-            let labels = [
-                (QueueAction::Insert, "insert"),
-                (QueueAction::Edit, "edit"),
-                (QueueAction::MoveUp, "↑"),
-                (QueueAction::MoveDown, "↓"),
-                (QueueAction::Delete, "delete"),
-            ];
-            let mut x = inner.x
-                + inner
-                    .width
-                    .saturating_sub(crate::width::width(actions) as u16);
-            for (action, label) in labels {
-                x = x.saturating_add(2);
-                let width = crate::width::width(label) as u16;
-                hitmap
-                    .actions
-                    .push((index, action, Rect::new(x, row_rect.y, width, 1)));
-                x = x.saturating_add(width);
+        let actions: &[(QueueAction, &str)] = if active && item.editable() {
+            &[
+                (QueueAction::Insert, "i insert"),
+                (QueueAction::Edit, "e edit"),
+                (QueueAction::MoveUp, "Ctrl↑"),
+                (QueueAction::MoveDown, "Ctrl↓"),
+                (QueueAction::Delete, "Del"),
+            ]
+        } else {
+            &[]
+        };
+        let action_width: usize = actions
+            .iter()
+            .map(|(_, label)| crate::width::width(label) + 2)
+            .sum();
+        let show_actions = area.width >= 80 && action_width + 20 < rect.width as usize;
+        let body_width = rect
+            .width
+            .saturating_sub(4 + if show_actions { action_width as u16 } else { 0 });
+        let text = format!(
+            "{} · {}",
+            item.label(),
+            item.text().replace(['\n', '\r'], " ")
+        );
+        f.render_widget(
+            Paragraph::new(crate::width::truncate(&text, body_width as usize))
+                .style(Style::default().fg(t.tinted_fg.into()).bg(bg.into())),
+            Rect::new(rect.x + 2, rect.y + rect.height / 2, body_width, 1),
+        );
+        hitmap.rows.push((index, rect));
+        if show_actions {
+            let mut x = rect.right().saturating_sub(action_width as u16);
+            for &(action, label) in actions {
+                let width = (crate::width::width(label) + 2) as u16;
+                let button = Rect::new(x, rect.y, width, rect.height);
+                f.render_widget(
+                    Paragraph::new(label)
+                        .centered()
+                        .style(Style::default().fg(t.subtle_fg.into()).bg(bg.into())),
+                    Rect::new(x, rect.y + rect.height / 2, width, 1),
+                );
+                hitmap.actions.push((index, action, button));
+                x += width;
+            }
+        } else if active && footer_rows > 0 {
+            let labels = ["i", "e", "^↑", "^↓", "Del"];
+            let width = inner.width / 5;
+            for (column, &(action, label)) in actions.iter().enumerate() {
+                let x = inner.x + column as u16 * width;
+                let button = Rect::new(x, inner.bottom() - footer_rows, width, footer_rows);
+                let label = if width < 10 { labels[column] } else { label };
+                f.render_widget(
+                    Block::default().style(Style::default().bg(t.work_detail_bg.into())),
+                    button,
+                );
+                f.render_widget(
+                    Paragraph::new(label)
+                        .centered()
+                        .style(Style::default().fg(t.subtle_fg.into())),
+                    Rect::new(x, button.y + button.height / 2, width, 1),
+                );
+                hitmap.actions.push((index, action, button));
             }
         }
-        if active && let Some(cursor_col) = edit_cursor_col {
-            hitmap.edit_origin = Some((
-                inner.x
-                    + crate::width::width(&format!(" {marker} {}. ", index + 1)) as u16
-                    + cursor_col.min(u16::MAX as usize) as u16,
-                row_rect.y,
-            ));
-        }
     }
-    if reason_rows > 0 {
-        lines.extend(reason_lines.into_iter().map(|line| {
-            Line::from(Span::styled(
-                format!("│ {line}"),
-                Style::default().fg(t.subtle_fg.into()),
-            ))
-        }));
+    for (index, line) in reason.iter().take(reason_rows).enumerate() {
+        f.render_widget(
+            Paragraph::new(line.as_str()).style(Style::default().fg(t.subtle_fg.into())),
+            Rect::new(
+                inner.x,
+                inner.bottom() - footer_rows - reason_rows as u16 + index as u16,
+                inner.width,
+                1,
+            ),
+        );
     }
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    if !focused {
+        f.render_widget(
+            Paragraph::new(" Shift+Tab focus · click to select ")
+                .style(Style::default().fg(t.subtle_fg.into())),
+            Rect::new(inner.x, area.bottom() - 1, inner.width, 1),
+        );
+    }
     hitmap
 }
 
@@ -275,7 +377,11 @@ mod tests {
                 atman_runtime::message::MessageOrigin::User,
             )
             .unwrap();
-        let submissions = session.queued_submissions();
+        let submissions: Vec<_> = session
+            .queued_submissions()
+            .into_iter()
+            .map(QueueItem::Session)
+            .collect();
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 6)).expect("terminal");
         let mut hitmap = QueueHitMap::default();
@@ -289,8 +395,10 @@ mod tests {
                         selected: 0,
                         focused: true,
                         hovered: None,
+                        hovered_action: None,
                         edit: None,
                         active_turn: true,
+                        saving: false,
                     },
                 );
             })
@@ -317,7 +425,11 @@ mod tests {
                 atman_runtime::message::MessageOrigin::User,
             )
             .unwrap();
-        let submissions = session.queued_submissions();
+        let submissions: Vec<_> = session
+            .queued_submissions()
+            .into_iter()
+            .map(QueueItem::Session)
+            .collect();
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 5)).unwrap();
         terminal
@@ -330,8 +442,10 @@ mod tests {
                         selected: 0,
                         focused: true,
                         hovered: None,
+                        hovered_action: None,
                         edit: None,
                         active_turn: true,
+                        saving: false,
                     },
                 );
             })

@@ -30,6 +30,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Inbox controls in conversation views** — Main and floating views share pending-input editing, insertion, reordering, and cancellation. Saves retain quotes and attachments, wait for durable acknowledgement, and preserve failed drafts. Runtime notifications remain read-only; queue editors support multiline cursor placement and keyboard or mouse saving.
+
 - **Inbox host controls** — Pending-input edits share the instance owner and view snapshot. Direct insertion checks the active invocation's settings; image input waits for a capable model call. Receipt retries do not consume input or trigger another scheduling notification.
 
 - **Durable inbox editing** — Storage supports versioned replacement, ordering, and cancellation of pending user input. Edits preserve original delivery receipts and invocation settings, reject active reservations and stale revisions, and replay atomically after restart.

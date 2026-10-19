@@ -321,6 +321,19 @@ impl AppState {
         let output = self.session.as_ref().map(|session| session.output_store());
         let before = self.items.revision_clock();
         self.items.sync_content(view, output.as_deref())?;
+        if let Some(snapshot) = self.items.snapshot() {
+            let flow = snapshot.status.execution.address().clone();
+            let items = snapshot
+                .pending
+                .iter()
+                .cloned()
+                .map(|entry| crate::submission_queue::QueueItem::Instance {
+                    flow: flow.clone(),
+                    entry: Box::new(entry),
+                })
+                .collect();
+            self.sync_queue(items);
+        }
         if self.startup_card.is_some()
             && self.items.iter().any(|item| {
                 matches!(

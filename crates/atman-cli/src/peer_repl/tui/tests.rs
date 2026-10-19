@@ -1487,6 +1487,99 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         .await
         .unwrap();
     assert_eq!(worker.snapshot().await.unwrap().pending.len(), 1);
+    let pending = expect_instance(source.refresh().await.unwrap())
+        .snapshot()
+        .pending[0]
+        .clone();
+    let edit = atman_runtime::flow_store::inbox::InboxEditRequest {
+        id: Uuid::new_v4(),
+        sender: SenderIdentity::User(USER),
+        message: pending.envelope.id,
+        expected: pending.revision,
+        change: atman_runtime::flow_store::inbox::InboxChange::Replace {
+            content: atman_runtime::flow_store::inbox::UserContent {
+                text: "edited queued input".into(),
+                images: vec![],
+                presentation: None,
+            },
+            delivery: atman_runtime::flow_store::inbox::DeliveryMode::NextTurn,
+        },
+    };
+    let (floating_commands, mut floating_rx) = mpsc::unbounded_channel();
+    let mut floating = TuiHandle::from_flow(
+        &worker,
+        ViewBinding {
+            view_id: Uuid::new_v4(),
+            revision: 1,
+            flow: address.clone().into(),
+        },
+        floating_commands,
+        attachment.config.clone(),
+    )
+    .await
+    .unwrap();
+    let mut receipt = None;
+    // Both surfaces submit the same durable operation through their own reply mailbox.
+    for is_floating in [false, true] {
+        let (control, incoming, replies) = if is_floating {
+            (
+                floating.control_tx.as_ref().unwrap(),
+                &mut floating_rx,
+                floating.control_reply_rx.as_mut().unwrap(),
+            )
+        } else {
+            (sender, &mut commands_rx, &mut *replies)
+        };
+        let ticket = control
+            .send_tracked(TuiControl::EditInbox(Box::new(edit.clone())))
+            .unwrap()
+            .unwrap();
+        let bound = incoming.recv().await.unwrap();
+        attachment
+            .tui_control(
+                &worker,
+                bound.ticket.request_id,
+                bound.command,
+                &bound.replies,
+                &forms,
+            )
+            .await
+            .unwrap();
+        let reply = replies.recv().await.unwrap();
+        assert_eq!(reply.ticket, ticket);
+        let TuiCommand::InboxEdited { request_id, result } = reply.command else {
+            panic!("missing edit receipt")
+        };
+        assert_eq!(request_id, edit.id);
+        let committed = result.unwrap();
+        if let Some(previous) = receipt.replace(committed.clone()) {
+            assert_eq!(previous, committed);
+        }
+        let view = expect_instance(source.refresh().await.unwrap());
+        assert_eq!(view.snapshot().pending[0].revision, committed);
+        assert_eq!(view.snapshot().pending[0].acceptance, pending.acceptance);
+        assert_eq!(worker.state().await.unwrap().pauses().len(), 1);
+    }
+    let mut forged = edit.clone();
+    forged.sender = SenderIdentity::User(Uuid::new_v4());
+    sender
+        .send(TuiControl::EditInbox(Box::new(forged)))
+        .unwrap();
+    let bound = commands_rx.recv().await.unwrap();
+    attachment
+        .tui_control(
+            &worker,
+            bound.ticket.request_id,
+            bound.command,
+            &bound.replies,
+            &forms,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        replies.recv().await.unwrap().command,
+        TuiCommand::InboxEdited { result: Err(_), .. }
+    ));
     attachment.command(&worker, ":resume").await.unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -1501,7 +1594,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         .unwrap();
     assert!(model.snapshot().unwrap().pending.is_empty());
     assert!(model.iter().any(
-        |item| matches!(item, atman_tui::app::OutputItem::AssistantMd { md, .. } if md == "queued")
+        |item| matches!(item, atman_tui::app::OutputItem::AssistantMd { md, .. } if md == "edited queued input")
     ));
 
     let image_path = dir.path().join("inline.png");

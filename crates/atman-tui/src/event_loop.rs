@@ -132,7 +132,13 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
         app.app.trust.theme = theme;
     }
     if let Some(rx) = handle.queued_submission_rx.as_ref() {
-        app.app.queued_submissions = rx.borrow().clone();
+        app.app.sync_queue(
+            rx.borrow()
+                .iter()
+                .cloned()
+                .map(crate::submission_queue::QueueItem::Session)
+                .collect(),
+        );
     }
     if let Some(reader) = handle.flow_view.as_mut() {
         app.app.sync_flow_view(reader.next().await?)?;
@@ -431,7 +437,7 @@ pub(crate) async fn run_frames(
                     continue;
                 }
                 if persistent {
-                    let shortcuts = app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none();
+                    let shortcuts = app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none() && !app.app.submission_focus;
                     if let Some(Ok(event)) = &key {
                         let result = match views.event(event, shortcuts) {
                             views::Action::Pass => Ok(true),
@@ -447,7 +453,7 @@ pub(crate) async fn run_frames(
                         }
                     }
                     let escape = matches!(&key, Some(Ok(CtEvent::Key(key))) if map_key(*key) == KeyAction::Escape)
-                        && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none();
+                        && shortcuts;
                     let mut clicked = false;
                     if let Some(Ok(CtEvent::Mouse(mouse))) = &key {
                         if app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
@@ -620,8 +626,11 @@ pub(crate) async fn run_frames(
                                 handle.control_tx.as_ref(),
                             );
                             if !paste_consumed {
-                                if let Some(edit) = app.app.queued_submission_edit.as_mut() {
-                                    edit.editor.insert_str(&s);
+                                let saving = app.app.queue_saving();
+                                if app.app.submission_focus && let Some(edit) = app.app.queued_submission_edit.as_mut() {
+                                    if !saving {
+                                        edit.editor.insert_str(&s);
+                                    }
                                 } else {
                                     editor.ingest_paste(&s);
                                     interrupt_prompt = None;
@@ -712,6 +721,21 @@ pub(crate) async fn run_frames(
                                     interrupt_prompt = None;
                                     break;
                                 }
+                                if let Some((rect, scroll)) = app.app.submission_queue_hitmap.edit_area
+                                    && rect_contains(rect, me.column, me.row)
+                                    && let Some(edit) = &mut app.app.queued_submission_edit
+                                {
+                                    let cursor = crate::input::cursor_from_wrapped(
+                                        edit.editor.buf(),
+                                        scroll + me.row.saturating_sub(rect.y) as usize,
+                                        me.column.saturating_sub(rect.x) as usize,
+                                        rect.width as usize,
+                                    );
+                                    edit.editor.set_cursor(cursor);
+                                    app.app.submission_focus = true;
+                                    interrupt_prompt = None;
+                                    break;
+                                }
                                 if let Some(index) = app
                                     .app
                                     .submission_queue_hitmap
@@ -719,7 +743,6 @@ pub(crate) async fn run_frames(
                                 {
                                     app.app.selected_submission = index;
                                     app.app.submission_focus = true;
-                                    app.app.queued_submission_edit = None;
                                     interrupt_prompt = None;
                                     break;
                                 }
@@ -752,7 +775,6 @@ pub(crate) async fn run_frames(
                                 );
                                 editor.set_cursor(pos);
                                 app.app.submission_focus = false;
-                                app.app.queued_submission_edit = None;
                             } else if let MouseEventKind::Down(MouseButton::Left) = me.kind {
                                 let topmost = app.wm
                                     .hit_test_panel(me.column, me.row)
@@ -1404,6 +1426,7 @@ pub(crate) async fn run_frames(
                                 app.wm.interaction.drag_target = None;
                                 app.wm.interaction.resize_target = None;
                             } else if let MouseEventKind::Moved = me.kind {
+                                app.app.hovered_submission_action = app.app.submission_queue_hitmap.action_at(me.column, me.row).map(|(_, action)| action);
                                 app.app.hovered_submission = app
                                     .app
                                     .submission_queue_hitmap
@@ -1803,35 +1826,7 @@ pub(crate) async fn run_frames(
             }
             _ = wait_queued_submission_change(handle.queued_submission_rx.as_mut()) => {
                 if let Some(rx) = handle.queued_submission_rx.as_mut() {
-                    let selected_id = app
-                        .app
-                        .queued_submissions
-                        .get(app.app.selected_submission)
-                        .map(|item| item.id.clone());
-                    app.app.queued_submissions = rx.borrow().clone();
-                    if app.app.queued_submissions.is_empty() {
-                        app.app.submission_focus = false;
-                        app.app.selected_submission = 0;
-                        app.app.queued_submission_edit = None;
-                    } else {
-                        app.app.selected_submission = selected_id
-                            .and_then(|id| {
-                                app.app
-                                    .queued_submissions
-                                    .iter()
-                                    .position(|item| item.id == id)
-                            })
-                            .unwrap_or_else(|| {
-                                app.app
-                                    .selected_submission
-                                    .min(app.app.queued_submissions.len() - 1)
-                            });
-                        if app.app.queued_submission_edit.as_ref().is_some_and(|edit| {
-                            !app.app.queued_submissions.iter().any(|item| item.id == edit.id)
-                        }) {
-                            app.app.queued_submission_edit = None;
-                        }
-                    }
+                    app.app.sync_queue(rx.borrow().iter().cloned().map(crate::submission_queue::QueueItem::Session).collect());
                     app.app.mark_visual_dirty();
                 }
             }
@@ -1958,6 +1953,9 @@ fn apply_view_command(
         TuiCommand::FlowCatalog { .. }
         | TuiCommand::FocusFlow { .. }
         | TuiCommand::FlowResolved { .. } => {}
+        TuiCommand::InboxEdited { request_id, result } => {
+            app.app.queue_result(ticket, request_id, result)
+        }
         TuiCommand::SubmissionResult { result } => {
             app.app.submission_result(editor, ticket, result);
         }

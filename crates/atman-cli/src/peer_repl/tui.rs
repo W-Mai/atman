@@ -224,6 +224,23 @@ impl Attachment {
                     result: result.map_err(|error| format!("{error:#}")),
                 });
             }
+            TuiControl::EditInbox(edit) => {
+                let request_id = edit.id;
+                let result = worker
+                    .edit_input(*edit, |edit| {
+                        if edit.sender == SenderIdentity::User(USER) {
+                            Ok(())
+                        } else {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::PermissionDenied,
+                                "input belongs to another user",
+                            ))
+                        }
+                    })
+                    .await
+                    .map_err(|error| error.to_string());
+                let _ = replies.send(TuiCommand::InboxEdited { request_id, result });
+            }
             TuiControl::GoalControl {
                 request_id,
                 target,
@@ -650,6 +667,10 @@ fn reject_archive_control(command: TuiControl, replies: &ControlReplies) {
     let error =
         "Archived flow is read-only; select an executable flow for this operation".to_owned();
     let command = match command {
+        TuiControl::EditInbox(edit) => TuiCommand::InboxEdited {
+            request_id: edit.id,
+            result: Err(error),
+        },
         TuiControl::Submit(_) => TuiCommand::SubmissionResult { result: Err(error) },
         TuiControl::GoalControl {
             request_id: Some(request_id),

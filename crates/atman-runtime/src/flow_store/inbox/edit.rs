@@ -74,11 +74,7 @@ impl Inbox {
         {
             return Err(invalid("inbox message was consumed, cancelled, or changed"));
         }
-        if request.scope.is_some()
-            || request.correlation.is_some()
-            || request.cause.is_some()
-            || !editable(request)
-        {
+        if !request.is_editable_user_input() {
             return Err(invalid("this input is not an editable user submission"));
         }
         match &edit.change {
@@ -116,10 +112,7 @@ impl Inbox {
                     .filter(|envelope| {
                         envelope.request.sender == edit.sender
                             && envelope.request.delivery == DeliveryMode::NextTurn
-                            && editable(&envelope.request)
-                            && envelope.request.scope.is_none()
-                            && envelope.request.correlation.is_none()
-                            && envelope.request.cause.is_none()
+                            && envelope.request.is_editable_user_input()
                     })
                     .map(|envelope| envelope.id)
                     .collect();
@@ -197,6 +190,17 @@ fn editable(request: &DeliveryRequest) -> bool {
             | InboxPayload::Command { user: Some(_), .. }
             | InboxPayload::Invocation { user: Some(_), .. }
     )
+}
+
+impl DeliveryRequest {
+    /// Whether this input belongs to the human-editable queue, independent of its current consumption state.
+    pub fn is_editable_user_input(&self) -> bool {
+        matches!(self.sender, SenderIdentity::User(_))
+            && self.scope.is_none()
+            && self.correlation.is_none()
+            && self.cause.is_none()
+            && editable(self)
+    }
 }
 
 impl FlowStore {

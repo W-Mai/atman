@@ -782,9 +782,10 @@ pub struct PendingPermissionGroup {
 }
 
 pub struct QueuedSubmissionEdit {
-    pub id: atman_runtime::SubmissionId,
-    pub revision: u64,
+    pub id: uuid::Uuid,
+    pub source: crate::submission_queue::QueueItem,
     pub editor: crate::input::InputEditor,
+    pub error: Option<String>,
 }
 
 #[derive(Default)]
@@ -830,7 +831,8 @@ pub struct AppState {
     pub grouped_permission_request_ids:
         std::collections::BTreeSet<atman_runtime::permission::PermissionRequestId>,
     pub pending_injections: Vec<atman_runtime::injection::Injection>,
-    pub queued_submissions: Vec<atman_runtime::QueuedSubmissionView>,
+    pub queued_submissions: Vec<crate::submission_queue::QueueItem>,
+    pub(crate) queue_request: Option<crate::submission_queue::QueueRequest>,
     pub pending_quote: Option<std::sync::Arc<str>>,
     pub(crate) pending_submission: Option<crate::composer::PendingSubmission>,
     pub quote_rect: Option<ratatui::layout::Rect>,
@@ -840,6 +842,7 @@ pub struct AppState {
     pub submission_focus: bool,
     pub selected_submission: usize,
     pub hovered_submission: Option<usize>,
+    pub hovered_submission_action: Option<crate::submission_queue::QueueAction>,
     pub queued_submission_edit: Option<QueuedSubmissionEdit>,
     pub submission_queue_rect: Option<ratatui::layout::Rect>,
     pub submission_queue_hitmap: crate::submission_queue::QueueHitMap,
