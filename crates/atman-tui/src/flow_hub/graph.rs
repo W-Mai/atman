@@ -199,7 +199,7 @@ impl Layout {
                         area.x + 2 + (slot % columns) as u16 * (width + 8),
                         area.y + ((y - self.top) * 6) as u16,
                         width,
-                        4,
+                        5,
                     ),
                 ))
             })

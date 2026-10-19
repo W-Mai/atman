@@ -38,6 +38,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Flow activity timestamps** — FlowHub lists and graphs display committed activity in local time with an explicit UTC offset. Live inspection and history recovery share the same projection; filesystem changes and unobserved recovery results do not create new activity.
+
 - **Session binding controls** — Select an existing management Session from the shared directory, review explicit grant removal, and save through revision-checked profile updates. Main and floating views preserve failed drafts and request identities without starting or stopping execution.
 
 - **Management grant controls** — The shared Session directory displays profile bindings and explicit Flow permissions. Searchable source and target pickers support grant creation and editing with individually selected permissions. Grant details support full-text inspection and revision-checked removal, with stable retries and view-bound acknowledgements in main and floating conversations.

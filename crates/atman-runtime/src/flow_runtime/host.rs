@@ -600,6 +600,7 @@ impl SessionHandle {
                         state: store.state().clone(),
                         loaded: true,
                         trailing_bytes: 0,
+                        activity: store.activity().cloned(),
                     }))
                 })
                 .await;
@@ -686,6 +687,7 @@ async fn serve_catalog(
                                 state: store.state().clone(),
                                 loaded: true,
                                 trailing_bytes: 0,
+                                activity: store.activity().cloned(),
                             })
                         })
                         .await
@@ -696,6 +698,7 @@ async fn serve_catalog(
                             state: flow.state,
                             loaded: false,
                             trailing_bytes: flow.journal.trailing_bytes,
+                            activity: flow.activity,
                         });
                         (store, result)
                     })

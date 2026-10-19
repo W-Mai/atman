@@ -28,6 +28,7 @@ pub struct OverviewCatalogSnapshot {
     pub recorded_state: FlowInstance<AtmanUuid>,
     pub goal: Option<GoalRecord>,
     pub pending_inputs: usize,
+    pub activity: Option<crate::flow_store::activity::RecordedActivity>,
     pub relations: Vec<FlowRelation>,
     /// Sampled after the journal read, without replacing its state or receipt.
     pub execution: OverviewExecution,
@@ -78,6 +79,7 @@ impl SessionCatalog {
                     recorded_state: flow.state,
                     goal: flow.goal,
                     pending_inputs: flow.pending_inputs,
+                    activity: flow.activity,
                     relations,
                     execution: OverviewExecution::Detached,
                 })

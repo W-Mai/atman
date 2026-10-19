@@ -665,6 +665,7 @@ mod tests {
                         unavailable: None,
                         loaded: false,
                         trailing_bytes: None,
+                        activity: None,
                     }],
                     next: None,
                     total: 1,

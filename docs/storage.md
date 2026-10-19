@@ -1,5 +1,7 @@
 # Durable fact journals
 
+Flow directory activity is derived from timestamped facts and retains the source commit receipt. Live writers and read-only replay use the same reducer. Unobserved completion recovery, untimed state changes, and filesystem modification times do not advance activity; late older timestamps cannot move it backwards. This derived metadata does not replace the journal cursor or indicate a live execution owner.
+
 `atman_runtime::event_log::journal::Journal` commits typed batches of host facts. It is separate from the asynchronous display/event writer: an accepted commit means the entire batch has been written and synchronized. A caller publishes the resulting in-memory projection and receipt only after `commit` succeeds. Streaming previews need no durable commit per chunk.
 
 `Journal::create(path, id)` creates a new file under an existing durable parent directory. `Journal::open(path, expected_id, apply)` holds an exclusive file lock, validates the log identity and format, and replays complete batches into a private projection. The caller must discard that projection if opening fails. These operations use blocking filesystem I/O and belong on a storage worker, outside UI or executor polling.

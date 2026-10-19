@@ -626,9 +626,10 @@ impl FlowHubPage {
                         ),
                         detail: row.unavailable.clone().unwrap_or_else(|| {
                             format!(
-                                "{} · {status}{}",
+                                "{} · {status}{}\n{}",
                                 row.address.instance_id,
-                                if paused { " · execution paused" } else { "" }
+                                if paused { " · execution paused" } else { "" },
+                                activity_label(row.activity.as_ref()),
                             )
                         }),
                         action: Action::Focus(row.address.clone().into()),
@@ -728,6 +729,23 @@ impl FlowHubPage {
                 .collect(),
         }
     }
+}
+
+pub(super) fn activity_label(
+    activity: Option<&atman_runtime::flow_store::activity::RecordedActivity>,
+) -> String {
+    activity.map_or_else(
+        || "Last activity: no timestamp".into(),
+        |activity| {
+            format!(
+                "Last {}",
+                activity
+                    .at
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M %:z")
+            )
+        },
+    )
 }
 
 pub(super) fn short_flow(flow: &atman_runtime::flow_store::FlowRef) -> String {

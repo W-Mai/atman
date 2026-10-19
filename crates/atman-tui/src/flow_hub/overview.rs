@@ -157,7 +157,7 @@ impl OverviewDirectory {
                                     }
                                 ),
                                 format!(
-                                    "{status}{} · {} pending\n{}\nRecorded {} · {}\n{session} · {}/{}",
+                                    "{status}{} · {} pending\n{}\n{} · Recorded {} · {}\n{session} · {}/{}",
                                     if state.pauses().is_empty() {
                                         ""
                                     } else {
@@ -168,6 +168,7 @@ impl OverviewDirectory {
                                         .goal
                                         .as_ref()
                                         .map_or("No goal", |goal| goal.objective.as_str()).split_whitespace().collect::<Vec<_>>().join(" "),
+                                    super::page::activity_label(snapshot.activity.as_ref()),
                                     execution_label(snapshot.recorded_state.state()),
                                     &owner.instance_id.to_string()[28..],
                                     owner.session_id,
@@ -245,6 +246,14 @@ mod tests {
                     digest: "snapshot".into(),
                 },
                 trailing_bytes: 0,
+                activity: Some(atman_runtime::flow_store::activity::RecordedActivity {
+                    at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+                    receipt: CommitReceipt {
+                        journal_id: Uuid::now_v7(),
+                        sequence: 1,
+                        digest: "activity".into(),
+                    },
+                }),
                 recorded_state: state,
                 goal: None,
                 pending_inputs: 2,
@@ -338,6 +347,7 @@ mod tests {
             .collect();
         assert!(text.contains("Session 3") && text.contains("Session 2"));
         assert!(text.contains("2 pending"));
+        assert!(text.contains("Last 2023-11"));
         assert!(text.contains("3 flows loaded"));
         assert!(
             matches!(hub.key(KeyAction::ToggleLastTool), Action::Float(address) if address == target)

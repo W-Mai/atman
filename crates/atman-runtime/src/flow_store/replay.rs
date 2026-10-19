@@ -24,6 +24,7 @@ pub(super) struct FlowReplay {
     pub(super) trace: trace::ExecutionTrace,
     pub(super) history: history::HistoryProgress,
     pub(super) cursor: Option<CommitReceipt>,
+    pub(super) activity: Option<super::activity::RecordedActivity>,
 }
 
 impl FlowReplay {
@@ -34,6 +35,7 @@ impl FlowReplay {
         facts: Vec<FlowFact>,
     ) -> io::Result<()> {
         FlowFact::validate_batch(&facts)?;
+        super::activity::observe(&mut self.activity, &receipt, &facts);
         if let Some((descriptor, _, _)) = &self.projection {
             FlowJournal::validate(
                 matches!(descriptor.content, FlowContent::History(_)),

@@ -279,6 +279,7 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
         assert_eq!(node.title, "main");
         assert!(matches!(node.execution, OverviewExecution::Detached));
         assert_eq!(node.pending_inputs, usize::from(offset != 2));
+        assert_eq!(node.activity.is_some(), offset != 2);
         if offset == 1 {
             assert_eq!(
                 node.goal.as_ref().unwrap().objective,

@@ -67,6 +67,7 @@ pub struct InstanceSummary {
     pub unavailable: Option<String>,
     pub loaded: bool,
     pub trailing_bytes: Option<u64>,
+    pub activity: Option<crate::flow_store::activity::RecordedActivity>,
 }
 
 pub struct InstanceObservation {
@@ -74,6 +75,7 @@ pub struct InstanceObservation {
     pub state: FlowInstance<AtmanUuid>,
     pub loaded: bool,
     pub trailing_bytes: u64,
+    pub activity: Option<crate::flow_store::activity::RecordedActivity>,
 }
 
 impl RuntimeHost {
@@ -130,15 +132,16 @@ pub(crate) async fn instance_page<
         let summary = observe(registration.id.clone()).await;
         // An expired caller must not turn a failed authorization into an unavailable row.
         authorize(&address)?;
-        let (entry, state, unavailable, loaded, trailing_bytes) = match summary {
+        let (entry, state, unavailable, loaded, trailing_bytes, activity) = match summary {
             Ok(view) => (
                 Some(view.entry),
                 Some(view.state),
                 None,
                 view.loaded,
                 Some(view.trailing_bytes),
+                view.activity,
             ),
-            Err(error) => (None, None, Some(error.to_string()), false, None),
+            Err(error) => (None, None, Some(error.to_string()), false, None, None),
         };
         instances.push(InstanceSummary {
             address,
@@ -147,6 +150,7 @@ pub(crate) async fn instance_page<
             unavailable,
             loaded,
             trailing_bytes,
+            activity,
         });
     }
     Ok(InstancePage {

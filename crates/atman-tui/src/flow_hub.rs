@@ -1283,7 +1283,8 @@ impl FlowHub {
         let footer = content.bottom().saturating_sub(6);
         let rows = self.filtered();
         let graph_visible = is_flows && self.graph_visible && !picking;
-        let visible = usize::from(footer.saturating_sub(rows_y) / 4);
+        let record_height = if is_flows { 5 } else { 4 };
+        let visible = usize::from(footer.saturating_sub(rows_y) / record_height);
         if self.selected < self.offset {
             self.offset = self.selected;
         }
@@ -1333,9 +1334,9 @@ impl FlowHub {
                         pos,
                         Rect::new(
                             content.x,
-                            rows_y + ((pos - self.offset) * 4) as u16,
+                            rows_y + (pos - self.offset) as u16 * record_height,
                             width,
-                            4,
+                            record_height,
                         ),
                     )
                 })
@@ -1448,7 +1449,7 @@ impl FlowHub {
                 );
                 self.float_hits.push((open, pos));
             }
-            let detail = if graph_visible {
+            let detail = if graph_visible || is_flows && width < 72 {
                 std::borrow::Cow::Owned(graph::compact_detail(row))
             } else if is_workspace_record {
                 std::borrow::Cow::Owned(
@@ -1908,6 +1909,7 @@ mod tests {
                         unavailable: None,
                         loaded: false,
                         trailing_bytes: None,
+                        activity: None,
                     }],
                     next: None,
                     total: 51,
@@ -2387,6 +2389,7 @@ mod tests {
                         unavailable: None,
                         loaded: false,
                         trailing_bytes: None,
+                        activity: None,
                     }],
                     next: Some(flow.instance_id.clone()),
                     total: 51,
@@ -2421,7 +2424,7 @@ mod tests {
             .draw(|f| hub.render(f, &flow.clone().into()))
             .unwrap();
         let rect = hub.hits[0].0;
-        assert_eq!(rect.height, 4);
+        assert_eq!(rect.height, 5);
         assert!(
             matches!(hub.key(KeyAction::Submit), Action::Focus(target) if target.instance() == Some(&flow))
         );

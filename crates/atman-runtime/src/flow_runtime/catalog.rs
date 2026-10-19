@@ -344,6 +344,7 @@ impl SessionCatalog {
                             state: flow.state,
                             loaded: false,
                             trailing_bytes: flow.journal.trailing_bytes,
+                            activity: flow.activity,
                         })
                 })
                 .await

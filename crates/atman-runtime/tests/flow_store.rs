@@ -20,6 +20,90 @@ use uuid::Uuid;
 mod common;
 
 #[tokio::test]
+async fn activity_is_derived_from_the_same_commits_in_live_inspection_and_recovery() {
+    use atman_runtime::{
+        event::Event,
+        flow_store::trace::{ExecutionEvent, ExecutionScope},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = RuntimeStore::open(dir.path()).unwrap();
+    let mut session = runtime.create_session(session_descriptor()).unwrap();
+    let description = descriptor(session.projection().descriptor.id);
+    let address = description.address.clone();
+    let mut flow = session.create_flow(description).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let lease = start(&mut flow);
+    assert!(
+        flow.activity().is_none(),
+        "Untimed state changes cannot invent a timestamp"
+    );
+    let at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+    let event = |sequence, timestamp| ExecutionEvent {
+        sequence,
+        timestamp,
+        scope: ExecutionScope::Invocation(lease.clone()),
+        event: Event::FlowStart {
+            run_id: lease.run.clone(),
+            flow_name: "worker".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+            spawned: false,
+        },
+    };
+    let receipt = flow.append_execution_events(vec![event(1, at)]).unwrap();
+    let expected = flow.activity().unwrap().clone();
+    assert_eq!(expected.at, at);
+    assert_eq!(expected.receipt, receipt);
+    flow.append_execution_events(vec![event(2, at - chrono::Duration::seconds(10))])
+        .unwrap();
+    assert_eq!(
+        flow.activity(),
+        Some(&expected),
+        "Late older diagnostics must not move activity backwards"
+    );
+    assert!(
+        flow.append_execution_events(vec![event(2, at + chrono::Duration::hours(1))])
+            .is_err()
+    );
+    assert_eq!(
+        flow.activity(),
+        Some(&expected),
+        "Rejected writes cannot advance activity"
+    );
+    let before = std::fs::read(flow.dir().join("events.jsonl")).unwrap();
+    let inspected = session.inspect_flow(&address.instance_id).unwrap();
+    assert_eq!(inspected.activity, Some(expected.clone()));
+    assert_eq!(
+        before,
+        std::fs::read(flow.dir().join("events.jsonl")).unwrap()
+    );
+    drop(flow);
+    let recovered = session.open_flow(&address.instance_id).unwrap();
+    assert_eq!(recovered.activity(), Some(&expected));
+    assert_eq!(
+        session.inspect_flow(&address.instance_id).unwrap().activity,
+        Some(expected.clone())
+    );
+    drop(recovered);
+    let host = atman_runtime::flow_runtime::host::RuntimeHost::default();
+    let owner = host.attach_session(session).unwrap();
+    let detached = owner
+        .describe_flow(address.instance_id.clone())
+        .await
+        .unwrap();
+    assert!(!detached.loaded);
+    assert_eq!(detached.activity, Some(expected.clone()));
+    let _worker = host.flow(&address).await.unwrap();
+    let live = owner
+        .describe_flow(address.instance_id.clone())
+        .await
+        .unwrap();
+    assert!(live.loaded);
+    assert_eq!(live.activity, Some(expected));
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn inbox_history_pages_preserve_delivery_identity_without_consumption_or_execution() {
     use atman_runtime::{
         flow_runtime::{catalog::SessionCatalog, host::RuntimeHost},

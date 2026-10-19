@@ -3,6 +3,7 @@
 //! Host-only storage: authorization and scheduling happen before commands reach this module. Each flow has one authoritative journal. Metadata files are disposable projections and never override facts. Blocking calls belong on storage workers.
 
 pub mod access;
+pub mod activity;
 pub mod completion;
 pub mod context;
 pub mod continuation;
@@ -257,6 +258,7 @@ enum FlowFact {
 struct FlowJournal {
     inner: Journal,
     history_only: bool,
+    activity: Option<activity::RecordedActivity>,
 }
 
 impl FlowJournal {
@@ -277,7 +279,9 @@ impl FlowJournal {
 
     fn commit(&mut self, facts: &[FlowFact]) -> io::Result<CommitReceipt> {
         Self::validate(self.history_only, facts)?;
-        self.inner.commit(facts)
+        let receipt = self.inner.commit(facts)?;
+        activity::observe(&mut self.activity, &receipt, facts);
+        Ok(receipt)
     }
 
     fn read_after(
@@ -549,6 +553,7 @@ pub struct FlowInspection {
     pub workspace: Option<workspace::WorkspaceRequest>,
     pub goal: Option<crate::memory::goal::GoalRecord>,
     pub pending_inputs: usize,
+    pub activity: Option<activity::RecordedActivity>,
 }
 
 impl SessionInspection {
@@ -705,6 +710,7 @@ fn inspect_registered_flow_with(
         workspace: replay.workspace,
         goal: replay.goals.current().cloned(),
         pending_inputs: inbox.pending_entries().count(),
+        activity: replay.activity,
     })
 }
 
@@ -1076,6 +1082,11 @@ pub struct FlowStore {
 }
 
 impl FlowStore {
+    /// Latest timestamped activity from committed facts, independent of filesystem modification time.
+    pub fn activity(&self) -> Option<&activity::RecordedActivity> {
+        self.journal.activity.as_ref()
+    }
+
     pub fn session_descriptor(&self) -> &SessionDescriptor {
         &self._owner.descriptor
     }
@@ -1097,6 +1108,7 @@ impl FlowStore {
         let journal = FlowJournal {
             inner: journal,
             history_only: matches!(descriptor.content, FlowContent::History(_)),
+            activity: None,
         };
         Ok(Self {
             dir: dir.into(),
@@ -1149,12 +1161,14 @@ impl FlowStore {
             trace,
             history,
             cursor,
+            activity,
         } = replay;
         let (descriptor, state, inbox) =
             projection.ok_or_else(|| invalid("flow creation was not committed"))?;
         let journal = FlowJournal {
             inner: journal,
             history_only: matches!(descriptor.content, FlowContent::History(_)),
+            activity,
         };
         let mut store = Self {
             dir: dir.into(),

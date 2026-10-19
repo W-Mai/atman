@@ -177,7 +177,7 @@ pub struct LaunchRecord {
 pub(super) struct Activation {
     pub input: LaunchInput,
     id: Uuid,
-    accepted_at: DateTime<Utc>,
+    pub(super) accepted_at: DateTime<Utc>,
     registration: Option<ResultRegistration>,
 }
 
