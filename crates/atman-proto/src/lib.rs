@@ -178,6 +178,8 @@ pub mod methods {
     pub const SESSION_SELECT_FLOW: &str = "session.select_flow";
     pub const FLOW_GET: &str = "flow.get";
     pub const FLOW_CONTROL: &str = "flow.control";
+    pub const FLOW_CONTROL_BATCH: &str = "flow.control_batch";
+    pub const FLOW_CONTROL_STATUS: &str = "flow.control_status";
     pub const FLOW_LAUNCH: &str = "flow.launch";
     pub const FLOW_BIND: &str = "flow.bind";
     pub const FLOW_INVOKE: &str = "flow.invoke";

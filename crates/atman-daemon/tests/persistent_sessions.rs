@@ -39,6 +39,300 @@ fn descriptor(session: Uuid) -> FlowDescriptor {
     }
 }
 
+async fn control_http(
+    state: &Arc<DaemonState>,
+    token: Option<&str>,
+    method: &str,
+    params: Value,
+) -> (axum::http::StatusCode, Value) {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    let app = atman_daemon::http::router(Arc::new(atman_daemon::http::HttpState {
+        daemon: state.clone(),
+        auth_token: "batch-test".into(),
+    }));
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/rpc")
+        .header("Content-Type", "application/json");
+    if let Some(token) = token {
+        request = request.header("Authorization", format!("Bearer {token}"));
+    }
+    let response = app
+        .oneshot(
+            request
+                .body(Body::from(
+                    serde_json::to_vec(&JsonRpcRequest::new(1, method, params)).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn batch_control_rpc_rejects_untrusted_or_invalid_requests_before_opening_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::new(dir.path().to_owned()));
+    let command = json!({"request_id": Uuid::new_v4(), "flow": {"session_id": Uuid::new_v4(), "instance_id": Uuid::new_v4()}, "expected_revision": 1, "action": "pause"});
+    let valid = json!({"request_id": Uuid::new_v4(), "commands": [command.clone()]});
+    for method in [methods::FLOW_CONTROL_BATCH, methods::FLOW_CONTROL_STATUS] {
+        for token in [None, Some("wrong")] {
+            assert_eq!(
+                control_http(&state, token, method, valid.clone()).await.0,
+                axum::http::StatusCode::UNAUTHORIZED
+            );
+        }
+        assert!(
+            dispatch_as(
+                state.clone(),
+                JsonRpcRequest::new(1, method, valid.clone()),
+                "untrusted"
+            )
+            .await
+            .error
+            .is_some()
+        );
+    }
+    let mut forged = valid.clone();
+    forged["sender"] = json!({"user": Uuid::new_v4()});
+    let mut nested = valid.clone();
+    nested["commands"][0]["sender"] = json!({"user": Uuid::new_v4()});
+    let mut nil_target = valid.clone();
+    nil_target["commands"][0]["flow"]["instance_id"] = json!(Uuid::nil());
+    let mut nil_control = valid.clone();
+    nil_control["commands"][0]["request_id"] = json!(Uuid::nil());
+    for params in [
+        forged,
+        nested,
+        nil_target,
+        nil_control,
+        json!({"request_id": Uuid::nil(), "commands": [command.clone()]}),
+        json!({"request_id": Uuid::new_v4(), "commands": []}),
+        json!({"request_id": Uuid::new_v4(), "commands": [command.clone(), command]}),
+    ] {
+        let (status, response) = control_http(
+            &state,
+            Some("batch-test"),
+            methods::FLOW_CONTROL_BATCH,
+            params,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(response["error"]["code"], -32602, "{response}");
+    }
+    for params in [
+        json!({"request_id": Uuid::nil()}),
+        json!({"request_id": Uuid::new_v4(), "sender": "another user"}),
+    ] {
+        let (_, response) = control_http(
+            &state,
+            Some("batch-test"),
+            methods::FLOW_CONTROL_STATUS,
+            params,
+        )
+        .await;
+        assert_eq!(response["error"]["code"], -32602);
+    }
+    assert!(!dir.path().join("runtime-v1").exists());
+}
+
+#[tokio::test]
+async fn batch_control_rpc_preserves_partial_results_and_retry_receipts_across_restart() {
+    use atman_runtime::flow_store::profile::{ControlBatchRecord, ControlProgress};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let mut commands = Vec::new();
+    let mut addresses = Vec::new();
+    let mut journals = Vec::new();
+    for action in ["pause", "close"] {
+        let id = Uuid::new_v4();
+        let mut catalog = root
+            .create_session(SessionDescriptor {
+                id,
+                project: None,
+                configuration: Default::default(),
+                title: action.into(),
+            })
+            .unwrap();
+        let descriptor = descriptor(id);
+        let mut flow = catalog.create_flow(descriptor.clone()).unwrap();
+        flow.transition(flow.state().revision(), FlowTransition::Activated)
+            .unwrap();
+        commands.push(json!({"request_id": Uuid::new_v4(), "flow": descriptor.address, "expected_revision": flow.state().revision(), "action": action}));
+        addresses.push(descriptor.address);
+        journals.push(flow.dir().join("events.jsonl"));
+    }
+    commands.push(json!({"request_id": Uuid::new_v4(), "flow": descriptor(Uuid::new_v4()).address, "expected_revision": 0, "action": "pause"}));
+    let id = Uuid::new_v4();
+    let params = json!({"request_id": id, "commands": commands});
+    let state = Arc::new(DaemonState::new(dir.path().to_owned()));
+    let (first, retry) = tokio::join!(
+        control_http(
+            &state,
+            Some("batch-test"),
+            methods::FLOW_CONTROL_BATCH,
+            params.clone()
+        ),
+        control_http(
+            &state,
+            Some("batch-test"),
+            methods::FLOW_CONTROL_BATCH,
+            params.clone()
+        ),
+    );
+    for response in [&first, &retry] {
+        assert_eq!(response.0, axum::http::StatusCode::OK);
+        assert!(response.1["error"].is_null(), "{}", response.1);
+    }
+    assert_eq!(
+        first.1["result"]["submitted"],
+        retry.1["result"]["submitted"]
+    );
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let value = rpc(
+                &state,
+                methods::FLOW_CONTROL_STATUS,
+                json!({"request_id": id}),
+            )
+            .await;
+            let record: ControlBatchRecord = serde_json::from_value(value).unwrap();
+            if record.items.iter().all(|item| item.is_terminal()) {
+                break record;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(finished.items.len(), 3);
+    for item in &finished.items[..2] {
+        assert!(matches!(
+            item.history[0].progress,
+            ControlProgress::Accepted { .. }
+        ));
+        assert!(matches!(
+            item.history[1].progress,
+            ControlProgress::Applied { .. }
+        ));
+    }
+    assert!(
+        matches!(&finished.items[2].history[0].progress, ControlProgress::Failed { reason } if !reason.is_empty())
+    );
+    let paused = rpc(&state, methods::FLOW_GET, json!({"flow": addresses[0]})).await;
+    assert_eq!(paused["execution"]["pause_count"], 1);
+    // Single-target resume must release the exact key held by the batch pause.
+    rpc(&state, methods::FLOW_CONTROL, json!({"flow": addresses[0], "request_id": Uuid::new_v4(), "expected_revision": paused["execution"]["revision"], "action": "resume"})).await;
+    let resumed = rpc(&state, methods::FLOW_GET, json!({"flow": addresses[0]})).await;
+    assert_eq!(resumed["execution"]["pause_count"], 0);
+    let reconciled_id = Uuid::new_v4();
+    rpc(
+        &state,
+        methods::FLOW_CONTROL_BATCH,
+        json!({"request_id": reconciled_id, "commands": [commands[0].clone()]}),
+    )
+    .await;
+    let reconciled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let record: ControlBatchRecord = serde_json::from_value(
+                rpc(
+                    &state,
+                    methods::FLOW_CONTROL_STATUS,
+                    json!({"request_id": reconciled_id}),
+                )
+                .await,
+            )
+            .unwrap();
+            if record.items[0].is_terminal() {
+                break record;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        reconciled.items[0].history[0].progress,
+        finished.items[0].history[0].progress
+    );
+    assert!(matches!(
+        reconciled.items[0].history[1].progress,
+        ControlProgress::Applied { .. }
+    ));
+    assert_eq!(
+        rpc(&state, methods::FLOW_GET, json!({"flow": addresses[0]})).await,
+        resumed
+    );
+    let mut conflict = params.clone();
+    conflict["commands"][0]["action"] = json!("close");
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::FLOW_CONTROL_BATCH, conflict)
+        )
+        .await
+        .error
+        .is_some()
+    );
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(
+                1,
+                methods::FLOW_CONTROL_STATUS,
+                json!({"request_id": Uuid::new_v4()})
+            )
+        )
+        .await
+        .error
+        .is_some()
+    );
+    state.shutdown().await.unwrap();
+    journals.push(root.root().join("host/events.jsonl"));
+    let original = journals
+        .iter()
+        .map(std::fs::read)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let state = Arc::new(DaemonState::new(dir.path().to_owned()));
+    let queried = rpc(
+        &state,
+        methods::FLOW_CONTROL_STATUS,
+        json!({"request_id": id}),
+    )
+    .await;
+    assert_eq!(queried, serde_json::to_value(&finished).unwrap());
+    assert_eq!(
+        rpc(&state, methods::FLOW_CONTROL_BATCH, params).await,
+        queried
+    );
+    // Settled batch queries and retries must not acquire target owners or replay the old pause.
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::FLOW_GET, json!({"flow": addresses[0]}))
+        )
+        .await
+        .error
+        .is_some()
+    );
+    state.shutdown().await.unwrap();
+    assert_eq!(
+        journals
+            .iter()
+            .map(std::fs::read)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        original
+    );
+}
+
 #[tokio::test]
 async fn session_open_reuses_the_owner_loaded_by_control_recovery() {
     use atman_runtime::flow_store::{

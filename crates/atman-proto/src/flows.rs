@@ -94,12 +94,28 @@ pub enum FlowControl {
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ControlFlowRequest {
     pub flow: FlowAddress,
     /// Reuse with identical parameters to retrieve the original committed receipt.
     pub request_id: Uuid,
     pub expected_revision: u64,
     pub action: FlowControl,
+}
+
+/// Persist the entire target list before independently delivering each control.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ControlFlowBatchRequest {
+    pub request_id: Uuid,
+    /// Each target has one stable control identity, independent of the batch identity.
+    pub commands: Vec<ControlFlowRequest>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ControlFlowStatusRequest {
+    pub request_id: Uuid,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]

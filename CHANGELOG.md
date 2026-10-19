@@ -9,6 +9,7 @@ All notable changes to atman are documented in this file.
 ### Added
 
 - **Host control reconciliation** — Persistent control batches execute independently of their invoking flows, recover missing acknowledgements, and report individual target outcomes. New effects recheck current permissions; closure and cancellation retain separate acceptance and completion evidence.
+- **Batch control RPC** — `flow.control_batch` submits controls across Sessions and `flow.control_status` reads durable per-target progress. Retries preserve request identities, successful targets remain applied when other targets fail, and batch pause ownership matches individual controls.
 
 - **Control batch ownership** — Profile handles serialize batch admission and progress, retain accepted work after caller disconnection, and preserve management-authority diagnostics during unrelated control updates.
 

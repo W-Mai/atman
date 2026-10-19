@@ -11,7 +11,6 @@ use atman_proto::{JsonRpcError, flows::*, methods};
 use atman_rt::FlowInstanceId;
 use atman_runtime::flow_runtime::{
     FlowWorker,
-    access::PeerControl,
     host::{HostServices, ProfileHandle, RuntimeHost, SessionHandle},
 };
 use atman_runtime::flow_store::{FlowRef, SessionDescriptor};
@@ -26,6 +25,7 @@ pub(crate) mod catalog;
 pub(crate) mod events;
 mod execution;
 pub(crate) use execution::launch_run;
+mod controls;
 pub(crate) mod goal;
 mod management;
 
@@ -85,6 +85,8 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::SESSION_SELECT_FLOW
             | methods::FLOW_GET
             | methods::FLOW_CONTROL
+            | methods::FLOW_CONTROL_BATCH
+            | methods::FLOW_CONTROL_STATUS
             | methods::FLOW_LAUNCH
             | methods::FLOW_BIND
             | methods::FLOW_INVOKE
@@ -241,6 +243,8 @@ enum Request {
     Select(FlowRequest),
     Get(FlowRequest),
     Control(ControlFlowRequest),
+    ControlBatch(ControlFlowBatchRequest),
+    ControlStatus(ControlFlowStatusRequest),
     Launch(LaunchFlowRequest),
     Bind(FlowRequest),
     Invoke(InvokeFlowRequest),
@@ -251,6 +255,16 @@ enum Request {
 impl Request {
     fn parse(method: &str, params: Value) -> Result<Self, JsonRpcError> {
         let request = match method {
+            methods::FLOW_CONTROL_BATCH => {
+                let request: ControlFlowBatchRequest = decode(params)?;
+                controls::validate_batch(&request)?;
+                return Ok(Self::ControlBatch(request));
+            }
+            methods::FLOW_CONTROL_STATUS => {
+                let request: ControlFlowStatusRequest = decode(params)?;
+                controls::validate_identity(request.request_id)?;
+                return Ok(Self::ControlStatus(request));
+            }
             methods::MANAGEMENT_GET | methods::MANAGEMENT_OPEN => {
                 #[derive(serde::Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -277,7 +291,10 @@ impl Request {
             _ => return Err(JsonRpcError::method_not_found(method)),
         };
         let (session, instance) = match &request {
-            Self::ManagementGet | Self::ManagementOpen => unreachable!(),
+            Self::ManagementGet
+            | Self::ManagementOpen
+            | Self::ControlBatch(_)
+            | Self::ControlStatus(_) => unreachable!(),
             Self::ManagementSelect(request) => {
                 if request.request_id.is_nil()
                     || request.expected.journal_id.is_nil()
@@ -309,7 +326,10 @@ impl Request {
             Self::Select(request) | Self::Get(request) | Self::Bind(request) => {
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
-            Self::Control(request) => (request.flow.session_id.0, Some(request.flow.instance_id)),
+            Self::Control(request) => {
+                controls::validate_control(request)?;
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
             Self::Launch(request) => {
                 if request.request_id.is_nil()
                     || request.entry.trim().is_empty()
@@ -391,6 +411,8 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         )?),
         Request::ManagementOpen => service.open_management(state).await,
         Request::ManagementSelect(request) => service.select_management(request).await,
+        Request::ControlBatch(request) => service.submit_controls(request).await,
+        Request::ControlStatus(request) => service.control_status(request).await,
         Request::Launch(request) => service.launch(state, request).await,
         Request::Bind(request) => service.bind(state, request).await,
         Request::Invoke(request) => service.invoke(request).await,
@@ -462,32 +484,11 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
             )
         }
         Request::Control(request) => {
-            let worker = service.host.flow(&core_address(request.flow)).await?;
-            let control = match request.action {
-                FlowControl::Pause => PeerControl::Pause,
-                FlowControl::Resume => PeerControl::Resume,
-                FlowControl::CancelTurn => PeerControl::CancelTurn,
-                FlowControl::Recover => PeerControl::Recover,
-                FlowControl::Close => PeerControl::Close,
-            };
-            // Stable across process restarts, distinct from peer-generated controller keys.
-            let user_pause = Uuid::from_bytes(*b"atman-user-pause").into();
-            let receipt = worker
-                .control(
-                    atman_runtime::flow_store::control::ControlRequest {
-                        id: request.request_id,
-                        sender: atman_runtime::flow_store::inbox::SenderIdentity::User(
-                            Uuid::from_bytes(*b"atman-local-user"),
-                        ),
-                        target: worker.address().clone(),
-                        expected_revision: request.expected_revision,
-                        pause_key: user_pause,
-                        action: control,
-                    },
-                    |_| Ok(()),
-                )
-                .await?;
-            Ok(json!({"request_id": request.request_id, "receipt": receipt.receipt}))
+            let request_id = request.request_id;
+            let request = controls::operator_control(request);
+            let worker = service.host.flow(&request.target).await?;
+            let receipt = worker.control(request, |_| Ok(())).await?;
+            Ok(json!({"request_id": request_id, "receipt": receipt.receipt}))
         }
     }
 }
