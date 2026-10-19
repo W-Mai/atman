@@ -1,0 +1,4 @@
+flow handle(input: int) -> int {
+    yield
+    return input + 1
+}

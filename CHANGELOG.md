@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Standalone peer demo** — The runtime embedding fixture demonstrates independent instances, paused inbox batches, later-turn replies, stale lease rejection, and independent closure using only `atman-rt`.
+
 ### Added
 
 - **FlowHub control history** — Submitted batches remain discoverable after closing a view or restarting. Main and floating views share paged history, preserved review drafts, and explicit retries of unfinished deliveries using their original command identities.

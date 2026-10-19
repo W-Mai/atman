@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v6
       - name: Run standalone embedding fixture
         run: cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked
+      - name: Run peer instance demo
+        run: cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked -- --peers
 
   no-std:
     runs-on: ubuntu-latest

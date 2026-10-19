@@ -162,4 +162,10 @@ The core requires an allocator and target support for pointer-width atomics beca
 
 The instance state machine is available with `no_std + alloc`. The embedding host owns scheduling, authorization, durable commits, and resource cleanup. Creating a state machine does not start a task or persist data. Ordinary `.at` calls and `fanout` retain their invocation semantics; they do not create persistent instances.
 
+The standalone fixture's peer demo executes [`peers.at`](../../fixtures/atman-rt-embed/src/peers.at) through two independent instances. One instance completes a turn, sends its result to a paused peer, and receives that peer's reply in a later turn. Two independent pause keys must both be released before the queued messages are consumed as one batch. Closing the peer leaves the original instance available, and an earlier turn's lease cannot complete a newer turn. The fixture depends only on `atman-rt`; its host keeps input history in memory and explicitly drives ready instances. It does not provide disk recovery, authentication, or automatic background scheduling.
+
+```sh
+cargo run --manifest-path fixtures/atman-rt-embed/Cargo.toml --locked -- --peers
+```
+
 `inbox::PendingBatch<T>` supplies single-consumer ownership for host inboxes. A reservation can select a FIFO subset without removing other entries. Failed publication retains the reserved batch; successful publication consumes only its selected entries, leaving later arrivals queued. Dropping a receipt releases ownership without consuming messages. Opaque receipts cannot be used with a different queue or after release, invalidation, or clear. Hosts enforce run leases and authorization and use the commit callback to persist input before consumption.

@@ -14,6 +14,8 @@ use atman_rt::{
     ast::{Arg, BinOp, Expr, FlowDecl, Ident, Literal, Node, ParamDecl, Span, Stmt, TypeExpr},
 };
 
+mod peers;
+
 type FixtureValue = Value<(), EvalError>;
 
 struct FixtureSources;
@@ -103,11 +105,7 @@ impl StatementHost for FixtureHost {
     ) -> Self::NodeScope {
     }
 
-    fn expression_host(
-        &self,
-        _node_id: Option<&str>,
-        _parent: Option<&str>,
-    ) -> Self::ExprHost {
+    fn expression_host(&self, _node_id: Option<&str>, _parent: Option<&str>) -> Self::ExprHost {
         self.clone()
     }
 
@@ -163,6 +161,10 @@ fn literal(value: i64) -> Expr {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--peers") {
+        peers::run();
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("--demo") {
         if let Err(error) = run_demo() {
             eprintln!("{error}");
