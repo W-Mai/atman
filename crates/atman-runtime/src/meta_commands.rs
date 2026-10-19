@@ -188,6 +188,12 @@ pub const META_COMMANDS: &[MetaCommand] = &[
         aliases: &[],
     },
     MetaCommand {
+        name: "activity",
+        desc: "switch the focused view between overview and task activity",
+        usage: ":activity",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "links",
         desc: "browse the focused flow's relations",
         usage: ":links",

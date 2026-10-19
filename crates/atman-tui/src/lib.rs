@@ -24,6 +24,7 @@ pub use instance_view::{FlowViewContent, FlowViewSource};
 mod directional_selector;
 pub mod flow_hub;
 pub mod flow_view;
+mod focus_rail;
 pub mod form_modal;
 pub mod highlight;
 pub mod history;

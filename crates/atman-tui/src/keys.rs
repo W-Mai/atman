@@ -38,6 +38,7 @@ pub enum KeyAction {
     OpenCommandPalette,
     OpenProjectHub,
     OpenRelations,
+    ToggleActivity,
     ToggleGoal,
     SearchHistory,
     NudgePrefill,
@@ -82,6 +83,7 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (Char('v'), true, _, _) | (Char('v'), false, _, true) => KeyAction::PasteImage,
         (Char('t'), true, _, _) => KeyAction::CycleReasoning,
         (Backspace, _, _, true) => KeyAction::DeleteWordBackward,
+        (Char('a' | 'A'), true, true, _) => KeyAction::ToggleActivity,
         (Char('a'), true, _, _) => KeyAction::CursorHome,
         (Char('e'), true, _, _) => KeyAction::CursorEnd,
         (Esc, _, _, _) => KeyAction::Escape,
@@ -304,6 +306,19 @@ mod tests {
 
     #[test]
     fn ctrl_shift_g_opens_flow_relations() {
+        for key in ['a', 'A'] {
+            assert_eq!(
+                map(ke(
+                    KeyCode::Char(key),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                )),
+                KeyAction::ToggleActivity
+            );
+        }
+        assert_eq!(
+            map(ke(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            KeyAction::CursorHome
+        );
         assert_eq!(
             map(ke(
                 KeyCode::Char('G'),

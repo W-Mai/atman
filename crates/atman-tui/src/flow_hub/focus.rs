@@ -65,6 +65,17 @@ pub(crate) struct FocusLinks {
 }
 
 impl FocusLinks {
+    pub fn height(&self, owner: &FlowRef, limit: u16) -> u16 {
+        if limit < 7 {
+            return 0;
+        }
+        let rows = self
+            .snapshot
+            .as_ref()
+            .filter(|snapshot| &snapshot.owner == owner)
+            .map_or(0, |snapshot| snapshot.rows.len());
+        7 + rows.min(3).min(usize::from((limit - 7) / 4)) as u16 * 4
+    }
     pub fn update(&mut self, snapshot: NeighborSnapshot) {
         self.snapshot = Some(snapshot);
     }
@@ -91,7 +102,7 @@ impl FocusLinks {
     /// Return the remaining sidebar area for ordinary task activity.
     pub fn render(&mut self, frame: &mut Frame, area: Rect, owner: &FlowRef) -> Rect {
         self.clear_hits();
-        if area.width < 24 || area.height < 12 {
+        if area.width < 24 || area.height < 7 {
             return area;
         }
         self.owner = Some(owner.clone());
@@ -102,7 +113,7 @@ impl FocusLinks {
         let count = snapshot
             .map_or(0, |snapshot| snapshot.rows.len())
             .min(3)
-            .min(usize::from(area.height.saturating_sub(13) / 4));
+            .min(usize::from(area.height.saturating_sub(7) / 4));
         let height = 7 + count as u16 * 4;
         let theme = crate::theme::theme();
         let panel = Rect::new(area.x, area.y, area.width, height);

@@ -39,9 +39,6 @@ impl ActivityStatus {
 
 use atman_runtime::{TaskId, TaskKind, TaskSnapshot, TaskStatus};
 
-pub const TASK_PANEL_WIDTH: u16 = 40;
-pub const TASK_PANEL_STRIP_WIDTH: u16 = 5;
-
 #[derive(Debug, Default)]
 pub struct TaskPanelHitMap {
     pub kill_rects: Vec<(TaskId, Rect)>,
@@ -65,27 +62,6 @@ pub struct TaskPanelHover {
     pub kill_armed_id: Option<TaskId>,
     pub kill_armed_expired: bool,
     pub expanded_tasks: std::collections::HashSet<String>,
-}
-
-pub fn compute_task_panel_rect(area: Rect, show: bool, collapsed: bool) -> Option<Rect> {
-    if !show {
-        return None;
-    }
-    let width = if collapsed {
-        TASK_PANEL_STRIP_WIDTH
-    } else {
-        TASK_PANEL_WIDTH
-    };
-    let height = area.height.saturating_sub(2);
-    if height == 0 {
-        return None;
-    }
-    Some(Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width,
-        height,
-    })
 }
 
 fn status_icon(
@@ -1052,14 +1028,6 @@ fn render_strip(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn task_panel_stays_on_screen_when_opened_on_narrow_terminals() {
-        let area = Rect::new(0, 0, 60, 20);
-        let rect = compute_task_panel_rect(area, true, false).unwrap();
-        assert_eq!(rect.width, TASK_PANEL_WIDTH);
-        assert!(rect.x + rect.width <= area.x + area.width);
-    }
 
     #[test]
     fn node_kind_glyph_returns_tool_for_toolcall() {

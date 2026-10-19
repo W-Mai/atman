@@ -3,14 +3,13 @@ use ratatui::layout::{Constraint, Direction, Layout as RatatuiLayout, Rect};
 // Kept as public constants so the palette / status bar helpers can still
 // query "will the sidebar be visible?" without duplicating the width math.
 pub const SIDEBAR_WIDTH: u16 = 40;
-pub const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 120 + SIDEBAR_WIDTH / 3 * 2;
+pub const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 120;
 
 pub const INPUT_BOTTOM_MARGIN: u16 = 2;
 pub const INPUT_TOP_GAP: u16 = 2;
 
-// AppLayout only reserves status + transcript. Input, approvals, and the
-// sidebar all draw as floating overlays on top of the transcript so
-// message content still visually flows underneath them.
+// The outer layout reserves status and work area. FocusLayout divides the work
+// area into an auxiliary rail and conversation; input overlays stay in the latter.
 #[derive(Debug, Clone, Copy)]
 pub struct AppLayout {
     pub status: Rect,
@@ -34,31 +33,39 @@ pub fn compute_ex(area: Rect, status_height: u16) -> AppLayout {
 
 pub const SIDEBAR_STRIP_WIDTH: u16 = 5;
 
-pub fn compute_sidebar_rect(area: Rect, show: bool, collapsed: bool) -> Option<Rect> {
-    if !show {
-        return None;
+/// Disjoint conversation and auxiliary regions for every flow surface.
+pub struct FocusLayout {
+    pub conversation: Rect,
+    pub rail: Option<Rect>,
+}
+
+impl FocusLayout {
+    pub fn new(area: Rect, show: bool, expanded: bool) -> Self {
+        if !show || area.width < 40 || area.height < 8 {
+            return Self {
+                conversation: area,
+                rail: None,
+            };
+        }
+        let candidate = if expanded {
+            SIDEBAR_WIDTH
+                .min(area.width.saturating_sub(42))
+                .max(SIDEBAR_STRIP_WIDTH)
+        } else {
+            SIDEBAR_STRIP_WIDTH
+        };
+        let width = if candidate < 24 {
+            SIDEBAR_STRIP_WIDTH
+        } else {
+            candidate
+        };
+        let rail = Rect::new(area.x + 1, area.y + 1, width, area.height - 2);
+        let left = rail.right() + 2;
+        Self {
+            conversation: Rect::new(left, area.y, area.right().saturating_sub(left), area.height),
+            rail: Some(rail),
+        }
     }
-    let width = if collapsed {
-        SIDEBAR_STRIP_WIDTH
-    } else {
-        SIDEBAR_WIDTH
-    };
-    let height = area.height.saturating_sub(4);
-    if height == 0 {
-        return None;
-    }
-    let x = area
-        .x
-        .saturating_add(area.width)
-        .saturating_sub(width)
-        .saturating_sub(1);
-    let y = area.y.saturating_add(1);
-    Some(Rect {
-        x,
-        y,
-        width,
-        height,
-    })
 }
 
 pub fn compute_input_rect(transcript: Rect, buf_lines: u16) -> Rect {
@@ -274,45 +281,6 @@ mod tests {
         let l = compute_ex(area, 1);
         assert_eq!(l.transcript.y, 1);
         assert_eq!(l.transcript.height, 39);
-    }
-
-    #[test]
-    fn sidebar_hidden_when_closed() {
-        let area = Rect::new(0, 0, 200, 40);
-        assert!(compute_sidebar_rect(area, false, false).is_none());
-    }
-
-    #[test]
-    fn sidebar_stays_on_screen_when_opened_on_narrow_terminals() {
-        let area = Rect::new(0, 0, 60, 40);
-        let rect = compute_sidebar_rect(area, true, false).unwrap();
-        assert_eq!(rect.width, SIDEBAR_WIDTH);
-        assert!(rect.x + rect.width <= area.x + area.width);
-    }
-
-    #[test]
-    fn sidebar_floats_in_top_right_when_open() {
-        let area = Rect::new(0, 1, 160, 40);
-        let rect = compute_sidebar_rect(area, true, false).unwrap();
-        assert_eq!(rect.width, SIDEBAR_WIDTH);
-        assert_eq!(rect.x + rect.width, area.x + area.width - 1);
-        assert_eq!(rect.y, area.y + 1);
-    }
-
-    #[test]
-    fn sidebar_collapsed_uses_strip_width() {
-        let area = Rect::new(0, 0, 140, 40);
-        let rect = compute_sidebar_rect(area, true, true).unwrap();
-        assert_eq!(rect.width, SIDEBAR_STRIP_WIDTH);
-        assert_eq!(rect.x + rect.width, area.x + area.width - 1);
-    }
-
-    #[test]
-    fn sidebar_collapsed_still_shows_on_narrow_terminal() {
-        // A 5-col strip fits even on narrow terminals.
-        let area = Rect::new(0, 0, 60, 40);
-        let rect = compute_sidebar_rect(area, true, true).unwrap();
-        assert_eq!(rect.width, SIDEBAR_STRIP_WIDTH);
     }
 
     #[test]

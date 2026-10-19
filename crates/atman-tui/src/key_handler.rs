@@ -1450,10 +1450,8 @@ pub(crate) fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::ToggleSidebar => {
-            app.sidebar_collapsed = !app.sidebar_collapsed;
-            app.sidebar_upper_runtime_collapsed = false;
-            app.sidebar_lower_runtime_collapsed = false;
-            app.save_ui_state();
+            app.wm
+                .dispatch_meta_command(":sidebar", &mut app.app, control_tx);
             *interrupt_prompt = None;
         }
         KeyAction::ToggleMouseCapture => {
@@ -1543,6 +1541,10 @@ pub(crate) fn handle_key(
         KeyAction::OpenRelations => {
             app.wm
                 .dispatch_meta_command(":links", &mut app.app, control_tx);
+        }
+        KeyAction::ToggleActivity => {
+            app.wm
+                .dispatch_meta_command(":activity", &mut app.app, control_tx);
         }
     }
     if edited {

@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub const GOAL_MAX_LINES: usize = 5;
+const GOAL_CONTROL_ROWS: u16 = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarPopupKind {
@@ -13,6 +14,7 @@ pub enum SidebarPopupKind {
 }
 
 pub struct SidebarInputs<'a> {
+    pub neighbor_height: u16,
     pub goal: Option<&'a str>,
     pub goal_status: Option<&'a crate::agent_presentation::GoalPresentation>,
     pub context: &'a ContextSnapshot,
@@ -72,6 +74,7 @@ impl SidebarMode {
 }
 
 pub struct SidebarRenderResult {
+    pub neighbor_rect: Option<Rect>,
     pub goal_rect: Option<Rect>,
     pub plan_rect: Option<Rect>,
     pub todo_rect: Option<Rect>,
@@ -91,8 +94,9 @@ pub struct SidebarRenderResult {
 }
 
 impl SidebarRenderResult {
-    fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
+            neighbor_rect: None,
             goal_rect: None,
             plan_rect: None,
             todo_rect: None,
@@ -196,7 +200,10 @@ pub fn render(
     } else {
         0
     };
-    let available = area.height.saturating_sub(meta_height + gap * 2);
+    let neighbor_height = inputs.neighbor_height.min(area.height.saturating_sub(8));
+    let available = area
+        .height
+        .saturating_sub(meta_height + gap * 2 + neighbor_height + u16::from(neighbor_height > 0));
     let strip_w = crate::layout::SIDEBAR_STRIP_WIDTH;
 
     // Height allocation:
@@ -204,7 +211,14 @@ pub fn render(
     // - Any collapsed: each panel takes its own content height (no "remaining")
     //   but clamped to available space so it doesn't push other panel off screen
     let (upper_expanded_h, lower_expanded_h) = if !upper_collapsed && !lower_collapsed {
-        let lower_h = lower_need.min(available.saturating_sub(4));
+        // Preserve one selectable objective row and the complete action before
+        // allocating the remaining height to context.
+        let upper_min = if inputs.goal_status.is_some() && !inputs.goal_collapsed {
+            4 + GOAL_CONTROL_ROWS + 1
+        } else {
+            12
+        };
+        let lower_h = lower_need.min(available.saturating_sub(available.min(upper_min) + gap));
         let upper_h = available.saturating_sub(lower_h + gap).max(4);
         (upper_h, lower_h)
     } else if !upper_collapsed {
@@ -219,26 +233,33 @@ pub fn render(
         (0, 0)
     };
 
-    // Build layout items: (is_upper, is_collapsed, height)
-    // Expanded first (in original order), then collapsed (in original order)
-    let mut layout: Vec<(bool, bool, u16)> = Vec::new();
-    if !upper_collapsed {
-        layout.push((true, false, upper_expanded_h));
-    }
-    if !lower_collapsed {
-        layout.push((false, false, lower_expanded_h));
-    }
-    if upper_collapsed {
-        layout.push((true, true, upper_strip_h));
-    }
-    if lower_collapsed {
-        layout.push((false, true, lower_strip_h));
-    }
+    // Keep section positions stable when either section collapses.
+    let layout = [
+        (
+            true,
+            upper_collapsed,
+            if upper_collapsed {
+                upper_strip_h
+            } else {
+                upper_expanded_h
+            },
+        ),
+        (
+            false,
+            lower_collapsed,
+            if lower_collapsed {
+                lower_strip_h
+            } else {
+                lower_expanded_h
+            },
+        ),
+    ];
 
     // Compute rects for each layout item
     let mut y = area.y;
     let mut upper_area: Option<Rect> = None;
     let mut lower_area: Option<Rect> = None;
+    let mut neighbor_area = None;
     for &(is_upper, is_collapsed, h) in &layout {
         let (r_x, r_w) = if is_collapsed {
             // Narrow stripe, right-aligned
@@ -253,13 +274,19 @@ pub fn render(
             y,
             width: r_w,
             height: h,
-        };
+        }
+        .intersection(area);
         if is_upper {
             upper_area = Some(r);
         } else {
             lower_area = Some(r);
         }
         y += h + gap;
+        if is_upper && neighbor_height > 0 {
+            neighbor_area =
+                Some(Rect::new(area.x, y, area.width, neighbor_height).intersection(area));
+            y += neighbor_height + gap;
+        }
     }
 
     let meta_area = Rect {
@@ -267,8 +294,10 @@ pub fn render(
         y: y + gap,
         width: area.width,
         height: meta_height,
-    };
+    }
+    .intersection(area);
     let mut result = SidebarRenderResult::empty();
+    result.neighbor_rect = neighbor_area;
 
     // ── Upper panel ──
     if let Some(upper_area) = upper_area {
@@ -406,6 +435,49 @@ pub fn render(
         );
     }
 
+    let clip = |slot: &mut Option<Rect>, bounds: Option<Rect>| {
+        *slot = slot
+            .and_then(|rect| bounds.map(|bounds| rect.intersection(bounds)))
+            .filter(|rect| !rect.is_empty());
+    };
+    for slot in [
+        &mut result.goal_rect,
+        &mut result.plan_rect,
+        &mut result.todo_rect,
+        &mut result.goal_hdr_rect,
+        &mut result.plan_hdr_rect,
+        &mut result.todo_hdr_rect,
+        &mut result.collapse_btn_rect,
+        &mut result.expand_btn_rect,
+        &mut result.upper_title_rect,
+    ] {
+        clip(slot, upper_area);
+    }
+    for slot in [
+        &mut result.ctx_hdr_rect,
+        &mut result.meta_hdr_rect,
+        &mut result.mcp_hdr_rect,
+        &mut result.lower_title_rect,
+        &mut result.mcp_more_rect,
+    ] {
+        clip(slot, lower_area);
+    }
+    for surface in &mut result.selection.surfaces {
+        let bounds = match surface.section {
+            crate::sidebar_selection::SidebarSection::Context
+            | crate::sidebar_selection::SidebarSection::Mcp => lower_area,
+            _ => upper_area,
+        };
+        surface.atoms.retain(|atom| {
+            bounds.is_some_and(|bounds| atom.rect.intersection(bounds) == atom.rect)
+        });
+    }
+    result.strip_rects.retain(|_, rect| {
+        [upper_area, lower_area]
+            .into_iter()
+            .flatten()
+            .any(|area| rect.intersection(area) == *rect)
+    });
     result
 }
 
@@ -712,11 +784,11 @@ fn render_upper_content(
 
     let mut lines: Vec<Line<'_>> = Vec::new();
     let goal_has_control = inputs.goal_status.is_some();
-    let goal_preview_rows =
-        GOAL_MAX_LINES.min(
-            area.height
-                .saturating_sub(if goal_has_control { 11 } else { 5 }) as usize,
-        );
+    let goal_preview_rows = GOAL_MAX_LINES.min(area.height.saturating_sub(if goal_has_control {
+        GOAL_CONTROL_ROWS
+    } else {
+        5
+    }) as usize);
 
     // ── Goal section ──
     lines.push(Line::from(""));
@@ -1678,7 +1750,12 @@ pub fn render_sidebar_popup(
     }
 
     let popup_h: u16 = (lines.len() as u16 + 2).min(sidebar_rect.height);
-    let popup_x = sidebar_rect.x.saturating_sub(popup_w).saturating_sub(1);
+    let popup_w = popup_w.min(f.area().width);
+    let popup_x = if sidebar_rect.right().saturating_add(popup_w + 1) <= f.area().right() {
+        sidebar_rect.right() + 1
+    } else {
+        sidebar_rect.x.saturating_sub(popup_w + 1).max(f.area().x)
+    };
     let popup_y = sidebar_rect.y;
     let popup_area = ratatui::layout::Rect {
         x: popup_x,

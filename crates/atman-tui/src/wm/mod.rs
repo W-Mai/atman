@@ -799,6 +799,7 @@ impl WindowManager {
                 id,
                 PaletteEntryId::OpenFlowHub
                     | PaletteEntryId::OpenFlowLinks
+                    | PaletteEntryId::ToggleActivity
                     | PaletteEntryId::OpenManagement
                     | PaletteEntryId::SwitchSession
                     | PaletteEntryId::OpenProjectHub
@@ -948,8 +949,14 @@ impl WindowManager {
             PaletteEntryId::SearchHistory => {
                 self.modals.history_search.open();
             }
+            PaletteEntryId::ToggleActivity => {
+                app.select_focus_rail(!app.focus_rail.activity);
+            }
             PaletteEntryId::ToggleSidebar => {
-                app.sidebar_mode = app.sidebar_mode.toggle();
+                app.sidebar_collapsed = !app.sidebar_collapsed;
+                app.sidebar_upper_runtime_collapsed = false;
+                app.sidebar_lower_runtime_collapsed = false;
+                app.task_panel_runtime_collapsed = false;
                 app.save_ui_state();
             }
             PaletteEntryId::ManageProviders => {

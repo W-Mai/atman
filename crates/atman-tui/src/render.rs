@@ -237,8 +237,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     let app = &mut ui.app;
     let area = f.area();
     if app.last_full_rect != Some(area) {
-        let responsive_narrow = area.width
-            < layout::SIDEBAR_MIN_TOTAL_WIDTH.max(crate::task_panel::TASK_PANEL_WIDTH + 40);
+        let responsive_narrow = area.width < layout::SIDEBAR_MIN_TOTAL_WIDTH;
         app.sidebar_upper_runtime_collapsed = responsive_narrow;
         app.sidebar_lower_runtime_collapsed = responsive_narrow;
         app.task_panel_runtime_collapsed = responsive_narrow;
@@ -303,9 +302,21 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         let overflow = u16::from(editor.pending_images().len() > 4);
         visible + overflow + 2
     };
-    let l = layout::compute_ex(area, status_height);
-    let sidebar_rect =
-        layout::compute_sidebar_rect(l.transcript, show_sidebar, sidebar_effective_collapsed);
+    let mut l = layout::compute_ex(area, status_height);
+    let expanded = !app.sidebar_collapsed
+        && if app.focus_rail.activity {
+            !app.task_panel_collapsed && !app.task_panel_runtime_collapsed
+        } else {
+            (!app.sidebar_upper_collapsed && !app.sidebar_upper_runtime_collapsed)
+                || (!app.sidebar_lower_collapsed && !app.sidebar_lower_runtime_collapsed)
+        };
+    let focus = layout::FocusLayout::new(l.transcript, show_sidebar, expanded);
+    l.transcript = focus.conversation;
+    let rail_content = focus
+        .rail
+        .map(crate::focus_rail::FocusRail::content_area)
+        .filter(|area| area.height >= 4);
+    let sidebar_rect = rail_content.filter(|_| !app.focus_rail.activity);
     let transcript_content = layout::compute_content_rect(l.transcript);
     let content_w = layout::input_content_width(l.transcript.width);
     let total_input_lines = crate::input::visual_line_count(editor.buf(), content_w) as u32;
@@ -676,6 +687,12 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             }
         }
     }
+    app.focus_rail.clear_hits();
+    app.flow_links.clear_hits();
+    if let Some(rail) = focus.rail {
+        app.focus_rail.render(f, rail);
+    }
+    let mut sidebar_result = sidebar::SidebarRenderResult::empty();
     if let Some(area) = sidebar_rect {
         let project_root = app.project_root.clone().or_else(|| {
             app.session
@@ -693,6 +710,15 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             f,
             area,
             sidebar::SidebarInputs {
+                neighbor_height: app.items.snapshot().filter(|_| area.width >= 24).map_or(
+                    0,
+                    |snapshot| {
+                        app.flow_links.height(
+                            snapshot.status.execution.address(),
+                            area.height.saturating_sub(28).min(19),
+                        )
+                    },
+                ),
                 goal: goal
                     .as_ref()
                     .map(|g| g.objective.as_str())
@@ -717,7 +743,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                 context_collapsed: app.context_collapsed,
                 meta_collapsed: app.meta_collapsed,
                 mcp_collapsed: app.mcp_collapsed,
-                sidebar_collapsed: sidebar_effective_collapsed,
+                sidebar_collapsed: sidebar_effective_collapsed || area.width < 24,
                 upper_collapsed: app.sidebar_upper_collapsed || app.sidebar_upper_runtime_collapsed,
                 lower_collapsed: app.sidebar_lower_collapsed || app.sidebar_lower_runtime_collapsed,
                 animation_frame: app.animation_frame,
@@ -730,7 +756,17 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                 on_todos_scroll: &|_c| {},
             },
         );
-        app.last_sidebar_rect = Some(area);
+        if let Some(neighbors) = sr.neighbor_rect
+            && let Some(snapshot) = app.items.snapshot()
+        {
+            let owner = snapshot.status.execution.address().clone();
+            app.flow_links.render(f, neighbors, &owner);
+        }
+        sidebar_result = sr;
+    }
+    {
+        let sr = sidebar_result;
+        app.last_sidebar_rect = sidebar_rect;
         app.last_goal_rect = sr.goal_rect;
         app.last_plan_rect = sr.plan_rect;
         app.last_todo_rect = sr.todo_rect;
@@ -756,28 +792,14 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         }
     }
     // ── Sidebar popup (Plan/Todo item full text) ──
-    if let Some(kind) = app.sidebar_popup {
-        if let Some(sidebar_rect) = app.last_sidebar_rect {
-            let popup_rect =
-                crate::sidebar::render_sidebar_popup(f, sidebar_rect, kind, &app.plans, &app.todos);
-            app.last_sidebar_popup_rect = Some(popup_rect);
-        }
+    if let (Some(kind), Some(sidebar_rect)) = (app.sidebar_popup, app.last_sidebar_rect) {
+        let popup_rect =
+            crate::sidebar::render_sidebar_popup(f, sidebar_rect, kind, &app.plans, &app.todos);
+        app.last_sidebar_popup_rect = Some(popup_rect);
     } else {
         app.last_sidebar_popup_rect = None;
     }
-    app.flow_links.clear_hits();
-    if let Some(mut tp_area) = crate::task_panel::compute_task_panel_rect(
-        l.transcript,
-        show_sidebar,
-        app.task_panel_collapsed || app.task_panel_runtime_collapsed,
-    ) {
-        if let Some(owner) = app
-            .items
-            .snapshot()
-            .map(|snapshot| snapshot.status.execution.address().clone())
-        {
-            tp_area = app.flow_links.render(f, tp_area, &owner);
-        }
+    if let Some(tp_area) = rail_content.filter(|_| app.focus_rail.activity) {
         let hover = crate::task_panel::TaskPanelHover {
             hovered_task_id: app.hovered_task_id.clone(),
             hovered_kill_id: app.hovered_kill_id.clone(),
@@ -798,7 +820,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             &app.items,
             &app.handle_index,
             &app.detached_task_details,
-            app.task_panel_collapsed,
+            app.task_panel_collapsed || tp_area.width < 24,
             &app.task_panel_collapsed_groups,
             &hover,
             watch_hub,
@@ -1437,6 +1459,49 @@ pub(crate) fn render_pulse_bar(
 #[cfg(test)]
 mod quote_tests {
     use super::*;
+
+    #[test]
+    fn focus_surfaces_keep_controls_outside_the_conversation_and_clear_hidden_hits() {
+        for width in [40, 80, 120, 200] {
+            for height in [12, 24, 45, 70] {
+                let mut app = UiState::new(crate::app::AppState::new("test".into(), None));
+                app.app.goal = Some("Review the current flow".into());
+                let mut editor = InputEditor::default();
+                editor.insert_str("preserved draft");
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                        .unwrap();
+                for activity in [false, true, false] {
+                    app.app.select_focus_rail(activity);
+                    terminal
+                        .draw(|frame| render_frame(frame, &mut app, &editor))
+                        .unwrap();
+                    let body = app.app.last_transcript_rect.unwrap();
+                    let rail = if activity {
+                        app.app.last_task_panel_rect
+                    } else {
+                        app.app.last_sidebar_rect
+                    };
+                    if let Some(rail) = rail {
+                        assert!(body.intersection(rail).is_empty());
+                        assert!(app.app.input_rect.unwrap().intersection(rail).is_empty());
+                    }
+                    if activity {
+                        assert!(app.app.last_sidebar_rect.is_none());
+                        assert!(app.app.last_goal_rect.is_none());
+                        assert!(app.app.last_ctx_hdr_rect.is_none());
+                    } else {
+                        assert!(app.app.last_task_panel_rect.is_none());
+                        assert!(app.app.last_task_panel_hitmap.kill_rects.is_empty());
+                        if let Some(goal) = app.app.last_goal_rect {
+                            assert_eq!(goal.intersection(app.app.last_sidebar_rect.unwrap()), goal);
+                        }
+                    }
+                    assert_eq!(editor.buf(), "preserved draft");
+                }
+            }
+        }
+    }
 
     #[test]
     fn pending_quote_remains_visible_when_the_card_does_not_fit() {

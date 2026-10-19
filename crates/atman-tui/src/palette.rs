@@ -13,6 +13,7 @@ use crate::keys::KeyAction;
 pub enum PaletteEntryId {
     OpenFlowHub,
     OpenFlowLinks,
+    ToggleActivity,
     OpenManagement,
     SwitchSession,
     AutoNameSession,
@@ -105,6 +106,13 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         label: "Flow Links",
         hint: "Inspect this flow's neighbors (Ctrl+Shift+G)",
         keyword: "links neighbors relations watch source target",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::ToggleActivity,
+        group: "Session",
+        label: "Toggle Activity",
+        hint: "Switch Overview / Activity (Ctrl+Shift+A)",
+        keyword: "activity tasks processes overview",
     },
     PaletteEntry {
         id: PaletteEntryId::OpenManagement,
@@ -251,6 +259,7 @@ impl PaletteEntryId {
         match self {
             Self::OpenFlowHub => "flows",
             Self::OpenFlowLinks => "links",
+            Self::ToggleActivity => "activity",
             Self::OpenManagement => "atman",
             Self::SwitchSession => "sessions",
             Self::AutoNameSession => "name-session",

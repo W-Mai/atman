@@ -463,6 +463,12 @@ pub(crate) async fn run_frames(
                         continue;
                     }
                 }
+                if let Some(Ok(CtEvent::Mouse(mouse))) = &key
+                    && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
+                    && let Some(activity) = app.app.focus_rail.mouse(*mouse) {
+                    app.app.select_focus_rail(activity);
+                    continue;
+                }
                 let mut current = key;
                 let mut scroll_delta: i32 = 0;
                 let mut drained: u32 = 0;

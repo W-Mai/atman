@@ -28,7 +28,9 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
-- **Focus neighborhood navigation** — Main and floating conversations expose `:links`, a palette action, and a shared shortcut. The activity sidebar retains scoped neighborhood snapshots with padded mouse targets; full directory navigation remains available on narrow terminals.
+- **Shared Focus layout** — Main and floating conversations reserve separate regions for the auxiliary rail and transcript, including the composer, quotes, and pending queue. Overview shows planning, neighborhood, and context; Activity retains task and process controls. Padded mouse buttons, `:activity`, and Ctrl+Shift+A share view-local selection, and hidden controls lose their click targets.
+
+- **Focus neighborhood navigation** — Main and floating conversations expose `:links`, a palette action, and a shared shortcut. The Overview rail retains scoped neighborhood snapshots with padded mouse targets; full directory navigation remains available on narrow terminals.
 
 - **Global flow relations** — Discover incoming and outgoing links across Sessions through incremental catalog reads. Scope controls retain shared endpoint navigation, failed Sessions remain visible, and empty batches can advance without starting execution services.
 
