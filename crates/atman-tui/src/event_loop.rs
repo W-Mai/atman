@@ -419,10 +419,11 @@ pub(crate) async fn run_frames(
                         Some(Ok(CtEvent::Key(key))) if map_key(key) == KeyAction::Quit => { break; },
                         Some(Ok(CtEvent::Key(key))) => opened.key(map_key(key)),
                         Some(Ok(CtEvent::Mouse(mouse))) => opened.mouse(mouse),
+                        Some(Ok(CtEvent::Paste(text))) => opened.paste(&text),
                         _ => crate::flow_hub::Action::None,
                     };
                     if let crate::flow_hub::Action::Load(request) = &action
-                        && opened.leaves_directory(request) {
+                        && opened.leaves_directory(request) && opened.restores_directory(request) {
                         action = crate::flow_hub::Action::Load(hub_history.request(request.clone()));
                     }
                     if matches!(action, crate::flow_hub::Action::Close) { hub_history.save(hub.take().unwrap()); }
@@ -3481,6 +3482,13 @@ fn dispatch_hub_action(
         crate::flow_hub::Action::CancelWatcher { owner, id } => {
             TuiControl::CancelWatcher { owner, id }
         }
+        crate::flow_hub::Action::RegisterWatcher {
+            owner,
+            subscription,
+        } => TuiControl::RegisterWatcher {
+            owner,
+            subscription,
+        },
         crate::flow_hub::Action::Focus(flow) => TuiControl::FocusFlow {
             flow,
             placement: FlowPlacement::Main,

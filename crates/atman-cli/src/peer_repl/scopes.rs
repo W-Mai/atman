@@ -188,6 +188,64 @@ impl Scopes {
         Ok(())
     }
 
+    pub async fn register_watcher(
+        &self,
+        owner: atman_runtime::flow_store::FlowRef,
+        subscription: atman_runtime::flow_store::subscription::FlowSubscription,
+    ) -> Result<()> {
+        use atman_runtime::flow_store::subscription::SubscriptionPurpose;
+        ensure!(
+            subscription.purpose == SubscriptionPurpose::Watcher && subscription.reply.is_none(),
+            "watcher controls cannot create internal result routes"
+        );
+        let recorded = self
+            .host
+            .flow(&owner)
+            .await?
+            .flow_subscriptions()
+            .await?
+            .iter()
+            .any(|record| record.subscription.id == subscription.id);
+        // Share the attachment lock with navigation, without building providers or scheduling turns.
+        let _loaded = self.loaded.lock().await;
+        let id = subscription.source.session_id.0;
+        match self.host.session(id) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !recorded => {
+                let root = self.root.clone();
+                let (session, redactor) = tokio::task::spawn_blocking(move || {
+                    let session = RuntimeStore::open(&root)?.open_session(id)?;
+                    let redactor = match &session.projection().descriptor.configuration {
+                        SessionConfiguration::Atman(source) => {
+                            let config = ConfigHub::from_source(source)?;
+                            atman_daemon::bootstrap::build_redactor(Some(config.config_dir()))
+                        }
+                        _ => None,
+                    };
+                    Ok::<_, anyhow::Error>((session, redactor))
+                })
+                .await??;
+                self.host.attach_session_with_redactor(session, redactor)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && recorded => {}
+            Err(error) => return Err(error.into()),
+        }
+        drop(_loaded);
+        self.host
+            .watch_events(owner.clone(), subscription, move |actual| {
+                if actual == &owner {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "watcher owner differs from selected flow",
+                    ))
+                }
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn startup_recent(
         &self,
         source: &Attachment,
@@ -568,6 +626,164 @@ fn prepare_new_session(
 mod tests {
     use super::*;
     use atman_runtime::flow_store::FlowTransition;
+
+    #[tokio::test]
+    async fn watcher_registration_attaches_storage_without_models_and_retains_retry_identity() {
+        use atman_runtime::flow_store::{
+            access::{AccessTarget, FlowAction, FlowGrant},
+            subscription::{FlowEventFilter, FlowSubscription, SubscriptionPurpose},
+        };
+        let data = tempfile::tempdir().unwrap();
+        let config = ConfigHub::from_config_dir(data.path().join("config"));
+        std::fs::create_dir_all(config.config_dir()).unwrap();
+        std::fs::write(config.config_dir().join("config.toml"), "").unwrap();
+        let host = RuntimeHost::default();
+        let (notices, _received) = mpsc::unbounded_channel();
+        let scopes = Arc::new(Scopes::empty(
+            data.path(),
+            host.clone(),
+            None,
+            Arc::new(prompts::Prompts::new(notices)),
+        ));
+        let owner = scopes.open_management(config).await.unwrap();
+        let recipient = host.flow(&owner).await.unwrap();
+        let before = recipient.snapshot().await.unwrap();
+        let mut descriptor = recipient.descriptor().await.unwrap();
+        let source_id = Uuid::now_v7();
+        descriptor.address.session_id = source_id.into();
+        descriptor.creation_request = Uuid::now_v7();
+        let source = descriptor.address.clone();
+        let mut stored = RuntimeStore::open(data.path())
+            .unwrap()
+            .create_session(SessionDescriptor {
+                id: source_id,
+                project: None,
+                configuration: Default::default(),
+                title: "Detached source".into(),
+            })
+            .unwrap();
+        let mut flow = stored.create_flow(descriptor).unwrap();
+        flow.transition(flow.state().revision(), FlowTransition::Activated)
+            .unwrap();
+        drop(flow);
+        drop(stored);
+        assert!(host.session(source_id).is_err());
+        let subscription = FlowSubscription {
+            id: Uuid::now_v7(),
+            source: source.clone(),
+            filter: FlowEventFilter::FinalAnswers,
+            once: false,
+            purpose: SubscriptionPurpose::Watcher,
+            expires_at: None,
+            reply: None,
+        };
+        assert!(
+            scopes
+                .register_watcher(owner.clone(), subscription.clone())
+                .await
+                .is_err()
+        );
+        assert!(recipient.flow_subscriptions().await.unwrap().is_empty());
+        let session = host.session(owner.session_id.0).unwrap();
+        let grant = Uuid::now_v7();
+        session
+            .grant_access(
+                session.snapshot().await.unwrap().cursor,
+                FlowGrant {
+                    id: grant,
+                    grantee: owner.clone(),
+                    target: AccessTarget::Flow(source),
+                    actions: [FlowAction::Watch].into(),
+                },
+            )
+            .await
+            .unwrap();
+        scopes
+            .register_watcher(owner.clone(), subscription.clone())
+            .await
+            .unwrap();
+        let registered = recipient.snapshot().await.unwrap();
+        assert_eq!(registered.state, before.state);
+        assert_eq!(registered.pending.len(), before.pending.len());
+        assert!(scopes.loaded.lock().await.is_empty());
+        assert!(
+            host.session(source_id)
+                .unwrap()
+                .scheduling_status(subscription.source.instance_id.clone())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        session
+            .revoke_access(session.snapshot().await.unwrap().cursor, grant)
+            .await
+            .unwrap();
+        scopes
+            .register_watcher(owner.clone(), subscription.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            recipient.snapshot().await.unwrap().cursor,
+            registered.cursor
+        );
+        let mut conflict = subscription.clone();
+        conflict.once = true;
+        assert!(
+            scopes
+                .register_watcher(owner.clone(), conflict)
+                .await
+                .is_err()
+        );
+        scopes
+            .cancel_watcher(owner.clone(), subscription.id)
+            .await
+            .unwrap();
+        let cancelled = recipient.snapshot().await.unwrap().cursor;
+        scopes
+            .register_watcher(owner.clone(), subscription.clone())
+            .await
+            .unwrap();
+        assert_eq!(recipient.snapshot().await.unwrap().cursor, cancelled);
+        host.shutdown().await.unwrap();
+        let source_path = data
+            .path()
+            .join("runtime-v1/sessions")
+            .join(source_id.to_string());
+        std::fs::rename(source_path, data.path().join("unavailable-source")).unwrap();
+        let restored_host = RuntimeHost::default();
+        restored_host
+            .attach_session(
+                RuntimeStore::open(data.path())
+                    .unwrap()
+                    .open_session(owner.session_id.0)
+                    .unwrap(),
+            )
+            .unwrap();
+        let (notices, _received) = mpsc::unbounded_channel();
+        let restored = Scopes::empty(
+            data.path(),
+            restored_host.clone(),
+            None,
+            Arc::new(prompts::Prompts::new(notices)),
+        );
+        restored
+            .register_watcher(owner.clone(), subscription)
+            .await
+            .unwrap();
+        assert!(restored_host.session(source_id).is_err());
+        assert_eq!(
+            restored_host
+                .flow(&owner)
+                .await
+                .unwrap()
+                .snapshot()
+                .await
+                .unwrap()
+                .cursor,
+            cancelled
+        );
+        restored_host.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn projectless_management_entry_can_bind_without_model_work() {

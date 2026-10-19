@@ -515,7 +515,7 @@ impl FlowHubPage {
     }
 }
 
-fn short_flow(flow: &atman_runtime::flow_store::FlowRef) -> String {
+pub(super) fn short_flow(flow: &atman_runtime::flow_store::FlowRef) -> String {
     format!(
         "{}/{}",
         &flow.session_id.to_string()[28..],

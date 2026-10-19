@@ -28,6 +28,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **WatchHub creation** — Main and floating views can select a source Flow and register final-reply, turn-completion, or instance-closure subscriptions. Shared forms support text matching, delivery mode, optional expiry, keyboard controls, mouse editing, and paste. Failed requests retain their registration identity and deadline for retry.
+
 - **Host watcher registration** — Hosts can register Flow and owned-process subscriptions without starting a turn. Agent tools share the same registration paths, preserving authorization checks, original source positions on retry, and cancelled registrations.
 
 - **WatchHub cancellation** — Active subscription details provide a padded cancel button with Delete and Tab/Enter controls. Changes appear after host acknowledgement, failures remain visible for retry, and closing the view does not cancel an accepted operation.

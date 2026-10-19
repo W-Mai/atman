@@ -549,6 +549,19 @@ impl Workspace {
                             });
                             continue;
                         }
+                        TuiControl::RegisterWatcher { owner, subscription } => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = async {
+                                    scopes.register_watcher(owner.clone(), subscription).await?;
+                                    scopes.browse(atman_tui::flow_hub::HubRequest::Watchers { owner }).await
+                                        .context("Registration committed, but reading updated details failed")
+                                        .map(Navigation::Catalog)
+                                }.await;
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::FocusFlow { flow, placement, reuse } => {
                             if let Some(binding) = reuse {
                                 if binding.flow == flow && views.get(&binding.view_id).is_some_and(|view| view.binding == binding) {
