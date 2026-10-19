@@ -19,6 +19,7 @@ mod graph;
 pub(crate) use focus::{FocusLinks, NeighborSnapshot};
 mod create;
 pub use create::WatchDefinition;
+mod inbox;
 mod page;
 mod watch;
 pub use page::{
@@ -59,6 +60,7 @@ pub(crate) enum Action {
 pub(crate) struct FlowHub {
     create_watch: Option<create::Draft>,
     watch_details: watch::Details,
+    inbox_details: inbox::Details,
     watch_refresh: Option<atman_runtime::flow_store::FlowRef>,
     pub pending: Option<ControlTicket>,
     page: Option<FlowHubPage>,
@@ -313,6 +315,7 @@ impl FlowHub {
                 self.rows = page.rows(None, self.endpoint);
                 if changed_directory || changed_page {
                     self.watch_details = watch::Details::default();
+                    self.inbox_details = inbox::Details::default();
                     self.graph = graph::Layout::default();
                 }
                 if matches!(*page, FlowHubPage::Flows { .. }) {
@@ -435,6 +438,10 @@ impl FlowHub {
                     Action::None
                 }
             };
+        }
+        if let Some(page::RowKey::Delivery { id, .. }) = selected.map(|row| &row.key) {
+            self.inbox_details.open(*id);
+            return Action::None;
         }
         if let Some(page::RowKey::Watcher { owner, id }) = self
             .filtered()
@@ -563,6 +570,9 @@ impl FlowHub {
                 return self.create_action(Action::Load(request));
             }
         }
+        if self.inbox_details.id.is_some() {
+            return self.inbox_details.key(key);
+        }
         if self.watch_details.id.is_some() {
             let action = self.watch_details.key(key);
             return self.detail_action(action);
@@ -580,6 +590,22 @@ impl FlowHub {
             return Action::None;
         }
         match key {
+            KeyAction::Tab | KeyAction::BackTab
+                if matches!(self.page, Some(FlowHubPage::Inbox(_))) =>
+            {
+                let Some(FlowHubPage::Inbox(page)) = &self.page else {
+                    unreachable!()
+                };
+                return Action::Load(HubRequest::Inbox {
+                    owner: page.owner.clone(),
+                    side: inbox::other_side(page.side),
+                    before: None,
+                });
+            }
+            KeyAction::RedirectPrefill if matches!(self.page, Some(FlowHubPage::Inbox(_))) => {
+                self.requested_index = Some(0);
+                return Action::Load(self.page.as_ref().unwrap().first());
+            }
             KeyAction::NudgePrefill if matches!(self.page, Some(FlowHubPage::Watchers(_))) => {
                 let Some(FlowHubPage::Watchers(directory)) = &self.page else {
                     unreachable!()
@@ -733,6 +759,9 @@ impl FlowHub {
             let action = draft.mouse(event, self.pending.is_some());
             return self.create_action(action);
         }
+        if self.inbox_details.id.is_some() {
+            return self.inbox_details.mouse(event);
+        }
         if self.watch_details.id.is_some() {
             let action = self.watch_details.mouse(event);
             return self.detail_action(action);
@@ -770,7 +799,9 @@ impl FlowHub {
                 },
             ),
             MouseEventKind::Down(MouseButton::Left) if self.relations.contains(point) => {
-                self.key(if matches!(self.page, Some(FlowHubPage::Watchers(_))) {
+                self.key(if matches!(self.page, Some(FlowHubPage::Inbox(_))) {
+                    KeyAction::Tab
+                } else if matches!(self.page, Some(FlowHubPage::Watchers(_))) {
                     KeyAction::NudgePrefill
                 } else if matches!(self.page, Some(FlowHubPage::Relations { .. })) {
                     KeyAction::Tab
@@ -794,7 +825,10 @@ impl FlowHub {
                     .find(|(rect, _)| rect.contains(point))
                 {
                     self.selected = *index;
-                    return if matches!(self.page, Some(FlowHubPage::Watchers(_))) {
+                    return if matches!(
+                        self.page,
+                        Some(FlowHubPage::Watchers(_) | FlowHubPage::Inbox(_))
+                    ) {
                         self.activate()
                     } else {
                         self.float()
@@ -822,6 +856,12 @@ impl FlowHub {
             && !draft.picking
         {
             draft.render(frame, area, self.pending.is_some(), self.error.as_deref());
+            return;
+        }
+        if self.inbox_details.id.is_some()
+            && let Some(FlowHubPage::Inbox(page)) = &self.page
+        {
+            self.inbox_details.render(frame, area, page);
             return;
         }
         if self.watch_details.id.is_some()
@@ -862,6 +902,7 @@ impl FlowHub {
         let is_flows = matches!(self.page, Some(FlowHubPage::Flows { .. }));
         let is_relations = matches!(self.page, Some(FlowHubPage::Relations { .. }));
         let is_watchers = matches!(self.page, Some(FlowHubPage::Watchers(_)));
+        let is_inbox = matches!(self.page, Some(FlowHubPage::Inbox(_)));
         let is_processes = matches!(self.page, Some(FlowHubPage::ProcessSources { .. }));
         let picking = self.create_watch.is_some();
         let scoped_links = matches!(
@@ -891,7 +932,7 @@ impl FlowHub {
             button_width,
             3,
         );
-        self.relations = if (is_flows || is_relations || is_watchers) && !picking {
+        self.relations = if (is_flows || is_relations || is_watchers || is_inbox) && !picking {
             Rect::new(
                 content.x + width / 2 + 1,
                 content.y + 5,
@@ -929,7 +970,17 @@ impl FlowHub {
             (self.refresh, "\nRefresh  Ctrl+R", self.refresh_hovered),
             (
                 self.relations,
-                if is_watchers {
+                if is_inbox {
+                    match &self.page {
+                        Some(FlowHubPage::Inbox(page))
+                            if page.side
+                                == atman_runtime::flow_store::inbox_view::InboxSide::Received =>
+                        {
+                            "\nSent Tab"
+                        }
+                        _ => "\nReceived Tab",
+                    }
+                } else if is_watchers {
                     if matches!(&self.page, Some(FlowHubPage::Watchers(directory)) if directory.global())
                     {
                         "\nThis Flow Ctrl+G"
@@ -984,7 +1035,7 @@ impl FlowHub {
             );
         }
         let search_y = content.y
-            + if picking || is_flows || is_relations || is_watchers {
+            + if picking || is_flows || is_relations || is_watchers || is_inbox {
                 8
             } else {
                 4
@@ -1073,7 +1124,7 @@ impl FlowHub {
                     "\nSelect Enter"
                 } else if matches!(row.key, page::RowKey::WatchFailure { .. }) {
                     "\nUnavailable"
-                } else if is_watchers {
+                } else if is_watchers || is_inbox {
                     "\nDetails Enter"
                 } else if matches!(row.action, Action::Focus(_)) {
                     "\nWindow Ctrl+O"
@@ -1105,6 +1156,36 @@ impl FlowHub {
         let message = self.error.clone().unwrap_or_else(|| {
             if self.pending.is_some() {
                 "Loading…".into()
+            } else if is_inbox {
+                let Some(FlowHubPage::Inbox(page)) = &self.page else {
+                    unreachable!()
+                };
+                if width < 90 {
+                    return format!(
+                        "Page {} / {} · {total} records · {} matches{}",
+                        self.index + 1,
+                        page_count,
+                        rows.len(),
+                        if page.trailing_bytes > 0 {
+                            " · partial tail"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                format!(
+                    "Snapshot · {} records · Page {} / {} · {} matches · commit {}{}",
+                    total,
+                    self.index + 1,
+                    page_count,
+                    rows.len(),
+                    page.cursor.sequence,
+                    if page.trailing_bytes > 0 {
+                        " · incomplete tail"
+                    } else {
+                        ""
+                    }
+                )
             } else if is_processes && total == 0 {
                 "No running Bash/Terminal resources · Ctrl+R refresh".into()
             } else if is_processes {
@@ -1194,6 +1275,16 @@ impl FlowHub {
                 rect,
             );
         }
+        if let Some(FlowHubPage::Inbox(page)) = &self.page {
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "Flow {} · read-only delivery history",
+                    page::short_flow(&page.owner)
+                ))
+                .style(muted),
+                Rect::new(content.x, footer + 4, width, 1),
+            );
+        }
         if let Some(FlowHubPage::Watchers(directory)) = &self.page {
             frame.render_widget(
                 Paragraph::new(format!(
@@ -1207,6 +1298,8 @@ impl FlowHub {
         frame.render_widget(
             Paragraph::new(if picking {
                 "↑↓ select · Enter choose · Ctrl+B sources · Esc back"
+            } else if is_inbox {
+                "↑↓ select · Enter details · Tab side · Esc back"
             } else if is_watchers {
                 "↑↓ select · Enter details · Ctrl+B new · Ctrl+G scope · Esc back"
             } else if is_flows {
@@ -1227,7 +1320,7 @@ impl FlowHub {
                 && !draft.picking
             {
                 draft.paste(text);
-            } else if self.watch_details.id.is_none() {
+            } else if self.watch_details.id.is_none() && self.inbox_details.id.is_none() {
                 self.query.extend(text.chars().filter(|c| !c.is_control()));
                 self.selected = 0;
                 self.offset = 0;

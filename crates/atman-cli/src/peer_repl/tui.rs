@@ -775,6 +775,15 @@ impl scopes::Scopes {
             FlowHubPage, HubRequest, PAGE_SIZE, RelationProgress, RelationRange,
         };
         Ok(Box::new(match request {
+            HubRequest::Inbox {
+                owner,
+                side,
+                before,
+            } => FlowHubPage::Inbox(
+                self.catalog
+                    .inbox_page(&owner, side, before, PAGE_SIZE, |_| Ok(()))
+                    .await?,
+            ),
             HubRequest::WatchCatalog { owner, after } => {
                 let page = self
                     .catalog

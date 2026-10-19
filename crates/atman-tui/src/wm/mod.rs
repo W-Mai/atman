@@ -800,6 +800,7 @@ impl WindowManager {
                 PaletteEntryId::OpenFlowHub
                     | PaletteEntryId::OpenFlowLinks
                     | PaletteEntryId::OpenWatchHub
+                    | PaletteEntryId::OpenInbox
                     | PaletteEntryId::ToggleActivity
                     | PaletteEntryId::OpenManagement
                     | PaletteEntryId::SwitchSession
@@ -906,13 +907,21 @@ impl WindowManager {
                     );
                 }
             }
-            PaletteEntryId::OpenFlowLinks | PaletteEntryId::OpenWatchHub => {
+            PaletteEntryId::OpenFlowLinks
+            | PaletteEntryId::OpenWatchHub
+            | PaletteEntryId::OpenInbox => {
                 if let Some(flow) = control_tx
                     .and_then(|tx| tx.binding())
                     .and_then(|binding| binding.flow.instance())
                 {
                     app.open_flow_hub = Some(crate::flow_hub::Action::Load(
-                        if id == PaletteEntryId::OpenWatchHub {
+                        if id == PaletteEntryId::OpenInbox {
+                            crate::flow_hub::HubRequest::Inbox {
+                                owner: flow.clone(),
+                                side: atman_runtime::flow_store::inbox_view::InboxSide::Received,
+                                before: None,
+                            }
+                        } else if id == PaletteEntryId::OpenWatchHub {
                             crate::flow_hub::HubRequest::Watchers {
                                 owner: flow.clone(),
                             }
@@ -1716,6 +1725,23 @@ mod tests {
             );
             assert!(
                 matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Watchers { owner })) if owner == flow)
+            );
+            assert!(incoming.try_recv().is_err());
+            assert!(wm.dispatch_meta_command(":inbox", &mut app, Some(&tx)));
+            assert!(
+                matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Inbox { owner, .. })) if owner == flow)
+            );
+            wm.apply_palette_action(
+                crate::palette::PaletteEntryId::OpenInbox,
+                &mut app,
+                Some(&tx),
+            );
+            assert!(
+                matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Inbox { owner, .. })) if owner == flow)
+            );
+            app.queue_action(0, crate::submission_queue::QueueAction::History, Some(&tx));
+            assert!(
+                matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Inbox { owner, .. })) if owner == flow)
             );
             assert!(incoming.try_recv().is_err());
         }

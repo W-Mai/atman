@@ -68,6 +68,11 @@ pub struct RelationProgress {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
+    Inbox {
+        owner: atman_runtime::flow_store::FlowRef,
+        side: atman_runtime::flow_store::inbox_view::InboxSide,
+        before: Option<atman_runtime::flow_store::inbox_view::InboxHistoryCursor>,
+    },
     WatchCatalog {
         owner: atman_runtime::flow_store::FlowRef,
         after: Option<atman_runtime::flow_runtime::catalog::WatchCatalogCursor>,
@@ -99,6 +104,11 @@ pub enum HubRequest {
 impl HubRequest {
     pub(super) fn first(&self) -> Self {
         match self {
+            Self::Inbox { owner, side, .. } => Self::Inbox {
+                owner: owner.clone(),
+                side: *side,
+                before: None,
+            },
             Self::WatchCatalog { owner, .. } => Self::WatchCatalog {
                 owner: owner.clone(),
                 after: None,
@@ -130,6 +140,7 @@ impl HubRequest {
 }
 
 pub enum FlowHubPage {
+    Inbox(atman_runtime::flow_store::inbox_view::InboxHistoryPage),
     ProcessSources {
         owner: atman_runtime::flow_store::FlowRef,
         sources: Vec<atman_runtime::flow_runtime::ProcessWatchSource>,
@@ -195,6 +206,11 @@ impl Endpoint {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum RowKey {
+    Delivery {
+        owner: atman_runtime::flow_store::FlowRef,
+        side: atman_runtime::flow_store::inbox_view::InboxSide,
+        id: Uuid,
+    },
     WatchFailure {
         session: Uuid,
         flow: Option<FlowInstanceId>,
@@ -262,6 +278,10 @@ impl FlowHubPage {
 
     pub fn title(&self) -> &str {
         match self {
+            Self::Inbox(page) => match page.side {
+                atman_runtime::flow_store::inbox_view::InboxSide::Received => "Inbox / Received",
+                atman_runtime::flow_store::inbox_view::InboxSide::Sent => "Inbox / Sent",
+            },
             Self::ProcessSources { .. } => "Processes",
             Self::Watchers(directory) => &directory.title,
             Self::Sessions(_) => "Sessions",
@@ -272,6 +292,7 @@ impl FlowHubPage {
     }
     pub fn unit(&self) -> &str {
         match self {
+            Self::Inbox(_) => "deliveries",
             Self::ProcessSources { .. } => "processes",
             Self::Watchers(_) => "subscriptions",
             Self::Sessions(_) => "sessions",
@@ -281,6 +302,11 @@ impl FlowHubPage {
     }
     pub fn first(&self) -> HubRequest {
         match self {
+            Self::Inbox(page) => HubRequest::Inbox {
+                owner: page.owner.clone(),
+                side: page.side,
+                before: None,
+            },
             Self::ProcessSources { owner, .. } => HubRequest::ProcessSources {
                 owner: owner.clone(),
             },
@@ -309,6 +335,11 @@ impl FlowHubPage {
     }
     pub fn next(&self) -> Option<HubRequest> {
         match self {
+            Self::Inbox(page) => page.next.clone().map(|before| HubRequest::Inbox {
+                owner: page.owner.clone(),
+                side: page.side,
+                before: Some(before),
+            }),
             Self::Watchers(directory) => directory.next(),
             Self::ProcessSources { .. } => None,
             Self::Sessions(page) => page.next.clone().map(|before| HubRequest::Sessions {
@@ -345,6 +376,7 @@ impl FlowHubPage {
     }
     pub fn total(&self) -> usize {
         match self {
+            Self::Inbox(page) => page.total,
             Self::ProcessSources { sources, .. } => sources.len(),
             Self::Watchers(directory) => directory.total(),
             Self::Sessions(page) => page.total,
@@ -359,6 +391,7 @@ impl FlowHubPage {
         endpoint: Endpoint,
     ) -> Vec<Row> {
         match self {
+            Self::Inbox(page) => super::inbox::rows(page),
             Self::ProcessSources { sources, .. } => sources
                 .iter()
                 .map(|source| Row {

@@ -5,7 +5,7 @@ mod model;
 #[path = "submission_queue/tests.rs"]
 mod ownership_tests;
 pub use model::QueueItem;
-pub(crate) use model::QueueRequest;
+pub(crate) use model::{QueueRequest, payload_text};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::{Block, Paragraph, Wrap};
@@ -15,6 +15,7 @@ type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueAction {
+    History,
     Insert,
     Edit,
     MoveUp,
@@ -110,20 +111,36 @@ pub fn render(
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );
+    let history = edit.is_none()
+        && submissions
+            .iter()
+            .any(|item| matches!(item, QueueItem::Instance { .. }));
     let title = if edit.is_some() {
         " Edit queued input ".to_owned()
     } else {
         format!(
-            " Inbox · {} · {} / {} ",
+            " Inbox · {} · {} / {}{} ",
             submissions.len(),
             selected.saturating_add(1).min(submissions.len()),
-            submissions.len()
+            submissions.len(),
+            if history { " · History :inbox" } else { "" }
         )
     };
+    let title_rect = Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1);
+    if history {
+        hitmap.actions.push((0, QueueAction::History, title_rect));
+    }
     f.render_widget(
-        Paragraph::new(crate::width::truncate(&title, area.width as usize))
-            .style(Style::default().fg(t.accent.into())),
-        Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1),
+        Paragraph::new(crate::width::truncate(&title, area.width as usize)).style(
+            Style::default().fg(t.accent.into()).bg(
+                if hovered_action == Some(QueueAction::History) {
+                    t.work_bg.lerp(t.work_hover_bg, 0.5)
+                } else {
+                    t.work_bg.into_inner()
+                },
+            ),
+        ),
+        title_rect,
     );
     if let Some(edit) = edit {
         let error = edit.error.as_deref().unwrap_or("");

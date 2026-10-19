@@ -50,36 +50,7 @@ impl QueueItem {
     pub fn text(&self) -> String {
         match self {
             Self::Session(value) => value.text.clone(),
-            Self::Instance { entry, .. } => {
-                let body = match &entry.envelope.request.payload {
-                    InboxPayload::UserSubmission { content, .. } => Some(content),
-                    InboxPayload::Command { user, .. } | InboxPayload::Invocation { user, .. } => {
-                        user.as_ref()
-                    }
-                    _ => None,
-                };
-                if let Some(body) = body {
-                    return body
-                        .presentation
-                        .as_ref()
-                        .map_or_else(|| body.text.clone(), |p| p.prompt.clone());
-                }
-                match &entry.envelope.request.payload {
-                    InboxPayload::Interjection { text }
-                    | InboxPayload::GoalContinuation { text, .. } => text.clone(),
-                    InboxPayload::GoalResume { objective, .. } => objective.clone(),
-                    InboxPayload::Watcher { content, .. }
-                    | InboxPayload::FlowEvent { content, .. }
-                    | InboxPayload::ProcessEvent { content, .. }
-                    | InboxPayload::Timer { content, .. }
-                    | InboxPayload::Internal { content, .. } => content
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| content.to_string()),
-                    InboxPayload::FormReply { answer } => answer.as_user_text(),
-                    _ => "Entry invocation".into(),
-                }
-            }
+            Self::Instance { entry, .. } => payload_text(&entry.envelope.request.payload),
         }
     }
 
@@ -222,6 +193,21 @@ impl AppState {
         action: QueueAction,
         control: Option<&ControlSender>,
     ) {
+        if action == QueueAction::History {
+            if let Some(flow) = control
+                .and_then(|tx| tx.binding())
+                .and_then(|binding| binding.flow.instance())
+            {
+                self.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                    crate::flow_hub::HubRequest::Inbox {
+                        owner: flow.clone(),
+                        side: atman_runtime::flow_store::inbox_view::InboxSide::Received,
+                        before: None,
+                    },
+                ));
+            }
+            return;
+        }
         if action == QueueAction::Cancel {
             self.queued_submission_edit = None;
             if self.queued_submissions.is_empty() {
@@ -334,7 +320,7 @@ impl AppState {
                         atman_runtime::SubmissionMove::Down
                     },
                 },
-                QueueAction::Save | QueueAction::Cancel => return,
+                QueueAction::Save | QueueAction::Cancel | QueueAction::History => return,
             };
             if control.send(command).is_ok() {
                 if action == QueueAction::Edit {
@@ -396,7 +382,7 @@ impl AppState {
                     },
                 }
             }
-            QueueAction::Save | QueueAction::Cancel => return,
+            QueueAction::Save | QueueAction::Cancel | QueueAction::History => return,
         };
         let mut edit = InboxEditRequest {
             id: Uuid::new_v4(),
@@ -470,5 +456,36 @@ impl AppState {
             std::time::Duration::from_secs(5),
             ToastPosition::TopRight,
         );
+    }
+}
+
+/// Authored text or typed notification content, without captured entry source.
+pub(crate) fn payload_text(payload: &InboxPayload) -> String {
+    let body = match payload {
+        InboxPayload::UserSubmission { content, .. } => Some(content),
+        InboxPayload::Command { user, .. } | InboxPayload::Invocation { user, .. } => user.as_ref(),
+        _ => None,
+    };
+    if let Some(body) = body {
+        return body
+            .presentation
+            .as_ref()
+            .map_or_else(|| body.text.clone(), |p| p.prompt.clone());
+    }
+    match payload {
+        InboxPayload::Interjection { text } | InboxPayload::GoalContinuation { text, .. } => {
+            text.clone()
+        }
+        InboxPayload::GoalResume { objective, .. } => objective.clone(),
+        InboxPayload::Watcher { content, .. }
+        | InboxPayload::FlowEvent { content, .. }
+        | InboxPayload::ProcessEvent { content, .. }
+        | InboxPayload::Timer { content, .. }
+        | InboxPayload::Internal { content, .. } => content
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| content.to_string()),
+        InboxPayload::FormReply { answer } => answer.as_user_text(),
+        _ => "Entry invocation".into(),
     }
 }

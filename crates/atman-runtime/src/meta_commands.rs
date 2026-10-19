@@ -200,6 +200,12 @@ pub const META_COMMANDS: &[MetaCommand] = &[
         aliases: &[],
     },
     MetaCommand {
+        name: "inbox",
+        desc: "inspect the focused flow's received and sent messages",
+        usage: ":inbox",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "watchers",
         desc: "inspect the focused flow's subscriptions and notification progress",
         usage: ":watchers",

@@ -30,6 +30,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Inbox history views** — Main and floating conversations share received and sent history, searchable pages, and scrollable message details. The `:inbox` command, panel menu, and pending-queue header open the same view. Status labels distinguish delivery acknowledgement from committed input; browsing leaves messages and execution unchanged.
+
 - **Delivery history inspection** — Read-only APIs page received messages and outgoing deliveries with their original identities, current dispositions, and journal boundaries. Pagination preserves order through edits and cancellation, rejects foreign cursors, and does not attach execution or consume pending input.
 
 - **Inbox controls in conversation views** — Main and floating views share pending-input editing, insertion, reordering, and cancellation. Saves retain quotes and attachments, wait for durable acknowledgement, and preserve failed drafts. Runtime notifications remain read-only; queue editors support multiline cursor placement and keyboard or mouse saving.

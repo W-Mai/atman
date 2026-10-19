@@ -440,6 +440,40 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         session_id: ids[1].into(),
         instance_id: instance.clone(),
     };
+    for side in [
+        atman_runtime::flow_store::inbox_view::InboxSide::Received,
+        atman_runtime::flow_store::inbox_view::InboxSide::Sent,
+    ] {
+        let directory = scopes
+            .browse(HubRequest::Inbox {
+                owner: watched_owner.clone(),
+                side,
+                before: None,
+            })
+            .await
+            .unwrap();
+        let FlowHubPage::Inbox(page) = *directory else {
+            panic!("wrong inbox page")
+        };
+        assert_eq!(page.owner, watched_owner);
+        assert_eq!(page.side, side);
+        match side {
+            atman_runtime::flow_store::inbox_view::InboxSide::Received => {
+                assert_eq!(page.items.len(), 1);
+                assert!(
+                    matches!(&page.items[0], atman_runtime::flow_store::inbox_view::InboxHistoryItem::Received(entry) if entry.acceptance.disposition == atman_runtime::flow_store::inbox::InboxDisposition::Pending)
+                );
+            }
+            atman_runtime::flow_store::inbox_view::InboxSide::Sent => {
+                assert!(page.items.is_empty())
+            }
+        }
+        assert_eq!(
+            host.sessions(),
+            vec![ids[0]],
+            "inbox inspection cannot attach an executor"
+        );
+    }
     let directory = scopes
         .browse(HubRequest::Watchers {
             owner: watched_owner.clone(),
