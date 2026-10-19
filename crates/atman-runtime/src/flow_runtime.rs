@@ -99,6 +99,7 @@ pub struct FlowWorker {
     close_error: watch::Sender<Option<String>>,
     observation_issues: watch::Sender<Vec<observation::ObservationIssue>>,
     observation_retry: watch::Sender<()>,
+    reply_claims: Arc<reply::ReplyClaims>,
 }
 
 impl FlowWorker {
@@ -302,6 +303,7 @@ impl FlowWorker {
             close_error: watch::channel(None).0,
             observation_issues: watch::channel(Vec::new()).0,
             observation_retry: watch::channel(()).0,
+            reply_claims: Default::default(),
         };
         if matches!(
             worker.state.borrow().state(),

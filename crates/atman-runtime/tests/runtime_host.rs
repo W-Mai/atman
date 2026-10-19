@@ -7778,6 +7778,21 @@ async fn correlated_completions_share_inbox_ownership_and_resume_independent_con
     let (second, second_request, second_wait) = waits.pop().unwrap();
     let (first, first_request, first_wait) = waits.pop().unwrap();
     let retry = first_wait.waiter().clone();
+    drop(first_wait);
+    // On this current-thread runtime the retry queues before the spawned cleanup.
+    // The retired claim must not cancel the replacement when cleanup catches up.
+    let first_wait = client
+        .prepare_reply(first.address().clone(), retry.correlation)
+        .await
+        .unwrap();
+    let duplicate = client
+        .prepare_reply(first.address().clone(), retry.correlation)
+        .await
+        .unwrap();
+    drop(duplicate);
+    // Process a cancelled duplicate's queued cleanup before delivering the reply.
+    tokio::task::yield_now().await;
+    recipient.snapshot().await.unwrap();
     assert!(
         client
             .prepare_reply(second.address().clone(), retry.correlation)

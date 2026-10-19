@@ -1,8 +1,13 @@
 //! Owned continuation pickup from the same durable inbox as model input.
 
-use std::io;
+use std::{
+    collections::HashMap,
+    io,
+    sync::{Arc, Mutex, Weak},
+};
 
 use atman_rt::TurnOutcome;
+use uuid::Uuid;
 
 use super::FlowWorker;
 use crate::event::TurnId;
@@ -12,39 +17,60 @@ use crate::flow_store::waiter::{ReplyStatus, ReplyWaiter};
 use crate::flow_store::{FlowStore, invalid};
 use crate::{RuntimeError, Value};
 
-/// Dropping a wait releases only its continuation claim, never the accepted input or source task.
-pub struct ReplyWait {
+#[derive(Default)]
+pub(super) struct ReplyClaims {
+    entries: Mutex<HashMap<Uuid, (Uuid, Weak<ReplyClaim>)>>,
+}
+
+struct ReplyClaim {
+    identity: Uuid,
     worker: FlowWorker,
     waiter: ReplyWaiter,
-    settled: bool,
+}
+
+/// Identical retries share continuation ownership. Dropping the last wait releases that claim, never the accepted input or source task.
+pub struct ReplyWait {
+    claim: Arc<ReplyClaim>,
 }
 
 impl ReplyWait {
     pub(super) fn new(worker: FlowWorker, waiter: ReplyWaiter) -> Self {
-        Self {
-            worker,
-            waiter,
-            settled: false,
+        let mut entries = worker.reply_claims.entries.lock().unwrap();
+        if let Some(claim) = entries
+            .get(&waiter.correlation)
+            .and_then(|(_, claim)| claim.upgrade())
+        {
+            return Self { claim };
         }
+        let claim = Arc::new(ReplyClaim {
+            identity: Uuid::new_v4(),
+            worker: worker.clone(),
+            waiter,
+        });
+        entries.insert(
+            claim.waiter.correlation,
+            (claim.identity, Arc::downgrade(&claim)),
+        );
+        Self { claim }
     }
 
     pub fn waiter(&self) -> &ReplyWaiter {
-        &self.waiter
+        &self.claim.waiter
     }
 
-    pub async fn completion(mut self, turn: TurnId) -> Result<Value, RuntimeError> {
-        let mut changes = self.worker.subscribe_commits();
+    pub async fn completion(self, turn: TurnId) -> Result<Value, RuntimeError> {
+        let mut changes = self.claim.worker.subscribe_commits();
         loop {
             changes.borrow_and_update();
-            let waiter = self.waiter.clone();
+            let waiter = self.claim.waiter.clone();
             let expected = turn.clone();
             let result = self
+                .claim
                 .worker
                 .request(move |store| receive(store, &waiter, &expected))
                 .await
                 .map_err(failed)?;
             if let Some(completion) = result {
-                self.settled = true;
                 return match (completion.completion.outcome, completion.completion.result) {
                     (_, InvocationResult::Failed(error)) => Err(error),
                     (TurnOutcome::Completed, InvocationResult::Returned(value)) => value.restore(),
@@ -62,16 +88,24 @@ impl ReplyWait {
     }
 }
 
-impl Drop for ReplyWait {
+impl Drop for ReplyClaim {
     fn drop(&mut self) {
-        if !self.settled
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
-        {
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let worker = self.worker.clone();
             let waiter = self.waiter.clone();
+            let claims = worker.reply_claims.clone();
+            let identity = self.identity;
             runtime.spawn(async move {
                 let _ = worker
                     .request(move |store| {
+                        let mut entries = claims.entries.lock().unwrap();
+                        if entries
+                            .get(&waiter.correlation)
+                            .is_none_or(|(current, _)| *current != identity)
+                        {
+                            return Ok(());
+                        }
+                        entries.remove(&waiter.correlation);
                         store
                             .cancel_reply_waiter(&waiter.lease, waiter.correlation)
                             .map(|_| ())
