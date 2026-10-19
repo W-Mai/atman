@@ -166,6 +166,28 @@ impl Scopes {
         Ok(scope)
     }
 
+    pub async fn cancel_watcher(
+        &self,
+        owner: atman_runtime::flow_store::FlowRef,
+        id: Uuid,
+    ) -> Result<()> {
+        // UI controls are authenticated operator requests; they never borrow a model turn lease.
+        let worker = self.host.flow(&owner).await?;
+        worker
+            .unwatch(id, move |actual| {
+                if actual == &owner {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "watcher owner differs from selected flow",
+                    ))
+                }
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn startup_recent(
         &self,
         source: &Attachment,

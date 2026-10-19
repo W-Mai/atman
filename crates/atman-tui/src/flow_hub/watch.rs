@@ -98,7 +98,7 @@ pub(super) struct Details {
     pub id: Option<Uuid>,
     scroll: usize,
     selected: usize,
-    targets: Vec<FlowRef>,
+    targets: Vec<(&'static str, Action)>,
     hits: Vec<(Rect, usize)>,
     back: Rect,
     back_hovered: bool,
@@ -106,6 +106,9 @@ pub(super) struct Details {
 }
 
 impl Details {
+    pub fn feedback(&mut self) {
+        self.scroll = 0;
+    }
     pub fn open(&mut self, id: Uuid) {
         *self = Self {
             id: Some(id),
@@ -120,15 +123,29 @@ impl Details {
             KeyAction::HistoryUp => self.scroll = self.scroll.saturating_sub(1),
             KeyAction::PageDown => self.scroll = self.scroll.saturating_add(10),
             KeyAction::PageUp => self.scroll = self.scroll.saturating_sub(10),
-            KeyAction::Tab | KeyAction::BackTab => {
-                self.selected = (self.selected + 1) % self.targets.len().max(1)
+            KeyAction::Tab => self.selected = (self.selected + 1) % self.targets.len().max(1),
+            KeyAction::BackTab => {
+                let count = self.targets.len().max(1);
+                self.selected = (self.selected + count - 1) % count;
+            }
+            KeyAction::Delete => {
+                if let Some((_, action)) = self
+                    .targets
+                    .iter()
+                    .find(|(_, action)| matches!(action, Action::CancelWatcher { .. }))
+                {
+                    return action.clone();
+                }
             }
             KeyAction::Submit | KeyAction::ToggleLastTool => {
-                if let Some(target) = self.targets.get(self.selected) {
+                if let Some((_, action)) = self.targets.get(self.selected) {
                     return if key == KeyAction::Submit {
-                        Action::Focus(target.clone().into())
+                        action.clone()
                     } else {
-                        Action::Float(target.clone().into())
+                        match action {
+                            Action::Focus(target) => Action::Float(target.clone()),
+                            _ => Action::None,
+                        }
                     };
                 }
             }
@@ -163,7 +180,14 @@ impl Details {
         }
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, directory: &WatchDirectory) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        directory: &WatchDirectory,
+        pending: bool,
+        error: Option<&str>,
+    ) {
         self.targets.clear();
         self.hits.clear();
         self.back = Rect::default();
@@ -201,7 +225,8 @@ impl Details {
                 })),
             self.back,
         );
-        self.targets.push(directory.owner.clone());
+        self.targets
+            .push(("Recipient", Action::Focus(directory.owner.clone().into())));
         let (kind, status, once, condition) = summary(record);
         let mut text = vec![
             format!(
@@ -223,7 +248,8 @@ impl Details {
                     "Source: {}/{}",
                     source.session_id, source.instance_id
                 ));
-                self.targets.push(source.clone());
+                self.targets
+                    .push(("Source", Action::Focus(source.clone().into())));
                 (
                     record.registered_at,
                     record.subscription.expires_at,
@@ -251,6 +277,33 @@ impl Details {
                 )
             }
         };
+        let active = match &record.registration {
+            WatchRegistration::Flow(record) => {
+                record.status == atman_runtime::flow_store::subscription::SubscriptionStatus::Active
+            }
+            WatchRegistration::Process(record) => {
+                record.status
+                    == atman_runtime::flow_store::process_watch::ProcessWatchStatus::Active
+            }
+        };
+        if active {
+            self.targets.push((
+                "Cancel Del",
+                if pending {
+                    Action::None
+                } else {
+                    Action::CancelWatcher {
+                        owner: directory.owner.clone(),
+                        id: record.registration.id(),
+                    }
+                },
+            ));
+        }
+        if let Some(error) = error {
+            text.insert(0, format!("Failed: {error}"));
+        } else if pending {
+            text.insert(0, "Waiting for host acknowledgement…".into());
+        }
         let local = |value: chrono::DateTime<chrono::Utc>| {
             value
                 .with_timezone(&chrono::Local)
@@ -338,9 +391,18 @@ impl Details {
             } else {
                 t.work_bg.into_inner()
             };
-            let label = if index == 0 { "Recipient" } else { "Source" };
+            let label = self.targets[index].0;
+            let label = if button_w < 12 {
+                match label {
+                    "Recipient" => "Target",
+                    "Cancel Del" => "Cancel",
+                    _ => label,
+                }
+            } else {
+                label
+            };
             frame.render_widget(
-                Paragraph::new(format!("\n{label}  Enter"))
+                Paragraph::new(format!("\n{label}"))
                     .alignment(Alignment::Center)
                     .style(fg.bg(bg)),
                 rect,
@@ -354,10 +416,16 @@ impl Details {
             self.hits.push((rect, index));
         }
         frame.render_widget(
-            Paragraph::new(if width < 60 {
-                "↑↓ scroll · Tab target · Enter · ^O"
+            Paragraph::new(if !active {
+                if width < 60 {
+                    "↑↓ scroll · Tab · Enter · Ctrl+O"
+                } else {
+                    "↑↓ scroll · Tab target · Enter open · Ctrl+O window"
+                }
+            } else if width < 60 {
+                "↑↓ scroll · Tab · Enter · Del cancel"
             } else {
-                "↑↓ scroll · Tab target · Enter open · Ctrl+O window"
+                "↑↓ scroll · Tab · Enter select · Ctrl+O window · Del cancel"
             })
             .style(muted),
             Rect::new(left, bottom, width, 1),
@@ -484,11 +552,39 @@ mod tests {
                         modifiers: crossterm::event::KeyModifiers::NONE,
                     });
                     let expected = if index == 0 { &owner } else { &source };
-                    assert!(
-                        matches!(action, Action::Focus(address) if address.instance() == Some(expected))
-                    );
+                    if index == 2 {
+                        assert!(
+                            matches!(action, Action::CancelWatcher { owner: target, id } if target == owner && id == selected_id)
+                        );
+                    } else {
+                        assert!(
+                            matches!(action, Action::Focus(address) if address.instance() == Some(expected))
+                        );
+                    }
                 }
             }
+            assert!(
+                matches!(hub.key(KeyAction::Delete), Action::CancelWatcher { owner: target, id } if target == owner && id == selected_id)
+            );
+            hub.pending = Some(ticket.clone());
+            assert!(matches!(hub.key(KeyAction::Delete), Action::None));
+            hub.failed("permission denied".into());
+            terminal
+                .draw(|frame| hub.render(frame, &owner.clone().into()))
+                .unwrap();
+            assert!(matches!(
+                hub.key(KeyAction::Delete),
+                Action::CancelWatcher { .. }
+            ));
+            // A late response cannot replace this directory's selected subscription.
+            let stale = ControlTicket {
+                request_id: Uuid::now_v7(),
+                ..ticket.clone()
+            };
+            hub.pending = Some(ticket.clone());
+            hub.receive(Some(&stale), Err("stale".into()));
+            assert_eq!(hub.pending.as_ref(), Some(&ticket));
+            hub.receive(Some(&ticket), Ok(page()));
             hub.key(KeyAction::PageDown);
             terminal
                 .draw(|frame| hub.render(frame, &owner.clone().into()))

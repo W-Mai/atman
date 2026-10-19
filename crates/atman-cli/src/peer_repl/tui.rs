@@ -536,6 +536,19 @@ impl Workspace {
                             navigation.spawn(async move { let result = scopes.browse(request).await.map(Navigation::Catalog); (replies, result) });
                             continue;
                         }
+                        TuiControl::CancelWatcher { owner, id } => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = async {
+                                    scopes.cancel_watcher(owner.clone(), id).await?;
+                                    scopes.browse(atman_tui::flow_hub::HubRequest::Watchers { owner }).await
+                                        .context("Cancellation committed, but reading updated details failed")
+                                        .map(Navigation::Catalog)
+                                }.await;
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::FocusFlow { flow, placement, reuse } => {
                             if let Some(binding) = reuse {
                                 if binding.flow == flow && views.get(&binding.view_id).is_some_and(|view| view.binding == binding) {

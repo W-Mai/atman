@@ -30,6 +30,10 @@ pub(crate) enum Action {
     Close,
     Return,
     Load(HubRequest),
+    CancelWatcher {
+        owner: atman_runtime::flow_store::FlowRef,
+        id: uuid::Uuid,
+    },
     NewSession,
     OpenManagement,
     Focus(crate::control::ViewAddress),
@@ -244,6 +248,7 @@ impl FlowHub {
         self.pending = None;
         self.requested_index = None;
         self.error = Some(message);
+        self.watch_details.feedback();
     }
 
     fn filtered(&self) -> Vec<usize> {
@@ -301,6 +306,17 @@ impl FlowHub {
         }
     }
 
+    fn detail_action(&mut self, action: Action) -> Action {
+        if matches!(action, Action::CancelWatcher { .. }) {
+            if self.pending.is_some() {
+                return Action::None;
+            }
+            self.error = None;
+            self.watch_details.feedback();
+        }
+        action
+    }
+
     fn page(&mut self, forward: bool) -> Action {
         if self.pending.is_some() {
             return Action::None;
@@ -344,7 +360,8 @@ impl FlowHub {
 
     pub fn key(&mut self, key: KeyAction) -> Action {
         if self.watch_details.id.is_some() {
-            return self.watch_details.key(key);
+            let action = self.watch_details.key(key);
+            return self.detail_action(action);
         }
         if key == KeyAction::Escape {
             if let Some(FlowHubPage::Relations { session, .. }) = self.page {
@@ -483,7 +500,8 @@ impl FlowHub {
 
     pub fn mouse(&mut self, event: MouseEvent) -> Action {
         if self.watch_details.id.is_some() {
-            return self.watch_details.mouse(event);
+            let action = self.watch_details.mouse(event);
+            return self.detail_action(action);
         }
         let point = (event.column, event.row).into();
         self.sessions_hovered = self.sessions.contains(point);
@@ -560,7 +578,13 @@ impl FlowHub {
         if self.watch_details.id.is_some()
             && let Some(FlowHubPage::Watchers(directory)) = &self.page
         {
-            self.watch_details.render(frame, area, directory);
+            self.watch_details.render(
+                frame,
+                area,
+                directory,
+                self.pending.is_some(),
+                self.error.as_deref(),
+            );
             return;
         }
         if area.width < 40 || area.height < 24 {

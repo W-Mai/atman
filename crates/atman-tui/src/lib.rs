@@ -115,6 +115,10 @@ impl TuiNote {
 #[non_exhaustive]
 pub enum TuiControl {
     BrowseFlows(flow_hub::HubRequest),
+    CancelWatcher {
+        owner: atman_runtime::flow_store::FlowRef,
+        id: uuid::Uuid,
+    },
     FocusFlow {
         flow: control::ViewAddress,
         placement: control::FlowPlacement,
