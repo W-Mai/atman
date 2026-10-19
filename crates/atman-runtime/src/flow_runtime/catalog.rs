@@ -171,7 +171,9 @@ impl SessionCatalog {
     /// Read the durable relation projection without opening a flow writer or scheduler.
     pub async fn relations(&self, id: Uuid) -> io::Result<Vec<FlowRelation>> {
         let read = self.recorded(id).await?;
-        let mut relations = read.relations()?;
+        let mut relations = tokio::task::spawn_blocking(move || read.relations())
+            .await
+            .map_err(io::Error::other)??;
         if let Some(host) = &self.host
             && let Some(view) = host.management_view().await
             && view.unavailable.is_none()

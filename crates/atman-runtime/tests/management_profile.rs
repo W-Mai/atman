@@ -39,6 +39,81 @@ fn session(root: &RuntimeStore) -> (atman_runtime::flow_store::SessionStore, Flo
     (session, address)
 }
 
+#[tokio::test]
+async fn management_relation_inspection_uses_the_current_acknowledged_grants() {
+    use atman_runtime::flow_runtime::host::RuntimeHost;
+    use atman_runtime::flow_store::relation::RelationKind;
+
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let mut owner = ProfileStore::open(&root).unwrap();
+    owner.bootstrap(Default::default()).unwrap();
+    let (_source_owner, source) = session(&root);
+    let (_target_owner, target) = session(&root);
+    let grant = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: source.clone(),
+        target: AccessTarget::Flow(target.clone()),
+        actions: [
+            FlowAction::ReadContext,
+            FlowAction::ReadOutput,
+            FlowAction::Watch,
+        ]
+        .into(),
+    };
+    owner
+        .select(
+            Uuid::new_v4(),
+            owner.snapshot().cursor.clone(),
+            source.session_id.0,
+            vec![grant.clone()],
+        )
+        .unwrap();
+    let host = RuntimeHost::default();
+    let profile = host.attach_profile(owner).unwrap();
+    let catalog = host.session_catalog();
+    let relations = catalog.relations(source.session_id.0).await.unwrap();
+    assert_eq!(relations.len(), 2);
+    assert!(
+        relations
+            .iter()
+            .any(|edge| edge.kind == RelationKind::Watch)
+    );
+    assert!(relations.iter().any(|edge| edge.kind == RelationKind::Read));
+    assert!(
+        relations.iter().all(|edge| edge.id == grant.id
+            && edge.source == source
+            && edge.target == grant.target)
+    );
+    assert!(
+        catalog
+            .relations(target.session_id.0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(host.sessions().is_empty());
+
+    profile
+        .select(
+            Uuid::new_v4(),
+            profile.snapshot().await.unwrap().profile.cursor,
+            source.session_id.0,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        catalog
+            .relations(source.session_id.0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(host.sessions().is_empty());
+    host.shutdown().await.unwrap();
+}
+
 #[test]
 fn management_bootstrap_is_exclusive_projectless_and_does_not_create_work() {
     let data = tempfile::tempdir().unwrap();

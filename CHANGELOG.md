@@ -22,7 +22,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
-- **Durable flow relations** — Runtime catalog inspection exposes read-only `Created`, `Read`, `Watch`, and `Interject` relations from flow journals and session grants without opening execution owners.
+- **Durable flow relations** — Runtime catalog inspection exposes read-only `Created`, `Read`, `Watch`, and `Interject` relations from flow journals and session grants without opening execution owners. Watch edges point from the observer to the observed flow, and journal scans run outside asynchronous execution workers.
 
 - **Management relation projection** — The management Session's explicit profile grants appear in its relation snapshot with the same flow relation records and remain unavailable while profile validation is unresolved.
 

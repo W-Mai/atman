@@ -624,8 +624,8 @@ fn inspect_registered_flow_with(
             })
             .map(|record| {
                 relation::FlowRelation::watch(
-                    record.subscription.source.clone(),
                     target.clone(),
+                    record.subscription.source.clone(),
                     record.subscription.id,
                     relation::watch_active(record.status),
                 )

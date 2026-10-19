@@ -90,6 +90,122 @@ fn subscription(source: &FlowStore, purpose: SubscriptionPurpose, once: bool) ->
     }
 }
 
+#[tokio::test]
+async fn relation_inspection_preserves_direction_revocation_and_read_only_ownership() {
+    use atman_runtime::flow_runtime::catalog::SessionCatalog;
+    use atman_runtime::flow_store::{
+        access::{AccessTarget, FlowAction, FlowGrant},
+        relation::RelationKind,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let id = Uuid::new_v4();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            id,
+            project: None,
+            configuration: Default::default(),
+            title: "Relations".into(),
+        })
+        .unwrap();
+    let mut source = session.create_flow(descriptor(id)).unwrap();
+    let source_address = source.descriptor().address.clone();
+    let mut recipient_descriptor = descriptor(id);
+    recipient_descriptor.created_by = Some(source_address.clone());
+    let creation = recipient_descriptor.creation_request;
+    let recipient_address = recipient_descriptor.address.clone();
+    let mut recipient = session.create_flow(recipient_descriptor).unwrap();
+    transition(&mut source, FlowTransition::Activated);
+    transition(&mut recipient, FlowTransition::Activated);
+    let watch = subscription(&source, SubscriptionPurpose::Watcher, false);
+    recipient
+        .subscribe_events(watch.clone(), &source.observation_anchor())
+        .unwrap();
+    let result = subscription(&source, SubscriptionPurpose::SpawnResult, false);
+    recipient
+        .subscribe_events(result.clone(), &source.observation_anchor())
+        .unwrap();
+    let grant = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: recipient_address.clone(),
+        target: AccessTarget::Flow(source_address.clone()),
+        actions: [
+            FlowAction::ReadOutput,
+            FlowAction::ReadContext,
+            FlowAction::Send,
+        ]
+        .into(),
+    };
+    session
+        .grant_access(&session.cursor().clone(), grant.clone())
+        .unwrap();
+    let catalog = SessionCatalog::new(None, Some(dir.path().to_owned()));
+    let relations = catalog.relations(id).await.unwrap();
+    assert_eq!(relations.len(), 4);
+    let created = relations.iter().find(|edge| edge.id == creation).unwrap();
+    assert_eq!(created.kind, RelationKind::Created);
+    assert_eq!(created.source, source_address);
+    assert_eq!(
+        created.target,
+        AccessTarget::Flow(recipient_address.clone())
+    );
+    let observed = relations.iter().find(|edge| edge.id == watch.id).unwrap();
+    assert_eq!(observed.kind, RelationKind::Watch);
+    assert_eq!(observed.source, recipient_address);
+    assert_eq!(observed.target, AccessTarget::Flow(source_address));
+    assert!(observed.active);
+    assert_eq!(
+        relations
+            .iter()
+            .filter(|edge| edge.kind == RelationKind::Read)
+            .count(),
+        1
+    );
+    assert!(!relations.iter().any(|edge| edge.id == result.id));
+
+    recipient.unsubscribe_events(watch.id).unwrap();
+    session
+        .revoke_access(&session.cursor().clone(), grant.id)
+        .unwrap();
+    let paths = [
+        session.dir().join("events.jsonl"),
+        source.dir().join("events.jsonl"),
+        recipient.dir().join("events.jsonl"),
+    ];
+    let bytes: Vec<_> = paths
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect();
+    let relations = catalog.relations(id).await.unwrap();
+    assert_eq!(relations.len(), 2);
+    assert!(
+        !relations
+            .iter()
+            .find(|edge| edge.id == watch.id)
+            .unwrap()
+            .active
+    );
+    // Inspection succeeds while the original writers still hold their exclusive leases.
+    drop(recipient);
+    drop(source);
+    drop(session);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&paths[2])
+        .unwrap()
+        .write_all(b"{partial")
+        .unwrap();
+    assert_eq!(catalog.relations(id).await.unwrap(), relations);
+    for (index, path) in paths.iter().enumerate() {
+        let mut expected = bytes[index].clone();
+        if index == 2 {
+            expected.extend_from_slice(b"{partial");
+        }
+        assert_eq!(std::fs::read(path).unwrap(), expected);
+    }
+}
+
 #[test]
 fn delayed_closure_observation_cannot_suppress_an_elapsed_watcher_deadline() {
     let dir = tempfile::tempdir().unwrap();
