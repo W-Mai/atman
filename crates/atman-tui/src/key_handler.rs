@@ -1300,6 +1300,15 @@ pub(crate) fn handle_key(
             if app.pending_submission.is_some() {
                 return;
             }
+            if app.items.is_archive() {
+                app.push_toast(
+                    "Archived flow is read-only; select an executable flow to send input",
+                    crate::app::NoteLevel::Info,
+                    std::time::Duration::from_secs(6),
+                    crate::app::ToastPosition::BottomRight,
+                );
+                return;
+            }
             app.sync_composer_images(editor);
             if app.composer_attachment_command(editor) {
                 *interrupt_prompt = None;

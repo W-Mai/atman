@@ -63,7 +63,7 @@ impl Attachment {
         loop {
             // Drain controls already submitted by a closed view before releasing its services.
             if input.is_empty() {
-                views.retain(|_, view| !view.panels.can_detach());
+                views.retain(|_, view| !view.can_detach());
             }
             tokio::select! {
                 result = &mut ui => return result,
@@ -86,26 +86,30 @@ impl Attachment {
                         let _ = replies.send(TuiCommand::SubmissionResult { result: Err("view is no longer attached to this flow".into()) });
                         continue;
                     };
-                    let worker = view.worker.clone();
-                    let scope = view.scope.clone();
-                    let Some(command) = view.panels.dispatch(command).await else { continue; };
                     let result = match command {
                         TuiControl::Projects(request) => {
+                            let current = view.binding.flow.session_id.0.to_string();
+                            let project = view.descriptor.project.as_ref().map(|p| p.root().to_owned());
+                            let config = view.execution.as_ref().map(|execution| execution.scope.config.clone());
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
                                 let command = crate::tui_projects::request(
-                                    scopes.root.clone(), scope.session.id().to_string(),
-                                    scope.descriptor.project.as_ref().map(|p| p.root().to_owned()),
-                                    scope.config.clone(), Some(&scopes.catalog), request,
+                                    scopes.root.clone(), current, project,
+                                    config, Some(&scopes.catalog), request,
                                 ).await;
                                 (replies, Ok(Navigation::Projects(Box::new(command))))
                             });
                             continue;
                         }
                         TuiControl::NewSession => {
+                            let Some(execution) = &view.execution else {
+                                reject_archive_control(command, &replies);
+                                continue;
+                            };
+                            let seed = (&execution.scope).into();
                             let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
                             navigation.spawn(async move {
-                                let result = scopes.create_tui_session((&scope).into(), ticket.request_id, controls, forms).await;
+                                let result = scopes.create_tui_session(seed, ticket.request_id, controls, forms).await;
                                 (replies, result)
                             });
                             continue;
@@ -127,7 +131,14 @@ impl Attachment {
                                 continue;
                             }
                         }
-                        command => scope.tui_control(&worker, ticket.request_id, command, &replies, &forms).await,
+                        command => {
+                            let Some(execution) = view.execution.as_mut() else {
+                                reject_archive_control(command, &replies);
+                                continue;
+                            };
+                            let Some(command) = execution.panels.dispatch(command).await else { continue; };
+                            execution.scope.tui_control(&execution.worker, ticket.request_id, command, &replies, &forms).await
+                        },
                     };
                     if let Err(error) = result {
                         let _ = replies.send(TuiCommand::Toast { message: format!("{error:#}"), level: atman_tui::app::NoteLevel::Error });
@@ -181,10 +192,14 @@ impl Attachment {
         Ok((
             handle,
             ViewServices {
-                scope: self.clone(),
                 binding,
-                worker: worker.clone(),
-                panels,
+                descriptor: self.descriptor.clone(),
+                commands: commands.clone(),
+                execution: Some(ExecutionServices {
+                    scope: self.clone(),
+                    worker: worker.clone(),
+                    panels,
+                }),
             },
             commands,
         ))
@@ -413,10 +428,57 @@ impl Attachment {
 }
 
 struct ViewServices {
-    scope: Attachment,
     binding: ViewBinding,
+    descriptor: SessionDescriptor,
+    commands: mpsc::UnboundedSender<TuiCommand>,
+    execution: Option<ExecutionServices>,
+}
+
+struct ExecutionServices {
+    scope: Attachment,
     worker: FlowWorker,
     panels: crate::tui_panels::PanelServices,
+}
+
+impl ViewServices {
+    fn can_detach(&self) -> bool {
+        self.execution.as_ref().map_or_else(
+            || self.commands.is_closed(),
+            |execution| execution.panels.can_detach(),
+        )
+    }
+}
+
+fn reject_archive_control(command: TuiControl, replies: &ControlReplies) {
+    let error =
+        "Archived flow is read-only; select an executable flow for this operation".to_owned();
+    let command = match command {
+        TuiControl::Submit(_) => TuiCommand::SubmissionResult { result: Err(error) },
+        TuiControl::GoalControl {
+            request_id: Some(request_id),
+            ..
+        } => TuiCommand::GoalSaved {
+            request_id,
+            result: Err(error),
+        },
+        TuiControl::MutateSettings(request) => TuiCommand::SettingsMutationResult {
+            request,
+            result: Err(error),
+        },
+        TuiControl::MutateProvider(request) => TuiCommand::ProviderMutationResult {
+            request,
+            result: Err(error),
+        },
+        TuiControl::MutateModel(request) => TuiCommand::ModelMutationResult {
+            request,
+            result: Err(error),
+        },
+        _ => TuiCommand::Toast {
+            message: error,
+            level: atman_tui::app::NoteLevel::Warn,
+        },
+    };
+    let _ = replies.send(command);
 }
 
 enum Navigation {
@@ -453,7 +515,11 @@ impl scopes::Scopes {
             handle, service, ..
         } = &mut navigation
         {
-            let recent = match self.startup_recent(&service.scope, 5).await {
+            let execution = service
+                .execution
+                .as_ref()
+                .context("created session has no execution services")?;
+            let recent = match self.startup_recent(&execution.scope, 5).await {
                 Ok(recent) => recent,
                 Err(error) => {
                     handle.boot_toasts.push(atman_tui::app::ToastNote {
@@ -513,6 +579,45 @@ impl scopes::Scopes {
         controls: mpsc::UnboundedSender<BoundControl>,
         forms: Arc<atman_runtime::session::FormRegistry>,
     ) -> Result<Navigation> {
+        let root = self.root.clone();
+        let address = flow.clone();
+        let archive = tokio::task::spawn_blocking(move || {
+            let read = RuntimeStore::inspect_session(&root, address.session_id.0)?;
+            let flow = read.inspect_flow(&address.instance_id)?;
+            if matches!(
+                flow.descriptor.content,
+                atman_runtime::flow_store::FlowContent::History(_)
+            ) {
+                Ok::<_, std::io::Error>(Some((
+                    read.archived_view(&address.instance_id)?,
+                    read.projection.descriptor,
+                )))
+            } else {
+                Ok(None)
+            }
+        })
+        .await??;
+        if let Some((view, descriptor)) = archive {
+            let binding = ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: flow.clone(),
+            };
+            let mut handle = TuiHandle::from_archive(view, binding.clone(), controls, &descriptor)?;
+            let (commands, rx) = mpsc::unbounded_channel();
+            handle.cmd_rx = Some(rx);
+            return Ok(Navigation::Focus {
+                flow,
+                placement,
+                handle: Box::new(handle),
+                service: Box::new(ViewServices {
+                    binding,
+                    descriptor,
+                    commands,
+                    execution: None,
+                }),
+            });
+        }
         let mut scope = self.open(flow.session_id.0).await?;
         scope.executor.tool_ctx.prompt_resolver = Some(Arc::new(
             atman_runtime::rendezvous::FormPromptResolver::new(forms.clone()),
@@ -533,8 +638,9 @@ async fn next_panel_completion(
 ) -> Result<(), tokio::task::JoinError> {
     let pending: Vec<_> = views
         .values_mut()
-        .filter(|view| view.panels.has_pending_work())
-        .map(|view| Box::pin(view.panels.next_completion()))
+        .filter_map(|view| view.execution.as_mut())
+        .filter(|execution| execution.panels.has_pending_work())
+        .map(|execution| Box::pin(execution.panels.next_completion()))
         .collect();
     if pending.is_empty() {
         std::future::pending().await

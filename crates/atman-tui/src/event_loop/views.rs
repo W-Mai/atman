@@ -758,7 +758,10 @@ pub(super) async fn changed<T>(rx: Option<&mut tokio::sync::watch::Receiver<T>>)
     std::future::pending::<()>().await;
 }
 
-async fn permission_change(rx: &mut tokio::sync::broadcast::Receiver<StreamFrame>) {
+async fn permission_change(rx: &mut Option<tokio::sync::broadcast::Receiver<StreamFrame>>) {
+    let Some(rx) = rx.as_mut() else {
+        return std::future::pending().await;
+    };
     loop {
         match rx.recv().await {
             Ok(frame) if is_live_instance_frame(&frame) => return,

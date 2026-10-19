@@ -2494,7 +2494,12 @@ async fn cmd_repl_once(
                             let reply = match config {
                                 Ok(config) => {
                                     tui_projects::request(
-                                        root, current, project, config, None, request,
+                                        root,
+                                        current,
+                                        project,
+                                        Some(config),
+                                        None,
+                                        request,
                                     )
                                     .await
                                 }
@@ -2574,7 +2579,7 @@ async fn cmd_repl_once(
                 .map(|catalog| catalog.projects)
                 .unwrap_or_default(),
             goal: session.goal(),
-            stream_rx: session.stream_subscribe(),
+            stream_rx: Some(session.stream_subscribe()),
             task_event_rx: executor
                 .tool_ctx
                 .task_registry

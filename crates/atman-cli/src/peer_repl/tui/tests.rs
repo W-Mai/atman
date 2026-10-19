@@ -6,6 +6,124 @@ use atman_runtime::flow_store::{
 use atman_runtime::source_program::RevisionBundle;
 
 #[tokio::test]
+async fn archive_navigation_uses_no_execution_owner_and_retains_bound_rejections() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("old.jsonl");
+    std::fs::write(&source, b"retained original line\n").unwrap();
+    let runtime = RuntimeStore::open(dir.path()).unwrap();
+    let old = Uuid::now_v7();
+    let id = atman_runtime::flow_store::migration::destination_id(&source, old).unwrap();
+    let descriptor = SessionDescriptor {
+        id,
+        title: "Archive".into(),
+        project: None,
+        configuration: Default::default(),
+    };
+    let receipt = runtime
+        .archive_legacy(&source, old, descriptor, true)
+        .unwrap();
+    std::fs::remove_file(source).unwrap();
+    // Both writer leases remain owned elsewhere; browsing must not acquire either.
+    let session = runtime.open_session(id).unwrap();
+    let instance = receipt
+        .flows
+        .iter()
+        .find(|flow| flow.owner == atman_runtime::event_log::legacy::LegacyFlowKey::Unassigned)
+        .unwrap()
+        .instance
+        .clone();
+    let writer = session.open_flow(&instance).unwrap();
+    let before = std::fs::read(writer.dir().join("events.jsonl")).unwrap();
+    let host = RuntimeHost::default();
+    let (notices, _rx) = mpsc::unbounded_channel();
+    let scopes = scopes::Scopes::empty(
+        dir.path(),
+        host.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(notices)),
+    );
+    let forms = Arc::new(atman_runtime::session::FormRegistry::default());
+    let (commands, mut controls) = mpsc::unbounded_channel();
+    for placement in [
+        atman_tui::control::FlowPlacement::Main,
+        atman_tui::control::FlowPlacement::Floating,
+    ] {
+        let Navigation::Focus {
+            mut handle,
+            service,
+            ..
+        } = scopes
+            .focus(
+                FlowRef {
+                    session_id: id.into(),
+                    instance_id: instance.clone(),
+                },
+                placement,
+                commands.clone(),
+                forms.clone(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("archive view missing")
+        };
+        assert!(service.execution.is_none());
+        assert!(handle.session.is_none());
+        assert!(handle.stream_rx.is_none());
+        assert!(handle.live_output.is_none());
+        assert!(!service.can_detach());
+        let mut model = atman_tui::flow_view::FlowViewModel::default();
+        let reader = handle.flow_view.as_mut().unwrap();
+        model.sync_view(reader.next().await.unwrap(), None).unwrap();
+        assert!(model.is_archive());
+        assert!(model.iter().any(|item| matches!(item, atman_tui::app::OutputItem::SystemNote { text, .. } if text.contains("retained original line"))));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), reader.next())
+                .await
+                .is_err()
+        );
+        assert!(
+            !model
+                .sync_view(reader.refresh().await.unwrap(), None)
+                .unwrap()
+        );
+        let ticket = handle
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .send_tracked(TuiControl::Submit(TuiSubmission {
+                text: "must remain a draft".into(),
+                images: vec![],
+                presentation: None,
+                reasoning: None,
+            }))
+            .unwrap()
+            .unwrap();
+        let control = controls.recv().await.unwrap();
+        reject_archive_control(control.command, &control.replies);
+        let reply = handle
+            .control_reply_rx
+            .as_mut()
+            .unwrap()
+            .recv()
+            .await
+            .unwrap();
+        assert_eq!(reply.ticket, ticket);
+        assert!(matches!(
+            reply.command,
+            TuiCommand::SubmissionResult { result: Err(_) }
+        ));
+        drop(handle);
+        assert!(service.can_detach());
+    }
+    assert!(host.sessions().is_empty());
+    assert_eq!(
+        std::fs::read(writer.dir().join("events.jsonl")).unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
 async fn session_navigation_retains_bound_configuration_execution_and_reply_ownership() {
     use atman_tui::{
         control::FlowPlacement,
@@ -97,7 +215,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         dir.path().to_owned(),
         ids[0].to_string(),
         None,
-        ConfigHub::from_config_dir(dir.path().join("config-0")),
+        Some(ConfigHub::from_config_dir(dir.path().join("config-0"))),
         Some(&scopes.catalog),
         atman_tui::project_hub::ProjectRequest {
             id: Uuid::new_v4(),
@@ -174,17 +292,39 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
             handle.session_name.as_deref(),
             Some(format!("Session {index}").as_str())
         );
-        let snapshot = service.worker.snapshot().await.unwrap();
+        let snapshot = service
+            .execution
+            .as_ref()
+            .unwrap()
+            .worker
+            .snapshot()
+            .await
+            .unwrap();
         assert_eq!(
             snapshot.pending.len(),
             1,
             "selecting must not execute queued input"
         );
-        let redactor = service.worker.context().sink().redactor().unwrap();
+        let redactor = service
+            .execution
+            .as_ref()
+            .unwrap()
+            .worker
+            .context()
+            .sink()
+            .redactor()
+            .unwrap();
         let (sample, _) = redactor.redact("TOKEN-0 TOKEN-1");
         assert!(!sample.contains(&format!("TOKEN-{index}")));
         assert!(sample.contains(&format!("TOKEN-{}", 1 - index)));
-        service.scope.bind(&service.worker).await.unwrap();
+        service
+            .execution
+            .as_ref()
+            .unwrap()
+            .scope
+            .bind(&service.execution.as_ref().unwrap().worker)
+            .await
+            .unwrap();
         views.push((handle, service));
     }
     tokio::time::timeout(std::time::Duration::from_secs(10), host.wait_quiescent())
@@ -192,7 +332,16 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         .unwrap()
         .unwrap();
     // Rename only the bound Session and preserve the flow's execution journal.
-    let previous = views[0].1.worker.snapshot().await.unwrap().cursor;
+    let previous = views[0]
+        .1
+        .execution
+        .as_ref()
+        .unwrap()
+        .worker
+        .snapshot()
+        .await
+        .unwrap()
+        .cursor;
     views[0]
         .0
         .control_tx
@@ -208,9 +357,12 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     let control = incoming.recv().await.unwrap();
     views[0]
         .1
+        .execution
+        .as_ref()
+        .unwrap()
         .scope
         .tui_control(
-            &views[0].1.worker,
+            &views[0].1.execution.as_ref().unwrap().worker,
             control.ticket.request_id,
             control.command,
             &control.replies,
@@ -242,20 +394,41 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
             .has_changed()
             .unwrap()
     );
-    assert_eq!(views[0].1.worker.snapshot().await.unwrap().cursor, previous);
+    assert_eq!(
+        views[0]
+            .1
+            .execution
+            .as_ref()
+            .unwrap()
+            .worker
+            .snapshot()
+            .await
+            .unwrap()
+            .cursor,
+        previous
+    );
     assert!(
         views[0]
             .1
+            .execution
+            .as_ref()
+            .unwrap()
             .scope
-            .command(&views[0].1.worker, ":rename")
+            .command(&views[0].1.execution.as_ref().unwrap().worker, ":rename")
             .await
             .unwrap()
             .contains("Renamed Session")
     );
     views[0]
         .1
+        .execution
+        .as_ref()
+        .unwrap()
         .scope
-        .command(&views[0].1.worker, ":rename clear")
+        .command(
+            &views[0].1.execution.as_ref().unwrap().worker,
+            ":rename clear",
+        )
         .await
         .unwrap();
     let names = views[0].0.session_name_rx.as_mut().unwrap();
@@ -263,17 +436,39 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     assert!(names.borrow_and_update().is_none());
     let (reopened, _, _) = views[0]
         .1
+        .execution
+        .as_ref()
+        .unwrap()
         .scope
-        .prepare_tui_view(&views[0].1.worker, commands.clone(), &forms)
+        .prepare_tui_view(
+            &views[0].1.execution.as_ref().unwrap().worker,
+            commands.clone(),
+            &forms,
+        )
         .await
         .unwrap();
     assert!(reopened.session_name.is_none());
-    assert_eq!(views[0].1.worker.snapshot().await.unwrap().cursor, previous);
+    assert_eq!(
+        views[0]
+            .1
+            .execution
+            .as_ref()
+            .unwrap()
+            .worker
+            .snapshot()
+            .await
+            .unwrap()
+            .cursor,
+        previous
+    );
     // Pause one Session, submit to both, then deliver the replies in reverse order.
     views[0]
         .1
+        .execution
+        .as_ref()
+        .unwrap()
         .scope
-        .command(&views[0].1.worker, ":pause")
+        .command(&views[0].1.execution.as_ref().unwrap().worker, ":pause")
         .await
         .unwrap();
     let mut requests = Vec::new();
@@ -303,9 +498,12 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
             .find(|(_, service)| service.binding == control.ticket.binding)
             .unwrap();
         service
+            .execution
+            .as_ref()
+            .unwrap()
             .scope
             .tui_control(
-                &service.worker,
+                &service.execution.as_ref().unwrap().worker,
                 control.ticket.request_id,
                 control.command,
                 &control.replies,
@@ -332,10 +530,26 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(views[0].1.worker.snapshot().await.unwrap().pending.len(), 1);
+    assert_eq!(
+        views[0]
+            .1
+            .execution
+            .as_ref()
+            .unwrap()
+            .worker
+            .snapshot()
+            .await
+            .unwrap()
+            .pending
+            .len(),
+        1
+    );
     assert!(
         views[1]
             .1
+            .execution
+            .as_ref()
+            .unwrap()
             .worker
             .snapshot()
             .await
@@ -345,8 +559,11 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     );
     views[0]
         .1
+        .execution
+        .as_ref()
+        .unwrap()
         .scope
-        .command(&views[0].1.worker, ":resume")
+        .command(&views[0].1.execution.as_ref().unwrap().worker, ":resume")
         .await
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), host.wait_quiescent())
@@ -374,7 +591,14 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         );
     }
     for (index, (handle, service)) in views.iter_mut().enumerate() {
-        let commands = service.scope.config.config_dir().join("commands");
+        let commands = service
+            .execution
+            .as_ref()
+            .unwrap()
+            .scope
+            .config
+            .config_dir()
+            .join("commands");
         std::fs::create_dir_all(&commands).unwrap();
         std::fs::write(commands.join("echo.at"), format!("flow echo(value: string) -> string {{ return final.answer(message: \"scope-{index}: \" + value) }}")).unwrap();
         handle
@@ -390,9 +614,12 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
             .unwrap();
         let control = incoming.recv().await.unwrap();
         service
+            .execution
+            .as_ref()
+            .unwrap()
             .scope
             .tui_control(
-                &service.worker,
+                &service.execution.as_ref().unwrap().worker,
                 control.ticket.request_id,
                 control.command,
                 &control.replies,
@@ -434,8 +661,8 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
             .collect();
         assert_eq!(answers.last().unwrap(), &format!("scope-{index}: selected"));
     }
-    let source = views[1].1.scope.clone();
-    let original = views[1].1.worker.clone();
+    let source = views[1].1.execution.as_ref().unwrap().scope.clone();
+    let original = views[1].1.execution.as_ref().unwrap().worker.clone();
     source.command(&original, ":pause").await.unwrap();
     let original_state = original.state().await.unwrap();
     let original_messages = original.context().messages_full();
@@ -491,8 +718,14 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     else {
         panic!("missing new view")
     };
-    assert_eq!(service.scope.descriptor.project, source.descriptor.project);
-    assert_eq!(service.scope.config.source(), source.config.source());
+    assert_eq!(
+        service.execution.as_ref().unwrap().scope.descriptor.project,
+        source.descriptor.project
+    );
+    assert_eq!(
+        service.execution.as_ref().unwrap().scope.config.source(),
+        source.config.source()
+    );
     let welcome = handle.startup_card.as_ref().unwrap();
     assert!(matches!(
         welcome.directory,
@@ -506,6 +739,9 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     assert!(handle.initial_items.is_empty());
     assert_eq!(
         service
+            .execution
+            .as_ref()
+            .unwrap()
             .worker
             .context()
             .messages_full()
@@ -514,11 +750,25 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
             .text_concat(),
         "ready"
     );
-    assert!(service.worker.goal().await.unwrap().goal.is_none());
+    assert!(
+        service
+            .execution
+            .as_ref()
+            .unwrap()
+            .worker
+            .goal()
+            .await
+            .unwrap()
+            .goal
+            .is_none()
+    );
     service
+        .execution
+        .as_ref()
+        .unwrap()
         .scope
         .submit_tui(
-            &service.worker,
+            &service.execution.as_ref().unwrap().worker,
             Uuid::now_v7(),
             TuiSubmission {
                 text: "! selected route".into(),

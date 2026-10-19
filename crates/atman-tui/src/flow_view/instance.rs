@@ -39,6 +39,7 @@ struct TurnView {
 
 #[derive(Default)]
 pub(super) struct InstanceDocument {
+    archive: bool,
     cursor: Option<CommitReceipt>,
     pub(super) structure_revision: u64,
     entries: usize,
@@ -85,6 +86,10 @@ impl From<Vec<OutputItem>> for FlowViewModel {
 }
 
 impl FlowViewModel {
+    pub fn is_archive(&self) -> bool {
+        self.instance.archive
+    }
+
     pub(crate) fn updated_workflows(&self) -> &[usize] {
         &self.updated_workflows
     }
@@ -341,6 +346,7 @@ impl FlowViewModel {
         }
         self.flow = Some(source.flow().clone());
         self.instance.entries = source.entries().len();
+        self.instance.archive = matches!(source.content(), Some(FlowContentSummary::History(_)));
         self.instance.cursor = source.cursor().cloned();
         self.instance.structure_revision = self.document.structure_revision();
         if self

@@ -263,11 +263,11 @@ pub(crate) async fn run_frames(
     // delay lifecycle, completion, approval, or cancellation frames.
     let (semantic_tx, mut semantic_rx) = tokio::sync::mpsc::channel::<StreamFrame>(512);
     let (bulk_tx, mut bulk_rx) = tokio::sync::mpsc::channel::<StreamFrame>(256);
-    if !persistent {
+    if !persistent && let Some(srx) = handle.stream_rx.as_mut() {
         let semantic_tx = semantic_tx.clone();
         let bulk_tx = bulk_tx.clone();
-        let replacement = handle.stream_rx.resubscribe();
-        let mut srx = std::mem::replace(&mut handle.stream_rx, replacement);
+        let replacement = srx.resubscribe();
+        let mut srx = std::mem::replace(srx, replacement);
         tokio::spawn(async move {
             loop {
                 match srx.recv().await {
@@ -395,8 +395,9 @@ pub(crate) async fn run_frames(
             }
 
             frame = async {
+                let Some(rx) = handle.stream_rx.as_mut() else { return std::future::pending().await; };
                 loop {
-                    match handle.stream_rx.recv().await {
+                    match rx.recv().await {
                         Ok(frame) if is_live_instance_frame(&frame) => break Some(frame),
                         Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break None,

@@ -18,7 +18,7 @@ pub(crate) async fn request(
     root: PathBuf,
     current: String,
     project: Option<PathBuf>,
-    config: ConfigHub,
+    config: Option<ConfigHub>,
     native: Option<&SessionCatalog>,
     request: ProjectRequest,
 ) -> atman_tui::TuiCommand {
@@ -53,7 +53,7 @@ pub(crate) async fn request(
 async fn directory(
     root: PathBuf,
     current: String,
-    config: ConfigHub,
+    config: Option<ConfigHub>,
     native: Option<&SessionCatalog>,
 ) -> Result<ProjectDirectory> {
     let data = root.clone();
@@ -68,8 +68,8 @@ async fn directory(
                 ProjectDetails {
                     path_available: project.path_available(),
                     scope: config
-                        .try_storage_config(Some(&project.root))
-                        .ok()
+                        .as_ref()
+                        .and_then(|config| config.try_storage_config(Some(&project.root)).ok())
                         .map(|cfg| cfg.scope.unwrap_or_default()),
                 },
             );
@@ -221,7 +221,7 @@ mod tests {
             data.path().to_owned(),
             "legacy-saved".into(),
             Some(project.clone()),
-            config.clone(),
+            Some(config.clone()),
             None,
             ProjectRequest { id, mutation: None },
         )
@@ -245,7 +245,7 @@ mod tests {
             data.path().to_owned(),
             "legacy-saved".into(),
             Some(project),
-            config,
+            Some(config),
             None,
             ProjectRequest {
                 id,

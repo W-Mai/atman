@@ -9,6 +9,7 @@ use crate::ModeColorExt;
 
 #[derive(Default)]
 pub struct InputFooter {
+    pub read_only: bool,
     pub sending: bool,
     pub queued_count: usize,
     pub pending_quote_lines: Option<usize>,
@@ -38,7 +39,9 @@ pub fn input_paragraph<'a>(
         title,
         Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
     );
-    let hint_right = if footer.sending {
+    let hint_right = if footer.read_only {
+        " Archived flow · read-only · :sessions to navigate ".into()
+    } else if footer.sending {
         " Sending · draft retained ".into()
     } else if let Some(lines) = footer.pending_quote_lines {
         format!(" quote · {lines} lines · Ctrl+U remove · Enter send ")

@@ -794,6 +794,29 @@ impl WindowManager {
         control_tx: Option<&crate::ControlSender>,
     ) -> Vec<WmCommand> {
         use crate::palette::PaletteEntryId;
+        if app.items.is_archive()
+            && !matches!(
+                id,
+                PaletteEntryId::OpenFlowHub
+                    | PaletteEntryId::SwitchSession
+                    | PaletteEntryId::OpenProjectHub
+                    | PaletteEntryId::SetFormulaRendering
+                    | PaletteEntryId::YankMode
+                    | PaletteEntryId::CopyLastMessage
+                    | PaletteEntryId::CopyLastTool
+                    | PaletteEntryId::ToggleSidebar
+                    | PaletteEntryId::SetModeTheme
+                    | PaletteEntryId::ShowHelp
+            )
+        {
+            app.push_toast(
+                "Archived flow is read-only; select an executable flow for this operation",
+                crate::app::NoteLevel::Info,
+                std::time::Duration::from_secs(6),
+                crate::app::ToastPosition::BottomRight,
+            );
+            return Vec::new();
+        }
         match id {
             PaletteEntryId::YankMode => {
                 crate::key_handler::enter_selection_mode(app);

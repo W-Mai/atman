@@ -10,7 +10,108 @@ use crate::{
     control::{BoundControl, ViewBinding},
 };
 
+/// A live commit reader or a complete immutable archive, independent of surface placement.
+pub enum FlowViewSource {
+    Live(Box<atman_runtime::flow_runtime::FlowViewReader>),
+    Archive {
+        view: Box<FlowView>,
+        delivered: bool,
+    },
+}
+
+impl FlowViewSource {
+    pub async fn next(&mut self) -> io::Result<&FlowView> {
+        match self {
+            Self::Live(reader) => reader.next().await,
+            Self::Archive { view, delivered } if !*delivered => {
+                *delivered = true;
+                Ok(view)
+            }
+            Self::Archive { .. } => std::future::pending().await,
+        }
+    }
+
+    pub async fn refresh(&mut self) -> io::Result<&FlowView> {
+        match self {
+            Self::Live(reader) => reader.refresh().await,
+            Self::Archive { view, delivered } => {
+                *delivered = true;
+                Ok(view)
+            }
+        }
+    }
+}
+
 impl TuiHandle {
+    pub fn from_archive(
+        view: FlowView,
+        binding: ViewBinding,
+        commands: tokio::sync::mpsc::UnboundedSender<BoundControl>,
+        descriptor: &atman_runtime::flow_store::SessionDescriptor,
+    ) -> io::Result<Self> {
+        if &binding.flow != view.transcript().flow()
+            || binding.flow.session_id.0 != descriptor.id
+            || !matches!(
+                view.transcript().content(),
+                Some(atman_runtime::flow_store::view::FlowContentSummary::History(_))
+            )
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "archive view binding mismatch",
+            ));
+        }
+        let (sender, replies) = ControlSender::for_flow(binding, commands);
+        Ok(Self {
+            settings: crate::settings::SettingsSource::unavailable(
+                "Archived flow has no execution settings",
+            ),
+            session_id: descriptor.id.to_string(),
+            session_dir: String::new(),
+            session_name: Some(descriptor.title.clone()),
+            session_name_rx: None,
+            project_root: descriptor
+                .project
+                .as_ref()
+                .map(|project| project.root().display().to_string()),
+            projects: Vec::new(),
+            goal: None,
+            stream_rx: None,
+            task_event_rx: None,
+            submit_tx: None,
+            note_rx: None,
+            shutdown_rx: None,
+            control_tx: Some(sender),
+            cmd_rx: None,
+            control_reply_rx: Some(replies),
+            flow_view: Some(FlowViewSource::Archive {
+                view: Box::new(view),
+                delivered: false,
+            }),
+            live_output: None,
+            initial_items: Vec::new(),
+            goal_rx: None,
+            context_rx: None,
+            attach_rx: None,
+            todos_rx: None,
+            plans_rx: None,
+            trust_rx: None,
+            compact_review_rx: None,
+            form_rx: None,
+            injection_rx: None,
+            queued_submission_rx: None,
+            flow_names: Vec::new(),
+            session: None,
+            startup_card: None,
+            startup_intro: None,
+            onboarding_recommended: false,
+            trust: Default::default(),
+            task_registry: None,
+            permission_client: None,
+            boot_toasts: Vec::new(),
+        })
+    }
+
     pub async fn from_flow(
         worker: &FlowWorker,
         binding: ViewBinding,
@@ -36,11 +137,11 @@ impl TuiHandle {
         }
         handle.settings = config.into();
         handle.live_output = Some(worker.subscribe_live_output());
-        handle.flow_view = Some(
+        handle.flow_view = Some(FlowViewSource::Live(Box::new(
             worker
                 .subscribe_view(NonZeroUsize::new(64).unwrap())
                 .await?,
-        );
+        )));
         let (sender, replies) = ControlSender::for_flow(binding, commands);
         handle.control_tx = Some(sender);
         handle.control_reply_rx = Some(replies);

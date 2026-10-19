@@ -998,6 +998,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             &app.trust,
             reasoning_badge.as_deref(),
             InputFooter {
+                read_only: app.items.is_archive(),
                 sending: app.pending_submission.is_some(),
                 queued_count: app.queued_submissions.len(),
                 pending_quote_lines: app

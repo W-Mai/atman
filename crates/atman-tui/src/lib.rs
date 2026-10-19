@@ -20,6 +20,7 @@ mod composer;
 pub mod control;
 mod instance_view;
 pub use control::ControlSender;
+pub use instance_view::FlowViewSource;
 mod directional_selector;
 pub mod flow_hub;
 pub mod flow_view;
@@ -576,7 +577,7 @@ pub struct TuiHandle {
     pub project_root: Option<String>,
     pub projects: Vec<atman_runtime::project_catalog::ProjectRecord>,
     pub goal: Option<String>,
-    pub stream_rx: broadcast::Receiver<StreamFrame>,
+    pub stream_rx: Option<broadcast::Receiver<StreamFrame>>,
     pub task_event_rx: Option<tokio::sync::broadcast::Receiver<atman_runtime::TaskEvent>>,
     pub submit_tx: Option<mpsc::UnboundedSender<TuiSubmission>>,
     pub note_rx: Option<mpsc::UnboundedReceiver<TuiNote>>,
@@ -584,7 +585,7 @@ pub struct TuiHandle {
     pub control_tx: Option<crate::ControlSender>,
     pub cmd_rx: Option<mpsc::UnboundedReceiver<TuiCommand>>,
     pub control_reply_rx: Option<mpsc::UnboundedReceiver<control::ControlReply>>,
-    pub flow_view: Option<atman_runtime::flow_runtime::FlowViewReader>,
+    pub flow_view: Option<FlowViewSource>,
     pub live_output: Option<atman_runtime::flow_runtime::live::LiveOutputReader>,
     pub initial_items: Vec<app::OutputItem>,
     pub goal_rx: Option<tokio::sync::watch::Receiver<Option<String>>>,
@@ -626,7 +627,7 @@ impl TuiHandle {
                 .map(|path| path.display().to_string()),
             projects: Vec::new(),
             goal: session.goal(),
-            stream_rx: session.stream_subscribe(),
+            stream_rx: Some(session.stream_subscribe()),
             task_event_rx: None,
             submit_tx: None,
             note_rx: None,

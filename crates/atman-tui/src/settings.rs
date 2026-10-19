@@ -99,6 +99,16 @@ impl std::ops::Deref for SettingsSource {
 }
 
 impl SettingsSource {
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        let models = Arc::new(ModelRegistry::new());
+        Self {
+            config: Err(reason.into()),
+            catalog: models.subscribe_model_catalog(),
+            models,
+            updates: None,
+        }
+    }
+
     pub(crate) async fn changed(&mut self) {
         tokio::select! {
             _ = wait_change(self.updates.as_mut()) => {}
