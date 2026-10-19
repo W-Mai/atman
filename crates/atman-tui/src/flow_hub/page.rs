@@ -68,7 +68,25 @@ pub enum HubRequest {
     },
     Relations {
         session: Uuid,
+        focus: Option<atman_runtime::flow_store::FlowRef>,
     },
+}
+
+impl HubRequest {
+    pub(super) fn first(&self) -> Self {
+        match self {
+            Self::Sessions { .. } => Self::Sessions { before: None },
+            Self::Flows { session, .. } => Self::Flows {
+                session: *session,
+                before: None,
+            },
+            Self::LegacyFlows { session, .. } => Self::LegacyFlows {
+                session: *session,
+                after: None,
+            },
+            Self::Relations { .. } => self.clone(),
+        }
+    }
 }
 
 pub enum FlowHubPage {
@@ -90,6 +108,7 @@ pub enum FlowHubPage {
     Relations {
         session: Uuid,
         title: String,
+        focus: Option<atman_runtime::flow_store::FlowRef>,
         relations: Vec<FlowRelation>,
     },
 }
@@ -99,6 +118,32 @@ pub(super) struct Row {
     pub title: String,
     pub detail: String,
     pub action: Action,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) enum Endpoint {
+    #[default]
+    Neighbor,
+    Source,
+    Target,
+}
+
+impl Endpoint {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Neighbor => Self::Source,
+            Self::Source => Self::Target,
+            Self::Target => Self::Neighbor,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Neighbor => "\nNeighbor Tab",
+            Self::Source => "\nSource Tab",
+            Self::Target => "\nTarget Tab",
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -140,7 +185,10 @@ impl FlowHubPage {
                 session: *session,
                 after: None,
             },
-            Self::Relations { session, .. } => HubRequest::Relations { session: *session },
+            Self::Relations { session, focus, .. } => HubRequest::Relations {
+                session: *session,
+                focus: focus.clone(),
+            },
         }
     }
     pub fn next(&self) -> Option<HubRequest> {
@@ -171,7 +219,11 @@ impl FlowHubPage {
             Self::Relations { relations, .. } => relations.len(),
         }
     }
-    pub(super) fn rows(&self, focused: Option<&crate::control::ViewAddress>) -> Vec<Row> {
+    pub(super) fn rows(
+        &self,
+        focused: Option<&crate::control::ViewAddress>,
+        endpoint: Endpoint,
+    ) -> Vec<Row> {
         match self {
             Self::LegacyFlows { session, flows, .. } => flows
                 .iter()
@@ -264,8 +316,11 @@ impl FlowHubPage {
                     }
                 })
                 .collect(),
-            Self::Relations { relations, .. } => relations
+            Self::Relations {
+                relations, focus, ..
+            } => relations
                 .iter()
+                .filter(|relation| focus.as_ref().is_none_or(|flow| incident(relation, flow)))
                 .map(|relation| {
                     let kind = match relation.kind {
                         RelationKind::Created => "Created",
@@ -289,7 +344,29 @@ impl FlowHubPage {
                                 before: None,
                             }),
                         ),
-                        AccessTarget::AllSessions => ("all sessions".into(), Action::None),
+                        AccessTarget::AllSessions => (
+                            "all sessions".into(),
+                            Action::Load(HubRequest::Sessions { before: None }),
+                        ),
+                    };
+                    let open_source = matches!(endpoint, Endpoint::Source)
+                        || matches!(endpoint, Endpoint::Neighbor)
+                            && focus.as_ref().is_some_and(|flow| &relation.source != flow);
+                    let action = if open_source {
+                        Action::Focus(relation.source.clone().into())
+                    } else {
+                        action
+                    };
+                    let label = if open_source {
+                        short_flow(&relation.source)
+                    } else {
+                        match &relation.target {
+                            AccessTarget::Flow(flow) => short_flow(flow),
+                            AccessTarget::Session(session) => {
+                                format!("session {}", &session.to_string()[28..])
+                            }
+                            AccessTarget::AllSessions => "all sessions".into(),
+                        }
                     };
                     Row {
                         key: RowKey::Relation {
@@ -298,7 +375,7 @@ impl FlowHubPage {
                             target: relation.target.clone(),
                             kind: relation.kind,
                         },
-                        title: format!("{kind} · {target}"),
+                        title: format!("{kind} {} {}", if open_source { "←" } else { "→" }, label),
                         detail: format!(
                             "{source} → {target} · {} · relation {}",
                             if relation.active {
@@ -313,5 +390,94 @@ impl FlowHubPage {
                 })
                 .collect(),
         }
+    }
+}
+
+fn short_flow(flow: &atman_runtime::flow_store::FlowRef) -> String {
+    format!(
+        "{}/{}",
+        &flow.session_id.to_string()[28..],
+        &flow.instance_id.to_string()[28..]
+    )
+}
+
+/// Broad grants stay broad; the directory does not synthesize per-flow edges.
+pub(super) fn incident(relation: &FlowRelation, flow: &atman_runtime::flow_store::FlowRef) -> bool {
+    &relation.source == flow
+        || match &relation.target {
+            AccessTarget::Flow(target) => target == flow,
+            AccessTarget::Session(session) => *session == flow.session_id.0,
+            AccessTarget::AllSessions => true,
+        }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atman_runtime::flow_store::FlowRef;
+
+    #[test]
+    fn relation_endpoints_keep_identity_direction_and_broad_targets() {
+        let observer = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let observed = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let relations = vec![
+            FlowRelation {
+                source: observer.clone(),
+                target: AccessTarget::Flow(observed.clone()),
+                kind: RelationKind::Watch,
+                id: Uuid::now_v7(),
+                active: false,
+            },
+            FlowRelation {
+                source: observer.clone(),
+                target: AccessTarget::AllSessions,
+                kind: RelationKind::Read,
+                id: Uuid::now_v7(),
+                active: true,
+            },
+            FlowRelation {
+                source: observer.clone(),
+                target: AccessTarget::Session(observed.session_id.0),
+                kind: RelationKind::Interject,
+                id: Uuid::now_v7(),
+                active: true,
+            },
+        ];
+        let page = FlowHubPage::Relations {
+            session: observer.session_id.0,
+            title: "Scope".into(),
+            focus: Some(observed.clone()),
+            relations,
+        };
+        let neighbors = page.rows(None, Endpoint::Neighbor);
+        assert_eq!(neighbors.len(), 3);
+        assert!(neighbors.iter().all(|row| matches!(&row.action, Action::Focus(address) if address.instance() == Some(&observer))));
+        assert!(neighbors.iter().all(|row| row.title.contains('←')));
+        assert!(neighbors[0].detail.contains("inactive"));
+        let sources = page.rows(None, Endpoint::Source);
+        let targets = page.rows(None, Endpoint::Target);
+        assert!(
+            neighbors
+                .iter()
+                .zip(&targets)
+                .zip(&sources)
+                .all(|((left, right), source)| left.key == right.key && left.key == source.key)
+        );
+        assert!(
+            matches!(&targets[0].action, Action::Focus(address) if address.instance() == Some(&observed))
+        );
+        assert!(matches!(
+            &targets[1].action,
+            Action::Load(HubRequest::Sessions { before: None })
+        ));
+        assert!(
+            matches!(&targets[2].action, Action::Load(HubRequest::Flows { session, before: None }) if *session == observed.session_id.0)
+        );
     }
 }

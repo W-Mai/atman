@@ -108,13 +108,18 @@ fn kind_name(kind: RelationKind) -> &'static str {
 }
 
 pub(super) fn has_link(row: &Row, relations: &[FlowRelation], kind: &str) -> bool {
+    if let RowKey::Relation {
+        kind: relation_kind,
+        ..
+    } = row.key
+    {
+        return kind_name(relation_kind).eq_ignore_ascii_case(kind);
+    }
     let Some(flow) = address(row) else {
         return false;
     };
     relations.iter().any(|relation| {
-        kind_name(relation.kind).eq_ignore_ascii_case(kind)
-            && (&relation.source == flow
-                || matches!(&relation.target, AccessTarget::Flow(target) if target == flow))
+        kind_name(relation.kind).eq_ignore_ascii_case(kind) && super::page::incident(relation, flow)
     })
 }
 
@@ -173,7 +178,7 @@ pub(super) fn draw_links(
             _ => None,
         };
         let outgoing = &relation.source == selected;
-        if !outgoing && target != Some(selected) {
+        if !super::page::incident(relation, selected) {
             continue;
         }
         let kind = kind_name(relation.kind);

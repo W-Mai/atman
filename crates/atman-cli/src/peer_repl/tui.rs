@@ -762,14 +762,23 @@ impl scopes::Scopes {
                 })
                 .await??
             }
-            HubRequest::Relations { session } => {
+            HubRequest::Relations { session, focus } => {
                 let overview = self.catalog.overview(session).await?;
+                let title = overview
+                    .summary
+                    .title
+                    .unwrap_or_else(|| session.to_string());
+                let title = match &focus {
+                    Some(flow) => format!(
+                        "{title} / links for {}",
+                        &flow.instance_id.to_string()[28..]
+                    ),
+                    None => format!("{title} / all links"),
+                };
                 FlowHubPage::Relations {
                     session,
-                    title: overview
-                        .summary
-                        .title
-                        .unwrap_or_else(|| session.to_string()),
+                    focus,
+                    title,
                     relations: self.catalog.relations(session).await?,
                 }
             }

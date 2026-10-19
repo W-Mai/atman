@@ -415,12 +415,16 @@ pub(crate) async fn run_frames(
                     atman_runtime::notify!(debug, "event: {key:?}");
                 }
                 if let Some(opened) = hub.as_mut() {
-                    let action = match key {
+                    let mut action = match key {
                         Some(Ok(CtEvent::Key(key))) if map_key(key) == KeyAction::Quit => { break; },
                         Some(Ok(CtEvent::Key(key))) => opened.key(map_key(key)),
                         Some(Ok(CtEvent::Mouse(mouse))) => opened.mouse(mouse),
                         _ => crate::flow_hub::Action::None,
                     };
+                    if let crate::flow_hub::Action::Load(request) = &action
+                        && opened.leaves_directory(request) {
+                        action = crate::flow_hub::Action::Load(hub_history.request(request.clone()));
+                    }
                     if matches!(action, crate::flow_hub::Action::Close) { hub_history.save(hub.take().unwrap()); }
                     else if let Some(tx) = handle.control_tx.as_ref() { let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle)); dispatch_hub_action(opened, action, tx, reuse); }
                     continue;
@@ -1889,7 +1893,7 @@ pub(crate) async fn run_frames(
                 if let Some((ticket, cmd)) = cmd {
                     match cmd {
                         TuiCommand::FlowCatalog { result } => {
-                            if let Some(hub) = hub.as_mut() { hub.receive(ticket.as_ref(), result); }
+                            if let Some(hub) = hub.as_mut() { hub_history.receive(hub, ticket.as_ref(), result); }
                         }
                         TuiCommand::FlowResolved { flow } => {
                             let Some(hub) = hub.as_mut().filter(|hub| hub.owns_reply(ticket.as_ref())) else { continue; };

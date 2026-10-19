@@ -35,6 +35,7 @@ pub(crate) struct FlowHub {
     pub pending: Option<ControlTicket>,
     page: Option<FlowHubPage>,
     rows: Vec<page::Row>,
+    endpoint: page::Endpoint,
     graph: graph::Layout,
     graph_visible: bool,
     graph_button: Rect,
@@ -67,6 +68,39 @@ pub(crate) struct History {
 }
 
 impl History {
+    pub fn request(&self, request: HubRequest) -> HubRequest {
+        self.pages
+            .iter()
+            .find(|saved| saved.page.as_ref().unwrap().first() == request.first())
+            .and_then(|saved| saved.cursors.get(saved.index))
+            .cloned()
+            .unwrap_or(request)
+    }
+
+    pub fn receive(
+        &mut self,
+        hub: &mut FlowHub,
+        ticket: Option<&ControlTicket>,
+        result: Result<Box<FlowHubPage>, String>,
+    ) {
+        if !hub.owns_reply(ticket) {
+            return;
+        }
+        if let Ok(page) = &result
+            && hub.leaves_directory(&page.first())
+        {
+            let next = self
+                .pages
+                .iter()
+                .position(|saved| saved.page.as_ref().unwrap().first() == page.first())
+                .map(|index| self.pages.remove(index))
+                .unwrap_or_default();
+            self.save(std::mem::replace(hub, next));
+            hub.pending = ticket.cloned();
+        }
+        hub.receive(ticket, result);
+    }
+
     pub fn save(&mut self, mut hub: FlowHub) {
         let Some(page) = &hub.page else { return };
         let directory = page.first();
@@ -104,6 +138,12 @@ impl History {
 }
 
 impl FlowHub {
+    pub fn leaves_directory(&self, request: &HubRequest) -> bool {
+        self.page
+            .as_ref()
+            .is_some_and(|page| page.first() != request.first())
+    }
+
     pub fn owns_reply(&self, ticket: Option<&ControlTicket>) -> bool {
         ticket.is_some() && ticket == self.pending.as_ref()
     }
@@ -136,7 +176,10 @@ impl FlowHub {
                     self.requested_index = None;
                     self.query.clear();
                 }
-                self.rows = page.rows(None);
+                if changed_directory {
+                    self.endpoint = page::Endpoint::default();
+                }
+                self.rows = page.rows(None, self.endpoint);
                 if changed_directory || changed_page {
                     self.graph = graph::Layout::default();
                 }
@@ -226,6 +269,15 @@ impl FlowHub {
         if self.pending.is_some() {
             return Action::None;
         }
+        if matches!(self.page, Some(FlowHubPage::Relations { .. })) {
+            let step = self.hits.len().max(1);
+            self.selected = if forward {
+                (self.selected + step).min(self.filtered().len().saturating_sub(1))
+            } else {
+                self.selected.saturating_sub(step)
+            };
+            return Action::None;
+        }
         if self.cursors.is_empty() {
             return Action::None;
         }
@@ -247,12 +299,59 @@ impl FlowHub {
 
     pub fn key(&mut self, key: KeyAction) -> Action {
         if key == KeyAction::Escape {
+            if let Some(FlowHubPage::Relations { session, .. }) = self.page {
+                return Action::Load(HubRequest::Flows {
+                    session,
+                    before: None,
+                });
+            }
             return Action::Close;
         }
         if self.pending.is_some() {
             return Action::None;
         }
         match key {
+            KeyAction::Tab | KeyAction::BackTab
+                if matches!(self.page, Some(FlowHubPage::Relations { .. })) =>
+            {
+                let selected = self
+                    .filtered()
+                    .get(self.selected)
+                    .map(|index| self.rows[*index].key.clone());
+                self.endpoint = self.endpoint.next();
+                if key == KeyAction::BackTab {
+                    self.endpoint = self.endpoint.next();
+                }
+                self.rows = self.page.as_ref().unwrap().rows(None, self.endpoint);
+                let filtered = self.filtered();
+                self.selected = selected
+                    .and_then(|key| {
+                        filtered
+                            .iter()
+                            .position(|index| self.rows[*index].key == key)
+                    })
+                    .unwrap_or(self.selected.min(filtered.len().saturating_sub(1)));
+            }
+            KeyAction::NudgePrefill if matches!(self.page, Some(FlowHubPage::Relations { .. })) => {
+                let Some(FlowHubPage::Relations { session, focus, .. }) = &self.page else {
+                    unreachable!()
+                };
+                let focus = if focus.is_some() {
+                    None
+                } else {
+                    match self.focus() {
+                        Action::Focus(address) => address.instance().cloned(),
+                        _ => {
+                            self.error = Some("Choose a Flow endpoint to show its links".into());
+                            return Action::None;
+                        }
+                    }
+                };
+                return Action::Load(HubRequest::Relations {
+                    session: *session,
+                    focus,
+                });
+            }
             KeyAction::NudgePrefill if matches!(self.page, Some(FlowHubPage::Flows { .. })) => {
                 self.graph_visible = !self.graph_visible;
             }
@@ -267,7 +366,14 @@ impl FlowHub {
             KeyAction::OpenRelations => {
                 return match self.page.as_ref() {
                     Some(FlowHubPage::Flows { session, .. }) => {
-                        Action::Load(HubRequest::Relations { session: *session })
+                        let focus = match self.focus() {
+                            Action::Focus(address) => address.instance().cloned(),
+                            _ => None,
+                        };
+                        Action::Load(HubRequest::Relations {
+                            session: *session,
+                            focus,
+                        })
                     }
                     _ => Action::None,
                 };
@@ -315,9 +421,13 @@ impl FlowHub {
             MouseEventKind::Down(MouseButton::Left) if self.sessions.contains(point) => {
                 self.key(KeyAction::Save)
             }
-            MouseEventKind::Down(MouseButton::Left) if self.relations.contains(point) => {
-                self.key(KeyAction::OpenRelations)
-            }
+            MouseEventKind::Down(MouseButton::Left) if self.relations.contains(point) => self.key(
+                if matches!(self.page, Some(FlowHubPage::Relations { .. })) {
+                    KeyAction::Tab
+                } else {
+                    KeyAction::OpenRelations
+                },
+            ),
             MouseEventKind::ScrollDown => self.key(KeyAction::HistoryDown),
             MouseEventKind::ScrollUp => self.key(KeyAction::HistoryUp),
             MouseEventKind::Down(MouseButton::Left) if self.previous.contains(point) => {
@@ -378,6 +488,11 @@ impl FlowHub {
         let muted = Style::default().fg(t.meta_fg.into());
         let session = self.page.as_ref().map_or("Loading", FlowHubPage::title);
         let is_flows = matches!(self.page, Some(FlowHubPage::Flows { .. }));
+        let is_relations = matches!(self.page, Some(FlowHubPage::Relations { .. }));
+        let scoped_links = matches!(
+            self.page,
+            Some(FlowHubPage::Relations { focus: Some(_), .. })
+        );
         frame.render_widget(
             Paragraph::new(format!("FlowHub  /  {session}")).style(fg),
             Rect::new(content.x, content.y, width.saturating_sub(12), 1),
@@ -397,7 +512,7 @@ impl FlowHub {
             button_width,
             3,
         );
-        self.relations = if is_flows {
+        self.relations = if is_flows || is_relations {
             Rect::new(
                 content.x + width / 2 + 1,
                 content.y + 5,
@@ -407,7 +522,7 @@ impl FlowHub {
         } else {
             Rect::default()
         };
-        self.graph_button = if is_flows {
+        self.graph_button = if is_flows || is_relations {
             Rect::new(content.x, content.y + 5, width / 2 - 1, 3)
         } else {
             Rect::default()
@@ -417,7 +532,9 @@ impl FlowHub {
             (self.refresh, "\nRefresh  Ctrl+R", self.refresh_hovered),
             (
                 self.relations,
-                if width < 72 {
+                if is_relations {
+                    self.endpoint.label()
+                } else if width < 72 {
                     "\nLinks Ctrl+⇧G"
                 } else {
                     "\nLinks Ctrl+Shift+G"
@@ -426,7 +543,13 @@ impl FlowHub {
             ),
             (
                 self.graph_button,
-                if self.graph_visible {
+                if is_relations {
+                    if scoped_links {
+                        "\nAll Ctrl+G"
+                    } else {
+                        "\nRelated Ctrl+G"
+                    }
+                } else if self.graph_visible {
                     "\nList  Ctrl+G"
                 } else {
                     "\nGraph  Ctrl+G"
@@ -448,7 +571,7 @@ impl FlowHub {
                 rect,
             );
         }
-        let search_y = content.y + if is_flows { 8 } else { 4 };
+        let search_y = content.y + if is_flows || is_relations { 8 } else { 4 };
         frame.render_widget(
             Paragraph::new(format!("Search this page: {}", self.query)).style(muted),
             Rect::new(content.x, search_y, width, 1),
@@ -550,11 +673,17 @@ impl FlowHub {
             );
             self.hits.push((rect, pos));
         }
-        let total = self.page.as_ref().map_or(0, FlowHubPage::total);
+        let total = if is_relations {
+            self.rows.len()
+        } else {
+            self.page.as_ref().map_or(0, FlowHubPage::total)
+        };
         let page_count = total.div_ceil(PAGE_SIZE).max(1);
         let message = self.error.clone().unwrap_or_else(|| {
             if self.pending.is_some() {
                 "Loading…".into()
+            } else if is_relations {
+                format!("Session links · {total} records · {} matches", rows.len())
             } else {
                 format!(
                     "Snapshot · {} {} · Page {} / {} · {} matches",
@@ -578,8 +707,22 @@ impl FlowHub {
             3,
         );
         for (rect, label) in [
-            (self.previous, "\n‹ Previous  PgUp"),
-            (self.next, "\nNext  PgDn ›"),
+            (
+                self.previous,
+                if is_relations {
+                    "\n‹ Earlier PgUp"
+                } else {
+                    "\n‹ Previous  PgUp"
+                },
+            ),
+            (
+                self.next,
+                if is_relations {
+                    "\nLater PgDn ›"
+                } else {
+                    "\nNext  PgDn ›"
+                },
+            ),
         ] {
             frame.render_widget(
                 Paragraph::new(label)
@@ -591,6 +734,8 @@ impl FlowHub {
         frame.render_widget(
             Paragraph::new(if is_flows {
                 "↑↓ select · Enter open · Ctrl+O window · Ctrl+G graph/list · Esc back"
+            } else if is_relations {
+                "↑↓ select · Tab endpoint · Enter open · Ctrl+O window · Esc flows"
             } else {
                 "↑↓ select · Enter open · Ctrl+O window · Ctrl+S sessions · Esc back"
             })
@@ -624,6 +769,135 @@ mod tests {
         flow_store::FlowInstanceId,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn neighborhood_navigation_commits_on_reply_and_restores_the_flow_directory() {
+        use atman_runtime::flow_store::{
+            access::AccessTarget,
+            relation::{FlowRelation, RelationKind},
+        };
+        let flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let observer = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let ticket = ControlTicket {
+            binding: crate::control::ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: flow.clone().into(),
+            },
+            request_id: Uuid::now_v7(),
+        };
+        let page = || {
+            Box::new(FlowHubPage::Flows {
+                session: flow.session_id.0,
+                title: "Example".into(),
+                default_flow: None,
+                page: InstancePage {
+                    instances: vec![InstanceSummary {
+                        address: flow.clone(),
+                        entry: Some("Worker".into()),
+                        state: None,
+                        unavailable: None,
+                        loaded: false,
+                        trailing_bytes: None,
+                    }],
+                    next: None,
+                    total: 51,
+                    catalog: CommitReceipt {
+                        journal_id: Uuid::now_v7(),
+                        sequence: 1,
+                        digest: "test".into(),
+                    },
+                },
+                relations: Ok(vec![]),
+            })
+        };
+        let links = || {
+            Box::new(FlowHubPage::Relations {
+                session: flow.session_id.0,
+                title: "Links".into(),
+                focus: Some(flow.clone()),
+                relations: vec![FlowRelation {
+                    source: observer.clone(),
+                    target: AccessTarget::Flow(flow.clone()),
+                    kind: RelationKind::Watch,
+                    id: Uuid::now_v7(),
+                    active: true,
+                }],
+            })
+        };
+        let mut hub = FlowHub {
+            pending: Some(ticket.clone()),
+            ..Default::default()
+        };
+        let mut history = History::default();
+        history.receive(&mut hub, Some(&ticket), Ok(page()));
+        let cursor = HubRequest::Flows {
+            session: flow.session_id.0,
+            before: Some(FlowInstanceId::now()),
+        };
+        hub.cursors.push(cursor.clone());
+        hub.index = 1;
+        hub.query = "Worker".into();
+        hub.graph_visible = true;
+        assert!(!hub.leaves_directory(&cursor));
+        assert!(
+            matches!(hub.key(KeyAction::OpenRelations), Action::Load(HubRequest::Relations { focus: Some(target), .. }) if target == flow)
+        );
+        hub.pending = Some(ticket.clone());
+        history.receive(&mut hub, Some(&ticket), Err("cannot read links".into()));
+        assert_eq!(hub.query, "Worker");
+        assert!(history.pages.is_empty());
+        hub.pending = Some(ticket.clone());
+        history.receive(&mut hub, Some(&ticket), Ok(links()));
+        assert_eq!(history.pages.len(), 1);
+        assert!(hub.query.is_empty());
+        assert!(
+            matches!(hub.key(KeyAction::Submit), Action::Focus(address) if address.instance() == Some(&observer))
+        );
+        hub.key(KeyAction::Tab); // Source.
+        hub.key(KeyAction::Tab); // Target.
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 24)).unwrap();
+        terminal
+            .draw(|frame| hub.render(frame, &flow.clone().into()))
+            .unwrap();
+        let row = hub.hits[0].0;
+        assert!(
+            matches!(hub.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: row.x + 1, row: row.y, modifiers: crossterm::event::KeyModifiers::NONE }), Action::Focus(address) if address.instance() == Some(&flow))
+        );
+        let endpoint = hub.relations;
+        hub.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: endpoint.x + 1,
+            row: endpoint.y + 1,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(
+            matches!(hub.key(KeyAction::ToggleLastTool), Action::Float(address) if address.instance() == Some(&observer))
+        );
+        let Action::Load(back) = hub.key(KeyAction::Escape) else {
+            panic!("missing back target")
+        };
+        assert_eq!(history.request(back), cursor);
+        let mut fresh = ticket.clone();
+        fresh.request_id = Uuid::now_v7();
+        hub.pending = Some(fresh.clone());
+        history.receive(&mut hub, Some(&ticket), Ok(page()));
+        assert!(matches!(hub.page, Some(FlowHubPage::Relations { .. })));
+        history.receive(&mut hub, Some(&fresh), Ok(page()));
+        assert_eq!(hub.index, 1);
+        assert_eq!(hub.query, "Worker");
+        assert!(hub.graph_visible);
+        assert!(
+            matches!(hub.key(KeyAction::Submit), Action::Focus(address) if address.instance() == Some(&flow))
+        );
+    }
 
     #[test]
     fn refreshed_directory_retains_identity_and_return_state_without_reusing_requests() {
@@ -837,7 +1111,10 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
         terminal.draw(|f| hub.render(f, &address)).unwrap();
         assert!(
-            hub.page.as_ref().unwrap().rows(Some(&address))[0]
+            hub.page
+                .as_ref()
+                .unwrap()
+                .rows(Some(&address), page::Endpoint::default())[0]
                 .title
                 .contains("focused")
         );
@@ -1076,7 +1353,7 @@ mod tests {
                     column: hub.relations.x + 1,
                     row,
                     modifiers: crossterm::event::KeyModifiers::NONE,
-                }), Action::Load(HubRequest::Relations { session }) if session == flow.session_id.0));
+                }), Action::Load(HubRequest::Relations { session, focus: Some(ref target) }) if session == flow.session_id.0 && target == &flow));
             }
         }
         hub.pending = Some(ticket.clone());
@@ -1119,6 +1396,7 @@ mod tests {
             Ok(Box::new(FlowHubPage::Relations {
                 session: source.session_id.0,
                 title: "Example".into(),
+                focus: None,
                 relations: vec![FlowRelation {
                     source,
                     target: atman_runtime::flow_store::access::AccessTarget::Flow(target.clone()),

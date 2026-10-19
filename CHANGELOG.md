@@ -26,6 +26,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Flow relation navigation** — Inspect a selected flow's Session links and open either endpoint in the main workspace or a floating window. Scope and endpoint controls share keyboard and mouse handling; returning restores the Flow directory's page and filters, while failed navigation retains the visible directory.
+
 - **FlowHub relation graph** — Switch between a stable node layout and a list while retaining selection, filters, and shared focus/window actions. Directed links identify the selected flow's relations; relation filters and isolated nodes remain available without starting execution.
 
 - **Atman Session navigation** — `:atman` and the command palette open the profile's management conversation, preserving its configuration, draft, and execution state. First use prepares a projectless default entry without starting model work or assigning cross-session grants.
