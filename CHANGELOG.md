@@ -26,7 +26,7 @@ All notable changes to atman are documented in this file.
 
 - **Management relation projection** — The management Session's explicit profile grants appear in its relation snapshot with the same flow relation records and remain unavailable while profile validation is unresolved.
 
-- **Flow relation browser** — FlowHub lists durable relations for a Session and opens flow targets through the shared main or floating view navigation. Keyboard and mouse controls expose the same read-only snapshot.
+- **Flow relation browser** — FlowHub lists durable relations for a Session and opens flow targets through the shared main or floating view navigation. Keyboard and mouse controls expose the same read-only snapshot. Navigation buttons retain vertical padding and separate hit areas in narrow terminals.
 
 - **Persistent default entry** — Launching `atman` creates and attaches a project-bound persistent Session through the shared host. The welcome view exposes recent sessions and the project directory before normal flow input; the same lifecycle is used when attaching an existing Session.
 

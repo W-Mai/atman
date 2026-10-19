@@ -48,6 +48,7 @@ pub(crate) struct FlowHub {
     sessions: Rect,
     sessions_hovered: bool,
     relations_hovered: bool,
+    refresh_hovered: bool,
     hovered: Option<usize>,
 }
 
@@ -205,6 +206,7 @@ impl FlowHub {
         let point = (event.column, event.row).into();
         self.sessions_hovered = self.sessions.contains(point);
         self.relations_hovered = self.relations.contains(point);
+        self.refresh_hovered = self.refresh.contains(point);
         self.hovered = self
             .hits
             .iter()
@@ -255,8 +257,8 @@ impl FlowHub {
             Paragraph::new("").style(Style::default().bg(t.panel_bg.into())),
             area,
         );
-        if area.width < 40 || area.height < 20 {
-            frame.render_widget(Paragraph::new("FlowHub needs 40×20 · Esc back"), area);
+        if area.width < 40 || area.height < 24 {
+            frame.render_widget(Paragraph::new("FlowHub needs 40×24 · Esc back"), area);
             self.hits.clear();
             self.float_hits.clear();
             self.previous = Rect::default();
@@ -281,92 +283,62 @@ impl FlowHub {
         let compact_relations = is_flows && width < 72;
         frame.render_widget(
             Paragraph::new(format!("FlowHub  /  {session}")).style(fg),
-            Rect::new(content.x, content.y, width.saturating_sub(34), 1),
+            Rect::new(content.x, content.y, width.saturating_sub(12), 1),
         );
-        self.relations = if is_flows {
-            if compact_relations {
-                Rect::new(
-                    content.x + 22,
-                    content.y + 1,
-                    18.min(width.saturating_sub(22)),
-                    1,
-                )
-            } else {
-                Rect::new(
-                    content.right().saturating_sub(52),
-                    content.y,
-                    18.min(width),
-                    3,
-                )
-            }
-        } else {
-            Rect::default()
-        };
-        if is_flows {
-            frame.render_widget(
-                Paragraph::new(if compact_relations {
-                    "Relations  Ctrl+Shift+G"
-                } else {
-                    "\nRelations  Ctrl+Shift+G"
-                })
-                .style(muted.bg(if self.relations_hovered {
-                    t.work_bg.lerp(t.work_hover_bg, 0.5)
-                } else {
-                    t.work_bg.into_inner()
-                }))
-                .alignment(Alignment::Center),
-                self.relations,
-            );
-        }
-        let refresh_x = if is_flows {
-            content.right().saturating_sub(72)
-        } else {
-            content.right().saturating_sub(32)
-        };
-        self.refresh = Rect::new(refresh_x, content.y, 18.min(width), 1);
-        frame.render_widget(Paragraph::new("Refresh  Ctrl+R").style(muted), self.refresh);
-        self.close = Rect::new(
-            content.right().saturating_sub(12),
-            content.y,
-            12.min(width),
-            1,
-        );
+        self.close = Rect::new(content.right() - 10, content.y, 10, 1);
         frame.render_widget(
             Paragraph::new("Back  Esc")
                 .style(muted)
                 .alignment(Alignment::Right),
             self.close,
         );
-        self.sessions = Rect::new(content.x, content.y + 1, 20, 3);
-        frame.render_widget(
-            Paragraph::new("\nSessions  Ctrl+S")
-                .style(muted.bg(if self.sessions_hovered {
-                    t.work_bg.lerp(t.work_hover_bg, 0.5)
-                } else {
-                    t.work_bg.into_inner()
-                }))
-                .alignment(Alignment::Center),
-            self.sessions,
+        let button_width = if width < 42 { (width - 2) / 2 } else { 20 };
+        self.sessions = Rect::new(content.x, content.y + 1, button_width, 3);
+        self.refresh = Rect::new(
+            content.right() - button_width,
+            content.y + 1,
+            button_width,
+            3,
         );
+        self.relations = if compact_relations {
+            Rect::new(content.x, content.y + 5, width, 3)
+        } else if is_flows {
+            Rect::new(content.x + 22, content.y + 1, width - 44, 3)
+        } else {
+            Rect::default()
+        };
+        for (rect, label, hovered) in [
+            (self.sessions, "\nSessions  Ctrl+S", self.sessions_hovered),
+            (self.refresh, "\nRefresh  Ctrl+R", self.refresh_hovered),
+            (
+                self.relations,
+                "\nRelations  Ctrl+Shift+G",
+                self.relations_hovered,
+            ),
+        ] {
+            if rect.is_empty() {
+                continue;
+            }
+            frame.render_widget(
+                Paragraph::new(label)
+                    .style(muted.bg(if hovered {
+                        t.work_bg.lerp(t.work_hover_bg, 0.5)
+                    } else {
+                        t.work_bg.into_inner()
+                    }))
+                    .alignment(Alignment::Center),
+                rect,
+            );
+        }
+        let search_y = content.y + if compact_relations { 8 } else { 4 };
         frame.render_widget(
             Paragraph::new(format!("Search this page: {}", self.query)).style(muted),
-            Rect::new(
-                content.x + 22,
-                content.y + if compact_relations { 3 } else { 2 },
-                width.saturating_sub(22),
-                1,
-            ),
+            Rect::new(content.x, search_y, width, 1),
         );
+        let rows_y = search_y + 2;
+        let footer = content.bottom().saturating_sub(6);
         let rows = self.filtered();
-        let visible = usize::from(
-            content.height.saturating_sub(if compact_relations {
-                14
-            } else if is_flows {
-                13
-            } else {
-                11
-            }) / 4,
-        );
+        let visible = usize::from(footer.saturating_sub(rows_y) / 4);
         if self.selected < self.offset {
             self.offset = self.selected;
         }
@@ -384,9 +356,7 @@ impl FlowHub {
             let row = &page_rows[*index];
             let rect = Rect::new(
                 content.x,
-                content.y
-                    + if compact_relations { 5 } else { 4 }
-                    + ((pos - self.offset) * 4) as u16,
+                rows_y + ((pos - self.offset) * 4) as u16,
                 width,
                 4,
             );
@@ -427,7 +397,6 @@ impl FlowHub {
             );
             self.hits.push((rect, pos));
         }
-        let footer = content.bottom().saturating_sub(6);
         let total = self.page.as_ref().map_or(0, FlowHubPage::total);
         let page_count = total.div_ceil(PAGE_SIZE).max(1);
         let message = self.error.clone().unwrap_or_else(|| {
@@ -835,6 +804,30 @@ mod tests {
                 matches!(hub.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: rect.x + 1, row, modifiers: crossterm::event::KeyModifiers::NONE }), Action::Focus(target) if target.instance() == Some(&flow))
             );
         }
+        for width in [40, 60, 76, 120] {
+            let mut compact =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            compact
+                .draw(|frame| hub.render(frame, &flow.clone().into()))
+                .unwrap();
+            let controls = [hub.sessions, hub.refresh, hub.relations];
+            for (index, rect) in controls.iter().enumerate() {
+                assert_eq!(rect.height, 3);
+                assert!(rect.x >= 2 && rect.right() <= width - 2);
+                assert!(rect.bottom() <= hub.hits[0].0.y);
+                for other in controls.iter().skip(index + 1) {
+                    assert!(rect.intersection(*other).is_empty());
+                }
+            }
+            for row in hub.relations.y..hub.relations.bottom() {
+                assert!(matches!(hub.mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: hub.relations.x + 1,
+                    row,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                }), Action::Load(HubRequest::Relations { session }) if session == flow.session_id.0));
+            }
+        }
         hub.pending = Some(ticket.clone());
         let mut stale = ticket.clone();
         stale.request_id = Uuid::now_v7();
@@ -876,7 +869,7 @@ mod tests {
                 session: source.session_id.0,
                 title: "Example".into(),
                 relations: vec![FlowRelation {
-                    source: source.clone(),
+                    source,
                     target: atman_runtime::flow_store::access::AccessTarget::Flow(target.clone()),
                     kind: RelationKind::Watch,
                     id: Uuid::now_v7(),
@@ -905,41 +898,5 @@ mod tests {
             Action::Focus(crate::control::ViewAddress::Instance(address))
                 if address.instance_id == target.instance_id
         ));
-        let mut compact_hub = FlowHub {
-            pending: Some(ticket.clone()),
-            ..Default::default()
-        };
-        compact_hub.receive(
-            Some(&ticket),
-            Ok(Box::new(FlowHubPage::Flows {
-                session: source.session_id.0,
-                title: "Example".into(),
-                default_flow: Some(target.instance_id.clone()),
-                page: InstancePage {
-                    instances: vec![InstanceSummary {
-                        address: target.clone(),
-                        entry: Some("Example flow".into()),
-                        state: None,
-                        unavailable: None,
-                        loaded: false,
-                        trailing_bytes: None,
-                    }],
-                    next: None,
-                    total: 1,
-                    catalog: CommitReceipt {
-                        journal_id: Uuid::now_v7(),
-                        sequence: 1,
-                        digest: "test".into(),
-                    },
-                },
-            })),
-        );
-        let mut compact =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 24)).unwrap();
-        compact
-            .draw(|frame| compact_hub.render(frame, &target.clone().into()))
-            .unwrap();
-        assert!(compact_hub.relations.width > 0);
-        assert!(compact_hub.hits[0].0.y > compact_hub.relations.bottom());
     }
 }
