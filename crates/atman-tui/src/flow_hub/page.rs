@@ -68,6 +68,9 @@ pub struct RelationProgress {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
+    Overview {
+        after: Option<atman_runtime::flow_runtime::catalog::FlowCatalogCursor>,
+    },
     FlowWorkspace {
         owner: atman_runtime::flow_store::FlowRef,
     },
@@ -117,6 +120,7 @@ pub enum HubRequest {
 impl HubRequest {
     pub(super) fn first(&self) -> Self {
         match self {
+            Self::Overview { .. } => Self::Overview { after: None },
             Self::Workspaces { .. } => Self::Workspaces { after: None },
             Self::Workspace { .. } | Self::WorkspaceRecord { .. } | Self::FlowWorkspace { .. } => {
                 self.clone()
@@ -157,6 +161,7 @@ impl HubRequest {
 }
 
 pub enum FlowHubPage {
+    Overview(super::OverviewDirectory),
     FlowWorkspace(super::FlowWorkspacePage),
     Workspaces(super::WorkspaceDirectory),
     Workspace(atman_runtime::git_workspace::WorkspaceSnapshot),
@@ -236,6 +241,8 @@ impl Endpoint {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum RowKey {
+    Overview,
+    OverviewFailure(Uuid),
     WorkspaceLocation(super::WorkspaceLocation),
     Workspace {
         location: super::WorkspaceLocation,
@@ -268,8 +275,26 @@ pub(super) enum RowKey {
 }
 
 impl FlowHubPage {
+    pub(super) fn nodes(&self) -> bool {
+        matches!(self, Self::Flows { .. } | Self::Overview(_))
+    }
+
+    pub(super) fn links(&self) -> Result<&[FlowRelation], &str> {
+        match self {
+            Self::Flows { relations, .. } => relations.as_deref().map_err(String::as_str),
+            Self::Overview(directory) => Ok(&directory.relations),
+            _ => Ok(&[]),
+        }
+    }
+
     /// Append only the next requested catalog batch; refresh replaces the snapshot.
     pub(super) fn append_catalog(&mut self, previous: Option<&mut Self>) -> Result<(), String> {
+        if let Self::Overview(directory) = self {
+            return directory.append(match previous {
+                Some(Self::Overview(old)) => Some(old),
+                _ => None,
+            });
+        }
         if let Self::Workspaces(directory) = self {
             return directory.append(match previous {
                 Some(Self::Workspaces(old)) => Some(old),
@@ -321,6 +346,7 @@ impl FlowHubPage {
 
     pub fn title(&self) -> &str {
         match self {
+            Self::Overview(_) => "All flows",
             Self::FlowWorkspace(_) => "Flow workspace",
             Self::Workspaces(_) => "Worktrees",
             Self::Workspace(snapshot) => snapshot
@@ -343,6 +369,7 @@ impl FlowHubPage {
     }
     pub fn unit(&self) -> &str {
         match self {
+            Self::Overview(_) => "flows",
             Self::FlowWorkspace(_) => "details",
             Self::Workspaces(_) => "sources",
             Self::Workspace(_) => "worktrees",
@@ -357,6 +384,7 @@ impl FlowHubPage {
     }
     pub fn first(&self) -> HubRequest {
         match self {
+            Self::Overview(_) => HubRequest::Overview { after: None },
             Self::FlowWorkspace(page) => HubRequest::FlowWorkspace {
                 owner: page.owner.clone(),
             },
@@ -401,6 +429,7 @@ impl FlowHubPage {
     }
     pub fn next(&self) -> Option<HubRequest> {
         match self {
+            Self::Overview(directory) => directory.next(),
             Self::FlowWorkspace(_) => None,
             Self::Workspaces(directory) => directory
                 .next
@@ -448,6 +477,7 @@ impl FlowHubPage {
     }
     pub fn total(&self) -> usize {
         match self {
+            Self::Overview(directory) => directory.page.entries.len(),
             Self::FlowWorkspace(page) => page.rows().len(),
             Self::Workspaces(directory) => directory.rows().len(),
             Self::Workspace(snapshot) => snapshot.workspaces.len(),
@@ -467,6 +497,7 @@ impl FlowHubPage {
         endpoint: Endpoint,
     ) -> Vec<Row> {
         match self {
+            Self::Overview(directory) => directory.rows(),
             Self::FlowWorkspace(page) => page.rows(),
             Self::Workspaces(directory) => directory.rows(),
             Self::Workspace(snapshot) => super::workspaces::resource_rows(snapshot),
@@ -530,6 +561,12 @@ impl FlowHubPage {
                         action: request.map_or(Action::None, Action::Load),
                     }
                 })
+                .chain(std::iter::once(Row {
+                    key: RowKey::Overview,
+                    title: "All flows".into(),
+                    detail: "Across sessions · Ctrl+B".into(),
+                    action: Action::Load(HubRequest::Overview { after: None }),
+                }))
                 .collect(),
             Self::Flows {
                 default_flow, page, ..

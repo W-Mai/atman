@@ -38,6 +38,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Cross-Session FlowHub** — Sessions provides an All flows entry with grouped graph and list views, progressive loading, search, Goal summaries, and pending-input counts. Main and floating conversations share full-address navigation, stable node positions, and return state; browsing leaves execution unchanged.
+
 - **Bounded Flow overview** — Cross-Session catalog pages combine recorded execution, Goals, pending input, and relations with separately acknowledged live state. Reads preserve journal boundaries, advance past corrupt records, and recheck authorization without starting or recovering Flows.
 
 - **Worktree removal controls** — Resource details offer a shared checkout-removal confirmation in main and floating views. Keyboard and mouse controls show the target path, protect uncommitted files by default, and wait for the resource owner's result. Failed requests retain their snapshot and error for inspection and refresh.

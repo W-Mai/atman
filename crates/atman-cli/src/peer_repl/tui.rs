@@ -800,6 +800,13 @@ impl scopes::Scopes {
             FlowHubPage, HubRequest, PAGE_SIZE, RelationProgress, RelationRange,
         };
         Ok(Box::new(match request {
+            HubRequest::Overview { after } => {
+                let page = self
+                    .catalog
+                    .overview_page(after.clone(), 8, |_| Ok(true), |_| Ok(()))
+                    .await?;
+                FlowHubPage::Overview(atman_tui::flow_hub::OverviewDirectory::new(after, page))
+            }
             HubRequest::FlowWorkspace { owner } => {
                 FlowHubPage::FlowWorkspace(workspaces::binding(&self.catalog, owner).await?)
             }

@@ -20,6 +20,8 @@ pub(crate) use focus::{FocusLinks, NeighborSnapshot};
 mod create;
 pub use create::WatchDefinition;
 mod inbox;
+mod overview;
+pub use overview::OverviewDirectory;
 mod page;
 mod release;
 mod text;
@@ -333,7 +335,7 @@ impl FlowHub {
                     self.inbox_details = inbox::Details::default();
                     self.graph = graph::Layout::default();
                 }
-                if matches!(*page, FlowHubPage::Flows { .. }) {
+                if page.nodes() {
                     self.graph.sync(&self.rows);
                 }
                 self.page = Some(*page);
@@ -378,13 +380,11 @@ impl FlowHub {
 
     fn filtered(&self) -> Vec<usize> {
         let query = self.query.to_lowercase();
-        let links = match &self.page {
-            Some(FlowHubPage::Flows {
-                relations: Ok(relations),
-                ..
-            }) => relations.as_slice(),
-            _ => &[],
-        };
+        let links = self
+            .page
+            .as_ref()
+            .and_then(|page| page.links().ok())
+            .unwrap_or(&[]);
         self.rows
             .iter()
             .enumerate()
@@ -447,7 +447,11 @@ impl FlowHub {
                     }
                     Action::None
                 }
-                Action::Load(HubRequest::Flows { .. } | HubRequest::Sessions { .. }) => action,
+                Action::Load(
+                    HubRequest::Flows { .. }
+                    | HubRequest::Sessions { .. }
+                    | HubRequest::Overview { .. },
+                ) => action,
                 _ => {
                     self.error = Some("Select a persistent Flow as the observation source".into());
                     Action::None
@@ -533,6 +537,7 @@ impl FlowHub {
             self.page,
             Some(
                 FlowHubPage::Relations { .. }
+                    | FlowHubPage::Overview(_)
                     | FlowHubPage::Watchers(_)
                     | FlowHubPage::ProcessSources { .. }
                     | FlowHubPage::Workspaces(_)
@@ -634,7 +639,13 @@ impl FlowHub {
             ) {
                 return Action::Return;
             }
-            if let Some(FlowHubPage::Relations { session, .. }) = self.page {
+            if let Some(FlowHubPage::Relations {
+                session, ref range, ..
+            }) = self.page
+            {
+                if matches!(range, RelationRange::Catalog { .. }) {
+                    return Action::Return;
+                }
                 return Action::Load(HubRequest::Flows {
                     session,
                     before: None,
@@ -646,6 +657,9 @@ impl FlowHub {
             return Action::None;
         }
         match key {
+            KeyAction::CoursePrefill if matches!(self.page, Some(FlowHubPage::Sessions(_))) => {
+                return Action::Load(HubRequest::Overview { after: None });
+            }
             KeyAction::Tab | KeyAction::BackTab
                 if matches!(self.page, Some(FlowHubPage::Inbox(_))) =>
             {
@@ -758,7 +772,7 @@ impl FlowHub {
                     },
                 });
             }
-            KeyAction::NudgePrefill if matches!(self.page, Some(FlowHubPage::Flows { .. })) => {
+            KeyAction::NudgePrefill if self.page.as_ref().is_some_and(FlowHubPage::nodes) => {
                 self.graph_visible = !self.graph_visible;
             }
             KeyAction::RedirectPrefill => {
@@ -771,6 +785,18 @@ impl FlowHub {
             KeyAction::Save => return Action::Load(HubRequest::Sessions { before: None }),
             KeyAction::OpenRelations => {
                 return match self.page.as_ref() {
+                    Some(FlowHubPage::Overview(_)) => match self.focus() {
+                        Action::Focus(address) => {
+                            address.instance().map_or(Action::None, |owner| {
+                                Action::Load(HubRequest::Relations {
+                                    session: owner.session_id.0,
+                                    focus: Some(owner.clone()),
+                                    range: RelationRange::Catalog { before: None },
+                                })
+                            })
+                        }
+                        _ => Action::None,
+                    },
                     Some(FlowHubPage::Flows { session, .. }) => {
                         let focus = match self.focus() {
                             Action::Focus(address) => address.instance().cloned(),
@@ -966,7 +992,8 @@ impl FlowHub {
         let fg = Style::default().fg(t.heading.into());
         let muted = Style::default().fg(t.meta_fg.into());
         let session = self.page.as_ref().map_or("Loading", FlowHubPage::title);
-        let is_flows = matches!(self.page, Some(FlowHubPage::Flows { .. }));
+        let is_flows = self.page.as_ref().is_some_and(FlowHubPage::nodes);
+        let is_overview = matches!(self.page, Some(FlowHubPage::Overview(_)));
         let is_relations = matches!(self.page, Some(FlowHubPage::Relations { .. }));
         let is_watchers = matches!(self.page, Some(FlowHubPage::Watchers(_)));
         let is_workspaces = matches!(
@@ -1121,7 +1148,7 @@ impl FlowHub {
                 4
             };
         frame.render_widget(
-            Paragraph::new(format!("Search {}: {}", if is_workspaces || matches!(&self.page, Some(FlowHubPage::Watchers(directory)) if directory.global()) { "loaded records" } else { "this page" }, self.query)).style(muted),
+            Paragraph::new(format!("Search {}: {}", if is_overview || is_workspaces || matches!(&self.page, Some(FlowHubPage::Watchers(directory)) if directory.global()) { "loaded records" } else { "this page" }, self.query)).style(muted),
             Rect::new(content.x, search_y, width, 1),
         );
         let rows_y = search_y + 2;
@@ -1137,7 +1164,23 @@ impl FlowHub {
         }
         self.hits.clear();
         self.float_hits.clear();
-        let cards = if graph_visible {
+        let mut group_bands = Vec::new();
+        let cards = if is_overview {
+            let layout = self.graph.grouped_cards(
+                Rect::new(
+                    content.x,
+                    rows_y,
+                    width,
+                    footer.saturating_sub(rows_y + u16::from(graph_visible)),
+                ),
+                &self.rows,
+                &rows,
+                self.selected,
+                graph_visible,
+            );
+            group_bands = layout.headings;
+            layout.cards
+        } else if graph_visible {
             self.graph.cards(
                 Rect::new(content.x, rows_y, width, footer.saturating_sub(rows_y + 1)),
                 &self.rows,
@@ -1178,6 +1221,19 @@ impl FlowHub {
                 &rows,
                 Rect::new(content.x, footer.saturating_sub(1), width, 1),
             );
+        }
+        if let Some(FlowHubPage::Overview(directory)) = &self.page {
+            for (session, rect) in group_bands {
+                frame.render_widget(
+                    Paragraph::new(format!(
+                        "{} · {}",
+                        directory.session_title(session),
+                        &session.to_string()[28..]
+                    ))
+                    .style(muted),
+                    rect,
+                );
+            }
         }
         for (pos, rect) in cards {
             let row = &self.rows[rows[pos]];
@@ -1226,17 +1282,29 @@ impl FlowHub {
                         _ => None,
                     }
                 };
+            let compact_action = width < 56 && matches!(row.action, Action::Focus(_)) && !picking;
+            let label = if compact_action {
+                Some("\nCtrl+O")
+            } else {
+                label
+            };
+            let action_width = if compact_action { 8 } else { 18 };
             frame.render_widget(
                 Paragraph::new(title).style(fg.bg(bg)),
                 Rect::new(
                     rect.x + 2,
                     rect.y + 1,
-                    width.saturating_sub(if label.is_some() { 23 } else { 4 }),
+                    width.saturating_sub(if label.is_some() { action_width + 5 } else { 4 }),
                     1,
                 ),
             );
             if let Some(label) = label {
-                let open = Rect::new(rect.right().saturating_sub(20), rect.y, 18, 3);
+                let open = Rect::new(
+                    rect.right().saturating_sub(action_width + 2),
+                    rect.y,
+                    action_width,
+                    3,
+                );
                 frame.render_widget(
                     Paragraph::new(label)
                         .alignment(Alignment::Center)
@@ -1266,7 +1334,7 @@ impl FlowHub {
             );
             self.hits.push((rect, pos));
         }
-        let total = if is_relations || is_watchers || is_processes || is_workspaces {
+        let total = if is_overview || is_relations || is_watchers || is_processes || is_workspaces {
             self.rows.len()
         } else {
             self.page.as_ref().map_or(0, FlowHubPage::total)
@@ -1275,6 +1343,17 @@ impl FlowHub {
         let message = self.error.clone().unwrap_or_else(|| {
             if self.pending.is_some() {
                 "Loading…".into()
+            } else if let Some(FlowHubPage::Overview(directory)) = &self.page {
+                format!(
+                    "{} · Item {} / {}",
+                    if directory.page.next.is_some() {
+                        "More PgDn"
+                    } else {
+                        "Snapshot"
+                    },
+                    (self.selected + 1).min(rows.len()),
+                    rows.len()
+                )
             } else if is_workspace_record {
                 format!(
                     "Item {} / {} · Resource snapshot",
@@ -1387,7 +1466,7 @@ impl FlowHub {
         for (rect, label) in [
             (
                 self.previous,
-                if is_relations || is_watchers || is_processes || is_workspaces {
+                if is_overview || is_relations || is_watchers || is_processes || is_workspaces {
                     "\n‹ Earlier PgUp"
                 } else {
                     "\n‹ Previous  PgUp"
@@ -1395,7 +1474,7 @@ impl FlowHub {
             ),
             (
                 self.next,
-                if is_relations || is_watchers || is_processes || is_workspaces {
+                if is_overview || is_relations || is_watchers || is_processes || is_workspaces {
                     if self.page.as_ref().and_then(FlowHubPage::next).is_some() {
                         "\nMore PgDn ›"
                     } else {
@@ -1423,6 +1502,12 @@ impl FlowHub {
                 Rect::new(content.x, footer + 4, width, 1),
             );
         }
+        if let Some(FlowHubPage::Overview(directory)) = &self.page {
+            frame.render_widget(
+                Paragraph::new(directory.status()).style(muted),
+                Rect::new(content.x, footer + 4, width, 1),
+            );
+        }
         if let Some(FlowHubPage::Watchers(directory)) = &self.page {
             frame.render_widget(
                 Paragraph::new(format!(
@@ -1445,7 +1530,7 @@ impl FlowHub {
             } else if is_flows {
                 "↑↓ select · Enter open · Ctrl+O window · Ctrl+G graph/list · Esc back"
             } else if is_relations {
-                "↑↓ select · Tab endpoint · Enter open · Ctrl+O window · Esc flows"
+                "↑↓ select · Tab endpoint · Enter open · Ctrl+O window · Esc back"
             } else {
                 "↑↓ select · Enter open · Ctrl+O window · Ctrl+S sessions · Esc back"
             })
@@ -1608,9 +1693,15 @@ mod tests {
             })
         ));
         let close = hub.close;
-        assert!(
-            matches!(hub.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: close.x + 1, row: close.y, modifiers: crossterm::event::KeyModifiers::NONE }), Action::Load(HubRequest::Flows { session, .. }) if session == flow.session_id.0)
-        );
+        assert!(matches!(
+            hub.mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: close.x + 1,
+                row: close.y,
+                modifiers: crossterm::event::KeyModifiers::NONE
+            }),
+            Action::Return
+        ));
         let mut refreshed = page(None, None, vec![]);
         if let FlowHubPage::Relations {
             progress: Some(progress),
@@ -1927,6 +2018,7 @@ mod tests {
                     assert_eq!(index, 1);
                     assert_eq!(session, id);
                 }
+                Action::Load(HubRequest::Overview { after: None }) => assert_eq!(index, 2),
                 _ => panic!("wrong source"),
             }
         }

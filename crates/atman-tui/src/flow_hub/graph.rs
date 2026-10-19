@@ -1,6 +1,6 @@
 //! Stable page-local node positions. Only selected incident edges are drawn.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use atman_runtime::flow_store::{
     access::AccessTarget,
@@ -9,21 +9,150 @@ use atman_runtime::flow_store::{
 use ratatui::{Frame, layout::Rect, style::Style, widgets::Paragraph};
 
 use super::{
-    Action, FlowHub, FlowHubPage,
+    Action, FlowHub,
     page::{Row, RowKey},
 };
 
 #[derive(Default)]
 pub(super) struct Layout {
-    slots: Vec<RowKey>,
+    slots: Vec<NodeKey>,
+    index: HashMap<NodeKey, usize>,
     top: usize,
 }
 
+#[derive(Clone, Eq, Hash, PartialEq)]
+enum NodeKey {
+    Flow(crate::control::ViewAddress),
+    UnavailableSession(uuid::Uuid),
+}
+
+impl NodeKey {
+    fn from_row(row: &Row) -> Self {
+        match &row.key {
+            RowKey::Flow(address) => Self::Flow(address.clone()),
+            RowKey::OverviewFailure(session) => Self::UnavailableSession(*session),
+            _ => unreachable!("graph rows must identify a Flow or unavailable Session"),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct GroupedCards {
+    pub cards: Vec<(usize, Rect)>,
+    pub headings: Vec<(uuid::Uuid, Rect)>,
+}
+
 impl Layout {
+    /// Session bands follow stable slots; appended nodes never move existing cards.
+    pub fn grouped_cards(
+        &mut self,
+        area: Rect,
+        rows: &[Row],
+        filtered: &[usize],
+        selected: usize,
+        graph: bool,
+    ) -> GroupedCards {
+        if area.height < 5 || area.width < 8 {
+            return GroupedCards::default();
+        }
+        let columns = if graph && area.width >= 88 { 2 } else { 1 };
+        let heading = (area.height - 4).min(2);
+        let card_height = usize::from((area.height - heading).min(6));
+        let step = card_height + 2;
+        let height = usize::from(area.height - heading);
+        let width = if columns == 2 {
+            (area.width - 12) / 2
+        } else {
+            area.width - 4
+        };
+        let mut positions = Vec::new();
+        let mut previous = None;
+        let (mut line, mut column) = (0usize, 0usize);
+        for key in &self.slots {
+            let session = match key {
+                NodeKey::Flow(address) => address.instance().map(|flow| flow.session_id.0),
+                NodeKey::UnavailableSession(session) => Some(*session),
+            };
+            if session != previous && previous.is_some() {
+                if column != 0 {
+                    line += step;
+                    column = 0;
+                }
+                line += 2;
+            }
+            positions.push((line, column, session));
+            previous = session;
+            column += 1;
+            if column == columns {
+                column = 0;
+                line += step;
+            }
+        }
+        let slot = |row: &Row| self.index[&NodeKey::from_row(row)];
+        if let Some(index) = filtered.get(selected) {
+            let y = positions[slot(&rows[*index])].0;
+            if y < self.top {
+                self.top = y;
+            }
+            if y + card_height > self.top + height {
+                self.top = y + card_height - height;
+            }
+        }
+        let mut cards = Vec::new();
+        let mut groups = Vec::new();
+        let mut last_group = None;
+        let visible: HashMap<_, _> = filtered
+            .iter()
+            .enumerate()
+            .map(|(pos, index)| (NodeKey::from_row(&rows[*index]), pos))
+            .collect();
+        // Traverse slots, preserving spatial order even when directory refresh reorders rows.
+        for (index, &(y, x, session)) in positions.iter().enumerate() {
+            if y < self.top || y + card_height > self.top + height {
+                continue;
+            }
+            let Some(&pos) = visible.get(&self.slots[index]) else {
+                continue;
+            };
+            let rect = Rect::new(
+                area.x + 2 + x as u16 * (width + 8),
+                area.y + heading + (y - self.top) as u16,
+                width,
+                card_height as u16,
+            );
+            if session != last_group {
+                if let Some(session) = session {
+                    groups.push((
+                        session,
+                        Rect::new(
+                            area.x + 2,
+                            if groups.is_empty() {
+                                area.y
+                            } else {
+                                rect.y.saturating_sub(2)
+                            },
+                            area.width - 4,
+                            1,
+                        ),
+                    ));
+                }
+                last_group = session;
+            }
+            cards.push((pos, rect));
+        }
+        GroupedCards {
+            cards,
+            headings: groups,
+        }
+    }
+
     pub fn sync(&mut self, rows: &[Row]) {
         for row in rows {
-            if !self.slots.contains(&row.key) {
-                self.slots.push(row.key.clone());
+            let key = NodeKey::from_row(row);
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.index.entry(key.clone())
+            {
+                entry.insert(self.slots.len());
+                self.slots.push(key);
             }
         }
     }
@@ -37,7 +166,7 @@ impl Layout {
     ) -> Vec<(usize, Rect)> {
         let columns = if area.width >= 88 { 2 } else { 1 };
         let height = usize::from(area.height / 6).max(1);
-        let slot = |row: &Row| self.slots.iter().position(|key| *key == row.key).unwrap();
+        let slot = |row: &Row| self.index[&NodeKey::from_row(row)];
         if let Some(index) = filtered.get(selected) {
             let y = slot(&rows[*index]) / columns;
             if y < self.top {
@@ -130,13 +259,13 @@ pub(super) fn draw_links(
     filtered: &[usize],
     caption: Rect,
 ) {
-    let Some(FlowHubPage::Flows { relations, .. }) = &hub.page else {
+    let Some(page) = &hub.page else {
         return;
     };
     let rows = &hub.rows;
     let theme = crate::theme::theme();
     let style = Style::default().fg(theme.meta_fg.into());
-    let relations = match relations {
+    let relations = match page.links() {
         Ok(relations) => relations,
         Err(error) => {
             frame.render_widget(
@@ -284,6 +413,7 @@ fn path(cells: &mut BTreeMap<(u16, u16), u8>, from: (u16, u16), to: (u16, u16)) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flow_hub::FlowHubPage;
     use atman_runtime::{
         event_log::journal::CommitReceipt,
         flow_runtime::access::InstancePage,
