@@ -1951,6 +1951,10 @@ fn apply_view_command(
         TuiCommand::SetSidebar(mode) => {
             app.app.sidebar_mode = mode;
         }
+        TuiCommand::CopyText(text) => {
+            let message = format!("copied {} chars", text.chars().count());
+            key_handler::copy_text(&mut app.app, &text, message);
+        }
         TuiCommand::OpenSessionSwitcher => {
             if app.app.items.flow().is_some() {
                 app.app.open_flow_hub = Some(crate::flow_hub::Action::Load(

@@ -183,14 +183,39 @@ impl Attachment {
                     return Ok(());
                 }
                 let result = if let Some(command) = submission.control_command() {
-                    self.command_with_request(worker, command, request)
-                        .await
-                        .map(|message| {
+                    let command = command.trim();
+                    let (name, argument) = command
+                        .split_once(char::is_whitespace)
+                        .unwrap_or((command, ""));
+                    let result = match name {
+                        ":sidebar" => crate::sidebar_mode(argument).map(|mode| {
+                            if let Some(mode) = mode {
+                                let _ = replies.send(TuiCommand::SetSidebar(mode));
+                                "Sidebar updated".into()
+                            } else {
+                                "Use :sidebar on | off".into()
+                            }
+                        }),
+                        ":copy" => {
+                            crate::copy_payload(argument, &context.messages_full()).map(|text| {
+                                if let Some(text) = text {
+                                    let _ = replies.send(TuiCommand::CopyText(text));
+                                    String::new()
+                                } else {
+                                    "Nothing to copy".into()
+                                }
+                            })
+                        }
+                        _ => self.command_with_request(worker, command, request).await,
+                    };
+                    result.map(|message| {
+                        if !message.is_empty() {
                             let _ = replies.send(TuiCommand::Toast {
                                 message,
                                 level: atman_tui::app::NoteLevel::Info,
                             });
-                        })
+                        }
+                    })
                 } else {
                     self.submit_tui(worker, request, submission).await
                 };

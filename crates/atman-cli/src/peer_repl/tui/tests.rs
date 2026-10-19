@@ -272,6 +272,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     let ids = [Uuid::now_v7(), Uuid::now_v7()];
     let missing_project = dir.path().join("removed-project");
     std::fs::create_dir(&missing_project).unwrap();
+    let missing_project = missing_project.canonicalize().unwrap();
     // An instance ID alone must never identify a view or its services.
     let instance = FlowInstanceId::now();
     for (index, id) in ids.into_iter().enumerate() {
@@ -1219,6 +1220,61 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         TuiCommand::SubmissionResult { result: Ok(()) }
     ));
     assert_eq!(worker.state().await.unwrap().pauses().len(), 1);
+    assert!(worker.snapshot().await.unwrap().pending.is_empty());
+    // Presentation commands keep their original view receipt and do not enter the flow inbox.
+    let cursor = worker.snapshot().await.unwrap().cursor;
+    for text in [":sidebar off", ":copy last-message", ":copy invalid"] {
+        let ticket = sender
+            .send_tracked(TuiControl::Submit(TuiSubmission {
+                text: text.into(),
+                images: vec![],
+                reasoning: None,
+                presentation: None,
+            }))
+            .unwrap()
+            .unwrap();
+        let bound = commands_rx.recv().await.unwrap();
+        attachment
+            .tui_control(
+                &worker,
+                bound.ticket.request_id,
+                bound.command,
+                &bound.replies,
+                &forms,
+            )
+            .await
+            .unwrap();
+        let result = replies.recv().await.unwrap();
+        assert_eq!(result.ticket, ticket);
+        match text {
+            ":sidebar off" => {
+                assert!(matches!(
+                    result.command,
+                    TuiCommand::SetSidebar(atman_tui::sidebar::SidebarMode::Closed)
+                ));
+                let notice = replies.recv().await.unwrap();
+                assert_eq!(notice.ticket, ticket);
+                assert!(matches!(notice.command, TuiCommand::Toast { .. }));
+            }
+            ":copy last-message" => {
+                assert!(matches!(result.command, TuiCommand::CopyText(text) if text == "seed"));
+            }
+            _ => {
+                assert!(matches!(
+                    result.command,
+                    TuiCommand::SubmissionResult { result: Err(_) }
+                ));
+                continue;
+            }
+        }
+        let ack = replies.recv().await.unwrap();
+        assert_eq!(ack.ticket, ticket);
+        assert!(matches!(
+            ack.command,
+            TuiCommand::SubmissionResult { result: Ok(()) }
+        ));
+    }
+    assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
     assert!(worker.snapshot().await.unwrap().pending.is_empty());
     // Todo commands update the same view snapshot without creating a turn or resuming it.
     use atman_runtime::{

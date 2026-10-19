@@ -4895,17 +4895,14 @@ fn handle_sidebar_builtin(
         reporter.info("[atman] :sidebar only works in TUI mode");
         return;
     };
-    let mode = match arg {
-        "" | "toggle" => {
-            reporter.info("[atman] :sidebar toggle | on | off");
+    let mode = match sidebar_mode(arg) {
+        Ok(Some(mode)) => mode,
+        Ok(None) => {
+            reporter.info(":sidebar on | off");
             return;
         }
-        "on" | "open" => atman_tui::sidebar::SidebarMode::Open,
-        "off" | "close" | "closed" => atman_tui::sidebar::SidebarMode::Closed,
-        other => {
-            reporter.error(format!(
-                "[atman] :sidebar: unknown arg `{other}` (try on/off)"
-            ));
+        Err(error) => {
+            reporter.error(error.to_string());
             return;
         }
     };
@@ -5129,46 +5126,59 @@ fn handle_compact_builtin(
     });
 }
 
-fn handle_copy_builtin(arg: &str, session: &Session, reporter: &Reporter) {
+fn sidebar_mode(argument: &str) -> Result<Option<atman_tui::sidebar::SidebarMode>> {
+    use atman_tui::sidebar::SidebarMode;
+    match argument.trim() {
+        "" | "toggle" => Ok(None),
+        "on" | "open" => Ok(Some(SidebarMode::Open)),
+        "off" | "close" | "closed" => Ok(Some(SidebarMode::Closed)),
+        value => anyhow::bail!("unknown sidebar argument `{value}`; use on | off"),
+    }
+}
+
+fn copy_payload(
+    argument: &str,
+    messages: &[atman_runtime::message::Message],
+) -> Result<Option<String>> {
     use atman_runtime::message::{MessagePart, MessageRole};
-    let target = if arg.is_empty() { "last-message" } else { arg };
-    let msgs = session.messages();
-    let text = match target {
-        "last-message" | "last" => msgs
+    match argument.trim() {
+        "" | "last" | "last-message" => Ok(messages
             .iter()
             .rev()
-            .find(|m| matches!(m.role, MessageRole::Assistant))
-            .and_then(|m| {
-                let mut buf = String::new();
-                for part in &m.parts {
-                    if let MessagePart::Text { text } = part {
-                        buf.push_str(text);
-                    }
-                }
-                if buf.is_empty() { None } else { Some(buf) }
-            }),
-        "last-tool" => msgs.iter().rev().find_map(|m| {
-            m.parts.iter().rev().find_map(|part| match part {
+            .find(|message| message.role == MessageRole::Assistant)
+            .map(|message| {
+                message
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        MessagePart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>()
+            })
+            .filter(|text| !text.is_empty())),
+        "last-tool" => Ok(messages.iter().rev().find_map(|message| {
+            message.parts.iter().rev().find_map(|part| match part {
                 MessagePart::ToolResult { content, .. } => Some(content.clone()),
                 _ => None,
             })
-        }),
-        other => {
-            reporter.error(format!(
-                ":copy: unknown target `{other}` — use last-message | last-tool"
+        })),
+        value => anyhow::bail!("unknown copy target `{value}`; use last-message | last-tool"),
+    }
+}
+
+fn handle_copy_builtin(arg: &str, session: &Session, reporter: &Reporter) {
+    match copy_payload(arg, &session.messages_full()) {
+        Ok(Some(payload)) => {
+            write_osc52(&payload);
+            reporter.info(format!(
+                "Copied {} chars to terminal clipboard (OSC 52)",
+                payload.chars().count()
             ));
-            return;
         }
-    };
-    let Some(payload) = text else {
-        reporter.info(format!(":copy: nothing to copy for {target}"));
-        return;
-    };
-    write_osc52(&payload);
-    reporter.info(format!(
-        ":copy: pushed {} chars to terminal clipboard (OSC 52)",
-        payload.chars().count()
-    ));
+        Ok(None) => reporter.info("Nothing to copy"),
+        Err(error) => reporter.error(error.to_string()),
+    }
 }
 
 fn write_osc52(payload: &str) {

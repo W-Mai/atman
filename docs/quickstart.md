@@ -201,6 +201,8 @@ Persistent terminal, main, and floating views run suggestions asynchronously. On
 
 `:compact` and the TUI's Compact Transcript action use the same explicit context operation. Persistent views keep the operation attached to its original flow while allowing navigation and other controls; repeated requests for the same flow are rejected until the operation finishes. TUI review uses `[compaction].review`, and the result distinguishes a committed compression, no smaller window, rejection, or failure. A paused flow stays paused, and full conversation history remains available. The summary uses the flow's latest model, or its configured `smart` alias before any model call.
 
+Persistent execution views accept `:copy last-message`, `:copy last-tool`, and `:sidebar on|off`. Copying reads the bound flow's original records rather than its compacted model window. Plain terminals receive an OSC 52 clipboard sequence; TUI requests use the existing clipboard handler and display the result in the requesting view. These commands do not submit user input or resume execution.
+
 When a completion menu is open, use `↑`/`↓` to select an item and `Enter` or `Tab` to place it in the input. Press `Enter` again to submit the completed command.
 
 In the TUI, `:panel` opens the `Ctrl+P` command palette without requiring the shortcut. Palette actions also have direct commands, displayed beside each menu item:

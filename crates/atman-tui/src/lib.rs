@@ -289,6 +289,8 @@ pub enum TuiCommand {
         result: Result<bool, String>,
     },
     SetSidebar(sidebar::SidebarMode),
+    /// Copy captured source text using the requesting view's clipboard handling.
+    CopyText(String),
     OpenSessionSwitcher,
     OpenProjectHub,
     OpenProjectStorageScopePicker,

@@ -44,7 +44,7 @@ fn selection_cursor_note(app: &mut AppState, points: &[crate::selection::VisualS
     );
 }
 
-fn copy_text(app: &mut AppState, text: &str, success: String) {
+pub(crate) fn copy_text(app: &mut AppState, text: &str, success: String) {
     match crate::clipboard::write_text(text) {
         Ok(()) => app.push_note(success, app::NoteLevel::Info),
         Err(error) => app.push_note(
