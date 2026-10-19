@@ -13,6 +13,9 @@ use uuid::Uuid;
 #[path = "management.rs"]
 mod management;
 pub use management::{ProfileHandle, ProfileView};
+#[path = "control_service.rs"]
+mod control_service;
+pub use control_service::ControlServiceProgress;
 
 use super::{
     FlowSnapshot, FlowWorker,
@@ -25,15 +28,22 @@ use crate::flow_store::access::{FlowGrant, SessionAccess};
 use crate::flow_store::inbox::{Acceptance, DeliveryRequest};
 
 use crate::flow_store::{
-    FlowDescriptor, FlowInstanceId, FlowRef, SessionProjection, SessionStore, invalid,
+    FlowDescriptor, FlowInstanceId, FlowRef, RuntimeStore, SessionDescriptor, SessionProjection,
+    SessionStore, invalid,
 };
 
 type FlowDirectory = Arc<Mutex<HashMap<FlowInstanceId, FlowWorker>>>;
+
+/// Resolve diagnostic redaction from immutable Session configuration before attaching its owner.
+pub type SessionRedactor = Arc<
+    dyn Fn(&SessionDescriptor) -> io::Result<Option<Arc<crate::redact::Redactor>>> + Send + Sync,
+>;
 
 /// Services installed before any instance opens. Approval endpoint ownership remains with the frontend or transport, independently of retained execution handles.
 #[derive(Clone, Default)]
 pub struct HostServices {
     pub redactor: Option<Arc<crate::redact::Redactor>>,
+    pub session_redactor: Option<SessionRedactor>,
     pub permission_clients: Weak<crate::permission::PermissionClients>,
 }
 
@@ -52,6 +62,8 @@ struct Directory {
     services: HostServices,
     stopping: std::sync::atomic::AtomicBool,
     shutdown: tokio::sync::OnceCell<Result<(), String>>,
+    controls: control_service::ControlService,
+    opening: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Default for Directory {
@@ -63,6 +75,8 @@ impl Default for Directory {
             services: HostServices::default(),
             stopping: Default::default(),
             shutdown: Default::default(),
+            controls: Default::default(),
+            opening: Default::default(),
         }
     }
 }
@@ -111,9 +125,83 @@ impl RuntimeHost {
         self.directory.changes.send_modify(|_| {});
     }
 
+    /// Reuse or open an existing Session owner without installing execution or scheduling.
+    pub async fn open_session(
+        &self,
+        data: &std::path::Path,
+        id: Uuid,
+    ) -> io::Result<SessionHandle> {
+        self.acquire_session(data, id, None).await
+    }
+
+    /// Create or reuse an owner with the same immutable descriptor. Conflicting retries fail.
+    pub async fn create_session(
+        &self,
+        data: &std::path::Path,
+        descriptor: SessionDescriptor,
+    ) -> io::Result<SessionHandle> {
+        self.acquire_session(data, descriptor.id, Some(descriptor))
+            .await
+    }
+
+    async fn acquire_session(
+        &self,
+        data: &std::path::Path,
+        id: Uuid,
+        create: Option<SessionDescriptor>,
+    ) -> io::Result<SessionHandle> {
+        let opening = self.directory.opening.clone().lock_owned().await;
+        let host = self.clone();
+        let data = data.to_owned();
+        let expected = create.clone();
+        // The blocking task retains the gate through attachment even if its caller disappears.
+        let session = tokio::task::spawn_blocking(move || {
+            let _opening = opening;
+            match host.session(id) {
+                Ok(session) => return Ok(session),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            let root = RuntimeStore::open(&data)?;
+            let store = match create.clone() {
+                Some(descriptor) => match root.create_session(descriptor) {
+                    Ok(store) => store,
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        root.open_session(id)?
+                    }
+                    Err(error) => return Err(error),
+                },
+                None => root.open_session(id)?,
+            };
+            if create
+                .as_ref()
+                .is_some_and(|expected| &store.projection().descriptor != expected)
+            {
+                return Err(invalid(
+                    "session creation conflicts with its recorded descriptor",
+                ));
+            }
+            host.attach_session(store)
+        })
+        .await
+        .map_err(io::Error::other)??;
+        if let Some(expected) = expected {
+            if session.snapshot().await?.catalog.descriptor != expected {
+                return Err(invalid(
+                    "session creation conflicts with its recorded descriptor",
+                ));
+            }
+        }
+        Ok(session)
+    }
+
     /// Attach an exclusively owned catalog without opening or starting its recorded flows.
     pub fn attach_session(&self, store: SessionStore) -> io::Result<SessionHandle> {
-        self.attach_session_with_redactor(store, self.directory.services.redactor.clone())
+        let redactor = match &self.directory.services.session_redactor {
+            Some(resolve) => resolve(&store.projection().descriptor)?,
+            None => self.directory.services.redactor.clone(),
+        };
+        self.attach_session_with_redactor(store, redactor)
     }
 
     /// Bind a Session's diagnostic policy independently of other Session owners.
@@ -254,6 +342,9 @@ impl RuntimeHost {
                         sessions.values().cloned().collect()
                     };
                     directory.changes.send_modify(|_| {});
+                    directory.controls.stop().await;
+                    // An in-flight open must finish and release its writer before shutdown returns.
+                    let _opening = directory.opening.lock().await;
                     let results = futures::future::join_all(sessions.iter().map(|session| async {
                         session
                             .request(CatalogCommand::Shutdown)

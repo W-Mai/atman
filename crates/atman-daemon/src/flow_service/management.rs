@@ -26,7 +26,9 @@ impl SessionService {
                         ProfileStore::open(&RuntimeStore::open(&data)?)
                     })
                     .await??;
-                    Ok::<_, anyhow::Error>(self.host.attach_profile(store)?)
+                    let profile = self.host.attach_profile(store)?;
+                    self.host.start_control_service()?;
+                    Ok::<_, anyhow::Error>(profile)
                 }
                 .await;
                 if let Err(error) = &result {

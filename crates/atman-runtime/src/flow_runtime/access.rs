@@ -713,6 +713,46 @@ impl FlowClient {
             .await
             .map(|record| record.receipt)
     }
+
+    /// Bind one immutable batch to this invocation's actor. Accepted work survives this flow's pause or closure; new target effects still require current grants.
+    pub async fn control_batch(
+        &self,
+        request_id: Uuid,
+        targets: Vec<(FlowRef, u64, PeerControl)>,
+    ) -> io::Result<crate::flow_store::profile::ControlBatchRecord> {
+        self.authenticate()?;
+        let sender = SenderIdentity::Flow(self.source().clone());
+        let commands = targets
+            .into_iter()
+            .map(
+                |(target, expected_revision, action)| crate::flow_store::control::ControlRequest {
+                    id: request_id,
+                    sender: sender.clone(),
+                    pause_key: pause_key(self.source(), &target),
+                    target,
+                    expected_revision,
+                    action,
+                },
+            )
+            .collect();
+        let client = self.clone();
+        self.host
+            .submit_controls(
+                crate::flow_store::profile::ControlBatchRequest {
+                    id: request_id,
+                    sender,
+                    commands,
+                },
+                move |request| {
+                    client.authenticate()?;
+                    for command in &request.commands {
+                        client.authorize(&command.target, FlowAction::Control)?;
+                    }
+                    Ok(())
+                },
+            )
+            .await
+    }
 }
 
 impl super::FlowWorker {

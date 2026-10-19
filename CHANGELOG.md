@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Added
 
+- **Host control reconciliation** — Persistent control batches execute independently of their invoking flows, recover missing acknowledgements, and report individual target outcomes. New effects recheck current permissions; closure and cancellation retain separate acceptance and completion evidence.
+
 - **Control batch ownership** — Profile handles serialize batch admission and progress, retain accepted work after caller disconnection, and preserve management-authority diagnostics during unrelated control updates.
 
 - **Control batch storage** — The profile storage API retains immutable target snapshots and individual delivery progress. Recovery preserves pending operations, accepted receipts, completion evidence, and partial failures without rolling back other targets.

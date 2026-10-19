@@ -14,7 +14,7 @@ use atman_runtime::flow_runtime::{
     access::PeerControl,
     host::{HostServices, ProfileHandle, RuntimeHost, SessionHandle},
 };
-use atman_runtime::flow_store::{FlowRef, RuntimeStore, SessionDescriptor};
+use atman_runtime::flow_store::{FlowRef, SessionDescriptor};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::OnceCell;
@@ -32,13 +32,10 @@ mod management;
 // Transport authentication identifies this operator; callers cannot supply sender provenance.
 const OPERATOR: Uuid = Uuid::from_bytes(*b"atman-operator!!");
 
-type CatalogSlot = Arc<OnceCell<SessionHandle>>;
-
 pub(crate) struct SessionService {
     data_dir: PathBuf,
     host: RuntimeHost,
     _permission_clients: Arc<atman_runtime::permission::PermissionClients>,
-    catalogs: Mutex<HashMap<Uuid, CatalogSlot>>,
     executors: Mutex<HashMap<Uuid, Arc<OnceCell<atman_runtime::Executor>>>>,
     profile: OnceCell<Result<ProfileHandle, String>>,
 }
@@ -50,10 +47,10 @@ impl SessionService {
             data_dir,
             host: RuntimeHost::with_services(HostServices {
                 redactor,
+                session_redactor: None,
                 permission_clients: Arc::downgrade(&permission_clients),
             }),
             _permission_clients: permission_clients,
-            catalogs: Default::default(),
             executors: Default::default(),
             profile: Default::default(),
         }
@@ -63,43 +60,10 @@ impl SessionService {
         anyhow::ensure!(!id.is_nil(), "session identity must not be nil");
         // Unavailable management authority must not prevent unrelated work. Initialization reports its diagnostic once and management endpoints return the error.
         let _ = self.profile().await;
-        let slot = self.catalogs.lock().unwrap().entry(id).or_default().clone();
-        let handle = slot
-            .get_or_try_init(|| async {
-                let data = self.data_dir.clone();
-                let requested = create.clone();
-                let store = tokio::task::spawn_blocking(move || -> Result<_> {
-                    let root = RuntimeStore::open(&data)?;
-                    let store = match requested {
-                        Some(descriptor) => match root.create_session(descriptor) {
-                            Ok(store) => store,
-                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                                root.open_session(id)?
-                            }
-                            Err(error) => return Err(error.into()),
-                        },
-                        None => root.open_session(id)?,
-                    };
-                    Ok(store)
-                })
-                .await??;
-                if let Some(expected) = &create {
-                    anyhow::ensure!(
-                        &store.projection().descriptor == expected,
-                        "session creation conflicts with its recorded descriptor"
-                    );
-                }
-                Ok::<_, anyhow::Error>(self.host.attach_session(store)?)
-            })
-            .await?
-            .clone();
-        if let Some(expected) = create {
-            anyhow::ensure!(
-                handle.snapshot().await?.catalog.descriptor == expected,
-                "session creation conflicts with its recorded descriptor"
-            );
-        }
-        Ok(handle)
+        Ok(match create {
+            Some(descriptor) => self.host.create_session(&self.data_dir, descriptor).await?,
+            None => self.host.open_session(&self.data_dir, id).await?,
+        })
     }
 
     fn session(&self, id: Uuid) -> Result<SessionHandle> {

@@ -84,7 +84,9 @@ impl Scopes {
                         ProfileStore::open(&RuntimeStore::open(&root)?)
                     })
                     .await??;
-                    Ok::<_, anyhow::Error>(self.host.attach_profile(store)?)
+                    let profile = self.host.attach_profile(store)?;
+                    self.host.start_control_service()?;
+                    Ok::<_, anyhow::Error>(profile)
                 }
                 .await;
                 if let Err(error) = &result {
@@ -288,31 +290,10 @@ impl Scopes {
             .await?
             .iter()
             .any(|record| record.subscription.id == subscription.id);
-        // Share the attachment lock with navigation, without building providers or scheduling turns.
-        let _loaded = self.loaded.lock().await;
         let id = subscription.source.session_id.0;
-        match self.host.session(id) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !recorded => {
-                let root = self.root.clone();
-                let (session, redactor) = tokio::task::spawn_blocking(move || {
-                    let session = RuntimeStore::open(&root)?.open_session(id)?;
-                    let redactor = match &session.projection().descriptor.configuration {
-                        SessionConfiguration::Atman(source) => {
-                            let config = ConfigHub::from_source(source)?;
-                            atman_daemon::bootstrap::build_redactor(Some(config.config_dir()))
-                        }
-                        _ => None,
-                    };
-                    Ok::<_, anyhow::Error>((session, redactor))
-                })
-                .await??;
-                self.host.attach_session_with_redactor(session, redactor)?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && recorded => {}
-            Err(error) => return Err(error.into()),
+        if !recorded {
+            self.host.open_session(&self.root, id).await?;
         }
-        drop(_loaded);
         Ok(())
     }
 
@@ -502,35 +483,10 @@ impl Scopes {
                 Some(prepare_new_session(&source.config, &descriptor)?)
             }
         };
-        let session = match self.host.session(request) {
-            Ok(session) => session,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let root = self.root.clone();
-                let expected = descriptor.clone();
-                let session = tokio::task::spawn_blocking(move || {
-                    let store = RuntimeStore::open(&root)?;
-                    let session = match store.create_session(expected.clone()) {
-                        Ok(session) => session,
-                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                            store.open_session(expected.id)?
-                        }
-                        Err(error) => return Err(error),
-                    };
-                    if session.projection().descriptor != expected {
-                        return Err(std::io::Error::other(
-                            "session creation identity conflicts with another scope",
-                        ));
-                    }
-                    Ok(session)
-                })
-                .await??;
-                self.host.attach_session_with_redactor(
-                    session,
-                    atman_daemon::bootstrap::build_redactor(Some(source.config.config_dir())),
-                )?
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let session = self
+            .host
+            .create_session(&self.root, descriptor.clone())
+            .await?;
         let catalog = session.snapshot().await?;
         ensure!(
             catalog.catalog.descriptor == descriptor,

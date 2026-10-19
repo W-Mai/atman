@@ -40,6 +40,71 @@ fn descriptor(session: Uuid) -> FlowDescriptor {
 }
 
 #[tokio::test]
+async fn session_open_reuses_the_owner_loaded_by_control_recovery() {
+    use atman_runtime::flow_store::{
+        control::{ControlAction, ControlRequest},
+        inbox::SenderIdentity,
+        profile::{ControlBatchRequest, ProfileStore},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let id = Uuid::new_v4();
+    let mut catalog = root
+        .create_session(SessionDescriptor {
+            id,
+            project: None,
+            configuration: Default::default(),
+            title: "Recovered control".into(),
+        })
+        .unwrap();
+    let descriptor = descriptor(id);
+    let mut flow = catalog.create_flow(descriptor.clone()).unwrap();
+    flow.transition(flow.state().revision(), FlowTransition::Activated)
+        .unwrap();
+    let sender = SenderIdentity::User(Uuid::new_v4());
+    ProfileStore::open(&root)
+        .unwrap()
+        .submit_controls(ControlBatchRequest {
+            id: Uuid::new_v4(),
+            sender: sender.clone(),
+            commands: vec![ControlRequest {
+                id: Uuid::new_v4(),
+                sender,
+                target: descriptor.address.clone(),
+                expected_revision: flow.state().revision(),
+                pause_key: Uuid::new_v4().into(),
+                action: ControlAction::Pause,
+            }],
+        })
+        .unwrap();
+    drop((flow, catalog));
+    let state = Arc::new(DaemonState::new(dir.path().to_path_buf()));
+    rpc(&state, methods::MANAGEMENT_GET, json!({})).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let response = dispatch(
+                state.clone(),
+                JsonRpcRequest::new(1, methods::FLOW_GET, json!({"flow": descriptor.address})),
+            )
+            .await;
+            if response
+                .result
+                .is_some_and(|value| value["execution"]["pause_count"] == 1)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let opened = rpc(&state, methods::SESSION_OPEN, json!({"session_id": id})).await;
+    assert_eq!(opened["title"], "Recovered control");
+    assert_eq!(opened["flow_count"], 1);
+    state.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn management_open_is_idempotent_and_restores_without_starting_flows() {
     let dir = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(dir.path().to_path_buf()));

@@ -121,6 +121,13 @@ impl Controls {
 }
 
 impl FlowStore {
+    /// Trusted host reconciliation of an already admitted command; this never mutates execution.
+    pub(crate) fn recorded_control(
+        &self,
+        request: &ControlRequest,
+    ) -> io::Result<Option<CommittedControl>> {
+        Ok(self.controls.previous(request)?.cloned())
+    }
     /// Persist the request and state change atomically. Identical retries return the original receipt even after subsequent turns or closure. Authorization must precede this call, including retries.
     pub fn control(&mut self, request: ControlRequest) -> io::Result<CommittedControl> {
         if let Some(record) = self.controls.previous(&request)? {

@@ -33,6 +33,437 @@ fn control_request(
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_opening_retains_one_owner_after_caller_cancellation() {
+    use atman_runtime::flow_runtime::host::HostServices;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let data = tempfile::tempdir().unwrap();
+    let info = session_descriptor();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let entered = Mutex::new(Some(entered));
+    let (release, gate) = std::sync::mpsc::channel();
+    let gate = Mutex::new(gate);
+    let counted = calls.clone();
+    let host = RuntimeHost::with_services(HostServices {
+        session_redactor: Some(Arc::new(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            if let Some(entered) = entered.lock().unwrap().take() {
+                let _ = entered.send(());
+                gate.lock().unwrap().recv().unwrap();
+            }
+            Ok(None)
+        })),
+        ..Default::default()
+    });
+    let opening = {
+        let host = host.clone();
+        let root = data.path().to_owned();
+        let descriptor = info.clone();
+        tokio::spawn(async move { host.create_session(&root, descriptor).await })
+    };
+    entry.await.unwrap();
+    opening.abort();
+    assert!(opening.await.err().unwrap().is_cancelled());
+    release.send(()).unwrap();
+    let (a, b) = tokio::join!(
+        host.open_session(data.path(), info.id),
+        host.create_session(data.path(), info.clone())
+    );
+    let a = a.unwrap();
+    let b = b.unwrap();
+    let cursor = a.snapshot().await.unwrap().cursor;
+    a.set_title(cursor, Some("Shared owner".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        b.snapshot().await.unwrap().catalog.title.as_deref(),
+        Some("Shared owner")
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let mut conflict = info.clone();
+    conflict.title = "Conflicting creation".into();
+    assert!(host.create_session(data.path(), conflict).await.is_err());
+    assert_eq!(host.sessions(), vec![info.id]);
+    host.shutdown().await.unwrap();
+    RuntimeStore::open(data.path())
+        .unwrap()
+        .open_session(info.id)
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_opening_releases_its_writer_before_shutdown_returns() {
+    use atman_runtime::flow_runtime::host::HostServices;
+    use std::sync::Mutex;
+
+    let data = tempfile::tempdir().unwrap();
+    let info = session_descriptor();
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let entered = Mutex::new(Some(entered));
+    let (release, gate) = std::sync::mpsc::channel();
+    let gate = Mutex::new(gate);
+    let host = RuntimeHost::with_services(HostServices {
+        session_redactor: Some(Arc::new(move |_| {
+            let _ = entered.lock().unwrap().take().unwrap().send(());
+            gate.lock().unwrap().recv().unwrap();
+            Ok(None)
+        })),
+        ..Default::default()
+    });
+    let opening = {
+        let host = host.clone();
+        let root = data.path().to_owned();
+        let descriptor = info.clone();
+        tokio::spawn(async move { host.create_session(&root, descriptor).await })
+    };
+    entry.await.unwrap();
+    let closing = {
+        let host = host.clone();
+        tokio::spawn(async move { host.shutdown().await })
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while host.session(info.id).err().unwrap().kind() == io::ErrorKind::NotFound {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!closing.is_finished());
+    release.send(()).unwrap();
+    assert!(opening.await.unwrap().is_err());
+    closing.await.unwrap().unwrap();
+    RuntimeStore::open(data.path())
+        .unwrap()
+        .open_session(info.id)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn host_batches_finish_other_targets_after_the_controller_pauses_or_closes_itself() {
+    use atman_runtime::flow_store::{
+        access::{AccessTarget, FlowAction, FlowGrant},
+        profile::{ControlProgress, ProfileStore},
+    };
+    for action in [PeerControl::Pause, PeerControl::Close] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(dir.path()).unwrap();
+        let host = RuntimeHost::default();
+        let profile = host
+            .attach_profile(ProfileStore::open(&root).unwrap())
+            .unwrap();
+        let info = session_descriptor();
+        let session = host
+            .attach_session(root.create_session(info.clone()).unwrap())
+            .unwrap();
+        let source = session
+            .create_flow(program_descriptor(
+                info.id,
+                "flow main() { loop { yield } }".into(),
+            ))
+            .await
+            .unwrap();
+        let target = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+        let stale = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+        for worker in [&source, &target, &stale] {
+            change(worker, FlowTransition::Activated).await;
+        }
+        session
+            .grant_access(
+                session.snapshot().await.unwrap().cursor,
+                FlowGrant {
+                    id: Uuid::new_v4(),
+                    grantee: source.address().clone(),
+                    target: AccessTarget::Session(info.id),
+                    actions: [FlowAction::Control].into(),
+                },
+            )
+            .await
+            .unwrap();
+        source
+            .accept_input(peer_request(target.address(), source.address()), |_| Ok(()))
+            .await
+            .unwrap();
+        let ticket = source
+            .start_turn(
+                Executor::new(),
+                prepare(&source.snapshot().await.unwrap()).unwrap().unwrap(),
+            )
+            .await
+            .unwrap();
+        let state = source.state().await.unwrap();
+        let InstanceState::Open(InstanceActivity::Active(active)) = state.state() else {
+            panic!("entry must be active");
+        };
+        let client = host.bind_invocation(active.lease.clone()).await.unwrap();
+        let id = Uuid::new_v4();
+        let mut updates = host.subscribe_controls();
+        let accepted = client
+            .control_batch(
+                id,
+                vec![
+                    (source.address().clone(), state.revision(), action),
+                    (
+                        target.address().clone(),
+                        target.state().await.unwrap().revision(),
+                        PeerControl::Pause,
+                    ),
+                    (stale.address().clone(), 0, PeerControl::Pause),
+                ],
+            )
+            .await
+            .unwrap();
+        drop(client);
+        let finished = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                updates.borrow_and_update();
+                let record = profile
+                    .control_batch(accepted.sender.clone(), id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if record.items.iter().all(|item| item.is_terminal()) {
+                    break record;
+                }
+                assert!(
+                    updates.borrow().errors.is_empty(),
+                    "{:?}",
+                    updates.borrow().errors
+                );
+                updates.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            finished.items[0].history.last().unwrap().progress,
+            ControlProgress::Applied { .. }
+        ));
+        assert!(matches!(
+            finished.items[1].history.last().unwrap().progress,
+            ControlProgress::Applied { .. }
+        ));
+        assert!(matches!(
+            finished.items[2].history.last().unwrap().progress,
+            ControlProgress::Failed { .. }
+        ));
+        assert_eq!(target.state().await.unwrap().pauses().len(), 1);
+        assert!(stale.state().await.unwrap().pauses().is_empty());
+        if action == PeerControl::Pause {
+            source
+                .control(
+                    control_request(
+                        &source,
+                        source.state().await.unwrap().revision(),
+                        Uuid::new_v4().into(),
+                        PeerControl::Close,
+                    ),
+                    |_| Ok(()),
+                )
+                .await
+                .unwrap();
+        }
+        wait_closed(&source).await;
+        assert!(matches!(
+            ticket.wait().await.unwrap().outcome,
+            TurnOutcome::Interrupted(_)
+        ));
+        tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+            .await
+            .unwrap()
+            .unwrap();
+        let cursor = target.snapshot().await.unwrap().cursor;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(
+            target.snapshot().await.unwrap().cursor,
+            cursor,
+            "idle control service must not repeat commands"
+        );
+        host.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn batch_cancel_is_applied_only_after_its_original_turn_finishes() {
+    use atman_runtime::flow_store::profile::{ControlBatchRequest, ControlProgress, ProfileStore};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let profile = host
+        .attach_profile(ProfileStore::open(&root).unwrap())
+        .unwrap();
+    let info = session_descriptor();
+    let session = host.create_session(dir.path(), info.clone()).await.unwrap();
+    let worker = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&worker, FlowTransition::Activated).await;
+    let lease = start(&worker).await;
+    let command = control_request(
+        &worker,
+        worker.state().await.unwrap().revision(),
+        Uuid::new_v4().into(),
+        PeerControl::CancelTurn,
+    );
+    let batch = ControlBatchRequest {
+        id: Uuid::new_v4(),
+        sender: command.sender.clone(),
+        commands: vec![command],
+    };
+    let mut changed = host.subscribe_controls();
+    host.submit_controls(batch.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    let accepted = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            changed.borrow_and_update();
+            let record = profile
+                .control_batch(batch.sender.clone(), batch.id)
+                .await
+                .unwrap()
+                .unwrap();
+            if !record.items[0].history.is_empty() {
+                break record;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(accepted.items[0].history.len(), 1);
+    assert!(matches!(
+        accepted.items[0].history[0].progress,
+        ControlProgress::Accepted { .. }
+    ));
+    change(
+        &worker,
+        FlowTransition::TurnFinished {
+            lease: lease.clone(),
+            outcome: TurnOutcome::Interrupted(atman_rt::Interruption::Cancelled),
+        },
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    let finished = profile
+        .control_batch(batch.sender, batch.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let completion = worker.completion(Some(lease.turn)).await.unwrap().unwrap();
+    assert_eq!(
+        finished.items[0].history[1].progress,
+        ControlProgress::Applied {
+            receipt: completion.receipt
+        }
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn host_batch_delivery_rechecks_grants_after_durable_admission() {
+    use atman_runtime::flow_store::{
+        access::{AccessTarget, FlowAction, FlowGrant},
+        profile::{ControlProgress, ProfileStore},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let profile = host
+        .attach_profile(ProfileStore::open(&root).unwrap())
+        .unwrap();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let source = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let target = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    for worker in [&source, &target] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    let grant = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: source.address().clone(),
+        target: AccessTarget::Flow(target.address().clone()),
+        actions: [FlowAction::Control].into(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
+        .await
+        .unwrap();
+    let lease = start(&source).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    let revision = target.state().await.unwrap().revision();
+    let hold = control_request(
+        &target,
+        revision,
+        Uuid::new_v4().into(),
+        PeerControl::CancelTurn,
+    );
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let blocked = target.clone();
+    let guard = tokio::spawn(async move {
+        blocked
+            .control(hold, move |_| {
+                let _ = entered.send(());
+                gate.recv().map_err(io::Error::other)?;
+                Ok(())
+            })
+            .await
+    });
+    observed.await.unwrap();
+    let id = Uuid::new_v4();
+    let accepted = client
+        .control_batch(
+            id,
+            vec![(target.address().clone(), revision, PeerControl::Pause)],
+        )
+        .await
+        .unwrap();
+    session
+        .revoke_access(session.snapshot().await.unwrap().cursor, grant.id)
+        .await
+        .unwrap();
+    let mut changes = host.subscribe_controls();
+    release.send(()).unwrap();
+    guard.await.unwrap().unwrap();
+    let record = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            changes.borrow_and_update();
+            let record = profile
+                .control_batch(accepted.sender.clone(), id)
+                .await
+                .unwrap()
+                .unwrap();
+            if record.items[0].is_terminal() {
+                break record;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(&record.items[0].history[0].progress, ControlProgress::Failed { reason } if reason.contains("permission"))
+    );
+    assert_eq!(record.items[0].history.len(), 1);
+    assert!(target.state().await.unwrap().pauses().is_empty());
+    change(
+        &source,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    host.shutdown().await.unwrap();
+}
+
 fn session_descriptor() -> SessionDescriptor {
     SessionDescriptor {
         configuration: Default::default(),

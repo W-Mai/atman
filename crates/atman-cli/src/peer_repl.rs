@@ -89,6 +89,20 @@ pub(crate) async fn create(root: &Path) -> Result<Uuid> {
     Ok(created.session_id.0)
 }
 
+fn session_redactor(
+    descriptor: &SessionDescriptor,
+) -> std::io::Result<Option<Arc<atman_runtime::redact::Redactor>>> {
+    match &descriptor.configuration {
+        SessionConfiguration::Atman(source) => {
+            let config = ConfigHub::from_source(source).map_err(std::io::Error::other)?;
+            Ok(atman_daemon::bootstrap::build_redactor(Some(
+                config.config_dir(),
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
 pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     let tui = crate::tui_mode_requested();
     let _terminal = if tui {
@@ -99,6 +113,7 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     let permissions = Arc::new(PermissionClients::default());
     let host = RuntimeHost::with_services(HostServices {
         redactor: None,
+        session_redactor: Some(Arc::new(session_redactor)),
         permission_clients: Arc::downgrade(&permissions),
     });
     let (collector, notifications) = atman_runtime::notify::ToastCollector::new();
@@ -436,21 +451,8 @@ impl Attachment {
         permissions: Option<Arc<PermissionClients>>,
         prompts: Arc<prompts::Prompts>,
     ) -> Result<Self> {
-        enum Owner {
-            Stored(Box<atman_runtime::flow_store::SessionStore>),
-            Attached(SessionHandle),
-        }
-        let owner = match host.session(id) {
-            Ok(session) => Owner::Attached(session),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Owner::Stored(Box::new(RuntimeStore::open(root)?.open_session(id)?))
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let descriptor = match &owner {
-            Owner::Stored(session) => session.projection().descriptor.clone(),
-            Owner::Attached(session) => session.snapshot().await?.catalog.descriptor,
-        };
+        let session = host.open_session(root, id).await?;
+        let descriptor = session.snapshot().await?.catalog.descriptor;
         let SessionConfiguration::Atman(source) = &descriptor.configuration else {
             bail!("session requires an Atman configuration source to execute");
         };
@@ -481,11 +483,6 @@ impl Attachment {
         }
         let mut executor = runtime.executor;
         executor.tool_ctx.prompt_resolver = Some(prompts.clone());
-        // No fallible setup or suspension follows attachment; a cancelled load cannot orphan an owner.
-        let session = match owner {
-            Owner::Stored(session) => host.attach_session_with_redactor(*session, redactor)?,
-            Owner::Attached(session) => session,
-        };
         Ok(Self {
             data_root: root.to_owned(),
             host,

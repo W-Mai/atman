@@ -7,6 +7,211 @@ use atman_runtime::source_program::RevisionBundle;
 use uuid::Uuid;
 
 #[tokio::test]
+async fn control_service_keeps_uncertain_delivery_pending_and_wakes_on_identical_retry() {
+    use atman_runtime::flow_runtime::host::RuntimeHost;
+    use atman_runtime::flow_store::{
+        FlowTransition,
+        control::{ControlAction, ControlRequest},
+        inbox::SenderIdentity,
+        profile::ControlBatchRequest,
+    };
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let (locked, address) = session(&root);
+    let mut flow = locked.open_flow(&address.instance_id).unwrap();
+    flow.transition(flow.state().revision(), FlowTransition::Activated)
+        .unwrap();
+    let sender = SenderIdentity::User(Uuid::new_v4());
+    let request = ControlBatchRequest {
+        id: Uuid::new_v4(),
+        sender: sender.clone(),
+        commands: vec![ControlRequest {
+            id: Uuid::new_v4(),
+            sender: sender.clone(),
+            target: address.clone(),
+            expected_revision: flow.state().revision(),
+            pause_key: Uuid::new_v4().into(),
+            action: ControlAction::Pause,
+        }],
+    };
+    drop(flow);
+    let host = RuntimeHost::default();
+    let profile = host
+        .attach_profile(ProfileStore::open(&root).unwrap())
+        .unwrap();
+    let accepted = host
+        .submit_controls(request.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), host.wait_quiescent())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    let pending = profile
+        .control_batch(sender.clone(), request.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending, accepted);
+    let cursor = profile.snapshot().await.unwrap().profile.cursor;
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    assert_eq!(profile.snapshot().await.unwrap().profile.cursor, cursor);
+    drop(locked);
+    let mut changed = host.subscribe_controls();
+    assert_eq!(
+        host.submit_controls(request.clone(), |_| Ok(()))
+            .await
+            .unwrap()
+            .submitted,
+        accepted.submitted
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            changed.borrow_and_update();
+            let current = profile
+                .control_batch(sender.clone(), request.id)
+                .await
+                .unwrap()
+                .unwrap();
+            if current.items[0].is_terminal() {
+                break;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        host.flow(&address)
+            .await
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .pauses()
+            .len(),
+        1
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn control_service_restores_lost_acknowledgements_without_reapplying_old_effects() {
+    use atman_runtime::flow_runtime::host::RuntimeHost;
+    use atman_runtime::flow_store::{
+        FlowTransition,
+        control::{ControlAction, ControlRequest},
+        inbox::SenderIdentity,
+        profile::ControlBatchRequest,
+    };
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let (a_session, a) = session(&root);
+    let (b_session, b) = session(&root);
+    let mut first = a_session.open_flow(&a.instance_id).unwrap();
+    let mut second = b_session.open_flow(&b.instance_id).unwrap();
+    for flow in [&mut first, &mut second] {
+        flow.transition(flow.state().revision(), FlowTransition::Activated)
+            .unwrap();
+    }
+    let sender = SenderIdentity::User(Uuid::new_v4());
+    let key = Uuid::new_v4().into();
+    let request = ControlBatchRequest {
+        id: Uuid::new_v4(),
+        sender: sender.clone(),
+        commands: [&first, &second]
+            .into_iter()
+            .zip([ControlAction::Pause, ControlAction::Close])
+            .map(|(flow, action)| ControlRequest {
+                id: Uuid::new_v4(),
+                sender: sender.clone(),
+                target: flow.state().address().clone(),
+                expected_revision: flow.state().revision(),
+                pause_key: key,
+                action,
+            })
+            .collect(),
+    };
+    let mut store = ProfileStore::open(&root).unwrap();
+    store.submit_controls(request.clone()).unwrap();
+    let paused = first.control(request.commands[0].clone()).unwrap();
+    first
+        .transition(
+            first.state().revision(),
+            FlowTransition::ExecutionResumed { key },
+        )
+        .unwrap();
+    let resumed = first.state().clone();
+    let before = first.cursor().clone();
+    drop((store, first, second, a_session, b_session));
+    let host = RuntimeHost::default();
+    let profile = host
+        .attach_profile(ProfileStore::open(&root).unwrap())
+        .unwrap();
+    host.start_control_service().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    let finished = profile
+        .control_batch(sender.clone(), request.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(finished.items.iter().all(|item| item.is_terminal()));
+    assert_eq!(
+        finished.items[0].history[0].progress,
+        atman_runtime::flow_store::profile::ControlProgress::Accepted {
+            receipt: paused.receipt
+        }
+    );
+    let first = host.flow(&a).await.unwrap();
+    assert_eq!(first.state().await.unwrap(), resumed);
+    assert_eq!(first.snapshot().await.unwrap().cursor, before);
+    let reopened = host
+        .open_session(data.path(), a.session_id.0)
+        .await
+        .unwrap();
+    let viewed = reopened.open_flow(a.instance_id.clone()).await.unwrap();
+    assert_eq!(viewed.snapshot().await.unwrap().cursor, before);
+    assert_eq!(
+        host.flow(&b).await.unwrap().state().await.unwrap().state(),
+        &atman_rt::InstanceState::Closed
+    );
+    let cursor = profile.snapshot().await.unwrap().profile.cursor;
+    host.shutdown().await.unwrap();
+    let host = RuntimeHost::default();
+    let profile = host
+        .attach_profile(ProfileStore::open(&root).unwrap())
+        .unwrap();
+    host.start_control_service().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        profile
+            .control_batch(sender, request.id)
+            .await
+            .unwrap()
+            .unwrap(),
+        finished
+    );
+    assert_eq!(profile.snapshot().await.unwrap().profile.cursor, cursor);
+    assert!(
+        host.sessions().is_empty(),
+        "settled control history must not open execution owners"
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn control_owner_retains_abandoned_requests_without_enabling_invalid_management() {
     use atman_runtime::flow_runtime::host::RuntimeHost;
     use atman_runtime::flow_store::{

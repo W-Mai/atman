@@ -615,7 +615,10 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         }
     }
     std::fs::remove_dir(&missing_project).unwrap();
-    let host = RuntimeHost::default();
+    let host = RuntimeHost::with_services(HostServices {
+        session_redactor: Some(Arc::new(session_redactor)),
+        ..Default::default()
+    });
     let (notices, _rx) = mpsc::unbounded_channel();
     let initial = Attachment::open(
         dir.path(),
@@ -783,6 +786,8 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         vec![ids[0]],
         "catalog browsing must not attach execution"
     );
+    // Background attachment must retain the same per-Session policy as later navigation.
+    host.open_session(dir.path(), ids[1]).await.unwrap();
     let (one, two) = tokio::join!(scopes.open(ids[1]), scopes.open(ids[1]));
     assert_eq!(one.unwrap().session.id(), two.unwrap().session.id());
     assert_eq!(host.sessions().len(), 2);

@@ -20,7 +20,8 @@ impl RuntimeHost {
         loop {
             let mut changes = Changes::default();
             changes.track(self.changes());
-            let mut busy = false;
+            changes.track(self.subscribe_controls());
+            let mut busy = self.control_work_pending()?;
             for worker in self.owned_flows()? {
                 changes.track(worker.subscribe_commits());
                 changes.track(worker.scheduling_progress.subscribe());

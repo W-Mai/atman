@@ -152,6 +152,25 @@ impl RuntimeHost {
 }
 
 impl ProfileHandle {
+    pub(super) fn control_source(&self) -> std::path::PathBuf {
+        self.data_dir.clone()
+    }
+
+    pub(super) fn subscribe_profile(&self) -> watch::Receiver<ProfileView> {
+        self.state.clone()
+    }
+
+    pub(super) async fn pending_control_snapshot(
+        &self,
+    ) -> io::Result<(CommitReceipt, Vec<ControlBatchRecord>)> {
+        self.control_work(|store| {
+            Ok((
+                store.snapshot().cursor.clone(),
+                store.pending_controls().into_iter().cloned().collect(),
+            ))
+        })
+        .await
+    }
     async fn control_work<T: Send + 'static>(
         &self,
         work: impl FnOnce(&mut ProfileStore) -> io::Result<T> + Send + 'static,
@@ -173,9 +192,14 @@ impl ProfileHandle {
         request: ControlBatchRequest,
         authorize: impl FnOnce(&ControlBatchRequest) -> io::Result<()> + Send + 'static,
     ) -> io::Result<ControlBatchRecord> {
+        let host = self.host.clone();
         self.control_work(move |store| {
             authorize(&request)?;
-            store.submit_controls(request)
+            let record = store.submit_controls(request)?;
+            if let Ok(host) = host.upgrade() {
+                host.changed();
+            }
+            Ok(record)
         })
         .await
     }
