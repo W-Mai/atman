@@ -35,6 +35,20 @@ pub(super) fn validate_control(request: &ControlFlowRequest) -> Result<(), JsonR
     ] {
         validate_identity(id)?;
     }
+    match (request.action, request.pause_key) {
+        (FlowControl::ReleasePause, Some(key)) => validate_identity(key)?,
+        (FlowControl::ReleasePause, None) => {
+            return Err(JsonRpcError::invalid_params(
+                "release_pause requires a selected pause_key",
+            ));
+        }
+        (_, Some(_)) => {
+            return Err(JsonRpcError::invalid_params(
+                "pause_key is only valid for release_pause",
+            ));
+        }
+        (_, None) => (),
+    }
     Ok(())
 }
 
@@ -63,11 +77,15 @@ pub(super) fn operator_control(request: ControlFlowRequest) -> ControlRequest {
         sender: operator(),
         target: core_address(request.flow),
         expected_revision: request.expected_revision,
-        // Shared with terminal controls, stable across restarts and distinct from peer keys.
-        pause_key: Uuid::from_bytes(*b"atman-user-pause").into(),
+        // Ordinary actions share the terminal's stable controller key.
+        pause_key: request
+            .pause_key
+            .unwrap_or(Uuid::from_bytes(*b"atman-user-pause"))
+            .into(),
         action: match request.action {
             FlowControl::Pause => ControlAction::Pause,
             FlowControl::Resume => ControlAction::Resume,
+            FlowControl::ReleasePause => ControlAction::ReleasePause,
             FlowControl::CancelTurn => ControlAction::CancelTurn,
             FlowControl::Recover => ControlAction::Recover,
             FlowControl::Close => ControlAction::Close,

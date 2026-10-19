@@ -87,6 +87,8 @@ fn page_size() -> usize {
 pub enum FlowControl {
     Pause,
     Resume,
+    /// Release one explicitly selected pause without removing other controllers' gates.
+    ReleasePause,
     CancelTurn,
     Recover,
     /// Accept closure; the execution state becomes closed after resource cleanup.
@@ -101,6 +103,9 @@ pub struct ControlFlowRequest {
     pub request_id: Uuid,
     pub expected_revision: u64,
     pub action: FlowControl,
+    /// Required only for release_pause. Read the key from flow.get execution.pause_keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_key: Option<Uuid>,
 }
 
 /// Persist the entire target list before independently delivering each control.

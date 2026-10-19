@@ -20,6 +20,98 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn operator_pause_release_is_selective_and_retains_retry_evidence_after_reacquisition() {
+    use atman_runtime::flow_store::control::{ControlAction, ControlRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let peer = SenderIdentity::Flow(description.address.clone());
+    let user = SenderIdentity::User(Uuid::new_v4());
+    let peer_key = Uuid::new_v4().into();
+    let user_key = Uuid::new_v4().into();
+    let request = |flow: &FlowStore, sender: SenderIdentity, pause_key, action| ControlRequest {
+        id: Uuid::new_v4(),
+        sender,
+        target: description.address.clone(),
+        expected_revision: flow.state().revision(),
+        pause_key,
+        action,
+    };
+    flow.control(request(&flow, peer.clone(), peer_key, ControlAction::Pause))
+        .unwrap();
+    let stale = request(&flow, user.clone(), peer_key, ControlAction::ReleasePause);
+    flow.control(request(&flow, user.clone(), user_key, ControlAction::Pause))
+        .unwrap();
+    let cursor = flow.cursor().clone();
+    assert!(flow.control(stale).is_err());
+    assert_eq!(
+        flow.control(request(
+            &flow,
+            peer.clone(),
+            peer_key,
+            ControlAction::ReleasePause
+        ))
+        .unwrap_err()
+        .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert!(
+        flow.control(request(
+            &flow,
+            user.clone(),
+            Uuid::new_v4().into(),
+            ControlAction::ReleasePause
+        ))
+        .is_err()
+    );
+    assert_eq!(flow.cursor(), &cursor);
+    let released = flow
+        .control(request(
+            &flow,
+            user.clone(),
+            peer_key,
+            ControlAction::ReleasePause,
+        ))
+        .unwrap();
+    assert_eq!(flow.state().pauses(), &[user_key]);
+    flow.control(request(&flow, peer, peer_key, ControlAction::Pause))
+        .unwrap();
+    let cursor = flow.cursor().clone();
+    assert_eq!(
+        flow.control(released.update.request.clone()).unwrap(),
+        released
+    );
+    assert_eq!(flow.cursor(), &cursor);
+    assert_eq!(flow.state().pauses().len(), 2);
+    drop(flow);
+    let mut restored = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(
+        restored.control(released.update.request.clone()).unwrap(),
+        released
+    );
+    assert_eq!(restored.cursor(), &cursor);
+    assert_eq!(restored.state().pauses().len(), 2);
+    restored
+        .control(request(
+            &restored,
+            user,
+            peer_key,
+            ControlAction::ReleasePause,
+        ))
+        .unwrap();
+    assert_eq!(restored.state().pauses(), &[user_key]);
+    let inspected = RuntimeStore::inspect_session(dir.path(), info.id)
+        .unwrap()
+        .inspect_flow(&description.address.instance_id)
+        .unwrap();
+    assert_eq!(&inspected.state, restored.state());
+}
+
+#[test]
 fn control_receipts_survive_later_turns_closure_and_recovery_without_reapplying() {
     use atman_runtime::flow_store::control::{ControlAction, ControlRequest};
     let dir = tempfile::tempdir().unwrap();

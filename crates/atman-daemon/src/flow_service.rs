@@ -522,7 +522,7 @@ fn address(flow: &FlowRef) -> FlowAddress {
 }
 
 fn execution(state: &atman_rt::FlowInstance<atman_runtime::event::AtmanUuid>) -> Value {
-    json!({"revision": state.revision(), "state": state.state(), "pause_count": state.pauses().len(), "can_start_turn": state.can_start_turn()})
+    json!({"revision": state.revision(), "state": state.state(), "pause_count": state.pauses().len(), "pause_keys": state.pauses(), "can_start_turn": state.can_start_turn()})
 }
 
 fn scheduling(status: &atman_runtime::flow_runtime::scheduler::SchedulingStatus) -> Value {

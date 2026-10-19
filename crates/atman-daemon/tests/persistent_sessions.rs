@@ -107,11 +107,20 @@ async fn batch_control_rpc_rejects_untrusted_or_invalid_requests_before_opening_
     nil_target["commands"][0]["flow"]["instance_id"] = json!(Uuid::nil());
     let mut nil_control = valid.clone();
     nil_control["commands"][0]["request_id"] = json!(Uuid::nil());
+    let mut missing_key = valid.clone();
+    missing_key["commands"][0]["action"] = json!("release_pause");
+    let mut wrong_action = valid.clone();
+    wrong_action["commands"][0]["pause_key"] = json!(Uuid::new_v4());
+    let mut nil_key = missing_key.clone();
+    nil_key["commands"][0]["pause_key"] = json!(Uuid::nil());
     for params in [
         forged,
         nested,
         nil_target,
         nil_control,
+        missing_key,
+        wrong_action,
+        nil_key,
         json!({"request_id": Uuid::nil(), "commands": [command.clone()]}),
         json!({"request_id": Uuid::new_v4(), "commands": []}),
         json!({"request_id": Uuid::new_v4(), "commands": [command.clone(), command]}),
@@ -140,6 +149,119 @@ async fn batch_control_rpc_rejects_untrusted_or_invalid_requests_before_opening_
         assert_eq!(response["error"]["code"], -32602);
     }
     assert!(!dir.path().join("runtime-v1").exists());
+}
+
+#[tokio::test]
+async fn operator_rpc_releases_only_the_selected_peer_pause() {
+    use atman_runtime::flow_store::control::{ControlAction, ControlRequest};
+    use atman_runtime::flow_store::inbox::SenderIdentity;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let id = Uuid::new_v4();
+    let mut catalog = root
+        .create_session(SessionDescriptor {
+            id,
+            project: None,
+            configuration: Default::default(),
+            title: "Paused controller".into(),
+        })
+        .unwrap();
+    let descriptor = descriptor(id);
+    let mut flow = catalog.create_flow(descriptor.clone()).unwrap();
+    flow.transition(flow.state().revision(), FlowTransition::Activated)
+        .unwrap();
+    let peer_key = Uuid::new_v4();
+    flow.control(ControlRequest {
+        id: Uuid::new_v4(),
+        sender: SenderIdentity::Flow(descriptor.address.clone()),
+        target: descriptor.address.clone(),
+        expected_revision: flow.state().revision(),
+        pause_key: peer_key.into(),
+        action: ControlAction::Pause,
+    })
+    .unwrap();
+    drop((flow, catalog));
+    let state = Arc::new(DaemonState::new(dir.path().to_owned()));
+    rpc(&state, methods::SESSION_OPEN, json!({"session_id": id})).await;
+    let before = rpc(
+        &state,
+        methods::FLOW_GET,
+        json!({"flow": descriptor.address}),
+    )
+    .await;
+    assert_eq!(before["execution"]["pause_keys"], json!([peer_key]));
+    rpc(&state, methods::FLOW_CONTROL, json!({"flow": descriptor.address, "request_id": Uuid::new_v4(), "expected_revision": before["execution"]["revision"], "action": "resume"})).await;
+    let still_paused = rpc(
+        &state,
+        methods::FLOW_GET,
+        json!({"flow": descriptor.address}),
+    )
+    .await;
+    assert_eq!(still_paused["execution"]["pause_count"], 1);
+    rpc(&state, methods::FLOW_CONTROL, json!({"flow": descriptor.address, "request_id": Uuid::new_v4(), "expected_revision": still_paused["execution"]["revision"], "action": "pause"})).await;
+    let paused = rpc(
+        &state,
+        methods::FLOW_GET,
+        json!({"flow": descriptor.address}),
+    )
+    .await;
+    assert_eq!(paused["execution"]["pause_count"], 2);
+    let release = json!({"flow": descriptor.address, "request_id": Uuid::new_v4(), "expected_revision": paused["execution"]["revision"], "action": "release_pause", "pause_key": peer_key});
+    let (_, response) = control_http(
+        &state,
+        Some("batch-test"),
+        methods::FLOW_CONTROL,
+        release.clone(),
+    )
+    .await;
+    assert!(response["error"].is_null(), "{response}");
+    let released = rpc(
+        &state,
+        methods::FLOW_GET,
+        json!({"flow": descriptor.address}),
+    )
+    .await;
+    assert_eq!(
+        released["execution"]["pause_keys"],
+        json!([Uuid::from_bytes(*b"atman-user-pause")])
+    );
+    assert_eq!(released["execution"]["can_start_turn"], false);
+    let mut unknown = release.clone();
+    unknown["request_id"] = json!(Uuid::new_v4());
+    unknown["expected_revision"] = released["execution"]["revision"].clone();
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::FLOW_CONTROL, unknown)
+        )
+        .await
+        .error
+        .is_some()
+    );
+    assert_eq!(
+        rpc(
+            &state,
+            methods::FLOW_GET,
+            json!({"flow": descriptor.address})
+        )
+        .await,
+        released
+    );
+    assert_eq!(
+        rpc(&state, methods::FLOW_CONTROL, release).await,
+        response["result"]
+    );
+    rpc(&state, methods::FLOW_CONTROL, json!({"flow": descriptor.address, "request_id": Uuid::new_v4(), "expected_revision": released["execution"]["revision"], "action": "resume"})).await;
+    assert_eq!(
+        rpc(
+            &state,
+            methods::FLOW_GET,
+            json!({"flow": descriptor.address})
+        )
+        .await["execution"]["can_start_turn"],
+        true
+    );
+    state.shutdown().await.unwrap();
 }
 
 #[tokio::test]

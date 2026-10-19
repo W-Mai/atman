@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Added
 
+- **Selective pause release** — Operators can release a selected flow pause without removing other controllers' gates or replacing the active invocation. Individual and batch RPC controls share revision checks and durable retry receipts; peer callers cannot use the operator override.
+
 - **Host control reconciliation** — Persistent control batches execute independently of their invoking flows, recover missing acknowledgements, and report individual target outcomes. New effects recheck current permissions; closure and cancellation retain separate acceptance and completion evidence.
 - **Batch control RPC** — `flow.control_batch` submits controls across Sessions and `flow.control_status` reads durable per-target progress. Retries preserve request identities, successful targets remain applied when other targets fail, and batch pause ownership matches individual controls.
 

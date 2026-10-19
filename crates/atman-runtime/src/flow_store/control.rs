@@ -9,18 +9,20 @@ use uuid::Uuid;
 use super::{FlowFact, FlowRef, FlowStore, FlowTransition, inbox::SenderIdentity, invalid};
 use crate::{event::AtmanUuid, event_log::journal::CommitReceipt};
 
-/// Controls do not forge completion or remove another controller's pause key.
+/// Controls retain invocation identity and independent pause ownership. Only explicit operator release can remove another controller's key.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlAction {
     Pause,
     Resume,
+    /// A trusted user or host releases one explicitly selected, currently recorded pause.
+    ReleasePause,
     CancelTurn,
     Recover,
     Close,
 }
 
-/// The host authenticates the sender and supplies its pause key before submission.
+/// The host authenticates the sender and binds its controller key or explicit operator selection before submission.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ControlRequest {
     pub id: Uuid,
@@ -79,9 +81,22 @@ impl Controls {
             ControlAction::Pause => FlowTransition::ExecutionPaused {
                 key: request.pause_key,
             },
-            ControlAction::Resume => FlowTransition::ExecutionResumed {
-                key: request.pause_key,
-            },
+            ControlAction::Resume | ControlAction::ReleasePause => {
+                if request.action == ControlAction::ReleasePause {
+                    if matches!(request.sender, SenderIdentity::Flow(_)) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "only an operator may release another controller's pause",
+                        ));
+                    }
+                    if !state.pauses().contains(&request.pause_key) {
+                        return Err(invalid("selected pause is no longer present"));
+                    }
+                }
+                FlowTransition::ExecutionResumed {
+                    key: request.pause_key,
+                }
+            }
             ControlAction::Recover => FlowTransition::InterruptionRecovered,
             ControlAction::Close => FlowTransition::CloseRequested,
             ControlAction::CancelTurn => match state.state() {

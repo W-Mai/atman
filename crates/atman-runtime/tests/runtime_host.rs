@@ -267,6 +267,86 @@ async fn host_batches_finish_other_targets_after_the_controller_pauses_or_closes
                     .is_none(),
                 "an applied pause must retain the invocation rather than wait for its completion"
             );
+            let user_key = Uuid::new_v4().into();
+            source
+                .control(
+                    control_request(&source, paused.revision(), user_key, PeerControl::Pause),
+                    |_| Ok(()),
+                )
+                .await
+                .unwrap();
+            let release_id = Uuid::new_v4();
+            let sender = SenderIdentity::User(Uuid::new_v4());
+            let mut commands = Vec::new();
+            for worker in [&source, &target] {
+                let original = finished
+                    .items
+                    .iter()
+                    .find(|item| &item.request.target == worker.address())
+                    .unwrap();
+                commands.push(atman_runtime::flow_store::control::ControlRequest {
+                    id: release_id,
+                    sender: sender.clone(),
+                    target: worker.address().clone(),
+                    expected_revision: worker.state().await.unwrap().revision(),
+                    pause_key: original.request.pause_key,
+                    action: PeerControl::ReleasePause,
+                });
+            }
+            host.submit_controls(
+                atman_runtime::flow_store::profile::ControlBatchRequest {
+                    id: release_id,
+                    sender: sender.clone(),
+                    commands,
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    updates.borrow_and_update();
+                    let record = profile
+                        .control_batch(sender.clone(), release_id)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if record.items.iter().all(|item| item.is_terminal()) {
+                        assert!(record.items.iter().all(|item| matches!(
+                            item.history.last().unwrap().progress,
+                            ControlProgress::Applied { .. }
+                        )));
+                        break;
+                    }
+                    updates.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            let still_paused = source.state().await.unwrap();
+            assert_eq!(still_paused.pauses(), &[user_key]);
+            assert!(target.state().await.unwrap().can_start_turn());
+            source
+                .control(
+                    control_request(
+                        &source,
+                        still_paused.revision(),
+                        user_key,
+                        PeerControl::Resume,
+                    ),
+                    |_| Ok(()),
+                )
+                .await
+                .unwrap();
+            let resumed = source.state().await.unwrap();
+            assert!(resumed.can_receive_at_boundary(&active.lease).unwrap());
+            assert!(
+                source
+                    .completion(Some(active.lease.turn.clone()))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
             source
                 .control(
                     control_request(
