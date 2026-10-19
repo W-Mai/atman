@@ -33,6 +33,7 @@ pub(super) fn observe(
             }
             FlowFact::ExecutionEvents(events) => events.iter().map(|event| event.timestamp).max(),
             FlowFact::GoalUpdated(record) => Some(record.at),
+            FlowFact::Controlled(record) => Some(record.at),
             FlowFact::PlanningUpdated(record) => Some(record.at),
             FlowFact::FlowSubscribed(record) => Some(record.registered_at),
             FlowFact::ProcessWatchRegistered(record) => Some(record.registered_at),

@@ -21,6 +21,7 @@ pub(super) struct FlowReplay {
     pub(super) checkpoints: context::Checkpoints,
     pub(super) goals: goal::Goals,
     pub(super) planning: planning::Planning,
+    pub(super) controls: super::control::Controls,
     pub(super) trace: trace::ExecutionTrace,
     pub(super) history: history::HistoryProgress,
     pub(super) cursor: Option<CommitReceipt>,
@@ -43,6 +44,7 @@ impl FlowReplay {
             )?;
         }
         for fact in facts {
+            let mut state_changed = false;
             match (&mut self.projection, fact) {
                 (None, FlowFact::Created(descriptor)) if &descriptor.address == address => {
                     let state = descriptor.content.initial_state(address.clone())?;
@@ -54,25 +56,20 @@ impl FlowReplay {
                     };
                     self.history = self.history.advance(archive, &records)?;
                 }
-                (Some((_, state, inbox)), FlowFact::Transition(mut transition)) => {
+                (Some((_, state, _)), FlowFact::Transition(mut transition)) => {
                     let original = transition.clone();
                     let revision = state.revision();
                     transition.apply(state)?;
                     if original != transition || revision == state.revision() {
                         return Err(invalid("noncanonical flow transition"));
                     }
-                    inbox.state_changed(state, &receipt);
-                    if matches!(state.state(), InstanceState::Closed) {
-                        self.closed = Some(receipt.clone());
-                    }
-                    if matches!(
-                        state.state(),
-                        InstanceState::Closing { .. } | InstanceState::Closed
-                    ) {
-                        inbox.close(&receipt);
-                        self.subscriptions.close();
-                        self.process_watches.close();
-                    }
+                    state_changed = true;
+                }
+                (Some((_, state, _)), FlowFact::Controlled(update)) => {
+                    let candidate = self.controls.prepare(state, &update.request)?;
+                    state_changed = candidate != *state;
+                    *state = candidate;
+                    self.controls.apply(*update, state.clone(), receipt.clone());
                 }
                 (Some((_, state, _)), FlowFact::WorkspaceRequested(request)) => {
                     request.replay(state, self.workspace.as_ref())?;
@@ -262,6 +259,21 @@ impl FlowReplay {
                 }
                 _ => {
                     return Err(invalid("missing, duplicate, or mismatched flow creation"));
+                }
+            }
+            if state_changed {
+                let (_, state, inbox) = self.projection.as_mut().expect("validated creation");
+                inbox.state_changed(state, &receipt);
+                if matches!(state.state(), InstanceState::Closed) {
+                    self.closed = Some(receipt.clone());
+                }
+                if matches!(
+                    state.state(),
+                    InstanceState::Closing { .. } | InstanceState::Closed
+                ) {
+                    inbox.close(&receipt);
+                    self.subscriptions.close();
+                    self.process_watches.close();
                 }
             }
         }

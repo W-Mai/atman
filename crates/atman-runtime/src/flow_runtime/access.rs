@@ -20,15 +20,7 @@ use crate::flow_store::subscription::{FlowEventFilter, FlowSubscription, Subscri
 use crate::flow_store::{FlowInstanceId, FlowRef, FlowTransition, invalid};
 use crate::message::{Message, MessageOrigin};
 
-/// Peer controls cannot remove another controller's pause key or forge lifecycle completion.
-#[derive(Clone, Copy, Debug)]
-pub enum PeerControl {
-    Pause,
-    Resume,
-    CancelTurn,
-    Recover,
-    Close,
-}
+pub use crate::flow_store::control::ControlAction as PeerControl;
 
 /// An opaque host-issued identity for one admitted invocation, not a serializable model argument.
 #[derive(Clone)]

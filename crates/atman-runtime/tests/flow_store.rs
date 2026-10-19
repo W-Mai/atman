@@ -19,6 +19,161 @@ use uuid::Uuid;
 
 mod common;
 
+#[test]
+fn control_receipts_survive_later_turns_closure_and_recovery_without_reapplying() {
+    use atman_runtime::flow_store::control::{ControlAction, ControlRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = runtime.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let actor = SenderIdentity::User(Uuid::new_v4());
+    let key = Uuid::new_v4().into();
+    let request = |flow: &FlowStore, action| ControlRequest {
+        id: Uuid::new_v4(),
+        sender: actor.clone(),
+        target: description.address.clone(),
+        expected_revision: flow.state().revision(),
+        pause_key: key,
+        action,
+    };
+    let pause = flow.control(request(&flow, ControlAction::Pause)).unwrap();
+    assert_eq!(pause.execution.pauses(), &[key]);
+    let resume = flow.control(request(&flow, ControlAction::Resume)).unwrap();
+    assert!(resume.execution.can_start_turn());
+    let cursor = flow.cursor().clone();
+    assert_eq!(flow.control(pause.update.request.clone()).unwrap(), pause);
+    assert_eq!(flow.cursor(), &cursor);
+    assert!(flow.state().can_start_turn());
+    let mut conflicting = pause.update.request.clone();
+    conflicting.action = ControlAction::Close;
+    assert!(flow.control(conflicting).is_err());
+    let mut stale = pause.update.request.clone();
+    stale.id = Uuid::new_v4();
+    assert!(flow.control(stale).is_err());
+    assert_eq!(flow.cursor(), &cursor);
+
+    let noop = flow
+        .control(request(&flow, ControlAction::CancelTurn))
+        .unwrap();
+    assert_eq!(noop.execution.revision(), resume.execution.revision());
+    assert!(noop.receipt.sequence > resume.receipt.sequence);
+    let first = start(&mut flow);
+    assert_eq!(flow.control(noop.update.request.clone()).unwrap(), noop);
+    assert!(
+        matches!(flow.state().state(), InstanceState::Open(InstanceActivity::Active(active)) if active.lease == first && active.phase == TurnPhase::Running)
+    );
+    let cancel = flow
+        .control(request(&flow, ControlAction::CancelTurn))
+        .unwrap();
+    assert!(
+        matches!(cancel.execution.state(), InstanceState::Open(InstanceActivity::Active(active)) if active.phase == TurnPhase::Cancelling)
+    );
+    change(
+        &mut flow,
+        FlowTransition::TurnFinished {
+            lease: first,
+            outcome: TurnOutcome::Interrupted(Interruption::Cancelled),
+        },
+    );
+    flow.control(request(&flow, ControlAction::Recover))
+        .unwrap();
+    let second = start(&mut flow);
+    assert_eq!(flow.control(cancel.update.request.clone()).unwrap(), cancel);
+    assert!(
+        matches!(flow.state().state(), InstanceState::Open(InstanceActivity::Active(active)) if active.lease == second && active.phase == TurnPhase::Running)
+    );
+    let close = flow.control(request(&flow, ControlAction::Close)).unwrap();
+    assert!(matches!(
+        close.execution.state(),
+        InstanceState::Closing { active: Some(_) }
+    ));
+    change(
+        &mut flow,
+        FlowTransition::TurnFinished {
+            lease: second,
+            outcome: TurnOutcome::Interrupted(Interruption::Cancelled),
+        },
+    );
+    change(&mut flow, FlowTransition::Closed);
+    let cursor = flow.cursor().clone();
+    drop(flow);
+    let mut restored = session.open_flow(&description.address.instance_id).unwrap();
+    for record in [pause, resume, noop, cancel, close] {
+        assert_eq!(
+            restored.control(record.update.request.clone()).unwrap(),
+            record
+        );
+    }
+    assert_eq!(restored.cursor(), &cursor);
+    assert_eq!(restored.state().state(), &InstanceState::Closed);
+    let inspected = RuntimeStore::inspect_session(dir.path(), info.id)
+        .unwrap()
+        .inspect_flow(&description.address.instance_id)
+        .unwrap();
+    assert_eq!(&inspected.state, restored.state());
+}
+
+#[test]
+fn control_noops_retain_input_reservations_and_invalid_requests_are_atomic() {
+    use atman_runtime::flow_store::control::{ControlAction, ControlRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = runtime.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let actor = SenderIdentity::User(Uuid::new_v4());
+    flow.accept_input(
+        delivery(&description.address, actor.clone(), "retained"),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let batch = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    let base = ControlRequest {
+        id: Uuid::new_v4(),
+        sender: actor,
+        target: description.address.clone(),
+        expected_revision: flow.state().revision(),
+        pause_key: Uuid::new_v4().into(),
+        action: ControlAction::CancelTurn,
+    };
+    let log = flow.dir().join("events.jsonl");
+    let before = std::fs::read(&log).unwrap();
+    for variant in 0..3 {
+        let mut invalid = base.clone();
+        match variant {
+            0 => invalid.id = Uuid::nil(),
+            1 => invalid.pause_key = Uuid::nil().into(),
+            _ => invalid.target = descriptor(info.id).address,
+        }
+        assert!(flow.control(invalid).is_err());
+        assert_eq!(std::fs::read(&log).unwrap(), before);
+    }
+    flow.control(base.clone()).unwrap();
+    let mut other_actor = base;
+    other_actor.sender = SenderIdentity::User(Uuid::new_v4());
+    let second = flow.control(other_actor).unwrap();
+    assert_eq!(second.execution.revision(), flow.state().revision());
+    flow.commit_input(
+        &batch,
+        InputContent::InvocationInput {
+            command: None,
+            arguments: BTreeMap::new(),
+            invocation: BTreeMap::new(),
+            messages: vec![],
+        },
+    )
+    .unwrap();
+    assert!(flow.pending_inputs().next().is_none());
+}
+
 #[tokio::test]
 async fn entry_exit_fences_hook_input_and_resumes_one_pending_batch() {
     use atman_runtime::{Value, flow_runtime::FlowWorker, message::MessageOrigin};

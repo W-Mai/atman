@@ -7,6 +7,7 @@ pub mod activity;
 pub mod completion;
 pub mod context;
 pub mod continuation;
+pub mod control;
 mod deletion;
 pub mod goal;
 pub mod history;
@@ -226,6 +227,7 @@ enum FlowFact {
     Activated(Box<launch::Activation>),
     WorkspaceRequested(Box<workspace::WorkspaceRequest>),
     Transition(FlowTransition),
+    Controlled(Box<control::ControlUpdate>),
     TurnCompleted(Box<completion::Completion>),
     EnvelopeAccepted(Box<AcceptedEnvelope>),
     InboxEdited(Box<inbox::InboxEditRequest>),
@@ -296,6 +298,13 @@ impl FlowJournal {
 
 impl FlowFact {
     fn validate_batch(facts: &[Self]) -> io::Result<()> {
+        if facts.iter().any(|fact| matches!(fact, Self::Controlled(_))) {
+            return if matches!(facts, [Self::Controlled(_)]) {
+                Ok(())
+            } else {
+                Err(invalid("execution control requires a dedicated batch"))
+            };
+        }
         if facts
             .iter()
             .any(|fact| matches!(fact, Self::InboxEdited(_)))
@@ -1075,6 +1084,7 @@ pub struct FlowStore {
     checkpoints: context::Checkpoints,
     goals: goal::Goals,
     planning: planning::Planning,
+    controls: control::Controls,
     trace: trace::ExecutionTrace,
     history: history::HistoryProgress,
     cursor: CommitReceipt,
@@ -1130,6 +1140,7 @@ impl FlowStore {
             checkpoints: Default::default(),
             goals: Default::default(),
             planning: Default::default(),
+            controls: Default::default(),
             trace: Default::default(),
             history: Default::default(),
             cursor,
@@ -1159,6 +1170,7 @@ impl FlowStore {
             checkpoints,
             goals,
             planning,
+            controls,
             trace,
             history,
             cursor,
@@ -1190,6 +1202,7 @@ impl FlowStore {
             checkpoints,
             goals,
             planning,
+            controls,
             trace,
             history,
             cursor: cursor.ok_or_else(|| invalid("empty flow journal"))?,
@@ -1282,6 +1295,11 @@ impl FlowStore {
             return Ok(self.cursor.clone());
         }
         let cursor = self.journal.commit(&[FlowFact::Transition(transition)])?;
+        self.publish_state(candidate, cursor.clone());
+        Ok(cursor)
+    }
+
+    fn publish_state(&mut self, candidate: FlowInstance<AtmanUuid>, cursor: CommitReceipt) {
         self.state = candidate;
         if matches!(self.state.state(), InstanceState::Closed) {
             self.closed = Some(cursor.clone());
@@ -1295,9 +1313,8 @@ impl FlowStore {
             self.subscriptions.close();
             self.process_watches.close();
         }
-        self.cursor = cursor.clone();
+        self.cursor = cursor;
         self.refresh_projection();
-        Ok(cursor)
     }
 
     /// Record loss of an admitted invocation without rerunning its unknown external effects.

@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Durable control receipts** — The flow storage API records execution controls with actor-scoped request identities. Retries return their original receipts across later turns, closure, and recovery without reapplying state changes.
+
 ### Fixes
 
 - **Archived tool details** — Main and floating views expand retained tool output after the original session directory is removed. Each view keeps its own disclosure state.
