@@ -19,6 +19,235 @@ use uuid::Uuid;
 
 mod common;
 
+#[tokio::test]
+async fn inbox_history_pages_preserve_delivery_identity_without_consumption_or_execution() {
+    use atman_runtime::{
+        flow_runtime::{catalog::SessionCatalog, host::RuntimeHost},
+        flow_store::{
+            inbox::{InboxChange, InboxEditRequest},
+            inbox_view::{InboxHistoryItem, InboxSide},
+        },
+    };
+    use std::{cell::Cell, io::Write};
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = RuntimeStore::open(dir.path()).unwrap();
+    let session_info = session_descriptor();
+    let mut session = runtime.create_session(session_info.clone()).unwrap();
+    let description = descriptor(session_info.id);
+    let address = description.address.clone();
+    let mut flow = session.create_flow(description).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let user = SenderIdentity::User(Uuid::new_v4());
+    let mut accepted = vec![];
+    for text in ["first", "second", "third"] {
+        accepted.push(
+            flow.accept_input(delivery(&address, user.clone(), text), |_| Ok(()))
+                .unwrap(),
+        );
+    }
+    let read = RuntimeStore::inspect_session(dir.path(), session_info.id).unwrap();
+    let first = read
+        .inspect_inbox(&address.instance_id, InboxSide::Received, None, 2)
+        .unwrap();
+    assert_eq!(first.total, 3);
+    let ids = |page: &atman_runtime::flow_store::inbox_view::InboxHistoryPage| {
+        page.items
+            .iter()
+            .map(|item| match item {
+                InboxHistoryItem::Received(entry) => entry.envelope.id,
+                InboxHistoryItem::Sent(record) => record.intent.request.request_id,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ids(&first),
+        [accepted[2].message_id, accepted[1].message_id]
+    );
+    let anchor = first.next.clone().unwrap();
+    flow.edit_input(
+        InboxEditRequest {
+            id: Uuid::new_v4(),
+            sender: user.clone(),
+            message: accepted[1].message_id,
+            expected: accepted[1].receipt.clone(),
+            change: InboxChange::Cancel,
+        },
+        |_| Ok(()),
+    )
+    .unwrap();
+    flow.accept_input(delivery(&address, user, "later"), |_| Ok(()))
+        .unwrap();
+    let older = read
+        .inspect_inbox(&address.instance_id, InboxSide::Received, Some(&anchor), 2)
+        .unwrap();
+    assert_eq!(older.total, 4);
+    assert_eq!(ids(&older), [accepted[0].message_id]);
+    assert!(older.next.is_none());
+    assert!(older.cursor.sequence > first.cursor.sequence);
+    let fresh = read
+        .inspect_inbox(&address.instance_id, InboxSide::Received, None, 50)
+        .unwrap();
+    assert!(
+        matches!(&fresh.items[2], InboxHistoryItem::Received(entry) if matches!(entry.acceptance.disposition, InboxDisposition::Cancelled { .. }))
+    );
+    for limit in [0, 51] {
+        assert!(
+            read.inspect_inbox(&address.instance_id, InboxSide::Received, None, limit)
+                .is_err()
+        );
+    }
+    for field in 0..4 {
+        let mut invalid = anchor.clone();
+        match field {
+            0 => invalid.owner.session_id = Uuid::new_v4().into(),
+            1 => invalid.side = InboxSide::Sent,
+            2 => invalid.receipt.digest.push('x'),
+            _ => invalid.id = Uuid::new_v4(),
+        }
+        assert!(
+            read.inspect_inbox(&address.instance_id, InboxSide::Received, Some(&invalid), 2)
+                .is_err()
+        );
+    }
+    assert!(
+        read.inspect_inbox(&address.instance_id, InboxSide::Sent, Some(&anchor), 2)
+            .is_err()
+    );
+    let lease = flow
+        .state()
+        .clone()
+        .begin_turn(TurnId::now(), RunId::now())
+        .unwrap();
+    change(
+        &mut flow,
+        FlowTransition::TurnStarted {
+            turn: lease.turn.clone(),
+            run: lease.run.clone(),
+        },
+    );
+    let outgoing = delivery(
+        &address,
+        SenderIdentity::Flow(address.clone()),
+        "self delivery",
+    );
+    let queued = flow
+        .queue_send(&lease, outgoing.clone(), None, |_| Ok(()))
+        .unwrap();
+    let pending = read
+        .inspect_inbox(&address.instance_id, InboxSide::Sent, None, 1)
+        .unwrap();
+    assert!(
+        matches!(&pending.items[0], InboxHistoryItem::Sent(record) if record.status == SendStatus::PendingDelivery)
+    );
+    let recipient = flow.accept_input(outgoing.clone(), |_| Ok(())).unwrap();
+    flow.confirm_delivery(outgoing.request_id, DeliveryReceipt::from(&recipient))
+        .unwrap();
+    let outgoing2 = delivery(
+        &address,
+        SenderIdentity::Flow(address.clone()),
+        "not delivered",
+    );
+    flow.queue_send(&lease, outgoing2.clone(), None, |_| Ok(()))
+        .unwrap();
+    let sent = read
+        .inspect_inbox(&address.instance_id, InboxSide::Sent, None, 1)
+        .unwrap();
+    assert_eq!(ids(&sent), [outgoing2.request_id]);
+    let prior = read
+        .inspect_inbox(&address.instance_id, InboxSide::Sent, sent.next.as_ref(), 1)
+        .unwrap();
+    assert!(
+        matches!(&prior.items[0], InboxHistoryItem::Sent(record) if matches!(&record.status, SendStatus::Accepted { delivery, .. } if delivery.message_id == recipient.message_id) && record.queued == queued.queued)
+    );
+    let reserved = flow
+        .reserve_context_input(&lease, |input| input.id == accepted[0].message_id)
+        .unwrap()
+        .unwrap();
+    let during = read
+        .inspect_inbox(&address.instance_id, InboxSide::Received, None, 50)
+        .unwrap();
+    assert!(during.items.iter().any(|item| matches!(item, InboxHistoryItem::Received(entry) if entry.envelope.id == accepted[0].message_id && entry.acceptance.disposition == InboxDisposition::Pending)));
+    let committed = flow
+        .commit_input(&reserved, context_content(&lease))
+        .unwrap();
+    let consumed = read
+        .inspect_inbox(&address.instance_id, InboxSide::Received, Some(&anchor), 2)
+        .unwrap();
+    assert!(
+        matches!(&consumed.items[0], InboxHistoryItem::Received(entry) if matches!(&entry.acceptance.disposition, InboxDisposition::InputCommitted { by } if by == &committed))
+    );
+    let host = RuntimeHost::default();
+    let catalog = SessionCatalog::new(Some(host.clone()), Some(dir.path().to_owned()));
+    let state = flow.state().clone();
+    let original_pending = flow
+        .pending_inputs()
+        .map(|item| item.id)
+        .collect::<Vec<_>>();
+    let bytes = std::fs::read(flow.dir().join("events.jsonl")).unwrap();
+    let checks = Cell::new(0);
+    let page = catalog
+        .inbox_page(&address, InboxSide::Received, None, 50, |owner| {
+            assert_eq!(owner, &address);
+            checks.set(checks.get() + 1);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(checks.get(), 3);
+    assert_eq!(page.total, 5);
+    assert!(host.sessions().is_empty());
+    assert_eq!(flow.state(), &state);
+    assert_eq!(
+        flow.pending_inputs()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        original_pending
+    );
+    assert_eq!(
+        std::fs::read(flow.dir().join("events.jsonl")).unwrap(),
+        bytes
+    );
+    checks.set(0);
+    let denied = catalog
+        .inbox_page(&address, InboxSide::Received, None, 1, |_| {
+            checks.set(checks.get() + 1);
+            if checks.get() == 3 {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+    assert!(matches!(denied, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied));
+    let path = flow.dir().join("events.jsonl");
+    drop(flow);
+    drop(session);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{partial")
+        .unwrap();
+    let partial = std::fs::read(&path).unwrap();
+    let detached = catalog
+        .inbox_page(&address, InboxSide::Received, None, 50, |_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(detached.trailing_bytes, 8);
+    assert_eq!(detached.cursor, page.cursor);
+    assert_eq!(std::fs::read(&path).unwrap(), partial);
+    assert!(host.sessions().is_empty());
+    std::fs::write(&path, b"corrupt\n").unwrap();
+    assert!(
+        catalog
+            .inbox_page(&address, InboxSide::Received, None, 1, |_| Ok(()))
+            .await
+            .is_err()
+    );
+    assert!(read.inspect_flow(&address.instance_id).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"corrupt\n");
+}
+
 #[test]
 fn session_titles_replay_independently_of_creation_and_execution() {
     let dir = tempfile::tempdir().unwrap();

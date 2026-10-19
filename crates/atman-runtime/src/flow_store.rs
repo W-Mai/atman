@@ -10,6 +10,7 @@ mod deletion;
 pub mod goal;
 pub mod history;
 pub mod inbox;
+pub mod inbox_view;
 mod input;
 pub mod launch;
 pub mod migration;
@@ -592,12 +593,12 @@ fn inspect_registered_flow(
     inspect_registered_flow_with(dir, catalog, id, |_, _| Ok(()))
 }
 
-fn inspect_registered_flow_with(
+fn read_registered_flow(
     dir: &Path,
     catalog: &SessionProjection,
     id: &FlowInstanceId,
     mut observe: impl FnMut(&CommitReceipt, &[FlowFact]) -> io::Result<()>,
-) -> io::Result<FlowInspection> {
+) -> io::Result<RecordedFlow> {
     let registration = catalog
         .flows
         .iter()
@@ -620,12 +621,38 @@ fn inspect_registered_flow_with(
             replay.apply(&address, receipt, facts)
         },
     )?;
-    let (descriptor, state, inbox) = replay
+    let (descriptor, _, _) = replay
         .projection
+        .as_ref()
         .ok_or_else(|| invalid("flow creation was not committed"))?;
     if descriptor.creation_request != registration.creation_request {
         return Err(invalid("flow creation does not match session registration"));
     }
+    Ok(RecordedFlow {
+        replay,
+        journal,
+        watch_deliveries,
+    })
+}
+
+struct RecordedFlow {
+    replay: replay::FlowReplay,
+    journal: crate::event_log::journal::JournalInspection,
+    watch_deliveries: watch_view::WatchDeliveries,
+}
+
+fn inspect_registered_flow_with(
+    dir: &Path,
+    catalog: &SessionProjection,
+    id: &FlowInstanceId,
+    observe: impl FnMut(&CommitReceipt, &[FlowFact]) -> io::Result<()>,
+) -> io::Result<FlowInspection> {
+    let RecordedFlow {
+        replay,
+        journal,
+        watch_deliveries,
+    } = read_registered_flow(dir, catalog, id, observe)?;
+    let (descriptor, state, inbox) = replay.projection.unwrap();
     let target = descriptor.address.clone();
     let mut relations = Vec::new();
     if let Some(source) = descriptor.created_by.clone() {
