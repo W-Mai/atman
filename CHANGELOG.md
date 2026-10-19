@@ -18,6 +18,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Original history navigation** — Project Hub opens legacy flow histories in the shared main and floating views without migration. Typed view addresses preserve source identity, read-only controls, and request ownership alongside persistent sessions.
+
 - **Legacy history snapshots** — Read original session logs by flow ownership without migrating data or opening execution services. Direct history and imported archives share message projection, retain unsupported records, and reject changed sources.
 
 - **Direct archive browsing** — `--continue` opens imported sessions without execution configuration or writer ownership. Archived and executable TUI views share navigation; non-TUI mode prints archived conversation text and exits. Archive selection and projection read the journal once.

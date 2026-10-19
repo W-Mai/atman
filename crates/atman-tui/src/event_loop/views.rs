@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use atman_runtime::flow_store::FlowRef;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::{
     Frame, TerminalOptions, Viewport,
@@ -13,11 +12,11 @@ use ratatui::{
 };
 
 use super::*;
-use crate::control::{FlowPlacement, ViewBinding};
+use crate::control::{FlowPlacement, ViewAddress, ViewBinding};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(super) struct ViewKey {
-    pub flow: FlowRef,
+    pub flow: ViewAddress,
     pub placement: FlowPlacement,
 }
 
@@ -104,7 +103,7 @@ impl Window {
         frame.render_widget(ratatui::widgets::Clear, self.rect);
         frame.render_widget(Paragraph::new("").style(Style::default().bg(bg)), self.rect);
         frame.render_widget(
-            Paragraph::new(format!("  Flow {}", self.key.flow.instance_id)).style(
+            Paragraph::new(format!("  {}", self.key.flow.label())).style(
                 Style::default()
                     .fg(if active {
                         t.heading.into()
@@ -570,7 +569,7 @@ impl Workspace {
                         .iter()
                         .map(|window| window.key.clone())
                         .collect();
-                    floating.sort_by_key(|key| key.flow.instance_id.to_string());
+                    floating.sort_by_key(|key| (key.flow.session_id(), key.flow.label()));
                     let keys: Vec<_> = std::iter::once(self.main.clone().unwrap())
                         .chain(floating)
                         .collect();

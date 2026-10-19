@@ -450,7 +450,7 @@ pub(crate) async fn run_frames(
                         clicked = app.app.flow_hub_hovered && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && !app.wm.modals.any_open();
                     }
                     if escape || clicked {
-                        app.app.open_flow_hub = handle.control_tx.as_ref().and_then(|tx| tx.binding()).map(|binding| crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Flows { session: binding.flow.session_id.0, before: None }));
+                        app.app.open_flow_hub = handle.control_tx.as_ref().and_then(|tx| tx.binding()).map(|binding| crate::flow_hub::Action::Load(binding.flow.directory()));
                         continue;
                     }
                 }
@@ -3526,7 +3526,7 @@ mod tests {
                     ViewBinding {
                         view_id: Uuid::now_v7(),
                         revision: 1,
-                        flow: address,
+                        flow: address.into(),
                     },
                     commands.clone(),
                     config.clone(),
@@ -3587,7 +3587,7 @@ mod tests {
                 &mut editor,
                 &mut handle,
                 ViewKey {
-                    flow: workers[1].address().clone(),
+                    flow: workers[1].address().clone().into(),
                     placement: FlowPlacement::Main,
                 },
                 Some(Box::new(b)),
@@ -3619,7 +3619,7 @@ mod tests {
                 &mut editor,
                 &mut handle,
                 ViewKey {
-                    flow: workers[0].address().clone(),
+                    flow: workers[0].address().clone().into(),
                     placement: FlowPlacement::Main,
                 },
                 None,
@@ -3652,7 +3652,7 @@ mod tests {
                 &mut editor,
                 &mut handle,
                 ViewKey {
-                    flow: workers[1].address().clone(),
+                    flow: workers[1].address().clone().into(),
                     placement: FlowPlacement::Main,
                 },
                 None,
@@ -3670,7 +3670,8 @@ mod tests {
                         flow: FlowRef {
                             session_id: sid.into(),
                             instance_id: FlowInstanceId::now()
-                        },
+                        }
+                        .into(),
                         placement: FlowPlacement::Main
                     },
                     None
@@ -3681,7 +3682,7 @@ mod tests {
         assert_eq!(editor.buf(), "draft B");
         // The same flow may be displayed twice, with separate drafts and reply addresses.
         let a_main = ViewKey {
-            flow: workers[0].address().clone(),
+            flow: workers[0].address().clone().into(),
             placement: FlowPlacement::Main,
         };
         views
@@ -3697,7 +3698,7 @@ mod tests {
         let main_draft = editor.buf().to_owned();
         assert_eq!(workers[0].context().pending_image_count(), 0);
         let floating = ViewKey {
-            flow: workers[0].address().clone(),
+            flow: workers[0].address().clone().into(),
             placement: FlowPlacement::Floating,
         };
         let mut floating_handle = TuiHandle::from_flow(
@@ -3738,7 +3739,7 @@ mod tests {
         let floating_draft = editor.buf().to_owned();
         assert_eq!(views.views[&a_main].editor.buf(), main_draft);
         let hidden = ViewKey {
-            flow: workers[1].address().clone(),
+            flow: workers[1].address().clone().into(),
             placement: FlowPlacement::Main,
         };
         session
@@ -5251,7 +5252,7 @@ mod tests {
         assert!(app.open_flow_hub.is_none());
         assert!(handle_startup_session_mouse(&mut app, &click, None));
         assert!(
-            matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Focus(flow)) if flow == target)
+            matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Focus(flow)) if flow.instance() == Some(&target))
         );
         assert!(!app.should_quit);
         app.startup_projects_rect = Some(ratatui::layout::Rect::new(18, 25, 40, 4));

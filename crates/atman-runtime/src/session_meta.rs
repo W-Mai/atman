@@ -153,6 +153,20 @@ impl Default for SessionStats {
 }
 
 impl SessionStats {
+    /// Read cached counts or scan the source without creating locks, repairing caches, or changing history.
+    pub fn inspect(session_dir: &Path) -> std::io::Result<Self> {
+        let events = session_dir.join("events.jsonl");
+        let bytes = std::fs::metadata(&events)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if let Some(stats) = Self::load_unchecked(session_dir)
+            && stats.event_bytes == bytes
+        {
+            return Ok(stats);
+        }
+        Self::scan(&events)
+    }
+
     pub fn load_or_rebuild(session_dir: &Path) -> std::io::Result<Self> {
         let events_path = session_dir.join("events.jsonl");
         let mut event_bytes = std::fs::metadata(&events_path)
@@ -501,6 +515,37 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn inspecting_stats_never_creates_or_repairs_storage() {
+        let dir = TempDir::new().unwrap();
+        let events = dir.path().join("events.jsonl");
+        std::fs::write(&events, "{\"type\":\"user_msg\"}\n").unwrap();
+        assert_eq!(
+            SessionStats::inspect(dir.path())
+                .unwrap()
+                .user_message_count,
+            1
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        for cache in [
+            b"broken".to_vec(),
+            serde_json::to_vec(&SessionStats::default()).unwrap(),
+        ] {
+            std::fs::write(dir.path().join(STATS_FILENAME), &cache).unwrap();
+            assert_eq!(
+                SessionStats::inspect(dir.path())
+                    .unwrap()
+                    .user_message_count,
+                1
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join(STATS_FILENAME)).unwrap(),
+                cache
+            );
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        }
+    }
 
     #[test]
     fn discovery_query_matches_project_identity_and_legacy_policy() {

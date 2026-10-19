@@ -20,7 +20,7 @@ mod composer;
 pub mod control;
 mod instance_view;
 pub use control::ControlSender;
-pub use instance_view::FlowViewSource;
+pub use instance_view::{FlowViewContent, FlowViewSource};
 mod directional_selector;
 pub mod flow_hub;
 pub mod flow_view;
@@ -115,7 +115,7 @@ impl TuiNote {
 pub enum TuiControl {
     BrowseFlows(flow_hub::HubRequest),
     FocusFlow {
-        flow: atman_runtime::flow_store::FlowRef,
+        flow: control::ViewAddress,
         placement: control::FlowPlacement,
         reuse: Option<control::ViewBinding>,
     },
@@ -271,7 +271,7 @@ pub enum TuiCommand {
         result: Result<Box<flow_hub::FlowHubPage>, String>,
     },
     FocusFlow {
-        flow: atman_runtime::flow_store::FlowRef,
+        flow: control::ViewAddress,
         placement: control::FlowPlacement,
         attachment: Option<Box<TuiHandle>>,
     },

@@ -252,7 +252,7 @@ mod tests {
             binding: ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,
-                flow,
+                flow: flow.into(),
             },
             request_id: Uuid::now_v7(),
         };
@@ -325,7 +325,8 @@ mod tests {
                 flow: FlowRef {
                     session_id: Uuid::now_v7().into(),
                     instance_id: FlowInstanceId::now(),
-                },
+                }
+                .into(),
             },
             request_id: Uuid::now_v7(),
         };

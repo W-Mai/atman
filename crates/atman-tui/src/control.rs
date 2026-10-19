@@ -1,5 +1,6 @@
 //! View-bound host commands. A queued operation retains its original destination and reply channel.
 
+use atman_runtime::event_log::legacy::LegacyFlowKey;
 use atman_runtime::flow_store::FlowRef;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -14,12 +15,73 @@ pub enum FlowPlacement {
     Floating,
 }
 
+/// A display destination. Original history addresses carry no execution authority or persistent instance identity.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ViewAddress {
+    Instance(FlowRef),
+    Legacy { session: Uuid, owner: LegacyFlowKey },
+}
+
+impl From<FlowRef> for ViewAddress {
+    fn from(flow: FlowRef) -> Self {
+        Self::Instance(flow)
+    }
+}
+
+impl ViewAddress {
+    pub fn session_target(&self) -> crate::project_hub::SessionTarget {
+        match self {
+            Self::Instance(flow) => {
+                crate::project_hub::SessionTarget::Persistent(flow.session_id.0)
+            }
+            Self::Legacy { session, .. } => {
+                crate::project_hub::SessionTarget::Legacy(session.to_string())
+            }
+        }
+    }
+    pub fn directory(&self) -> crate::flow_hub::HubRequest {
+        match self {
+            Self::Instance(flow) => crate::flow_hub::HubRequest::Flows {
+                session: flow.session_id.0,
+                before: None,
+            },
+            Self::Legacy { session, .. } => crate::flow_hub::HubRequest::LegacyFlows {
+                session: *session,
+                after: None,
+            },
+        }
+    }
+    pub fn session_id(&self) -> Uuid {
+        match self {
+            Self::Instance(flow) => flow.session_id.0,
+            Self::Legacy { session, .. } => *session,
+        }
+    }
+    pub fn instance(&self) -> Option<&FlowRef> {
+        match self {
+            Self::Instance(flow) => Some(flow),
+            Self::Legacy { .. } => None,
+        }
+    }
+    pub fn label(&self) -> String {
+        match self {
+            Self::Instance(flow) => format!("Flow {}", flow.instance_id),
+            Self::Legacy { owner, .. } => match owner {
+                LegacyFlowKey::Default => "Default flow history".into(),
+                LegacyFlowKey::Agent { owner } => format!("Agent history · {owner}"),
+                LegacyFlowKey::SpawnedRun { run_id } => format!("Flow history · {run_id}"),
+                LegacyFlowKey::Unassigned => "Unassigned history".into(),
+            },
+        }
+    }
+}
+
 /// A client view's selection, independent of the instance's execution revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ViewBinding {
     pub view_id: Uuid,
     pub revision: u64,
-    pub flow: FlowRef,
+    pub flow: ViewAddress,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -162,14 +224,16 @@ mod tests {
             flow: FlowRef {
                 session_id: Uuid::new_v4().into(),
                 instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
-            },
+            }
+            .into(),
         };
         let b = ViewBinding {
             revision: 2,
             flow: FlowRef {
                 instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
-                ..a.flow.clone()
-            },
+                ..a.flow.instance().unwrap().clone()
+            }
+            .into(),
             ..a.clone()
         };
         let (first, mut first_replies) = ControlSender::for_flow(a.clone(), host.clone());

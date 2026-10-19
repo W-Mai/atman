@@ -53,7 +53,7 @@ pub enum LegacyOwner {
 }
 
 /// Stable grouping for retained history; unassigned reasons remain on individual records.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LegacyFlowKey {
     Default,

@@ -2495,7 +2495,7 @@ async fn cmd_repl_once(
                                 Ok(config) => {
                                     tui_projects::request(
                                         root,
-                                        current,
+                                        atman_tui::project_hub::SessionTarget::Legacy(current),
                                         project,
                                         Some(config),
                                         None,

@@ -3,11 +3,12 @@
 use std::{io, num::NonZeroUsize};
 
 use atman_runtime::flow_runtime::{FlowView, FlowWorker};
+use atman_runtime::projection::flow::LegacyFlowView;
 
 use crate::{
     ControlSender, TuiControl, TuiHandle,
     app::AppState,
-    control::{BoundControl, ViewBinding},
+    control::{BoundControl, ViewAddress, ViewBinding},
 };
 
 /// A live commit reader or a complete immutable archive, independent of surface placement.
@@ -17,26 +18,62 @@ pub enum FlowViewSource {
         view: Box<FlowView>,
         delivered: bool,
     },
+    Legacy {
+        view: Box<LegacyFlowView>,
+        delivered: bool,
+    },
+}
+
+pub enum FlowViewContent<'a> {
+    Instance(&'a FlowView),
+    Legacy(&'a LegacyFlowView),
+}
+
+impl<'a> From<&'a FlowView> for FlowViewContent<'a> {
+    fn from(view: &'a FlowView) -> Self {
+        Self::Instance(view)
+    }
+}
+
+impl crate::flow_view::FlowViewModel {
+    pub fn sync_content<'a>(
+        &mut self,
+        source: impl Into<FlowViewContent<'a>>,
+        output: Option<&atman_runtime::tools::tool_output::OutputStore>,
+    ) -> io::Result<bool> {
+        match source.into() {
+            FlowViewContent::Instance(view) => self.sync_view(view, output),
+            FlowViewContent::Legacy(view) => self.sync_legacy(view, output),
+        }
+    }
 }
 
 impl FlowViewSource {
-    pub async fn next(&mut self) -> io::Result<&FlowView> {
+    pub async fn next(&mut self) -> io::Result<FlowViewContent<'_>> {
         match self {
-            Self::Live(reader) => reader.next().await,
+            Self::Live(reader) => reader.next().await.map(FlowViewContent::Instance),
             Self::Archive { view, delivered } if !*delivered => {
                 *delivered = true;
-                Ok(view)
+                Ok(FlowViewContent::Instance(view))
             }
-            Self::Archive { .. } => std::future::pending().await,
+            Self::Legacy { view, delivered } if !*delivered => {
+                *delivered = true;
+                Ok(FlowViewContent::Legacy(view))
+            }
+            Self::Archive { .. } | Self::Legacy { .. } => std::future::pending().await,
         }
     }
 
-    pub async fn refresh(&mut self) -> io::Result<&FlowView> {
+    pub async fn refresh(&mut self) -> io::Result<FlowViewContent<'_>> {
         match self {
-            Self::Live(reader) => reader.refresh().await,
+            Self::Live(reader) => reader.refresh().await.map(FlowViewContent::Instance),
             Self::Archive { view, delivered } => {
                 *delivered = true;
-                Ok(view)
+                Ok(FlowViewContent::Instance(view))
+            }
+            Self::Legacy { view, delivered } => {
+                *delivered = true;
+                Ok(FlowViewContent::Legacy(view))
             }
         }
     }
@@ -49,8 +86,8 @@ impl TuiHandle {
         commands: tokio::sync::mpsc::UnboundedSender<BoundControl>,
         descriptor: &atman_runtime::flow_store::SessionDescriptor,
     ) -> io::Result<Self> {
-        if &binding.flow != view.transcript().flow()
-            || binding.flow.session_id.0 != descriptor.id
+        if binding.flow.instance() != Some(view.transcript().flow())
+            || binding.flow.session_id() != descriptor.id
             || !matches!(
                 view.transcript().content(),
                 Some(atman_runtime::flow_store::view::FlowContentSummary::History(_))
@@ -61,19 +98,68 @@ impl TuiHandle {
                 "archive view binding mismatch",
             ));
         }
-        let (sender, replies) = ControlSender::for_flow(binding, commands);
-        Ok(Self {
-            settings: crate::settings::SettingsSource::unavailable(
-                "Archived flow has no execution settings",
-            ),
-            session_id: descriptor.id.to_string(),
-            session_dir: String::new(),
-            session_name: Some(descriptor.title.clone()),
-            session_name_rx: None,
-            project_root: descriptor
+        Ok(Self::history_view(
+            FlowViewSource::Archive {
+                view: Box::new(view),
+                delivered: false,
+            },
+            binding,
+            commands,
+            Some(descriptor.title.clone()),
+            descriptor
                 .project
                 .as_ref()
                 .map(|project| project.root().display().to_string()),
+        ))
+    }
+
+    pub fn from_legacy(
+        view: LegacyFlowView,
+        binding: ViewBinding,
+        commands: tokio::sync::mpsc::UnboundedSender<BoundControl>,
+        title: Option<String>,
+        project: Option<String>,
+    ) -> io::Result<Self> {
+        let expected = ViewAddress::Legacy {
+            session: view.session_id(),
+            owner: view.owner().clone(),
+        };
+        if binding.flow != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "legacy view binding mismatch",
+            ));
+        }
+        Ok(Self::history_view(
+            FlowViewSource::Legacy {
+                view: Box::new(view),
+                delivered: false,
+            },
+            binding,
+            commands,
+            title,
+            project,
+        ))
+    }
+
+    fn history_view(
+        source: FlowViewSource,
+        binding: ViewBinding,
+        commands: tokio::sync::mpsc::UnboundedSender<BoundControl>,
+        title: Option<String>,
+        project: Option<String>,
+    ) -> Self {
+        let session_id = binding.flow.session_id().to_string();
+        let (sender, replies) = ControlSender::for_flow(binding, commands);
+        Self {
+            settings: crate::settings::SettingsSource::unavailable(
+                "Archived flow has no execution settings",
+            ),
+            session_id,
+            session_dir: String::new(),
+            session_name: title,
+            session_name_rx: None,
+            project_root: project,
             projects: Vec::new(),
             goal: None,
             stream_rx: None,
@@ -84,10 +170,7 @@ impl TuiHandle {
             control_tx: Some(sender),
             cmd_rx: None,
             control_reply_rx: Some(replies),
-            flow_view: Some(FlowViewSource::Archive {
-                view: Box::new(view),
-                delivered: false,
-            }),
+            flow_view: Some(source),
             live_output: None,
             initial_items: Vec::new(),
             goal_rx: None,
@@ -109,7 +192,7 @@ impl TuiHandle {
             task_registry: None,
             permission_client: None,
             boot_toasts: Vec::new(),
-        })
+        }
     }
 
     pub async fn from_flow(
@@ -118,7 +201,7 @@ impl TuiHandle {
         commands: tokio::sync::mpsc::UnboundedSender<BoundControl>,
         config: atman_runtime::config_hub::ConfigHub,
     ) -> io::Result<Self> {
-        if &binding.flow != worker.address() {
+        if binding.flow.instance() != Some(worker.address()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "view binding does not match flow",
@@ -231,10 +314,13 @@ impl AppState {
         self.mark_visual_dirty();
     }
 
-    pub(crate) fn sync_flow_view(&mut self, view: &FlowView) -> io::Result<()> {
+    pub(crate) fn sync_flow_view<'a>(
+        &mut self,
+        view: impl Into<FlowViewContent<'a>>,
+    ) -> io::Result<()> {
         let output = self.session.as_ref().map(|session| session.output_store());
         let before = self.items.revision_clock();
-        self.items.sync_view(view, output.as_deref())?;
+        self.items.sync_content(view, output.as_deref())?;
         self.streaming = self.items.has_live_output();
         for &index in self.items.updated_workflows() {
             let crate::app::OutputItem::WorkflowPanel { graph, .. } = &self.items[index] else {

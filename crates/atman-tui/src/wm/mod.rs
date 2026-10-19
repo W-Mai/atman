@@ -893,12 +893,8 @@ impl WindowManager {
             }
             PaletteEntryId::OpenFlowHub => {
                 if let Some(binding) = control_tx.and_then(|tx| tx.binding()) {
-                    app.open_flow_hub = Some(crate::flow_hub::Action::Load(
-                        crate::flow_hub::HubRequest::Flows {
-                            session: binding.flow.session_id.0,
-                            before: None,
-                        },
-                    ));
+                    app.open_flow_hub =
+                        Some(crate::flow_hub::Action::Load(binding.flow.directory()));
                 } else {
                     app.push_note(
                         "FlowHub requires a persistent session",

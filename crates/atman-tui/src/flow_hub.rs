@@ -1,5 +1,6 @@
 //! A paged instance directory. Reading and selecting rows never controls execution.
 
+#[cfg(test)]
 use atman_runtime::flow_store::FlowRef;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -22,8 +23,8 @@ pub(crate) enum Action {
     Close,
     Load(HubRequest),
     NewSession,
-    Focus(FlowRef),
-    Float(FlowRef),
+    Focus(crate::control::ViewAddress),
+    Float(crate::control::ViewAddress),
 }
 
 #[derive(Default)]
@@ -233,7 +234,7 @@ impl FlowHub {
         }
     }
 
-    pub fn render(&mut self, frame: &mut Frame, focused: &FlowRef) {
+    pub fn render(&mut self, frame: &mut Frame, focused: &crate::control::ViewAddress) {
         let t = crate::theme::theme();
         let area = frame.area();
         frame.render_widget(
@@ -432,6 +433,80 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn legacy_pages_preserve_addresses_across_keyboard_mouse_and_pagination() {
+        use crate::control::{ViewAddress, ViewBinding};
+        use atman_runtime::event_log::legacy::LegacyFlowKey;
+        let session = Uuid::now_v7();
+        let owner = LegacyFlowKey::Default;
+        let address = ViewAddress::Legacy {
+            session,
+            owner: owner.clone(),
+        };
+        let ticket = ControlTicket {
+            binding: ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: address.clone(),
+            },
+            request_id: Uuid::now_v7(),
+        };
+        let mut hub = FlowHub {
+            pending: Some(ticket.clone()),
+            ..Default::default()
+        };
+        hub.receive(
+            Some(&ticket),
+            Ok(Box::new(FlowHubPage::LegacyFlows {
+                session,
+                title: "Original history".into(),
+                flows: vec![owner.clone()],
+                next: Some(owner.clone()),
+                total: 51,
+            })),
+        );
+        assert!(matches!(hub.key(KeyAction::Submit), Action::Focus(target) if target == address));
+        assert!(
+            matches!(hub.key(KeyAction::ToggleLastTool), Action::Float(target) if target == address)
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
+        terminal.draw(|f| hub.render(f, &address)).unwrap();
+        assert!(
+            hub.page.as_ref().unwrap().rows(Some(&address))[0]
+                .title
+                .contains("focused")
+        );
+        for (rect, floating) in [(hub.hits[0].0, false), (hub.float_hits[0].0, true)] {
+            for row in rect.y..rect.bottom() {
+                let action = hub.mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x + 1,
+                    row,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                });
+                match action {
+                    Action::Focus(target) => {
+                        assert!(!floating);
+                        assert_eq!(target, address);
+                    }
+                    Action::Float(target) => {
+                        assert!(floating);
+                        assert_eq!(target, address);
+                    }
+                    _ => panic!("missing row action"),
+                }
+            }
+        }
+        assert!(
+            matches!(hub.key(KeyAction::PageDown), Action::Load(HubRequest::LegacyFlows {session:id, after:Some(key)}) if id==session && key==owner)
+        );
+        hub.pending = Some(ticket.clone());
+        hub.receive(Some(&ticket), Err("source unavailable".into()));
+        assert_eq!(hub.index, 0);
+        assert!(matches!(hub.key(KeyAction::Escape), Action::Close));
+    }
+
+    #[test]
     fn session_directory_and_flow_pages_share_navigation_and_ignore_stale_replies() {
         use atman_runtime::flow_runtime::catalog::{SessionPage, SessionSummary};
         let flow = FlowRef {
@@ -442,7 +517,7 @@ mod tests {
             binding: crate::control::ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,
-                flow: flow.clone(),
+                flow: flow.clone().into(),
             },
             request_id: Uuid::now_v7(),
         };
@@ -470,7 +545,9 @@ mod tests {
         assert_eq!(hub.index, 1);
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
-        terminal.draw(|f| hub.render(f, &flow)).unwrap();
+        terminal
+            .draw(|f| hub.render(f, &flow.clone().into()))
+            .unwrap();
         let rect = hub.hits[0].0;
         for row in rect.y..rect.bottom() {
             assert!(
@@ -542,7 +619,7 @@ mod tests {
             binding: crate::control::ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,
-                flow: flow.clone(),
+                flow: flow.clone().into(),
             },
             request_id: Uuid::now_v7(),
         };
@@ -588,22 +665,26 @@ mod tests {
         assert!(hub.page.is_some());
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
-        terminal.draw(|f| hub.render(f, &flow)).unwrap();
+        terminal
+            .draw(|f| hub.render(f, &flow.clone().into()))
+            .unwrap();
         let rect = hub.hits[0].0;
         assert_eq!(rect.height, 4);
-        assert!(matches!(hub.key(KeyAction::Submit), Action::Focus(target) if target == flow));
         assert!(
-            matches!(hub.key(KeyAction::ToggleLastTool), Action::Float(target) if target == flow)
+            matches!(hub.key(KeyAction::Submit), Action::Focus(target) if target.instance() == Some(&flow))
+        );
+        assert!(
+            matches!(hub.key(KeyAction::ToggleLastTool), Action::Float(target) if target.instance() == Some(&flow))
         );
         let window = hub.float_hits[0].0;
         for row in window.y..window.bottom() {
             assert!(
-                matches!(hub.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: window.x + 1, row, modifiers: crossterm::event::KeyModifiers::NONE }), Action::Float(target) if target == flow)
+                matches!(hub.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: window.x + 1, row, modifiers: crossterm::event::KeyModifiers::NONE }), Action::Float(target) if target.instance() == Some(&flow))
             );
         }
         for row in rect.y..rect.bottom() {
             assert!(
-                matches!(hub.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: rect.x + 1, row, modifiers: crossterm::event::KeyModifiers::NONE }), Action::Focus(target) if target == flow)
+                matches!(hub.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: rect.x + 1, row, modifiers: crossterm::event::KeyModifiers::NONE }), Action::Focus(target) if target.instance() == Some(&flow))
             );
         }
         hub.pending = Some(ticket.clone());
@@ -613,7 +694,7 @@ mod tests {
         assert_eq!(hub.pending.as_ref(), Some(&ticket));
         assert!(matches!(hub.key(KeyAction::Escape), Action::Close));
         let mut tiny = ratatui::Terminal::new(ratatui::backend::TestBackend::new(2, 2)).unwrap();
-        tiny.draw(|f| hub.render(f, &flow)).unwrap();
+        tiny.draw(|f| hub.render(f, &flow.clone().into())).unwrap();
         assert!(hub.hits.is_empty());
     }
 }

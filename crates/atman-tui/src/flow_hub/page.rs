@@ -1,8 +1,9 @@
+use atman_runtime::event_log::legacy::LegacyFlowKey;
 use atman_runtime::flow_runtime::{
     access::InstancePage,
     catalog::{CatalogStatus, SessionPage},
 };
-use atman_runtime::flow_store::{FlowInstanceId, FlowRef};
+use atman_runtime::flow_store::FlowInstanceId;
 use uuid::Uuid;
 
 use super::{Action, execution_label};
@@ -16,6 +17,10 @@ pub enum HubRequest {
         session: Uuid,
         before: Option<FlowInstanceId>,
     },
+    LegacyFlows {
+        session: Uuid,
+        after: Option<LegacyFlowKey>,
+    },
 }
 
 pub enum FlowHubPage {
@@ -25,6 +30,13 @@ pub enum FlowHubPage {
         title: String,
         default_flow: Option<FlowInstanceId>,
         page: InstancePage,
+    },
+    LegacyFlows {
+        session: Uuid,
+        title: String,
+        flows: Vec<LegacyFlowKey>,
+        next: Option<LegacyFlowKey>,
+        total: usize,
     },
 }
 
@@ -38,13 +50,13 @@ impl FlowHubPage {
     pub fn title(&self) -> &str {
         match self {
             Self::Sessions(_) => "Sessions",
-            Self::Flows { title, .. } => title,
+            Self::Flows { title, .. } | Self::LegacyFlows { title, .. } => title,
         }
     }
     pub fn unit(&self) -> &str {
         match self {
             Self::Sessions(_) => "sessions",
-            Self::Flows { .. } => "flows",
+            Self::Flows { .. } | Self::LegacyFlows { .. } => "flows",
         }
     }
     pub fn first(&self) -> HubRequest {
@@ -53,6 +65,10 @@ impl FlowHubPage {
             Self::Flows { session, .. } => HubRequest::Flows {
                 session: *session,
                 before: None,
+            },
+            Self::LegacyFlows { session, .. } => HubRequest::LegacyFlows {
+                session: *session,
+                after: None,
             },
         }
     }
@@ -67,16 +83,45 @@ impl FlowHubPage {
                     before: Some(before),
                 })
             }
+            Self::LegacyFlows { session, next, .. } => {
+                next.clone().map(|after| HubRequest::LegacyFlows {
+                    session: *session,
+                    after: Some(after),
+                })
+            }
         }
     }
     pub fn total(&self) -> usize {
         match self {
             Self::Sessions(page) => page.total,
             Self::Flows { page, .. } => page.total,
+            Self::LegacyFlows { total, .. } => *total,
         }
     }
-    pub(super) fn rows(&self, focused: Option<&FlowRef>) -> Vec<Row> {
+    pub(super) fn rows(&self, focused: Option<&crate::control::ViewAddress>) -> Vec<Row> {
         match self {
+            Self::LegacyFlows { session, flows, .. } => flows
+                .iter()
+                .map(|owner| {
+                    let address = crate::control::ViewAddress::Legacy {
+                        session: *session,
+                        owner: owner.clone(),
+                    };
+                    Row {
+                        title: format!(
+                            "{}{}",
+                            address.label(),
+                            if focused == Some(&address) {
+                                " · focused"
+                            } else {
+                                ""
+                            }
+                        ),
+                        detail: "Original history · read-only snapshot".into(),
+                        action: Action::Focus(address),
+                    }
+                })
+                .collect(),
             Self::Sessions(page) => page
                 .sessions
                 .iter()
@@ -119,13 +164,14 @@ impl FlowHubPage {
                 .instances
                 .iter()
                 .map(|row| {
-                    let marker = if Some(&row.address) == focused {
-                        " · focused"
-                    } else if default_flow.as_ref() == Some(&row.address.instance_id) {
-                        " · default"
-                    } else {
-                        ""
-                    };
+                    let marker =
+                        if Some(&row.address) == focused.and_then(|address| address.instance()) {
+                            " · focused"
+                        } else if default_flow.as_ref() == Some(&row.address.instance_id) {
+                            " · default"
+                        } else {
+                            ""
+                        };
                     let status = row.state.as_ref().map_or("Unavailable", |state| {
                         if row.loaded {
                             execution_label(state.state())
@@ -149,7 +195,7 @@ impl FlowHubPage {
                                 if paused { " · execution paused" } else { "" }
                             )
                         }),
-                        action: Action::Focus(row.address.clone()),
+                        action: Action::Focus(row.address.clone().into()),
                     }
                 })
                 .collect(),

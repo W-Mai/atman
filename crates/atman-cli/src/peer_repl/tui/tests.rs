@@ -5,6 +5,133 @@ use atman_runtime::flow_store::{
 };
 use atman_runtime::source_program::RevisionBundle;
 
+fn expect_instance(content: atman_tui::FlowViewContent<'_>) -> &FlowView {
+    match content {
+        atman_tui::FlowViewContent::Instance(view) => view,
+        atman_tui::FlowViewContent::Legacy(_) => panic!("expected an execution-backed view"),
+    }
+}
+
+#[tokio::test]
+async fn original_history_navigation_is_read_only_and_keeps_owner_and_reply_identity() {
+    use atman_runtime::event_log::legacy::LegacyFlowKey;
+    use atman_tui::{
+        control::FlowPlacement,
+        flow_hub::{FlowHubPage, HubRequest},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let id = Uuid::now_v7();
+    let directory = dir.path().join("sessions").join(id.to_string());
+    std::fs::create_dir_all(&directory).unwrap();
+    let run = Uuid::now_v7();
+    let child = Uuid::now_v7();
+    let source = directory.join("events.jsonl");
+    let bytes = [
+        serde_json::json!({"type":"flow_start", "run_id":run, "flow_name":"main", "spawned":false}),
+        serde_json::json!({"type":"flow_start", "run_id":child, "flow_name":"child", "parent_run_id":run, "spawned":true}),
+    ].into_iter().map(|event| format!("{event}\n")).collect::<String>();
+    std::fs::write(&source, &bytes).unwrap();
+    let host = RuntimeHost::default();
+    let (notices, _rx) = mpsc::unbounded_channel();
+    let scopes = scopes::Scopes::empty(
+        dir.path(),
+        host.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(notices)),
+    );
+    let page = scopes
+        .browse(HubRequest::LegacyFlows {
+            session: id,
+            after: None,
+        })
+        .await
+        .unwrap();
+    let FlowHubPage::LegacyFlows { flows, total, .. } = *page else {
+        panic!("wrong directory")
+    };
+    assert_eq!(total, 2);
+    assert!(flows.contains(&LegacyFlowKey::Default));
+    let owner = LegacyFlowKey::SpawnedRun {
+        run_id: child.to_string(),
+    };
+    assert!(flows.contains(&owner));
+    let forms = Arc::new(atman_runtime::session::FormRegistry::default());
+    let (commands, mut controls) = mpsc::unbounded_channel();
+    let mut handles = Vec::new();
+    for (owner, placement) in [
+        (LegacyFlowKey::Default, FlowPlacement::Main),
+        (owner, FlowPlacement::Floating),
+    ] {
+        let address = ViewAddress::Legacy { session: id, owner };
+        let Navigation::Focus {
+            mut handle,
+            service,
+            ..
+        } = scopes
+            .focus(address.clone(), placement, commands.clone(), forms.clone())
+            .await
+            .unwrap()
+        else {
+            panic!("missing view")
+        };
+        assert!(service.execution.is_none());
+        assert!(handle.session.is_none());
+        assert_eq!(service.binding.flow, address);
+        let mut model = atman_tui::flow_view::FlowViewModel::default();
+        let reader = handle.flow_view.as_mut().unwrap();
+        model
+            .sync_content(reader.next().await.unwrap(), None)
+            .unwrap();
+        assert!(model.is_archive());
+        assert!(model.flow().is_none());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), reader.next())
+                .await
+                .is_err()
+        );
+        assert!(
+            !model
+                .sync_content(reader.refresh().await.unwrap(), None)
+                .unwrap()
+        );
+        let ticket = handle
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .send_tracked(TuiControl::Submit(TuiSubmission {
+                text: "must remain a draft".into(),
+                images: vec![],
+                presentation: None,
+                reasoning: None,
+            }))
+            .unwrap()
+            .unwrap();
+        let control = controls.recv().await.unwrap();
+        assert_eq!(ticket.binding.flow, address);
+        handles.push((handle, ticket, control));
+    }
+    // Complete requests in reverse order after both views exist.
+    for (mut handle, ticket, control) in handles.into_iter().rev() {
+        reject_archive_control(control.command, &control.replies);
+        let reply = handle
+            .control_reply_rx
+            .as_mut()
+            .unwrap()
+            .recv()
+            .await
+            .unwrap();
+        assert_eq!(reply.ticket, ticket);
+        assert!(matches!(
+            reply.command,
+            TuiCommand::SubmissionResult { result: Err(_) }
+        ));
+    }
+    assert!(host.sessions().is_empty());
+    assert!(!dir.path().join("runtime-v1").exists());
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), bytes);
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+}
+
 #[tokio::test]
 async fn archive_navigation_uses_no_execution_owner_and_retains_bound_rejections() {
     let dir = tempfile::tempdir().unwrap();
@@ -65,7 +192,8 @@ async fn archive_navigation_uses_no_execution_owner_and_retains_bound_rejections
                 FlowRef {
                     session_id: id.into(),
                     instance_id: instance.clone(),
-                },
+                }
+                .into(),
                 placement,
                 commands.clone(),
                 forms.clone(),
@@ -82,7 +210,9 @@ async fn archive_navigation_uses_no_execution_owner_and_retains_bound_rejections
         assert!(!service.can_detach());
         let mut model = atman_tui::flow_view::FlowViewModel::default();
         let reader = handle.flow_view.as_mut().unwrap();
-        model.sync_view(reader.next().await.unwrap(), None).unwrap();
+        model
+            .sync_content(reader.next().await.unwrap(), None)
+            .unwrap();
         assert!(model.is_archive());
         assert!(model.iter().any(|item| matches!(item, atman_tui::app::OutputItem::SystemNote { text, .. } if text.contains("retained original line"))));
         assert!(
@@ -92,7 +222,7 @@ async fn archive_navigation_uses_no_execution_owner_and_retains_bound_rejections
         );
         assert!(
             !model
-                .sync_view(reader.refresh().await.unwrap(), None)
+                .sync_content(reader.refresh().await.unwrap(), None)
                 .unwrap()
         );
         let ticket = handle
@@ -221,7 +351,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     let scopes = Arc::new(scopes::Scopes::new(dir.path(), initial));
     let project_reply = crate::tui_projects::request(
         dir.path().to_owned(),
-        ids[0].to_string(),
+        atman_tui::project_hub::SessionTarget::Persistent(ids[0]),
         None,
         Some(ConfigHub::from_config_dir(dir.path().join("config-0"))),
         Some(&scopes.catalog),
@@ -286,7 +416,8 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
                 FlowRef {
                     session_id: id.into(),
                     instance_id: instance.clone(),
-                },
+                }
+                .into(),
                 FlowPlacement::Main,
                 commands.clone(),
                 forms.clone(),
@@ -581,7 +712,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     for (index, (handle, _)) in views.iter_mut().enumerate() {
         let mut model = atman_tui::flow_view::FlowViewModel::default();
         model
-            .sync_view(
+            .sync_content(
                 handle.flow_view.as_mut().unwrap().refresh().await.unwrap(),
                 None,
             )
@@ -655,7 +786,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     for (index, (handle, _)) in views.iter_mut().enumerate() {
         let mut model = atman_tui::flow_view::FlowViewModel::default();
         model
-            .sync_view(
+            .sync_content(
                 handle.flow_view.as_mut().unwrap().refresh().await.unwrap(),
                 None,
             )
@@ -790,7 +921,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
     host.wait_quiescent().await.unwrap();
     let mut model = atman_tui::flow_view::FlowViewModel::default();
     model
-        .sync_view(
+        .sync_content(
             handle.flow_view.as_mut().unwrap().refresh().await.unwrap(),
             None,
         )
@@ -1007,7 +1138,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     let binding = ViewBinding {
         view_id: Uuid::now_v7(),
         revision: 1,
-        flow: address.clone(),
+        flow: address.clone().into(),
     };
     let mut handle = TuiHandle::from_flow(&worker, binding, commands, attachment.config.clone())
         .await
@@ -1110,7 +1241,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
             replies.recv().await.unwrap().command,
             TuiCommand::SubmissionResult { result: Ok(()) }
         ));
-        let view = source.refresh().await.unwrap();
+        let view = expect_instance(source.refresh().await.unwrap());
         assert_eq!(
             view.snapshot()
                 .planning
@@ -1147,7 +1278,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         TuiCommand::SubmissionResult { result } => result.unwrap(),
         _ => panic!("missing submission acknowledgement"),
     }
-    let view = source.refresh().await.unwrap();
+    let view = expect_instance(source.refresh().await.unwrap());
     assert_eq!(view.snapshot().pending.len(), 1);
     assert_eq!(
         view.snapshot().pending[0].request.request_id,
@@ -1185,7 +1316,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     .unwrap();
     let mut model = atman_tui::flow_view::FlowViewModel::default();
     model
-        .sync_view(source.refresh().await.unwrap(), None)
+        .sync_content(source.refresh().await.unwrap(), None)
         .unwrap();
     assert!(model.snapshot().unwrap().pending.is_empty());
     assert!(model.iter().any(
@@ -1375,10 +1506,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         }
     ));
     assert_eq!(
-        source
-            .refresh()
-            .await
-            .unwrap()
+        expect_instance(source.refresh().await.unwrap())
             .snapshot()
             .status
             .goal
@@ -1450,7 +1578,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     .unwrap()
     .unwrap();
     model
-        .sync_view(source.refresh().await.unwrap(), None)
+        .sync_content(source.refresh().await.unwrap(), None)
         .unwrap();
     assert!(model.iter().any(|item| matches!(item, atman_tui::app::OutputItem::AssistantMd { md, .. } if md == "answered")));
     attachment.command(&worker, ":close").await.unwrap();

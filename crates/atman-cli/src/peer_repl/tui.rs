@@ -3,7 +3,7 @@
 use super::*;
 use atman_tui::{
     TuiCommand, TuiControl, TuiHandle, TuiSubmission,
-    control::{BoundControl, ControlReplies, ViewBinding},
+    control::{BoundControl, ControlReplies, ViewAddress, ViewBinding},
 };
 
 impl Attachment {
@@ -80,7 +80,7 @@ impl Attachment {
         let binding = ViewBinding {
             view_id: Uuid::now_v7(),
             revision: 1,
-            flow: worker.address().clone(),
+            flow: worker.address().clone().into(),
         };
         let mut handle =
             TuiHandle::from_flow(worker, binding.clone(), controls, self.config.clone()).await?;
@@ -109,7 +109,11 @@ impl Attachment {
             handle,
             ViewServices {
                 binding,
-                descriptor: self.descriptor.clone(),
+                project: self
+                    .descriptor
+                    .project
+                    .as_ref()
+                    .map(|project| project.root().to_owned()),
                 commands: commands.clone(),
                 execution: Some(ExecutionServices {
                     scope: self.clone(),
@@ -372,7 +376,7 @@ fn archive_attachment(
     let binding = ViewBinding {
         view_id: Uuid::now_v7(),
         revision: 1,
-        flow: view.transcript().flow().clone(),
+        flow: view.transcript().flow().clone().into(),
     };
     let mut handle = TuiHandle::from_archive(view, binding.clone(), controls, &descriptor)?;
     let (commands, rx) = mpsc::unbounded_channel();
@@ -381,7 +385,10 @@ fn archive_attachment(
         handle,
         ViewServices {
             binding,
-            descriptor,
+            project: descriptor
+                .project
+                .as_ref()
+                .map(|project| project.root().to_owned()),
             commands,
             execution: None,
         },
@@ -446,8 +453,8 @@ impl Workspace {
                     };
                     let result = match command {
                         TuiControl::Projects(request) => {
-                            let current = view.binding.flow.session_id.0.to_string();
-                            let project = view.descriptor.project.as_ref().map(|p| p.root().to_owned());
+                            let current = view.binding.flow.session_target();
+                            let project = view.project.clone();
                             let config = view.execution.as_ref().map(|execution| execution.scope.config.clone());
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
@@ -509,7 +516,7 @@ impl Workspace {
 
 struct ViewServices {
     binding: ViewBinding,
-    descriptor: SessionDescriptor,
+    project: Option<std::path::PathBuf>,
     commands: mpsc::UnboundedSender<TuiCommand>,
     execution: Option<ExecutionServices>,
 }
@@ -565,7 +572,7 @@ enum Navigation {
     Projects(Box<TuiCommand>),
     Catalog(Box<atman_tui::flow_hub::FlowHubPage>),
     Focus {
-        flow: atman_runtime::flow_store::FlowRef,
+        flow: ViewAddress,
         placement: atman_tui::control::FlowPlacement,
         handle: Box<TuiHandle>,
         service: Box<ViewServices>,
@@ -585,7 +592,7 @@ impl scopes::Scopes {
             .await?;
         let mut navigation = self
             .focus(
-                flow,
+                flow.into(),
                 atman_tui::control::FlowPlacement::Main,
                 controls,
                 forms,
@@ -649,16 +656,88 @@ impl scopes::Scopes {
                     page,
                 }
             }
+            HubRequest::LegacyFlows { session, after } => {
+                let root = self.root.clone();
+                tokio::task::spawn_blocking(move || -> Result<_> {
+                    let directory = root.join("sessions").join(session.to_string());
+                    let history = atman_runtime::projection::flow::LegacyHistory::inspect(
+                        &directory.join("events.jsonl"),
+                        session,
+                    )?;
+                    let all = history.flows();
+                    let eligible = all
+                        .iter()
+                        .filter(|owner| after.as_ref().is_none_or(|after| *owner > after))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let next =
+                        (eligible.len() > PAGE_SIZE).then(|| eligible[PAGE_SIZE - 1].clone());
+                    Ok(FlowHubPage::LegacyFlows {
+                        session,
+                        title: atman_runtime::session_meta::SessionMeta::load(&directory)
+                            .and_then(|meta| meta.title)
+                            .unwrap_or_else(|| format!("Legacy session {session}")),
+                        flows: eligible.into_iter().take(PAGE_SIZE).collect(),
+                        next,
+                        total: all.len(),
+                    })
+                })
+                .await??
+            }
         }))
     }
 
     async fn focus(
         &self,
-        flow: atman_runtime::flow_store::FlowRef,
+        address: ViewAddress,
         placement: atman_tui::control::FlowPlacement,
         controls: mpsc::UnboundedSender<BoundControl>,
         forms: Arc<atman_runtime::session::FormRegistry>,
     ) -> Result<Navigation> {
+        let flow = match &address {
+            ViewAddress::Instance(flow) => flow,
+            ViewAddress::Legacy { session, owner } => {
+                let (root, session, owner) = (self.root.clone(), *session, owner.clone());
+                let (view, meta) = tokio::task::spawn_blocking(move || -> Result<_> {
+                    let directory = root.join("sessions").join(session.to_string());
+                    let history = atman_runtime::projection::flow::LegacyHistory::inspect(
+                        &directory.join("events.jsonl"),
+                        session,
+                    )?;
+                    Ok((
+                        history.read_flow(&owner)?,
+                        atman_runtime::session_meta::SessionMeta::load(&directory),
+                    ))
+                })
+                .await??;
+                let project = meta.as_ref().and_then(|meta| meta.project_root.clone());
+                let binding = ViewBinding {
+                    view_id: Uuid::now_v7(),
+                    revision: 1,
+                    flow: address.clone(),
+                };
+                let mut handle = TuiHandle::from_legacy(
+                    view,
+                    binding.clone(),
+                    controls,
+                    meta.and_then(|meta| meta.title),
+                    project.as_ref().map(|path| path.display().to_string()),
+                )?;
+                let (commands, rx) = mpsc::unbounded_channel();
+                handle.cmd_rx = Some(rx);
+                return Ok(Navigation::Focus {
+                    flow: address,
+                    placement,
+                    handle: Box::new(handle),
+                    service: Box::new(ViewServices {
+                        binding,
+                        project,
+                        commands,
+                        execution: None,
+                    }),
+                });
+            }
+        };
         if let Some((view, descriptor)) = archived_selection(
             &self.root,
             flow.session_id.0,
@@ -668,7 +747,7 @@ impl scopes::Scopes {
         {
             let (handle, service) = archive_attachment(view, descriptor, controls)?;
             return Ok(Navigation::Focus {
-                flow,
+                flow: address,
                 placement,
                 handle: Box::new(handle),
                 service: Box::new(service),
@@ -682,7 +761,7 @@ impl scopes::Scopes {
         let worker = scope.session.open_flow(flow.instance_id.clone()).await?;
         let (handle, service, _) = scope.prepare_tui_view(&worker, controls, &forms).await?;
         Ok(Navigation::Focus {
-            flow,
+            flow: address,
             placement,
             handle: Box::new(handle),
             service: Box::new(service),

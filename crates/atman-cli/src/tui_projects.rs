@@ -16,7 +16,7 @@ use atman_tui::project_hub::{
 
 pub(crate) async fn request(
     root: PathBuf,
-    current: String,
+    current: SessionTarget,
     project: Option<PathBuf>,
     config: Option<ConfigHub>,
     native: Option<&SessionCatalog>,
@@ -52,7 +52,7 @@ pub(crate) async fn request(
 
 async fn directory(
     root: PathBuf,
-    current: String,
+    current: SessionTarget,
     config: Option<ConfigHub>,
     native: Option<&SessionCatalog>,
 ) -> Result<ProjectDirectory> {
@@ -81,6 +81,10 @@ async fn directory(
         })
     })
     .await??;
+    let (legacy_root, legacy_current) = (root.clone(), current.clone());
+    directory.sessions =
+        tokio::task::spawn_blocking(move || legacy_sessions(&legacy_root, &legacy_current))
+            .await??;
     if let Some(catalog) = native {
         for id in catalog.ids().await? {
             let view = catalog.overview(id).await?;
@@ -117,12 +121,9 @@ async fn directory(
                     ),
                     updated_at: activity_label(activity),
                     goal: view.default_goal,
-                    is_current: id.to_string() == current,
+                    is_current: SessionTarget::Persistent(id) == current,
                 });
         }
-    } else {
-        directory.sessions =
-            tokio::task::spawn_blocking(move || legacy_sessions(&root, &current)).await??;
     }
     for sessions in directory.sessions.values_mut() {
         sessions.sort_by(|a, b| {
@@ -144,7 +145,7 @@ fn activity_label(time: Option<std::time::SystemTime>) -> String {
 
 fn legacy_sessions(
     root: &Path,
-    current: &str,
+    current: &SessionTarget,
 ) -> Result<std::collections::HashMap<String, Vec<ProjectSession>>> {
     let mut grouped: std::collections::HashMap<String, Vec<ProjectSession>> = Default::default();
     let entries = match std::fs::read_dir(root.join("sessions")) {
@@ -164,7 +165,7 @@ fn legacy_sessions(
         let Some(fingerprint) = meta.project_fingerprint else {
             continue;
         };
-        let stats = SessionStats::load_or_rebuild(&path)?;
+        let stats = SessionStats::inspect(&path)?;
         if stats.user_message_count == 0 {
             continue;
         }
@@ -186,7 +187,7 @@ fn legacy_sessions(
                 activity: format!("{} messages", stats.message_count),
                 updated_at: activity_label(activity),
                 goal: atman_runtime::memory::goal::GoalStore::at(&path).get().ok(),
-                is_current: id == current,
+                is_current: &SessionTarget::Legacy(id) == current,
             });
     }
     Ok(grouped)
@@ -195,6 +196,61 @@ fn legacy_sessions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mixed_directory_keeps_same_uuid_sources_distinct_without_writing_history() {
+        let data = tempfile::tempdir().unwrap();
+        let config = ConfigHub::from_config_dir(data.path().join("config"));
+        let project = data.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let context =
+            atman_runtime::storage::ProjectContext::resolve(&config, &project, data.path())
+                .unwrap();
+        let id = uuid::Uuid::now_v7();
+        let store = RuntimeStore::open(data.path()).unwrap();
+        let _owner = store
+            .create_session(atman_runtime::flow_store::SessionDescriptor {
+                id,
+                title: "Persistent".into(),
+                project: Some(context),
+                configuration: Default::default(),
+            })
+            .unwrap();
+        let legacy = data.path().join("sessions").join(id.to_string());
+        std::fs::create_dir_all(&legacy).unwrap();
+        let fingerprint = fingerprint_from_root(&project);
+        SessionMeta {
+            project_root: Some(project),
+            project_fingerprint: Some(fingerprint.clone()),
+            title: Some("Original".into()),
+            ..Default::default()
+        }
+        .save(&legacy)
+        .unwrap();
+        std::fs::write(legacy.join("events.jsonl"), "{\"type\":\"user_msg\"}\n").unwrap();
+        let catalog = SessionCatalog::new(None, Some(data.path().to_owned()));
+        for current in [
+            SessionTarget::Legacy(id.to_string()),
+            SessionTarget::Persistent(id),
+        ] {
+            let directory = directory(
+                data.path().to_owned(),
+                current.clone(),
+                None,
+                Some(&catalog),
+            )
+            .await
+            .unwrap();
+            let sessions = &directory.sessions[&fingerprint];
+            assert_eq!(sessions.len(), 2);
+            assert_eq!(sessions.iter().filter(|row| row.is_current).count(), 1);
+            assert_eq!(
+                sessions.iter().find(|row| row.is_current).unwrap().target,
+                current
+            );
+            assert_eq!(std::fs::read_dir(&legacy).unwrap().count(), 2);
+        }
+    }
 
     #[tokio::test]
     async fn project_requests_preserve_legacy_targets_and_report_mutation_failures() {
@@ -219,7 +275,7 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         let reply = request(
             data.path().to_owned(),
-            "legacy-saved".into(),
+            SessionTarget::Legacy("legacy-saved".into()),
             Some(project.clone()),
             Some(config.clone()),
             None,
@@ -243,7 +299,7 @@ mod tests {
         assert!(directory.details[&fingerprint].scope.is_none());
         let failed = request(
             data.path().to_owned(),
-            "legacy-saved".into(),
+            SessionTarget::Legacy("legacy-saved".into()),
             Some(project),
             Some(config),
             None,

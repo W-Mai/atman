@@ -1814,7 +1814,7 @@ pub(crate) fn request_startup_session(
             request_session_switch(app, control_tx, sid);
         }
         Some(crate::app::StartupSessionTarget::Flow(flow)) => {
-            app.open_flow_hub = Some(crate::flow_hub::Action::Focus(flow));
+            app.open_flow_hub = Some(crate::flow_hub::Action::Focus(flow.into()));
         }
         None => {}
     }
@@ -1828,6 +1828,9 @@ pub(crate) fn request_session_switch(
     control_tx: Option<&crate::ControlSender>,
     sid: String,
 ) {
+    if open_legacy_directory(app, control_tx, &sid) {
+        return;
+    }
     let intro = match app.startup_card.as_ref() {
         Some(crate::app::StartupCard {
             version,
@@ -1871,6 +1874,9 @@ pub(crate) fn request_project_session_switch(
     sid: String,
     project_root: std::path::PathBuf,
 ) {
+    if open_legacy_directory(app, control_tx, &sid) {
+        return;
+    }
     let intro = crate::app::StartupIntro {
         started_at: std::time::Instant::now(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1892,8 +1898,63 @@ pub(crate) fn request_project_session_switch(
     app.should_quit = true;
 }
 
+fn open_legacy_directory(
+    app: &mut AppState,
+    control_tx: Option<&crate::ControlSender>,
+    sid: &str,
+) -> bool {
+    if control_tx.and_then(|tx| tx.binding()).is_none() {
+        return false;
+    }
+    match uuid::Uuid::parse_str(sid) {
+        Ok(session) => {
+            app.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                crate::flow_hub::HubRequest::LegacyFlows {
+                    session,
+                    after: None,
+                },
+            ))
+        }
+        Err(error) => app.push_note(
+            format!("Invalid legacy session: {error}"),
+            app::NoteLevel::Error,
+        ),
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bound_legacy_navigation_does_not_exit_or_send_execution_commands() {
+        use crate::control::{ViewAddress, ViewBinding};
+        use atman_runtime::event_log::legacy::LegacyFlowKey;
+        let id = uuid::Uuid::now_v7();
+        let mut app = AppState::new("current".into(), None);
+        app.pending_quote = Some("retained quote".into());
+        let (host, mut incoming) = mpsc::unbounded_channel();
+        let (sender, _replies) = crate::ControlSender::for_flow(
+            ViewBinding {
+                view_id: uuid::Uuid::now_v7(),
+                revision: 1,
+                flow: ViewAddress::Legacy {
+                    session: id,
+                    owner: LegacyFlowKey::Default,
+                },
+            },
+            host,
+        );
+        request_session_switch(&mut app, Some(&sender), id.to_string());
+        assert!(
+            matches!(app.open_flow_hub.take(),Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::LegacyFlows {session,..})) if session==id)
+        );
+        request_session_switch(&mut app, Some(&sender), "invalid".into());
+        assert!(app.open_flow_hub.is_none());
+        assert!(!app.should_quit);
+        assert_eq!(app.pending_quote.as_deref(), Some("retained quote"));
+        assert!(incoming.try_recv().is_err());
+    }
+
     use super::*;
     use crate::history_search_modal::extract_event_text;
 
@@ -2093,7 +2154,7 @@ mod tests {
         press_startup_key(&mut state, &mut editor, KeyAction::BackTab, Some(&tx));
         press_startup_key(&mut state, &mut editor, KeyAction::Submit, Some(&tx));
         assert!(
-            matches!(&state.open_flow_hub, Some(crate::flow_hub::Action::Focus(flow)) if *flow == target)
+            matches!(&state.open_flow_hub, Some(crate::flow_hub::Action::Focus(flow)) if flow.instance() == Some(&target))
         );
         assert!(!state.should_quit);
         assert!(state.startup_card.is_some());
@@ -2459,7 +2520,8 @@ mod tests {
                     flow: FlowRef {
                         session_id: uuid::Uuid::now_v7().into(),
                         instance_id: FlowInstanceId::now(),
-                    },
+                    }
+                    .into(),
                 },
                 host,
             );
