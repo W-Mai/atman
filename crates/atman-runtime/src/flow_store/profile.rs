@@ -14,6 +14,12 @@ use crate::event_log::journal::{CommitReceipt, Journal, RecoveredTail, private_f
 
 const VERSION: u32 = 1;
 
+mod controls;
+pub use controls::{
+    ControlBatchItem, ControlBatchRecord, ControlBatchRequest, ControlBatchUpdate, ControlProgress,
+    ControlProgressRecord,
+};
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ManagementBinding {
     pub session: SessionDescriptor,
@@ -102,6 +108,8 @@ enum Fact {
     BootstrapPrepared(SessionDescriptor),
     BootstrapBound,
     ManagementReplaced(ReplaceManagement),
+    ControlsSubmitted(ControlBatchRequest),
+    ControlProgressed(ControlBatchUpdate),
 }
 
 #[derive(Clone)]
@@ -109,6 +117,7 @@ struct Projection {
     snapshot: ProfileSnapshot,
     prepared: Option<SessionDescriptor>,
     requests: BTreeMap<Uuid, (ReplaceManagement, CommitReceipt)>,
+    controls: controls::ControlBatches,
 }
 
 impl Projection {
@@ -132,6 +141,7 @@ impl Projection {
                         },
                         prepared: None,
                         requests: BTreeMap::new(),
+                        controls: Default::default(),
                     });
                 }
                 (Some(state), fact) => state.apply(fact, receipt.clone())?,
@@ -143,6 +153,8 @@ impl Projection {
 
     fn apply(&mut self, fact: Fact, receipt: CommitReceipt) -> io::Result<()> {
         match fact {
+            Fact::ControlsSubmitted(request) => self.controls.submit(request, receipt.clone())?,
+            Fact::ControlProgressed(update) => self.controls.advance(update, receipt.clone())?,
             Fact::BootstrapPrepared(descriptor)
                 if self.prepared.is_none() && self.snapshot.management.is_none() =>
             {

@@ -6,6 +6,247 @@ use atman_runtime::flow_store::{
 use atman_runtime::source_program::RevisionBundle;
 use uuid::Uuid;
 
+#[test]
+fn control_batches_reconcile_partial_delivery_and_preserve_terminal_receipts() {
+    use atman_runtime::flow_store::{
+        FlowTransition,
+        control::{ControlAction, ControlRequest},
+        inbox::SenderIdentity,
+        profile::{ControlBatchRequest, ControlBatchUpdate, ControlProgress},
+    };
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let (a_session, a) = session(&root);
+    let (b_session, b) = session(&root);
+    let mut first = a_session.open_flow(&a.instance_id).unwrap();
+    let mut second = b_session.open_flow(&b.instance_id).unwrap();
+    for flow in [&mut first, &mut second] {
+        flow.transition(flow.state().revision(), FlowTransition::Activated)
+            .unwrap();
+    }
+    let sender = SenderIdentity::User(Uuid::new_v4());
+    let key = Uuid::new_v4().into();
+    let commands = [&first, &second]
+        .into_iter()
+        .zip([ControlAction::Pause, ControlAction::Close])
+        .map(|(flow, action)| ControlRequest {
+            id: Uuid::new_v4(),
+            sender: sender.clone(),
+            target: flow.state().address().clone(),
+            expected_revision: flow.state().revision(),
+            pause_key: key,
+            action,
+        })
+        .collect();
+    let request = ControlBatchRequest {
+        id: Uuid::new_v4(),
+        sender: sender.clone(),
+        commands,
+    };
+    let progress = |target: FlowRef, progress| ControlBatchUpdate {
+        batch_id: request.id,
+        sender: sender.clone(),
+        target,
+        progress,
+    };
+    let mut profile = ProfileStore::open(&root).unwrap();
+    let batch = profile.submit_controls(request.clone()).unwrap();
+    assert!(batch.items.iter().all(|item| item.history.is_empty()));
+    assert!(
+        profile.snapshot().management.is_none(),
+        "host controls must not bootstrap a management conversation"
+    );
+    let paused = first.control(request.commands[0].clone()).unwrap();
+    let accepted_a = progress(
+        a.clone(),
+        ControlProgress::Accepted {
+            receipt: paused.receipt.clone(),
+        },
+    );
+    let a_receipt = profile.advance_control(accepted_a.clone()).unwrap();
+    profile
+        .advance_control(progress(
+            a.clone(),
+            ControlProgress::Applied {
+                receipt: paused.receipt.clone(),
+            },
+        ))
+        .unwrap();
+
+    // The target commits closure, but the host loses its acknowledgement before recording it.
+    let closing = second.control(request.commands[1].clone()).unwrap();
+    drop(profile);
+    drop(second);
+    drop(first);
+    let mut profile = ProfileStore::open(&root).unwrap();
+    assert_eq!(profile.pending_controls().len(), 1);
+    let pending = profile.pending_controls()[0];
+    assert_eq!(pending.submitted, batch.submitted);
+    assert!(pending.items[0].is_terminal());
+    assert!(pending.items[1].history.is_empty());
+    let mut second = b_session.open_flow(&b.instance_id).unwrap();
+    assert_eq!(
+        second.control(request.commands[1].clone()).unwrap(),
+        closing
+    );
+    let accepted_b = progress(
+        b.clone(),
+        ControlProgress::Accepted {
+            receipt: closing.receipt,
+        },
+    );
+    let b_receipt = profile.advance_control(accepted_b.clone()).unwrap();
+    assert!(!profile.pending_controls()[0].items[1].is_terminal());
+    let closed = second
+        .transition(second.state().revision(), FlowTransition::Closed)
+        .unwrap();
+    profile
+        .advance_control(progress(b, ControlProgress::Applied { receipt: closed }))
+        .unwrap();
+    let cursor = profile.snapshot().cursor.clone();
+    assert_eq!(profile.advance_control(accepted_a).unwrap(), a_receipt);
+    assert_eq!(profile.advance_control(accepted_b).unwrap(), b_receipt);
+    assert_eq!(profile.snapshot().cursor, cursor);
+    assert!(profile.pending_controls().is_empty());
+    let finished = profile.submit_controls(request.clone()).unwrap();
+    assert_eq!(finished.submitted, batch.submitted);
+    assert!(finished.items.iter().all(|item| item.is_terminal()));
+    drop(profile);
+    let mut profile = ProfileStore::open(&root).unwrap();
+    assert_eq!(profile.submit_controls(request).unwrap(), finished);
+    assert_eq!(profile.snapshot().cursor, cursor);
+}
+
+#[test]
+fn control_batches_reject_conflicts_and_keep_independent_target_failures() {
+    use atman_runtime::flow_store::{
+        control::{ControlAction, ControlRequest},
+        inbox::SenderIdentity,
+        profile::{ControlBatchRequest, ControlBatchUpdate, ControlProgress},
+    };
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let (_a_session, a) = session(&root);
+    let (_b_session, b) = session(&root);
+    let sender = SenderIdentity::User(Uuid::new_v4());
+    let request = ControlBatchRequest {
+        id: Uuid::new_v4(),
+        sender: sender.clone(),
+        commands: [a.clone(), b.clone()]
+            .into_iter()
+            .map(|target| ControlRequest {
+                id: Uuid::new_v4(),
+                sender: sender.clone(),
+                target,
+                expected_revision: 1,
+                pause_key: Uuid::new_v4().into(),
+                action: ControlAction::Pause,
+            })
+            .collect(),
+    };
+    let mut profile = ProfileStore::open(&root).unwrap();
+    let before = profile.snapshot().cursor.clone();
+    let mut duplicate = request.clone();
+    duplicate.commands.push(duplicate.commands[0].clone());
+    assert!(profile.submit_controls(duplicate).is_err());
+    let mut wrong_actor = request.clone();
+    wrong_actor.commands[0].sender = SenderIdentity::User(Uuid::new_v4());
+    assert!(profile.submit_controls(wrong_actor).is_err());
+    let mut nil_actor = request.clone();
+    nil_actor.sender = SenderIdentity::User(Uuid::nil());
+    for command in &mut nil_actor.commands {
+        command.sender = nil_actor.sender.clone();
+    }
+    assert!(profile.submit_controls(nil_actor).is_err());
+    assert_eq!(profile.snapshot().cursor, before);
+    profile.submit_controls(request.clone()).unwrap();
+    let mut conflict = request.clone();
+    conflict.commands[0].action = ControlAction::Close;
+    assert!(profile.submit_controls(conflict).is_err());
+    let mut update = ControlBatchUpdate {
+        batch_id: request.id,
+        sender: sender.clone(),
+        target: a,
+        progress: ControlProgress::Failed {
+            reason: "target revision changed".into(),
+        },
+    };
+    let failed = profile.advance_control(update.clone()).unwrap();
+    let saved = profile.control_batch(&sender, request.id).unwrap().clone();
+    assert!(saved.items[0].is_terminal());
+    assert!(!saved.items[1].is_terminal());
+    update.progress = ControlProgress::Failed {
+        reason: "different error".into(),
+    };
+    assert!(profile.advance_control(update).is_err());
+    let mut update = ControlBatchUpdate {
+        batch_id: request.id,
+        sender: sender.clone(),
+        target: b.clone(),
+        progress: ControlProgress::Applied {
+            receipt: before.clone(),
+        },
+    };
+    assert!(profile.advance_control(update.clone()).is_err());
+    let mut target_receipt = before;
+    target_receipt.journal_id = b.instance_id.0.0;
+    update.progress = ControlProgress::Applied {
+        receipt: target_receipt.clone(),
+    };
+    assert!(
+        profile.advance_control(update.clone()).is_err(),
+        "application needs recorded target acceptance"
+    );
+    update.progress = ControlProgress::Accepted {
+        receipt: target_receipt,
+    };
+    profile.advance_control(update.clone()).unwrap();
+    update.progress = ControlProgress::Failed {
+        reason: "cleanup failed".into(),
+    };
+    profile.advance_control(update).unwrap();
+    let finished = profile.control_batch(&sender, request.id).unwrap().clone();
+    assert_eq!(finished.items[0], saved.items[0]);
+    assert_eq!(
+        finished.items[1].history.len(),
+        2,
+        "failure retains accepted effects"
+    );
+    assert!(profile.pending_controls().is_empty());
+    assert_eq!(finished.items[0].history[0].recorded, failed);
+    let cursor = profile.snapshot().cursor.clone();
+    let journal = root.root().join("host/events.jsonl");
+    let bytes = std::fs::read(&journal).unwrap();
+    assert!(
+        profile
+            .submit_controls(ControlBatchRequest {
+                commands: Vec::new(),
+                ..request.clone()
+            })
+            .is_err()
+    );
+    assert_eq!(profile.snapshot().cursor, cursor);
+    assert_eq!(std::fs::read(journal).unwrap(), bytes);
+    drop(profile);
+    let mut profile = ProfileStore::open(&root).unwrap();
+    assert_eq!(
+        profile.control_batch(&sender, finished.id).unwrap(),
+        &finished
+    );
+    let mut other_actor = request;
+    other_actor.sender = SenderIdentity::User(Uuid::new_v4());
+    for command in &mut other_actor.commands {
+        command.sender = other_actor.sender.clone();
+    }
+    let separate = profile.submit_controls(other_actor).unwrap();
+    assert_eq!(separate.id, finished.id);
+    assert_eq!(profile.pending_controls(), [&separate]);
+    assert_eq!(
+        profile.control_batch(&sender, finished.id).unwrap(),
+        &finished
+    );
+}
+
 fn session(root: &RuntimeStore) -> (atman_runtime::flow_store::SessionStore, FlowRef) {
     let mut session = root
         .create_session(SessionDescriptor {
