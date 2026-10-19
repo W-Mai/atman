@@ -344,8 +344,12 @@ fn remove_file_if_exists(path: &Path) -> Result<()> {
 }
 
 fn load_catalog(path: &Path) -> Result<ProjectCatalog> {
-    let Ok(bytes) = std::fs::read(path) else {
-        return Ok(ProjectCatalog::default());
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ProjectCatalog::default());
+        }
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
     serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
 }
@@ -430,6 +434,22 @@ mod tests {
     use chrono::TimeZone;
     use tempfile::TempDir;
     use uuid::Uuid;
+
+    #[test]
+    fn catalog_reads_distinguish_missing_data_from_failures_without_creating_files() {
+        let dir = TempDir::new().unwrap();
+        let store = ProjectCatalogStore::new(dir.path());
+        assert!(store.load().unwrap().projects.is_empty());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        let path = store.catalog_path();
+        std::fs::create_dir(&path).unwrap();
+        assert!(store.load().unwrap_err().to_string().contains("read"));
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, "invalid").unwrap();
+        assert!(store.load().unwrap_err().to_string().contains("parse"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "invalid");
+        assert!(!dir.path().join(LOCK_FILENAME).exists());
+    }
 
     fn persistent_session(data: &Path, project: &Path) -> (SessionStore, FlowStore) {
         let root = RuntimeStore::open(data).unwrap();

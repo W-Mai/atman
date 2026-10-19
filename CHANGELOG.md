@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- **Project catalog errors** — Unreadable project catalogs report their read failure instead of appearing empty. Missing catalogs remain an empty directory without creating files.
+
 - **Partial Bash output** — Output without a newline reaches watchers and live views before process exit. Fragment framing preserves matches across reads, UTF-8 characters, stdout/stderr ordering, and bounded retained output.
 
 - **Session restore visibility** — Restored user turns dismiss the welcome overlay through the shared flow view projection. Startup greetings alone retain the new-session welcome page.
