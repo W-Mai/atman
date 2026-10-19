@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     io,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 
 use chrono::{DateTime, Utc};
@@ -12,12 +12,14 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use super::{Command, FlowWorker, request};
+use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::{
     FlowStore, invalid,
     process_watch::{
         ProcessMatch, ProcessReport, ProcessSignal, ProcessSource, ProcessWatch,
         ProcessWatchRecord, ProcessWatchStatus,
     },
+    watch_edit::WatchDefinition,
 };
 use crate::task_registry::{TaskFilter, TaskKind, TaskStatus};
 use crate::tools::{
@@ -27,6 +29,7 @@ use crate::tools::{
 use crate::watch::OutputCursor;
 
 type Authorize = Box<dyn FnOnce() -> io::Result<()> + Send>;
+type RegistrationResult = (ProcessWatchRecord, Option<CommitReceipt>);
 
 /// A live resource-directory entry. Registration rechecks the selected incarnation; listing does not subscribe to output or claim execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,8 +41,9 @@ pub struct ProcessWatchSource {
 
 struct Registration {
     watch: ProcessWatch,
+    expected: Option<WatchDefinition>,
     authorize: Authorize,
-    reply: oneshot::Sender<io::Result<ProcessWatchRecord>>,
+    reply: oneshot::Sender<io::Result<RegistrationResult>>,
 }
 
 struct Producer {
@@ -224,6 +228,7 @@ struct Observation {
     source: ProcessSource,
     feed: Feed,
     commands: mpsc::WeakSender<Command>,
+    resources: Weak<super::resources::InstanceResources>,
     watches: BTreeMap<Uuid, (ProcessWatch, Matcher)>,
     position: u64,
     ended: bool,
@@ -290,27 +295,64 @@ impl Observation {
     async fn register(&mut self, registration: Registration) -> io::Result<()> {
         let Registration {
             watch,
+            expected,
             authorize,
             reply,
         } = registration;
         // Capture the initial replaceable state before acknowledging registration. The feed was subscribed before this snapshot.
         let snapshot = self.feed.snapshot();
+        let mut matcher = Matcher::default();
+        if expected.is_some() {
+            if !snapshot.running() {
+                let _ = reply.send(Err(invalid("replacement process is no longer running")));
+                return Ok(());
+            }
+            // Editing starts at the captured live state, without replaying retained output.
+            match &snapshot {
+                Snapshot::Bash { bytes, base, .. } => {
+                    matcher.cursor = Some(OutputCursor::at(base + bytes.len()));
+                }
+                Snapshot::Terminal { .. } => {
+                    matcher.matches(&watch, &snapshot)?;
+                }
+            }
+        }
         let requested = watch.clone();
         let position = self.position;
+        let resources = self.resources.clone();
         let result = self
             .store(move |store| {
                 authorize()?;
-                store.register_process_watch(requested, position)
+                if let Some(expected) = expected {
+                    let receipt =
+                        store.replace_process_watch(expected, requested.clone(), position)?;
+                    if let Some(resources) = resources.upgrade() {
+                        resources.observers.refresh();
+                    }
+                    let record = store
+                        .process_watches()
+                        .find(|record| record.watch.id == requested.id)
+                        .cloned()
+                        .ok_or_else(|| invalid("replacement registration was not committed"))?;
+                    Ok((record, Some(receipt)))
+                } else {
+                    store
+                        .register_process_watch(requested, position)
+                        .map(|record| (record, None))
+                }
             })
             .await;
         match result {
-            Ok(record) => {
+            Ok((record, receipt)) => {
+                if receipt.is_some() {
+                    self.refresh().await?;
+                }
                 if record.status == ProcessWatchStatus::Active {
                     self.watches
                         .entry(watch.id)
-                        .or_insert_with(|| (watch, Matcher::default()));
+                        .or_insert_with(|| (watch, matcher));
                 }
-                let _ = reply.send(Ok(record));
+                let _ = reply.send(Ok((record, receipt)));
                 self.scan(snapshot).await
             }
             Err(error) => {
@@ -449,8 +491,33 @@ impl FlowWorker {
             ));
         }
         let owner = self.address.clone();
-        self.register_process_feed(watch, feed, Box::new(move || authorize_owner(&owner)))
+        self.register_process_feed(watch, feed, None, Box::new(move || authorize_owner(&owner)))
             .await
+            .map(|(record, _)| record)
+    }
+
+    pub(super) async fn replace_process_source(
+        &self,
+        expected: WatchDefinition,
+        watch: ProcessWatch,
+        authorize_owner: impl Fn(&crate::flow_store::FlowRef) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<CommitReceipt> {
+        let (source, feed) = self.process_feed(watch.source.handle())?;
+        if source != watch.source {
+            return Err(invalid(
+                "selected process incarnation is no longer available; refresh the resource list",
+            ));
+        }
+        let owner = self.address.clone();
+        self.register_process_feed(
+            watch,
+            feed,
+            Some(expected),
+            Box::new(move || authorize_owner(&owner)),
+        )
+        .await?
+        .1
+        .ok_or_else(|| invalid("process watcher replacement was not committed"))
     }
 
     /// Register observation of a live process owned by this instance without claiming a turn. Owner authorization runs before resource lookup and again at registration; registration captures the resource incarnation and initial source position before acknowledgement.
@@ -477,9 +544,11 @@ impl FlowWorker {
                 expires_at,
             },
             feed,
+            None,
             authorize,
         )
         .await
+        .map(|(record, _)| record)
     }
 
     fn process_feed(&self, handle: &str) -> io::Result<(ProcessSource, Feed)> {
@@ -541,8 +610,9 @@ impl FlowWorker {
         &self,
         watch: ProcessWatch,
         feed: Feed,
+        expected: Option<WatchDefinition>,
         authorize: Authorize,
-    ) -> io::Result<ProcessWatchRecord> {
+    ) -> io::Result<RegistrationResult> {
         let source = watch.source.clone();
         let sender = {
             let mut producers = self.resources.observers.0.lock().unwrap();
@@ -557,6 +627,7 @@ impl FlowWorker {
                     source: source.clone(),
                     feed,
                     commands: self.commands.downgrade(),
+                    resources: Arc::downgrade(&self.resources),
                     watches: BTreeMap::new(),
                     position: 0,
                     ended: false,
@@ -582,6 +653,7 @@ impl FlowWorker {
         sender
             .send(Registration {
                 watch,
+                expected,
                 authorize,
                 reply,
             })

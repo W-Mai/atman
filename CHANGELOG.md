@@ -30,6 +30,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Watcher editing API** — Hosts can replace Flow and process subscriptions without starting execution. Source authorization and resource identities are rechecked, existing notifications remain available, and process replacements match output after the captured live state.
+
 - **Atomic watcher replacement** — Flow storage can replace user subscriptions in one commit, preserving accepted notifications and earlier registrations. Stale edits and invalid replacements leave the original active; identical retries retain their receipt after recovery.
 
 - **Global WatchHub** — Main and floating views can browse subscriptions across Sessions, load additional records, filter results, inspect delivery details, and cancel subscriptions without losing their directory position. Unavailable records remain visible, and creation retains the original recipient.

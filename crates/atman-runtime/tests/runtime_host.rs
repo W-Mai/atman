@@ -2070,6 +2070,216 @@ async fn execution_traces_share_instance_order_and_survive_turns_and_reopen() {
 }
 
 #[tokio::test]
+async fn host_watcher_replacement_shares_process_producers_without_backfill() {
+    use atman_runtime::flow_store::{process_watch::ProcessWatch, watch_edit::WatchDefinition};
+    use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions};
+    let dir = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let config = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
+    let mut info = session_descriptor();
+    info.configuration = atman_runtime::flow_store::SessionConfiguration::Atman(config.source());
+    info.project = Some(
+        atman_runtime::storage::ProjectContext::resolve(&config, project.path(), dir.path())
+            .unwrap(),
+    );
+    let runtime = AtmanRuntime::build(AtmanRuntimeOptions {
+        events: atman_runtime::event::EventSink::new(),
+        mock: false,
+        config,
+        project: info.project.clone(),
+        home_dir: None,
+        workspace_generation: "watch-replacement".into(),
+    })
+    .await
+    .unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let worker = session
+        .create_flow(program_descriptor(
+            info.id,
+            r#"
+        flow main() -> any {
+            contract { capabilities { shell: true } }
+            bash.spawn(cmd: env("bash"), timeout_ms: 0)
+            term.spawn(cmd: env("terminal"))
+            return "started"
+        }
+    "#
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let source = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    for flow in [&worker, &source] {
+        change(flow, FlowTransition::Activated).await;
+    }
+    let command = |name| {
+        format!(
+            "printf ready; while [ ! -f '{}' ]; do sleep 0.05; done; printf ready; exec sleep 60",
+            project.path().join(name).display()
+        )
+    };
+    invoke_with_env(
+        &worker,
+        runtime.executor.clone(),
+        [
+            ("bash".into(), command("bash").into()),
+            ("terminal".into(), command("terminal").into()),
+        ]
+        .into(),
+    )
+    .await
+    .result
+    .unwrap();
+    change(
+        &worker,
+        FlowTransition::ExecutionPaused {
+            key: Uuid::now_v7().into(),
+        },
+    )
+    .await;
+    let state = worker.state().await.unwrap();
+    let owner = worker.address().clone();
+    let sources = worker.process_watch_sources();
+    assert_eq!(sources.len(), 2);
+    let mut pending = 0;
+    let mut retries = Vec::new();
+    for entry in sources {
+        let original = ProcessWatch {
+            id: Uuid::now_v7(),
+            source: entry.source.clone(),
+            pattern: "ready".into(),
+            once: false,
+            expires_at: None,
+        };
+        worker
+            .watch_process_source(original.clone(), |_| Ok(()))
+            .await
+            .unwrap();
+        pending += 1;
+        wait_inputs(&worker, pending).await;
+        let expected = WatchDefinition::Process(original);
+        let watch = ProcessWatch {
+            id: Uuid::now_v7(),
+            source: entry.source.clone(),
+            pattern: "ready".into(),
+            once: false,
+            expires_at: None,
+        };
+        let replacement = WatchDefinition::Process(watch.clone());
+        let initial = worker.snapshot().await.unwrap();
+        let denied = host
+            .replace_watcher(owner.clone(), expected.clone(), replacement.clone(), {
+                let calls = std::sync::atomic::AtomicUsize::new(0);
+                move |_| {
+                    if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 2 {
+                        Err(io::ErrorKind::PermissionDenied.into())
+                    } else {
+                        Ok(())
+                    }
+                }
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(worker.snapshot().await.unwrap().cursor, initial.cursor);
+        let (first, retry) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                host.replace_watcher(
+                    owner.clone(),
+                    expected.clone(),
+                    replacement.clone(),
+                    |_| Ok(())
+                ),
+                host.replace_watcher(
+                    owner.clone(),
+                    expected.clone(),
+                    replacement.clone(),
+                    |_| Ok(())
+                )
+            )
+        })
+        .await
+        .unwrap();
+        let receipt = first.unwrap();
+        assert_eq!(receipt, retry.unwrap());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            worker.snapshot().await.unwrap().pending,
+            initial.pending,
+            "retained process output must not match a replacement"
+        );
+        let marker = match entry.source {
+            atman_runtime::flow_store::process_watch::ProcessSource::Bash { .. } => "bash",
+            _ => "terminal",
+        };
+        std::fs::write(project.path().join(marker), "go").unwrap();
+        pending += 1;
+        wait_inputs(&worker, pending).await;
+        let inputs = worker.snapshot().await.unwrap().pending;
+        assert!(inputs.iter().any(|input| matches!(&input.request.payload, InboxPayload::ProcessEvent { content, .. } if content["subscriptions"].as_array().is_some_and(|ids| ids.len() == 1 && ids[0][0] == watch.id.to_string()))));
+        let flow_watch = WatchDefinition::Flow(answer_watch(&source));
+        host.replace_watcher(
+            owner.clone(),
+            replacement.clone(),
+            flow_watch.clone(),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        invoke(&source, runtime.executor.clone())
+            .await
+            .result
+            .unwrap();
+        pending += 1;
+        wait_inputs(&worker, pending).await;
+        let back = WatchDefinition::Process(ProcessWatch {
+            id: Uuid::now_v7(),
+            ..watch
+        });
+        host.replace_watcher(owner.clone(), flow_watch, back.clone(), |_| Ok(()))
+            .await
+            .unwrap();
+        worker.unwatch(back.id(), |_| Ok(())).await.unwrap();
+        assert_eq!(
+            host.replace_watcher(
+                owner.clone(),
+                expected.clone(),
+                replacement.clone(),
+                |_| Ok(())
+            )
+            .await
+            .unwrap(),
+            receipt
+        );
+        retries.push((expected, replacement, receipt));
+    }
+    assert_eq!(worker.state().await.unwrap(), state);
+    host.wait_quiescent().await.unwrap();
+    let quiet = worker.snapshot().await.unwrap().cursor;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(worker.snapshot().await.unwrap().cursor, quiet);
+    host.shutdown().await.unwrap();
+    let reopened = RuntimeHost::default();
+    reopened
+        .attach_session(root.open_session(info.id).unwrap())
+        .unwrap();
+    for (expected, replacement, receipt) in retries {
+        assert_eq!(
+            reopened
+                .replace_watcher(owner.clone(), expected, replacement, |_| Ok(()))
+                .await
+                .unwrap(),
+            receipt
+        );
+    }
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn process_watch_tools_share_instance_delivery_across_pause_turns_and_explicit_wait() {
     use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};
     let dir = tempfile::tempdir().unwrap();
@@ -6977,6 +7187,146 @@ fn answer_watch(source: &FlowWorker) -> atman_runtime::flow_store::subscription:
         expires_at: None,
         reply: None,
     }
+}
+
+#[tokio::test]
+async fn host_watcher_replacement_rechecks_authority_and_keeps_pending_across_retries() {
+    use atman_runtime::flow_store::{
+        subscription::SubscriptionStatus, watch_edit::WatchDefinition,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let recipient = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let source = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    for worker in [&recipient, &source] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    let owner = recipient.address().clone();
+    let original = answer_watch(&source);
+    host.watch_events(owner.clone(), original.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    invoke(&source, Executor::new()).await.result.unwrap();
+    wait_inputs(&recipient, 1).await;
+    change(
+        &recipient,
+        FlowTransition::ExecutionPaused {
+            key: Uuid::now_v7().into(),
+        },
+    )
+    .await;
+    let initial = recipient.snapshot().await.unwrap();
+    let expected = WatchDefinition::Flow(original.clone());
+    let replacement = WatchDefinition::Flow(answer_watch(&source));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    assert_eq!(
+        host.replace_watcher(
+            owner.clone(),
+            expected.clone(),
+            replacement.clone(),
+            move |_| {
+                if counter.fetch_add(1, Ordering::SeqCst) == 3 {
+                    Err(io::ErrorKind::PermissionDenied.into())
+                } else {
+                    Ok(())
+                }
+            }
+        )
+        .await
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(recipient.snapshot().await.unwrap().cursor, initial.cursor);
+    let (a, b) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            host.replace_watcher(
+                owner.clone(),
+                expected.clone(),
+                replacement.clone(),
+                |_| Ok(())
+            ),
+            host.replace_watcher(
+                owner.clone(),
+                expected.clone(),
+                replacement.clone(),
+                |_| Ok(())
+            )
+        )
+    })
+    .await
+    .unwrap();
+    let receipt = a.unwrap();
+    assert_eq!(receipt, b.unwrap());
+    assert_eq!(recipient.state().await.unwrap(), initial.state);
+    assert_eq!(recipient.snapshot().await.unwrap().pending, initial.pending);
+    let records = recipient.flow_subscriptions().await.unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records
+            .iter()
+            .find(|r| r.subscription.id == original.id)
+            .unwrap()
+            .status,
+        SubscriptionStatus::Cancelled
+    );
+    assert!(
+        host.replace_watcher(
+            owner.clone(),
+            expected.clone(),
+            WatchDefinition::Flow(answer_watch(&source)),
+            |_| Ok(())
+        )
+        .await
+        .is_err()
+    );
+    invoke(&source, Executor::new()).await.result.unwrap();
+    wait_inputs(&recipient, 2).await;
+    recipient
+        .unwatch(replacement.id(), |_| Ok(()))
+        .await
+        .unwrap();
+    change(&source, FlowTransition::CloseRequested).await;
+    change(&source, FlowTransition::Closed).await;
+    assert_eq!(
+        host.replace_watcher(
+            owner.clone(),
+            expected.clone(),
+            replacement.clone(),
+            |_| Ok(())
+        )
+        .await
+        .unwrap(),
+        receipt
+    );
+    assert!(
+        host.replace_watcher(owner.clone(), expected.clone(), replacement.clone(), |_| {
+            Err(io::ErrorKind::PermissionDenied.into())
+        })
+        .await
+        .is_err()
+    );
+    host.shutdown().await.unwrap();
+    let reopened = RuntimeHost::default();
+    reopened
+        .attach_session(root.open_session(info.id).unwrap())
+        .unwrap();
+    assert_eq!(
+        reopened
+            .replace_watcher(owner, expected, replacement, |_| Ok(()))
+            .await
+            .unwrap(),
+        receipt
+    );
+    reopened.shutdown().await.unwrap();
 }
 
 #[tokio::test]

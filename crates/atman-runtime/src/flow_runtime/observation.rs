@@ -13,7 +13,8 @@ use super::{
 use crate::flow_store::access::FlowAction;
 use crate::flow_store::{
     FlowRef, FlowStore, invalid,
-    subscription::{FlowSubscription, SubscriptionRecord, SubscriptionStatus},
+    subscription::{FlowSubscription, ObservationAnchor, SubscriptionRecord, SubscriptionStatus},
+    watch_edit::WatchDefinition,
 };
 
 /// A retained subscription that could not advance. Retrying never resets its durable cursor.
@@ -93,18 +94,8 @@ impl RuntimeHost {
         {
             return Ok(record);
         }
-        self.authorize_observation(&owner, &subscription.source)?;
-        let host = self.clone();
-        let recipient_address = owner.clone();
-        let authorize = authorize_owner.clone();
         let anchor = self
-            .flow(&subscription.source)
-            .await?
-            .request(move |store| {
-                authorize(&recipient_address)?;
-                host.authorize_observation(&recipient_address, store.state().address())?;
-                Ok(store.observation_anchor())
-            })
+            .watch_anchor(&owner, &subscription.source, authorize_owner.clone())
             .await?;
         let host = self.clone();
         recipient
@@ -118,6 +109,80 @@ impl RuntimeHost {
                 store.subscribe_events(subscription.clone(), &anchor)?;
                 existing_subscription(store, &subscription)?
                     .ok_or_else(|| invalid("subscription was not committed"))
+            })
+            .await
+    }
+
+    /// Atomically replace an owned user subscription without claiming a turn. Identical retries return their original receipt; new edits recheck owner authority and source access at the commit boundary.
+    pub async fn replace_watcher(
+        &self,
+        owner: FlowRef,
+        expected: WatchDefinition,
+        replacement: WatchDefinition,
+        authorize_owner: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<crate::event_log::journal::CommitReceipt> {
+        authorize_owner(&owner)?;
+        let authorize_owner = Arc::new(authorize_owner);
+        let recipient = self.flow(&owner).await?;
+        let authorize = authorize_owner.clone();
+        let old = expected.clone();
+        let new = replacement.clone();
+        if let Some(receipt) = recipient
+            .request(move |store| {
+                authorize(store.state().address())?;
+                store.watcher_replacement(&old, &new)
+            })
+            .await?
+        {
+            return Ok(receipt);
+        }
+        let subscription = match replacement {
+            WatchDefinition::Process(watch) => {
+                return recipient
+                    .replace_process_source(expected, watch, move |address| {
+                        authorize_owner(address)
+                    })
+                    .await;
+            }
+            WatchDefinition::Flow(subscription) => subscription,
+        };
+        let anchor = self
+            .watch_anchor(&owner, &subscription.source, authorize_owner.clone())
+            .await?;
+        let host = self.clone();
+        let resources = recipient.resources.clone();
+        recipient
+            .request(move |store| {
+                authorize_owner(store.state().address())?;
+                if let Some(receipt) = store
+                    .watcher_replacement(&expected, &WatchDefinition::Flow(subscription.clone()))?
+                {
+                    return Ok(receipt);
+                }
+                host.authorize_observation(store.state().address(), &subscription.source)?;
+                let receipt = store.replace_flow_watch(expected, subscription, &anchor)?;
+                // Retire process matchers even when the caller drops its acknowledgement.
+                resources.observers.refresh();
+                Ok(receipt)
+            })
+            .await
+    }
+
+    async fn watch_anchor(
+        &self,
+        owner: &FlowRef,
+        source: &FlowRef,
+        authorize: Arc<impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static>,
+    ) -> io::Result<ObservationAnchor> {
+        self.authorize_observation(owner, source)?;
+        let host = self.clone();
+        let recipient_address = owner.clone();
+        self.flow(source)
+            .await?
+            .request(move |store| {
+                authorize(&recipient_address)?;
+                host.authorize_observation(&recipient_address, store.state().address())?;
+                Ok(store.observation_anchor())
             })
             .await
     }
