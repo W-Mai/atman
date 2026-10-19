@@ -81,6 +81,14 @@ fn call_status(view: &FlowViewModel, index: usize) -> ToolCallStatus {
     calls[0].status
 }
 
+fn welcome_card() -> crate::app::StartupCard {
+    crate::app::StartupCard {
+        version: "test".into(),
+        recent: vec![],
+        directory: crate::app::StartupDirectory::Projects,
+    }
+}
+
 #[test]
 fn archived_views_reuse_history_rendering_without_writers_or_execution() {
     use atman_runtime::{event_log::legacy::LegacyFlowKey, flow_store::migration};
@@ -268,6 +276,13 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
     let view = reader.next().await.unwrap();
     let mut main = FlowViewModel::default();
     let mut floating = FlowViewModel::default();
+    let mut app = crate::app::AppState::new(session_id.to_string(), None);
+    app.startup_card = Some(welcome_card());
+    app.sync_flow_view(view).unwrap();
+    assert!(
+        app.startup_card.is_some(),
+        "a startup greeting alone retains the welcome page"
+    );
     main.sync_view(view, None).unwrap();
     floating.sync_view(view, None).unwrap();
     let before = main.revisions().to_vec();
@@ -819,7 +834,12 @@ async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_res
     assert_eq!(main.snapshot().unwrap().status.execution.pauses().len(), 1);
     let mut app = crate::app::AppState::new(session_id.to_string(), None)
         .with_session(Some(worker.context()));
+    app.startup_card = Some(welcome_card());
     app.sync_flow_view(view).unwrap();
+    assert!(
+        app.startup_card.is_none(),
+        "restored user turns must remain visible"
+    );
     let version = app.items_version;
     let original_count = app.items.len();
     app.push_note("local control acknowledgement", crate::app::NoteLevel::Info);

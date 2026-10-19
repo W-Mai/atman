@@ -321,6 +321,18 @@ impl AppState {
         let output = self.session.as_ref().map(|session| session.output_store());
         let before = self.items.revision_clock();
         self.items.sync_content(view, output.as_deref())?;
+        if self.startup_card.is_some()
+            && self.items.iter().any(|item| {
+                matches!(
+                    item,
+                    crate::app::OutputItem::UserTurn { .. }
+                        | crate::app::OutputItem::Interjection { .. }
+                )
+            })
+        {
+            self.startup_card = None;
+            self.startup_intro = None;
+        }
         self.streaming = self.items.has_live_output();
         for &index in self.items.updated_workflows() {
             let crate::app::OutputItem::WorkflowPanel { graph, .. } = &self.items[index] else {
