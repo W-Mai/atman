@@ -91,6 +91,98 @@ fn subscription(source: &FlowStore, purpose: SubscriptionPurpose, once: bool) ->
 }
 
 #[tokio::test]
+async fn operator_unwatch_preserves_paused_execution_pending_input_and_internal_routes() {
+    use atman_runtime::flow_runtime::FlowWorker;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let id = Uuid::now_v7();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            id,
+            project: None,
+            configuration: Default::default(),
+            title: "Watch controls".into(),
+        })
+        .unwrap();
+    let mut source = session.create_flow(descriptor(id)).unwrap();
+    let mut recipient = session.create_flow(descriptor(id)).unwrap();
+    transition(&mut source, FlowTransition::Activated);
+    transition(&mut recipient, FlowTransition::Activated);
+    let anchor = source.observation_anchor();
+    let watch = subscription(&source, SubscriptionPurpose::Watcher, false);
+    let route = subscription(&source, SubscriptionPurpose::SpawnResult, false);
+    recipient.subscribe_events(watch.clone(), &anchor).unwrap();
+    recipient.subscribe_events(route.clone(), &anchor).unwrap();
+    answer(&mut source, "delivered", false);
+    recipient
+        .observe_events(
+            &source
+                .events_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    transition(
+        &mut recipient,
+        FlowTransition::ExecutionPaused {
+            key: Uuid::now_v7().into(),
+        },
+    );
+    let worker = FlowWorker::start(recipient).await.unwrap();
+    let before = worker.snapshot().await.unwrap();
+    assert_eq!(before.pending.len(), 1);
+    assert!(
+        worker
+            .unwatch(watch.id, |_| Err(
+                std::io::ErrorKind::PermissionDenied.into()
+            ))
+            .await
+            .is_err()
+    );
+    assert!(worker.unwatch(route.id, |_| Ok(())).await.is_err());
+    assert!(worker.unwatch(Uuid::now_v7(), |_| Ok(())).await.is_err());
+    assert_eq!(worker.snapshot().await.unwrap().cursor, before.cursor);
+    let owner = worker.address().clone();
+    let receipt = worker
+        .unwatch(watch.id, move |address| {
+            assert_eq!(address, &owner);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(receipt.sequence, before.cursor.sequence + 1);
+    assert_eq!(worker.unwatch(watch.id, |_| Ok(())).await.unwrap(), receipt);
+    let after = worker.snapshot().await.unwrap();
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.pending, before.pending);
+    let flow = worker.shutdown().await.unwrap();
+    let address = flow.descriptor().address.clone();
+    drop(flow);
+    let reopened = session.open_flow(&address.instance_id).unwrap();
+    assert_eq!(reopened.cursor(), &receipt);
+    assert_eq!(
+        reopened.pending_inputs().cloned().collect::<Vec<_>>(),
+        before.pending
+    );
+    let records: Vec<_> = reopened.flow_subscriptions().collect();
+    assert_eq!(
+        records
+            .iter()
+            .find(|r| r.subscription.id == watch.id)
+            .unwrap()
+            .status,
+        SubscriptionStatus::Cancelled
+    );
+    assert_eq!(
+        records
+            .iter()
+            .find(|r| r.subscription.id == route.id)
+            .unwrap()
+            .status,
+        SubscriptionStatus::Active
+    );
+}
+
+#[tokio::test]
 async fn relation_inspection_preserves_direction_revocation_and_read_only_ownership() {
     use atman_runtime::flow_runtime::catalog::SessionCatalog;
     use atman_runtime::flow_store::{

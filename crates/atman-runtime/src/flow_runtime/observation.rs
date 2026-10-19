@@ -24,6 +24,38 @@ pub struct ObservationIssue {
 }
 
 impl FlowWorker {
+    /// Cancel a user subscription without requiring an executing turn. The host authenticates the caller and authorizes this owner inside the serialized storage operation; accepted notifications remain in the inbox.
+    pub async fn unwatch(
+        &self,
+        id: uuid::Uuid,
+        authorize: impl FnOnce(&FlowRef) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<crate::event_log::journal::CommitReceipt> {
+        let resources = self.resources.clone();
+        self.request(move |store| {
+            authorize(store.state().address())?;
+            let flow = store
+                .flow_subscriptions()
+                .find(|record| record.subscription.id == id);
+            let receipt = match flow {
+                Some(record)
+                    if record.subscription.purpose
+                        == crate::flow_store::subscription::SubscriptionPurpose::Watcher =>
+                {
+                    store.unsubscribe_events(id)?
+                }
+                Some(_) => {
+                    return Err(crate::flow_store::invalid(
+                        "internal result routes are not watcher controls",
+                    ));
+                }
+                None => store.unregister_process_watch(id)?,
+            };
+            resources.observers.refresh();
+            Ok(receipt)
+        })
+        .await
+    }
+
     pub async fn flow_subscriptions(&self) -> io::Result<Vec<SubscriptionRecord>> {
         self.request(|store| Ok(store.flow_subscriptions().cloned().collect()))
             .await

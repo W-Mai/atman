@@ -594,6 +594,8 @@ closure = watch(handle: peer, event: "instance_closed")
 
 Unwatch cancels the owned Flow or process registration while retaining accepted input, and refreshes the process observer at the successful storage commit independently of the caller awaiting its reply. Instance shutdown cancels and joins observers together with process resources. Legacy invocations retain their existing watcher hub.
 
+`FlowWorker::unwatch` is the shared host control for Flow and process registrations. It authorizes the actual owner inside the serialized storage request, rejects internal result routes, and returns the durable receipt. It works while execution is paused or idle without claiming a turn or changing execution state. Repeated cancellation does not append another cancellation fact. `FlowClient::unwatch` uses this operation with lease authentication, so tool calls and operator controls preserve the same pending notifications and producer cleanup.
+
 ## Owned send attempts
 
 `RuntimeHost::send` uses the sender's admitted lease to commit an outbox intent, routes its recorded request to the receiver, and commits the authenticated acceptance receipt back to the sender. A reply waiter, when supplied, is registered with the intent before receiver contact. Send admission and new receiver delivery have separate authorization callbacks. The caller authenticates the invoking flow before entering this host API.

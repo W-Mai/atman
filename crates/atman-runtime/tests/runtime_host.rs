@@ -2112,6 +2112,38 @@ async fn process_watch_tools_share_instance_delivery_across_pause_turns_and_expl
         cursor,
         "quiet sources must not spin or write duplicate matches"
     );
+    let persistent = Uuid::parse_str(
+        setup[2]["watcher_id"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("w_")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        worker
+            .unwatch(persistent, |_| Err(
+                std::io::ErrorKind::PermissionDenied.into()
+            ))
+            .await
+            .is_err()
+    );
+    assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
+    let owner = worker.address().clone();
+    let before = worker.state().await.unwrap();
+    let cancelled = worker
+        .unwatch(persistent, move |address| {
+            assert_eq!(address, &owner);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        worker.unwatch(persistent, |_| Ok(())).await.unwrap(),
+        cancelled
+    );
+    assert_eq!(worker.state().await.unwrap(), before);
+    assert_eq!(worker.snapshot().await.unwrap().pending.len(), 2);
     change(&worker, FlowTransition::ExecutionResumed { key: pause }).await;
     let result = invoke_with_env(
         &worker,

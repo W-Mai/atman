@@ -28,6 +28,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- **Watcher control** — Hosts can cancel owned Flow and process subscriptions while execution is idle or paused. Operator controls and agent tools share serialized authorization, durable cancellation, and producer cleanup; accepted notifications and internal result routes remain intact.
+
 - **WatchHub** — `:watchers` and the command palette open the current flow's subscription directory in main and floating views. Searchable padded records expose registration status and delivery counts; scrollable details include local timestamps, source positions, and navigation to the source and recipient flows.
 
 - **Watcher inspection** — Read-only Flow inspection exposes subscription and process-watch registrations with distinct match, pending, input-committed, and cancelled counts. Delivery progress uses original observation and inbox facts, excludes internal result routes, and remains available without starting execution or consuming notifications.

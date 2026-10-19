@@ -258,29 +258,7 @@ impl FlowClient {
         self.authenticate()?;
         let client = self.clone();
         let worker = self.host.flow(self.source()).await?;
-        let resources = worker.resources.clone();
-        worker
-            .request(move |store| {
-                client.authenticate()?;
-                let flow = store
-                    .flow_subscriptions()
-                    .find(|record| record.subscription.id == id);
-                let receipt = match flow {
-                    Some(record)
-                        if record.subscription.purpose
-                            == crate::flow_store::subscription::SubscriptionPurpose::Watcher =>
-                    {
-                        store.unsubscribe_events(id)?
-                    }
-                    Some(_) => {
-                        return Err(invalid("internal result routes are not watcher controls"));
-                    }
-                    None => store.unregister_process_watch(id)?,
-                };
-                resources.observers.refresh();
-                Ok(receipt)
-            })
-            .await
+        worker.unwatch(id, move |_| client.authenticate()).await
     }
 
     pub async fn read_planning(
