@@ -340,50 +340,6 @@ pub async fn request_approval_with_additional_risks(
             };
         }
     }
-    if let Some(result) = broker_resolution {
-        let (decision, execution_boundary) = match result {
-            Ok(crate::permission::PermissionResolution::Decision(decision))
-                if decision.action == crate::permission::PermissionAction::Approve =>
-            {
-                (
-                    crate::session::ApprovalDecision::Approve,
-                    decision.execution_boundary,
-                )
-            }
-            Ok(crate::permission::PermissionResolution::Decision(decision)) => (
-                crate::session::ApprovalDecision::Deny {
-                    reason: decision
-                        .reason
-                        .unwrap_or_else(|| "denied by permission broker".into()),
-                },
-                crate::permission::ExecutionBoundary::Sandboxed,
-            ),
-            Ok(crate::permission::PermissionResolution::Cancelled { reason }) => (
-                crate::session::ApprovalDecision::Deny { reason },
-                crate::permission::ExecutionBoundary::Sandboxed,
-            ),
-            Err(_) => (
-                crate::session::ApprovalDecision::Deny {
-                    reason: "permission request dropped".into(),
-                },
-                crate::permission::ExecutionBoundary::Sandboxed,
-            ),
-        };
-        return match decision {
-            crate::session::ApprovalDecision::Approve => ApprovalOutcome::Approve {
-                authorization: Box::new(permit(
-                    pending_permission
-                        .as_ref()
-                        .expect("pending permission")
-                        .request
-                        .request_id
-                        .clone(),
-                    execution_boundary,
-                )),
-            },
-            crate::session::ApprovalDecision::Deny { reason } => ApprovalOutcome::Deny { reason },
-        };
-    }
     let Some(pending) = pending_permission else {
         return ApprovalOutcome::Deny {
             reason: format!("{name}: blocked — permission request transport unavailable"),
@@ -393,17 +349,25 @@ pub async fn request_approval_with_additional_risks(
         .permission_broker
         .as_ref()
         .expect("pending permission requires a broker");
-    if !broker.has_clients() {
+    if broker_resolution.is_none() && !broker.has_clients() {
         let reason = "no permission client".to_string();
         if let Err(error) = broker.cancel(&pending.request.request_id, reason.clone())
-            && error != crate::permission::PermissionError::AlreadyResolved
+            && !matches!(
+                error,
+                crate::permission::PermissionError::AlreadyResolved
+                    | crate::permission::PermissionError::RequestNotFound
+            )
         {
             crate::notify!(warn, "permission cancel failed: {error}");
         }
-        return ApprovalOutcome::Deny { reason };
     }
     let request_id = pending.request.request_id.clone();
-    let (decision, execution_boundary) = match pending.resolution.await {
+    // The broker owns the result even if a decision wins before client loss is observed.
+    let resolution = match broker_resolution {
+        Some(resolution) => resolution,
+        None => pending.resolution.await,
+    };
+    let (decision, execution_boundary) = match resolution {
         Ok(crate::permission::PermissionResolution::Decision(decision))
             if decision.action == crate::permission::PermissionAction::Approve =>
         {
@@ -978,6 +942,93 @@ mod tests {
             broker.get(&request_id).map(|request| request.state),
             Some(crate::permission::PermissionRequestState::Cancelled { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn settled_broker_result_survives_missing_clients_and_terminal_eviction() {
+        use crate::permission::{ExecutionBoundary, PermissionAction, PermissionIntent};
+        for action in [
+            Some(PermissionAction::Approve),
+            Some(PermissionAction::Deny),
+            None,
+        ] {
+            for evict in [false, true] {
+                let ctx = ctx_without_permission_client(TrustConfig {
+                    mode: TrustMode::Steady,
+                    ..Default::default()
+                });
+                let broker = ctx.permission_broker.as_ref().unwrap();
+                let weak = Arc::downgrade(broker);
+                // Resolve after submission commits, before its caller observes client availability.
+                broker.set_audit_dispatch_hook(Arc::new(move |sequence| {
+                    if sequence != 0 {
+                        return;
+                    }
+                    let broker = weak.upgrade().unwrap();
+                    let request = broker.list().into_iter().next().unwrap();
+                    match action {
+                        Some(action) => resolve_as_user(
+                            &broker,
+                            request.request_id.clone(),
+                            action,
+                            Some("recorded decision".into()),
+                        ),
+                        None => broker
+                            .cancel(&request.request_id, "recorded cancellation")
+                            .unwrap(),
+                    }
+                    if evict {
+                        for index in 0..300 {
+                            let result = broker
+                                .submit(
+                                    Some(&request.session_id),
+                                    Some(&request.requesting_run_id),
+                                    PermissionIntent::minimal(
+                                        format!("other-{index}"),
+                                        "read",
+                                        Tier::Zero,
+                                    ),
+                                    false,
+                                    &TrustConfig::default(),
+                                )
+                                .unwrap();
+                            assert!(matches!(
+                                result,
+                                crate::permission::SubmissionOutcome::Immediate(_)
+                            ));
+                        }
+                        assert!(broker.get(&request.request_id).is_none());
+                    }
+                }));
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    authorize_tool_invocation(
+                        &ctx,
+                        "settled",
+                        "process.tool",
+                        &ToolArgs::default(),
+                        &ProcessTool,
+                    ),
+                )
+                .await
+                .expect("settled result must not block");
+                match action {
+                    Some(PermissionAction::Approve) => {
+                        let authorized = result.unwrap();
+                        assert_eq!(
+                            authorized
+                                .invocation_authorization()
+                                .unwrap()
+                                .execution_boundary(),
+                            ExecutionBoundary::Direct,
+                        );
+                    }
+                    Some(_) => assert_eq!(result.err().unwrap(), "recorded decision"),
+                    None => assert_eq!(result.err().unwrap(), "recorded cancellation"),
+                }
+                assert!(!broker.has_clients());
+            }
+        }
     }
 
     #[tokio::test]

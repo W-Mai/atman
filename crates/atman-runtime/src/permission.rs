@@ -904,7 +904,7 @@ impl PermissionBroker {
     }
 
     #[cfg(test)]
-    fn set_audit_dispatch_hook(&self, hook: AuditDispatchHook) {
+    pub(crate) fn set_audit_dispatch_hook(&self, hook: AuditDispatchHook) {
         self.audit_dispatch_hook.lock().unwrap().replace(hook);
     }
 

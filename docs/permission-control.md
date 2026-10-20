@@ -31,6 +31,8 @@ The main policy actions are:
 
 The permission decision is made once for each invocation. A cloned, invocation-specific context carries the resulting authorization to the tool, so one call cannot reuse another call's approval.
 
+Waiting invocations consume the broker's committed result even when the last approval client disconnects or the completed request leaves bounded history. Missing clients cancel unresolved requests; they do not replace an existing approval, denial, or cancellation with a transport error.
+
 ## Versioned decisions
 
 `permission.list` and `permission.get` include each request's `revision`. Individual `permission.approve`, `permission.deny`, and `permission.defer` calls require that value as `expected_revision`, alongside `request_id`. Re-read a request after a stale-version error; do not assume an earlier decision still applies after its approval target changes.
