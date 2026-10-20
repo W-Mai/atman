@@ -267,6 +267,7 @@ enum FlowFact {
     TaskScopeCreated(Box<task_scope::TaskScopeCreated>),
     TaskScopeCancelled(Uuid),
     TaskScopeBound(task_scope::TaskScopeRef),
+    InputScopeInvalidated(Box<inbox::InputScopeInvalidation>),
     DeliveryConfirmed {
         request_id: Uuid,
         delivery: outbox::DeliveryReceipt,
@@ -409,6 +410,7 @@ impl FlowFact {
                     | Self::TaskScopeCreated(_)
                     | Self::TaskScopeCancelled(_)
                     | Self::TaskScopeBound(_)
+                    | Self::InputScopeInvalidated(_)
             )
         }) {
             return if facts.len() == 1

@@ -196,8 +196,12 @@ fn detail_text(page: &InboxHistoryPage, item: &InboxHistoryItem) -> Vec<String> 
     if let Some(correlation) = request.correlation {
         metadata.push(format!("Correlation: {correlation}"));
     }
-    if let Some(scope) = request.scope {
-        metadata.push(format!("Scope: {scope}"));
+    if let Some(scope) = &request.scope {
+        metadata.push(format!("Scope: {}", scope.id));
+        metadata.push(format!(
+            "Scope owner: {}/{}",
+            scope.owner.session_id, scope.owner.instance_id
+        ));
     }
     match item {
         InboxHistoryItem::Received(entry) => {
@@ -319,6 +323,13 @@ mod tests {
             digest: "digest".into(),
         };
         let id = Uuid::new_v4();
+        let scope = atman_runtime::flow_store::task_scope::TaskScopeRef {
+            owner: FlowRef {
+                session_id: Uuid::new_v4().into(),
+                instance_id: FlowInstanceId::now(),
+            },
+            id: Uuid::new_v4(),
+        };
         let anchor = InboxHistoryCursor {
             owner: owner.clone(),
             side: InboxSide::Received,
@@ -344,7 +355,7 @@ mod tests {
                             delivery: DeliveryMode::AtBoundary,
                             cause: None,
                             correlation: None,
-                            scope: None,
+                            scope: Some(scope.clone()),
                             payload: InboxPayload::Interjection {
                                 text: "A long message 中文 wraps correctly. ".repeat(100),
                             },
@@ -359,6 +370,18 @@ mod tests {
                 }))],
             }))
         };
+        let sample = page(InboxSide::Received, None);
+        let FlowHubPage::Inbox(sample) = sample.as_ref() else {
+            unreachable!()
+        };
+        let detail = detail_text(sample, &sample.items[0]).join("\n");
+        for identity in [
+            scope.id.to_string(),
+            scope.owner.session_id.to_string(),
+            scope.owner.instance_id.to_string(),
+        ] {
+            assert!(detail.contains(&identity));
+        }
         let mut ticket = ControlTicket {
             binding: ViewBinding {
                 view_id: Uuid::new_v4(),

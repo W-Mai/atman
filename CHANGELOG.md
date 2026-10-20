@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Scoped inbox records** — Messages retain complete task-scope addresses. Durable invalidation cancels matching unread input while preserving consumed history, unrelated messages, and original acceptance receipts.
+
 - **Task scope lifecycle** — Runtime hosts validate explicit membership at execution boundaries and close cancelled members through shared resource cleanup. Nested scopes recover their source checks on reopen; unavailable sources block admission without deleting history.
 
 - **Task scope records** — Flow journals retain explicit cancellation groups, immutable pre-activation membership, and optional Goal bindings. Goal replacement cancels associated group records without treating pause or resume as new work.

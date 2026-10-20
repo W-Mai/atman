@@ -19,6 +19,8 @@ use crate::user_input::UserInputPresentation;
 
 mod edit;
 pub use edit::{InboxChange, InboxEditRequest, InboxMove};
+mod scope;
+pub use scope::{InputScopeInvalidation, InvalidatedInputScope};
 
 /// Authenticated provenance supplied by the host, never an authorization grant by itself.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -133,12 +135,15 @@ pub struct DeliveryRequest {
     pub delivery: DeliveryMode,
     pub cause: Option<FlowEventRef>,
     pub correlation: Option<Uuid>,
-    pub scope: Option<Uuid>,
+    pub scope: Option<super::task_scope::TaskScopeRef>,
     pub payload: InboxPayload,
 }
 
 impl DeliveryRequest {
     pub(crate) fn validate_source(&self) -> io::Result<()> {
+        if let Some(scope) = &self.scope {
+            scope.validate()?;
+        }
         if let InboxPayload::Invocation { user, .. } = &self.payload {
             return if self.delivery == DeliveryMode::NextTurn
                 && self.correlation.is_none()
@@ -350,6 +355,7 @@ pub(super) struct Inbox {
     pub(super) waiters: ReplyWaiters,
     original_requests: HashMap<Uuid, DeliveryRequest>,
     edits: HashMap<(SenderIdentity, Uuid), (InboxEditRequest, CommitReceipt)>,
+    invalid_scopes: HashMap<super::task_scope::TaskScopeRef, InvalidatedInputScope>,
 }
 
 impl Inbox {
@@ -687,6 +693,14 @@ impl Inbox {
 
     pub fn validate(&self, envelope: &AcceptedEnvelope) -> io::Result<()> {
         envelope.request.validate_source()?;
+        if envelope
+            .request
+            .scope
+            .as_ref()
+            .is_some_and(|scope| self.invalid_scopes.contains_key(scope))
+        {
+            return Err(invalid("input task scope was invalidated"));
+        }
         if self.messages.contains_key(&envelope.id) || self.previous(&envelope.request)?.is_some() {
             return Err(invalid("duplicate acceptance fact"));
         }

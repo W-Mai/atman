@@ -20,6 +20,247 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn input_scope_invalidation_preserves_consumed_history_unrelated_input_and_retry_receipts() {
+    use atman_runtime::flow_store::{
+        inbox::InputScopeInvalidation,
+        task_scope::{TaskScopeDefinition, TaskScopeRef},
+        view::FlowUpdate,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut owner = session.create_flow(descriptor(info.id)).unwrap();
+    let mut other = session.create_flow(descriptor(info.id)).unwrap();
+    let mut recipient = session.create_flow(descriptor(info.id)).unwrap();
+    for flow in [&mut owner, &mut other, &mut recipient] {
+        change(flow, FlowTransition::Activated);
+    }
+    let definition = TaskScopeDefinition {
+        id: Uuid::new_v4(),
+        name: "Work".into(),
+        goal: None,
+    };
+    owner.create_task_scope(definition.clone()).unwrap();
+    other.create_task_scope(definition.clone()).unwrap();
+    let scope = TaskScopeRef {
+        owner: owner.state().address().clone(),
+        id: definition.id,
+    };
+    let other_scope = TaskScopeRef {
+        owner: other.state().address().clone(),
+        id: definition.id,
+    };
+    let mut request = delivery(
+        recipient.state().address(),
+        SenderIdentity::Flow(owner.state().address().clone()),
+        "scoped",
+    );
+    request.scope = Some(scope.clone());
+    let consumed = recipient.accept_input(request.clone(), |_| Ok(())).unwrap();
+    let reserved = recipient
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    let lease = reserved.lease().clone();
+    let history_receipt = recipient
+        .commit_input(&reserved, invocation_content(&lease))
+        .unwrap();
+    request.request_id = Uuid::new_v4();
+    let pending = recipient.accept_input(request.clone(), |_| Ok(())).unwrap();
+    let mut independent = request.clone();
+    independent.request_id = Uuid::new_v4();
+    independent.scope = Some(other_scope);
+    let same_id_other_owner = recipient.accept_input(independent, |_| Ok(())).unwrap();
+    let unscoped = recipient
+        .accept_input(
+            delivery(
+                recipient.state().address(),
+                request.sender.clone(),
+                "independent",
+            ),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let reservation = recipient
+        .reserve_context_input(&lease, |_| true)
+        .unwrap()
+        .unwrap();
+    owner.cancel_task_scope(scope.id).unwrap();
+    let observation = InputScopeInvalidation {
+        scope: scope.clone(),
+        cancellation: owner
+            .task_scopes()
+            .next()
+            .unwrap()
+            .cancellation
+            .clone()
+            .unwrap(),
+    };
+    let state = recipient.state().clone();
+    let before = recipient.cursor().clone();
+    let receipt = recipient
+        .invalidate_input_scope(observation.clone())
+        .unwrap();
+    assert_eq!(recipient.state(), &state);
+    assert_eq!(recipient.committed_inputs()[0].receipt, history_receipt);
+    assert_eq!(
+        recipient.committed_inputs()[0].input.message_ids,
+        [consumed.message_id]
+    );
+    assert!(
+        recipient
+            .commit_input(&reservation, context_content(&lease))
+            .is_err()
+    );
+    assert_eq!(
+        recipient
+            .pending_inputs()
+            .map(|input| input.id)
+            .collect::<Vec<_>>(),
+        [same_id_other_owner.message_id, unscoped.message_id]
+    );
+    let retry = recipient
+        .accept_input(request.clone(), |_| {
+            panic!("retry must not reauthorize new delivery")
+        })
+        .unwrap();
+    assert_eq!(retry.receipt, pending.receipt);
+    assert_eq!(
+        retry.disposition,
+        InboxDisposition::Cancelled {
+            by: receipt.clone()
+        }
+    );
+    assert_eq!(
+        recipient
+            .invalidate_input_scope(observation.clone())
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(recipient.cursor(), &receipt);
+    let mut conflicting = observation.clone();
+    conflicting.cancellation.receipt.sequence += 1;
+    assert!(recipient.invalidate_input_scope(conflicting).is_err());
+    request.request_id = Uuid::new_v4();
+    assert!(recipient.accept_input(request, |_| Ok(())).is_err());
+    let page = recipient
+        .read_updates(Some(&before), 10.try_into().unwrap())
+        .unwrap();
+    assert!(
+        matches!(&page.batches[0].facts[..], [FlowUpdate::InputScopeInvalidated(record)] if **record == observation)
+    );
+    let id = recipient.state().address().instance_id.clone();
+    let log = recipient.dir().join("events.jsonl");
+    let bytes = std::fs::read(&log).unwrap();
+    drop(recipient);
+    let inspection = session.inspect_flow(&id).unwrap();
+    assert_eq!(inspection.pending_inputs, 2);
+    assert_eq!(std::fs::read(&log).unwrap(), bytes);
+    let mut recipient = session.open_flow(&id).unwrap();
+    assert_eq!(
+        recipient
+            .input_scope_invalidation(&scope)
+            .unwrap()
+            .observation,
+        observation
+    );
+    assert_eq!(
+        recipient.invalidate_input_scope(observation).unwrap(),
+        receipt
+    );
+    assert_eq!(recipient.committed_inputs()[0].receipt, history_receipt);
+    assert_eq!(
+        recipient
+            .pending_inputs()
+            .map(|input| input.id)
+            .collect::<Vec<_>>(),
+        [same_id_other_owner.message_id, unscoped.message_id]
+    );
+}
+
+#[test]
+fn input_scope_replay_rejects_foreign_unknown_and_duplicate_cancellation_facts() {
+    use atman_runtime::event_log::journal::Journal;
+    use atman_runtime::flow_store::{
+        inbox::InputScopeInvalidation,
+        task_scope::{TaskScopeDefinition, TaskScopeRef},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut owner = session.create_flow(descriptor(info.id)).unwrap();
+    let mut recipient = session.create_flow(descriptor(info.id)).unwrap();
+    change(&mut owner, FlowTransition::Activated);
+    change(&mut recipient, FlowTransition::Activated);
+    let definition = TaskScopeDefinition {
+        id: Uuid::new_v4(),
+        name: "Work".into(),
+        goal: None,
+    };
+    owner.create_task_scope(definition.clone()).unwrap();
+    let scope = TaskScopeRef {
+        owner: owner.state().address().clone(),
+        id: definition.id,
+    };
+    let mut request = delivery(
+        recipient.state().address(),
+        SenderIdentity::Flow(owner.state().address().clone()),
+        "scoped",
+    );
+    request.scope = Some(TaskScopeRef {
+        id: Uuid::nil(),
+        ..scope.clone()
+    });
+    assert!(recipient.accept_input(request.clone(), |_| Ok(())).is_err());
+    request.scope = Some(scope.clone());
+    recipient.accept_input(request, |_| Ok(())).unwrap();
+    owner.cancel_task_scope(scope.id).unwrap();
+    let observation = InputScopeInvalidation {
+        scope,
+        cancellation: owner
+            .task_scopes()
+            .next()
+            .unwrap()
+            .cancellation
+            .clone()
+            .unwrap(),
+    };
+    let id = recipient.state().address().instance_id.clone();
+    let path = recipient.dir().join("events.jsonl");
+    let accepted = std::fs::read(&path).unwrap();
+    drop(recipient);
+    for case in 0..5 {
+        std::fs::write(&path, &accepted).unwrap();
+        let mut invalid = observation.clone();
+        match case {
+            0 => invalid.cancellation.receipt.journal_id = Uuid::new_v4(),
+            1 => invalid.cancellation.receipt.sequence = 0,
+            2 => invalid.scope.id = Uuid::new_v4(),
+            _ => {}
+        }
+        let fact = serde_json::json!({"type": "input_scope_invalidated", "data": invalid});
+        let (mut journal, _) =
+            Journal::open::<serde_json::Value>(&path, id.0.0, |_, _| Ok(())).unwrap();
+        if case == 3 {
+            journal.commit(&[fact.clone(), fact]).unwrap();
+        } else {
+            journal.commit(std::slice::from_ref(&fact)).unwrap();
+            if case == 4 {
+                journal.commit(&[fact]).unwrap();
+            }
+        }
+        drop(journal);
+        let bytes = std::fs::read(&path).unwrap();
+        let inspected = session.inspect_flow(&id).unwrap_err();
+        let reopened = session.open_flow(&id).err().unwrap();
+        assert_eq!(inspected.to_string(), reopened.to_string(), "case {case}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "case {case}");
+    }
+}
+
+#[test]
 fn task_scope_facts_bind_only_prepared_members_and_recover_independent_lifetimes() {
     use atman_runtime::flow_store::task_scope::{
         ScopeCancelReason, TaskScopeDefinition, TaskScopeRef,

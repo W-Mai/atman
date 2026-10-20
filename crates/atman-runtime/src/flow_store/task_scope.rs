@@ -9,10 +9,22 @@ use uuid::Uuid;
 use super::{CommitReceipt, FlowFact, FlowRef, FlowStore, invalid};
 use crate::memory::goal::GoalRecord;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct TaskScopeRef {
     pub owner: FlowRef,
     pub id: Uuid,
+}
+
+impl TaskScopeRef {
+    pub(crate) fn validate(&self) -> io::Result<()> {
+        if self.id.is_nil()
+            || self.owner.session_id.0.is_nil()
+            || self.owner.instance_id.0.0.is_nil()
+        {
+            return Err(invalid("task scope requires a nonempty owner and identity"));
+        }
+        Ok(())
+    }
 }
 
 /// Pause/resume revisions do not change the work to which a scope is bound.
@@ -162,12 +174,8 @@ impl TaskScopes {
     }
 
     fn validate_binding(&self, scope: &TaskScopeRef, address: &FlowRef) -> io::Result<()> {
-        if self.binding.is_some()
-            || scope.id.is_nil()
-            || scope.owner == *address
-            || scope.owner.session_id.0.is_nil()
-            || scope.owner.instance_id.0.0.is_nil()
-        {
+        scope.validate()?;
+        if self.binding.is_some() || scope.owner == *address {
             return Err(invalid("invalid or duplicate task scope binding"));
         }
         Ok(())

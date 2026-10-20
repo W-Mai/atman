@@ -121,6 +121,9 @@ impl FlowReplay {
                     }
                     inbox.replay_edit(*edit, receipt.clone())?;
                 }
+                (Some((_, _, inbox)), FlowFact::InputScopeInvalidated(observation)) => {
+                    inbox.replay_scope_invalidation(*observation, receipt.clone())?;
+                }
                 (Some((_, state, _)), FlowFact::MessagePublished(publication)) => {
                     self.publications.validate(state, &publication)?;
                     self.publications.apply(*publication, receipt.clone());
