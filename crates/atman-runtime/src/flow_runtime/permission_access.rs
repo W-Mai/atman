@@ -9,6 +9,36 @@ use crate::permission::{
 use std::{io, sync::Arc};
 
 impl FlowClient {
+    /// Inspect actionable review detail, redacted by the requesting instance before delivery.
+    pub async fn permission_review(
+        &self,
+        target: FlowRef,
+        request_id: PermissionRequestId,
+    ) -> io::Result<serde_json::Value> {
+        self.authorize_permission_review(&target)?;
+        let worker = self.host.flow(&target).await?;
+        self.authorize_permission_review(&target)?;
+        let request = worker
+            .context()
+            .permission_broker()
+            .get(&request_id)
+            .filter(|request| {
+                matches!(
+                    request.state,
+                    PermissionRequestState::Pending {
+                        target: ApprovalTarget::User
+                    }
+                )
+            })
+            .ok_or_else(|| denied("permission request was not found or is not visible"))?;
+        Ok(
+            crate::permission_audit::PermissionRequestAudit::flow_review(
+                &request,
+                worker.context().sink().redactor().as_deref(),
+            ),
+        )
+    }
+
     fn authorize_permission_review(&self, target: &FlowRef) -> io::Result<()> {
         if target == self.source() {
             return Err(denied("a flow cannot approve its own tool requests"));

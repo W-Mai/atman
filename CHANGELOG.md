@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Peer review tools** — Permission tools address explicitly authorized flow instances, inspect source-redacted approval detail, and commit individual decisions against the observed request revision.
+
 - **Peer approval access** — Admitted flow clients can inspect and resolve another instance's pending approvals under explicit grants. Decisions preserve the request owner's broker, observed revision, reviewer authority, and sandbox boundary.
 
 - **Approval request versions** — Individual permission decision tools require the observed request revision. Single and batch decisions share commitment logic, including revision advancement when forwarding approval.

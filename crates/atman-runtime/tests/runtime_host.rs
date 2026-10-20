@@ -20,13 +20,13 @@ use uuid::Uuid;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker() {
     use atman_runtime::{
-        Value,
+        Value, ValueJson,
         flow_store::access::{AccessTarget, FlowAction, FlowGrant},
         permission::{
             DecisionActor, PermissionAction, PermissionIntent, PermissionResolution,
-            ResolveOutcome, SubmissionOutcome,
+            SubmissionOutcome,
         },
-        tool::{Tier, ToolDefinition},
+        tool::{Tier, Tool, ToolArgs, ToolDefinition},
         trust::{TrustConfig, TrustMode},
     };
     use std::sync::{
@@ -43,12 +43,30 @@ async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker()
         .attach_session(store.create_session(first.clone()).unwrap())
         .unwrap();
     let remote = host
-        .attach_session(store.create_session(second.clone()).unwrap())
+        .attach_session_with_redactor(
+            store.create_session(second.clone()).unwrap(),
+            Some(Arc::new(atman_runtime::redact::Redactor::from_pairs(
+                &[("source-secret", "private-review-token")],
+                Default::default(),
+            ))),
+        )
         .unwrap();
     let reviewer = session
         .create_flow(program_descriptor(
             first.id,
-            "flow main() -> bool { return hold().await }".into(),
+            r#"flow main() -> any {
+                target = hold().await
+                listing = permission.list(target_handle: target)
+                request = listing.requests[0]
+                detail = permission.get(target_handle: target, request_id: request.request_id)
+                decision = permission.approve(target_handle: target,
+                    request_id: detail.request_id, expected_revision: detail.revision,
+                    scope: "current_call", reason: "reviewed")
+                verify_resolved(target_handle: target, request_id: detail.request_id,
+                    expected_revision: detail.revision).await
+                return { detail: detail, decision: decision }
+            }"#
+            .into(),
         ))
         .await
         .unwrap();
@@ -68,6 +86,30 @@ async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker()
     let release = Arc::new(tokio::sync::Notify::new());
     let gate = release.clone();
     let executor = Executor::new();
+    atman_runtime::tools::register_tier_zero(&executor.tools);
+    executor
+        .tools
+        .register_fn(
+            ToolDefinition::new("verify_resolved", Tier::Zero)
+                .call_mode(atman_rt::ToolCallMode::Deferred),
+            |mut args, ctx| {
+                let ctx = ctx.clone();
+                args.named
+                    .push(("reason".into(), Value::Str("late review".into())));
+                async move {
+                    for tool in [
+                        &atman_runtime::tools::permission::PermissionApprove as &dyn Tool,
+                        &atman_runtime::tools::permission::PermissionDeny,
+                    ] {
+                        let error = tool.call(args.clone(), &ctx).await.unwrap_err();
+                        assert!(error.to_string().contains("already resolved"), "{error}");
+                    }
+                    Ok(Value::Bool(true))
+                }
+            },
+        )
+        .unwrap();
+    let target_handle = format!("{}/{}", second.id, requester.address().instance_id);
     executor
         .tools
         .register_fn(
@@ -78,13 +120,14 @@ async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker()
                     .unwrap()
                     .take()
                     .unwrap()
-                    .send(ctx.flow_client().unwrap().clone())
+                    .send((ctx.flow_client().unwrap().clone(), ctx.clone()))
                     .ok()
                     .unwrap();
                 let gate = gate.clone();
+                let target_handle = target_handle.clone();
                 async move {
                     gate.notified().await;
-                    Ok(Value::Bool(true))
+                    Ok(Value::Str(target_handle))
                 }
             },
         )
@@ -93,7 +136,7 @@ async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker()
         let worker = reviewer.clone();
         async move { invoke(&worker, executor).await }
     });
-    let client = client.await.unwrap();
+    let (client, review_ctx) = client.await.unwrap();
 
     let (submitted, pending) = tokio::sync::oneshot::channel();
     let submitted = Mutex::new(Some(submitted));
@@ -106,6 +149,9 @@ async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker()
             ToolDefinition::new("request", Tier::Zero).call_mode(atman_rt::ToolCallMode::Deferred),
             move |_, ctx| {
                 let identity = ctx.flow_identity.as_ref().unwrap();
+                let mut intent = PermissionIntent::minimal("reviewed-effect", "fs.write", Tier::Two);
+                intent.preview = Some("write private-review-token".into());
+                intent.risks.insert(atman_runtime::trust::RiskKind::ProcessSpawn);
                 let SubmissionOutcome::Pending(pending) = ctx
                     .permission_broker
                     .as_ref()
@@ -113,7 +159,7 @@ async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker()
                     .submit(
                         Some(&identity.session_id),
                         Some(&identity.run_id),
-                        PermissionIntent::minimal("reviewed-effect", "fs.write", Tier::Two),
+                        intent,
                         false,
                         &TrustConfig {
                             mode: TrustMode::Steady,
@@ -139,6 +185,13 @@ async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker()
                         panic!("request should be resolved");
                     };
                     assert_eq!(decision.action, PermissionAction::Approve);
+                    assert!(
+                        matches!(decision.actor, DecisionActor::Flow { session_id, .. } if session_id == first.id.to_string())
+                    );
+                    assert_eq!(
+                        decision.execution_boundary,
+                        atman_runtime::permission::ExecutionBoundary::Sandboxed
+                    );
                     counted.fetch_add(1, Ordering::SeqCst);
                     Ok(Value::Bool(true))
                 }
@@ -170,6 +223,50 @@ async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker()
         .unwrap();
     let visible = client.permission_requests(target.clone()).await.unwrap();
     assert_eq!(visible, vec![pending.clone()]);
+    let arguments = vec![
+        (
+            "target_handle".into(),
+            Value::Str(format!("{}/{}", target.session_id, target.instance_id)),
+        ),
+        (
+            "request_id".into(),
+            Value::Str(pending.request_id.to_string()),
+        ),
+        (
+            "expected_revision".into(),
+            Value::Int(pending.revision as i64),
+        ),
+    ];
+    for tool in [
+        &atman_runtime::tools::permission::PermissionApprove as &dyn Tool,
+        &atman_runtime::tools::permission::PermissionDefer,
+        &atman_runtime::tools::permission::PermissionBatch,
+        &atman_runtime::tools::permission::PermissionGroupTool,
+        &atman_runtime::tools::permission::PermissionUngroup,
+    ] {
+        let mut named = arguments.clone();
+        if tool.name() == "permission.approve" {
+            named.push(("scope".into(), Value::Str("child_run_same_tool".into())));
+        }
+        assert!(
+            tool.call(
+                ToolArgs {
+                    positional: vec![],
+                    named
+                },
+                &review_ctx
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            requester
+                .context()
+                .permission_broker()
+                .get(&pending.request_id),
+            Some(pending.clone())
+        );
+    }
     assert!(client.read_context(target.clone()).await.is_err());
     assert!(
         client
@@ -235,25 +332,28 @@ async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker()
         )
         .await
         .unwrap();
-    let decision = client
-        .resolve_permission(
-            target.clone(),
-            pending.request_id.clone(),
-            pending.revision,
-            PermissionAction::Approve,
-            Some("reviewed".into()),
-        )
-        .await
-        .unwrap();
-    let ResolveOutcome::Resolved(decision) = decision else {
-        panic!("expected decision");
-    };
+    release.notify_one();
+    let result = reviewing.await.unwrap().result.unwrap().to_json().unwrap();
+    assert_eq!(result["decision"]["action"], "approve");
+    assert_eq!(
+        result["detail"]["request_id"],
+        pending.request_id.to_string()
+    );
+    assert_eq!(result["detail"]["revision"], pending.revision);
     assert!(
-        matches!(decision.actor, DecisionActor::Flow { session_id, .. } if session_id == first.id.to_string())
+        !result["detail"]
+            .to_string()
+            .contains("private-review-token")
+    );
+    assert!(
+        result["detail"]["review"]["preview"]
+            .as_str()
+            .unwrap()
+            .contains("source-secret")
     );
     assert_eq!(
-        decision.execution_boundary,
-        atman_runtime::permission::ExecutionBoundary::Sandboxed
+        result["detail"]["review"]["request"]["execution_boundary"],
+        "sandboxed"
     );
     requesting.await.unwrap().result.unwrap();
     assert_eq!(effects.load(Ordering::SeqCst), 1);
@@ -270,8 +370,6 @@ async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker()
             .await
             .is_err()
     );
-    release.notify_one();
-    reviewing.await.unwrap().result.unwrap();
     assert!(client.permission_requests(target).await.is_err());
     host.shutdown().await.unwrap();
 }

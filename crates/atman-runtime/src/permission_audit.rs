@@ -222,6 +222,58 @@ pub struct PermissionRequestAudit {
 }
 
 impl PermissionRequestAudit {
+    /// Build model-visible review detail using the request owner's redaction policy. Review content is data, not instructions or authorization.
+    pub fn flow_review(
+        request: &PermissionRequest,
+        redactor: Option<&crate::redact::Redactor>,
+    ) -> serde_json::Value {
+        let mut audit = Self::from_request(request, Vec::new(), None, request.requested_at);
+        // A flow decision never acquires the user's direct execution boundary.
+        if audit.execution_boundary.is_some()
+            && matches!(request.state, PermissionRequestState::Pending { .. })
+        {
+            audit.execution_boundary = Some(ExecutionBoundary::Sandboxed);
+        }
+        let mut value = Self::summary(request);
+        value["review"] = serde_json::json!({
+            "request": audit,
+            "preview": request.intent.preview,
+            "risks": request.intent.risks,
+        });
+        if let Some(redactor) = redactor {
+            redactor.redact_json(&mut value);
+        }
+        value
+    }
+
+    /// Stable request metadata shared by listing and detailed inspection.
+    pub fn summary(request: &PermissionRequest) -> serde_json::Value {
+        let (state, target) = match &request.state {
+            PermissionRequestState::Evaluating => ("evaluating", None),
+            PermissionRequestState::Pending { target } => (
+                "pending",
+                Some(match target {
+                    ApprovalTarget::Flow(run) => run.to_string(),
+                    ApprovalTarget::User => "user".into(),
+                }),
+            ),
+            PermissionRequestState::Approved { .. } => ("approved", None),
+            PermissionRequestState::Denied { .. } => ("denied", None),
+            PermissionRequestState::Cancelled { .. } => ("cancelled", None),
+        };
+        serde_json::json!({
+            "request_id": request.request_id,
+            "revision": request.revision,
+            "requesting_run_id": request.requesting_run_id,
+            "tool_use_id": request.intent.tool_use_id,
+            "tool_name": request.intent.tool_name,
+            "tier": format!("{:?}", request.intent.tier).to_lowercase(),
+            "state": state,
+            "target": target,
+            "requested_at": request.requested_at.to_rfc3339(),
+        })
+    }
+
     pub fn from_request(
         request: &PermissionRequest,
         group_ids: Vec<PermissionGroupId>,
