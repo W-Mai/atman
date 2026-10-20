@@ -74,6 +74,7 @@ impl EntryRecipe {
         input: &LaunchInput,
         current: &EffectiveAuthority,
         yield_interval: NonZeroUsize,
+        project: Option<&crate::storage::ProjectContext>,
     ) -> io::Result<Self> {
         if descriptor.address.session_id.0 != session.id
             || input.request.recipient != descriptor.address
@@ -92,7 +93,7 @@ impl EntryRecipe {
         let program = crate::source_program::load_program_from_bundle(
             &entry.bundle,
             &entry.path,
-            &session.source_roots(),
+            &session.source_roots_for(project),
         )
         .map_err(invalid)?;
         let flow = program
@@ -321,6 +322,7 @@ impl super::FlowWorker {
                 &launch.input,
                 &current,
                 yield_interval,
+                store.project(),
             )
         })
         .await

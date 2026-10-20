@@ -148,7 +148,7 @@ impl FlowWorker {
                 sink,
                 store.descriptor().address.clone(),
                 store.session_descriptor().configuration.clone(),
-                store.session_descriptor().project.clone(),
+                store.project().cloned(),
                 store.context_messages(),
                 store.history_messages(),
                 store

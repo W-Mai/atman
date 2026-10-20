@@ -1021,7 +1021,21 @@ fn configuration_source_replays_without_accessing_project_or_credential_files() 
     info.configuration = SessionConfiguration::Atman(source.clone());
     let mut store = root.create_session(info.clone()).unwrap();
     let flow = descriptor(info.id);
-    drop(store.create_flow(flow.clone()).unwrap());
+    let instance = store.create_flow(flow.clone()).unwrap();
+    assert_eq!(instance.project(), info.project.as_ref());
+    assert_eq!(
+        instance.source_roots().project_root,
+        info.source_roots().project_root
+    );
+    assert_eq!(store.projection().flows[0].project, info.project);
+    assert_eq!(
+        store
+            .inspect_flow(&flow.address.instance_id)
+            .unwrap()
+            .project,
+        info.project
+    );
+    drop(instance);
     let journal = std::fs::read_to_string(store.dir().join("events.jsonl")).unwrap();
     assert!(journal.contains("selected-account.json"));
     assert!(!journal.contains("private-credential-test-value"));
@@ -1030,6 +1044,22 @@ fn configuration_source_replays_without_accessing_project_or_credential_files() 
     project.close().unwrap();
     let restored = root.open_session(info.id).unwrap();
     assert_eq!(&restored.projection().descriptor, &info);
+    assert_eq!(restored.projection().flows[0].project, info.project);
+    let inspection = RuntimeStore::inspect_session(data.path(), info.id).unwrap();
+    assert_eq!(
+        inspection
+            .inspect_flow(&flow.address.instance_id)
+            .unwrap()
+            .project,
+        info.project
+    );
+    assert_eq!(
+        restored
+            .open_flow(&flow.address.instance_id)
+            .unwrap()
+            .project(),
+        info.project.as_ref()
+    );
     assert_eq!(
         restored
             .open_flow(&flow.address.instance_id)

@@ -4538,7 +4538,13 @@ async fn runtime_projects_bind_rules_and_spawned_flows_without_borrowing_another
             result,
             serde_json::json!([expected, expected, "# global-rule\nshared rule"])
         );
-        assert_eq!(session.snapshot().await.unwrap().catalog.flows.len(), 2);
+        let catalog = session.snapshot().await.unwrap().catalog;
+        assert_eq!(catalog.flows.len(), 2);
+        for registration in catalog.flows {
+            assert_eq!(registration.project, *binding);
+            let peer = session.open_flow(registration.id).await.unwrap();
+            assert_eq!(peer.project().await.unwrap(), *binding);
+        }
         if let Some(binding) = binding {
             assert!(
                 !binding.storage_root().exists(),

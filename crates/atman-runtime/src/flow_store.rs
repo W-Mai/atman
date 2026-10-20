@@ -85,11 +85,16 @@ pub enum SessionConfiguration {
 impl SessionDescriptor {
     /// Resolve recorded source namespaces without reading configuration or source files.
     pub fn source_roots(&self) -> crate::source_program::SourceRoots {
+        self.source_roots_for(self.project.as_ref())
+    }
+
+    /// Resolve namespaces for an instance's captured project binding.
+    pub fn source_roots_for(
+        &self,
+        project: Option<&crate::storage::ProjectContext>,
+    ) -> crate::source_program::SourceRoots {
         crate::source_program::SourceRoots {
-            project_root: self
-                .project
-                .as_ref()
-                .map(|project| project.root().to_path_buf()),
+            project_root: project.map(|project| project.root().to_path_buf()),
             config_dir: match &self.configuration {
                 SessionConfiguration::Atman(source) => Some(source.config_dir().to_path_buf()),
                 SessionConfiguration::HostProvided => None,
@@ -460,6 +465,8 @@ impl FlowFact {
 pub struct FlowRegistration {
     pub id: FlowInstanceId,
     pub creation_request: Uuid,
+    /// Project at registration, retained independently of later container changes.
+    pub project: Option<crate::storage::ProjectContext>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -467,9 +474,15 @@ pub struct FlowRegistration {
 enum SessionFact {
     Created(SessionDescriptor),
     TitleChanged(Option<String>),
-    FlowRegistered(FlowRegistration),
+    FlowRegistered {
+        id: FlowInstanceId,
+        creation_request: Uuid,
+    },
     DefaultFlowSelected(FlowInstanceId),
-    FlowArchiveChanged { id: FlowInstanceId, archived: bool },
+    FlowArchiveChanged {
+        id: FlowInstanceId,
+        archived: bool,
+    },
     AccessGranted(access::FlowGrant),
     AccessRevoked(Uuid),
     LegacyImported(migration::LegacyMigration),
@@ -515,14 +528,22 @@ impl SessionProjection {
         match fact {
             SessionFact::Created(_) => return Err(invalid("duplicate session creation")),
             SessionFact::TitleChanged(title) => self.title = title,
-            SessionFact::FlowRegistered(registration) => {
-                if self.flows.iter().any(|flow| {
-                    flow.id == registration.id
-                        || flow.creation_request == registration.creation_request
-                }) {
+            SessionFact::FlowRegistered {
+                id,
+                creation_request,
+            } => {
+                if self
+                    .flows
+                    .iter()
+                    .any(|flow| flow.id == id || flow.creation_request == creation_request)
+                {
                     return Err(invalid("duplicate flow registration"));
                 }
-                self.flows.push(registration);
+                self.flows.push(FlowRegistration {
+                    id,
+                    creation_request,
+                    project: self.descriptor.project.clone(),
+                });
             }
             SessionFact::DefaultFlowSelected(id) => {
                 if !self.flows.iter().any(|flow| flow.id == id) {
@@ -573,6 +594,8 @@ pub struct SessionInspection {
 #[derive(Debug)]
 pub struct FlowInspection {
     pub archived: bool,
+    /// Project captured by the session journal when the instance was registered.
+    pub project: Option<crate::storage::ProjectContext>,
     pub descriptor: FlowDescriptor,
     pub state: FlowInstance<AtmanUuid>,
     pub journal: crate::event_log::journal::JournalInspection,
@@ -665,6 +688,7 @@ fn read_registered_flow(
         return Err(invalid("flow creation does not match session registration"));
     }
     Ok(RecordedFlow {
+        project: registration.project.clone(),
         replay,
         journal,
         watch_deliveries,
@@ -672,6 +696,7 @@ fn read_registered_flow(
 }
 
 struct RecordedFlow {
+    project: Option<crate::storage::ProjectContext>,
     replay: replay::FlowReplay,
     journal: crate::event_log::journal::JournalInspection,
     watch_deliveries: watch_view::WatchDeliveries,
@@ -684,6 +709,7 @@ fn inspect_registered_flow_with(
     observe: impl FnMut(&CommitReceipt, &[FlowFact]) -> io::Result<()>,
 ) -> io::Result<FlowInspection> {
     let RecordedFlow {
+        project,
         replay,
         journal,
         watch_deliveries,
@@ -731,6 +757,7 @@ fn inspect_registered_flow_with(
     );
     Ok(FlowInspection {
         archived: catalog.archived_flows.contains(id),
+        project,
         descriptor,
         state,
         journal,
@@ -991,13 +1018,21 @@ impl SessionStore {
             return Ok(store);
         }
         let dir = self.dir.join("flows").join(id.to_string());
+        let project = self.projection.descriptor.project.clone();
         let mut flow = match initialize_dir(&dir, |dir| {
-            FlowStore::create(dir, self.owner.clone(), descriptor.clone()).map(drop)
+            FlowStore::create(dir, self.owner.clone(), descriptor.clone(), project.clone())
+                .map(drop)
         }) {
-            Ok(()) => FlowStore::open(&dir, self.owner.clone(), &descriptor.address)?,
+            Ok(()) => FlowStore::open(
+                &dir,
+                self.owner.clone(),
+                &descriptor.address,
+                project.clone(),
+            )?,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 // A crash between flow creation and container registration leaves a prepared orphan.
-                let store = FlowStore::open(&dir, self.owner.clone(), &descriptor.address)?;
+                let store =
+                    FlowStore::open(&dir, self.owner.clone(), &descriptor.address, project)?;
                 if store.descriptor != descriptor || store.cursor.sequence != 1 {
                     return Err(invalid(
                         "unregistered flow does not match the prepared creation",
@@ -1007,10 +1042,10 @@ impl SessionStore {
             }
             Err(error) => return Err(error),
         };
-        let mut facts = vec![SessionFact::FlowRegistered(FlowRegistration {
+        let mut facts = vec![SessionFact::FlowRegistered {
             id: id.clone(),
             creation_request: descriptor.creation_request,
-        })];
+        }];
         if self.projection.default_flow.is_none() {
             facts.push(SessionFact::DefaultFlowSelected(id));
         }
@@ -1045,6 +1080,7 @@ impl SessionStore {
                 session_id: self.projection.descriptor.id.into(),
                 instance_id: id.clone(),
             },
+            registration.project.clone(),
         )?;
         if store.descriptor.creation_request != registration.creation_request {
             return Err(invalid("flow creation does not match session registration"));
@@ -1170,6 +1206,7 @@ impl SessionStore {
 pub struct FlowStore {
     dir: PathBuf,
     _owner: Arc<SessionOwner>,
+    project: Option<crate::storage::ProjectContext>,
     journal: FlowJournal,
     descriptor: FlowDescriptor,
     state: FlowInstance<AtmanUuid>,
@@ -1204,10 +1241,20 @@ impl FlowStore {
         &self._owner.descriptor
     }
 
+    /// Immutable instance binding; does not follow the container's current project.
+    pub fn project(&self) -> Option<&crate::storage::ProjectContext> {
+        self.project.as_ref()
+    }
+
+    pub fn source_roots(&self) -> crate::source_program::SourceRoots {
+        self.session_descriptor().source_roots_for(self.project())
+    }
+
     fn create(
         dir: &Path,
         owner: Arc<SessionOwner>,
         descriptor: FlowDescriptor,
+        project: Option<crate::storage::ProjectContext>,
     ) -> io::Result<Self> {
         ensure_dir(&dir.join("artifacts"))?;
         let mut journal = Journal::create(
@@ -1226,6 +1273,7 @@ impl FlowStore {
         Ok(Self {
             dir: dir.into(),
             _owner: owner,
+            project,
             journal,
             descriptor,
             state,
@@ -1251,7 +1299,12 @@ impl FlowStore {
         })
     }
 
-    fn open(dir: &Path, owner: Arc<SessionOwner>, address: &FlowRef) -> io::Result<Self> {
+    fn open(
+        dir: &Path,
+        owner: Arc<SessionOwner>,
+        address: &FlowRef,
+        project: Option<crate::storage::ProjectContext>,
+    ) -> io::Result<Self> {
         let mut replay = replay::FlowReplay::default();
         let (journal, recovered_tail) = Journal::open(
             &dir.join("events.jsonl"),
@@ -1288,6 +1341,7 @@ impl FlowStore {
         let mut store = Self {
             dir: dir.into(),
             _owner: owner,
+            project,
             journal,
             descriptor,
             state,

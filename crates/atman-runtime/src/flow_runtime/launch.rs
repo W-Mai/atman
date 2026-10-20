@@ -30,6 +30,11 @@ pub(crate) struct LaunchExecution {
 }
 
 impl FlowWorker {
+    /// Read the instance's immutable project binding without resolving live configuration.
+    pub async fn project(&self) -> io::Result<Option<crate::storage::ProjectContext>> {
+        self.request(|store| Ok(store.project().cloned())).await
+    }
+
     pub async fn descriptor(&self) -> io::Result<FlowDescriptor> {
         self.request(|store| Ok(store.descriptor().clone())).await
     }
@@ -57,6 +62,12 @@ impl RuntimeHost {
             .snapshot()
             .await?;
         let session = snapshot.catalog.descriptor;
+        let project = snapshot
+            .catalog
+            .flows
+            .iter()
+            .find(|flow| flow.id == descriptor.address.instance_id)
+            .map_or_else(|| session.project.clone(), |flow| flow.project.clone());
         self.launch_owned(
             descriptor,
             input,
@@ -69,6 +80,7 @@ impl RuntimeHost {
                     &requested,
                     &execution.authority,
                     execution.yield_interval,
+                    project.as_ref(),
                 )?;
                 Ok(Some(LaunchExecution {
                     executor: execution.executor,
