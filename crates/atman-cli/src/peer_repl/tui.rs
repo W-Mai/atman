@@ -25,6 +25,7 @@ impl Attachment {
                     .context("session has no default flow")?,
             )
             .await?;
+        self = self.for_worker(&worker).await?;
         let forms = worker.context().forms();
         self.executor.tool_ctx.prompt_resolver = Some(Arc::new(
             atman_runtime::rendezvous::FormPromptResolver::new(forms.clone()),
@@ -43,7 +44,7 @@ impl Attachment {
                     peer.state().await?.state(),
                     atman_rt::InstanceState::Open(_)
                 ) {
-                    self.bind(&peer).await?;
+                    self.for_worker(&peer).await?.bind(&peer).await?;
                 }
                 Ok::<_, anyhow::Error>(())
             }
@@ -77,6 +78,10 @@ impl Attachment {
             worker.address().session_id == self.session.id().into(),
             "view and Session scope differ"
         );
+        ensure!(
+            worker.project().await? == self.project,
+            "view and execution project differ"
+        );
         worker
             .context()
             .bind_model_registry(self.config.models().clone())?;
@@ -92,7 +97,6 @@ impl Attachment {
         handle.session_name = names.borrow_and_update().clone();
         handle.session_name_rx = Some(names);
         handle.project_root = self
-            .descriptor
             .project
             .as_ref()
             .map(|project| project.root().display().to_string());
@@ -106,14 +110,13 @@ impl Attachment {
             commands.clone(),
             vec![],
             self.config.clone(),
-            self.descriptor.project.clone(),
+            self.project.clone(),
         )?;
         Ok((
             handle,
             ViewServices {
                 binding,
                 project: self
-                    .descriptor
                     .project
                     .as_ref()
                     .map(|project| project.root().to_owned()),
@@ -420,14 +423,13 @@ impl Attachment {
 }
 
 pub(super) async fn interact_archive(
-    view: FlowView,
-    descriptor: SessionDescriptor,
+    archive: ArchivedSelection,
     scopes: Arc<scopes::Scopes>,
     terminal: atman_tui::InheritedTerminal,
     notifications: Vec<atman_runtime::notify::Notification>,
 ) -> Result<()> {
     let (controls, input) = mpsc::unbounded_channel();
-    let (handle, service) = archive_attachment(view, descriptor, controls.clone())?;
+    let (handle, service) = archive_attachment(archive, controls.clone())?;
     Workspace {
         scopes,
         controls,
@@ -441,26 +443,35 @@ pub(super) async fn interact_archive(
 }
 
 fn archive_attachment(
-    view: FlowView,
-    descriptor: SessionDescriptor,
+    archive: ArchivedSelection,
     controls: mpsc::UnboundedSender<BoundControl>,
 ) -> Result<(TuiHandle, ViewServices)> {
+    let ArchivedSelection {
+        view,
+        title,
+        project,
+    } = archive;
     let binding = ViewBinding {
         view_id: Uuid::now_v7(),
         revision: 1,
         flow: view.transcript().flow().clone().into(),
     };
-    let mut handle = TuiHandle::from_archive(view, binding.clone(), controls, &descriptor)?;
+    let mut handle = TuiHandle::from_archive(
+        view,
+        binding.clone(),
+        controls,
+        title,
+        project
+            .as_ref()
+            .map(|project| project.root().display().to_string()),
+    )?;
     let (commands, rx) = mpsc::unbounded_channel();
     handle.cmd_rx = Some(rx);
     Ok((
         handle,
         ViewServices {
             binding,
-            project: descriptor
-                .project
-                .as_ref()
-                .map(|project| project.root().to_owned()),
+            project: project.as_ref().map(|project| project.root().to_owned()),
             commands,
             execution: None,
         },
@@ -1352,14 +1363,14 @@ impl scopes::Scopes {
                 });
             }
         };
-        if let Some((view, descriptor)) = archived_selection(
+        if let Some(archive) = archived_selection(
             &self.root,
             flow.session_id.0,
             Some(flow.instance_id.clone()),
         )
         .await?
         {
-            let (handle, service) = archive_attachment(view, descriptor, controls)?;
+            let (handle, service) = archive_attachment(archive, controls)?;
             return Ok(Navigation::Focus {
                 flow: address,
                 placement,
@@ -1368,7 +1379,7 @@ impl scopes::Scopes {
             });
         }
         self.enable_management().await;
-        let mut scope = self.open(flow.session_id.0).await?;
+        let mut scope = self.open_flow_scope(flow).await?;
         scope.executor.tool_ctx.prompt_resolver = Some(Arc::new(
             atman_runtime::rendezvous::FormPromptResolver::new(forms.clone()),
         ));

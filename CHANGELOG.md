@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Interactive project scopes** — Main and floating views retain each flow's project resources, commands, and attachment paths across Session reassignment and restart. Archived views display the current Session title and original flow project.
+
 - **Daemon project scopes** — Flow launch and rebinding retain each instance's project resources across Session reassignment and restart. Execution caches distinguish project paths and local/global storage bindings.
 
 - **Session project association** — Runtime catalog updates change project membership for discovery and new flow registrations. Existing instances retain their project bindings after restart, and retained cross-project histories protect shared data from deletion.

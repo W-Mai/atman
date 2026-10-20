@@ -4,6 +4,7 @@ use atman_runtime::flow_store::{
     launch::{EntryBinding, LaunchInput},
 };
 use atman_runtime::source_program::RevisionBundle;
+mod project_scope;
 
 #[tokio::test]
 async fn default_flow_details_and_selection_do_not_load_execution_or_replace_stale_catalogs() {
@@ -820,6 +821,15 @@ async fn archive_navigation_uses_no_execution_owner_and_retains_bound_rejections
     session
         .select_default(&session.cursor().clone(), instance.clone())
         .unwrap();
+    session
+        .set_title(&session.cursor().clone(), Some("Renamed archive".into()))
+        .unwrap();
+    let config = ConfigHub::from_config_dir(dir.path().join("unused-config"));
+    let project =
+        atman_runtime::storage::ProjectContext::resolve(&config, dir.path(), dir.path()).unwrap();
+    session
+        .set_project(&session.cursor().clone(), Some(project))
+        .unwrap();
     let before = std::fs::read(writer.dir().join("events.jsonl")).unwrap();
     let host = RuntimeHost::default();
     let (notices, _rx) = mpsc::unbounded_channel();
@@ -829,11 +839,13 @@ async fn archive_navigation_uses_no_execution_owner_and_retains_bound_rejections
         None,
         Arc::new(prompts::Prompts::new(notices)),
     ));
-    let Prepared::Archive(view, descriptor) = prepare(&scopes, id).await.unwrap() else {
+    let Prepared::Archive(archive) = prepare(&scopes, id).await.unwrap() else {
         panic!("archive startup acquired execution services")
     };
-    assert_eq!(view.transcript().flow().instance_id, instance);
-    assert_eq!(descriptor.id, id);
+    assert_eq!(archive.view.transcript().flow().instance_id, instance);
+    assert_eq!(archive.view.transcript().flow().session_id.0, id);
+    assert_eq!(archive.title.as_deref(), Some("Renamed archive"));
+    assert!(archive.project.is_none());
     assert!(!dir.path().join("runtime-v1/host").exists());
     assert!(!dir.path().join("runtime-v1/.profile.lock").exists());
     let forms = Arc::new(atman_runtime::session::FormRegistry::default());
@@ -863,6 +875,8 @@ async fn archive_navigation_uses_no_execution_owner_and_retains_bound_rejections
             panic!("archive view missing")
         };
         assert!(service.execution.is_none());
+        assert_eq!(handle.session_name.as_deref(), Some("Renamed archive"));
+        assert!(handle.project_root.is_none());
         assert!(handle.session.is_none());
         assert!(handle.stream_rx.is_none());
         assert!(handle.live_output.is_none());
@@ -1959,6 +1973,8 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         data_root: dir.path().to_owned(),
         host,
         session,
+        project: descriptor.project.clone(),
+        executors: Default::default(),
         descriptor,
         executor,
         config,

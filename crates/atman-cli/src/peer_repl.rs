@@ -32,6 +32,7 @@ use atman_runtime::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+mod execution;
 mod operations;
 mod prompts;
 mod scopes;
@@ -47,6 +48,8 @@ struct Attachment {
     host: RuntimeHost,
     session: SessionHandle,
     descriptor: SessionDescriptor,
+    project: Option<atman_runtime::storage::ProjectContext>,
+    executors: execution::ScopeExecutors,
     executor: Executor,
     config: ConfigHub,
     prompts: Arc<prompts::Prompts>,
@@ -177,8 +180,8 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
                         .interact_tui(scopes, terminal, notifications)
                         .await
                 }
-                Prepared::Archive(view, descriptor) => {
-                    tui::interact_archive(*view, descriptor, scopes, terminal, notifications).await
+                Prepared::Archive(archive) => {
+                    tui::interact_archive(*archive, scopes, terminal, notifications).await
                 }
                 Prepared::Legacy(view, meta) => {
                     tui::interact_legacy(*view, meta, scopes, terminal, notifications).await
@@ -187,8 +190,8 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
         } else {
             match prepare(&scopes, id).await? {
                 Prepared::Live(attachment) => attachment.interact(prompt_rx).await,
-                Prepared::Archive(view, _) => {
-                    print_archive(&view.transcript().archived_transcript()?)
+                Prepared::Archive(archive) => {
+                    print_archive(&archive.view.transcript().archived_transcript()?)
                 }
                 Prepared::Legacy(view, _) => print_archive(view.transcript()),
             }
@@ -204,11 +207,17 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
 
 enum Prepared {
     Live(Box<Attachment>),
-    Archive(Box<FlowView>, SessionDescriptor),
+    Archive(Box<ArchivedSelection>),
     Legacy(
         Box<LegacyFlowView>,
         Option<atman_runtime::session_meta::SessionMeta>,
     ),
+}
+
+struct ArchivedSelection {
+    view: FlowView,
+    title: Option<String>,
+    project: Option<atman_runtime::storage::ProjectContext>,
 }
 
 async fn legacy_selection(
@@ -245,16 +254,21 @@ async fn archived_selection(
     root: &Path,
     id: Uuid,
     instance: Option<FlowInstanceId>,
-) -> Result<Option<(FlowView, SessionDescriptor)>> {
+) -> Result<Option<ArchivedSelection>> {
     let root = root.to_owned();
     tokio::task::spawn_blocking(move || {
         let read = RuntimeStore::inspect_session(&root, id)?;
         let instance = instance
             .or_else(|| read.projection.default_flow.clone())
             .context("session has no default flow")?;
+        let project = execution::selected_project(&read.projection, Some(&instance))?;
         Ok(read
             .archived_view(&instance)?
-            .map(|view| (view, read.projection.descriptor)))
+            .map(|view| ArchivedSelection {
+                view,
+                title: read.projection.title,
+                project,
+            }))
     })
     .await?
 }
@@ -269,8 +283,8 @@ async fn prepare(scopes: &Arc<scopes::Scopes>, id: Uuid) -> Result<Prepared> {
         let (view, meta) = legacy_selection(&scopes.root, id, None).await?;
         return Ok(Prepared::Legacy(Box::new(view), meta));
     }
-    if let Some((view, descriptor)) = archived_selection(&scopes.root, id, None).await? {
-        return Ok(Prepared::Archive(Box::new(view), descriptor));
+    if let Some(archive) = archived_selection(&scopes.root, id, None).await? {
+        return Ok(Prepared::Archive(Box::new(archive)));
     }
     scopes.enable_management().await;
     Ok(Prepared::Live(Box::new(scopes.open(id).await?)))
@@ -359,12 +373,7 @@ impl Attachment {
             record
                 .and_then(|record| record.input.workspace.as_ref())
                 .map(|workspace| workspace.binding.path.as_path())
-                .or_else(|| {
-                    self.descriptor
-                        .project
-                        .as_ref()
-                        .map(|project| project.root())
-                })
+                .or_else(|| self.project.as_ref().map(|project| project.root()))
                 .context("relative image paths require a bound project or workspace")?
                 .join(path)
         };
@@ -425,10 +434,7 @@ impl Attachment {
             let (program, name, arguments, _) = crate::resolve_slash_command_from(
                 &command,
                 self.config.config_dir(),
-                self.descriptor
-                    .project
-                    .as_ref()
-                    .map(|project| project.root()),
+                self.project.as_ref().map(|project| project.root()),
             )?;
             let flow = program
                 .entry_flow(&name)
@@ -499,43 +505,34 @@ impl Attachment {
         permissions: Option<Arc<PermissionClients>>,
         prompts: Arc<prompts::Prompts>,
     ) -> Result<Self> {
+        Self::open_selected(root, id, host, permissions, prompts, None).await
+    }
+
+    async fn open_selected(
+        root: &Path,
+        id: Uuid,
+        host: RuntimeHost,
+        permissions: Option<Arc<PermissionClients>>,
+        prompts: Arc<prompts::Prompts>,
+        instance: Option<FlowInstanceId>,
+    ) -> Result<Self> {
         let session = host.open_session(root, id).await?;
-        let descriptor = session.snapshot().await?.catalog.descriptor;
+        let catalog = session.snapshot().await?.catalog;
+        let project = execution::selected_project(&catalog, instance.as_ref())?;
+        let descriptor = catalog.descriptor;
         let SessionConfiguration::Atman(source) = &descriptor.configuration else {
             bail!("session requires an Atman configuration source to execute");
         };
         let config = ConfigHub::from_source(source)?;
-        let redactor = atman_daemon::bootstrap::build_redactor(Some(config.config_dir()));
-        let mut events = EventSink::new();
-        if let Some(redactor) = &redactor {
-            events = events.with_redactor(redactor.clone());
-        }
-        let runtime = AtmanRuntime::build(AtmanRuntimeOptions {
-            events,
-            mock: false,
-            config: config.clone(),
-            project: descriptor.project.clone(),
-            home_dir: std::env::var_os("HOME").map(Into::into),
-            workspace_generation: Uuid::now_v7().to_string(),
-        })
-        .await?;
-        if let Some(lifecycle) = runtime.executor.provider_lifecycle() {
-            crate::consume_provider_catalog_refresh_plan(
-                runtime.provider_catalog_refresh_plan,
-                move |id| {
-                    let lifecycle = lifecycle.clone();
-                    async move { lifecycle.refresh_models_if_stale(&id).await }
-                },
-            )
-            .await;
-        }
-        let mut executor = runtime.executor;
-        executor.tool_ctx.prompt_resolver = Some(prompts.clone());
+        let executors = Default::default();
+        let executor = execution::executor(&executors, &config, project.as_ref(), &prompts).await?;
         Ok(Self {
             data_root: root.to_owned(),
             host,
             session,
             descriptor,
+            project,
+            executors,
             executor,
             config,
             prompts,
@@ -546,8 +543,7 @@ impl Attachment {
     async fn validate_text_input(&self, worker: &FlowWorker) -> Result<()> {
         let descriptor = worker.descriptor().await?;
         let entry = descriptor.entry()?;
-        let program =
-            load_program_from_bundle(&entry.bundle, &entry.path, &self.descriptor.source_roots())?;
+        let program = load_program_from_bundle(&entry.bundle, &entry.path, &self.source_roots())?;
         let flow = program
             .entry_flow(&entry.name)
             .and_then(|id| program.flow(&id))
@@ -585,6 +581,10 @@ impl Attachment {
         Ok(receipt.message_id)
     }
     async fn bind(&self, worker: &FlowWorker) -> Result<()> {
+        ensure!(
+            worker.project().await? == self.project,
+            "flow and execution project differ"
+        );
         if self
             .session
             .scheduling_status(worker.address().instance_id.clone())
@@ -598,8 +598,7 @@ impl Attachment {
         }
         let descriptor = worker.descriptor().await?;
         let entry = descriptor.entry()?;
-        let program =
-            load_program_from_bundle(&entry.bundle, &entry.path, &self.descriptor.source_roots())?;
+        let program = load_program_from_bundle(&entry.bundle, &entry.path, &self.source_roots())?;
         let flow = program
             .entry_flow(&entry.name)
             .and_then(|id| program.flow(&id))
@@ -608,8 +607,7 @@ impl Attachment {
         let authority = EffectiveAuthority::root(
             &trust,
             contract_allows_shell(flow.contract.as_ref()),
-            self.descriptor
-                .project
+            self.project
                 .as_ref()
                 .map(|project| project.root().to_path_buf()),
         );
@@ -667,7 +665,7 @@ impl Attachment {
                     worker.state().await?.state(),
                     atman_rt::InstanceState::Open(_)
                 ) {
-                    self.bind(&worker).await?;
+                    self.for_worker(&worker).await?.bind(&worker).await?;
                 }
                 Ok::<_, anyhow::Error>(())
             }
@@ -688,6 +686,7 @@ impl Attachment {
                 focus.address().instance_id
             ),
         );
+        let mut focused_scope = self.for_worker(&focus).await?;
         let mut views = HashMap::<FlowInstanceId, TerminalView>::new();
         let mut draining = false;
         let mut operations = operations::Operations::new();
@@ -721,15 +720,20 @@ impl Attachment {
                     if line.is_empty() { continue; }
                     if matches!(line, ":quit" | ":q" | ":exit") { break; }
                     if let Some(operation) = operations::Operation::parse(line) {
-                        match operations.start(&self, &focus, operation, Uuid::now_v7(), focus.address().instance_id.clone()) {
+                        match operations.start(&focused_scope, &focus, operation, Uuid::now_v7(), focus.address().instance_id.clone()) {
                             Ok(()) => crate::render_note(&mut printer, operation.notice().into()),
                             Err(error) => crate::render_note(&mut printer, format!("{error:#}")),
                         }
                         continue;
                     }
                     if let Some(prefix) = line.strip_prefix(":focus ") {
-                        match self.select(prefix.trim()).await {
-                            Ok(worker) => {
+                        let selected = async {
+                            let worker = self.select(prefix.trim()).await?;
+                            let scope = self.for_worker(&worker).await?;
+                            Ok::<_, anyhow::Error>((worker, scope))
+                        }.await;
+                        match selected {
+                            Ok((worker, scope)) => {
                                 if worker.address() != focus.address() {
                                     let selected = match views.remove(&worker.address().instance_id) {
                                         Some(view) => view,
@@ -738,13 +742,14 @@ impl Attachment {
                                     views.insert(focus.address().instance_id.clone(), std::mem::replace(&mut focused_view, selected));
                                     focus = worker;
                                 }
+                                focused_scope = scope;
                                 crate::render_note(&mut printer, format!("Flow {}", focus.address().instance_id));
                             }
                             Err(error) => crate::render_note(&mut printer, error.to_string()),
                         }
                         continue;
                     }
-                    let result = focused_view.submit(&self, &focus, &input).await;
+                    let result = focused_view.submit(&focused_scope, &focus, &input).await;
                     match result {
                         Ok(text) if !text.is_empty() => crate::render_note(&mut printer, text),
                         Ok(_) => {},
@@ -776,7 +781,6 @@ impl Attachment {
             ":model" => Ok(format!("Current model: {}", worker.context().last_model())),
             ":storage" => {
                 let root = self
-                    .descriptor
                     .project
                     .as_ref()
                     .context("current session has no project")?

@@ -13,7 +13,7 @@ impl From<&Attachment> for SessionSeed {
     fn from(scope: &Attachment) -> Self {
         Self {
             config: scope.config.clone(),
-            project: scope.descriptor.project.clone(),
+            project: scope.project.clone(),
             prompt_resolver: scope.executor.tool_ctx.prompt_resolver.clone(),
         }
     }
@@ -153,17 +153,38 @@ impl Scopes {
     }
 
     pub async fn open(&self, id: Uuid) -> Result<Attachment> {
+        self.open_selected(id, None).await
+    }
+
+    pub async fn open_flow_scope(
+        &self,
+        flow: &atman_runtime::flow_store::FlowRef,
+    ) -> Result<Attachment> {
+        self.open_selected(flow.session_id.0, Some(flow.instance_id.clone()))
+            .await
+    }
+
+    async fn open_selected(
+        &self,
+        id: Uuid,
+        instance: Option<FlowInstanceId>,
+    ) -> Result<Attachment> {
         // Only navigation loads serialize. Existing views retain their own immutable scope.
         let mut loaded = self.loaded.lock().await;
         if let Some(scope) = loaded.get(&id) {
-            return Ok(scope.clone());
+            let scope = scope.clone();
+            drop(loaded);
+            let catalog = scope.session.snapshot().await?.catalog;
+            let project = execution::selected_project(&catalog, instance.as_ref())?;
+            return scope.for_project(project).await;
         }
-        let scope = Attachment::open(
+        let scope = Attachment::open_selected(
             &self.root,
             id,
             self.host.clone(),
             self.permissions.clone(),
             self.prompts.clone(),
+            instance,
         )
         .await?;
         loaded.insert(id, scope.clone());
@@ -338,11 +359,7 @@ impl Scopes {
         let ids = self.catalog.ids().await?;
         let root = self.root.clone();
         let current = source.session.id();
-        let project = source
-            .descriptor
-            .project
-            .as_ref()
-            .map(|p| p.root().to_owned());
+        let project = source.project.as_ref().map(|p| p.root().to_owned());
         let rows = tokio::task::spawn_blocking(move || {
             let mut rows = Vec::new();
             for id in ids.into_iter().filter(|id| *id != current) {
@@ -350,13 +367,7 @@ impl Scopes {
                     continue;
                 };
                 if read.projection.default_flow.is_none()
-                    || read
-                        .projection
-                        .descriptor
-                        .project
-                        .as_ref()
-                        .map(|p| p.root())
-                        != project.as_deref()
+                    || read.projection.project.as_ref().map(|p| p.root()) != project.as_deref()
                 {
                     continue;
                 }

@@ -84,10 +84,10 @@ impl TuiHandle {
         view: FlowView,
         binding: ViewBinding,
         commands: tokio::sync::mpsc::UnboundedSender<BoundControl>,
-        descriptor: &atman_runtime::flow_store::SessionDescriptor,
+        title: Option<String>,
+        project: Option<String>,
     ) -> io::Result<Self> {
         if binding.flow.instance() != Some(view.transcript().flow())
-            || binding.flow.session_id() != descriptor.id
             || !matches!(
                 view.transcript().content(),
                 Some(atman_runtime::flow_store::view::FlowContentSummary::History(_))
@@ -105,11 +105,8 @@ impl TuiHandle {
             },
             binding,
             commands,
-            Some(descriptor.title.clone()),
-            descriptor
-                .project
-                .as_ref()
-                .map(|project| project.root().display().to_string()),
+            title,
+            project,
         ))
     }
 

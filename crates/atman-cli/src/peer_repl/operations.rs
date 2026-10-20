@@ -289,6 +289,8 @@ mod tests {
                 data_root: dir.path().to_owned(),
                 host: host.clone(),
                 session,
+                project: descriptor.project.clone(),
+                executors: Default::default(),
                 descriptor,
                 executor,
                 config: config.clone(),
