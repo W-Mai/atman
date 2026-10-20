@@ -697,7 +697,7 @@ impl Workspace {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
                                 let result = async {
-                                    directory::remove(&scopes.root, *request).await?;
+                                    scopes.remove_session(*request).await?;
                                     let _ = replies.send(TuiCommand::Toast {
                                         message: "Session deleted".into(),
                                         level: atman_tui::app::NoteLevel::Info,

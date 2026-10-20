@@ -178,7 +178,8 @@ pub(super) async fn removal(
     .await?
 }
 
-pub(super) async fn remove(root: &Path, request: SessionRemoval) -> Result<()> {
+#[cfg(test)]
+async fn remove(root: &Path, request: SessionRemoval) -> Result<()> {
     let data = root.to_owned();
     tokio::task::spawn_blocking(move || RuntimeStore::open(&data)?.delete_session(&request)).await?
 }

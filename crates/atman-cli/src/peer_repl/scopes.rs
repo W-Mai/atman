@@ -170,6 +170,24 @@ impl Scopes {
         Ok(scope)
     }
 
+    pub async fn remove_session(
+        self: &Arc<Self>,
+        request: atman_runtime::flow_store::SessionRemoval,
+    ) -> Result<()> {
+        let scopes = self.clone();
+        tokio::spawn(async move {
+            let mut loaded = scopes.loaded.lock().await;
+            let id = request.session_id;
+            let result = scopes.host.delete_session(&scopes.root, request).await;
+            // Eviction follows accepted removal even if the requesting view disappears.
+            if scopes.host.session(id).is_err() {
+                loaded.remove(&id);
+            }
+            result
+        })
+        .await?
+    }
+
     pub async fn cancel_watcher(
         &self,
         owner: atman_runtime::flow_store::FlowRef,
