@@ -97,10 +97,18 @@ impl Target<'_> {
     }
 
     pub async fn interject(self, args: &ToolArgs, text: String) -> ToolResult {
+        let scope = crate::tools::task_scope::reference(args)?;
         match args.named("level") {
             None => (),
             Some(Value::Str(level)) if level == "l1_nudge" => (),
-            Some(Value::Str(level)) if level == "l4_hard_stop" => return self.cancel(args).await,
+            Some(Value::Str(level)) if level == "l4_hard_stop" => {
+                if scope.is_some() {
+                    return Err(failed(
+                        "scope applies to messages, not execution cancellation",
+                    ));
+                }
+                return self.cancel(args).await;
+            }
             _ => {
                 return Err(failed(
                     "persistent interjection requires l1_nudge; execution cancellation uses flow.kill",
@@ -121,12 +129,13 @@ impl Target<'_> {
         let request_id = request_id(args)?;
         let attempt = self
             .client
-            .send(self.address, request_id, text, delivery)
+            .send(self.address, request_id, text, delivery, scope)
             .await
             .map_err(failed)?;
         Ok(Value::from_json(serde_json::json!({
             "request_id": request_id,
             "delivery": attempt.record.status,
+            "scope": attempt.record.intent.request.scope,
             "pending_reason": attempt.pending_reason.map(|error| error.to_string()),
         })))
     }

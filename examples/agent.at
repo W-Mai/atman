@@ -39,6 +39,7 @@ flow agent_loop(tools_called: bool, empty_wait_ms: int = 0) -> string {
             "preview.push",
             "session.push", "sleep", "message.user",
             "timer.schedule", "timer.cancel", "timer.list",
+            "flow.scope.create", "flow.scope.list", "flow.scope.cancel",
             "mcp.status", "mcp.tools", "mcp.await", "mcp.call"
         ],
     )

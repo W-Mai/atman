@@ -1960,6 +1960,7 @@ impl Tool for FlowInterject {
                 "level": {"type": "string", "enum": ["l1_nudge", "l2_course_correct", "l3_redirect", "l4_hard_stop"], "default": "l1_nudge", "description": "Interjection level."},
                 "redirect_target": {"type": "string", "description": "Required for L3 redirect: the flow to redirect to."},
                 "delivery": {"type": "string", "enum": ["at_boundary", "next_turn"], "default": "at_boundary"},
+                "scope": super::task_scope::reference_schema(),
                 "request_id": {"type": "string", "description": "Stable UUID for a persistent send; reuse only for an identical retry."},
                 "expected_revision": {"type": "integer", "minimum": 0}
             },
@@ -1979,6 +1980,11 @@ impl Tool for FlowInterject {
             let text = extract_string(&args, "text", 1)?;
             if let Some(target) = instance::resolve(&handle, ctx)? {
                 return target.interject(&args, text).await;
+            }
+            if args.named("scope").is_some() {
+                return Err(RuntimeError::ToolFailed(
+                    "flow.interject: task scopes require a persistent instance".into(),
+                ));
             }
             let level_str = args
                 .named("level")

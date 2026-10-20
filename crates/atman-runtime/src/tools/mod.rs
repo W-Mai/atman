@@ -38,6 +38,7 @@ pub mod session;
 pub mod sleep;
 pub mod stdlib;
 pub mod task_ops;
+pub mod task_scope;
 pub mod term;
 pub mod test;
 pub mod timer;
@@ -111,6 +112,9 @@ pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stub
     reg.register(Arc::new(flow_control::FlowControlBatch));
     reg.register(Arc::new(flow_control::FlowControlStatus));
     reg.register(Arc::new(agent_ctrl::FlowInterject));
+    reg.register(Arc::new(task_scope::TaskScopeTool::Create));
+    reg.register(Arc::new(task_scope::TaskScopeTool::Cancel));
+    reg.register(Arc::new(task_scope::TaskScopeTool::List));
     reg.register(Arc::new(form::FormAsk));
     reg.register(Arc::new(session::SessionPush));
     reg.register(Arc::new(sleep::Sleep));

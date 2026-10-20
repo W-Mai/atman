@@ -747,6 +747,164 @@ async fn task_scope_recovery_rejects_cross_journal_cycles_without_locking_owners
 }
 
 #[tokio::test]
+async fn task_scope_tools_preserve_owner_identity_retries_and_scoped_peer_delivery() {
+    use atman_runtime::{
+        ValueJson,
+        flow_store::access::{AccessTarget, FlowAction, FlowGrant},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let receiver = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&receiver, FlowTransition::Activated).await;
+    let source = r#"
+        flow main() -> any {
+            when env("action") == "cancel" {
+                first = flow.scope.cancel(id: env("id"))
+                again = flow.scope.cancel(id: env("id"))
+                return [first, again, flow.scope.list()]
+            }
+            when env("action") == "invalid" {
+                return flow.interject(handle: env("target"), text: "invalid", scope: env("scope"))
+            }
+            group = flow.scope.create(id: env("id"), name: "task")
+            same = flow.scope.create(id: env("id"), name: "task")
+            sent = flow.interject(handle: env("target"), text: "scoped", scope: group.reference, request_id: env("request"))
+            retried = flow.interject(handle: env("target"), text: "scoped", scope: group.reference, request_id: env("request"))
+            return [group, same, sent, retried, flow.scope.list()]
+        }
+    "#;
+    let id = Uuid::new_v4();
+    let mut owners = Vec::new();
+    for _ in 0..2 {
+        let owner = session
+            .create_flow(program_descriptor(info.id, source.into()))
+            .await
+            .unwrap();
+        change(&owner, FlowTransition::Activated).await;
+        session
+            .grant_access(
+                session.snapshot().await.unwrap().cursor,
+                FlowGrant {
+                    id: Uuid::new_v4(),
+                    grantee: owner.address().clone(),
+                    target: AccessTarget::Flow(receiver.address().clone()),
+                    actions: [FlowAction::Send].into(),
+                },
+            )
+            .await
+            .unwrap();
+        let response = invoke_with_env(
+            &owner,
+            Executor::new(),
+            [
+                ("action".into(), "send".into()),
+                ("id".into(), id.to_string().into()),
+                ("request".into(), Uuid::new_v4().to_string().into()),
+                (
+                    "target".into(),
+                    receiver.address().instance_id.to_string().into(),
+                ),
+            ]
+            .into(),
+        )
+        .await
+        .result
+        .unwrap()
+        .to_json()
+        .unwrap();
+        assert_eq!(response[0], response[1]);
+        assert_eq!(response[2], response[3]);
+        assert_eq!(
+            response[0]["reference"]["owner"],
+            serde_json::to_value(owner.address()).unwrap()
+        );
+        assert_eq!(response[0]["reference"], response[2]["scope"]);
+        assert_eq!(response[4][0], response[0]);
+        owners.push(owner);
+    }
+    let pending = receiver.snapshot().await.unwrap().pending;
+    assert_eq!(pending.len(), 2);
+    assert_ne!(pending[0].request.scope, pending[1].request.scope);
+    let cancelled = invoke_with_env(
+        &owners[0],
+        Executor::new(),
+        [
+            ("action".into(), "cancel".into()),
+            ("id".into(), id.to_string().into()),
+        ]
+        .into(),
+    )
+    .await
+    .result
+    .unwrap()
+    .to_json()
+    .unwrap();
+    assert_eq!(cancelled[0], cancelled[1]);
+    assert_eq!(
+        cancelled[2][0]["record"]["cancellation"]["reason"],
+        "requested"
+    );
+    let mut changes = receiver.subscribe_commits();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            changes.borrow_and_update();
+            let pending = receiver.snapshot().await.unwrap().pending;
+            if pending.len() == 1 {
+                assert_eq!(
+                    pending[0].request.scope.as_ref().unwrap().owner,
+                    *owners[1].address()
+                );
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(receiver.state().await.unwrap().can_start_turn());
+    for scope in [
+        serde_json::json!({"owner": owners[1].address(), "id": Uuid::nil()}),
+        serde_json::json!({"owner": owners[1].address(), "id": id, "extra": true}),
+        serde_json::json!({"owner": {"session_id": info.id}, "id": id}),
+    ] {
+        let response = invoke_with_env(
+            &owners[1],
+            Executor::new(),
+            [
+                ("action".into(), "invalid".into()),
+                (
+                    "target".into(),
+                    receiver.address().instance_id.to_string().into(),
+                ),
+                ("scope".into(), scope),
+            ]
+            .into(),
+        )
+        .await;
+        assert!(
+            response
+                .result
+                .unwrap_err()
+                .to_string()
+                .contains("flow.scope")
+        );
+        change(&owners[1], FlowTransition::InterruptionRecovered).await;
+        assert_eq!(receiver.snapshot().await.unwrap().pending.len(), 1);
+    }
+    let owner_address = owners[0].address().clone();
+    host.shutdown().await.unwrap();
+    let restored = root.open_session(info.id).unwrap();
+    let owner = restored.open_flow(&owner_address.instance_id).unwrap();
+    assert!(owner.task_scopes().next().unwrap().cancellation.is_some());
+    assert_eq!(owner.sends().len(), 1);
+}
+
+#[tokio::test]
 async fn durable_timer_tools_wake_equal_peers_without_promoting_notification_content() {
     use atman_runtime::{ValueJson, flow_store::inbox::TimerPurpose};
     use chrono::{Duration as ClockDuration, Utc};
@@ -3217,7 +3375,8 @@ async fn management_authority_is_explicit_revocable_and_shared_with_observers() 
                 source.address().clone(),
                 Uuid::new_v4(),
                 "revoked".into(),
-                DeliveryMode::AtBoundary
+                DeliveryMode::AtBoundary,
+                None
             )
             .await
             .is_err()
@@ -9528,6 +9687,17 @@ async fn instance_flow_tools_fail_closed_and_controls_do_not_close_the_recipient
         ),
         (
             format!(
+                "flow main() -> any {{ return flow.interject(handle: \"{}\", text: \"no\", level: \"l4_hard_stop\", expected_revision: {revision}, scope: {{owner: {{session_id: \"{}\", instance_id: \"{}\"}}, id: \"{}\"}}) }}",
+                b.address().instance_id,
+                info.id,
+                b.address().instance_id,
+                Uuid::new_v4()
+            ),
+            true,
+            false,
+        ),
+        (
+            format!(
                 "flow main() -> any {{ return flow.interject(handle: \"{}\", text: \"no\", level: \"l2_course_correct\") }}",
                 b.address().instance_id
             ),
@@ -10627,7 +10797,8 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
                 d_info.address.clone(),
                 Uuid::new_v4(),
                 "unauthorized".into(),
-                DeliveryMode::AtBoundary
+                DeliveryMode::AtBoundary,
+                None
             )
             .await
             .is_err()
@@ -10733,7 +10904,8 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
                 d_info.address.clone(),
                 delivery_id,
                 "allowed".into(),
-                DeliveryMode::AtBoundary
+                DeliveryMode::AtBoundary,
+                None
             )
             .await
             .unwrap()
@@ -10755,7 +10927,8 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
                 d_info.address.clone(),
                 delivery_id,
                 "allowed".into(),
-                DeliveryMode::AtBoundary
+                DeliveryMode::AtBoundary,
+                None
             )
             .await
             .unwrap()
@@ -10768,7 +10941,8 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
                 d_info.address,
                 Uuid::new_v4(),
                 "revoked".into(),
-                DeliveryMode::AtBoundary
+                DeliveryMode::AtBoundary,
+                None
             )
             .await
             .is_err()
@@ -10826,6 +11000,7 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
                 Uuid::new_v4(),
                 "late work".into(),
                 DeliveryMode::AtBoundary,
+                None
             )
             .await
             .is_err()
@@ -11426,6 +11601,7 @@ async fn cyclic_peer_waits_park_and_unwind_through_pause_cancel_and_close() {
                                     Uuid::new_v4(),
                                     "peer input".into(),
                                     DeliveryMode::AtBoundary,
+                                    None,
                                 )
                                 .await
                                 .map_err(failed)?;

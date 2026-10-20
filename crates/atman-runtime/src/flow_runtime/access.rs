@@ -727,12 +727,49 @@ impl FlowClient {
             .await
     }
 
+    /// Create an explicitly owned cancellation group without binding any existing peer.
+    pub async fn create_task_scope(
+        &self,
+        definition: crate::flow_store::task_scope::TaskScopeDefinition,
+    ) -> io::Result<crate::flow_store::task_scope::TaskScopeRecord> {
+        self.authenticate()?;
+        let client = self.clone();
+        self.host
+            .flow(self.source())
+            .await?
+            .create_task_scope(definition, move |_| client.authenticate())
+            .await
+    }
+
+    pub async fn cancel_task_scope(&self, id: Uuid) -> io::Result<CommitReceipt> {
+        self.authenticate()?;
+        let client = self.clone();
+        self.host
+            .flow(self.source())
+            .await?
+            .cancel_task_scope(id, move |_| client.authenticate())
+            .await
+    }
+
+    pub async fn task_scopes(
+        &self,
+    ) -> io::Result<Vec<crate::flow_store::task_scope::TaskScopeRecord>> {
+        self.authenticate()?;
+        let client = self.clone();
+        self.host
+            .flow(self.source())
+            .await?
+            .task_scopes(move |_| client.authenticate())
+            .await
+    }
+
     pub async fn send(
         &self,
         target: FlowRef,
         request_id: Uuid,
         text: String,
         delivery: DeliveryMode,
+        scope: Option<crate::flow_store::task_scope::TaskScopeRef>,
     ) -> io::Result<SendAttempt> {
         // Authenticate before consulting the durable intent. Matching retries retain their receipt;
         // only a new intent and a new receiver admission require current send authority.
@@ -749,7 +786,7 @@ impl FlowClient {
                     delivery,
                     cause: None,
                     correlation: None,
-                    scope: None,
+                    scope,
                     payload: InboxPayload::Interjection { text },
                 },
                 None,

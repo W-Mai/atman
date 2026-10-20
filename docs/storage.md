@@ -881,3 +881,15 @@ Scheduler idle checkpoints include the source subscriptions observed during prep
 Scoped send intents use the same source validation as scoped inbox admission. New intents require active source scopes; identical requests return their existing send record before consulting those sources. A reply correlation belongs to one send request, so cancellation cannot alias an unrelated intent. Scope cancellation records the existing reply-cancellation facts for matching pending waits in one commit, including while the sending turn is paused. Delivered results and unrelated waits remain unchanged. The shared message observer watches both unread inputs and pending send waits.
 
 An explicit reply wait checks the original send scope as well as the incoming message scope. An unscoped reply therefore cannot bypass a missing or cancelled source group. Unknown sources retain the reply until source or directory changes wake the wait; confirmed cancellation ends the wait without manufacturing a completion. Cancellation does not erase send intents or mark delivery successful. `PendingDelivery` retains uncertainty about receiver acceptance, and retrying the same request may reconcile an earlier acceptance after source cancellation; the receiver still rejects new scoped acceptance.
+
+### Task scope tools
+
+`flow.scope.create(id, name, goal?)`, `flow.scope.list()`, and `flow.scope.cancel(id)` operate on the invoking persistent Flow. Create and list return each complete `reference` (`owner.session_id`, `owner.instance_id`, and `id`) alongside its durable `record`. Reuse a stable UUID and identical definition for creation retries. An optional goal binding contains the current goal id and objective; a mismatch is rejected. Cancelling a group requires the normal approval policy for a Tier Two tool. Creation and listing are Tier Zero. A closed invocation cannot use its previous client to manage groups.
+
+`flow.interject(scope: reference)` records the scope in both the send intent and recipient inbox. Omitting it keeps the message independent. Malformed references, unknown fields, and nil identities are rejected; legacy Session invocation and L4 execution cancellation do not accept message scopes. The managed main agent, all four subagent roles, and the agent example declare the scope tools.
+
+```at
+group = flow.scope.create(id: "1d2e1d89-30fb-4573-8d95-d81429758d36", name: "Review changes")
+flow.interject(handle: peer, text: "Review the changes", scope: group.reference, request_id: "169b699f-2688-4694-9826-f8fce8606f38")
+flow.scope.cancel(id: group.reference.id)
+```
