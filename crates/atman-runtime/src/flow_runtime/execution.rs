@@ -125,9 +125,9 @@ impl FlowWorker {
         let worker = self.clone();
         let runtime = tokio::runtime::Handle::current();
         let scope = self.scope_admission().await?;
-        self.request(move |store| {
+        self.request_scoped(scope.clone(), move |store, snapshot| {
             scope.validate_member(store)?;
-            let _scope = scope.acquire()?;
+            scope.check(snapshot)?;
             if worker.is_stopping() {
                 return if expected.is_some() {
                     Ok(None)

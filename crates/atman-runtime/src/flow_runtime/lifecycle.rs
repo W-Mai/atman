@@ -31,7 +31,12 @@ impl FlowWorker {
         } else {
             None
         };
-        self.request(move |store| {
+        let dependencies = scope
+            .as_ref()
+            .and_then(|scope| scope.as_ref().ok())
+            .cloned()
+            .unwrap_or_default();
+        self.request_scoped(dependencies, move |store, snapshot| {
             authorize(store.state().address())?;
             if worker.is_stopping() {
                 return Err(invalid("instance host is stopping"));
@@ -40,11 +45,11 @@ impl FlowWorker {
                 Some(scope) if store.recorded_control(&request)?.is_none() => Some(scope?),
                 _ => None,
             };
-            let _scope = scope
+            scope
                 .as_ref()
                 .map(|scope| {
                     scope.validate_member(store)?;
-                    scope.acquire()
+                    scope.check(snapshot)
                 })
                 .transpose()?;
             let close = request.action == ControlAction::Close;

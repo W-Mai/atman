@@ -320,9 +320,9 @@ impl RuntimeHost {
                 let access = host.clone();
                 let scope = worker.scope_admission().await?;
                 worker
-                    .request(move |store| {
+                    .request_scoped(scope.clone(), move |store, snapshot| {
                         scope.validate_member(store)?;
-                        let _scope = scope.acquire()?;
+                        scope.check(snapshot)?;
                         let new = store.launch_record().is_none();
                         let record = store.activate_entry(input, proof, |input| {
                             authorize(&descriptor, input)?;

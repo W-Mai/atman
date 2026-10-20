@@ -39,6 +39,8 @@ use crate::session::Session;
 use crate::tool::ToolCtx;
 
 type Acknowledge = Box<dyn FnOnce() + Send>;
+type StorageCommand =
+    Box<dyn FnOnce(&mut FlowStore, io::Result<&task_scope::ScopeSnapshot>) -> Acknowledge + Send>;
 
 /// An atomic scheduling read; pending input alone does not grant permission to execute.
 #[derive(Clone, Debug)]
@@ -71,7 +73,10 @@ impl InstanceStatus {
 
 enum Command {
     FlushTrace,
-    Apply(Box<dyn FnOnce(&mut FlowStore) -> Acknowledge + Send>),
+    Apply {
+        scope: task_scope::ScopeAdmission,
+        command: StorageCommand,
+    },
     Stop(oneshot::Sender<FlowStore>),
     ClaimExecution {
         lease: TurnLease<AtmanUuid>,
@@ -210,12 +215,16 @@ impl FlowWorker {
                     },
                     _ = trace_owner.0.wake.notified() => Command::FlushTrace,
                 };
-                let command = match command {
-                    Command::FlushTrace => {
-                        Box::new(|_: &mut FlowStore| Box::new(|| {}) as Acknowledge)
-                            as Box<dyn FnOnce(&mut FlowStore) -> Acknowledge + Send>
-                    }
-                    Command::Apply(command) => command,
+                let (scope, command) = match command {
+                    Command::FlushTrace => (
+                        task_scope::ScopeAdmission::default(),
+                        Box::new(
+                            |_: &mut FlowStore, _: io::Result<&task_scope::ScopeSnapshot>| {
+                                Box::new(|| {}) as Acknowledge
+                            },
+                        ) as StorageCommand,
+                    ),
+                    Command::Apply { scope, command } => (scope, command),
                     Command::Stop(reply) => {
                         receiver.close();
                         if stopped.is_none() {
@@ -235,8 +244,15 @@ impl FlowWorker {
                         } else if matches!(store.state().state(), atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) if active.lease == lease && active.phase == atman_rt::TurnPhase::Running)
                         {
                             let resources = resource_owner.0.clone();
+                            let owner = store.state().address().clone();
+                            let scope_owner = scope_owner.clone();
                             let result = tokio::task::spawn_blocking(move || {
-                                let _scope = scope.acquire()?;
+                                let transaction = task_scope::ScopeTransaction::acquire(
+                                    &scope,
+                                    &owner,
+                                    &scope_owner,
+                                )?;
+                                scope.check(&transaction.snapshot(&scope))?;
                                 Ok(resources.executions.token())
                             })
                             .await
@@ -260,13 +276,20 @@ impl FlowWorker {
                 let trace = trace_owner.0.clone();
                 let scope_owner = scope_owner.clone();
                 match tokio::task::spawn_blocking(move || {
-                    let mut scope = scope_owner
-                        .write()
-                        .map_err(|_| invalid("task scope owner failed"))?;
+                    let owner = store.state().address().clone();
+                    let mut transaction =
+                        match task_scope::ScopeTransaction::acquire(&scope, &owner, &scope_owner) {
+                            Ok(transaction) => transaction,
+                            Err(error) => {
+                                command(&mut store, Err(error))();
+                                return Ok(store);
+                            }
+                        };
                     trace.flush(&mut store)?;
-                    let acknowledge = command(&mut store);
-                    *scope = task_scope::ScopeState::from_store(&store);
-                    drop(scope);
+                    let snapshot = transaction.snapshot(&scope);
+                    let acknowledge = command(&mut store, Ok(&snapshot));
+                    transaction.publish(&store);
+                    drop(transaction);
                     if matches!(
                         store.state().state(),
                         atman_rt::InstanceState::Closing { .. } | atman_rt::InstanceState::Closed
@@ -378,6 +401,16 @@ impl FlowWorker {
         request(&self.commands, command).await
     }
 
+    async fn request_scoped<T: Send + 'static>(
+        &self,
+        scope: task_scope::ScopeAdmission,
+        command: impl FnOnce(&mut FlowStore, &task_scope::ScopeSnapshot) -> io::Result<T>
+        + Send
+        + 'static,
+    ) -> io::Result<T> {
+        request_scoped(&self.commands, scope, command).await
+    }
+
     pub async fn state(&self) -> io::Result<FlowInstance<AtmanUuid>> {
         self.request(|store| Ok(store.state().clone())).await
     }
@@ -457,14 +490,17 @@ impl FlowWorker {
         } else {
             None
         };
-        self.request(move |store| match scope {
-            Some(scope) => {
-                scope.validate_member(store)?;
-                let _scope = scope.acquire()?;
-                lifecycle::transition(store, &resources, revision, transition)
-            }
-            None => lifecycle::transition(store, &resources, revision, transition),
-        })
+        self.request_scoped(
+            scope.clone().unwrap_or_default(),
+            move |store, snapshot| match scope {
+                Some(scope) => {
+                    scope.validate_member(store)?;
+                    scope.check(snapshot)?;
+                    lifecycle::transition(store, &resources, revision, transition)
+                }
+                None => lifecycle::transition(store, &resources, revision, transition),
+            },
+        )
         .await
     }
 
@@ -550,14 +586,30 @@ async fn request<T: Send + 'static>(
     commands: &mpsc::Sender<Command>,
     command: impl FnOnce(&mut FlowStore) -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
+    request_scoped(
+        commands,
+        task_scope::ScopeAdmission::default(),
+        move |store, _| command(store),
+    )
+    .await
+}
+
+async fn request_scoped<T: Send + 'static>(
+    commands: &mpsc::Sender<Command>,
+    scope: task_scope::ScopeAdmission,
+    command: impl FnOnce(&mut FlowStore, &task_scope::ScopeSnapshot) -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
     let (reply, received) = oneshot::channel();
     commands
-        .send(Command::Apply(Box::new(move |store| {
-            let result = command(store);
-            Box::new(move || {
-                let _ = reply.send(result);
-            })
-        })))
+        .send(Command::Apply {
+            scope,
+            command: Box::new(move |store, snapshot| {
+                let result = snapshot.and_then(|snapshot| command(store, snapshot));
+                Box::new(move || {
+                    let _ = reply.send(result);
+                })
+            }),
+        })
         .await
         .map_err(|_| io::Error::other("flow storage worker stopped"))?;
     received

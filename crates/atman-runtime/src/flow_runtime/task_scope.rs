@@ -1,6 +1,10 @@
 //! Explicit membership validation and cancellation through the shared close lifecycle.
 
-use std::{collections::BTreeMap, io};
+use std::{
+    collections::{BTreeMap, HashMap},
+    io,
+    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+};
 
 use atman_rt::InstanceState;
 use uuid::Uuid;
@@ -9,13 +13,16 @@ use super::{FlowWorker, host::RuntimeHost};
 use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::{
     FlowRef, FlowStore, FlowTransition, invalid,
-    task_scope::{TaskScopeDefinition, TaskScopeRecord, TaskScopeRef},
+    task_scope::{ScopeCancellation, TaskScopeDefinition, TaskScopeRecord, TaskScopeRef},
 };
+
+#[cfg(test)]
+mod tests;
 
 /// Updated under the writer's gate before acknowledging any storage command.
 pub(super) struct ScopeState {
     open: bool,
-    records: BTreeMap<Uuid, bool>,
+    records: BTreeMap<Uuid, Option<ScopeCancellation>>,
 }
 
 impl ScopeState {
@@ -24,19 +31,136 @@ impl ScopeState {
             open: matches!(store.state().state(), InstanceState::Open(_)),
             records: store
                 .task_scopes()
-                .map(|record| (record.created.definition.id, record.cancellation.is_none()))
+                .map(|record| (record.created.definition.id, record.cancellation.clone()))
                 .collect(),
         }
     }
 }
 
-/// Sources are resolved without holding writer locks. The immutable ancestry is checked again under read guards at the member's commit boundary, from child to ancestor.
-#[derive(Default)]
+/// Sources are resolved before queueing a transaction; ancestry remains immutable after activation.
+#[derive(Clone, Default)]
 pub(super) struct ScopeAdmission(Vec<(TaskScopeRef, FlowWorker)>);
 
-pub(super) struct ScopeRead<'a> {
-    _guards: Vec<std::sync::RwLockReadGuard<'a, ScopeState>>,
-    active: bool,
+pub(super) struct ScopeStatus {
+    open: bool,
+    cancellation: Option<ScopeCancellation>,
+}
+
+#[derive(Default)]
+pub(super) struct ScopeSnapshot(HashMap<TaskScopeRef, Result<ScopeStatus, String>>);
+
+impl ScopeSnapshot {
+    fn status(&self, scope: &TaskScopeRef) -> io::Result<&ScopeStatus> {
+        self.0
+            .get(scope)
+            .ok_or_else(|| invalid("task scope was not included in the transaction"))?
+            .as_ref()
+            .map_err(|error| invalid(error.clone()))
+    }
+}
+
+enum ScopeGuard<'a> {
+    Read(RwLockReadGuard<'a, ScopeState>),
+    Write(RwLockWriteGuard<'a, ScopeState>),
+}
+
+impl ScopeGuard<'_> {
+    fn state(&self) -> &ScopeState {
+        match self {
+            Self::Read(state) => state,
+            Self::Write(state) => state,
+        }
+    }
+}
+
+/// One target write gate and deduplicated source read gates, always in full-address order.
+pub(super) struct ScopeTransaction<'a>(Vec<(&'a FlowRef, ScopeGuard<'a>)>);
+
+impl<'a> ScopeTransaction<'a> {
+    pub fn acquire(
+        sources: &'a ScopeAdmission,
+        owner: &'a FlowRef,
+        writer: &'a RwLock<ScopeState>,
+    ) -> io::Result<Self> {
+        let mut gates = vec![(owner, writer, true)];
+        gates.extend(
+            sources
+                .0
+                .iter()
+                .map(|(_, source)| (source.address(), source.scope_state.as_ref(), false)),
+        );
+        gates.sort_by_key(|(address, _, write)| {
+            (address.session_id.0, address.instance_id.0.0, !write)
+        });
+        for pair in gates.windows(2) {
+            if pair[0].0 == pair[1].0 && !std::ptr::eq(pair[0].1, pair[1].1) {
+                return Err(invalid(
+                    "task scope writer changed during transaction preparation",
+                ));
+            }
+        }
+        gates.dedup_by(|right, left| right.0 == left.0);
+        let guards = gates
+            .into_iter()
+            .map(|(address, state, write)| {
+                let guard = if write {
+                    ScopeGuard::Write(
+                        state
+                            .write()
+                            .map_err(|_| invalid("task scope owner failed"))?,
+                    )
+                } else {
+                    ScopeGuard::Read(
+                        state
+                            .read()
+                            .map_err(|_| invalid("task scope owner failed"))?,
+                    )
+                };
+                Ok((address, guard))
+            })
+            .collect::<io::Result<_>>()?;
+        Ok(Self(guards))
+    }
+
+    pub fn snapshot(&self, sources: &ScopeAdmission) -> ScopeSnapshot {
+        ScopeSnapshot(
+            sources
+                .0
+                .iter()
+                .map(|(scope, worker)| {
+                    let status = if worker.is_stopping() || worker.is_stopped() {
+                        Err("task scope owner is unavailable".into())
+                    } else {
+                        self.0
+                            .iter()
+                            .find(|(address, _)| **address == scope.owner)
+                            .and_then(|(_, guard)| {
+                                let state = guard.state();
+                                state
+                                    .records
+                                    .get(&scope.id)
+                                    .map(|cancellation| ScopeStatus {
+                                        open: state.open,
+                                        cancellation: cancellation.clone(),
+                                    })
+                            })
+                            .ok_or_else(|| "task scope is not registered by its owner".into())
+                    };
+                    (scope.clone(), status)
+                })
+                .collect(),
+        )
+    }
+
+    pub fn publish(&mut self, store: &FlowStore) {
+        for (_, guard) in &mut self.0 {
+            if let ScopeGuard::Write(state) = guard {
+                **state = ScopeState::from_store(store);
+                return;
+            }
+        }
+        unreachable!("a scope transaction always owns one target writer")
+    }
 }
 
 impl ScopeAdmission {
@@ -46,40 +170,26 @@ impl ScopeAdmission {
         }
         Ok(())
     }
-    fn read(&self) -> io::Result<ScopeRead<'_>> {
-        let guards = self
-            .0
-            .iter()
-            .map(|(_, worker)| {
-                worker
-                    .scope_state
-                    .read()
-                    .map_err(|_| invalid("task scope owner failed"))
-            })
-            .collect::<io::Result<Vec<_>>>()?;
+    fn is_active(&self, snapshot: &ScopeSnapshot) -> io::Result<bool> {
         let mut active = true;
-        for ((scope, worker), state) in self.0.iter().zip(&guards) {
-            if worker.is_stopping() || worker.is_stopped() {
-                return Err(invalid("task scope owner is unavailable"));
+        let mut unavailable = None;
+        for (scope, _) in &self.0 {
+            match snapshot.status(scope) {
+                Ok(status) => active &= status.open && status.cancellation.is_none(),
+                Err(error) => unavailable = Some(error),
             }
-            let registered = state
-                .records
-                .get(&scope.id)
-                .ok_or_else(|| invalid("task scope is not registered by its owner"))?;
-            active &= state.open && *registered;
         }
-        Ok(ScopeRead {
-            _guards: guards,
-            active,
-        })
+        if active && let Some(error) = unavailable {
+            return Err(error);
+        }
+        Ok(active)
     }
 
-    pub fn acquire(&self) -> io::Result<ScopeRead<'_>> {
-        let read = self.read()?;
-        if !read.active {
+    pub fn check(&self, snapshot: &ScopeSnapshot) -> io::Result<()> {
+        if !self.is_active(snapshot)? {
             return Err(invalid("task scope is cancelled or its owner is closed"));
         }
-        Ok(read)
+        Ok(())
     }
 }
 
@@ -159,9 +269,8 @@ impl FlowWorker {
             return Ok(());
         }
         let worker = self.clone();
-        self.request(move |store| {
-            let scope = admission.read()?;
-            if !scope.active
+        self.request_scoped(admission.clone(), move |store, snapshot| {
+            if !admission.is_active(snapshot)?
                 && !matches!(
                     store.state().state(),
                     InstanceState::Closing { .. } | InstanceState::Closed
@@ -234,13 +343,13 @@ impl RuntimeHost {
             .resolve_task_scope(&member, scope.clone(), None)
             .await?;
         worker
-            .request(move |store| {
+            .request_scoped(admission.clone(), move |store, snapshot| {
                 authorize(store.state().address(), &scope)?;
                 // Retried binding cannot revive a cancelled group or alter membership.
                 if store.task_scope_binding() == Some(&scope) {
                     return store.bind_task_scope(scope);
                 }
-                let _guard = admission.acquire()?;
+                admission.check(snapshot)?;
                 store.bind_task_scope(scope)
             })
             .await
