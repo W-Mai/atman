@@ -399,17 +399,8 @@ pub(crate) async fn run_frames(
                 refresh_live_output(&mut app, &mut handle)?;
             }
 
-            frame = async {
-                let Some(rx) = handle.stream_rx.as_mut() else { return std::future::pending().await; };
-                loop {
-                    match rx.recv().await {
-                        Ok(frame) if is_live_instance_frame(&frame) => break Some(frame),
-                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break None,
-                    }
-                }
-            }, if persistent => {
-                if frame.is_some() { app.app.sync_instance_permissions(); } else { break; }
+            _ = views::permission_change(&mut handle.stream_rx), if persistent => {
+                app.app.sync_instance_permissions();
             }
             _ = views.next_background(), if persistent => {}
             key = recv_input_event(&mut key_events, &mut pending_input_event) => {

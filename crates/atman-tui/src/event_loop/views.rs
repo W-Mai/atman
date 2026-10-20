@@ -818,15 +818,19 @@ pub(super) async fn changed<T>(rx: Option<&mut tokio::sync::watch::Receiver<T>>)
     std::future::pending::<()>().await;
 }
 
-async fn permission_change(rx: &mut Option<tokio::sync::broadcast::Receiver<StreamFrame>>) {
-    let Some(rx) = rx.as_mut() else {
-        return std::future::pending().await;
-    };
+pub(super) async fn permission_change(
+    rx: &mut Option<tokio::sync::broadcast::Receiver<StreamFrame>>,
+) {
     loop {
-        match rx.recv().await {
+        let Some(receiver) = rx.as_mut() else {
+            return std::future::pending().await;
+        };
+        match receiver.recv().await {
             Ok(frame) if is_live_instance_frame(&frame) => return,
+            // A missed permission event is recovered from the broker snapshot.
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return,
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                std::future::pending::<()>().await
+                *rx = None;
             }
             _ => {}
         }
@@ -836,6 +840,44 @@ async fn permission_change(rx: &mut Option<tokio::sync::broadcast::Receiver<Stre
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn permission_subscription_resynchronizes_lag_and_quiesces_after_close() {
+        let (sender, receiver) = tokio::sync::broadcast::channel(1);
+        let mut receiver = Some(receiver);
+        // Any dropped frame may contain a permission update; reread the registry.
+        for _ in 0..4 {
+            sender.send(StreamFrame::Note("unrelated".into())).unwrap();
+        }
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                permission_change(&mut receiver)
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                permission_change(&mut receiver)
+            )
+            .await
+            .is_err()
+        );
+        drop(sender);
+        for _ in 0..2 {
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(20),
+                    permission_change(&mut receiver)
+                )
+                .await
+                .is_err()
+            );
+            assert!(receiver.is_none());
+        }
+    }
 
     fn window() -> Window {
         Window {

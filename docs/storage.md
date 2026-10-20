@@ -56,6 +56,8 @@ Flow focus changes retain the destination view in the workspace until its commit
 
 Compact workflow cards and full graphs share each view's node disclosure state. Clicking a node reveals its arguments and recorded output and stops automatic tail following. Explicitly expanded details can enlarge the compact card; automatic summaries retain their height limit, and each detail section retains its preview limit. Reading details does not consume inbox messages or change execution.
 
+Focused and background views share permission-stream handling. A lagged subscription rereads the broker snapshot; closing one subscription disables that event source without exiting the workspace, cancelling execution, or continuously scheduling redraws. Durable view updates and control replies retain their independent channels.
+
 ## Session and flow storage
 
 ### Project discovery and deletion

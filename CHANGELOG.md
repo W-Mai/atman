@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Permission view subscriptions** — Closing a flow's permission stream leaves the workspace open. Missed events refresh the current permission snapshot in both focused and background views.
+
 - **Workflow node details** — Compact workflow cards honor node expansion, displaying arguments and recorded output through the same renderer as the full graph.
 
 - **Flow focus recovery** — Failed view refreshes preserve the destination's draft, reading position, and reply mailbox while leaving the current view selected.
