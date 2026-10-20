@@ -693,6 +693,40 @@ impl FlowClient {
             .await
     }
 
+    /// Schedule durable input for this instance. The registration survives the admitting turn.
+    pub async fn schedule_timer(
+        &self,
+        timer: crate::flow_store::timer::Timer,
+    ) -> io::Result<crate::flow_store::timer::TimerRecord> {
+        self.authenticate()?;
+        let client = self.clone();
+        self.host
+            .flow(self.source())
+            .await?
+            .schedule_timer(timer, move |_| client.authenticate())
+            .await
+    }
+
+    pub async fn cancel_timer(&self, id: Uuid) -> io::Result<CommitReceipt> {
+        self.authenticate()?;
+        let client = self.clone();
+        self.host
+            .flow(self.source())
+            .await?
+            .cancel_timer(id, move |_| client.authenticate())
+            .await
+    }
+
+    pub async fn timers(&self) -> io::Result<Vec<crate::flow_store::timer::TimerRecord>> {
+        self.authenticate()?;
+        let client = self.clone();
+        self.host
+            .flow(self.source())
+            .await?
+            .timers(move |_| client.authenticate())
+            .await
+    }
+
     pub async fn send(
         &self,
         target: FlowRef,

@@ -17,6 +17,168 @@ use atman_runtime::source_program::RevisionBundle;
 use atman_runtime::{Executor, flow_authority::EffectiveAuthority};
 use uuid::Uuid;
 
+#[tokio::test]
+async fn durable_timer_observer_retains_deadlines_across_turns_pause_and_restart() {
+    use atman_runtime::flow_store::timer::{Timer, TimerStatus};
+    use chrono::{Duration as ClockDuration, Utc};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let flow = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&flow, FlowTransition::Activated).await;
+    let lease = start(&flow).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    let timer = Timer {
+        id: Uuid::new_v4(),
+        due_at: Utc::now() + ClockDuration::milliseconds(200),
+        content: serde_json::json!({"text": "deadline reached"}),
+    };
+    let cancelled = Timer {
+        id: Uuid::new_v4(),
+        ..timer.clone()
+    };
+    client.schedule_timer(cancelled.clone()).await.unwrap();
+    client.cancel_timer(cancelled.id).await.unwrap();
+    client.schedule_timer(timer.clone()).await.unwrap();
+    assert_eq!(client.timers().await.unwrap().len(), 2);
+    change(
+        &flow,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    assert!(
+        client
+            .schedule_timer(Timer {
+                id: Uuid::new_v4(),
+                ..timer.clone()
+            })
+            .await
+            .is_err()
+    );
+    assert!(client.cancel_timer(timer.id).await.is_err());
+    assert!(client.timers().await.is_err());
+    let pause = Uuid::new_v4().into();
+    change(&flow, FlowTransition::ExecutionPaused { key: pause }).await;
+    let received = wait_inputs(&flow, 1).await;
+    assert_eq!(received.state.pauses(), &[pause]);
+    assert_eq!(
+        received.pending[0].request.payload,
+        InboxPayload::Timer {
+            timer: timer.id,
+            due_at: timer.due_at,
+            content: timer.content.clone(),
+        }
+    );
+    assert_eq!(
+        flow.timers(|_| Ok(()))
+            .await
+            .unwrap()
+            .iter()
+            .find(|record| record.timer.id == cancelled.id)
+            .unwrap()
+            .status,
+        TimerStatus::Cancelled
+    );
+
+    // A later deadline is installed while the observer is already waiting for an earlier one.
+    // Cancelling the earlier registration must update the wait without manufacturing input.
+    let later = Timer {
+        id: Uuid::new_v4(),
+        due_at: Utc::now() + ClockDuration::milliseconds(300),
+        content: serde_json::json!("after reopening"),
+    };
+    let earlier = Timer {
+        id: Uuid::new_v4(),
+        due_at: Utc::now() + ClockDuration::milliseconds(150),
+        ..later.clone()
+    };
+    flow.schedule_timer(earlier.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    flow.schedule_timer(later.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    flow.cancel_timer(earlier.id, |_| Ok(())).await.unwrap();
+    let address = flow.address().clone();
+    let saved = received.pending[0].clone();
+    drop(client);
+    drop(flow.shutdown().await.unwrap());
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    // Catalog inspection must not trigger due timers.
+    let inspection = session
+        .describe_flow(address.instance_id.clone())
+        .await
+        .unwrap();
+    assert!(!inspection.loaded);
+    let flow = host.flow(&address).await.unwrap();
+    let received = wait_inputs(&flow, 2).await;
+    assert_eq!(received.pending[0], saved);
+    assert!(
+        matches!(&received.pending[1].request.payload, InboxPayload::Timer { timer, .. } if *timer == later.id)
+    );
+    let before = received.cursor;
+    flow.retry_observations();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(flow.snapshot().await.unwrap().cursor, before);
+    assert!(
+        flow.schedule_timer(
+            Timer {
+                id: Uuid::new_v4(),
+                ..later.clone()
+            },
+            |_| Err(io::ErrorKind::PermissionDenied.into())
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        flow.cancel_timer(later.id, |_| Err(io::ErrorKind::PermissionDenied.into()))
+            .await
+            .is_err()
+    );
+    assert!(
+        flow.timers(|_| Err(io::ErrorKind::PermissionDenied.into()))
+            .await
+            .is_err()
+    );
+    let closing = Timer {
+        id: Uuid::new_v4(),
+        due_at: Utc::now() + ClockDuration::seconds(60),
+        ..later
+    };
+    flow.schedule_timer(closing.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    change(&flow, FlowTransition::CloseRequested).await;
+    assert_eq!(
+        flow.timers(|_| Ok(()))
+            .await
+            .unwrap()
+            .iter()
+            .find(|record| record.timer.id == closing.id)
+            .unwrap()
+            .status,
+        TimerStatus::Cancelled
+    );
+    let mut commits = flow.subscribe_commits();
+    drop(flow);
+    drop(session);
+    drop(host);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while commits.changed().await.is_ok() {}
+    })
+    .await
+    .expect("timer observer retained the host");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn peer_permission_routing_gates_real_effects_and_falls_back_without_clients() {
     use atman_runtime::{

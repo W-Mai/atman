@@ -237,24 +237,48 @@ async fn observe(recipient: FlowWorker, host: WeakRuntimeHost) {
         directory_changes.borrow_and_update();
         recipient_changes.borrow_and_update();
         retries.borrow_and_update();
-        let Ok(records) = recipient
+        let snapshot = recipient
             .request(|store| {
                 if !store.state().accepts_input() {
                     return Ok(
                         matches!(store.state().state(), atman_rt::InstanceState::Prepared)
-                            .then(Vec::new),
+                            .then(|| (Vec::new(), None)),
                     );
                 }
-                store.expire_flow_watches(chrono::Utc::now())?;
-                Ok(Some(
+                let now = chrono::Utc::now();
+                store.expire_flow_watches(now)?;
+                store.fire_due_timers(now)?;
+                Ok(Some((
                     store.flow_subscriptions().cloned().collect::<Vec<_>>(),
-                ))
+                    store.next_timer_deadline(),
+                )))
             })
-            .await
-        else {
-            return;
+            .await;
+        let records = match snapshot {
+            Ok(records) => records,
+            Err(error) => {
+                let issue = ObservationIssue {
+                    source: recipient.address().clone(),
+                    reason: error.to_string(),
+                };
+                recipient.observation_issues.send_if_modified(|issues| {
+                    if issues.as_slice() == std::slice::from_ref(&issue) {
+                        return false;
+                    }
+                    *issues = vec![issue];
+                    true
+                });
+                // A failed durable write must not spin on an already due deadline or silently
+                // retire the observer. Retry only after an owner change or explicit request.
+                tokio::select! {
+                    result = directory_changes.changed() => { if result.is_err() { return; } }
+                    result = recipient_changes.changed() => { if result.is_err() { return; } }
+                    result = retries.changed() => { if result.is_err() { return; } }
+                }
+                continue;
+            }
         };
-        let Some(records) = records else {
+        let Some((records, timer_deadline)) = records else {
             recipient.observation_issues.send_if_modified(|issues| {
                 let changed = !issues.is_empty();
                 issues.clear();
@@ -266,6 +290,7 @@ async fn observe(recipient: FlowWorker, host: WeakRuntimeHost) {
             .iter()
             .filter(|record| record.status == SubscriptionStatus::Active)
             .filter_map(|record| record.subscription.expires_at)
+            .chain(timer_deadline)
             .min();
         let mut positions: HashMap<FlowRef, u64> = HashMap::new();
         for record in records

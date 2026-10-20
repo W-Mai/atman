@@ -20,6 +20,7 @@ pub mod reply;
 pub mod resources;
 pub mod scheduler;
 pub mod send;
+pub mod timer;
 mod trace;
 mod view;
 pub use view::{FlowView, FlowViewReader, FlowViewSnapshot};
