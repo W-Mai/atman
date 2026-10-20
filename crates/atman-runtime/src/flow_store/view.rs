@@ -146,6 +146,8 @@ pub enum FlowUpdate {
     Activated {
         flow: FlowRef,
         input: Option<Box<AcceptedInput>>,
+        /// Captured initialization command, distinct from ordinary accepted work.
+        startup_input: Option<Uuid>,
         inherited_context: Vec<Message>,
     },
     WorkspaceRequested(Box<super::workspace::WorkspaceRequest>),
@@ -191,6 +193,14 @@ impl From<FlowFact> for FlowUpdate {
                 created_by: descriptor.created_by,
             },
             FlowFact::Activated(activation) => Self::Activated {
+                startup_input: if matches!(
+                    activation.input.request.start,
+                    super::launch::EntryStart::Command { .. }
+                ) {
+                    activation.envelope().map(|input| input.id)
+                } else {
+                    None
+                },
                 flow: activation.input.request.recipient.clone(),
                 input: activation
                     .envelope()

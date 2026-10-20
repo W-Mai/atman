@@ -336,13 +336,14 @@ impl AppState {
             self.sync_queue(items);
         }
         if self.startup_card.is_some()
-            && self.items.iter().any(|item| {
-                matches!(
-                    item,
-                    crate::app::OutputItem::UserTurn { .. }
-                        | crate::app::OutputItem::Interjection { .. }
-                )
-            })
+            && (self.items.has_work_input()
+                || self.items.iter().any(|item| {
+                    matches!(
+                        item,
+                        crate::app::OutputItem::UserTurn { .. }
+                            | crate::app::OutputItem::Interjection { .. }
+                    )
+                }))
         {
             self.startup_card = None;
             self.startup_intro = None;

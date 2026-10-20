@@ -344,6 +344,115 @@ fn archived_views_reuse_history_rendering_without_writers_or_execution() {
 }
 
 #[tokio::test]
+async fn internal_work_dismisses_welcome_in_live_and_restored_views() {
+    use atman_runtime::flow_runtime::FlowWorker;
+    let directory = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(directory.path()).unwrap();
+    let session_id = Uuid::now_v7();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            id: session_id,
+            configuration: Default::default(),
+            project: None,
+            title: "Work".into(),
+        })
+        .unwrap();
+    let flow = FlowRef {
+        session_id: session_id.into(),
+        instance_id: FlowInstanceId::now(),
+    };
+    let mut store = session
+        .create_flow(FlowDescriptor {
+            address: flow.clone(),
+            creation_request: Uuid::now_v7(),
+            created_by: None,
+            content: EntrySnapshot {
+                name: "main".into(),
+                path: "main.at".into(),
+                bundle: RevisionBundle {
+                    entry: "main.at".into(),
+                    sources: [("main.at".into(), "flow main() {}".into())].into(),
+                    edges: Default::default(),
+                },
+            }
+            .into(),
+        })
+        .unwrap();
+    store
+        .transition(store.state().revision(), FlowTransition::Activated)
+        .unwrap();
+    let lease = start(&mut store);
+    let mut main = crate::app::AppState::new(session_id.to_string(), None);
+    main.startup_card = Some(welcome_card());
+    let mut source = FlowTranscript::new(flow.clone());
+    let mut floating_view = FlowViewModel::default();
+    store
+        .accept_input(
+            DeliveryRequest {
+                request_id: Uuid::now_v7(),
+                sender: SenderIdentity::Host(Uuid::now_v7()),
+                recipient: flow,
+                delivery: DeliveryMode::AtBoundary,
+                cause: None,
+                correlation: None,
+                scope: None,
+                payload: InboxPayload::Internal {
+                    kind: "notification".into(),
+                    content: "Continue".into(),
+                },
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+    sync(&mut store, &mut source, &mut main.items, &mut floating_view);
+    assert!(
+        !main.items.has_work_input(),
+        "pending input is not executed work"
+    );
+    let reservation = store
+        .reserve_context_input(&lease, |_| true)
+        .unwrap()
+        .unwrap();
+    let message = atman_runtime::flow_runtime::input::context_message(
+        store.pending_inputs().next().unwrap(),
+        &lease.turn,
+    )
+    .unwrap();
+    store
+        .commit_input(
+            &reservation,
+            InputContent::Context {
+                messages: vec![message],
+            },
+        )
+        .unwrap();
+    let worker = FlowWorker::start(store).await.unwrap();
+    let mut reader = worker
+        .subscribe_view(NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
+    main.sync_flow_view(reader.refresh().await.unwrap())
+        .unwrap();
+    assert!(main.startup_card.is_none());
+    assert!(!main.items.iter().any(|item| matches!(
+        item,
+        OutputItem::UserTurn { .. } | OutputItem::Interjection { .. }
+    )));
+    let mut restored = worker
+        .subscribe_view(NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
+    let mut floating = crate::app::AppState::new(session_id.to_string(), None);
+    floating.startup_card = Some(welcome_card());
+    floating
+        .sync_flow_view(restored.refresh().await.unwrap())
+        .unwrap();
+    assert!(floating.startup_card.is_none());
+    assert_eq!(main.items.cursor(), floating.items.cursor());
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn live_output_preserves_committed_state_and_each_views_disclosure() {
     use atman_runtime::flow_runtime::{
         FlowWorker,

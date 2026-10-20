@@ -75,6 +75,8 @@ pub struct FlowTranscript {
     receipts: Vec<CommitReceipt>,
     entries: Vec<FlowTranscriptEntry>,
     workflows: FlowWorkflows,
+    startup_input: Option<uuid::Uuid>,
+    work_input: bool,
 }
 
 impl FlowTranscript {
@@ -85,6 +87,8 @@ impl FlowTranscript {
             receipts: Vec::new(),
             entries: Vec::new(),
             workflows: FlowWorkflows::default(),
+            startup_input: None,
+            work_input: false,
         }
     }
 
@@ -112,6 +116,11 @@ impl FlowTranscript {
 
     pub fn entries(&self) -> &[FlowTranscriptEntry] {
         &self.entries
+    }
+
+    /// Whether input other than the captured initialization command has entered execution. Sender identity and rendered message roles do not determine whether work began.
+    pub fn has_work_input(&self) -> bool {
+        self.work_input
     }
 
     pub fn turns(&self) -> impl DoubleEndedIterator<Item = &FlowTurnProjection> {
@@ -157,12 +166,20 @@ impl FlowTranscript {
                     }
                     Some(flow)
                 }
-                FlowUpdate::Activated { flow, input, .. } => {
+                FlowUpdate::Activated {
+                    flow,
+                    input,
+                    startup_input,
+                    ..
+                } => {
                     if input
                         .as_ref()
                         .is_some_and(|input| input.recipient() != flow)
                     {
                         return Err(invalid("activation input belongs to another flow"));
+                    }
+                    if startup_input.is_some_and(|startup| !matches!(input.as_deref(), Some(crate::flow_store::view::AcceptedInput::Command { id, .. }) if *id == startup)) {
+                        return Err(invalid("startup input does not identify the activation command"));
                     }
                     Some(flow)
                 }
@@ -195,7 +212,14 @@ impl FlowTranscript {
             };
             match fact {
                 FlowUpdate::Created { content, .. } => self.content = Some(content),
-                FlowUpdate::InputCommitted(value) => append(0, FlowRecord::Input(value)),
+                FlowUpdate::Activated { startup_input, .. } => self.startup_input = startup_input,
+                FlowUpdate::InputCommitted(value) => {
+                    self.work_input |= value
+                        .message_ids
+                        .iter()
+                        .any(|id| Some(*id) != self.startup_input);
+                    append(0, FlowRecord::Input(value));
+                }
                 FlowUpdate::MessagePublished(value) => append(0, FlowRecord::Publication(value)),
                 FlowUpdate::ContextCheckpoint(value) => append(0, FlowRecord::Checkpoint(value)),
                 FlowUpdate::TurnCompleted(value) => append(0, FlowRecord::Completion(value)),

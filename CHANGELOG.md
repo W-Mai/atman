@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Flow history visibility** — Committed work input dismisses the welcome page even without a visible user message. Startup greetings retain the welcome page, and restored flows use the same input provenance as live views.
+
 - **Flow details** — FlowHub provides keyboard and mouse access to instance details and default-entry selection. Changes retain the reviewed catalog version and original view reply ownership without starting flow execution.
 
 - **Default flow selection** — Session default changes validate the observed catalog revision. Stale selections cannot overwrite a different default, and repeating the current choice leaves the journal unchanged.

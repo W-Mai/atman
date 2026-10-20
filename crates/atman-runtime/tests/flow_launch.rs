@@ -118,6 +118,7 @@ async fn captured_startup_commands_run_once_without_replacing_the_default_entry(
         .unwrap();
     let view = reader.refresh().await.unwrap();
     assert_eq!(view.transcript().turns().count(), 1);
+    assert!(!view.transcript().has_work_input());
     let page = launched
         .worker
         .read_updates(None, NonZeroUsize::new(64).unwrap())
@@ -146,6 +147,18 @@ async fn captured_startup_commands_run_once_without_replacing_the_default_entry(
     let worker = host.flow(&entry.address).await.unwrap();
     host.wait_quiescent().await.unwrap();
     assert_eq!(worker.context().messages_full().len(), messages.len());
+    let mut restored = worker
+        .subscribe_view(NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        !restored
+            .refresh()
+            .await
+            .unwrap()
+            .transcript()
+            .has_work_input()
+    );
     worker
         .accept_input(
             DeliveryRequest {
@@ -187,6 +200,14 @@ async fn captured_startup_commands_run_once_without_replacing_the_default_entry(
         .await
         .unwrap();
     assert_eq!(retry.record.receipt, receipt);
+    assert!(
+        restored
+            .refresh()
+            .await
+            .unwrap()
+            .transcript()
+            .has_work_input()
+    );
     host.shutdown().await.unwrap();
 }
 

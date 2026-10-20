@@ -56,6 +56,7 @@ struct TurnView {
 #[derive(Default)]
 pub(super) struct InstanceDocument {
     archive: bool,
+    work_input: bool,
     cursor: Option<CommitReceipt>,
     pub(super) structure_revision: u64,
     entries: usize,
@@ -201,6 +202,10 @@ impl FlowViewModel {
 
     pub fn cursor(&self) -> Option<&CommitReceipt> {
         self.instance.cursor.as_ref()
+    }
+
+    pub(crate) fn has_work_input(&self) -> bool {
+        self.instance.work_input
     }
 
     /// Durable state belonging to the displayed document. Transcript-only updates and external structural edits invalidate an older state snapshot.
@@ -390,6 +395,7 @@ impl FlowViewModel {
         self.restore_work_markers(document_start);
         self.binding = Some(SourceBinding::Instance(source.flow().clone()));
         self.instance.entries = source.entries().len();
+        self.instance.work_input = source.has_work_input();
         self.instance.archive = matches!(source.content(), Some(FlowContentSummary::History(_)));
         self.instance.cursor = source.cursor().cloned();
         self.instance.structure_revision = self.document.structure_revision();
