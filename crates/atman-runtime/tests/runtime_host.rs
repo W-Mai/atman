@@ -7528,6 +7528,154 @@ async fn settled(worker: &FlowWorker) {
 }
 
 #[tokio::test]
+async fn flow_archive_changes_only_catalog_discovery_and_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let first = flow_descriptor(info.id);
+    let second = flow_descriptor(info.id);
+    let a = session.create_flow(first.clone()).await.unwrap();
+    let b = session.create_flow(second.clone()).await.unwrap();
+    change(&a, FlowTransition::Activated).await;
+    let before = session.snapshot().await.unwrap();
+    assert!(
+        session
+            .set_flow_archived(
+                before.cursor.clone(),
+                first.address.instance_id.clone(),
+                true
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(session.snapshot().await.unwrap().cursor, before.cursor);
+    change(&a, FlowTransition::CloseRequested).await;
+    change(&a, FlowTransition::Closed).await;
+    let path = root
+        .root()
+        .join("sessions")
+        .join(info.id.to_string())
+        .join("flows")
+        .join(first.address.instance_id.to_string())
+        .join("events.jsonl");
+    let bytes = std::fs::read(&path).unwrap();
+    let archived = session
+        .set_flow_archived(
+            before.cursor.clone(),
+            first.address.instance_id.clone(),
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .set_flow_archived(
+                before.cursor.clone(),
+                first.address.instance_id.clone(),
+                true
+            )
+            .await
+            .unwrap(),
+        archived
+    );
+    assert!(
+        session
+            .set_flow_archived(
+                before.cursor.clone(),
+                first.address.instance_id.clone(),
+                false
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        session
+            .set_flow_archived(archived.clone(), FlowInstanceId::now(), false)
+            .await
+            .is_err()
+    );
+    let snapshot = session.snapshot().await.unwrap();
+    assert_eq!(
+        snapshot.catalog.archived_flows.iter().collect::<Vec<_>>(),
+        [&first.address.instance_id]
+    );
+    assert_eq!(snapshot.catalog.default_flow, before.catalog.default_flow);
+    assert_eq!(snapshot.catalog.descriptor, before.catalog.descriptor);
+    assert_eq!(
+        session
+            .instances(None, 50, |_| Ok(()))
+            .await
+            .unwrap()
+            .instances
+            .len(),
+        2
+    );
+    assert!(matches!(
+        b.state().await.unwrap().state(),
+        InstanceState::Prepared
+    ));
+    assert!(matches!(
+        session
+            .open_flow(first.address.instance_id.clone())
+            .await
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .state(),
+        InstanceState::Closed
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    host.shutdown().await.unwrap();
+    let inspected = RuntimeStore::inspect_session(dir.path(), info.id).unwrap();
+    assert!(
+        inspected
+            .projection
+            .archived_flows
+            .contains(&first.address.instance_id)
+    );
+    let host = RuntimeHost::default();
+    let session = host.open_session(dir.path(), info.id).await.unwrap();
+    assert!(session.observe().await.unwrap().loaded.is_empty());
+    let restored = session
+        .set_flow_archived(archived.clone(), first.address.instance_id.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .set_flow_archived(archived.clone(), first.address.instance_id.clone(), false)
+            .await
+            .unwrap(),
+        restored
+    );
+    assert!(
+        session
+            .set_flow_archived(archived, first.address.instance_id.clone(), true)
+            .await
+            .is_err()
+    );
+    assert!(
+        session
+            .snapshot()
+            .await
+            .unwrap()
+            .catalog
+            .archived_flows
+            .is_empty()
+    );
+    assert!(
+        session.observe().await.unwrap().loaded.is_empty(),
+        "visibility does not acquire execution owners"
+    );
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn directory_reuses_active_instances_and_default_binding_has_no_execution_privilege() {
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();

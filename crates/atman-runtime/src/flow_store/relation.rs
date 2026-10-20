@@ -136,6 +136,7 @@ mod tests {
             title: Some("relations".into()),
             flows: Vec::new(),
             default_flow: None,
+            archived_flows: Default::default(),
             access: Default::default(),
             migrated_from: None,
         };

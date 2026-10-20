@@ -20,6 +20,57 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn flow_archive_rejects_incomplete_history_without_repair_or_catalog_writes() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let id = description.address.instance_id.clone();
+    let mut flow = session.create_flow(description).unwrap();
+    let expected = session.cursor().clone();
+    assert!(
+        session
+            .set_flow_archived(&expected, id.clone(), true)
+            .is_err()
+    );
+    change(&mut flow, FlowTransition::CloseRequested);
+    change(&mut flow, FlowTransition::Closed);
+    let path = flow.dir().join("events.jsonl");
+    drop(flow);
+    let complete = std::fs::read(&path).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"unfinished")
+        .unwrap();
+    let damaged = std::fs::read(&path).unwrap();
+    assert!(
+        session
+            .set_flow_archived(&expected, id.clone(), true)
+            .is_err()
+    );
+    assert_eq!(session.cursor(), &expected);
+    assert!(session.projection().archived_flows.is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), damaged);
+    std::fs::write(&path, complete).unwrap();
+    session
+        .set_flow_archived(&expected, id.clone(), true)
+        .unwrap();
+    let session_path = session.dir().to_path_buf();
+    drop(session);
+    std::fs::write(session_path.join("session.json"), "invalid cache").unwrap();
+    let session = root.open_session(info.id).unwrap();
+    assert!(session.projection().archived_flows.contains(&id));
+    assert!(matches!(
+        session.inspect_flow(&id).unwrap().state.state(),
+        InstanceState::Closed
+    ));
+}
+
+#[test]
 fn operator_pause_release_is_selective_and_retains_retry_evidence_after_reacquisition() {
     use atman_runtime::flow_store::control::{ControlAction, ControlRequest};
     let dir = tempfile::tempdir().unwrap();

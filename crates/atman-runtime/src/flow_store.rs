@@ -469,6 +469,7 @@ enum SessionFact {
     TitleChanged(Option<String>),
     FlowRegistered(FlowRegistration),
     DefaultFlowSelected(FlowInstanceId),
+    FlowArchiveChanged { id: FlowInstanceId, archived: bool },
     AccessGranted(access::FlowGrant),
     AccessRevoked(Uuid),
     LegacyImported(migration::LegacyMigration),
@@ -481,6 +482,8 @@ pub struct SessionProjection {
     pub title: Option<String>,
     pub flows: Vec<FlowRegistration>,
     pub default_flow: Option<FlowInstanceId>,
+    /// Reversible discovery metadata; archived instances remain readable and closed.
+    pub archived_flows: std::collections::HashSet<FlowInstanceId>,
     pub access: access::SessionAccess,
     pub migrated_from: Option<migration::LegacyMigration>,
 }
@@ -496,6 +499,7 @@ impl SessionProjection {
                         descriptor,
                         flows: Vec::new(),
                         default_flow: None,
+                        archived_flows: Default::default(),
                         access: Default::default(),
                         migrated_from: None,
                     });
@@ -525,6 +529,16 @@ impl SessionProjection {
                     return Err(invalid("default flow is not registered"));
                 }
                 self.default_flow = Some(id);
+            }
+            SessionFact::FlowArchiveChanged { id, archived } => {
+                if !self.flows.iter().any(|flow| flow.id == id) {
+                    return Err(invalid("archived flow is not registered"));
+                }
+                if archived {
+                    self.archived_flows.insert(id);
+                } else {
+                    self.archived_flows.remove(&id);
+                }
             }
             SessionFact::AccessGranted(grant) => {
                 if grant.grantee.session_id.0 != self.descriptor.id
@@ -842,6 +856,7 @@ impl RuntimeStore {
                 descriptor,
                 flows: Vec::new(),
                 default_flow: None,
+                archived_flows: Default::default(),
                 access: Default::default(),
                 migrated_from: None,
             },
@@ -1050,6 +1065,37 @@ impl SessionStore {
             ));
         }
         self.commit(vec![SessionFact::DefaultFlowSelected(id)])
+    }
+
+    /// Change discovery metadata for a closed instance without altering its history, default binding, permissions, or execution. Restoring visibility does not reopen execution.
+    pub fn set_flow_archived(
+        &mut self,
+        expected: &CommitReceipt,
+        id: FlowInstanceId,
+        archived: bool,
+    ) -> io::Result<CommitReceipt> {
+        if !self.projection.flows.iter().any(|flow| flow.id == id) {
+            return Err(invalid("flow is not registered"));
+        }
+        if self.projection.archived_flows.contains(&id) == archived {
+            return Ok(self.cursor.clone());
+        }
+        if expected != &self.cursor {
+            return Err(invalid(
+                "session catalog changed; refresh before changing flow visibility",
+            ));
+        }
+        if archived {
+            let inspection = self.inspect_flow(&id)?;
+            if inspection.journal.trailing_bytes != 0
+                || !matches!(inspection.state.state(), InstanceState::Closed)
+            {
+                return Err(invalid(
+                    "only closed flows with complete journals can be archived",
+                ));
+            }
+        }
+        self.commit(vec![SessionFact::FlowArchiveChanged { id, archived }])
     }
 
     /// Persist a display name without changing creation identity or flow execution. An already applied value is a no-op; a stale snapshot cannot replace a different title.

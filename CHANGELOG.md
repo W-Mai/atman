@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Flow archive metadata** — Closed instances support reversible archive markers in their Session catalog. Updates validate catalog revisions and retained history without changing execution, permissions, default selection, or flow records.
+
 - **Flow history visibility** — Committed work input dismisses the welcome page even without a visible user message. Startup greetings retain the welcome page, and restored flows use the same input provenance as live views.
 
 - **Flow details** — FlowHub provides keyboard and mouse access to instance details and default-entry selection. Changes retain the reviewed catalog version and original view reply ownership without starting flow execution.

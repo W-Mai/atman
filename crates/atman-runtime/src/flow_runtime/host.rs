@@ -488,6 +488,12 @@ enum CatalogCommand {
         expected: CommitReceipt,
         reply: oneshot::Sender<io::Result<CommitReceipt>>,
     },
+    Archive {
+        id: FlowInstanceId,
+        archived: bool,
+        expected: CommitReceipt,
+        reply: oneshot::Sender<io::Result<CommitReceipt>>,
+    },
     Title {
         title: Option<String>,
         expected: CommitReceipt,
@@ -747,6 +753,22 @@ impl SessionHandle {
                 .await;
         }
         Ok(None)
+    }
+
+    /// Change only discovery metadata through the catalog owner. Archiving requires a closed instance; restoring visibility never restarts it.
+    pub async fn set_flow_archived(
+        &self,
+        expected: CommitReceipt,
+        id: FlowInstanceId,
+        archived: bool,
+    ) -> io::Result<CommitReceipt> {
+        self.request(|reply| CatalogCommand::Archive {
+            id,
+            archived,
+            expected,
+            reply,
+        })
+        .await
     }
 
     /// Change only the default view binding; this does not start, pause, or privilege a flow.
@@ -1027,6 +1049,23 @@ async fn serve_catalog(
             } => {
                 let result = tokio::task::spawn_blocking(move || {
                     let result = store.select_default(&expected, id);
+                    (store, result)
+                })
+                .await;
+                let Ok((returned, result)) = result else {
+                    return;
+                };
+                store = returned;
+                let _ = reply.send(result);
+            }
+            CatalogCommand::Archive {
+                id,
+                archived,
+                expected,
+                reply,
+            } => {
+                let result = tokio::task::spawn_blocking(move || {
+                    let result = store.set_flow_archived(&expected, id, archived);
                     (store, result)
                 })
                 .await;
