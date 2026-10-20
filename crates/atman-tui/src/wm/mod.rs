@@ -806,6 +806,7 @@ impl WindowManager {
                     | PaletteEntryId::ToggleActivity
                     | PaletteEntryId::OpenManagement
                     | PaletteEntryId::SwitchSession
+                    | PaletteEntryId::DeleteSession
                     | PaletteEntryId::OpenProjectHub
                     | PaletteEntryId::SetFormulaRendering
                     | PaletteEntryId::YankMode
@@ -885,9 +886,15 @@ impl WindowManager {
                 }
             }
             PaletteEntryId::DeleteSession => {
-                let scope = crate::session_switcher::SessionScope::Project;
-                let rows = crate::key_handler::enumerate_session_rows(app, scope);
-                self.modals.session_switcher.open_with(rows, scope);
+                if control_tx.is_some_and(|tx| tx.binding().is_some()) {
+                    app.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                        crate::flow_hub::HubRequest::Sessions { before: None },
+                    ));
+                } else {
+                    let scope = crate::session_switcher::SessionScope::Project;
+                    let rows = crate::key_handler::enumerate_session_rows(app, scope);
+                    self.modals.session_switcher.open_with(rows, scope);
+                }
             }
             PaletteEntryId::OpenProjectHub => {
                 let canvas = app.maximized_canvas();

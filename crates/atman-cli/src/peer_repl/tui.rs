@@ -693,6 +693,23 @@ impl Workspace {
                             });
                             continue;
                         }
+                        TuiControl::RemoveSession(request) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = async {
+                                    directory::remove(&scopes.root, *request).await?;
+                                    let _ = replies.send(TuiCommand::Toast {
+                                        message: "Session deleted".into(),
+                                        level: atman_tui::app::NoteLevel::Info,
+                                    });
+                                    scopes.browse(atman_tui::flow_hub::HubRequest::Sessions { before: None }).await
+                                        .context("Session deletion committed, but refreshing the directory failed; retry or refresh")
+                                        .map(Navigation::Catalog)
+                                }.await;
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::CancelWatcher { owner, id } => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
@@ -1138,6 +1155,9 @@ impl scopes::Scopes {
             HubRequest::Sessions { before } => FlowHubPage::Sessions(
                 directory::sessions(&self.catalog, &self.root, before, PAGE_SIZE).await?,
             ),
+            HubRequest::SessionRemoval { session } => {
+                FlowHubPage::SessionRemoval(directory::removal(&self.root, session).await?)
+            }
             HubRequest::Flows { session, before } => {
                 let overview = self.catalog.overview(session).await?;
                 let page = self

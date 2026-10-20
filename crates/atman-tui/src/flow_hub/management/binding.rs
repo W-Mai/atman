@@ -316,6 +316,7 @@ mod tests {
                 sessions: [previous, destination]
                     .into_iter()
                     .map(|id| SessionRow {
+                        cleanup_pending: false,
                         target: SessionTarget::Persistent(id),
                         title: id.to_string(),
                         detail: "Session".into(),

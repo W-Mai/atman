@@ -5,6 +5,7 @@ use std::{io, path::Path};
 use anyhow::{Result, ensure};
 use atman_runtime::{
     flow_runtime::catalog::{SessionCatalog, SessionSummary},
+    flow_store::{RuntimeStore, SessionRemoval},
     session_meta::SessionMeta,
 };
 use atman_tui::{
@@ -49,6 +50,7 @@ fn legacy_row(root: &Path, id: String) -> SessionRow {
         Err(error) => format!("Unavailable · {error}"),
     };
     SessionRow {
+        cleanup_pending: false,
         target: SessionTarget::Legacy(id.clone()),
         title: meta.title.unwrap_or_else(|| format!("Legacy session {id}")),
         detail: format!(
@@ -82,8 +84,17 @@ pub(super) async fn sessions(
         .map(SessionTarget::Persistent)
         .collect::<Vec<_>>();
     let data = root.to_owned();
-    targets.extend(tokio::task::spawn_blocking(move || legacy_ids(&data)).await??);
+    let (legacy, cleanup) = tokio::task::spawn_blocking(move || {
+        Ok::<_, io::Error>((
+            legacy_ids(&data)?,
+            RuntimeStore::pending_session_removals(&data)?,
+        ))
+    })
+    .await??;
+    targets.extend(legacy);
+    targets.extend(cleanup.iter().copied().map(SessionTarget::Persistent));
     targets.sort_by_cached_key(order);
+    targets.dedup();
     let total = targets.len();
     let boundary = before.as_ref().map(order);
     let eligible = targets
@@ -100,6 +111,12 @@ pub(super) async fn sessions(
     let mut sessions = Vec::new();
     for target in eligible.into_iter().take(limit) {
         sessions.push(match target {
+            SessionTarget::Persistent(id) if cleanup.contains(&id) => SessionRow {
+                target: SessionTarget::Persistent(id),
+                title: "Session cleanup pending".into(),
+                detail: format!("{id} · Deleted · Enter to finish interrupted cleanup"),
+                cleanup_pending: true,
+            },
             SessionTarget::Persistent(id) => catalog
                 .overview(id)
                 .await
@@ -119,10 +136,126 @@ pub(super) async fn sessions(
     })
 }
 
+pub(super) async fn removal(
+    root: &Path,
+    id: Uuid,
+) -> Result<Box<atman_tui::flow_hub::SessionRemovalPage>> {
+    let data = root.to_owned();
+    tokio::task::spawn_blocking(move || {
+        if let Some(request) = RuntimeStore::inspect_session_removal(&data, id)? {
+            return Ok(Box::new(atman_tui::flow_hub::SessionRemovalPage {
+                request,
+                title: "Deleted session".into(),
+                cleanup: true,
+                detail: "Continue the original cleanup request; the session cannot execute".into(),
+            }));
+        }
+        let inspected = RuntimeStore::inspect_session(&data, id)?;
+        ensure!(
+            inspected.journal.trailing_bytes == 0,
+            "Session journal is incomplete"
+        );
+        Ok(Box::new(atman_tui::flow_hub::SessionRemovalPage {
+            request: SessionRemoval {
+                session_id: id,
+                expected: inspected
+                    .journal
+                    .cursor
+                    .ok_or_else(|| anyhow::anyhow!("Session has no creation receipt"))?,
+            },
+            title: inspected
+                .projection
+                .title
+                .unwrap_or_else(|| "Untitled session".into()),
+            detail: format!(
+                "{} flows · {}",
+                inspected.projection.flows.len(),
+                inspected.dir.display()
+            ),
+            cleanup: false,
+        }))
+    })
+    .await?
+}
+
+pub(super) async fn remove(root: &Path, request: SessionRemoval) -> Result<()> {
+    let data = root.to_owned();
+    tokio::task::spawn_blocking(move || RuntimeStore::open(&data)?.delete_session(&request)).await?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use atman_runtime::flow_store::{RuntimeStore, SessionDescriptor};
+
+    #[tokio::test]
+    async fn session_removal_review_preserves_versions_and_discovers_interrupted_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RuntimeStore::open(temp.path()).unwrap();
+        let id = Uuid::now_v7();
+        let mut writer = store
+            .create_session(SessionDescriptor {
+                id,
+                title: "Original".into(),
+                project: None,
+                configuration: Default::default(),
+            })
+            .unwrap();
+        let initial = removal(temp.path(), id).await.unwrap();
+        assert_eq!(initial.title, "Original");
+        assert!(!initial.cleanup);
+        assert!(
+            remove(temp.path(), initial.request.clone())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("owner")
+        );
+        writer
+            .set_title(&writer.cursor().clone(), Some("Renamed".into()))
+            .unwrap();
+        drop(writer);
+        assert!(
+            remove(temp.path(), initial.request)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("changed")
+        );
+        let current = removal(temp.path(), id).await.unwrap();
+        assert_eq!(current.title, "Renamed");
+        remove(temp.path(), current.request.clone()).await.unwrap();
+        // Simulate data cleanup interrupted after its receipt and directory move committed.
+        let data = store
+            .root()
+            .join(".deletions/sessions")
+            .join(id.to_string())
+            .join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("partial"), "retained until retry").unwrap();
+        let catalog = SessionCatalog::new(None, Some(temp.path().to_owned()));
+        let listed = sessions(&catalog, temp.path(), None, 1).await.unwrap();
+        assert_eq!(listed.total, 1);
+        assert_eq!(listed.sessions[0].target, SessionTarget::Persistent(id));
+        assert!(listed.sessions[0].cleanup_pending);
+        assert!(data.join("partial").exists());
+        let retry = removal(temp.path(), id).await.unwrap();
+        assert!(retry.cleanup);
+        assert_eq!(retry.request, current.request);
+        remove(temp.path(), retry.request).await.unwrap();
+        assert!(!data.exists());
+        assert_eq!(
+            sessions(&catalog, temp.path(), None, 1)
+                .await
+                .unwrap()
+                .total,
+            0
+        );
+        assert!(RuntimeStore::inspect_session(temp.path(), id).is_err());
+        // A late duplicate result uses the same receipt and cannot recreate a session.
+        remove(temp.path(), current.request).await.unwrap();
+        assert!(!temp.path().join("runtime-v1/host").exists());
+    }
 
     #[tokio::test]
     async fn mixed_pages_preserve_source_identity_without_requiring_metadata_or_reading_bodies() {

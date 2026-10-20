@@ -28,6 +28,8 @@ mod overview;
 pub use overview::OverviewDirectory;
 mod page;
 mod release;
+mod removal;
+pub use removal::SessionRemovalPage;
 mod text;
 mod watch;
 mod workspaces;
@@ -51,6 +53,7 @@ pub(crate) enum Action {
     UpdateManagement(Box<atman_runtime::flow_store::profile::ReplaceManagement>),
     ReviewWorkspaceRelease(Box<WorkspaceRemoval>),
     ReleaseWorkspace(Box<WorkspaceRemoval>),
+    RemoveSession(Box<atman_runtime::flow_store::SessionRemoval>),
     SetWorkspaceRetention(Box<WorkspaceRetention>),
     None,
     Close,
@@ -474,11 +477,20 @@ impl FlowHub {
         }
         match self.focus() {
             Action::Focus(flow) => Action::Float(flow),
+            Action::RemoveSession(_) => Action::None,
             _ => self.activate(),
         }
     }
 
     fn activate(&mut self) -> Action {
+        if matches!(self.focus(), Action::RemoveSession(_))
+            && self
+                .filtered()
+                .get(self.selected)
+                .is_none_or(|selected| !self.hits.iter().any(|(_, index)| index == selected))
+        {
+            return Action::None;
+        }
         if self.controls.as_ref().is_some_and(|draft| draft.picking) {
             if let Some(index) = self.filtered().get(self.selected).copied()
                 && let page::RowKey::Flow(address) = &self.rows[index].key
@@ -813,6 +825,7 @@ impl FlowHub {
                 &self.page,
                 Some(
                     FlowHubPage::WorkspaceRecord(_)
+                        | FlowHubPage::SessionRemoval(_)
                         | FlowHubPage::Management(_)
                         | FlowHubPage::Workspace(_)
                         | FlowHubPage::FlowWorkspace(_)
@@ -840,6 +853,23 @@ impl FlowHub {
             return Action::None;
         }
         match key {
+            KeyAction::Delete
+                if matches!(self.page, Some(FlowHubPage::Sessions(_)))
+                    && self.create_watch.is_none()
+                    && self.edit_management.is_none()
+                    && self.controls.is_none() =>
+            {
+                if let Some(page::RowKey::Session(crate::project_hub::SessionTarget::Persistent(
+                    session,
+                ))) = self
+                    .filtered()
+                    .get(self.selected)
+                    .map(|i| &self.rows[*i].key)
+                {
+                    return Action::Load(HubRequest::SessionRemoval { session: *session });
+                }
+                self.error = Some("Select a persistent session to review deletion".into());
+            }
             KeyAction::CycleReasoning
                 if self.page.as_ref().is_some_and(FlowHubPage::nodes)
                     && self.create_watch.is_none()
@@ -1087,9 +1117,12 @@ impl FlowHub {
                 self.key(KeyAction::Escape)
             }
             _ if self.pending.is_some() => Action::None,
-            MouseEventKind::Down(MouseButton::Left) if self.controls_button.contains(point) => {
-                self.key(KeyAction::CycleReasoning)
-            }
+            MouseEventKind::Down(MouseButton::Left) if self.controls_button.contains(point) => self
+                .key(if matches!(self.page, Some(FlowHubPage::Sessions(_))) {
+                    KeyAction::Delete
+                } else {
+                    KeyAction::CycleReasoning
+                }),
             MouseEventKind::Down(MouseButton::Left) if self.graph_button.contains(point) => self
                 .key(
                     if self.create_watch.is_some()
@@ -1537,6 +1570,8 @@ impl FlowHub {
                     Action::RetryControls(_) => Some("\nRetry Enter"),
                     Action::Load(HubRequest::ControlBatch { .. }) => Some("\nDetails Enter"),
                     Action::Load(HubRequest::ControlHistory { .. }) => Some("\nHistory Enter"),
+                    Action::Load(HubRequest::Sessions { .. }) => Some("\nSessions Enter"),
+                    Action::Load(HubRequest::SessionRemoval { .. }) => Some("\nReview Enter"),
                     Action::Focus(_) => Some("\nWindow Ctrl+O"),
                     Action::Load(
                         HubRequest::Workspace { .. }
@@ -1740,7 +1775,9 @@ impl FlowHub {
             width.saturating_sub(width / 2 + 1),
             3,
         );
-        if (self.page.as_ref().is_some_and(FlowHubPage::nodes) || self.controls.is_some())
+        if (self.page.as_ref().is_some_and(FlowHubPage::nodes)
+            || self.controls.is_some()
+            || matches!(self.page, Some(FlowHubPage::Sessions(_))))
             && self.create_watch.is_none()
             && self.edit_management.is_none()
         {
@@ -1757,7 +1794,9 @@ impl FlowHub {
                 frame,
                 self.controls_button,
                 &crate::settings_form::Action {
-                    label: if cell < 17 {
+                    label: if matches!(self.page, Some(FlowHubPage::Sessions(_))) {
+                        "Delete Del"
+                    } else if cell < 17 {
                         "Ctrl+T"
                     } else if self.controls.is_some() {
                         "Review Ctrl+T"
@@ -1864,6 +1903,10 @@ impl FlowHub {
                 "↑↓ select · Enter details · Tab side · Esc back"
             } else if is_watchers {
                 "↑↓ select · Enter details · Ctrl+B new · Ctrl+G scope · Esc back"
+            } else if matches!(self.page, Some(FlowHubPage::Sessions(_))) {
+                "Enter open · Del review deletion · Ctrl+B overview · Esc back"
+            } else if matches!(self.page, Some(FlowHubPage::SessionRemoval(_))) {
+                "↑↓ select · Enter confirm / details · Ctrl+R refresh · Esc back"
             } else if self.controls_button.width > 0 {
                 "Enter open · Ctrl+O window · Ctrl+T controls · Esc back"
             } else if is_relations {
@@ -2256,6 +2299,7 @@ mod tests {
                 sessions: ids
                     .iter()
                     .map(|id| SessionRow {
+                        cleanup_pending: false,
                         target: SessionTarget::Persistent(*id),
                         title: "Same title".into(),
                         detail: id.to_string(),
@@ -2357,11 +2401,13 @@ mod tests {
             Ok(Box::new(FlowHubPage::Sessions(SessionDirectory {
                 sessions: vec![
                     SessionRow {
+                        cleanup_pending: false,
                         target: SessionTarget::Persistent(id),
                         title: "Same name".into(),
                         detail: "Persistent".into(),
                     },
                     SessionRow {
+                        cleanup_pending: false,
                         target: SessionTarget::Legacy(id.to_string()),
                         title: "Same name".into(),
                         detail: "Original history".into(),

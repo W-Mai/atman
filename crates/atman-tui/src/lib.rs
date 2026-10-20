@@ -182,6 +182,7 @@ pub enum TuiControl {
     },
     CompactNow,
     AutoNameSession,
+    RemoveSession(Box<atman_runtime::flow_store::SessionRemoval>),
     CompactReviewAccept {
         review_id: String,
         edited: Option<String>,

@@ -18,6 +18,53 @@ pub struct SessionRemoval {
 }
 
 impl RuntimeStore {
+    /// Discover unfinished deletion cleanup without opening Session owners or changing data.
+    pub fn pending_session_removals(data: &Path) -> io::Result<Vec<uuid::Uuid>> {
+        let root = data.join(super::NAMESPACE);
+        let entries = match fs::read_dir(root.join(".deletions/sessions")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(error) => return Err(error),
+        };
+        let mut ids = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_dir()
+                && let Some(name) = entry.file_name().to_str()
+                && let Ok(id) = uuid::Uuid::parse_str(name)
+                && id.to_string() == name
+                && (entry.path().join("data").try_exists()?
+                    || root.join("sessions").join(name).try_exists()?)
+            {
+                ids.push(id);
+            }
+        }
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// Read the original deletion request, including after cleanup completed, without mutation.
+    pub fn inspect_session_removal(
+        data: &Path,
+        id: uuid::Uuid,
+    ) -> io::Result<Option<SessionRemoval>> {
+        let root = Self {
+            root: data.join(super::NAMESPACE),
+        };
+        let marker = root.deletion_path(id);
+        if !marker.try_exists()? {
+            return Ok(None);
+        }
+        let saved: SessionRemoval = serde_json::from_slice(&fs::read(marker.join("receipt.json"))?)
+            .map_err(super::invalid)?;
+        if saved.session_id != id || saved.expected.journal_id != id {
+            return Err(super::invalid(
+                "session deletion receipt belongs to another identity",
+            ));
+        }
+        Ok(Some(saved))
+    }
+
     pub(super) fn deletion_path(&self, id: uuid::Uuid) -> std::path::PathBuf {
         self.root
             .join(".deletions")
@@ -361,6 +408,19 @@ mod tests {
             if moved {
                 fs::rename(&source, marker.join("data")).unwrap();
             }
+            let receipt_bytes = fs::read(marker.join("receipt.json")).unwrap();
+            assert_eq!(
+                RuntimeStore::pending_session_removals(data.path()).unwrap(),
+                vec![descriptor.id]
+            );
+            assert_eq!(
+                RuntimeStore::inspect_session_removal(data.path(), descriptor.id).unwrap(),
+                Some(request.clone())
+            );
+            assert_eq!(
+                fs::read(marker.join("receipt.json")).unwrap(),
+                receipt_bytes
+            );
             assert!(RuntimeStore::session_ids(data.path()).unwrap().is_empty());
             assert!(root.open_session(descriptor.id).is_err());
             assert!(root.create_session(descriptor.clone()).is_err());
@@ -370,6 +430,15 @@ mod tests {
             assert!(!source.exists());
             assert!(!marker.join("data").exists());
             assert!(marker.join("receipt.json").is_file());
+            assert!(
+                RuntimeStore::pending_session_removals(data.path())
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                RuntimeStore::inspect_session_removal(data.path(), descriptor.id).unwrap(),
+                Some(request)
+            );
         }
     }
 }

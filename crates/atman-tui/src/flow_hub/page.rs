@@ -24,6 +24,7 @@ pub struct SessionRow {
     pub target: SessionTarget,
     pub title: String,
     pub detail: String,
+    pub cleanup_pending: bool,
 }
 
 impl From<SessionSummary> for SessionRow {
@@ -36,6 +37,7 @@ impl From<SessionSummary> for SessionRow {
             CatalogStatus::Unavailable => "Unavailable",
         };
         Self {
+            cleanup_pending: false,
             target: SessionTarget::Persistent(row.session_id),
             title: row.title.unwrap_or_else(|| "Unavailable session".into()),
             detail: row.unavailable.unwrap_or_else(|| {
@@ -68,6 +70,9 @@ pub struct RelationProgress {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
+    SessionRemoval {
+        session: Uuid,
+    },
     ControlHistory {
         before: Option<Uuid>,
     },
@@ -129,6 +134,7 @@ pub enum HubRequest {
 impl HubRequest {
     pub(super) fn first(&self) -> Self {
         match self {
+            Self::SessionRemoval { .. } => self.clone(),
             Self::ControlBatch { .. } => self.clone(),
             Self::ControlHistory { .. } => Self::ControlHistory { before: None },
             Self::Management { .. } => self.clone(),
@@ -173,6 +179,7 @@ impl HubRequest {
 }
 
 pub enum FlowHubPage {
+    SessionRemoval(Box<super::SessionRemovalPage>),
     ControlHistory(atman_runtime::flow_store::profile::ControlBatchPage),
     ControlBatch(Box<super::ControlBatchPage>),
     Management(Box<super::ManagementPage>),
@@ -227,6 +234,7 @@ impl Row {
                 | RowKey::WorkspaceError(_)
                 | RowKey::ManagementField(_)
                 | RowKey::ControlField(_)
+                | RowKey::RemovalField(_)
         ) && matches!(self.action, Action::None)
     }
 }
@@ -259,6 +267,7 @@ impl Endpoint {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum RowKey {
+    RemovalField(&'static str),
     ControlField(String),
     ManagementField(&'static str),
     ManagementGrant(Uuid),
@@ -405,6 +414,7 @@ impl FlowHubPage {
 
     pub fn title(&self) -> &str {
         match self {
+            Self::SessionRemoval(_) => "Sessions / Delete",
             Self::ControlBatch(_) => "Control results",
             Self::ControlHistory(_) => "Control history",
             Self::Management(page) => {
@@ -437,6 +447,7 @@ impl FlowHubPage {
     }
     pub fn unit(&self) -> &str {
         match self {
+            Self::SessionRemoval(_) => "items",
             Self::ControlBatch(_) => "results",
             Self::ControlHistory(_) => "batches",
             Self::Management(_) => "details",
@@ -455,6 +466,9 @@ impl FlowHubPage {
     }
     pub fn first(&self) -> HubRequest {
         match self {
+            Self::SessionRemoval(page) => HubRequest::SessionRemoval {
+                session: page.request.session_id,
+            },
             Self::ControlBatch(page) => HubRequest::ControlBatch {
                 request_id: page.record.id,
             },
@@ -505,6 +519,7 @@ impl FlowHubPage {
     }
     pub fn next(&self) -> Option<HubRequest> {
         match self {
+            Self::SessionRemoval(_) => None,
             Self::ControlBatch(_) => None,
             Self::ControlHistory(page) => page.next.map(|before| HubRequest::ControlHistory {
                 before: Some(before),
@@ -558,6 +573,7 @@ impl FlowHubPage {
     }
     pub fn total(&self) -> usize {
         match self {
+            Self::SessionRemoval(page) => page.rows().len(),
             Self::ControlBatch(page) => page.rows().len(),
             Self::ControlHistory(page) => page.total,
             Self::Management(page) => page.total(),
@@ -581,6 +597,7 @@ impl FlowHubPage {
         endpoint: Endpoint,
     ) -> Vec<Row> {
         match self {
+            Self::SessionRemoval(page) => page.rows(),
             Self::ControlBatch(page) => page.rows(),
             Self::ControlHistory(page) => super::controls::history_rows(page),
             Self::Management(page) => page.rows(),
@@ -628,6 +645,9 @@ impl FlowHubPage {
                 .iter()
                 .map(|row| {
                     let request = match &row.target {
+                        SessionTarget::Persistent(session) if row.cleanup_pending => {
+                            Some(HubRequest::SessionRemoval { session: *session })
+                        }
                         SessionTarget::Persistent(session) => Some(HubRequest::Flows {
                             session: *session,
                             before: None,
