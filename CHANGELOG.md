@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Flow focus recovery** — Failed view refreshes preserve the destination's draft, reading position, and reply mailbox while leaving the current view selected.
+
 - **Persistent transcript imports** — External text transcripts publish as read-only flow archives, preserving message text, roles, source metadata, and recorded times without starting execution or creating legacy sessions.
 
 - **Unified session attachment** — Original session logs open as read-only history through the shared main and floating workspace. CLI interaction uses the persistent Flow host; the separate legacy REPL scheduler is removed.

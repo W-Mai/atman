@@ -52,6 +52,8 @@ Import converts loaded messages into a private immutable event snapshot and uses
 
 The published archive includes the complete normalized snapshot and does not require the external storage or temporary file for reading. The adapters currently import text and message metadata; they do not preserve unparsed non-text parts or claim a byte-for-byte copy of external source storage. Conversion failures do not publish a partial Session. Import does not load execution configuration, create project authority, or migrate unrelated user configuration. Stopped-source confirmation and asset retention for original Atman archives remain part of the separate `migrate archive` command.
 
+Flow focus changes retain the destination view in the workspace until its committed state and live preview have refreshed successfully. A failed refresh leaves the current view selected and preserves the destination's draft, reading position, and original reply mailbox for retry. Main and floating views use the same ownership path.
+
 ## Session and flow storage
 
 ### Project discovery and deletion

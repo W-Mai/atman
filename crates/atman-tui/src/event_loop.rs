@@ -4089,6 +4089,60 @@ mod tests {
         views::changed(handle.session_name_rx.as_mut()).await;
         refresh_session_name(&mut ui, &mut handle);
         assert!(ui.app.session_name.is_none());
+        // Failed refreshes retain the destination's draft and original reply mailbox.
+        let destination = views.views.get_mut(&a_main).unwrap();
+        let original_live = destination
+            .handle
+            .live_output
+            .replace(workers[1].subscribe_live_output());
+        let draft = destination.editor.buf().to_owned();
+        destination.ui.app.scroll_offset = 17;
+        destination.ui.app.follow_tail = false;
+        let sender = destination.handle.control_tx.as_ref().unwrap().clone();
+        assert!(
+            views
+                .focus(&mut ui, &mut editor, &mut handle, a_main.clone(), None)
+                .await
+                .is_err()
+        );
+        assert_eq!(editor.buf(), "draft B");
+        let destination = views
+            .views
+            .get_mut(&a_main)
+            .expect("failed target retained");
+        assert_eq!(destination.editor.buf(), draft);
+        assert_eq!(destination.ui.app.scroll_offset, 17);
+        assert_eq!(
+            destination.handle.control_tx.as_ref().unwrap().binding(),
+            sender.binding()
+        );
+        sender.send(TuiControl::CancelFlow).unwrap();
+        incoming
+            .recv()
+            .await
+            .unwrap()
+            .replies
+            .send(TuiCommand::Toast {
+                message: "original mailbox".into(),
+                level: crate::app::NoteLevel::Info,
+            })
+            .unwrap();
+        destination.handle.live_output = original_live;
+        views
+            .focus(&mut ui, &mut editor, &mut handle, a_main, None)
+            .await
+            .unwrap();
+        assert_eq!(editor.buf(), draft);
+        let (_, command) = recv_cmd(
+            &mut handle.cmd_rx,
+            &mut handle.control_reply_rx,
+            sender.binding(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(command, TuiCommand::Toast { message, .. } if message == "original mailbox")
+        );
         host.shutdown().await.unwrap();
         assert!(
             tokio::time::timeout(

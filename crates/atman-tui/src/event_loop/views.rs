@@ -275,9 +275,7 @@ impl Workspace {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("view is not bound"))?;
         if old != key {
-            let mut selected = if let Some(view) = self.views.remove(&key) {
-                view
-            } else {
+            if !self.views.contains_key(&key) {
                 let mut handle =
                     attachment.ok_or_else(|| anyhow::anyhow!("view attachment is missing"))?;
                 anyhow::ensure!(
@@ -289,19 +287,19 @@ impl Workspace {
                     "view source does not match destination"
                 );
                 let (ui, editor) = initialize_view(&mut handle).await?;
-                AttachedView {
-                    ui,
-                    editor,
-                    handle: *handle,
-                }
-            };
+                self.views.insert(
+                    key.clone(),
+                    AttachedView {
+                        ui,
+                        editor,
+                        handle: *handle,
+                    },
+                );
+            }
+            // Retain ownership until every fallible refresh has succeeded.
+            let selected = self.views.get_mut(&key).unwrap();
             if let Some(reader) = selected.handle.flow_view.as_mut() {
-                if let Err(error) =
-                    async { selected.ui.app.sync_flow_view(reader.refresh().await?) }.await
-                {
-                    self.views.insert(key, selected);
-                    return Err(error.into());
-                }
+                selected.ui.app.sync_flow_view(reader.refresh().await?)?;
                 if let Some(snapshot) = selected.ui.app.items.snapshot() {
                     selected.ui.wm.flow_snapshot(snapshot.clone());
                 }
@@ -312,6 +310,7 @@ impl Workspace {
             if selected.handle.settings.take_changes() {
                 apply_provider_catalog_changed(&mut selected.ui, None);
             }
+            let selected = self.views.remove(&key).unwrap();
             ui.app.transcript_selection_pointer = None;
             ui.app.thinking_click_origin = None;
             ui.selection_menu = None;
