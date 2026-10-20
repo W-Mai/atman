@@ -1,8 +1,6 @@
 # Context strategy
 
-Atman separates durable session history, the active message window, workflow-selected
-memory, and the final provider request. Treating all four as one "context window"
-hides important behavior.
+Atman separates durable history, the active message window, workflow-selected memory, and the final provider request. In persistent Sessions, each Flow owns its context independently. `context: "session"` selects the invoking Flow's message window, not every conversation in its containing Session. Selecting a default Flow or moving a view does not merge contexts.
 
 ## The request model
 
@@ -33,18 +31,9 @@ Explicit tool selectors retain their declared order, wildcard matches are sorted
 qualified name, and overlaps are removed. Tool schema object keys are recursively
 canonicalized, so registry insertion order does not change the provider prefix.
 
-Before dispatch, the runtime wraps the assembled request in a provider-neutral
-`ModelContextPlan`. Its `ContextPlanId` is recorded on the corresponding `llm_call`
-event and does not alter provider serialization. The identifier is the correlation
-key between the compiled plan and its resulting call event. The event also separates
-estimated stable-instruction, tool-definition, message, and context-record tokens.
-Provider usage remains authoritative when present; missing input or output counts use
-the complete plan estimate and the event identifies provider, estimated, or mixed
-usage. The same event classifies general, extraction, classification, and branch
-generation calls and identifies detached, root-session, and spawned-child contexts.
-The Session retains the latest usage in bounded provider/model/purpose/identity buckets.
-Only a general root-session call updates the active model-window reading; helper and
-child calls remain visible in their own buckets without replacing it.
+Before dispatch, the runtime wraps the assembled request in a provider-neutral `ModelContextPlan`. Its `ContextPlanId` is recorded on the corresponding `llm_call` event and does not alter provider serialization. The identifier correlates the compiled plan with its resulting call event. The event separates estimated stable-instruction, tool-definition, message, and context-record tokens. Provider usage remains authoritative when present; missing input or output counts use the complete plan estimate, with provider, estimated, or mixed usage identified explicitly.
+
+Calls are classified by purpose and context identity, with bounded provider/model/purpose/identity usage buckets. A general call in a persistent Flow's own context updates that Flow's active model-window reading. Auxiliary calls do not replace it. The serialized `root` scope identifies an owning context, not a privileged Flow: every persistent instance, including one created by another Flow, owns such a context. The `child` scope remains available for isolated spawned history segments in embedded legacy execution.
 
 Each call also fingerprints the cacheable prompt sequence after OpenAI Chat, API-key Responses, Anthropic Messages, Codex Responses, or provider-neutral projection. The observation records prompt bytes and estimated tokens, plus a conservative common-prefix lower bound at complete tool, instruction, message, or content-block boundaries. It reports cold starts, cache enablement or disablement, provider/model/projection changes, stable-instruction changes, tool changes, compaction, and other message-prefix rewrites separately. Transport JSON punctuation and output-only request fields are excluded because they do not represent the provider's semantic prompt prefix. Successful calls record the number of tool uses returned in the assistant message. Each dispatched tool result records raw bytes, model-visible excerpt bytes, and whether output budgeting changed the content before it enters message history.
 
@@ -79,17 +68,9 @@ keyed retrieved records instead of rewriting its system prompt.
 
 Budgeted compaction preserves the latest context records and tombstones when replacing individual turn outputs, including records appended after user messages. Hiding a record from a request does not remove it from subsequent calls or let cleared records reappear.
 
-Root and spawned contexts also receive `runtime.clock`: the runtime host's local date, time, and numeric UTC offset at minute precision. It refreshes before model calls when the minute or offset changes, including after session recovery. Repeated calls within the same minute reuse the record; clock updates append to history without rewriting the stable system prefix. The record distinguishes UTC timestamps from local time and identifies its timezone as the host's, which may differ from the user's. It is a current clock sample, not evidence of when a past action occurred.
+Flow contexts also receive `runtime.clock`: the runtime host's local date, time, and numeric UTC offset at minute precision. It refreshes before model calls when the minute or offset changes, including after session recovery. Repeated calls within the same minute reuse the record; clock updates append to history without rewriting the stable system prefix. The record distinguishes UTC timestamps from local time and identifies its timezone as the host's, which may differ from the user's. It is a current clock sample, not evidence of when a past action occurred.
 
-The stable system template retains the agent identity, voice, durable work contract,
-and general tool-use workflow. Because this prefix is stable across calls, its length
-affects cold-start input and the context window but does not invalidate later cache
-prefixes. Session state, retrieved rules, confessions, and changing capabilities stay
-in append-only records instead of rewriting the template. The template does not
-contain a working-directory placeholder. Root calls append one workspace record from
-session metadata; spawned flows append one to their local history from the effective
-tool workspace. This prevents duplicate root context and literal placeholders in
-child requests.
+The stable system template retains the agent identity, voice, durable work contract, and general tool-use workflow. Because this prefix is stable across calls, its length affects cold-start input and the context window but does not invalidate later cache prefixes. Context state, retrieved rules, confessions, and changing capabilities stay in append-only records instead of rewriting the template. The template has no working-directory placeholder. Each persistent Flow obtains its workspace record from its bound execution context; isolated legacy history segments use their effective tool workspace.
 
 ## Message selection
 

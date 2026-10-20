@@ -76,6 +76,22 @@ The managed agent template lives at [`examples/agent.at`](examples/agent.at). It
 atman run examples/agent.at --flow agent user_prompt="read Cargo.toml and list the workspace members"
 ```
 
+### Persistent flows
+
+A Session contains independently addressable Flow instances. Each instance retains its conversation, inbox, Goal, execution state, and resource bindings across turns. Returning a final answer finishes the current turn; it does not destroy the instance. Flows can exchange messages and watch public results, with explicit grants for cross-Session access and privileged controls.
+
+The main conversation and floating windows use the same Flow view. Selecting a different Flow changes the recipient of input and controls while retaining each view's draft and reading position. Closing a window does not stop execution. The default Flow is the Session's initial view, with no extra authority.
+
+| Entry | Purpose |
+|---|---|
+| `:flows` | Browse the current Session's Flows as a list or graph; focus one with Enter or open a window with Ctrl+O. |
+| `:sessions` | Browse Sessions; All flows / Ctrl+B opens the cross-Session overview. |
+| `:watchers` | Inspect, create, edit, or cancel subscriptions for the focused Flow. |
+| `:atman` | Open the profile's management Session; permissions remain explicit. |
+| `atman --continue <session-id>` | Reopen a recorded Session. Published legacy histories open read-only. |
+
+New execution records live under `runtime-v1/sessions/<session>/flows/<flow>/`. Recovery retains committed work and pending input; it does not replay unknown external effects. See [Session and Flow navigation](docs/quickstart.md#8-session-discovery-and-spec-state), [storage and migration](docs/storage.md), and [approval controls](docs/permission-control.md).
+
 ## What is atman?
 
 > **आत्मन् (ātman)** — Sanskrit for *self*, the inner essence that witnesses thought but is not thought itself. The agent that watches the LLM's words and acts on them.
