@@ -9924,3 +9924,129 @@ async fn host_scheduler_failures_remain_observable_and_replacement_keeps_unconsu
     host.wait_quiescent().await.unwrap();
     assert!(worker.snapshot().await.unwrap().pending.is_empty());
 }
+
+#[tokio::test]
+async fn session_removal_releases_only_confirmed_closed_owners() {
+    use atman_runtime::flow_store::SessionRemoval;
+    let data = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .create_session(data.path(), info.clone())
+        .await
+        .unwrap();
+    let worker = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&worker, FlowTransition::Activated).await;
+    let other_info = session_descriptor();
+    let other = host
+        .create_session(data.path(), other_info.clone())
+        .await
+        .unwrap();
+    let other_worker = other
+        .create_flow(flow_descriptor(other_info.id))
+        .await
+        .unwrap();
+    change(&other_worker, FlowTransition::Activated).await;
+    let request = SessionRemoval {
+        session_id: info.id,
+        expected: session.snapshot().await.unwrap().cursor,
+    };
+    let original = worker.snapshot().await.unwrap().cursor;
+    assert!(
+        host.delete_session(data.path(), request.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not closed")
+    );
+    assert_eq!(worker.snapshot().await.unwrap().cursor, original);
+    assert!(session.snapshot().await.is_ok());
+    change(&worker, FlowTransition::CloseRequested).await;
+    change(&worker, FlowTransition::Closed).await;
+    session
+        .set_title(request.expected.clone(), Some("Reviewed again".into()))
+        .await
+        .unwrap();
+    assert!(
+        host.delete_session(data.path(), request.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("changed")
+    );
+    let request = SessionRemoval {
+        expected: session.snapshot().await.unwrap().cursor,
+        ..request
+    };
+    let foreign = RuntimeStore::open(elsewhere.path()).unwrap();
+    drop(foreign.create_session(info.clone()).unwrap());
+    assert!(
+        host.delete_session(elsewhere.path(), request.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("different storage owner")
+    );
+    assert!(session.snapshot().await.is_ok());
+    host.delete_session(data.path(), request.clone())
+        .await
+        .unwrap();
+    assert!(!host.sessions().contains(&info.id));
+    assert!(worker.snapshot().await.is_err());
+    assert!(session.create_flow(flow_descriptor(info.id)).await.is_err());
+    assert!(host.open_session(data.path(), info.id).await.is_err());
+    assert!(
+        host.create_session(data.path(), info.clone())
+            .await
+            .is_err()
+    );
+    assert!(RuntimeStore::inspect_session(elsewhere.path(), info.id).is_ok());
+    assert_eq!(
+        other_worker.state().await.unwrap().state(),
+        &InstanceState::Open(InstanceActivity::Idle)
+    );
+    assert!(
+        other
+            .create_flow(flow_descriptor(other_info.id))
+            .await
+            .is_ok()
+    );
+    host.delete_session(data.path(), request).await.unwrap();
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn session_removal_serializes_new_flow_creation() {
+    use atman_runtime::flow_store::SessionRemoval;
+    for _ in 0..4 {
+        let data = tempfile::tempdir().unwrap();
+        let host = RuntimeHost::default();
+        let info = session_descriptor();
+        let session = host
+            .create_session(data.path(), info.clone())
+            .await
+            .unwrap();
+        let request = SessionRemoval {
+            session_id: info.id,
+            expected: session.snapshot().await.unwrap().cursor,
+        };
+        let (removed, created) = tokio::join!(
+            host.delete_session(data.path(), request.clone()),
+            session.create_flow(flow_descriptor(info.id))
+        );
+        assert_ne!(removed.is_ok(), created.is_ok());
+        if let Ok(worker) = created {
+            assert!(worker.snapshot().await.is_ok());
+            change(&worker, FlowTransition::CloseRequested).await;
+            change(&worker, FlowTransition::Closed).await;
+            let request = SessionRemoval {
+                expected: session.snapshot().await.unwrap().cursor,
+                ..request
+            };
+            host.delete_session(data.path(), request).await.unwrap();
+        }
+        host.shutdown().await.unwrap();
+        assert!(RuntimeStore::inspect_session(data.path(), info.id).is_err());
+    }
+}

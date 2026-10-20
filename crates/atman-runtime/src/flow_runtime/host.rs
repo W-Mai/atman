@@ -100,6 +100,44 @@ impl WeakRuntimeHost {
 }
 
 impl RuntimeHost {
+    /// Remove a confirmed Session, releasing its loaded owners only when every instance is closed or archived. Accepted removal survives caller disconnection; other Sessions keep running.
+    pub async fn delete_session(
+        &self,
+        data: &std::path::Path,
+        request: crate::flow_store::SessionRemoval,
+    ) -> anyhow::Result<()> {
+        let host = self.clone();
+        let data = data.to_owned();
+        tokio::spawn(async move {
+            let _opening = host.directory.opening.lock().await;
+            match host.session(request.session_id) {
+                Ok(session) => {
+                    let result = session
+                        .request(|reply| CatalogCommand::ReleaseClosed {
+                            data: data.clone(),
+                            request: request.clone(),
+                            reply,
+                        })
+                        .await;
+                    if session.is_stopped() {
+                        host.directory
+                            .sessions
+                            .lock()
+                            .unwrap()
+                            .remove(&request.session_id);
+                        host.changed();
+                    }
+                    result?;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            tokio::task::spawn_blocking(move || RuntimeStore::open(&data)?.delete_session(&request))
+                .await?
+        })
+        .await?
+    }
+
     /// Bind service diagnostic redaction before opening instances. Per-invocation sinks can supply their own execution diagnostic policy.
     pub fn with_redactor(redactor: Arc<crate::redact::Redactor>) -> Self {
         Self::with_services(HostServices {
@@ -334,17 +372,23 @@ impl RuntimeHost {
             directory
                 .shutdown
                 .get_or_init(|| async {
-                    let sessions: Vec<_> = {
-                        let sessions = directory.sessions.lock().unwrap();
+                    {
+                        let _sessions = directory.sessions.lock().unwrap();
                         directory
                             .stopping
                             .store(true, std::sync::atomic::Ordering::Release);
-                        sessions.values().cloned().collect()
-                    };
+                    }
                     directory.changes.send_modify(|_| {});
                     directory.controls.stop().await;
                     // An in-flight open must finish and release its writer before shutdown returns.
                     let _opening = directory.opening.lock().await;
+                    let sessions: Vec<_> = directory
+                        .sessions
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .cloned()
+                        .collect();
                     let results = futures::future::join_all(sessions.iter().map(|session| async {
                         session
                             .request(CatalogCommand::Shutdown)
@@ -401,6 +445,11 @@ pub struct SessionObservation {
 }
 
 enum CatalogCommand {
+    ReleaseClosed {
+        data: std::path::PathBuf,
+        request: crate::flow_store::SessionRemoval,
+        reply: oneshot::Sender<io::Result<()>>,
+    },
     Shutdown(oneshot::Sender<io::Result<()>>),
     Describe {
         id: FlowInstanceId,
@@ -719,7 +768,38 @@ async fn serve_catalog(
     let mut observers: HashMap<FlowInstanceId, AbortOnDropHandle<()>> = HashMap::new();
     let mut schedulers: HashMap<FlowInstanceId, FlowScheduler> = HashMap::new();
     while let Some(command) = commands.recv().await {
+        let command = match command {
+            CatalogCommand::ReleaseClosed {
+                data,
+                request,
+                reply,
+            } => {
+                // Keep the catalog serialized while full replay runs off the async worker.
+                let checked = tokio::task::spawn_blocking(move || {
+                    let result = store.validate_removal(&data, &request);
+                    (store, result)
+                })
+                .await;
+                let (returned, result) = match checked {
+                    Ok(checked) => checked,
+                    Err(error) => {
+                        let _ = reply.send(Err(io::Error::other(error)));
+                        return;
+                    }
+                };
+                store = returned;
+                if let Err(error) = result {
+                    let _ = reply.send(Err(io::Error::other(format!("{error:#}"))));
+                    continue;
+                }
+                CatalogCommand::Shutdown(reply)
+            }
+            command => command,
+        };
         match command {
+            CatalogCommand::ReleaseClosed { .. } => {
+                unreachable!("release validated before dispatch")
+            }
             CatalogCommand::Shutdown(reply) => {
                 // Reject queued catalog work before waiting for executions which may themselves be awaiting a catalog reply.
                 commands.close();
@@ -1013,5 +1093,84 @@ async fn serve_catalog(
                 let _ = reply.send(result);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accepted_removal_survives_disconnection_and_serializes_host_shutdown() {
+        let data = tempfile::tempdir().unwrap();
+        let host = RuntimeHost::default();
+        let id = Uuid::now_v7();
+        let session = host
+            .create_session(
+                data.path(),
+                SessionDescriptor {
+                    id,
+                    title: "Removal".into(),
+                    project: None,
+                    configuration: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let request = crate::flow_store::SessionRemoval {
+            session_id: id,
+            expected: session.snapshot().await.unwrap().cursor,
+        };
+        let catalog = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(data.path().join("runtime-v1/.catalog.lock"))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&catalog).unwrap();
+        let mut removal = Box::pin(host.delete_session(data.path(), request.clone()));
+        assert!(futures::poll!(removal.as_mut()).is_pending());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while host.directory.opening.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(removal);
+        let closing = {
+            let host = host.clone();
+            tokio::spawn(async move { host.shutdown().await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !host
+                .directory
+                .stopping
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!closing.is_finished());
+        fs2::FileExt::unlock(&catalog).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), closing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(session.snapshot().await.is_err());
+        assert!(host.sessions().is_empty());
+        assert_eq!(
+            RuntimeStore::inspect_session_removal(data.path(), id).unwrap(),
+            Some(request)
+        );
+        assert!(
+            !data
+                .path()
+                .join("runtime-v1/sessions")
+                .join(id.to_string())
+                .exists()
+        );
     }
 }

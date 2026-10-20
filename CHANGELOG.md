@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Loaded Session removal** — Confirmed deletion releases closed Session owners without stopping other Sessions. Catalog validation prevents removing live or changed instances, and storage rechecks ownership before deleting data.
+
 - **Session deletion review** — The Delete Session menu opens the persistent directory with keyboard and mouse review controls. Confirmation retains its catalog version across errors, and unfinished cleanup remains discoverable after restarting.
 
 - **Session storage removal** — Closed, detached sessions can be removed with a confirmed catalog receipt. Deletion protects the management session, preserves other sessions and shared project data, and supports interrupted cleanup without recreating deleted identities.

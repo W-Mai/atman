@@ -6,7 +6,8 @@ use anyhow::{Context, Result, ensure};
 use atman_rt::InstanceState;
 
 use super::{
-    FlowContent, RuntimeStore, SessionInspection, SessionOwner, ensure_dir, profile::ProfileStore,
+    FlowContent, RuntimeStore, SessionInspection, SessionOwner, SessionStore, ensure_dir,
+    profile::ProfileStore,
 };
 use crate::{event_log::journal::sync_parent, session_meta::fingerprint_from_root};
 
@@ -93,24 +94,13 @@ impl RuntimeStore {
                 ensure!(saved == *request, "session deletion request changed");
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                self.ensure_session_available(request.session_id)?;
-                ensure!(
-                    ProfileStore::protected_session(self)? != Some(request.session_id),
-                    "session is the management session; select another management session before deletion"
-                );
                 let dir = self
                     .root
                     .join("sessions")
                     .join(request.session_id.to_string());
                 let owner = SessionOwner::lock(&dir)
                     .context("session still has an owner; detach it before deletion")?;
-                let inspected =
-                    Self::inspect_session(self.root.parent().unwrap(), request.session_id)?;
-                ensure!(
-                    inspected.journal.cursor.as_ref() == Some(&request.expected),
-                    "session changed; refresh before deletion"
-                );
-                validate_closed_session(&inspected)?;
+                self.validate_session_removal(request)?;
                 ensure_dir(marker.parent().unwrap())?;
                 super::initialize_dir(&marker, |dir| {
                     super::write_json(&dir.join("receipt.json"), request)
@@ -121,6 +111,20 @@ impl RuntimeStore {
             Err(error) => return Err(error.into()),
         }
         self.finish_session_deletion(request.session_id)
+    }
+
+    fn validate_session_removal(&self, request: &SessionRemoval) -> Result<()> {
+        self.ensure_session_available(request.session_id)?;
+        ensure!(
+            ProfileStore::protected_session(self)? != Some(request.session_id),
+            "session is the management session; select another management session before deletion"
+        );
+        let inspected = Self::inspect_session(self.root.parent().unwrap(), request.session_id)?;
+        ensure!(
+            inspected.journal.cursor.as_ref() == Some(&request.expected),
+            "session changed; refresh before deletion"
+        );
+        validate_closed_session(&inspected)
     }
 
     fn finish_session_deletion(&self, id: uuid::Uuid) -> Result<()> {
@@ -143,6 +147,27 @@ impl RuntimeStore {
             }
         }
         Ok(())
+    }
+}
+
+impl SessionStore {
+    /// Check release under the catalog owner. Closed instances cannot resume; deletion revalidates after ownership is relinquished.
+    pub(crate) fn validate_removal(&self, data: &Path, request: &SessionRemoval) -> Result<()> {
+        let root = RuntimeStore {
+            root: data.join(super::NAMESPACE),
+        };
+        ensure!(
+            self.projection().descriptor.id == request.session_id
+                && self.dir().canonicalize()?
+                    == root
+                        .root
+                        .join("sessions")
+                        .join(request.session_id.to_string())
+                        .canonicalize()?,
+            "session removal targets a different storage owner"
+        );
+        let _catalog = root.lock_catalog()?;
+        root.validate_session_removal(request)
     }
 }
 
