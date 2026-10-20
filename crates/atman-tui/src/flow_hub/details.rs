@@ -57,6 +57,12 @@ impl FlowDetailsPage {
                     Action::ArchiveFlow(Box::new(FlowArchiveChange { selection: self.selection.clone(), archived: !self.archived }))
                 } else { Action::None },
             },
+            Row {
+                key: RowKey::FlowField("project"),
+                title: "Session project · Enter".into(),
+                detail: "Change container membership. Existing flows keep their project and worktrees.".into(),
+                action: Action::Load(super::HubRequest::SessionProject { session: flow.session_id.0 }),
+            },
         ]
     }
 }

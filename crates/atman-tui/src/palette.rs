@@ -80,7 +80,7 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         id: PaletteEntryId::MoveSession,
         group: "Session",
         label: "Move Session",
-        hint: "Change this session's working directory",
+        hint: "Change this session's project association",
         keyword: "session move cwd path",
     },
     PaletteEntry {

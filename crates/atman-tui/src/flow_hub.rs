@@ -29,6 +29,8 @@ pub use management::{ManagementPage, ManagementSelection};
 mod overview;
 pub use overview::OverviewDirectory;
 mod page;
+mod project;
+pub use project::{SessionProjectChange, SessionProjectPage};
 mod release;
 mod removal;
 pub use removal::{SessionRemovalPage, SessionRemovalRequest};
@@ -47,6 +49,7 @@ pub use workspaces::{
 
 #[derive(Clone)]
 pub(crate) enum Action {
+    ChangeSessionProject(Box<SessionProjectChange>),
     ArchiveFlow(Box<FlowArchiveChange>),
     SelectDefault(Box<FlowCatalogSelection>),
     RetryControls(uuid::Uuid),
@@ -210,6 +213,9 @@ impl History {
             }
             let leaving_picker = (draft.is_some()
                 && !matches!(hub.page, Some(FlowHubPage::Watchers(_))))
+                || matches!((&hub.page, &**page),
+                    (Some(FlowHubPage::SessionProject(editor)), FlowHubPage::Flows { session, .. })
+                    if editor.session() == *session)
                 || (management.is_some() && !matches!(hub.page, Some(FlowHubPage::Management(_))))
                 || returning_to_management
                 || controls.as_ref().is_some_and(|draft| {
@@ -737,6 +743,9 @@ impl FlowHub {
     }
 
     pub fn key(&mut self, key: KeyAction) -> Action {
+        if let Some(FlowHubPage::SessionProject(page)) = &mut self.page {
+            return page.key(key, self.pending.is_some());
+        }
         if let Some(draft) = &mut self.controls {
             if !draft.picking {
                 let identity = draft.identity();
@@ -1085,6 +1094,9 @@ impl FlowHub {
     }
 
     pub fn mouse(&mut self, event: MouseEvent) -> Action {
+        if let Some(FlowHubPage::SessionProject(page)) = &mut self.page {
+            return page.mouse(event, self.pending.is_some());
+        }
         if let Some(draft) = &mut self.controls
             && !draft.picking
         {
@@ -1220,6 +1232,10 @@ impl FlowHub {
         );
         self.controls_button = Rect::default();
         self.details_button = Rect::default();
+        if let Some(FlowHubPage::SessionProject(page)) = &mut self.page {
+            page.render(frame, area, self.pending.is_some(), self.error.as_deref());
+            return;
+        }
         if let Some(draft) = &mut self.controls
             && !draft.picking
         {
@@ -1981,6 +1997,10 @@ impl FlowHub {
     }
 
     pub fn paste(&mut self, text: &str) -> Action {
+        if let Some(FlowHubPage::SessionProject(page)) = &mut self.page {
+            page.paste(text, self.pending.is_some());
+            return Action::None;
+        }
         if self.controls.as_ref().is_some_and(|draft| !draft.picking) {
             return Action::None;
         }

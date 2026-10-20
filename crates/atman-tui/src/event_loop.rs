@@ -3510,6 +3510,9 @@ fn dispatch_hub_action(
     reuse: Option<crate::control::ViewBinding>,
 ) {
     let command = match action {
+        crate::flow_hub::Action::ChangeSessionProject(change) => {
+            TuiControl::ChangeSessionProject(change)
+        }
         crate::flow_hub::Action::SelectDefault(change) => TuiControl::SelectDefaultFlow(change),
         crate::flow_hub::Action::ArchiveFlow(change) => TuiControl::ArchiveFlow(change),
         crate::flow_hub::Action::SubmitControls(request) => TuiControl::SubmitControls(request),

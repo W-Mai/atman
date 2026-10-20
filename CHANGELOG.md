@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Session project editor** — Move Session, `:move-session`, and Flow details share a project association form with keyboard and mouse saving. Catalog revision checks preserve concurrent edits; existing flows retain their execution resources.
+
 - **Interactive project scopes** — Main and floating views retain each flow's project resources, commands, and attachment paths across Session reassignment and restart. Archived views display the current Session title and original flow project.
 
 - **Daemon project scopes** — Flow launch and rebinding retain each instance's project resources across Session reassignment and restart. Execution caches distinguish project paths and local/global storage bindings.

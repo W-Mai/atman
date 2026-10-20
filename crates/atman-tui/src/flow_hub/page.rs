@@ -70,6 +70,9 @@ pub struct RelationProgress {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
+    SessionProject {
+        session: Uuid,
+    },
     FlowDetails {
         owner: atman_runtime::flow_store::FlowRef,
     },
@@ -137,6 +140,7 @@ pub enum HubRequest {
 impl HubRequest {
     pub(super) fn first(&self) -> Self {
         match self {
+            Self::SessionProject { .. } => self.clone(),
             Self::FlowDetails { .. } | Self::SessionRemoval { .. } => self.clone(),
             Self::ControlBatch { .. } => self.clone(),
             Self::ControlHistory { .. } => Self::ControlHistory { before: None },
@@ -182,6 +186,7 @@ impl HubRequest {
 }
 
 pub enum FlowHubPage {
+    SessionProject(Box<super::SessionProjectPage>),
     FlowDetails(Box<super::FlowDetailsPage>),
     SessionRemoval(Box<super::SessionRemovalPage>),
     ControlHistory(atman_runtime::flow_store::profile::ControlBatchPage),
@@ -420,6 +425,7 @@ impl FlowHubPage {
 
     pub fn title(&self) -> &str {
         match self {
+            Self::SessionProject(_) => "Session / Project",
             Self::FlowDetails(_) => "Flow details",
             Self::SessionRemoval(_) => "Sessions / Delete",
             Self::ControlBatch(_) => "Control results",
@@ -454,6 +460,7 @@ impl FlowHubPage {
     }
     pub fn unit(&self) -> &str {
         match self {
+            Self::SessionProject(_) => "project",
             Self::FlowDetails(_) | Self::SessionRemoval(_) => "items",
             Self::ControlBatch(_) => "results",
             Self::ControlHistory(_) => "batches",
@@ -473,6 +480,9 @@ impl FlowHubPage {
     }
     pub fn first(&self) -> HubRequest {
         match self {
+            Self::SessionProject(page) => HubRequest::SessionProject {
+                session: page.session(),
+            },
             Self::FlowDetails(page) => HubRequest::FlowDetails {
                 owner: page.selection.flow.clone(),
             },
@@ -529,6 +539,7 @@ impl FlowHubPage {
     }
     pub fn next(&self) -> Option<HubRequest> {
         match self {
+            Self::SessionProject(_) => None,
             Self::FlowDetails(_) | Self::SessionRemoval(_) => None,
             Self::ControlBatch(_) => None,
             Self::ControlHistory(page) => page.next.map(|before| HubRequest::ControlHistory {
@@ -583,6 +594,7 @@ impl FlowHubPage {
     }
     pub fn total(&self) -> usize {
         match self {
+            Self::SessionProject(_) => 1,
             Self::FlowDetails(page) => page.rows().len(),
             Self::SessionRemoval(page) => page.rows().len(),
             Self::ControlBatch(page) => page.rows().len(),
@@ -608,6 +620,7 @@ impl FlowHubPage {
         endpoint: Endpoint,
     ) -> Vec<Row> {
         match self {
+            Self::SessionProject(_) => vec![],
             Self::FlowDetails(page) => page.rows(),
             Self::SessionRemoval(page) => page.rows(),
             Self::ControlBatch(page) => page.rows(),

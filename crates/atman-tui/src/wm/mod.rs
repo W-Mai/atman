@@ -859,7 +859,15 @@ impl WindowManager {
                 }
             }
             PaletteEntryId::MoveSession => {
-                if let (Some(tx), Some(session)) = (control_tx, app.session.as_ref()) {
+                if let Some(binding) = control_tx.and_then(|tx| tx.binding())
+                    && let Some(flow) = binding.flow.instance()
+                {
+                    app.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                        crate::flow_hub::HubRequest::SessionProject {
+                            session: flow.session_id.0,
+                        },
+                    ));
+                } else if let (Some(tx), Some(session)) = (control_tx, app.session.as_ref()) {
                     let form = atman_runtime::form::PendingForm {
                         form_id: "session_move_path".to_string(),
                         run_id: atman_rt::RunId::<atman_runtime::event::AtmanUuid>::now(),
@@ -1736,6 +1744,18 @@ mod tests {
                 matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Relations {focus:Some(target), ..})) if target == flow)
             );
             assert!(incoming.try_recv().is_err());
+            assert!(wm.dispatch_meta_command(":move-session", &mut app, Some(&tx)));
+            assert!(matches!(app.open_flow_hub.take(),
+                Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::SessionProject { session }))
+                if session == flow.session_id.0));
+            wm.apply_palette_action(
+                crate::palette::PaletteEntryId::MoveSession,
+                &mut app,
+                Some(&tx),
+            );
+            assert!(matches!(app.open_flow_hub.take(),
+                Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::SessionProject { session }))
+                if session == flow.session_id.0));
             assert!(wm.dispatch_meta_command(":watchers", &mut app, Some(&tx)));
             assert!(
                 matches!(app.open_flow_hub.take(), Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::Watchers { owner })) if owner == flow)

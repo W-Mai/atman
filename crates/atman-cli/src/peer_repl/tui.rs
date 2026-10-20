@@ -664,6 +664,14 @@ impl Workspace {
                             navigation.spawn(async move { let result = scopes.browse(request).await.map(Navigation::Catalog); (replies, result) });
                             continue;
                         }
+                        TuiControl::ChangeSessionProject(change) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = scopes.change_session_project(*change).await.map(Navigation::Catalog);
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::SubmitControls(request) => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
@@ -908,6 +916,42 @@ enum Navigation {
 }
 
 impl scopes::Scopes {
+    async fn change_session_project(
+        &self,
+        change: atman_tui::flow_hub::SessionProjectChange,
+    ) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
+        let session = self.host.open_session(&self.root, change.session).await?;
+        let catalog = session.snapshot().await?.catalog;
+        let project = match change.project {
+            Some(path) => {
+                ensure!(path.is_absolute(), "Enter an absolute project directory");
+                ensure!(
+                    path.is_dir(),
+                    "Project directory does not exist: {}",
+                    path.display()
+                );
+                let SessionConfiguration::Atman(source) = &catalog.descriptor.configuration else {
+                    bail!(
+                        "Session needs a recorded Atman configuration to resolve project storage"
+                    );
+                };
+                Some(atman_runtime::storage::ProjectContext::resolve(
+                    &ConfigHub::from_source(source)?,
+                    &path.canonicalize()?,
+                    &self.root,
+                )?)
+            }
+            None => None,
+        };
+        session.set_project(change.expected, project).await?;
+        self.browse(atman_tui::flow_hub::HubRequest::Flows {
+            session: change.session,
+            before: None,
+        })
+        .await
+        .context("Project association saved, but refreshing the directory failed; retry or refresh")
+    }
+
     async fn select_management(
         &self,
         change: atman_tui::flow_hub::ManagementSelection,
@@ -1124,6 +1168,19 @@ impl scopes::Scopes {
             FlowHubPage, HubRequest, PAGE_SIZE, RelationProgress, RelationRange,
         };
         Ok(Box::new(match request {
+            HubRequest::SessionProject { session } => {
+                let summary = self.catalog.overview(session).await?.summary;
+                ensure!(
+                    summary.trailing_bytes.is_none_or(|bytes| bytes == 0),
+                    "Session journal has an incomplete tail"
+                );
+                FlowHubPage::SessionProject(Box::new(atman_tui::flow_hub::SessionProjectPage::new(
+                    session,
+                    summary.catalog.context("Session catalog is unavailable")?,
+                    summary.title.unwrap_or_else(|| session.to_string()),
+                    summary.project_root,
+                )))
+            }
             HubRequest::FlowDetails { owner } => {
                 let summary = self.catalog.overview(owner.session_id.0).await?.summary;
                 let expected = summary.catalog.context("Session catalog is unavailable")?;

@@ -114,6 +114,7 @@ impl TuiNote {
 
 #[non_exhaustive]
 pub enum TuiControl {
+    ChangeSessionProject(Box<flow_hub::SessionProjectChange>),
     SelectDefaultFlow(Box<flow_hub::FlowCatalogSelection>),
     ArchiveFlow(Box<flow_hub::FlowArchiveChange>),
     SubmitControls(Box<flow_hub::OperatorControls>),
