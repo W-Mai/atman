@@ -199,6 +199,7 @@ pub struct StorageConfig {
     Deserialize,
     PartialEq,
     Eq,
+    Hash,
     documented::DocumentedVariants,
 )]
 #[serde(rename_all = "lowercase")]
@@ -257,7 +258,7 @@ fn project_storage_path(project_root: &Path, scope: StorageScope, data_dir: &Pat
 }
 
 /// Recorded project resources. This binding does not grant filesystem execution authority.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ProjectContext {
     root: PathBuf,
     scope: StorageScope,

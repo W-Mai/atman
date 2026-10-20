@@ -20,6 +20,7 @@ use atman_runtime::flow_store::{
     EntrySnapshot, FlowDescriptor, SessionConfiguration, SessionDescriptor,
 };
 use atman_runtime::source_program::{load_program, load_program_from_bundle};
+use atman_runtime::storage::ProjectContext;
 use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, Executor};
 use serde_json::{Value, json};
 
@@ -28,18 +29,31 @@ use crate::{DaemonState, prompt_bridge::DaemonPromptResolver};
 
 const YIELD_INTERVAL: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 
+#[cfg(test)]
+mod tests;
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub(super) struct ExecutorScope {
+    session: uuid::Uuid,
+    project: Option<ProjectContext>,
+}
+
 impl SessionService {
     async fn executor(
         &self,
         state: &Arc<DaemonState>,
         descriptor: &SessionDescriptor,
+        project: Option<&ProjectContext>,
         home_dir: Option<PathBuf>,
     ) -> Result<Executor> {
         let slot = self
             .executors
             .lock()
             .unwrap()
-            .entry(descriptor.id)
+            .entry(ExecutorScope {
+                session: descriptor.id,
+                project: project.cloned(),
+            })
             .or_default()
             .clone();
         let executor = slot
@@ -54,7 +68,7 @@ impl SessionService {
                     events,
                     mock: false,
                     config,
-                    project: descriptor.project.clone(),
+                    project: project.cloned(),
                     home_dir,
                     workspace_generation: state.daemon_generation().to_owned(),
                 })
@@ -77,6 +91,7 @@ impl SessionService {
         state: &Arc<DaemonState>,
         session: &SessionDescriptor,
         descriptor: &FlowDescriptor,
+        project: Option<&ProjectContext>,
         home_dir: Option<PathBuf>,
     ) -> Result<(
         Executor,
@@ -86,8 +101,11 @@ impl SessionService {
         let source = descriptor.entry()?;
         let hub = config(session)?;
         let trust = hub.trust_config()?;
-        let program =
-            load_program_from_bundle(&source.bundle, &source.path, &session.source_roots())?;
+        let program = load_program_from_bundle(
+            &source.bundle,
+            &source.path,
+            &session.source_roots_for(project),
+        )?;
         let entry = program
             .entry_flow(&source.name)
             .and_then(|id| program.flow(&id))
@@ -95,12 +113,9 @@ impl SessionService {
         let authority = EffectiveAuthority::root(
             &trust,
             contract_allows_shell(entry.contract.as_ref()),
-            session
-                .project
-                .as_ref()
-                .map(|project| project.root().to_path_buf()),
+            project.map(|project| project.root().to_path_buf()),
         );
-        let executor = self.executor(state, session, home_dir).await?;
+        let executor = self.executor(state, session, project, home_dir).await?;
         if let Err(errors) = atman_runtime::validate::validate(entry, &executor.tools) {
             anyhow::bail!(
                 "entry validation failed: {}",
@@ -124,11 +139,13 @@ impl SessionService {
         let snapshot = session.snapshot().await?;
         let worker = self.host.flow(&flow).await?;
         let descriptor = worker.descriptor().await?;
+        let project = worker.project().await?;
         let (executor, authority, trust) = self
             .prepare_entry(
                 state,
                 &snapshot.catalog.descriptor,
                 &descriptor,
+                project.as_ref(),
                 launcher_home(state),
             )
             .await?;
@@ -203,7 +220,10 @@ impl SessionService {
                 snapshot.cursor.sequence == request.expected_catalog_sequence,
                 "session catalog changed; inspect its flows before launching"
             );
-            let roots = snapshot.catalog.descriptor.source_roots();
+            let roots = snapshot
+                .catalog
+                .descriptor
+                .source_roots_for(snapshot.catalog.project.as_ref());
             let path = request.path.clone();
             let entry = request.entry.clone();
             let loaded = tokio::task::spawn_blocking(move || {
@@ -257,8 +277,22 @@ impl SessionService {
             initial_goal,
             session_start,
         } = entry;
+        let project = snapshot
+            .catalog
+            .flows
+            .iter()
+            .find(|flow| flow.id == descriptor.address.instance_id)
+            .map_or(snapshot.catalog.project.as_ref(), |flow| {
+                flow.project.as_ref()
+            });
         let (executor, authority, trust) = self
-            .prepare_entry(state, &snapshot.catalog.descriptor, &descriptor, home_dir)
+            .prepare_entry(
+                state,
+                &snapshot.catalog.descriptor,
+                &descriptor,
+                project,
+                home_dir,
+            )
             .await?;
         let request_id = descriptor.creation_request;
         let input = LaunchInput {
