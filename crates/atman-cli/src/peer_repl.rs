@@ -842,7 +842,7 @@ impl Attachment {
                 Ok(format!("Copied {} chars to terminal clipboard (OSC 52)", payload.chars().count()))
             }
             ":sidebar" => Ok("Sidebar controls are available in TUI mode".into()),
-            ":help" => Ok("Text submits to the focused flow; /command [arguments] queues a captured command in the same flow. :attach <path>|list|clear · :rename [<text>|clear] · :focus <flow-prefix> · :flows · :status · :session · :sessions · :model · :cost · :storage [global|local] · :suggest · :compact · :copy [last-message|last-tool] · :sidebar on|off · :invoke <JSON arguments> · :insert <text> · :pause/:resume (execution) · :recover · :cancel · :close · :goal [set <text>|pause|resume|clear] · :todo [list|done <id>|cancel <id>|clear] · :pending · :reply <prompt-id> <JSON> · :approve/:deny <flow-prefix> <request-id> · :quit. EOF waits for runnable work; :quit detaches immediately.".into()),
+            ":help" => Ok("Text submits to the focused flow; /command [arguments] queues a captured command in the same flow. :attach <path>|list|clear · :name-session · :rename [<text>|clear] · :focus <flow-prefix> · :flows · :status · :session · :sessions · :model · :cost · :storage [global|local] · :suggest · :compact · :copy [last-message|last-tool] · :sidebar on|off · :invoke <JSON arguments> · :insert <text> · :pause/:resume (execution) · :recover · :cancel · :close · :goal [set <text>|pause|resume|clear] · :todo [list|done <id>|cancel <id>|clear] · :pending · :reply <prompt-id> <JSON> · :approve/:deny <flow-prefix> <request-id> · :quit. EOF waits for runnable work; :quit detaches immediately.".into()),
             ":rename" => {
                 let snapshot = self.session.snapshot().await?;
                 if argument.is_empty() {

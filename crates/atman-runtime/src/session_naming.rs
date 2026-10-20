@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{Executor, Session, value::Value};
+use crate::{Executor, Session, message::Message, value::Value};
 
 const MAX_MESSAGES: usize = 24;
 const MAX_MESSAGE_CHARS: usize = 600;
@@ -28,9 +28,24 @@ async fn generate_session_name(
     if !force && meta.name_source == crate::session_meta::NameSource::User {
         return Ok(false);
     }
+    let title =
+        suggest_session_title(executor, session.goal().as_deref(), &session.messages()).await?;
+    Ok(crate::session_meta::SessionMeta::set_auto_title_with_force(
+        session.dir(),
+        title,
+        force,
+    )?)
+}
+
+/// Generate a title from captured context without writing Session metadata or flow history.
+pub async fn suggest_session_title(
+    executor: &Executor,
+    goal: Option<&str>,
+    messages: &[Message],
+) -> anyhow::Result<String> {
     let flow = atman_rt::parse_file(crate::templates::SESSION_NAME_AT)
         .map_err(|error| anyhow::anyhow!("parsing built-in session name flow: {error}"))?;
-    let input = naming_input(session);
+    let input = naming_input(goal, messages);
     let mut naming_executor = executor.clone();
     naming_executor.events = crate::event::EventSink::new();
     naming_executor.tool_ctx.events = None;
@@ -49,19 +64,14 @@ async fn generate_session_name(
     let Value::Str(title) = value else {
         anyhow::bail!("session name flow did not return a string");
     };
-    Ok(crate::session_meta::SessionMeta::set_auto_title_with_force(
-        session.dir(),
-        title,
-        force,
-    )?)
+    Ok(title)
 }
 
-fn naming_input(session: &Session) -> String {
-    let messages = session.messages();
+fn naming_input(goal: Option<&str>, messages: &[Message]) -> String {
     let start = messages.len().saturating_sub(MAX_MESSAGES);
     let mut input = format!(
         "Goal:\n{}\n\nRecent conversation:\n",
-        session.goal().unwrap_or_default()
+        goal.unwrap_or_default()
     );
     for message in &messages[start..] {
         let text: String = message
@@ -92,7 +102,7 @@ mod tests {
             Message::user_text(crate::event::TurnId::now(), "Fix switcher"),
             None,
         );
-        let input = naming_input(&session);
+        let input = naming_input(session.goal().as_deref(), &session.messages());
         assert!(input.contains("Ship session naming"));
         assert!(input.contains("user: Fix switcher"));
     }

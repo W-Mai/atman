@@ -764,6 +764,7 @@ impl Workspace {
                             }
                             let operation = match &command {
                                 TuiControl::CompactNow => Some((operations::Operation::Compact, false)),
+                                TuiControl::AutoNameSession => Some((operations::Operation::NameSession, false)),
                                 TuiControl::Submit(submission) => submission.control_command().and_then(operations::Operation::parse).map(|operation| (operation, true)),
                                 _ => None,
                             };

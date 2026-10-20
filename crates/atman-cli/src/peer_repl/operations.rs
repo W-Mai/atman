@@ -14,6 +14,7 @@ use tokio::task::{Id, JoinSet};
 pub(super) enum Operation {
     Suggest,
     Compact,
+    NameSession,
 }
 
 impl Operation {
@@ -21,6 +22,7 @@ impl Operation {
         match command.trim() {
             ":suggest" => Some(Self::Suggest),
             ":compact" => Some(Self::Compact),
+            ":name-session" => Some(Self::NameSession),
             _ => None,
         }
     }
@@ -29,6 +31,7 @@ impl Operation {
         match self {
             Self::Suggest => "Examining recent flow messages…",
             Self::Compact => "Compacting context…",
+            Self::NameSession => "Generating a session name…",
         }
     }
 }
@@ -75,6 +78,33 @@ impl<T: Send + 'static> Operations<T> {
             return Ok(());
         }
         let messages = session.messages_full();
+        if operation == Operation::NameSession {
+            let goal = session.goal();
+            let catalog = scope.session.clone();
+            let executor = scope.executor.clone();
+            self.enqueue(key, receipt, async move {
+                let expected = catalog.snapshot().await?.cursor;
+                let title = atman_runtime::session_naming::suggest_session_title(
+                    &executor,
+                    goal.as_deref(),
+                    &messages,
+                )
+                .await?;
+                let title: String = title
+                    .trim()
+                    .replace(['\n', '\r'], " ")
+                    .chars()
+                    .take(60)
+                    .collect();
+                ensure!(
+                    !title.is_empty(),
+                    "the model returned an empty session name"
+                );
+                catalog.set_title(expected, Some(title.clone())).await?;
+                Ok(format!("Session renamed to {title}"))
+            });
+            return Ok(());
+        }
         let mut context = ToolCtx::new();
         context.prompt_resolver = scope.executor.tool_ctx.prompt_resolver.clone();
         context.forms = Some(session.forms());
@@ -146,9 +176,44 @@ mod tests {
     use super::*;
     use atman_runtime::{
         flow_store::{EntrySnapshot, FlowDescriptor},
+        provider::{AssistantMessage, LlmRequest, Provider},
         providers::mock::MockProvider,
         source_program::RevisionBundle,
     };
+
+    struct NamingProbe(mpsc::UnboundedSender<(String, oneshot::Sender<()>)>);
+
+    impl Provider for NamingProbe {
+        fn name(&self) -> &str {
+            "cheap"
+        }
+
+        fn call<'a>(
+            &'a self,
+            request: LlmRequest,
+        ) -> atman_runtime::tool::BoxFut<'a, Result<AssistantMessage, atman_runtime::RuntimeError>>
+        {
+            self.call_streaming(request).output
+        }
+
+        fn call_streaming(
+            &self,
+            request: LlmRequest,
+        ) -> atman_runtime::event::Observable<AssistantMessage> {
+            let prompt = request.messages.last().unwrap().text_concat();
+            let (release, wait) = oneshot::channel();
+            self.0.send((prompt, release)).unwrap();
+            let mut response = MockProvider::new("cheap")
+                .with_fallback(atman_runtime::Value::Str("Generated session".into()))
+                .call_streaming(request);
+            let output = response.output;
+            response.output = Box::pin(async move {
+                wait.await.unwrap();
+                output.await
+            });
+            response
+        }
+    }
 
     #[tokio::test]
     async fn suggestions_keep_flow_prompt_and_receipt_ownership_and_require_acceptance() {
@@ -158,7 +223,7 @@ mod tests {
             std::fs::create_dir_all(config.config_dir()).unwrap();
             std::fs::write(
                 config.config_dir().join("config.toml"),
-                "[suggest]\nmodel = 'mini'\n",
+                "[suggest]\nmodel = 'mini'\n[models.cheap]\nmodel = 'cheap'\nprovider = 'cheap'\ncontext_budget = 8192\n",
             )
             .unwrap();
             let descriptor = SessionDescriptor {
@@ -336,6 +401,46 @@ mod tests {
             assert!(forms.list_pending().is_empty());
             assert!(attachment.command(&workers[0], ":status").await.is_ok());
             assert!(workers[0].snapshot().await.unwrap().pending.is_empty());
+            // Naming is a catalog operation: it captures the requesting flow's context,
+            // preserves flow history, and cannot overwrite a concurrent manual rename.
+            let (naming_tx, mut naming_rx) = mpsc::unbounded_channel();
+            attachment.executor.providers.register(Arc::new(NamingProbe(naming_tx)));
+            let before = workers[0].snapshot().await.unwrap().cursor;
+            let messages = workers[0].context().messages_full();
+            let mut titles = attachment.session.subscribe_title();
+            for (receipt, concurrent_rename) in [(4, true), (5, false)] {
+                failed.start(&attachment, &workers[0], Operation::NameSession, Uuid::now_v7(), receipt).unwrap();
+                let (prompt, release) = tokio::select! {
+                    request = naming_rx.recv() => request.unwrap(),
+                    result = failed.next() => panic!("naming ended before model reply: {result:?}"),
+                };
+                assert!(prompt.contains("user: first"));
+                assert!(!prompt.contains("user: second"));
+                if concurrent_rename {
+                    let expected = attachment.session.snapshot().await.unwrap().cursor;
+                    attachment.session.set_title(expected, Some("Manual title".into())).await.unwrap();
+                }
+                release.send(()).unwrap();
+                let (actual, result) = failed.next().await;
+                assert_eq!(actual, receipt);
+                if concurrent_rename {
+                    assert!(result.is_err());
+                    assert_eq!(titles.borrow_and_update().as_deref(), Some("Manual title"));
+                } else {
+                    assert_eq!(result.unwrap(), "Session renamed to Generated session");
+                    assert_eq!(titles.borrow_and_update().as_deref(), Some("Generated session"));
+                }
+            }
+            attachment.executor.providers.remove("cheap");
+            failed.start(&attachment, &workers[0], Operation::NameSession, Uuid::now_v7(), 6).unwrap();
+            let (receipt, result) = failed.next().await;
+            assert_eq!(receipt, 6);
+            assert!(result.is_err());
+            assert_eq!(titles.borrow().as_deref(), Some("Generated session"));
+            assert_eq!(workers[0].snapshot().await.unwrap().cursor, before);
+            assert_eq!(workers[0].context().messages_full(), messages);
+            assert!(!workers[0].context().dir().join("session_meta.json").exists());
+            assert_eq!(Operation::parse(":name-session"), Some(Operation::NameSession));
             host.shutdown().await.unwrap();
         })
         .await

@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Session auto naming** — Persistent views and plain REPL commands generate names from the requesting flow's context and save through the session catalog. Concurrent manual renames are preserved, and naming failures leave flow execution and history unchanged.
+
 - **Terminal panel resizing** — Persistent views resize their own terminal resources through the shared terminal operation. Resizing does not start a turn or block other view controls while waiting for terminal access.
 
 - **Flow view recovery** — Subscription failures preserve drafts, recorded state, and control replies without closing the workspace. Reopening the view retries its reader, and live-preview failures leave committed updates available.
