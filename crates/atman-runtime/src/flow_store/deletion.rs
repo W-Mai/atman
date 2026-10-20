@@ -1,12 +1,126 @@
-//! Project removal requires exclusive catalog access and closed, detached instances.
+//! Removal requires exclusive catalog access and closed, detached instances.
 
 use std::{fs, fs::File, io, path::Path};
 
 use anyhow::{Context, Result, ensure};
 use atman_rt::InstanceState;
 
-use super::{FlowContent, RuntimeStore, SessionOwner, ensure_dir, profile::ProfileStore};
+use super::{
+    FlowContent, RuntimeStore, SessionInspection, SessionOwner, ensure_dir, profile::ProfileStore,
+};
 use crate::{event_log::journal::sync_parent, session_meta::fingerprint_from_root};
+
+/// A confirmed catalog version for deleting one Session and its recorded flows.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionRemoval {
+    pub session_id: uuid::Uuid,
+    pub expected: crate::event_log::journal::CommitReceipt,
+}
+
+impl RuntimeStore {
+    pub(super) fn deletion_path(&self, id: uuid::Uuid) -> std::path::PathBuf {
+        self.root
+            .join(".deletions")
+            .join("sessions")
+            .join(id.to_string())
+    }
+
+    pub(super) fn ensure_session_available(&self, id: uuid::Uuid) -> io::Result<()> {
+        if self.deletion_path(id).try_exists()? {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "session was deleted",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Delete a closed, detached Session under catalog ownership. Retrying the same request finishes interrupted cleanup; the retired identity cannot be created or migrated again. This blocking host operation never stops execution or releases live workspaces.
+    pub fn delete_session(&self, request: &SessionRemoval) -> Result<()> {
+        let _catalog = self.lock_catalog()?;
+        let marker = self.deletion_path(request.session_id);
+        let receipt = marker.join("receipt.json");
+        match fs::read(&receipt) {
+            Ok(bytes) => {
+                let saved: SessionRemoval = serde_json::from_slice(&bytes)?;
+                ensure!(saved == *request, "session deletion request changed");
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.ensure_session_available(request.session_id)?;
+                ensure!(
+                    ProfileStore::protected_session(self)? != Some(request.session_id),
+                    "session is the management session; select another management session before deletion"
+                );
+                let dir = self
+                    .root
+                    .join("sessions")
+                    .join(request.session_id.to_string());
+                let owner = SessionOwner::lock(&dir)
+                    .context("session still has an owner; detach it before deletion")?;
+                let inspected =
+                    Self::inspect_session(self.root.parent().unwrap(), request.session_id)?;
+                ensure!(
+                    inspected.journal.cursor.as_ref() == Some(&request.expected),
+                    "session changed; refresh before deletion"
+                );
+                validate_closed_session(&inspected)?;
+                ensure_dir(marker.parent().unwrap())?;
+                super::initialize_dir(&marker, |dir| {
+                    super::write_json(&dir.join("receipt.json"), request)
+                })?;
+                // The durable receipt retires the identity before any data is removed.
+                drop(owner);
+            }
+            Err(error) => return Err(error.into()),
+        }
+        self.finish_session_deletion(request.session_id)
+    }
+
+    fn finish_session_deletion(&self, id: uuid::Uuid) -> Result<()> {
+        let source = self.root.join("sessions").join(id.to_string());
+        let trash = self.deletion_path(id).join("data");
+        if source.try_exists()? {
+            ensure!(
+                !trash.try_exists()?,
+                "session deletion has conflicting data directories"
+            );
+            fs::rename(&source, &trash)?;
+            sync_parent(&source)?;
+            sync_parent(&trash)?;
+        }
+        match fs::remove_dir_all(&trash) {
+            Ok(()) => sync_parent(&trash)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).context("session deleted; retry to finish data cleanup");
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_closed_session(inspected: &SessionInspection) -> Result<()> {
+    ensure!(
+        inspected.journal.trailing_bytes == 0,
+        "session {} has an incomplete journal",
+        inspected.projection.descriptor.id
+    );
+    for registered in &inspected.projection.flows {
+        let flow = inspected.inspect_flow(&registered.id)?;
+        ensure!(
+            flow.journal.trailing_bytes == 0,
+            "flow {} has an incomplete journal",
+            registered.id
+        );
+        ensure!(
+            matches!(flow.descriptor.content, FlowContent::History(_))
+                || matches!(flow.state.state(), InstanceState::Closed),
+            "flow {} is not closed; close it before deletion",
+            registered.id
+        );
+    }
+    Ok(())
+}
 
 /// Keep membership stable until shared data and project catalog records have been updated.
 pub(crate) struct ProjectDeletion {
@@ -47,24 +161,7 @@ impl ProjectDeletion {
             })?);
             // Read again after acquiring ownership: the preceding inspection may overlap a writer's last commit.
             let inspected = RuntimeStore::inspect_session(data_dir, id)?;
-            ensure!(
-                inspected.journal.trailing_bytes == 0,
-                "session {id} has an incomplete journal"
-            );
-            for registered in &inspected.projection.flows {
-                let flow = inspected.inspect_flow(&registered.id)?;
-                ensure!(
-                    flow.journal.trailing_bytes == 0,
-                    "flow {} has an incomplete journal",
-                    registered.id
-                );
-                ensure!(
-                    matches!(flow.descriptor.content, FlowContent::History(_))
-                        || matches!(flow.state.state(), InstanceState::Closed),
-                    "flow {} is not closed; close it before deleting this project",
-                    registered.id
-                );
-            }
+            validate_closed_session(&inspected)?;
             sessions.push(inspected.dir);
         }
 
@@ -91,5 +188,188 @@ impl ProjectDeletion {
             Err(error) => return Err(error).context("finish pending project session deletion"),
         }
         Ok(guard)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flow_store::{
+        EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowTransition, SessionDescriptor,
+    };
+    use uuid::Uuid;
+
+    #[test]
+    fn deletion_requires_confirmed_closed_detached_data_and_retires_identity() {
+        let data = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(data.path()).unwrap();
+        let descriptor = SessionDescriptor {
+            id: Uuid::now_v7(),
+            project: None,
+            configuration: Default::default(),
+            title: "Delete example".into(),
+        };
+        let mut session = root.create_session(descriptor.clone()).unwrap();
+        let mut flow = session
+            .create_flow(FlowDescriptor {
+                address: FlowRef {
+                    session_id: descriptor.id.into(),
+                    instance_id: FlowInstanceId::now(),
+                },
+                creation_request: Uuid::now_v7(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: "main".into(),
+                    path: "main.at".into(),
+                    bundle: crate::source_program::RevisionBundle {
+                        entry: "main.at".into(),
+                        sources: [("main.at".into(), "flow main() {}".into())].into(),
+                        edges: Default::default(),
+                    },
+                }
+                .into(),
+            })
+            .unwrap();
+        let request = SessionRemoval {
+            session_id: descriptor.id,
+            expected: session.cursor().clone(),
+        };
+        assert!(
+            root.delete_session(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("owner")
+        );
+        drop(session);
+        assert!(root.delete_session(&request).is_err());
+        drop(flow);
+        assert!(
+            root.delete_session(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("not closed")
+        );
+        let session = root.open_session(descriptor.id).unwrap();
+        flow = session
+            .open_flow(&session.projection().flows[0].id)
+            .unwrap();
+        for transition in [FlowTransition::CloseRequested, FlowTransition::Closed] {
+            flow.transition(flow.state().revision(), transition)
+                .unwrap();
+        }
+        let path = flow.dir().join("events.jsonl");
+        drop((session, flow));
+        let original = fs::read(&path).unwrap();
+        let mut incomplete = original.clone();
+        incomplete.extend_from_slice(b"{\"partial\":");
+        fs::write(&path, &incomplete).unwrap();
+        assert!(
+            root.delete_session(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete")
+        );
+        assert_eq!(fs::read(&path).unwrap(), incomplete);
+        fs::write(&path, original).unwrap();
+        let mut stale = request.clone();
+        stale.expected.sequence += 1;
+        assert!(
+            root.delete_session(&stale)
+                .unwrap_err()
+                .to_string()
+                .contains("changed")
+        );
+        let mut profile = ProfileStore::open(&root).unwrap();
+        let manager = profile
+            .bootstrap(Default::default())
+            .unwrap()
+            .management
+            .unwrap()
+            .session
+            .id;
+        profile
+            .select(
+                Uuid::now_v7(),
+                profile.snapshot().cursor.clone(),
+                descriptor.id,
+                vec![],
+            )
+            .unwrap();
+        assert!(
+            root.delete_session(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("management session")
+        );
+        profile
+            .select(
+                Uuid::now_v7(),
+                profile.snapshot().cursor.clone(),
+                manager,
+                vec![],
+            )
+            .unwrap();
+        root.delete_session(&request).unwrap();
+        root.delete_session(&request).unwrap();
+        assert!(root.delete_session(&stale).is_err());
+        assert!(
+            !root
+                .root
+                .join("sessions")
+                .join(descriptor.id.to_string())
+                .exists()
+        );
+        assert!(!root.deletion_path(descriptor.id).join("data").exists());
+        assert!(
+            root.deletion_path(descriptor.id)
+                .join("receipt.json")
+                .is_file()
+        );
+        assert!(root.create_session(descriptor.clone()).is_err());
+        assert!(root.open_session(descriptor.id).is_err());
+        assert!(RuntimeStore::inspect_session(data.path(), descriptor.id).is_err());
+        assert_eq!(
+            RuntimeStore::session_ids(data.path()).unwrap(),
+            vec![manager]
+        );
+    }
+
+    #[test]
+    fn committed_removal_is_hidden_and_resumes_before_or_after_directory_move() {
+        for moved in [false, true] {
+            let data = tempfile::tempdir().unwrap();
+            let root = RuntimeStore::open(data.path()).unwrap();
+            let descriptor = SessionDescriptor {
+                id: Uuid::now_v7(),
+                project: None,
+                configuration: Default::default(),
+                title: "Example".into(),
+            };
+            let session = root.create_session(descriptor.clone()).unwrap();
+            let request = SessionRemoval {
+                session_id: descriptor.id,
+                expected: session.cursor().clone(),
+            };
+            let source = session.dir().to_owned();
+            drop(session);
+            let marker = root.deletion_path(descriptor.id);
+            ensure_dir(marker.parent().unwrap()).unwrap();
+            super::super::initialize_dir(&marker, |dir| {
+                super::super::write_json(&dir.join("receipt.json"), &request)
+            })
+            .unwrap();
+            if moved {
+                fs::rename(&source, marker.join("data")).unwrap();
+            }
+            assert!(RuntimeStore::session_ids(data.path()).unwrap().is_empty());
+            assert!(root.open_session(descriptor.id).is_err());
+            assert!(root.create_session(descriptor.clone()).is_err());
+            assert!(RuntimeStore::inspect_session(data.path(), descriptor.id).is_err());
+            let reopened = RuntimeStore::open(data.path()).unwrap();
+            reopened.delete_session(&request).unwrap();
+            assert!(!source.exists());
+            assert!(!marker.join("data").exists());
+            assert!(marker.join("receipt.json").is_file());
+        }
     }
 }

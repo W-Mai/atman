@@ -33,6 +33,7 @@ pub mod watch_view;
 pub mod workspace;
 
 pub(crate) use deletion::ProjectDeletion;
+pub use deletion::SessionRemoval;
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -747,6 +748,11 @@ impl RuntimeStore {
             if let Some(name) = name.to_str()
                 && let Ok(id) = Uuid::parse_str(name)
                 && id.to_string() == name
+                && !(Self {
+                    root: data_dir.join(NAMESPACE),
+                })
+                .deletion_path(id)
+                .try_exists()?
             {
                 ids.push(id);
             }
@@ -757,6 +763,10 @@ impl RuntimeStore {
 
     /// Read recorded catalog facts without repairing logs, rewriting metadata, or recovering execution. The source project and configuration need not exist. Use the owning host to observe acknowledged live state.
     pub fn inspect_session(data_dir: &Path, id: Uuid) -> io::Result<SessionInspection> {
+        Self {
+            root: data_dir.join(NAMESPACE),
+        }
+        .ensure_session_available(id)?;
         let dir = std::path::absolute(data_dir)?
             .join(NAMESPACE)
             .join("sessions")
@@ -789,6 +799,7 @@ impl RuntimeStore {
     }
 
     fn create_session_locked(&self, descriptor: SessionDescriptor) -> io::Result<SessionStore> {
+        self.ensure_session_available(descriptor.id)?;
         let dir = self.root.join("sessions").join(descriptor.id.to_string());
         initialize_dir(&dir, |dir| {
             self.create_session_at(dir, descriptor.clone()).map(drop)
@@ -846,6 +857,7 @@ impl RuntimeStore {
     }
 
     fn open_session_locked(&self, id: Uuid) -> io::Result<SessionStore> {
+        self.ensure_session_available(id)?;
         let dir = self.root.join("sessions").join(id.to_string());
         let owner_lock = SessionOwner::lock(&dir)?;
         let mut projection: Option<SessionProjection> = None;

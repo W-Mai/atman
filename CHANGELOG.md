@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Session storage removal** — Closed, detached sessions can be removed with a confirmed catalog receipt. Deletion protects the management session, preserves other sessions and shared project data, and supports interrupted cleanup without recreating deleted identities.
+
 - **Session auto naming** — Persistent views and plain REPL commands generate names from the requesting flow's context and save through the session catalog. Concurrent manual renames are preserved, and naming failures leave flow execution and history unchanged.
 
 - **Terminal panel resizing** — Persistent views resize their own terminal resources through the shared terminal operation. Resizing does not start a turn or block other view controls while waiting for terminal access.

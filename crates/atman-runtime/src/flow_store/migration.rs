@@ -133,6 +133,7 @@ impl RuntimeStore {
         if destination.id == source_session {
             return Err(invalid("migration requires a new session identity"));
         }
+        self.ensure_session_available(destination.id)?;
         let inspection = legacy::inspect(source, source_session)?;
         let plan = MigrationPlan {
             version: 1,
@@ -198,6 +199,7 @@ impl RuntimeStore {
         drop(session);
         // All journal handles are closed before rename, including on Windows.
         let _catalog = self.lock_catalog()?;
+        self.ensure_session_available(plan.destination.id)?;
         if published.try_exists()? {
             return self.completed_migration(&plan);
         }
@@ -477,9 +479,28 @@ mod tests {
         assert_eq!(fs::read_dir(root.root.join("sessions")).unwrap().count(), 1);
         assert_eq!(fs::read(&path).unwrap(), raw);
         assert_eq!(
-            root.archive_legacy(&path, source, destination, true)
+            root.archive_legacy(&path, source, destination.clone(), true)
                 .unwrap(),
             receipt
         );
+        let inspected = RuntimeStore::inspect_session(temp.path(), destination.id).unwrap();
+        root.delete_session(&super::super::SessionRemoval {
+            session_id: destination.id,
+            expected: inspected.journal.cursor.unwrap(),
+        })
+        .unwrap();
+        assert!(
+            root.archive_legacy(&path, source, destination.clone(), true)
+                .is_err()
+        );
+        assert!(
+            !stage
+                .root
+                .join("sessions")
+                .join(destination.id.to_string())
+                .exists()
+        );
+        assert!(RuntimeStore::session_ids(temp.path()).unwrap().is_empty());
+        assert_eq!(fs::read(&path).unwrap(), raw);
     }
 }
