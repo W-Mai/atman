@@ -85,6 +85,13 @@ impl FocusLinks {
         self.owner = None;
     }
 
+    pub(crate) fn project_hits(&mut self, viewport: crate::focus_rail::AuxiliaryViewport) {
+        // Keep row indices stable for hover while disabling offscreen targets.
+        for (rect, _) in &mut self.hits {
+            *rect = viewport.project(*rect).unwrap_or_default();
+        }
+    }
+
     pub fn mouse(&mut self, mouse: MouseEvent, owner: &FlowRef) -> Option<Action> {
         if self.owner.as_ref() != Some(owner) {
             return None;
@@ -262,6 +269,28 @@ mod tests {
                     }
                 }
             }
+            let button = links.hits[1].0;
+            let viewport = crate::focus_rail::AuxiliaryViewport {
+                canvas: area,
+                visible: button,
+                target: Rect::new(button.x, 1, button.width, button.height),
+            };
+            links.project_hits(viewport);
+            assert!(links.hits[0].0.is_empty());
+            assert!(
+                links
+                    .mouse(
+                        MouseEvent {
+                            kind: MouseEventKind::Moved,
+                            column: button.x,
+                            row: 1,
+                            modifiers: KeyModifiers::NONE,
+                        },
+                        &owner
+                    )
+                    .is_none()
+            );
+            assert_eq!(links.hovered, Some(1));
             terminal
                 .draw(|frame| {
                     links.render(frame, Rect::new(0, 0, 5, 10), &owner);

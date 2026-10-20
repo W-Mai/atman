@@ -1695,7 +1695,7 @@ pub(crate) async fn run_frames(
                         break;
                     }
                     match pending_input_event.take().or_else(|| key_events.try_recv().ok()) {
-                        Some(next) if persistent && !matches!(&next, Ok(CtEvent::Paste(_)) | Ok(CtEvent::Key(crossterm::event::KeyEvent { code: crossterm::event::KeyCode::Char(_), modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT, .. }))) => {
+                        Some(next) if app.app.focus_rail.page_open() || (persistent && !matches!(&next, Ok(CtEvent::Paste(_)) | Ok(CtEvent::Key(crossterm::event::KeyEvent { code: crossterm::event::KeyCode::Char(_), modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT, .. })))) => {
                             // Navigation and pointer events must pass through workspace routing.
                             pending_input_event = Some(next);
                             break;

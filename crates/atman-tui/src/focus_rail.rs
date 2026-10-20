@@ -21,6 +21,34 @@ pub(crate) struct FocusRail {
     page_open: bool,
     hits: Vec<(Rect, Action)>,
     hovered: Option<Action>,
+    scroll: [u16; 2],
+    viewport: Option<AuxiliaryViewport>,
+}
+
+/// One coordinate transform for the rendered page, controls, and text selection.
+#[derive(Clone, Copy)]
+pub(crate) struct AuxiliaryViewport {
+    pub canvas: Rect,
+    pub visible: Rect,
+    pub target: Rect,
+}
+
+impl AuxiliaryViewport {
+    pub fn project(self, rect: Rect) -> Option<Rect> {
+        let visible = rect.intersection(self.visible);
+        (!visible.is_empty()).then(|| {
+            Rect::new(
+                visible.x,
+                self.target.y + (visible.y - self.visible.y),
+                visible.width,
+                visible.height,
+            )
+        })
+    }
+
+    pub fn project_option(self, rect: &mut Option<Rect>) {
+        *rect = rect.and_then(|rect| self.project(rect));
+    }
 }
 
 impl FocusRail {
@@ -30,10 +58,36 @@ impl FocusRail {
             self.page_open = false;
         }
         self.clear_hits();
+        self.viewport = None;
     }
 
     pub fn page_open(&self) -> bool {
         self.compact && self.page_open
+    }
+
+    pub fn viewport(&mut self, area: Rect) -> AuxiliaryViewport {
+        // Retain a normal sidebar layout in a short surface without rasterizing
+        // unbounded history or changing the section renderers' content budgets.
+        let canvas = Rect::new(area.x, 0, area.width, area.height.max(60));
+        let scroll = &mut self.scroll[usize::from(self.activity)];
+        *scroll = (*scroll).min(canvas.height.saturating_sub(area.height));
+        let viewport = AuxiliaryViewport {
+            canvas,
+            visible: Rect::new(area.x, *scroll, area.width, area.height),
+            target: area,
+        };
+        self.viewport = Some(viewport);
+        viewport
+    }
+
+    fn scroll_page(&mut self, rows: i32) {
+        if let Some(viewport) = self.viewport {
+            let scroll = &mut self.scroll[usize::from(self.activity)];
+            *scroll = (i32::from(*scroll) + rows).clamp(
+                0,
+                i32::from(viewport.canvas.height - viewport.target.height),
+            ) as u16;
+        }
     }
 
     pub fn clear_hits(&mut self) {
@@ -178,7 +232,10 @@ impl crate::app::AppState {
     pub(crate) fn apply_focus_action(&mut self, action: Action) {
         match action {
             Action::Select(activity) => self.select_focus_rail(activity),
-            Action::Back => self.focus_rail.page_open = false,
+            Action::Back => {
+                self.focus_rail.page_open = false;
+                self.sidebar_popup = None;
+            }
         }
     }
 
@@ -212,7 +269,16 @@ impl crate::app::AppState {
         }
         if let Event::Key(key) = event {
             use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-            if key.kind != KeyEventKind::Press {
+            if key.kind == KeyEventKind::Release
+                || (key.kind == KeyEventKind::Repeat
+                    && !matches!(
+                        crate::keys::map(*key),
+                        KeyAction::HistoryUp
+                            | KeyAction::HistoryDown
+                            | KeyAction::PageUp
+                            | KeyAction::PageDown
+                    ))
+            {
                 return true;
             }
             if matches!(key.code, KeyCode::F(6 | 7 | 10))
@@ -223,7 +289,11 @@ impl crate::app::AppState {
         }
         match event {
             Event::Key(key) => match crate::keys::map(*key) {
-                KeyAction::Escape => self.apply_focus_action(Action::Back),
+                KeyAction::Escape => {
+                    if self.sidebar_popup.take().is_none() {
+                        self.apply_focus_action(Action::Back);
+                    }
+                }
                 KeyAction::Tab
                 | KeyAction::BackTab
                 | KeyAction::CursorLeft
@@ -242,19 +312,44 @@ impl crate::app::AppState {
                 | KeyAction::ToggleMouseCapture
                 | KeyAction::CyclePanelForward
                 | KeyAction::CyclePanelBackward => return false,
-                KeyAction::HistoryUp | KeyAction::PageUp => {
-                    self.goal_scroll = self.goal_scroll.saturating_sub(1);
-                    self.plans_scroll = self.plans_scroll.saturating_sub(1);
-                    self.todos_scroll = self.todos_scroll.saturating_sub(1);
+                KeyAction::HistoryUp => self.focus_rail.scroll_page(-1),
+                KeyAction::HistoryDown => self.focus_rail.scroll_page(1),
+                KeyAction::PageUp | KeyAction::PageDown => {
+                    let rows = self
+                        .focus_rail
+                        .viewport
+                        .map_or(1, |v| i32::from(v.target.height));
+                    self.focus_rail
+                        .scroll_page(if crate::keys::map(*key) == KeyAction::PageUp {
+                            -rows
+                        } else {
+                            rows
+                        });
                 }
-                KeyAction::HistoryDown | KeyAction::PageDown => {
-                    self.goal_scroll = self.goal_scroll.saturating_add(1);
-                    self.plans_scroll = self.plans_scroll.saturating_add(1);
-                    self.todos_scroll = self.todos_scroll.saturating_add(1);
-                }
+                KeyAction::CursorHome => self.focus_rail.scroll_page(-i32::from(u16::MAX)),
+                KeyAction::CursorEnd => self.focus_rail.scroll_page(i32::from(u16::MAX)),
                 _ => {}
             },
             Event::Paste(_) => {}
+            Event::Mouse(mouse)
+                if self
+                    .focus_rail
+                    .viewport
+                    .is_some_and(|v| v.target.contains((mouse.column, mouse.row).into())) =>
+            {
+                if mouse
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::SHIFT)
+                    && !self.focus_rail.activity
+                {
+                    return false;
+                }
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => self.focus_rail.scroll_page(-3),
+                    MouseEventKind::ScrollDown => self.focus_rail.scroll_page(3),
+                    _ => return false,
+                }
+            }
             _ => return false,
         }
         true
@@ -264,6 +359,56 @@ impl crate::app::AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auxiliary_scroll_is_view_owned_bounded_and_independent_between_pages() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = crate::app::AppState::new("test".into(), None);
+        app.focus_rail.configure(true);
+        app.select_focus_rail(false);
+        let area = Rect::new(7, 9, 40, 7);
+        app.focus_rail.viewport(area);
+        let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        assert!(app.focus_page_event(&key(KeyCode::End)));
+        assert_eq!(app.focus_rail.viewport(area).visible.y, 53);
+        assert!(app.focus_page_event(&key(KeyCode::Down)));
+        assert_eq!(app.focus_rail.viewport(area).visible.y, 53);
+        app.select_focus_rail(true);
+        assert_eq!(app.focus_rail.viewport(area).visible.y, 0);
+        assert!(app.focus_page_event(&key(KeyCode::PageDown)));
+        assert_eq!(app.focus_rail.viewport(area).visible.y, 7);
+        app.select_focus_rail(false);
+        assert_eq!(app.focus_rail.viewport(area).visible.y, 53);
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            row: 10,
+            column: 8,
+            modifiers: KeyModifiers::SHIFT,
+        };
+        assert!(!app.focus_page_event(&Event::Mouse(mouse)));
+        assert!(app.focus_page_event(&Event::Mouse(MouseEvent {
+            modifiers: KeyModifiers::NONE,
+            ..mouse
+        })));
+        assert_eq!(app.focus_rail.viewport(area).visible.y, 50);
+        assert!(app.focus_page_event(&key(KeyCode::Home)));
+        assert_eq!(app.focus_rail.viewport(area).visible.y, 0);
+        app.sidebar_popup = Some(crate::sidebar::SidebarPopupKind::Plan(0));
+        assert!(app.focus_page_event(&key(KeyCode::Esc)));
+        assert!(app.sidebar_popup.is_none());
+        assert!(app.focus_rail.page_open());
+        assert!(app.focus_page_event(&key(KeyCode::Esc)));
+        assert!(!app.focus_rail.page_open());
+        let edge = AuxiliaryViewport {
+            canvas: Rect::new(0, 0, 40, 60),
+            visible: Rect::new(0, 53, 40, 7),
+            target: Rect::new(0, u16::MAX - 7, 40, 7),
+        };
+        assert_eq!(
+            edge.project(Rect::new(0, 59, 1, 1)),
+            Some(Rect::new(0, u16::MAX - 1, 1, 1))
+        );
+    }
 
     #[test]
     fn rail_and_conversation_keep_disjoint_bounds_and_full_button_targets() {

@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Auxiliary page scrolling** — Overview and Activity support keyboard and wheel navigation in short main and floating views. Controls and text selection remain aligned after scrolling, and hidden composer input stays isolated.
+
 - **Compact Focus navigation** — Narrow main and floating views retain full-width conversations with keyboard and mouse access to Overview and Activity. Auxiliary pages preserve drafts and return to the conversation before closing the view.
 
 - **Narrow floating views** — Floating transcripts use the full available width, retain readable controls, and preserve their preferred window geometry across terminal resizing.

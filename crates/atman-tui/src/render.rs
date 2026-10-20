@@ -373,10 +373,17 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         app.approval_hitmap = Default::default();
         let mut content = l.transcript;
         content.height = content.height.saturating_sub(1);
-        render_auxiliary(f, app, Some(content));
+        let viewport = app.focus_rail.viewport(content);
+        render_auxiliary_page(f, app, viewport);
+        render_auxiliary_popup(f, app);
         f.render_widget(
-            Paragraph::new(" Esc back · Tab section · Ctrl+P panels")
-                .style(Style::default().fg(crate::theme::theme().subtle_fg.into())),
+            Paragraph::new(format!(
+                " ↑↓ {}–{}/{} · Tab · Shift+wheel text",
+                viewport.visible.y + 1,
+                viewport.visible.bottom(),
+                viewport.canvas.height
+            ))
+            .style(Style::default().fg(crate::theme::theme().subtle_fg.into())),
             ratatui::layout::Rect::new(
                 l.transcript.x,
                 l.transcript.bottom() - 1,
@@ -727,6 +734,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         app.focus_rail.render(f, rail);
     }
     render_auxiliary(f, app, rail_content);
+    render_auxiliary_popup(f, app);
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {
         output::render_startup_intro_fade(
             f,
@@ -1140,14 +1148,6 @@ fn render_auxiliary(
             );
         }
     }
-    // ── Sidebar popup (Plan/Todo item full text) ──
-    if let (Some(kind), Some(sidebar_rect)) = (app.sidebar_popup, app.last_sidebar_rect) {
-        let popup_rect =
-            crate::sidebar::render_sidebar_popup(f, sidebar_rect, kind, &app.plans, &app.todos);
-        app.last_sidebar_popup_rect = Some(popup_rect);
-    } else {
-        app.last_sidebar_popup_rect = None;
-    }
     if let Some(tp_area) = rail_content.filter(|_| app.focus_rail.activity) {
         let hover = crate::task_panel::TaskPanelHover {
             hovered_task_id: app.hovered_task_id.clone(),
@@ -1179,6 +1179,93 @@ fn render_auxiliary(
     } else {
         app.last_task_panel_rect = None;
         app.last_task_panel_hitmap = crate::task_panel::TaskPanelHitMap::default();
+    }
+}
+
+fn render_auxiliary_popup(f: &mut ratatui::Frame, app: &mut crate::app::AppState) {
+    app.last_sidebar_popup_rect =
+        if let (Some(kind), Some(rect)) = (app.sidebar_popup, app.last_sidebar_rect) {
+            Some(crate::sidebar::render_sidebar_popup(
+                f, rect, kind, &app.plans, &app.todos,
+            ))
+        } else {
+            None
+        };
+}
+
+fn render_auxiliary_page(
+    frame: &mut ratatui::Frame,
+    app: &mut crate::app::AppState,
+    viewport: crate::focus_rail::AuxiliaryViewport,
+) {
+    let mut surface = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+        viewport.canvas.right(),
+        viewport.canvas.bottom(),
+    ))
+    .expect("in-memory auxiliary viewport");
+    let mut canvas = surface.get_frame();
+    render_auxiliary(&mut canvas, app, Some(viewport.canvas));
+    for y in 0..viewport.target.height {
+        for x in viewport.target.x..viewport.target.right() {
+            frame.buffer_mut()[(x, viewport.target.y + y)] =
+                canvas.buffer_mut()[(x, viewport.visible.y + y)].clone();
+        }
+    }
+    for rect in [
+        &mut app.last_sidebar_rect,
+        &mut app.last_goal_rect,
+        &mut app.last_plan_rect,
+        &mut app.last_todo_rect,
+        &mut app.last_goal_hdr_rect,
+        &mut app.last_plan_hdr_rect,
+        &mut app.last_todo_hdr_rect,
+        &mut app.last_ctx_hdr_rect,
+        &mut app.last_meta_hdr_rect,
+        &mut app.last_mcp_hdr_rect,
+        &mut app.last_collapse_btn_rect,
+        &mut app.last_expand_btn_rect,
+        &mut app.last_upper_title_rect,
+        &mut app.last_lower_title_rect,
+        &mut app.last_sidebar_more_rect,
+        &mut app.last_task_panel_rect,
+    ] {
+        viewport.project_option(rect);
+    }
+    app.last_sidebar_strip_rects
+        .retain(|_, rect| project_rect(viewport, rect));
+    for surface in &mut app.last_sidebar_selection_projection.surfaces {
+        surface
+            .atoms
+            .retain_mut(|atom| project_rect(viewport, &mut atom.rect));
+    }
+    let hits = &mut app.last_task_panel_hitmap;
+    for rect in [&mut hits.history_btn_rect, &mut hits.hamburger_rect] {
+        viewport.project_option(rect);
+    }
+    hits.kill_rects
+        .retain_mut(|(_, rect)| project_rect(viewport, rect));
+    hits.group_header_rects
+        .retain_mut(|(_, rect)| project_rect(viewport, rect));
+    hits.task_rects
+        .retain_mut(|(_, rect)| project_rect(viewport, rect));
+    hits.task_header_rects
+        .retain_mut(|(_, rect)| project_rect(viewport, rect));
+    hits.activity_rects
+        .retain_mut(|(_, _, rect)| project_rect(viewport, rect));
+    hits.insert_rects
+        .retain_mut(|(_, rect)| project_rect(viewport, rect));
+    app.flow_links.project_hits(viewport);
+}
+
+fn project_rect(
+    viewport: crate::focus_rail::AuxiliaryViewport,
+    rect: &mut ratatui::layout::Rect,
+) -> bool {
+    if let Some(visible) = viewport.project(*rect) {
+        *rect = visible;
+        true
+    } else {
+        false
     }
 }
 
@@ -1507,6 +1594,80 @@ pub(crate) fn render_pulse_bar(
 #[cfg(test)]
 mod quote_tests {
     use super::*;
+
+    #[test]
+    fn auxiliary_viewport_pixels_controls_and_selection_share_one_projection() {
+        use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+        for activity in [false, true] {
+            for (x, y) in [(0, 0), (7, 6)] {
+                for height in [7, 19, 40] {
+                    for offset in [0, 9, 60 - height] {
+                        let make_app = || {
+                            let mut app = crate::app::AppState::new("test".into(), None);
+                            app.goal = Some("A selectable objective with several words".into());
+                            app.select_focus_rail(activity);
+                            app
+                        };
+                        let target = Rect::new(x, y, 40, height);
+                        let viewport = crate::focus_rail::AuxiliaryViewport {
+                            canvas: Rect::new(x, 0, 40, 60),
+                            visible: Rect::new(x, offset, 40, height),
+                            target,
+                        };
+                        let mut baseline_app = make_app();
+                        let mut baseline =
+                            Terminal::new(TestBackend::new(target.right(), 60)).unwrap();
+                        baseline
+                            .draw(|f| render_auxiliary(f, &mut baseline_app, Some(viewport.canvas)))
+                            .unwrap();
+                        let mut app = make_app();
+                        let mut terminal =
+                            Terminal::new(TestBackend::new(target.right(), target.bottom()))
+                                .unwrap();
+                        terminal
+                            .draw(|f| render_auxiliary_page(f, &mut app, viewport))
+                            .unwrap();
+                        for row in 0..height {
+                            for column in x..target.right() {
+                                assert_eq!(
+                                    terminal.backend().buffer()[(column, y + row)],
+                                    baseline.backend().buffer()[(column, offset + row)]
+                                );
+                            }
+                        }
+                        for (source, projected) in [
+                            (baseline_app.last_goal_rect, app.last_goal_rect),
+                            (baseline_app.last_goal_hdr_rect, app.last_goal_hdr_rect),
+                            (baseline_app.last_ctx_hdr_rect, app.last_ctx_hdr_rect),
+                            (
+                                baseline_app.last_task_panel_hitmap.history_btn_rect,
+                                app.last_task_panel_hitmap.history_btn_rect,
+                            ),
+                        ] {
+                            assert_eq!(source.and_then(|rect| viewport.project(rect)), projected);
+                        }
+                        for surface in &app.last_sidebar_selection_projection.surfaces {
+                            let original = baseline_app
+                                .last_sidebar_selection_projection
+                                .surfaces
+                                .iter()
+                                .find(|original| original.section == surface.section)
+                                .unwrap();
+                            for atom in &surface.atoms {
+                                assert_eq!(atom.rect.intersection(target), atom.rect);
+                                for column in atom.cols.clone() {
+                                    assert_eq!(
+                                        surface.point_at(atom.rect.y, column),
+                                        original.point_at(atom.rect.y - y + offset, column)
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn compact_focus_pages_preserve_drafts_and_restore_only_visible_hit_targets() {
