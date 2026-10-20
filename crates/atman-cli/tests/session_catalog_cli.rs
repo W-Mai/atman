@@ -34,7 +34,7 @@ fn cli_inspects_live_catalogs_without_touching_execution_and_retains_legacy_view
     let mut owner = root
         .create_session(SessionDescriptor {
             id,
-            project: Some(binding),
+            project: Some(binding.clone()),
             configuration: Default::default(),
             title: "Preserved session".into(),
         })
@@ -108,6 +108,51 @@ fn cli_inspects_live_catalogs_without_touching_execution_and_retains_legacy_view
     assert!(!config.exists());
     assert!(!project.exists());
     assert!(!data.join("sessions").exists());
+
+    // Discovery uses current container membership while existing flow bindings stay fixed.
+    let moved_path = temp.path().join("different-project");
+    let moved =
+        ProjectContext::resolve(&ConfigHub::from_config_dir(&config), &moved_path, &data).unwrap();
+    owner
+        .set_project(&owner.cursor().clone(), Some(moved))
+        .unwrap();
+    for (path, present) in [(&project, false), (&moved_path, true)] {
+        let listed = run(
+            &data,
+            &config,
+            &["session", "list", "--project", path.to_str().unwrap()],
+        );
+        assert!(
+            listed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listed.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&listed.stdout).contains(&id.to_string()),
+            present
+        );
+    }
+    let shown = run(&data, &config, &["session", "show", &id.to_string()]);
+    let text = String::from_utf8_lossy(&shown.stdout);
+    assert!(
+        shown.status.success() && text.contains(moved_path.to_str().unwrap()),
+        "{text}"
+    );
+    assert!(!text.contains(project.to_str().unwrap()), "{text}");
+    assert_eq!(owner.projection().flows[0].project.as_ref(), Some(&binding));
+    assert_eq!(std::fs::read(&flow_log).unwrap(), before);
+    assert!(!moved_path.exists() && !config.exists());
+    owner.set_project(&owner.cursor().clone(), None).unwrap();
+    let shown = run(&data, &config, &["session", "show", &id.to_string()]);
+    assert!(shown.status.success());
+    assert!(String::from_utf8_lossy(&shown.stdout).contains("project:    -"));
+    let listed = run(
+        &data,
+        &config,
+        &["session", "list", "--project", moved_path.to_str().unwrap()],
+    );
+    assert!(listed.status.success());
+    assert!(!String::from_utf8_lossy(&listed.stdout).contains(&id.to_string()));
 
     // Both storage layouts remain inspectable even if their IDs coincide.
     let legacy = data.join("sessions").join(id.to_string());

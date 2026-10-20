@@ -111,9 +111,8 @@ pub(crate) fn list(root: &Path, project: Option<&Path>) -> Result<usize> {
                 continue;
             }
         };
-        let descriptor = &read.projection.descriptor;
         if project.is_some_and(|wanted| {
-            descriptor
+            read.projection
                 .project
                 .as_ref()
                 .is_none_or(|binding| binding.root() != wanted)
@@ -141,7 +140,8 @@ pub(crate) fn list(root: &Path, project: Option<&Path>) -> Result<usize> {
         println!("{:<38} {:>5}  {:<28} where", "session_id", "flows", "title");
         for read in &rows {
             let descriptor = &read.projection.descriptor;
-            let location = descriptor
+            let location = read
+                .projection
                 .project
                 .as_ref()
                 .map(|project| crate::short_project_path(project.root()))
@@ -167,7 +167,6 @@ pub(crate) fn show(root: &Path, sid: &str) -> Result<bool> {
     }
     let read = RuntimeStore::inspect_session(root, id)
         .with_context(|| format!("inspect persistent session {id}"))?;
-    let descriptor = &read.projection.descriptor;
     println!("session_id: {id}");
     println!("layout:     persistent (recorded catalog)");
     println!(
@@ -177,7 +176,7 @@ pub(crate) fn show(root: &Path, sid: &str) -> Result<bool> {
     println!("dir:        {}", read.dir.display());
     println!(
         "project:    {}",
-        descriptor
+        read.projection
             .project
             .as_ref()
             .map(|project| project.root().display().to_string())
