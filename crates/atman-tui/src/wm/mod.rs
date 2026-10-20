@@ -985,14 +985,10 @@ impl WindowManager {
                 self.modals.history_search.open();
             }
             PaletteEntryId::ToggleActivity => {
-                app.select_focus_rail(!app.focus_rail.activity);
+                app.toggle_focus_activity();
             }
             PaletteEntryId::ToggleSidebar => {
-                app.sidebar_collapsed = !app.sidebar_collapsed;
-                app.sidebar_upper_runtime_collapsed = false;
-                app.sidebar_lower_runtime_collapsed = false;
-                app.task_panel_runtime_collapsed = false;
-                app.save_ui_state();
+                app.toggle_focus_sidebar();
             }
             PaletteEntryId::ManageProviders => {
                 self.modals.provider_manager.toggle();

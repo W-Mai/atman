@@ -227,6 +227,10 @@ pub(super) struct Workspace {
 }
 
 impl Workspace {
+    pub fn editing_geometry(&self) -> bool {
+        self.geometry.is_some()
+    }
+
     pub fn new(handle: &TuiHandle) -> Self {
         let key = handle
             .control_tx

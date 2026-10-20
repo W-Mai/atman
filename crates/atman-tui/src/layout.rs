@@ -37,6 +37,7 @@ pub const SIDEBAR_STRIP_WIDTH: u16 = 5;
 pub struct FocusLayout {
     pub conversation: Rect,
     pub rail: Option<Rect>,
+    pub tabs: Option<Rect>,
 }
 
 impl FocusLayout {
@@ -45,11 +46,19 @@ impl FocusLayout {
             return Self {
                 conversation: area,
                 rail: None,
+                tabs: None,
+            };
+        }
+        if area.width < 67 {
+            return Self {
+                conversation: Rect::new(area.x, area.y + 4, area.width, area.height - 4),
+                rail: None,
+                tabs: Some(Rect::new(area.x, area.y, area.width, 3)),
             };
         }
         let candidate = if expanded {
             SIDEBAR_WIDTH
-                .min(area.width.saturating_sub(42))
+                .min(area.width.saturating_sub(43))
                 .max(SIDEBAR_STRIP_WIDTH)
         } else {
             SIDEBAR_STRIP_WIDTH
@@ -64,6 +73,7 @@ impl FocusLayout {
         Self {
             conversation: Rect::new(left, area.y, area.right().saturating_sub(left), area.height),
             rail: Some(rail),
+            tabs: None,
         }
     }
 }

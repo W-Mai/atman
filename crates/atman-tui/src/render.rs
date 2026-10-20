@@ -237,7 +237,8 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     let app = &mut ui.app;
     let area = f.area();
     if app.last_full_rect != Some(area) {
-        let responsive_narrow = area.width < layout::SIDEBAR_MIN_TOTAL_WIDTH;
+        let responsive_narrow =
+            area.width < layout::SIDEBAR_MIN_TOTAL_WIDTH && !app.focus_rail.page_open();
         app.sidebar_upper_runtime_collapsed = responsive_narrow;
         app.sidebar_lower_runtime_collapsed = responsive_narrow;
         app.task_panel_runtime_collapsed = responsive_narrow;
@@ -261,7 +262,6 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         .unwrap_or(1.0);
     let intro_active = app.startup_intro.is_some() && intro_progress < 1.0;
     let show_sidebar = !startup_active && !intro_active;
-    let sidebar_effective_collapsed = app.sidebar_collapsed;
     let status_height: u16 = 1;
     let standalone_canonical = app
         .pending_permissions
@@ -305,6 +305,51 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         visible + overflow + 2
     };
     let mut l = layout::compute_ex(area, status_height);
+    let flow_id = app
+        .items
+        .snapshot()
+        .map(|snapshot| snapshot.status.execution.address().instance_id.to_string());
+    let mut status_area = l.status;
+    app.flow_hub_rect = flow_id.as_ref().map(|_| {
+        let width = 16.min(status_area.width);
+        status_area.width = status_area.width.saturating_sub(width);
+        ratatui::layout::Rect::new(
+            status_area.right(),
+            status_area.y,
+            width,
+            status_area.height,
+        )
+    });
+    if app.flow_hub_rect.is_some() {
+        status_area.width = status_area.width.saturating_sub(2);
+    }
+    f.render_widget(
+        status::render_bar(status::StatusInputs {
+            flow_id,
+            session_id: &app.session_id,
+            session_name: app.session_name.as_deref(),
+            goal: app.goal.as_deref(),
+            streaming: app.streaming,
+            waiting_for_llm: app.waiting_for_llm,
+            status_notes: &app.status_notes,
+            activity: Some(&app.session_activity),
+            pending_permissions: pending_count,
+        }),
+        status_area,
+    );
+    if let Some(rect) = app.flow_hub_rect {
+        let t = crate::theme::theme();
+        f.render_widget(
+            Paragraph::new(" FlowHub  Esc ").style(Style::default().fg(t.heading.into()).bg(
+                if app.flow_hub_hovered {
+                    t.work_hover_bg.into()
+                } else {
+                    t.work_bg.into()
+                },
+            )),
+            rect,
+        );
+    }
     let expanded = !app.sidebar_collapsed
         && if app.focus_rail.activity {
             !app.task_panel_collapsed && !app.task_panel_runtime_collapsed
@@ -314,11 +359,38 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         };
     let focus = layout::FocusLayout::new(l.transcript, show_sidebar, expanded);
     l.transcript = focus.conversation;
+    app.focus_rail.configure(focus.tabs.is_some());
+    if let Some(tabs) = focus.tabs {
+        app.focus_rail.render_tabs(f, tabs);
+    }
+    if app.focus_rail.page_open() {
+        app.last_transcript_rect = None;
+        app.last_selection_projection = Default::default();
+        app.input_rect = None;
+        app.quote_rect = None;
+        app.submission_queue_rect = None;
+        app.submission_queue_hitmap = Default::default();
+        app.approval_hitmap = Default::default();
+        let mut content = l.transcript;
+        content.height = content.height.saturating_sub(1);
+        render_auxiliary(f, app, Some(content));
+        f.render_widget(
+            Paragraph::new(" Esc back · Tab section · Ctrl+P panels")
+                .style(Style::default().fg(crate::theme::theme().subtle_fg.into())),
+            ratatui::layout::Rect::new(
+                l.transcript.x,
+                l.transcript.bottom() - 1,
+                l.transcript.width,
+                1,
+            ),
+        );
+        render_windows_and_selection(f, ui);
+        return;
+    }
     let rail_content = focus
         .rail
         .map(crate::focus_rail::FocusRail::content_area)
         .filter(|area| area.height >= 4);
-    let sidebar_rect = rail_content.filter(|_| !app.focus_rail.activity);
     let transcript_content = layout::compute_content_rect(l.transcript);
     let content_w = layout::input_content_width(l.transcript.width);
     let total_input_lines = crate::input::visual_line_count(editor.buf(), content_w) as u32;
@@ -439,51 +511,6 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     }
     app.submission_queue_rect = submission_queue_rect;
     app.input_rect = Some(input_rect);
-    let flow_id = app
-        .items
-        .snapshot()
-        .map(|snapshot| snapshot.status.execution.address().instance_id.to_string());
-    let mut status_area = l.status;
-    app.flow_hub_rect = flow_id.as_ref().map(|_| {
-        let width = 16.min(status_area.width);
-        status_area.width = status_area.width.saturating_sub(width);
-        ratatui::layout::Rect::new(
-            status_area.right(),
-            status_area.y,
-            width,
-            status_area.height,
-        )
-    });
-    if app.flow_hub_rect.is_some() {
-        status_area.width = status_area.width.saturating_sub(2);
-    }
-    f.render_widget(
-        status::render_bar(status::StatusInputs {
-            flow_id,
-            session_id: &app.session_id,
-            session_name: app.session_name.as_deref(),
-            goal: app.goal.as_deref(),
-            streaming: app.streaming,
-            waiting_for_llm: app.waiting_for_llm,
-            status_notes: &app.status_notes,
-            activity: Some(&app.session_activity),
-            pending_permissions: pending_count,
-        }),
-        status_area,
-    );
-    if let Some(rect) = app.flow_hub_rect {
-        let t = crate::theme::theme();
-        f.render_widget(
-            Paragraph::new(" FlowHub  Esc ").style(Style::default().fg(t.heading.into()).bg(
-                if app.flow_hub_hovered {
-                    t.work_hover_bg.into()
-                } else {
-                    t.work_bg.into()
-                },
-            )),
-            rect,
-        );
-    }
     let transcript_area = transcript_content;
     app.last_transcript_rect = Some(transcript_area);
     let document_visible_rows = layout::document_visible_rows(transcript_area.height);
@@ -696,150 +723,10 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             }
         }
     }
-    app.focus_rail.clear_hits();
-    app.flow_links.clear_hits();
     if let Some(rail) = focus.rail {
         app.focus_rail.render(f, rail);
     }
-    let mut sidebar_result = sidebar::SidebarRenderResult::empty();
-    if let Some(area) = sidebar_rect {
-        let project_root = app.project_root.clone().or_else(|| {
-            app.session
-                .as_ref()
-                .and_then(|s| s.meta())
-                .and_then(|m| m.project_root)
-                .map(|p| p.display().to_string())
-        });
-        let goal_scroll = app.goal_scroll;
-        let plans_scroll = app.plans_scroll;
-        let todos_scroll = app.todos_scroll;
-        let goal = app.goal_record();
-        let goal_status = app.goal_presentation();
-        let sr = sidebar::render(
-            f,
-            area,
-            sidebar::SidebarInputs {
-                neighbor_height: app.items.snapshot().filter(|_| area.width >= 24).map_or(
-                    0,
-                    |snapshot| {
-                        app.flow_links.height(
-                            snapshot.status.execution.address(),
-                            area.height.saturating_sub(28).min(19),
-                        )
-                    },
-                ),
-                goal: goal
-                    .as_ref()
-                    .map(|g| g.objective.as_str())
-                    .or(app.goal.as_deref()),
-                goal_status: goal_status.as_ref(),
-                context: &app.context,
-                attach_count: app.attach_count,
-                session_id: &app.session_id,
-                session_dir: &app.session_dir,
-                project_root: project_root.as_deref(),
-                app_version: env!("CARGO_PKG_VERSION"),
-                latest_release: app.latest_release.as_deref(),
-                streaming: app.streaming,
-                todos: &app.todos,
-                plans: &app.plans,
-                goal_scroll,
-                plans_scroll,
-                todos_scroll,
-                goal_collapsed: app.goal_collapsed,
-                plan_collapsed: app.plan_collapsed,
-                todo_collapsed: app.todo_collapsed,
-                context_collapsed: app.context_collapsed,
-                meta_collapsed: app.meta_collapsed,
-                mcp_collapsed: app.mcp_collapsed,
-                sidebar_collapsed: sidebar_effective_collapsed || area.width < 24,
-                upper_collapsed: app.sidebar_upper_collapsed || app.sidebar_upper_runtime_collapsed,
-                lower_collapsed: app.sidebar_lower_collapsed || app.sidebar_lower_runtime_collapsed,
-                animation_frame: app.animation_frame,
-                hovered_row: app.hovered_sidebar_row.as_deref(),
-                hovered_hamburger: app.hovered_sidebar_hamburger,
-                hovered_lower: app.hovered_sidebar_lower,
-                hovered_more: app.hovered_sidebar_more,
-                on_goal_scroll: &|_c| {},
-                on_plans_scroll: &|_c| {},
-                on_todos_scroll: &|_c| {},
-            },
-        );
-        if let Some(neighbors) = sr.neighbor_rect
-            && let Some(snapshot) = app.items.snapshot()
-        {
-            let owner = snapshot.status.execution.address().clone();
-            app.flow_links.render(f, neighbors, &owner);
-        }
-        sidebar_result = sr;
-    }
-    {
-        let sr = sidebar_result;
-        app.last_sidebar_rect = sidebar_rect;
-        app.last_goal_rect = sr.goal_rect;
-        app.last_plan_rect = sr.plan_rect;
-        app.last_todo_rect = sr.todo_rect;
-        app.last_goal_hdr_rect = sr.goal_hdr_rect;
-        app.last_plan_hdr_rect = sr.plan_hdr_rect;
-        app.last_todo_hdr_rect = sr.todo_hdr_rect;
-        app.last_ctx_hdr_rect = sr.ctx_hdr_rect;
-        app.last_meta_hdr_rect = sr.meta_hdr_rect;
-        app.last_mcp_hdr_rect = sr.mcp_hdr_rect;
-        app.last_collapse_btn_rect = sr.collapse_btn_rect;
-        app.last_expand_btn_rect = sr.expand_btn_rect;
-        app.last_upper_title_rect = sr.upper_title_rect;
-        app.last_lower_title_rect = sr.lower_title_rect;
-        app.last_sidebar_more_rect = sr.mcp_more_rect;
-        app.last_sidebar_strip_rects = sr.strip_rects;
-        app.last_sidebar_selection_projection = sr.selection;
-        if let Some(selection) = app.selection.as_ref() {
-            render_sidebar_selection_highlight(
-                f,
-                &app.last_sidebar_selection_projection,
-                selection,
-            );
-        }
-    }
-    // ── Sidebar popup (Plan/Todo item full text) ──
-    if let (Some(kind), Some(sidebar_rect)) = (app.sidebar_popup, app.last_sidebar_rect) {
-        let popup_rect =
-            crate::sidebar::render_sidebar_popup(f, sidebar_rect, kind, &app.plans, &app.todos);
-        app.last_sidebar_popup_rect = Some(popup_rect);
-    } else {
-        app.last_sidebar_popup_rect = None;
-    }
-    if let Some(tp_area) = rail_content.filter(|_| app.focus_rail.activity) {
-        let hover = crate::task_panel::TaskPanelHover {
-            hovered_task_id: app.hovered_task_id.clone(),
-            hovered_kill_id: app.hovered_kill_id.clone(),
-            hovered_insert_handle: app.hovered_insert_handle.clone(),
-            hovered_activity: app.hovered_activity.clone(),
-            hovered_history_btn: app.hovered_history_btn,
-            hovered_hamburger: app.hovered_hamburger,
-            kill_armed_id: app.kill_armed_id.clone(),
-            kill_armed_expired: app.kill_arm_expired(),
-            expanded_tasks: app.expanded_tasks.clone(),
-        };
-        let watch_hub = app.session.as_ref().map(|s| &*s.watch_hub);
-        let hitmap = crate::task_panel::render(
-            f,
-            tp_area,
-            &app.task_snapshots,
-            &app.activity_nodes,
-            &app.items,
-            &app.handle_index,
-            &app.detached_task_details,
-            app.task_panel_collapsed || tp_area.width < 24,
-            &app.task_panel_collapsed_groups,
-            &hover,
-            watch_hub,
-        );
-        app.last_task_panel_rect = Some(tp_area);
-        app.last_task_panel_hitmap = hitmap;
-    } else {
-        app.last_task_panel_rect = None;
-        app.last_task_panel_hitmap = crate::task_panel::TaskPanelHitMap::default();
-    }
+    render_auxiliary(f, app, rail_content);
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {
         output::render_startup_intro_fade(
             f,
@@ -1141,6 +1028,163 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         border_color,
     );
 
+    if intro_progress >= 1.0 && app.startup_intro.is_some() {
+        app.startup_intro = None;
+    }
+    render_windows_and_selection(f, ui);
+}
+
+fn render_auxiliary(
+    f: &mut ratatui::Frame,
+    app: &mut crate::app::AppState,
+    rail_content: Option<ratatui::layout::Rect>,
+) {
+    app.flow_links.clear_hits();
+    let sidebar_rect = rail_content.filter(|_| !app.focus_rail.activity);
+    let mut sidebar_result = sidebar::SidebarRenderResult::empty();
+    if let Some(area) = sidebar_rect {
+        let project_root = app.project_root.clone().or_else(|| {
+            app.session
+                .as_ref()
+                .and_then(|s| s.meta())
+                .and_then(|m| m.project_root)
+                .map(|p| p.display().to_string())
+        });
+        let goal_scroll = app.goal_scroll;
+        let plans_scroll = app.plans_scroll;
+        let todos_scroll = app.todos_scroll;
+        let goal = app.goal_record();
+        let goal_status = app.goal_presentation();
+        let sr = sidebar::render(
+            f,
+            area,
+            sidebar::SidebarInputs {
+                neighbor_height: app.items.snapshot().filter(|_| area.width >= 24).map_or(
+                    0,
+                    |snapshot| {
+                        app.flow_links.height(
+                            snapshot.status.execution.address(),
+                            area.height.saturating_sub(28).min(19),
+                        )
+                    },
+                ),
+                goal: goal
+                    .as_ref()
+                    .map(|g| g.objective.as_str())
+                    .or(app.goal.as_deref()),
+                goal_status: goal_status.as_ref(),
+                context: &app.context,
+                attach_count: app.attach_count,
+                session_id: &app.session_id,
+                session_dir: &app.session_dir,
+                project_root: project_root.as_deref(),
+                app_version: env!("CARGO_PKG_VERSION"),
+                latest_release: app.latest_release.as_deref(),
+                streaming: app.streaming,
+                todos: &app.todos,
+                plans: &app.plans,
+                goal_scroll,
+                plans_scroll,
+                todos_scroll,
+                goal_collapsed: app.goal_collapsed,
+                plan_collapsed: app.plan_collapsed,
+                todo_collapsed: app.todo_collapsed,
+                context_collapsed: app.context_collapsed,
+                meta_collapsed: app.meta_collapsed,
+                mcp_collapsed: app.mcp_collapsed,
+                sidebar_collapsed: app.sidebar_collapsed || area.width < 24,
+                upper_collapsed: app.sidebar_upper_collapsed || app.sidebar_upper_runtime_collapsed,
+                lower_collapsed: app.sidebar_lower_collapsed || app.sidebar_lower_runtime_collapsed,
+                animation_frame: app.animation_frame,
+                hovered_row: app.hovered_sidebar_row.as_deref(),
+                hovered_hamburger: app.hovered_sidebar_hamburger,
+                hovered_lower: app.hovered_sidebar_lower,
+                hovered_more: app.hovered_sidebar_more,
+                on_goal_scroll: &|_c| {},
+                on_plans_scroll: &|_c| {},
+                on_todos_scroll: &|_c| {},
+            },
+        );
+        if let Some(neighbors) = sr.neighbor_rect
+            && let Some(snapshot) = app.items.snapshot()
+        {
+            let owner = snapshot.status.execution.address().clone();
+            app.flow_links.render(f, neighbors, &owner);
+        }
+        sidebar_result = sr;
+    }
+    {
+        let sr = sidebar_result;
+        app.last_sidebar_rect = sidebar_rect;
+        app.last_goal_rect = sr.goal_rect;
+        app.last_plan_rect = sr.plan_rect;
+        app.last_todo_rect = sr.todo_rect;
+        app.last_goal_hdr_rect = sr.goal_hdr_rect;
+        app.last_plan_hdr_rect = sr.plan_hdr_rect;
+        app.last_todo_hdr_rect = sr.todo_hdr_rect;
+        app.last_ctx_hdr_rect = sr.ctx_hdr_rect;
+        app.last_meta_hdr_rect = sr.meta_hdr_rect;
+        app.last_mcp_hdr_rect = sr.mcp_hdr_rect;
+        app.last_collapse_btn_rect = sr.collapse_btn_rect;
+        app.last_expand_btn_rect = sr.expand_btn_rect;
+        app.last_upper_title_rect = sr.upper_title_rect;
+        app.last_lower_title_rect = sr.lower_title_rect;
+        app.last_sidebar_more_rect = sr.mcp_more_rect;
+        app.last_sidebar_strip_rects = sr.strip_rects;
+        app.last_sidebar_selection_projection = sr.selection;
+        if let Some(selection) = app.selection.as_ref() {
+            render_sidebar_selection_highlight(
+                f,
+                &app.last_sidebar_selection_projection,
+                selection,
+            );
+        }
+    }
+    // ── Sidebar popup (Plan/Todo item full text) ──
+    if let (Some(kind), Some(sidebar_rect)) = (app.sidebar_popup, app.last_sidebar_rect) {
+        let popup_rect =
+            crate::sidebar::render_sidebar_popup(f, sidebar_rect, kind, &app.plans, &app.todos);
+        app.last_sidebar_popup_rect = Some(popup_rect);
+    } else {
+        app.last_sidebar_popup_rect = None;
+    }
+    if let Some(tp_area) = rail_content.filter(|_| app.focus_rail.activity) {
+        let hover = crate::task_panel::TaskPanelHover {
+            hovered_task_id: app.hovered_task_id.clone(),
+            hovered_kill_id: app.hovered_kill_id.clone(),
+            hovered_insert_handle: app.hovered_insert_handle.clone(),
+            hovered_activity: app.hovered_activity.clone(),
+            hovered_history_btn: app.hovered_history_btn,
+            hovered_hamburger: app.hovered_hamburger,
+            kill_armed_id: app.kill_armed_id.clone(),
+            kill_armed_expired: app.kill_arm_expired(),
+            expanded_tasks: app.expanded_tasks.clone(),
+        };
+        let watch_hub = app.session.as_ref().map(|s| &*s.watch_hub);
+        let hitmap = crate::task_panel::render(
+            f,
+            tp_area,
+            &app.task_snapshots,
+            &app.activity_nodes,
+            &app.items,
+            &app.handle_index,
+            &app.detached_task_details,
+            app.task_panel_collapsed || tp_area.width < 24,
+            &app.task_panel_collapsed_groups,
+            &hover,
+            watch_hub,
+        );
+        app.last_task_panel_rect = Some(tp_area);
+        app.last_task_panel_hitmap = hitmap;
+    } else {
+        app.last_task_panel_rect = None;
+        app.last_task_panel_hitmap = crate::task_panel::TaskPanelHitMap::default();
+    }
+}
+
+fn render_windows_and_selection(f: &mut ratatui::Frame, ui: &mut UiState) {
+    let area = f.area();
+    let app = &mut ui.app;
     ui.wm.render(f, area, app);
     app.last_window_selection_projection = crate::selection::VisibleSelectionProjection {
         structure_revision: app.wm_visual_version,
@@ -1165,9 +1209,6 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         ui.selection_menu = None;
     } else {
         render_selection_menu(f, area, &mut ui.selection_menu);
-    }
-    if intro_progress >= 1.0 && app.startup_intro.is_some() {
-        app.startup_intro = None;
     }
 }
 
@@ -1468,6 +1509,97 @@ mod quote_tests {
     use super::*;
 
     #[test]
+    fn compact_focus_pages_preserve_drafts_and_restore_only_visible_hit_targets() {
+        use crossterm::event::{
+            Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        let mut ui = UiState::new(crate::app::AppState::new("test".into(), None));
+        ui.app.goal = Some("Inspect this flow".into());
+        ui.app.pending_quote = Some("Preserved quotation".into());
+        let mut editor = InputEditor::default();
+        editor.insert_str("Preserved draft");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 24)).unwrap();
+        let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        terminal
+            .draw(|f| render_frame(f, &mut ui, &editor))
+            .unwrap();
+        assert_eq!(ui.app.input_rect.unwrap().width, 40);
+        assert!(ui.app.last_sidebar_rect.is_none());
+        assert!(ui.wm.dispatch_meta_command(":sidebar", &mut ui.app, None));
+        terminal
+            .draw(|f| render_frame(f, &mut ui, &editor))
+            .unwrap();
+        assert!(ui.app.focus_rail.page_open());
+        assert_eq!(ui.app.last_sidebar_rect.unwrap().width, 40);
+        assert!(ui.app.last_transcript_rect.is_none());
+        assert!(ui.app.input_rect.is_none());
+        assert!(ui.app.quote_rect.is_none());
+        assert!(ui.app.submission_queue_hitmap.rows.is_empty());
+        assert!(ui.app.focus_page_event(&key(KeyCode::Char('x'))));
+        assert!(ui.app.focus_page_event(&key(KeyCode::Enter)));
+        assert!(
+            ui.app
+                .focus_page_event(&Event::Paste("hidden input".into()))
+        );
+        assert!(ui.app.focus_page_event(&key(KeyCode::Tab)));
+        terminal
+            .draw(|f| render_frame(f, &mut ui, &editor))
+            .unwrap();
+        assert!(ui.app.last_sidebar_rect.is_none());
+        assert!(ui.app.last_goal_rect.is_none());
+        assert_eq!(ui.app.last_task_panel_rect.unwrap().width, 40);
+        assert!(!ui.app.focus_page_event(&key(KeyCode::F(6))));
+        assert!(ui.app.focus_page_event(&key(KeyCode::Esc)));
+        assert!(!ui.app.focus_page_event(&key(KeyCode::Esc)));
+        terminal
+            .draw(|f| render_frame(f, &mut ui, &editor))
+            .unwrap();
+        assert!(ui.app.last_task_panel_rect.is_none());
+        assert!(ui.app.last_transcript_rect.is_some());
+        assert_eq!(ui.app.input_rect.unwrap().width, 40);
+        assert_eq!(editor.buf(), "Preserved draft");
+        assert_eq!(ui.app.pending_quote.as_deref(), Some("Preserved quotation"));
+        // The entire three-row launcher is clickable, including its padding.
+        let action = ui
+            .app
+            .focus_rail
+            .mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            })
+            .unwrap();
+        ui.app.apply_focus_action(action);
+        terminal
+            .draw(|f| render_frame(f, &mut ui, &editor))
+            .unwrap();
+        assert!(ui.app.focus_rail.page_open());
+        let action = ui
+            .app
+            .focus_rail
+            .mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: 3,
+                modifiers: KeyModifiers::NONE,
+            })
+            .unwrap();
+        ui.app.apply_focus_action(action);
+        assert!(!ui.app.focus_rail.page_open());
+        ui.app.toggle_focus_activity();
+        assert!(ui.app.focus_rail.activity);
+        terminal.backend_mut().resize(120, 45);
+        terminal
+            .draw(|f| render_frame(f, &mut ui, &editor))
+            .unwrap();
+        assert!(!ui.app.focus_rail.page_open());
+        assert!(ui.app.input_rect.is_some());
+        assert_eq!(editor.buf(), "Preserved draft");
+    }
+
+    #[test]
     fn focus_surfaces_keep_controls_outside_the_conversation_and_clear_hidden_hits() {
         for width in [40, 80, 120, 200] {
             for height in [12, 24, 45, 70] {
@@ -1483,15 +1615,19 @@ mod quote_tests {
                     terminal
                         .draw(|frame| render_frame(frame, &mut app, &editor))
                         .unwrap();
-                    let body = app.app.last_transcript_rect.unwrap();
+                    let body = app.app.last_transcript_rect;
                     let rail = if activity {
                         app.app.last_task_panel_rect
                     } else {
                         app.app.last_sidebar_rect
                     };
                     if let Some(rail) = rail {
-                        assert!(body.intersection(rail).is_empty());
-                        assert!(app.app.input_rect.unwrap().intersection(rail).is_empty());
+                        assert!(body.is_none_or(|body| body.intersection(rail).is_empty()));
+                        assert!(
+                            app.app
+                                .input_rect
+                                .is_none_or(|input| input.intersection(rail).is_empty())
+                        );
                     }
                     if activity {
                         assert!(app.app.last_sidebar_rect.is_none());

@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Compact Focus navigation** — Narrow main and floating views retain full-width conversations with keyboard and mouse access to Overview and Activity. Auxiliary pages preserve drafts and return to the conversation before closing the view.
+
 - **Narrow floating views** — Floating transcripts use the full available width, retain readable controls, and preserve their preferred window geometry across terminal resizing.
 
 - **Persistent peer example** — A runnable host demonstrates bidirectional final-answer watches, batched input retained across restart, explicit scheduling restoration, and independent instance closure without model credentials.

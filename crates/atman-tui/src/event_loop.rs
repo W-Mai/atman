@@ -441,6 +441,11 @@ pub(crate) async fn run_frames(
                     else if let Some(tx) = handle.control_tx.as_ref() { let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle)); dispatch_hub_action(opened, action, tx, reuse); }
                     continue;
                 }
+                if !views.editing_geometry() && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
+                    && let Some(Ok(event)) = &key
+                    && app.app.focus_page_event(event) {
+                    continue;
+                }
                 if persistent {
                     let shortcuts = app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none() && !app.app.submission_focus;
                     if let Some(Ok(event)) = &key {
@@ -477,8 +482,8 @@ pub(crate) async fn run_frames(
                 }
                 if let Some(Ok(CtEvent::Mouse(mouse))) = &key
                     && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
-                    && let Some(activity) = app.app.focus_rail.mouse(*mouse) {
-                    app.app.select_focus_rail(activity);
+                    && let Some(action) = app.app.focus_rail.mouse(*mouse) {
+                    app.app.apply_focus_action(action);
                     continue;
                 }
                 let mut current = key;
