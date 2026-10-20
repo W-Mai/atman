@@ -152,6 +152,7 @@ fn request_value(request: PermissionRequest) -> Value {
             "request_id".into(),
             Value::Str(request.request_id.to_string()),
         ),
+        ("revision".into(), Value::Int(request.revision as i64)),
         (
             "requesting_run_id".into(),
             Value::Str(request.requesting_run_id.to_string()),
@@ -679,6 +680,16 @@ fn resolve(
 ) -> Result<Value, RuntimeError> {
     let (broker, actor) = broker_and_actor(ctx, name)?;
     let id = request_id(args)?;
+    let expected_revision = match args.named("expected_revision") {
+        Some(Value::Int(value)) if *value >= 0 => *value as u64,
+        Some(_) => {
+            return Err(failed(
+                name,
+                "expected_revision must be a non-negative integer",
+            ));
+        }
+        None => return Err(RuntimeError::MissingArg("expected_revision".into())),
+    };
     let authority = DecisionAuthority::Flow(
         broker
             .flow_authority(Arc::clone(actor))
@@ -699,7 +710,7 @@ fn resolve(
         optional_string(args, "reason")?
     };
     broker
-        .resolve(&id, &authority, action, scope, reason)
+        .resolve_at_revision(&id, expected_revision, &authority, action, scope, reason)
         .map(decision_value)
         .map_err(|e| failed(name, e))
 }
@@ -732,25 +743,28 @@ decision_tool!(
     PermissionAction::Approve,
     serde_json::json!({"type":"object","properties":{
         "request_id":{"type":"string"},
+        "expected_revision":{"type":"integer","minimum":0},
         "scope":{"type":"string","enum":["current_call","child_run_same_tool","child_run_same_path_rule"]},
         "reason":{"type":"string"}
-    },"required":["request_id"]})
+    },"required":["request_id","expected_revision"]})
 );
 decision_tool!(
     PermissionDeny,
     "permission.deny",
     PermissionAction::Deny,
     serde_json::json!({"type":"object","properties":{
-        "request_id":{"type":"string"},"reason":{"type":"string"}
-    },"required":["request_id","reason"]})
+        "request_id":{"type":"string"},"reason":{"type":"string"},
+        "expected_revision":{"type":"integer","minimum":0}
+    },"required":["request_id","expected_revision","reason"]})
 );
 decision_tool!(
     PermissionDefer,
     "permission.defer",
     PermissionAction::Defer,
     serde_json::json!({"type":"object","properties":{
-        "request_id":{"type":"string"},"reason":{"type":"string"}
-    },"required":["request_id"]})
+        "request_id":{"type":"string"},"reason":{"type":"string"},
+        "expected_revision":{"type":"integer","minimum":0}
+    },"required":["request_id","expected_revision"]})
 );
 
 #[cfg(test)]
@@ -890,10 +904,16 @@ mod tests {
 
         let args = ToolArgs {
             positional: Vec::new(),
-            named: vec![(
-                "request_id".into(),
-                Value::Str(pending.request.request_id.to_string()),
-            )],
+            named: vec![
+                (
+                    "request_id".into(),
+                    Value::Str(pending.request.request_id.to_string()),
+                ),
+                (
+                    "expected_revision".into(),
+                    Value::Int(pending.request.revision as i64),
+                ),
+            ],
         };
         let call_ctx = crate::approval::authorize_tool_invocation(
             &ctx,
@@ -1066,10 +1086,16 @@ mod tests {
         let pending = submit_pending(&broker, &requester);
         let args = ToolArgs {
             positional: Vec::new(),
-            named: vec![(
-                "request_id".into(),
-                Value::Str(pending.request.request_id.to_string()),
-            )],
+            named: vec![
+                (
+                    "request_id".into(),
+                    Value::Str(pending.request.request_id.to_string()),
+                ),
+                (
+                    "expected_revision".into(),
+                    Value::Int(pending.request.revision as i64),
+                ),
+            ],
         };
 
         let error = PermissionDeny.call(args, &ctx).await.unwrap_err();
@@ -1077,6 +1103,112 @@ mod tests {
         assert!(matches!(
             broker.get(&pending.request.request_id).unwrap().state,
             PermissionRequestState::Pending { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn decisions_use_the_observed_request_version_across_retargeting() {
+        let (ctx, broker, requester) = managed_ctx();
+        let pending = submit_pending(&broker, &requester);
+        let id = pending.request.request_id.clone();
+        let revision = pending.request.revision;
+        let view = PermissionGet
+            .call(
+                ToolArgs {
+                    positional: Vec::new(),
+                    named: vec![("request_id".into(), Value::Str(id.to_string()))],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::Struct(fields) = view else {
+            panic!("expected request");
+        };
+        assert!(fields.iter().any(|(name, value)| name == "revision"
+            && matches!(value, Value::Int(value) if *value == revision as i64)));
+
+        for tool in [
+            &PermissionApprove as &dyn Tool,
+            &PermissionDeny,
+            &PermissionDefer,
+        ] {
+            for version in [
+                None,
+                Some(Value::Int(-1)),
+                Some(Value::Str("0".into())),
+                Some(Value::Int((revision + 1) as i64)),
+            ] {
+                let mut named = vec![
+                    ("request_id".into(), Value::Str(id.to_string())),
+                    ("reason".into(), Value::Str("reviewed".into())),
+                ];
+                if let Some(version) = version {
+                    named.push(("expected_revision".into(), version));
+                }
+                assert!(
+                    tool.call(
+                        ToolArgs {
+                            positional: Vec::new(),
+                            named
+                        },
+                        &ctx
+                    )
+                    .await
+                    .is_err()
+                );
+                assert_eq!(broker.get(&id).unwrap(), pending.request);
+                assert!(broker.grants().is_empty());
+            }
+        }
+
+        PermissionDefer
+            .call(
+                ToolArgs {
+                    positional: Vec::new(),
+                    named: vec![
+                        ("request_id".into(), Value::Str(id.to_string())),
+                        ("expected_revision".into(), Value::Int(revision as i64)),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let forwarded = broker.get(&id).unwrap();
+        assert!(matches!(
+            forwarded.state,
+            PermissionRequestState::Pending {
+                target: ApprovalTarget::User
+            }
+        ));
+        assert!(forwarded.revision > revision);
+        let authority = DecisionAuthority::User(broker.user_authority(&requester.session_id, None));
+        assert_eq!(
+            broker.resolve_at_revision(
+                &id,
+                revision,
+                &authority,
+                PermissionAction::Approve,
+                None,
+                None
+            ),
+            Err(crate::permission::PermissionError::RequestRevisionConflict)
+        );
+        assert_eq!(broker.get(&id).unwrap(), forwarded);
+        broker
+            .resolve_at_revision(
+                &id,
+                forwarded.revision,
+                &authority,
+                PermissionAction::Approve,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            pending.resolution.await.unwrap(),
+            crate::permission::PermissionResolution::Decision(_)
         ));
     }
 }

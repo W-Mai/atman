@@ -529,6 +529,7 @@ pub enum PermissionError {
     GroupNotEmpty,
     GroupNotOwner,
     GroupRevisionConflict,
+    RequestRevisionConflict,
     EmptyGroup,
 }
 
@@ -551,6 +552,7 @@ impl std::fmt::Display for PermissionError {
             Self::GroupNotEmpty => "permission group must be empty before deletion",
             Self::GroupNotOwner => "permission group is not owned by this actor",
             Self::GroupRevisionConflict => "permission group revision is stale",
+            Self::RequestRevisionConflict => "permission request revision is stale",
             Self::EmptyGroup => "permission group cannot be empty",
         };
         f.write_str(message)
@@ -1133,21 +1135,55 @@ impl PermissionBroker {
         // decision commits before the run is terminal, or terminal cleanup runs first
         // and this call observes a cancelled request.
         let (outcome, sequence) = self.flows.with_lifecycle_arbitration(|| {
-            self.resolve_locked(request_id, authority, action, grant_scope, reason)
+            self.resolve_locked(request_id, None, authority, action, grant_scope, reason)
         })?;
         self.dispatch_audit_bundle(sequence);
         Ok(outcome)
     }
 
+    /// Resolve the observed request version under the same lock as authority and decision checks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_at_revision(
+        &self,
+        request_id: &PermissionRequestId,
+        expected_revision: u64,
+        authority: &DecisionAuthority,
+        action: PermissionAction,
+        grant_scope: Option<GrantScope>,
+        reason: Option<String>,
+    ) -> Result<ResolveOutcome, PermissionError> {
+        let (outcome, sequence) = self.flows.with_lifecycle_arbitration(|| {
+            self.resolve_locked(
+                request_id,
+                Some(expected_revision),
+                authority,
+                action,
+                grant_scope,
+                reason,
+            )
+        })?;
+        self.dispatch_audit_bundle(sequence);
+        Ok(outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn resolve_locked(
         &self,
         request_id: &PermissionRequestId,
+        expected_revision: Option<u64>,
         authority: &DecisionAuthority,
         action: PermissionAction,
         grant_scope: Option<GrantScope>,
         reason: Option<String>,
     ) -> Result<(ResolveOutcome, u64), PermissionError> {
         let mut state = self.state.lock().unwrap();
+        if let Some(expected) = expected_revision
+            && state
+                .request(request_id)
+                .is_some_and(|request| !request.state.is_terminal() && request.revision != expected)
+        {
+            return Err(PermissionError::RequestRevisionConflict);
+        }
         let request_ids = BTreeSet::from([request_id.clone()]);
         let candidate_groups = Self::unresolved_groups_for_requests(&state, &request_ids);
         let outcome = self.resolve_locked_state(
@@ -1376,117 +1412,9 @@ impl PermissionBroker {
             return Err(PermissionError::ActorNotRunning);
         }
 
-        let actor = self.validate_authority(&request, authority, action, grant_scope.as_ref())?;
-        let target = match &request.state {
-            PermissionRequestState::Pending { target } => target.clone(),
-            PermissionRequestState::Evaluating => return Err(PermissionError::ActorNotAuthorized),
-            _ => return Err(PermissionError::AlreadyResolved),
-        };
-        if !actor_matches_target(&actor, &target) {
-            return Err(PermissionError::ActorNotAuthorized);
-        }
-
-        let decision = PermissionDecision {
-            decision_id: PermissionDecisionId::now(),
-            request_id: request_id.clone(),
-            actor: actor.clone(),
-            action,
-            execution_boundary: decision_execution_boundary(&request, &actor, action),
-            grant_scope: grant_scope.clone(),
-            reason: reason.clone(),
-            decided_at: Utc::now(),
-        };
-        let entry = state.requests.get_mut(request_id).unwrap();
-        entry.request.escalation_path.push(EscalationHop {
-            target: target.clone(),
-            actor: Some(actor.clone()),
-            action: Some(action),
-            reason: reason.clone(),
-            at: decision.decided_at,
-        });
-
-        if action == PermissionAction::Defer {
-            if matches!(
-                entry.request.state,
-                PermissionRequestState::Pending {
-                    target: ApprovalTarget::User
-                }
-            ) {
-                let reason = reason.unwrap_or_else(|| "user deferred without a fallback".into());
-                cancel_entry(entry, "permission.user_defer", reason, decision.decided_at);
-                return Ok(ResolveOutcome::Deferred(decision));
-            }
-            let requester = self
-                .flows
-                .lookup_run(&entry.request.requesting_run_id)
-                .ok_or(PermissionError::RequestNotFound)?;
-            let next_target = self.next_eligible_target(
-                &requester,
-                &entry.request.requirement,
-                &entry.request.intent.provenance,
-                match &target {
-                    ApprovalTarget::Flow(run_id) => Some(run_id),
-                    ApprovalTarget::User => None,
-                },
-            );
-            entry.request.state = PermissionRequestState::Pending {
-                target: next_target.clone(),
-            };
-            if let Some(target_tx) = &entry.target_tx {
-                let _ = target_tx.send(next_target.clone());
-            }
-            entry.request.escalation_path.push(EscalationHop {
-                target: next_target,
-                actor: None,
-                action: None,
-                reason: None,
-                at: Utc::now(),
-            });
-            return Ok(ResolveOutcome::Deferred(decision));
-        }
-
-        let persistent_grant = if action == PermissionAction::Approve {
-            grant_scope
-                .clone()
-                .filter(|scope| !matches!(scope, GrantScope::CurrentCall))
-                .map(|scope| PermissionGrant {
-                    grant_id: PermissionGrantId::now(),
-                    request_id: request_id.clone(),
-                    session_id: request.session_id.clone(),
-                    requesting_run_id: request.requesting_run_id.clone(),
-                    requirement: request.requirement.clone(),
-                    execution_boundary: decision.execution_boundary,
-                    scope,
-                    actor,
-                    granted_at: decision.decided_at,
-                })
-        } else {
-            None
-        };
-        let entry = state.requests.get_mut(request_id).unwrap();
-        entry.request.state = if action == PermissionAction::Approve {
-            PermissionRequestState::Approved {
-                decision_id: decision.decision_id.clone(),
-            }
-        } else {
-            PermissionRequestState::Denied {
-                decision_id: decision.decision_id.clone(),
-            }
-        };
-        entry.request.revision += 1;
-        let responder = entry.responder.take();
-        if let Some(grant) = persistent_grant
-            && !state
-                .grants
-                .iter()
-                .any(|existing| equivalent_grant(existing, &grant))
-        {
-            state.grants.push(grant);
-        }
-        if let Some(responder) = responder {
-            let _ = responder.send(PermissionResolution::Decision(decision.clone()));
-        }
-        Ok(ResolveOutcome::Resolved(decision))
+        let prepared =
+            self.prepare_resolution(state, request_id, authority, action, grant_scope.as_ref())?;
+        Ok(self.commit_prepared_resolution(state, prepared, action, grant_scope, reason))
     }
 
     pub fn defer_timed_out_target(
@@ -2782,7 +2710,9 @@ fn batch_error_outcome(error: PermissionError) -> BatchRequestOutcome {
         PermissionError::GrantExceedsAuthority => BatchRequestOutcome::RejectedOverAuthority,
         PermissionError::RequestNotFound => BatchRequestOutcome::RejectedNotFound,
         PermissionError::ActorNotRunning => BatchRequestOutcome::RejectedNotRunning,
-        PermissionError::IdentityMismatch => BatchRequestOutcome::RejectedStale,
+        PermissionError::IdentityMismatch | PermissionError::RequestRevisionConflict => {
+            BatchRequestOutcome::RejectedStale
+        }
         PermissionError::PermissionManagementRequired => {
             BatchRequestOutcome::RejectedPermissionManagementRequired
         }

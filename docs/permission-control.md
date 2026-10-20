@@ -31,6 +31,14 @@ The main policy actions are:
 
 The permission decision is made once for each invocation. A cloned, invocation-specific context carries the resulting authorization to the tool, so one call cannot reuse another call's approval.
 
+## Versioned decisions
+
+`permission.list` and `permission.get` include each request's `revision`. Individual `permission.approve`, `permission.deny`, and `permission.defer` calls require that value as `expected_revision`, alongside `request_id`. Re-read a request after a stale-version error; do not assume an earlier decision still applies after its approval target changes.
+
+Request revision validation, authority checks, and commitment execute under the broker's lifecycle and request locks. Single decisions and atomic batch decisions use the same preparation and commitment path. Forwarding a request advances its revision before notifying the next approval target. A rejected stale decision does not create a grant, change the target, or resolve the waiting invocation.
+
+Embedded controllers can use `PermissionBroker::resolve_at_revision` for the same contract. UI and daemon batch resolution retain their request-version and group-version checks.
+
 ## Trust modes
 
 `TrustMode` selects the baseline Tier policy:
