@@ -851,3 +851,9 @@ timer.schedule(id: "d7827f6f-240f-4c3c-8e02-f2f58d786bfd", due_at: "2027-01-15T1
 timer.list()
 timer.cancel(id: "d7827f6f-240f-4c3c-8e02-f2f58d786bfd")
 ```
+
+## Task scope records
+
+`FlowStore::create_task_scope` records a named cancellation group owned by an open Flow. `TaskScopeRef` contains the owner address and scope UUID. A new instance can record one immutable membership through `bind_task_scope` while Prepared; activation prevents new or replacement bindings. The host must authenticate membership and verify that the referenced owner and scope are available before binding. These storage methods do not attach observers or close other instances.
+
+An optional `ScopeGoal` binds the group to the current Goal ID and objective text. Goal replacement, objective changes, and clearing cancel associated groups in the same journal commit; pause and resume leave them active. Owner closure cancels its remaining groups, while unbound groups survive Goal changes. `cancel_task_scope` is terminal and preserves the original cancellation receipt on retry. `FlowInspection.task_scopes`, `task_scope_binding`, and typed updates use the same replay validation as writer recovery.

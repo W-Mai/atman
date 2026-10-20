@@ -20,6 +20,230 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn task_scope_facts_bind_only_prepared_members_and_recover_independent_lifetimes() {
+    use atman_runtime::flow_store::task_scope::{
+        ScopeCancelReason, TaskScopeDefinition, TaskScopeRef,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut owner = session.create_flow(descriptor(info.id)).unwrap();
+    let mut member = session.create_flow(descriptor(info.id)).unwrap();
+    let definition = TaskScopeDefinition {
+        id: Uuid::new_v4(),
+        name: "Investigation".into(),
+        goal: None,
+    };
+    assert!(owner.create_task_scope(definition.clone()).is_err());
+    change(&mut owner, FlowTransition::Activated);
+    let created = owner.create_task_scope(definition.clone()).unwrap();
+    let scope = TaskScopeRef {
+        owner: owner.descriptor().address.clone(),
+        id: definition.id,
+    };
+    assert!(
+        member
+            .bind_task_scope(TaskScopeRef {
+                owner: member.descriptor().address.clone(),
+                ..scope.clone()
+            })
+            .is_err()
+    );
+    let bound = member.bind_task_scope(scope.clone()).unwrap();
+    change(&mut member, FlowTransition::Activated);
+    assert_eq!(member.bind_task_scope(scope.clone()).unwrap(), bound);
+    assert!(
+        member
+            .bind_task_scope(TaskScopeRef {
+                id: Uuid::new_v4(),
+                ..scope.clone()
+            })
+            .is_err()
+    );
+    assert!(
+        owner
+            .bind_task_scope(TaskScopeRef {
+                owner: member.descriptor().address.clone(),
+                ..scope.clone()
+            })
+            .is_err()
+    );
+    assert_eq!(
+        owner.create_task_scope(definition.clone()).unwrap(),
+        created
+    );
+    assert!(
+        owner
+            .create_task_scope(TaskScopeDefinition {
+                name: "different".into(),
+                ..definition.clone()
+            })
+            .is_err()
+    );
+    let cancelled = owner.cancel_task_scope(definition.id).unwrap();
+    let retry = owner.create_task_scope(definition.clone()).unwrap();
+    assert_eq!(retry.receipt, created.receipt);
+    assert_eq!(
+        retry.cancellation.as_ref().unwrap().reason,
+        ScopeCancelReason::Requested
+    );
+    let independent = TaskScopeDefinition {
+        id: Uuid::new_v4(),
+        name: "Independent".into(),
+        goal: None,
+    };
+    owner.create_task_scope(independent.clone()).unwrap();
+    assert_eq!(owner.cancel_task_scope(definition.id).unwrap(), cancelled);
+    assert!(
+        member.state().can_start_turn(),
+        "storage replay does not perform host reconciliation"
+    );
+    let owner_id = owner.descriptor().address.instance_id.clone();
+    let member_id = member.descriptor().address.instance_id.clone();
+    drop(owner);
+    drop(member);
+    let inspected = session.inspect_flow(&member_id).unwrap();
+    assert_eq!(inspected.task_scope_binding, Some(scope.clone()));
+    let mut owner = session.open_flow(&owner_id).unwrap();
+    let member = session.open_flow(&member_id).unwrap();
+    assert_eq!(member.task_scope_binding(), Some(&scope));
+    assert_eq!(owner.cancel_task_scope(definition.id).unwrap(), cancelled);
+    change(&mut owner, FlowTransition::CloseRequested);
+    let closed = owner.cursor().clone();
+    assert_eq!(
+        owner
+            .create_task_scope(independent)
+            .unwrap()
+            .cancellation
+            .unwrap()
+            .reason,
+        ScopeCancelReason::OwnerClosed
+    );
+    assert_eq!(owner.cancel_task_scope(definition.id).unwrap(), cancelled);
+    drop(owner);
+    let owner = session.open_flow(&owner_id).unwrap();
+    assert_eq!(owner.cursor(), &closed);
+    assert!(
+        owner
+            .task_scopes()
+            .all(|record| record.cancellation.is_some())
+    );
+}
+
+#[test]
+fn goal_bound_task_scopes_cancel_on_changed_work_but_not_pause_or_resume() {
+    use atman_runtime::flow_store::{
+        goal::{GoalRequest, GoalVersion},
+        task_scope::{ScopeCancelReason, ScopeGoal, TaskScopeDefinition},
+    };
+    use atman_runtime::memory::goal::{GoalActor, GoalEdit, GoalPauseReason};
+
+    for edit in [
+        GoalEdit::Set {
+            text: "Other work".into(),
+            replace_completed: false,
+        },
+        GoalEdit::Create {
+            text: "Original work".into(),
+        },
+        GoalEdit::Clear,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(dir.path()).unwrap();
+        let info = session_descriptor();
+        let mut session = root.create_session(info.clone()).unwrap();
+        let mut flow = session.create_flow(descriptor(info.id)).unwrap();
+        change(&mut flow, FlowTransition::Activated);
+        let request = |flow: &FlowStore, edit| GoalRequest {
+            id: Uuid::new_v4(),
+            sender: SenderIdentity::User(info.id),
+            expected: flow.goal().map(GoalVersion::from),
+            edit,
+            start_turn: false,
+        };
+        flow.edit_goal(
+            request(
+                &flow,
+                GoalEdit::Create {
+                    text: "Original work".into(),
+                },
+            ),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let definition = TaskScopeDefinition {
+            id: Uuid::new_v4(),
+            name: "Bound".into(),
+            goal: flow.goal().map(ScopeGoal::from),
+        };
+        let original = flow.create_task_scope(definition.clone()).unwrap();
+        let independent = TaskScopeDefinition {
+            id: Uuid::new_v4(),
+            name: "Unbound".into(),
+            goal: None,
+        };
+        flow.create_task_scope(independent.clone()).unwrap();
+        for edit in [
+            GoalEdit::Pause {
+                actor: GoalActor::User,
+                reason: GoalPauseReason::UserRequested,
+                summary: String::new(),
+            },
+            GoalEdit::Resume {
+                actor: GoalActor::User,
+            },
+            GoalEdit::Set {
+                text: "Original work".into(),
+                replace_completed: false,
+            },
+        ] {
+            flow.edit_goal(request(&flow, edit), |_| Ok(())).unwrap();
+            assert_eq!(
+                flow.create_task_scope(definition.clone()).unwrap(),
+                original
+            );
+        }
+        let changed = flow.edit_goal(request(&flow, edit), |_| Ok(())).unwrap();
+        let cancelled = flow.create_task_scope(definition.clone()).unwrap();
+        assert_eq!(
+            cancelled.cancellation.as_ref().unwrap().reason,
+            ScopeCancelReason::GoalChanged
+        );
+        assert_eq!(
+            cancelled.cancellation.as_ref().unwrap().receipt,
+            changed.receipt
+        );
+        assert!(
+            flow.create_task_scope(independent.clone())
+                .unwrap()
+                .cancellation
+                .is_none()
+        );
+        assert!(
+            flow.create_task_scope(TaskScopeDefinition {
+                id: Uuid::new_v4(),
+                ..definition.clone()
+            })
+            .is_err()
+        );
+        let id = flow.descriptor().address.instance_id.clone();
+        drop(flow);
+        let inspected = session.inspect_flow(&id).unwrap();
+        assert!(inspected.task_scopes.contains(&cancelled));
+        let mut flow = session.open_flow(&id).unwrap();
+        assert_eq!(flow.create_task_scope(definition).unwrap(), cancelled);
+        assert!(
+            flow.create_task_scope(independent)
+                .unwrap()
+                .cancellation
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn durable_timers_commit_once_across_pause_recovery_and_cancellation() {
     use atman_runtime::flow_store::timer::{Timer, TimerStatus};
     use atman_runtime::flow_store::view::FlowUpdate;

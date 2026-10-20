@@ -226,6 +226,7 @@ impl FlowStore {
             .journal
             .commit(&[FlowFact::GoalUpdated(Box::new(update.clone()))])?;
         self.inbox.goal_changed(goal.as_ref(), &receipt);
+        self.task_scopes.goal_changed(goal.as_ref(), &receipt);
         if let Some(input) = &update.input {
             self.inbox.apply(input.clone(), receipt.clone());
         }

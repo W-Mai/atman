@@ -185,6 +185,9 @@ pub enum FlowUpdate {
     TimerScheduled(Box<super::timer::TimerRecord>),
     TimerCancelled(Uuid),
     TimersFired(Box<super::timer::TimerDelivery>),
+    TaskScopeCreated(Box<super::task_scope::TaskScopeCreated>),
+    TaskScopeCancelled(Uuid),
+    TaskScopeBound(super::task_scope::TaskScopeRef),
 }
 
 impl From<FlowFact> for FlowUpdate {
@@ -247,6 +250,9 @@ impl From<FlowFact> for FlowUpdate {
             FlowFact::TimerScheduled(value) => Self::TimerScheduled(value),
             FlowFact::TimerCancelled(value) => Self::TimerCancelled(value),
             FlowFact::TimersFired(value) => Self::TimersFired(value),
+            FlowFact::TaskScopeCreated(value) => Self::TaskScopeCreated(value),
+            FlowFact::TaskScopeCancelled(value) => Self::TaskScopeCancelled(value),
+            FlowFact::TaskScopeBound(value) => Self::TaskScopeBound(value),
         }
     }
 }

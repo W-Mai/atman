@@ -26,6 +26,7 @@ pub mod publication;
 pub mod relation;
 mod replay;
 pub mod subscription;
+pub mod task_scope;
 pub mod timer;
 pub mod trace;
 pub mod view;
@@ -263,6 +264,9 @@ enum FlowFact {
     TimerScheduled(Box<timer::TimerRecord>),
     TimerCancelled(Uuid),
     TimersFired(Box<timer::TimerDelivery>),
+    TaskScopeCreated(Box<task_scope::TaskScopeCreated>),
+    TaskScopeCancelled(Uuid),
+    TaskScopeBound(task_scope::TaskScopeRef),
     DeliveryConfirmed {
         request_id: Uuid,
         delivery: outbox::DeliveryReceipt,
@@ -402,6 +406,9 @@ impl FlowFact {
                     | Self::TimerScheduled(_)
                     | Self::TimerCancelled(_)
                     | Self::TimersFired(_)
+                    | Self::TaskScopeCreated(_)
+                    | Self::TaskScopeCancelled(_)
+                    | Self::TaskScopeBound(_)
             )
         }) {
             return if facts.len() == 1
@@ -619,6 +626,8 @@ pub struct FlowInspection {
     pub relations: Vec<relation::FlowRelation>,
     pub watchers: Vec<watch_view::WatchRecord>,
     pub timers: Vec<timer::TimerRecord>,
+    pub task_scopes: Vec<task_scope::TaskScopeRecord>,
+    pub task_scope_binding: Option<task_scope::TaskScopeRef>,
     pub workspace: Option<workspace::WorkspaceRequest>,
     pub goal: Option<crate::memory::goal::GoalRecord>,
     pub pending_inputs: usize,
@@ -782,6 +791,8 @@ fn inspect_registered_flow_with(
         relations,
         watchers,
         timers: replay.timers.records().cloned().collect(),
+        task_scopes: replay.task_scopes.records().cloned().collect(),
+        task_scope_binding: replay.task_scopes.binding().cloned(),
         workspace: replay.workspace,
         goal: replay.goals.current().cloned(),
         pending_inputs: inbox.pending_entries().count(),
@@ -1259,6 +1270,7 @@ pub struct FlowStore {
     subscriptions: subscription::Subscriptions,
     process_watches: process_watch::ProcessWatches,
     timers: timer::Timers,
+    task_scopes: task_scope::TaskScopes,
     watch_replacements: watch_edit::WatchReplacements,
     activation: Option<(launch::Activation, CommitReceipt)>,
     workspace: Option<workspace::WorkspaceRequest>,
@@ -1327,6 +1339,7 @@ impl FlowStore {
             subscriptions: subscription::Subscriptions::default(),
             process_watches: process_watch::ProcessWatches::default(),
             timers: timer::Timers::default(),
+            task_scopes: task_scope::TaskScopes::default(),
             watch_replacements: watch_edit::WatchReplacements::default(),
             activation: None,
             workspace: None,
@@ -1362,6 +1375,7 @@ impl FlowStore {
             subscriptions,
             process_watches,
             timers,
+            task_scopes,
             watch_replacements,
             activation,
             workspace,
@@ -1397,6 +1411,7 @@ impl FlowStore {
             subscriptions,
             process_watches,
             timers,
+            task_scopes,
             watch_replacements,
             activation,
             workspace,
@@ -1515,6 +1530,7 @@ impl FlowStore {
             self.subscriptions.close();
             self.process_watches.close();
             self.timers.close();
+            self.task_scopes.close(&cursor);
         }
         self.cursor = cursor;
         self.refresh_projection();

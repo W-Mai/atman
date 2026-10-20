@@ -14,6 +14,7 @@ pub(super) struct FlowReplay {
     pub(super) subscriptions: subscription::Subscriptions,
     pub(super) process_watches: process_watch::ProcessWatches,
     pub(super) timers: super::timer::Timers,
+    pub(super) task_scopes: super::task_scope::TaskScopes,
     pub(super) watch_replacements: super::watch_edit::WatchReplacements,
     pub(super) activation: Option<(launch::Activation, CommitReceipt)>,
     pub(super) workspace: Option<workspace::WorkspaceRequest>,
@@ -134,6 +135,7 @@ impl FlowReplay {
                         inbox.validate(input)?;
                     }
                     inbox.goal_changed(record.as_ref(), &receipt);
+                    self.task_scopes.goal_changed(record.as_ref(), &receipt);
                     if let Some(input) = &update.input {
                         inbox.apply(input.clone(), receipt.clone());
                     }
@@ -231,6 +233,22 @@ impl FlowReplay {
                     self.timers.validate_delivery(&delivery, inbox, address)?;
                     self.timers.apply_delivery(*delivery, inbox, &receipt);
                 }
+                (Some((_, state, _)), FlowFact::TaskScopeCreated(created)) => {
+                    if !matches!(state.state(), InstanceState::Open(_)) {
+                        return Err(invalid("task scope owner is not open"));
+                    }
+                    self.task_scopes
+                        .register(*created, self.goals.current(), receipt.clone())?;
+                }
+                (Some(_), FlowFact::TaskScopeCancelled(id)) => {
+                    self.task_scopes.cancel(id, receipt.clone())?;
+                }
+                (Some((_, state, _)), FlowFact::TaskScopeBound(scope)) => {
+                    if !matches!(state.state(), InstanceState::Prepared) {
+                        return Err(invalid("task scope binding follows activation"));
+                    }
+                    self.task_scopes.bind(scope, address, receipt.clone())?;
+                }
                 (Some((_, state, inbox)), FlowFact::SendQueued(intent)) => {
                     self.outbox.validate(state, &intent)?;
                     if let Some(reply) = &intent.reply {
@@ -290,6 +308,7 @@ impl FlowReplay {
                     self.subscriptions.close();
                     self.process_watches.close();
                     self.timers.close();
+                    self.task_scopes.close(&receipt);
                 }
             }
         }
