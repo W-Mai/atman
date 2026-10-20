@@ -1,4 +1,4 @@
-//! Input references share scope admission without making the recipient a group member.
+//! Message references share scope admission without making peers group members.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -18,22 +18,26 @@ use crate::flow_store::{
 };
 
 #[derive(Clone, Default)]
-pub(in crate::flow_runtime) struct InputScopes {
+pub(in crate::flow_runtime) struct MessageScopes {
     pub dependencies: ScopeAdmission,
     admitted: HashMap<TaskScopeRef, ScopeAdmission>,
-    pub changes: InputScopeChanges,
+    pub changes: ScopeChanges,
 }
 
 #[derive(Clone, Debug, Default)]
-pub(in crate::flow_runtime) struct InputScopeChanges {
+pub(in crate::flow_runtime) struct ScopeChanges {
     sources: Vec<watch::Receiver<CommitReceipt>>,
     directory: Option<watch::Receiver<()>>,
     retries: Option<watch::Receiver<()>>,
 }
 
-impl InputScopes {
+impl MessageScopes {
     pub fn eligible(&self, snapshot: &ScopeSnapshot, request: &DeliveryRequest) -> bool {
-        request.scope.as_ref().is_none_or(|scope| {
+        self.eligible_scope(snapshot, request.scope.as_ref())
+    }
+
+    pub fn eligible_scope(&self, snapshot: &ScopeSnapshot, scope: Option<&TaskScopeRef>) -> bool {
+        scope.is_none_or(|scope| {
             self.admitted
                 .get(scope)
                 .is_some_and(|admission| admission.check(snapshot).is_ok())
@@ -45,10 +49,7 @@ impl InputScopes {
             if let Ok(status) = snapshot.status(scope)
                 && let Some(cancellation) = &status.cancellation
             {
-                store.invalidate_input_scope(InputScopeInvalidation {
-                    scope: scope.clone(),
-                    cancellation: cancellation.clone(),
-                })?;
+                invalidate_messages(store, scope, cancellation)?;
             }
         }
         Ok(())
@@ -59,7 +60,7 @@ impl InputScopes {
     }
 }
 
-impl InputScopeChanges {
+impl ScopeChanges {
     pub fn has_changed(&self) -> bool {
         self.sources
             .iter()
@@ -102,9 +103,22 @@ impl FlowWorker {
     pub(in crate::flow_runtime) async fn resolve_pending_scopes(
         &self,
         pending: &[AcceptedEnvelope],
-    ) -> InputScopes {
-        let mut scopes = InputScopes {
-            changes: InputScopeChanges {
+    ) -> MessageScopes {
+        self.resolve_message_scopes(
+            pending
+                .iter()
+                .filter_map(|input| input.request.scope.clone())
+                .collect(),
+        )
+        .await
+    }
+
+    pub(in crate::flow_runtime) async fn resolve_message_scopes(
+        &self,
+        references: Vec<TaskScopeRef>,
+    ) -> MessageScopes {
+        let mut scopes = MessageScopes {
+            changes: ScopeChanges {
                 directory: self
                     .host
                     .as_ref()
@@ -124,13 +138,12 @@ impl FlowWorker {
             source.borrow_and_update();
         }
         let mut seen = HashSet::new();
-        for scope in pending
-            .iter()
-            .filter_map(|input| input.request.scope.as_ref())
-            .filter(|scope| seen.insert((*scope).clone()))
+        for scope in references
+            .into_iter()
+            .filter(|scope| seen.insert(scope.clone()))
         {
             if let Ok(admission) = self
-                .resolve_input_scope(scope.clone(), Some(&mut scopes.changes.sources))
+                .resolve_message_scope(scope.clone(), Some(&mut scopes.changes.sources))
                 .await
             {
                 scopes.dependencies.0.extend(admission.0.iter().cloned());
@@ -142,7 +155,7 @@ impl FlowWorker {
 
     pub(in crate::flow_runtime) async fn scheduling_snapshot(
         &self,
-    ) -> io::Result<(Option<FlowSnapshot>, InputScopes)> {
+    ) -> io::Result<(Option<FlowSnapshot>, MessageScopes)> {
         let mut view = self.snapshot().await?;
         let scopes = self.resolve_pending_scopes(&view.pending).await;
         let checked = scopes.clone();
@@ -181,7 +194,7 @@ impl FlowWorker {
         {
             return Ok(previous);
         }
-        let admission = self.resolve_input_scope(scope, None).await;
+        let admission = self.resolve_message_scope(scope, None).await;
         let dependencies = admission.as_ref().ok().cloned().unwrap_or_default();
         self.request_scoped(dependencies, move |store, snapshot| {
             store.accept_input(request, |request| {
@@ -192,7 +205,7 @@ impl FlowWorker {
         .await
     }
 
-    async fn resolve_input_scope(
+    pub(in crate::flow_runtime) async fn resolve_message_scope(
         &self,
         scope: TaskScopeRef,
         changes: Option<&mut Vec<watch::Receiver<CommitReceipt>>>,
@@ -200,39 +213,44 @@ impl FlowWorker {
         scope.validate()?;
         self.host
             .as_ref()
-            .ok_or_else(|| invalid("scoped input requires its runtime host"))?
+            .ok_or_else(|| invalid("scoped messages require their runtime host"))?
             .upgrade()?
             .resolve_task_scope(None, scope, changes)
             .await
     }
 
+    pub(in crate::flow_runtime) async fn pending_message_scopes(
+        &self,
+    ) -> io::Result<Vec<TaskScopeRef>> {
+        self.request(|store| {
+            let mut seen = HashSet::new();
+            Ok(store
+                .pending_inputs()
+                .filter_map(|input| input.request.scope.clone())
+                .chain(store.pending_send_scopes())
+                .filter(|scope| seen.insert(scope.clone()))
+                .collect::<Vec<_>>())
+        })
+        .await
+    }
+
     /// Subscribe before sampling, retaining unknown sources and cancelling only confirmed scope facts.
-    pub(in crate::flow_runtime) async fn observe_input_scopes(
+    pub(in crate::flow_runtime) async fn observe_message_scopes(
         &self,
         changes: &mut Vec<watch::Receiver<CommitReceipt>>,
     ) -> io::Result<Vec<ObservationIssue>> {
-        let scopes = self
-            .request(|store| {
-                let mut seen = HashSet::new();
-                Ok(store
-                    .pending_inputs()
-                    .filter_map(|input| input.request.scope.as_ref())
-                    .filter(|scope| seen.insert((*scope).clone()))
-                    .cloned()
-                    .collect::<Vec<_>>())
-            })
-            .await?;
+        let scopes = self.pending_message_scopes().await?;
         let mut issues = Vec::new();
         for scope in scopes {
-            let result = match self.resolve_input_scope(scope.clone(), Some(changes)).await {
+            let result = match self
+                .resolve_message_scope(scope.clone(), Some(changes))
+                .await
+            {
                 Ok(admission) => {
                     let observed = scope.clone();
                     self.request_scoped(admission, move |store, snapshot| {
                         if let Some(cancellation) = &snapshot.status(&observed)?.cancellation {
-                            store.invalidate_input_scope(InputScopeInvalidation {
-                                scope: observed,
-                                cancellation: cancellation.clone(),
-                            })?;
+                            invalidate_messages(store, &observed, cancellation)?;
                         }
                         Ok(())
                     })
@@ -249,4 +267,21 @@ impl FlowWorker {
         }
         Ok(issues)
     }
+}
+
+fn invalidate_messages(
+    store: &mut FlowStore,
+    scope: &TaskScopeRef,
+    cancellation: &crate::flow_store::task_scope::ScopeCancellation,
+) -> io::Result<()> {
+    if store
+        .pending_inputs()
+        .any(|input| input.request.scope.as_ref() == Some(scope))
+    {
+        store.invalidate_input_scope(InputScopeInvalidation {
+            scope: scope.clone(),
+            cancellation: cancellation.clone(),
+        })?;
+    }
+    store.cancel_scoped_replies(scope)
 }

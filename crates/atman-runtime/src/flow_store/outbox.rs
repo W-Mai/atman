@@ -59,6 +59,7 @@ pub struct SendRecord {
 pub(super) struct Outbox {
     records: Vec<SendRecord>,
     indices: HashMap<Uuid, usize>,
+    replies: HashMap<Uuid, usize>,
     pending: BTreeSet<usize>,
 }
 
@@ -74,6 +75,12 @@ impl Outbox {
     pub fn get(&self, request_id: Uuid) -> Option<&SendRecord> {
         self.indices
             .get(&request_id)
+            .map(|&index| &self.records[index])
+    }
+
+    pub fn by_reply(&self, correlation: Uuid) -> Option<&SendRecord> {
+        self.replies
+            .get(&correlation)
             .map(|&index| &self.records[index])
     }
 
@@ -95,6 +102,9 @@ impl Outbox {
             {
                 return Err(invalid("send intent and reply waiter disagree"));
             }
+            if self.replies.contains_key(&reply.correlation) {
+                return Err(invalid("reply waiter already belongs to another send"));
+            }
         }
         Ok(())
     }
@@ -108,6 +118,9 @@ impl Outbox {
         self.pending.insert(self.records.len());
         self.indices
             .insert(record.intent.request.request_id, self.records.len());
+        if let Some(waiter) = &record.intent.reply {
+            self.replies.insert(waiter.correlation, self.records.len());
+        }
         self.records.push(record.clone());
         record
     }
@@ -152,6 +165,26 @@ impl Outbox {
 }
 
 impl FlowStore {
+    pub(crate) fn pending_send_scopes(&self) -> Vec<super::task_scope::TaskScopeRef> {
+        let mut seen = std::collections::HashSet::new();
+        self.inbox
+            .waiters
+            .pending()
+            .filter_map(|record| self.reply_scope(record.waiter.correlation))
+            .filter(|scope| seen.insert(*scope))
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn reply_scope(
+        &self,
+        correlation: Uuid,
+    ) -> Option<&super::task_scope::TaskScopeRef> {
+        self.outbox
+            .by_reply(correlation)
+            .and_then(|record| record.intent.request.scope.as_ref())
+    }
+
     pub fn send_record(&self, request_id: Uuid) -> Option<&SendRecord> {
         self.outbox.get(request_id)
     }
@@ -174,14 +207,8 @@ impl FlowStore {
         reply: Option<ReplyWaiter>,
         authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()>,
     ) -> io::Result<SendRecord> {
-        if request.sender != SenderIdentity::Flow(self.descriptor.address.clone()) {
-            return Err(invalid("send intent does not belong to this flow"));
-        }
-        if let Some(previous) = self.outbox.get(request.request_id) {
-            if previous.intent.request != request || previous.intent.reply != reply {
-                return Err(invalid("send request ID was reused with different data"));
-            }
-            return Ok(previous.clone());
+        if let Some(previous) = self.send_retry(&request, reply.as_ref())? {
+            return Ok(previous);
         }
         let intent = SendIntent {
             lease: lease.clone(),
@@ -218,6 +245,23 @@ impl FlowStore {
         let record = self.outbox.apply(intent, receipt.clone());
         self.cursor = receipt;
         Ok(record)
+    }
+
+    pub(crate) fn send_retry(
+        &self,
+        request: &DeliveryRequest,
+        reply: Option<&ReplyWaiter>,
+    ) -> io::Result<Option<SendRecord>> {
+        if request.sender != SenderIdentity::Flow(self.descriptor.address.clone()) {
+            return Err(invalid("send intent does not belong to this flow"));
+        }
+        if let Some(previous) = self.outbox.get(request.request_id) {
+            if previous.intent.request != *request || previous.intent.reply.as_ref() != reply {
+                return Err(invalid("send request ID was reused with different data"));
+            }
+            return Ok(Some(previous.clone()));
+        }
+        Ok(None)
     }
 
     /// Confirm an authenticated receiver ACK, including reconciliation after interruption or closure.

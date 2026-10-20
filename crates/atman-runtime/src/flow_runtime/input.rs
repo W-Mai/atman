@@ -101,7 +101,7 @@ impl FlowWorker {
     ) -> io::Result<(
         usize,
         tokio::sync::OwnedMutexGuard<()>,
-        super::task_scope::InputScopes,
+        super::task_scope::MessageScopes,
     )> {
         if matches!(context.history_segment, HistorySegment::Spawned) {
             return Ok((0, compact_guard, Default::default()));

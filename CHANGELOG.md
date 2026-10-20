@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Scoped sends and replies** — New send intents validate their task scope before committing. Scope cancellation ends matching pending reply waits while preserving accepted delivery reconciliation, unrelated waits, and consumed results.
+
 - **Scoped input pickup** — Turn admission, model-context boundaries, and explicit reply waits validate source scopes before consuming input. Schedulers wake when missing sources become available, while unrelated input continues and cancelled input retains its history.
 
 - **Scoped inbox admission** — Runtime hosts validate new message scopes at the receiver's commit boundary and observe cancellation while recipients are paused or idle. Missing sources retain recorded input and surface diagnostics; accepted retries preserve their original receipts.

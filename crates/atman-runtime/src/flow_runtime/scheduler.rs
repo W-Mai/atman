@@ -39,7 +39,7 @@ pub(super) enum SchedulingProgress {
     Busy,
     Idle(
         crate::event_log::journal::CommitReceipt,
-        super::task_scope::InputScopeChanges,
+        super::task_scope::ScopeChanges,
     ),
     Stopped,
     Failed(String),

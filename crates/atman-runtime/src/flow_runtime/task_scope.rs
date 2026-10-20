@@ -16,8 +16,8 @@ use crate::flow_store::{
     task_scope::{ScopeCancellation, TaskScopeDefinition, TaskScopeRecord, TaskScopeRef},
 };
 
-mod input;
-pub(super) use input::{InputScopeChanges, InputScopes};
+mod message;
+pub(super) use message::{MessageScopes, ScopeChanges};
 #[cfg(test)]
 mod tests;
 

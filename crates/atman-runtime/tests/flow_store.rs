@@ -6030,6 +6030,13 @@ fn request_registration_and_send_share_one_commit_and_peers_can_reply_in_the_sam
         .find(|record| record.waiter == waiter)
         .unwrap();
     assert_eq!(registered.registered, queued.queued);
+    let mut aliased = request.clone();
+    aliased.request_id = Uuid::new_v4();
+    assert!(
+        a.queue_send(&waiter.lease, aliased, Some(waiter.clone()), |_| Ok(()))
+            .is_err()
+    );
+    assert_eq!(a.cursor(), &queued.queued);
     let accepted = b.accept_input(request.clone(), |_| Ok(())).unwrap();
     a.confirm_delivery(request.request_id, DeliveryReceipt::from(&accepted))
         .unwrap();

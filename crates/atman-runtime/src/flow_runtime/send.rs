@@ -30,8 +30,28 @@ impl FlowWorker {
         reply: Option<ReplyWaiter>,
         authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()> + Send + 'static,
     ) -> io::Result<SendRecord> {
-        self.request(move |store| store.queue_send(&lease, request, reply, authorize_new))
-            .await
+        let Some(scope) = request.scope.clone() else {
+            return self
+                .request(move |store| store.queue_send(&lease, request, reply, authorize_new))
+                .await;
+        };
+        let lookup = request.clone();
+        let expected_reply = reply.clone();
+        if let Some(previous) = self
+            .request(move |store| store.send_retry(&lookup, expected_reply.as_ref()))
+            .await?
+        {
+            return Ok(previous);
+        }
+        let admission = self.resolve_message_scope(scope, None).await;
+        let dependencies = admission.as_ref().ok().cloned().unwrap_or_default();
+        self.request_scoped(dependencies, move |store, snapshot| {
+            store.queue_send(&lease, request, reply, |request| {
+                authorize_new(request)?;
+                admission?.check(snapshot)
+            })
+        })
+        .await
     }
 
     pub async fn send_record(&self, request_id: Uuid) -> io::Result<Option<SendRecord>> {

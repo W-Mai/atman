@@ -53,6 +53,293 @@ async fn pending_count(worker: &FlowWorker, count: usize) {
     );
 }
 
+async fn begin_turn(worker: &FlowWorker) -> atman_rt::TurnLease<crate::event::AtmanUuid> {
+    worker
+        .request(|store| {
+            let lease = store
+                .state()
+                .clone()
+                .begin_turn(atman_rt::TurnId::now(), atman_rt::RunId::now())
+                .map_err(invalid)?;
+            store.transition(
+                store.state().revision(),
+                FlowTransition::TurnStarted {
+                    turn: lease.turn.clone(),
+                    run: lease.run.clone(),
+                },
+            )?;
+            Ok(lease)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn scoped_send_cancellation_ends_only_bound_waiters_and_preserves_delivery_reconciliation() {
+    use crate::flow_runtime::reply::ReplyWait;
+    use crate::flow_store::{
+        outbox::SendStatus,
+        waiter::{ReplyStatus, ReplyWaiter},
+    };
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let host = RuntimeHost::default();
+    let (source, scope) = owner(&root, FlowInstanceId::now()).await;
+    let (sender, _) = owner(&root, FlowInstanceId::now()).await;
+    let sender = rehost(&root, &host, sender).await;
+    let (recipient, _) = owner(&root, FlowInstanceId::now()).await;
+    let recipient = rehost(&root, &host, recipient).await;
+    let lease = begin_turn(&sender).await;
+    let mut sends = Vec::new();
+    for scoped in [true, true, false] {
+        let waiter = ReplyWaiter {
+            correlation: Uuid::new_v4(),
+            lease: lease.clone(),
+            sender: SenderIdentity::Flow(recipient.address().clone()),
+        };
+        let mut request = scoped_input(&recipient, scoped.then(|| scope.clone()));
+        request.sender = SenderIdentity::Flow(sender.address().clone());
+        request.correlation = Some(waiter.correlation);
+        sends.push((request, waiter));
+    }
+    // Source lookup failure must leave neither a send nor a registered wait.
+    assert!(
+        sender
+            .queue_send(
+                lease.clone(),
+                sends[0].0.clone(),
+                Some(sends[0].1.clone()),
+                |_| Ok(())
+            )
+            .await
+            .is_err()
+    );
+    sender
+        .request(|store| {
+            assert!(store.sends().is_empty());
+            assert!(store.reply_waiters().is_empty());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let source = rehost(&root, &host, source).await;
+    for (request, waiter) in &sends {
+        sender
+            .queue_send(lease.clone(), request.clone(), Some(waiter.clone()), |_| {
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+    // The first receiver ACK is lost; the second request has not reached the receiver.
+    let accepted = host.deliver(sends[0].0.clone(), |_| Ok(())).await.unwrap();
+    let pause = Uuid::new_v4().into();
+    sender
+        .transition(
+            sender.state().await.unwrap().revision(),
+            FlowTransition::ExecutionPaused { key: pause },
+        )
+        .await
+        .unwrap();
+    let waiting = tokio::spawn(
+        ReplyWait::new(sender.clone(), sends[0].1.clone()).completion(atman_rt::TurnId::now()),
+    );
+    source
+        .cancel_task_scope(scope.id, |_| Ok(()))
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.unwrap_err().to_string().contains("cancelled"));
+    sender
+        .request(|store| {
+            let waits = store.reply_waiters();
+            assert!(matches!(waits[0].status, ReplyStatus::Cancelled { .. }));
+            assert_eq!(waits[0].status, waits[1].status);
+            assert_eq!(waits[2].status, ReplyStatus::Pending);
+            assert_eq!(store.pending_sends().count(), 3);
+            assert!(!store.state().can_start_turn());
+            assert!(store.committed_inputs().is_empty());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let confirmed = host
+        .retry_send(sender.address().clone(), sends[0].0.request_id, |_| {
+            panic!("accepted retry")
+        })
+        .await
+        .unwrap();
+    assert!(confirmed.pending_reason.is_none());
+    assert!(
+        matches!(confirmed.record.status, SendStatus::Accepted { delivery, .. } if delivery.message_id == accepted.message_id)
+    );
+    let never_delivered = host
+        .retry_send(sender.address().clone(), sends[1].0.request_id, |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(never_delivered.pending_reason.is_some());
+    assert_eq!(never_delivered.record.status, SendStatus::PendingDelivery);
+    sender
+        .queue_send(
+            lease.clone(),
+            sends[0].0.clone(),
+            Some(sends[0].1.clone()),
+            |_| panic!("recorded retry"),
+        )
+        .await
+        .unwrap();
+    let mut new = sends[1].0.clone();
+    new.request_id = Uuid::new_v4();
+    new.correlation = None;
+    assert!(
+        sender
+            .queue_send(lease, new, None, |_| Ok(()))
+            .await
+            .is_err()
+    );
+    let address = sender.address().clone();
+    let lease = sends[0].1.lease.clone();
+    sender
+        .request(move |store| {
+            store.finish_turn(
+                lease,
+                crate::flow_store::completion::InvocationResult::Returned(
+                    crate::flow_store::completion::StoredValue::Unit,
+                ),
+            )
+        })
+        .await
+        .unwrap();
+    host.shutdown().await.unwrap();
+    let session = root.open_session(address.session_id.0).unwrap();
+    let restored = session.open_flow(&address.instance_id).unwrap();
+    assert!(matches!(
+        restored.reply_waiters()[0].status,
+        ReplyStatus::Cancelled { .. }
+    ));
+    assert_eq!(
+        restored.reply_waiters()[0].status,
+        restored.reply_waiters()[1].status
+    );
+    assert!(matches!(
+        restored.sends()[0].status,
+        SendStatus::Accepted { .. }
+    ));
+    assert_eq!(restored.sends()[1].status, SendStatus::PendingDelivery);
+}
+
+#[tokio::test]
+async fn reply_pickup_requires_the_original_send_scope_and_preserves_delivered_results() {
+    use crate::flow_runtime::reply::ReplyWait;
+    use crate::flow_store::{
+        completion::{InvocationResult, StoredValue},
+        inbox::FlowEventRef,
+        waiter::{ReplyStatus, ReplyWaiter},
+    };
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let host = RuntimeHost::default();
+    let (source, scope) = owner(&root, FlowInstanceId::now()).await;
+    let (sender, _) = owner(&root, FlowInstanceId::now()).await;
+    let sender = rehost(&root, &host, sender).await;
+    let (recipient, _) = owner(&root, FlowInstanceId::now()).await;
+    let recipient = rehost(&root, &host, recipient).await;
+    let lease = begin_turn(&sender).await;
+    let waiter = ReplyWaiter {
+        correlation: Uuid::new_v4(),
+        lease: lease.clone(),
+        sender: SenderIdentity::Flow(recipient.address().clone()),
+    };
+    let mut request = scoped_input(&recipient, Some(scope.clone()));
+    request.sender = SenderIdentity::Flow(sender.address().clone());
+    request.correlation = Some(waiter.correlation);
+    let registered = waiter.clone();
+    let queued_lease = lease.clone();
+    // Model recorded intent whose scope owner is absent from the current host.
+    sender
+        .request(move |store| {
+            store.queue_send(&queued_lease, request, Some(registered), |_| Ok(()))
+        })
+        .await
+        .unwrap();
+    let source_lease = begin_turn(&recipient).await;
+    let source_turn = source_lease.turn.clone();
+    let completion = recipient
+        .request(move |store| {
+            store.finish_turn(
+                source_lease,
+                InvocationResult::Returned(StoredValue::String("done".into())),
+            )
+        })
+        .await
+        .unwrap();
+    let event = FlowEventRef {
+        flow: recipient.address().clone(),
+        sequence: completion.receipt.sequence,
+        index: 0,
+    };
+    let mut reply = scoped_input(&sender, None);
+    reply.sender = waiter.sender.clone();
+    reply.correlation = Some(waiter.correlation);
+    reply.cause = Some(event.clone());
+    reply.payload = InboxPayload::FlowEvent {
+        source: event,
+        event: "turn_completed".into(),
+        content: serde_json::json!({
+            "subscriptions": [], "kind": "turn_completed", "completion": completion
+        }),
+    };
+    sender.accept_input(reply, |_| Ok(())).await.unwrap();
+    let mut waiting =
+        Box::pin(ReplyWait::new(sender.clone(), waiter.clone()).completion(source_turn.clone()));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut waiting)
+            .await
+            .is_err()
+    );
+    assert_eq!(sender.snapshot().await.unwrap().pending.len(), 1);
+    let source = rehost(&root, &host, source).await;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap(),
+        crate::Value::Str(value) if value == "done"
+    ));
+    source
+        .cancel_task_scope(scope.id, |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        ReplyWait::new(sender.clone(), waiter)
+            .completion(source_turn)
+            .await
+            .unwrap(),
+        crate::Value::Str(value) if value == "done"
+    ));
+    sender
+        .request(|store| {
+            assert!(matches!(
+                store.reply_waiters()[0].status,
+                ReplyStatus::Delivered { .. }
+            ));
+            assert_eq!(store.committed_inputs().len(), 1);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    sender
+        .request(move |store| {
+            store.finish_turn(lease, InvocationResult::Returned(StoredValue::Unit))
+        })
+        .await
+        .unwrap();
+    host.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn scoped_scheduler_wakes_on_source_recovery_and_preserves_ordinary_work() {
     use crate::flow_runtime::execution::TurnRequest;

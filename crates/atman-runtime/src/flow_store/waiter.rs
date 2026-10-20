@@ -53,6 +53,12 @@ impl ReplyWaiters {
             .map(|&index| &self.records[index])
     }
 
+    pub fn pending(&self) -> impl Iterator<Item = &ReplyRecord> {
+        self.pending
+            .iter()
+            .map(|correlation| &self.records[self.indices[correlation]])
+    }
+
     pub fn matches(&self, correlation: Uuid, envelope: &AcceptedEnvelope) -> bool {
         self.get(correlation).is_some_and(|record| {
             record.status == ReplyStatus::Pending
@@ -160,18 +166,49 @@ impl FlowStore {
         if record.status != ReplyStatus::Pending {
             return Ok(record.clone());
         }
-        let receipt = self.journal.commit(&[FlowFact::ReplyWaiterCancelled {
-            lease: lease.clone(),
-            correlation,
-        }])?;
-        self.inbox.invalidate();
-        self.inbox.waiters.cancel(correlation, receipt.clone());
-        self.cursor = receipt;
+        self.cancel_waiters(vec![record.waiter.clone()])?;
         Ok(self
             .inbox
             .waiters
             .get(correlation)
             .expect("cancelled waiter")
             .clone())
+    }
+
+    /// The host verifies source cancellation while holding the shared scope gates.
+    pub(crate) fn cancel_scoped_replies(
+        &mut self,
+        scope: &super::task_scope::TaskScopeRef,
+    ) -> io::Result<()> {
+        let waiters = self
+            .inbox
+            .waiters
+            .pending()
+            .filter(|record| self.reply_scope(record.waiter.correlation) == Some(scope))
+            .map(|record| record.waiter.clone())
+            .collect();
+        self.cancel_waiters(waiters)
+    }
+
+    fn cancel_waiters(&mut self, waiters: Vec<ReplyWaiter>) -> io::Result<()> {
+        if waiters.is_empty() {
+            return Ok(());
+        }
+        let facts: Vec<_> = waiters
+            .iter()
+            .map(|waiter| FlowFact::ReplyWaiterCancelled {
+                lease: waiter.lease.clone(),
+                correlation: waiter.correlation,
+            })
+            .collect();
+        let receipt = self.journal.commit(&facts)?;
+        self.inbox.invalidate();
+        for waiter in waiters {
+            self.inbox
+                .waiters
+                .cancel(waiter.correlation, receipt.clone());
+        }
+        self.cursor = receipt;
+        Ok(())
     }
 }

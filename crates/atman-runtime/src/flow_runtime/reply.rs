@@ -65,15 +65,17 @@ impl ReplyWait {
             let waiter = self.claim.waiter.clone();
             let expected = turn.clone();
             let worker = &self.claim.worker;
-            let pending = worker.snapshot().await.map_err(failed)?.pending;
-            let mut scopes = worker.resolve_pending_scopes(&pending).await;
+            let references = worker.pending_message_scopes().await.map_err(failed)?;
+            let mut scopes = worker.resolve_message_scopes(references).await;
             let checked = scopes.clone();
             let result = self
                 .claim
                 .worker
                 .request_scoped(scopes.dependencies.clone(), move |store, snapshot| {
                     checked.invalidate(store, snapshot)?;
-                    receive(store, &waiter, &expected, |input| {
+                    let eligible_wait =
+                        checked.eligible_scope(snapshot, store.reply_scope(waiter.correlation));
+                    receive(store, &waiter, &expected, eligible_wait, |input| {
                         checked.eligible(snapshot, &input.request)
                     })
                 })
@@ -132,6 +134,7 @@ fn receive(
     store: &mut FlowStore,
     waiter: &ReplyWaiter,
     turn: &TurnId,
+    eligible_wait: bool,
     eligible: impl FnMut(&crate::flow_store::inbox::AcceptedEnvelope) -> bool,
 ) -> io::Result<Option<CommittedCompletion>> {
     let registered = store
@@ -172,6 +175,9 @@ fn receive(
         } else {
             Err(invalid("committed reply belongs to another source turn"))
         };
+    }
+    if !eligible_wait {
+        return Ok(None);
     }
     let Some(reserved) = store.reserve_reply_input(&waiter.lease, waiter.correlation, eligible)?
     else {
