@@ -20,6 +20,195 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn durable_timers_commit_once_across_pause_recovery_and_cancellation() {
+    use atman_runtime::flow_store::timer::{Timer, TimerStatus};
+    use atman_runtime::flow_store::view::FlowUpdate;
+    use chrono::{Duration, Utc};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let id = description.address.instance_id.clone();
+    let mut flow = session.create_flow(description).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let pause = Uuid::new_v4().into();
+    change(&mut flow, FlowTransition::ExecutionPaused { key: pause });
+    let at = Utc::now();
+    let timers: Vec<_> = (0..3)
+        .map(|offset| Timer {
+            id: Uuid::new_v4(),
+            due_at: at + Duration::seconds(offset),
+            content: serde_json::json!({"offset": offset}),
+        })
+        .collect();
+    for timer in &timers {
+        flow.schedule_timer(timer.clone()).unwrap();
+    }
+    let before = flow.cursor().clone();
+    assert_eq!(flow.next_timer_deadline(), Some(at));
+    assert_eq!(
+        flow.fire_due_timers(at - Duration::seconds(1)).unwrap(),
+        before
+    );
+    drop(flow);
+    let inspection = session.inspect_flow(&id).unwrap();
+    assert_eq!(inspection.pending_inputs, 0);
+    assert_eq!(inspection.timers.len(), 3);
+    assert!(
+        inspection
+            .timers
+            .iter()
+            .all(|record| record.status == TimerStatus::Scheduled)
+    );
+    let mut flow = session.open_flow(&id).unwrap();
+    assert_eq!(flow.cursor(), &before);
+    assert_eq!(flow.pending_inputs().count(), 0);
+
+    flow.cancel_timer(timers[2].id).unwrap();
+    let before_delivery = flow.cursor().clone();
+    let delivery = flow.fire_due_timers(at + Duration::seconds(10)).unwrap();
+    assert!(!flow.state().can_start_turn());
+    let pending: Vec<_> = flow.pending_inputs().cloned().collect();
+    assert_eq!(pending.len(), 2);
+    for (envelope, timer) in pending.iter().zip(&timers) {
+        assert_eq!(
+            envelope.request.payload,
+            InboxPayload::Timer {
+                timer: timer.id,
+                due_at: timer.due_at,
+                content: timer.content.clone()
+            }
+        );
+        assert_ne!(envelope.request.request_id, timer.id);
+    }
+    let updates = flow
+        .read_updates(Some(&before_delivery), 10.try_into().unwrap())
+        .unwrap();
+    assert_eq!(updates.batches.len(), 1);
+    assert!(
+        matches!(&updates.batches[0].facts[..], [FlowUpdate::TimersFired(batch)] if batch.envelopes == pending)
+    );
+    assert_eq!(
+        flow.fire_due_timers(at + Duration::days(1)).unwrap(),
+        delivery
+    );
+    assert_eq!(flow.cancel_timer(timers[0].id).unwrap(), delivery);
+    assert_eq!(
+        flow.schedule_timer(timers[0].clone()).unwrap().status,
+        TimerStatus::Fired
+    );
+    assert_eq!(
+        flow.schedule_timer(timers[2].clone()).unwrap().status,
+        TimerStatus::Cancelled
+    );
+    let mut conflict = timers[0].clone();
+    conflict.content = serde_json::json!("different");
+    assert!(flow.schedule_timer(conflict).is_err());
+    assert_eq!(flow.cursor(), &delivery);
+    drop(flow);
+    let mut flow = session.open_flow(&id).unwrap();
+    assert_eq!(flow.pending_inputs().cloned().collect::<Vec<_>>(), pending);
+    assert_eq!(flow.next_timer_deadline(), None);
+    assert_eq!(
+        flow.fire_due_timers(at + Duration::days(2)).unwrap(),
+        delivery
+    );
+    change(&mut flow, FlowTransition::ExecutionResumed { key: pause });
+    let remaining = Timer {
+        id: Uuid::new_v4(),
+        ..timers[0].clone()
+    };
+    flow.schedule_timer(remaining.clone()).unwrap();
+    change(&mut flow, FlowTransition::CloseRequested);
+    assert_eq!(
+        flow.schedule_timer(remaining.clone()).unwrap().status,
+        TimerStatus::Cancelled
+    );
+    assert_eq!(flow.next_timer_deadline(), None);
+    assert!(flow.fire_due_timers(at + Duration::days(2)).is_err());
+    assert!(
+        flow.schedule_timer(Timer {
+            id: Uuid::new_v4(),
+            ..remaining
+        })
+        .is_err()
+    );
+    drop(flow);
+    let flow = session.open_flow(&id).unwrap();
+    assert_eq!(flow.next_timer_deadline(), None);
+}
+
+#[test]
+fn durable_timers_replay_rejects_incomplete_or_mismatched_atomic_delivery() {
+    use atman_runtime::event_log::journal::Journal;
+    use atman_runtime::flow_store::timer::{Timer, TimerDelivery};
+    use chrono::{Duration, Utc};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let id = description.address.instance_id.clone();
+    let mut flow = session.create_flow(description).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let at = Utc::now();
+    for _ in 0..2 {
+        flow.schedule_timer(Timer {
+            id: Uuid::new_v4(),
+            due_at: at,
+            content: serde_json::json!("wake"),
+        })
+        .unwrap();
+    }
+    let path = flow.dir().join("events.jsonl");
+    let scheduled = std::fs::read(&path).unwrap();
+    flow.fire_due_timers(at).unwrap();
+    let delivery = TimerDelivery {
+        at,
+        envelopes: flow.pending_inputs().cloned().collect(),
+    };
+    drop(flow);
+    for case in 0..6 {
+        std::fs::write(&path, &scheduled).unwrap();
+        let mut invalid = delivery.clone();
+        match case {
+            0 => {
+                invalid.envelopes.pop();
+            }
+            1 => {
+                invalid.at -= Duration::seconds(1);
+            }
+            2 => {
+                invalid.envelopes[0].id = invalid.envelopes[1].id;
+            }
+            3 => {
+                invalid.envelopes[0].request.request_id = Uuid::new_v4();
+            }
+            4 => {
+                invalid.envelopes[0].request.recipient.instance_id = FlowInstanceId::now();
+            }
+            _ => {}
+        }
+        let mut facts = vec![serde_json::json!({"type": "timers_fired", "data": invalid})];
+        if case == 5 {
+            facts.push(facts[0].clone());
+        }
+        let (mut journal, _) =
+            Journal::open::<serde_json::Value>(&path, id.0.0, |_, _| Ok(())).unwrap();
+        journal.commit(&facts).unwrap();
+        drop(journal);
+        let bytes = std::fs::read(&path).unwrap();
+        let inspect = session.inspect_flow(&id).unwrap_err();
+        let reopen = session.open_flow(&id).err().unwrap();
+        assert_eq!(inspect.to_string(), reopen.to_string(), "case {case}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "case {case}");
+    }
+}
+
+#[test]
 fn flow_archive_rejects_incomplete_history_without_repair_or_catalog_writes() {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();

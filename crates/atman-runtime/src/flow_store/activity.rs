@@ -37,6 +37,8 @@ pub(super) fn observe(
             FlowFact::PlanningUpdated(record) => Some(record.at),
             FlowFact::FlowSubscribed(record) => Some(record.registered_at),
             FlowFact::ProcessWatchRegistered(record) => Some(record.registered_at),
+            FlowFact::TimerScheduled(record) => Some(record.scheduled_at),
+            FlowFact::TimersFired(record) => Some(record.at),
             FlowFact::WatcherReplaced(record) => Some(match &record.replacement {
                 WatchRegistration::Flow(record) => record.registered_at,
                 WatchRegistration::Process(record) => record.registered_at,

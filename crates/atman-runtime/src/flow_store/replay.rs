@@ -13,6 +13,7 @@ pub(super) struct FlowReplay {
     pub(super) publications: publication::Publications,
     pub(super) subscriptions: subscription::Subscriptions,
     pub(super) process_watches: process_watch::ProcessWatches,
+    pub(super) timers: super::timer::Timers,
     pub(super) watch_replacements: super::watch_edit::WatchReplacements,
     pub(super) activation: Option<(launch::Activation, CommitReceipt)>,
     pub(super) workspace: Option<workspace::WorkspaceRequest>,
@@ -216,6 +217,20 @@ impl FlowReplay {
                         .validate_expiry(&expiry, inbox, address)?;
                     self.process_watches.apply_expiry(*expiry, inbox, &receipt);
                 }
+                (Some((_, state, _)), FlowFact::TimerScheduled(record)) => {
+                    if !state.accepts_input() {
+                        return Err(invalid("timer recipient is unavailable"));
+                    }
+                    self.timers.register(*record)?;
+                }
+                (Some(_), FlowFact::TimerCancelled(id)) => self.timers.cancel(id)?,
+                (Some((_, state, inbox)), FlowFact::TimersFired(delivery)) => {
+                    if !state.accepts_input() {
+                        return Err(invalid("timer recipient is unavailable"));
+                    }
+                    self.timers.validate_delivery(&delivery, inbox, address)?;
+                    self.timers.apply_delivery(*delivery, inbox, &receipt);
+                }
                 (Some((_, state, inbox)), FlowFact::SendQueued(intent)) => {
                     self.outbox.validate(state, &intent)?;
                     if let Some(reply) = &intent.reply {
@@ -274,6 +289,7 @@ impl FlowReplay {
                     inbox.close(&receipt);
                     self.subscriptions.close();
                     self.process_watches.close();
+                    self.timers.close();
                 }
             }
         }

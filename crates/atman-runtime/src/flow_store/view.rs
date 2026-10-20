@@ -182,6 +182,9 @@ pub enum FlowUpdate {
     WatcherReplaced(Box<super::watch_edit::WatcherReplacement>),
     ProcessObserved(Box<process_watch::ProcessObservation>),
     ProcessWatchesExpired(Box<process_watch::ProcessWatchExpiry>),
+    TimerScheduled(Box<super::timer::TimerRecord>),
+    TimerCancelled(Uuid),
+    TimersFired(Box<super::timer::TimerDelivery>),
 }
 
 impl From<FlowFact> for FlowUpdate {
@@ -241,6 +244,9 @@ impl From<FlowFact> for FlowUpdate {
             FlowFact::WatcherReplaced(value) => Self::WatcherReplaced(value),
             FlowFact::ProcessObserved(value) => Self::ProcessObserved(value),
             FlowFact::ProcessWatchesExpired(value) => Self::ProcessWatchesExpired(value),
+            FlowFact::TimerScheduled(value) => Self::TimerScheduled(value),
+            FlowFact::TimerCancelled(value) => Self::TimerCancelled(value),
+            FlowFact::TimersFired(value) => Self::TimersFired(value),
         }
     }
 }

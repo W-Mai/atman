@@ -26,6 +26,7 @@ pub mod publication;
 pub mod relation;
 mod replay;
 pub mod subscription;
+pub mod timer;
 pub mod trace;
 pub mod view;
 pub mod waiter;
@@ -259,6 +260,9 @@ enum FlowFact {
     WatcherReplaced(Box<watch_edit::WatcherReplacement>),
     ProcessObserved(Box<process_watch::ProcessObservation>),
     ProcessWatchesExpired(Box<process_watch::ProcessWatchExpiry>),
+    TimerScheduled(Box<timer::TimerRecord>),
+    TimerCancelled(Uuid),
+    TimersFired(Box<timer::TimerDelivery>),
     DeliveryConfirmed {
         request_id: Uuid,
         delivery: outbox::DeliveryReceipt,
@@ -395,6 +399,9 @@ impl FlowFact {
                     | Self::WatcherReplaced(_)
                     | Self::ProcessObserved(_)
                     | Self::ProcessWatchesExpired(_)
+                    | Self::TimerScheduled(_)
+                    | Self::TimerCancelled(_)
+                    | Self::TimersFired(_)
             )
         }) {
             return if facts.len() == 1
@@ -611,6 +618,7 @@ pub struct FlowInspection {
     pub journal: crate::event_log::journal::JournalInspection,
     pub relations: Vec<relation::FlowRelation>,
     pub watchers: Vec<watch_view::WatchRecord>,
+    pub timers: Vec<timer::TimerRecord>,
     pub workspace: Option<workspace::WorkspaceRequest>,
     pub goal: Option<crate::memory::goal::GoalRecord>,
     pub pending_inputs: usize,
@@ -773,6 +781,7 @@ fn inspect_registered_flow_with(
         journal,
         relations,
         watchers,
+        timers: replay.timers.records().cloned().collect(),
         workspace: replay.workspace,
         goal: replay.goals.current().cloned(),
         pending_inputs: inbox.pending_entries().count(),
@@ -1249,6 +1258,7 @@ pub struct FlowStore {
     publications: publication::Publications,
     subscriptions: subscription::Subscriptions,
     process_watches: process_watch::ProcessWatches,
+    timers: timer::Timers,
     watch_replacements: watch_edit::WatchReplacements,
     activation: Option<(launch::Activation, CommitReceipt)>,
     workspace: Option<workspace::WorkspaceRequest>,
@@ -1316,6 +1326,7 @@ impl FlowStore {
             publications: publication::Publications::default(),
             subscriptions: subscription::Subscriptions::default(),
             process_watches: process_watch::ProcessWatches::default(),
+            timers: timer::Timers::default(),
             watch_replacements: watch_edit::WatchReplacements::default(),
             activation: None,
             workspace: None,
@@ -1350,6 +1361,7 @@ impl FlowStore {
             publications,
             subscriptions,
             process_watches,
+            timers,
             watch_replacements,
             activation,
             workspace,
@@ -1384,6 +1396,7 @@ impl FlowStore {
             publications,
             subscriptions,
             process_watches,
+            timers,
             watch_replacements,
             activation,
             workspace,
@@ -1501,6 +1514,7 @@ impl FlowStore {
             self.inbox.close(&cursor);
             self.subscriptions.close();
             self.process_watches.close();
+            self.timers.close();
         }
         self.cursor = cursor;
         self.refresh_projection();
