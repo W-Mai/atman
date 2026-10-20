@@ -348,7 +348,7 @@ atman daemon start | stop | status | run [--reasoning <level>] [--image <path>].
 atman flow run <name> --revision <id-or-hash> [--mock] [--ephemeral]
 atman flow snapshot | versions | diff | rollback | lint | test
 atman sync init | push | pull      # git-based cross-machine memory sync
-atman migrate list | import [--from opencode|kiro]
+atman migrate list | import [--from opencode|kiro-cli]
 atman doctor [--fix]
 ```
 

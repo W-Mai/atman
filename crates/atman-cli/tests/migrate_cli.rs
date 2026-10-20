@@ -373,12 +373,16 @@ fn migrate_import_picker_empty_pick_aborts() {
 }
 
 #[test]
-fn migrate_import_into_new_writes_session_events() {
+fn migrate_import_into_new_publishes_self_contained_read_only_history() {
     let tmp = tempfile::tempdir().unwrap();
     seed_fixture(tmp.path());
     let storage = tmp.path().to_str().unwrap();
     let data = tmp.path().join("atman_data");
     std::fs::create_dir_all(&data).unwrap();
+    let config = tmp.path().join("config");
+    std::fs::create_dir(&config).unwrap();
+    std::fs::write(config.join("config.toml"), "invalid [ configuration").unwrap();
+    std::fs::write(data.join("config.toml"), "# untouched legacy config\n").unwrap();
 
     let out = Command::new(atman_bin())
         .args([
@@ -394,7 +398,8 @@ fn migrate_import_into_new_writes_session_events() {
         ])
         .current_dir(tmp.path())
         .env("ATMAN_DATA_DIR", data.to_str().unwrap())
-        .env("ATMAN_DISABLE_MIGRATION", "1")
+        .env("ATMAN_CONFIG_DIR", &config)
+        .env_remove("ATMAN_DISABLE_MIGRATION")
         .output()
         .expect("spawn atman");
     assert!(
@@ -404,35 +409,85 @@ fn migrate_import_into_new_writes_session_events() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("replayed 2 messages"),
-        "want replay count, got: {stdout}"
+        stdout.contains("archived 2 messages"),
+        "want archive count, got: {stdout}"
     );
 
-    let sessions_root = data.join("sessions");
-    let session_dirs: Vec<_> = std::fs::read_dir(&sessions_root)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
+    use atman_runtime::flow_store::RuntimeStore;
+    let ids = RuntimeStore::session_ids(&data).unwrap();
+    assert_eq!(ids.len(), 1);
+    let session = RuntimeStore::inspect_session(&data, ids[0]).unwrap();
+    let flow = session.projection.default_flow.as_ref().unwrap();
+    let view = session.archived_view(flow).unwrap().unwrap();
+    let archive = view.transcript().archived_transcript().unwrap();
+    let texts: Vec<_> = archive
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            atman_runtime::TranscriptEntry::Message { message, .. } => Some(message.text_concat()),
+            _ => None,
+        })
         .collect();
+    assert_eq!(texts, ["please investigate", "here is what I found"]);
+    assert!(archive.unparsed.is_empty());
+    let snapshot = data
+        .join("runtime-v1/sessions")
+        .join(ids[0].to_string())
+        .join("artifacts/legacy-events.jsonl");
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(snapshot)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records[0]["ts"], "1970-01-01T00:00:01.001Z");
+    assert_eq!(records[1]["imported_from"]["source"], "opencode");
+    assert_eq!(records[1]["imported_from"]["session_id"], "ses_abc");
+    assert_eq!(records[1]["imported_from"]["agent"], "explore");
+    assert_eq!(records[1]["imported_from"]["model"], "opencode/big-pickle");
+    assert_eq!(records[0]["turn_id"], records[1]["turn_id"]);
+    assert!(!data.join("sessions").exists());
+    assert!(!data.join("runtime-v1/host").exists());
     assert_eq!(
-        session_dirs.len(),
-        1,
-        "want one session dir: {session_dirs:?}"
+        std::fs::read_to_string(data.join("config.toml")).unwrap(),
+        "# untouched legacy config\n"
     );
-    let events = std::fs::read_to_string(session_dirs[0].join("events.jsonl")).unwrap();
-    let user_hits = events
-        .lines()
-        .filter(|l| l.contains("\"type\":\"user_msg\""))
-        .count();
-    let asst_hits = events
-        .lines()
-        .filter(|l| l.contains("\"type\":\"assistant_msg\""))
-        .count();
-    assert_eq!(user_hits, 1, "want 1 user_msg event: {events}");
-    assert_eq!(asst_hits, 1, "want 1 assistant_msg event: {events}");
+    assert_eq!(
+        std::fs::read_to_string(config.join("config.toml")).unwrap(),
+        "invalid [ configuration"
+    );
+
+    // The published archive retains history after both adapter input and its
+    // private normalized snapshot have disappeared.
     assert!(
-        events.contains("migrated from opencode"),
-        "want provenance tag in event body: {events}"
+        !session
+            .projection
+            .migrated_from
+            .as_ref()
+            .unwrap()
+            .source
+            .path
+            .exists()
+    );
+    for part in ["session", "message", "part"] {
+        std::fs::remove_dir_all(tmp.path().join(part)).unwrap();
+    }
+    let output = Command::new(atman_bin())
+        .args(["--continue", &ids[0].to_string()])
+        .env("ATMAN_DATA_DIR", &data)
+        .env("ATMAN_CONFIG_DIR", &config)
+        .env("ATMAN_DISABLE_MIGRATION", "1")
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("read-only") && text.contains("here is what I found"),
+        "{text}"
     );
 }
 

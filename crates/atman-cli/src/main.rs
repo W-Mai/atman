@@ -418,12 +418,7 @@ async fn async_main() -> Result<()> {
         }
         _ => {}
     }
-    if let Some(Cmd::Migrate { action }) = &cli.cmd
-        && matches!(
-            action,
-            MigrateAction::Inspect { .. } | MigrateAction::Archive { .. }
-        )
-    {
+    if let Some(Cmd::Migrate { action }) = &cli.cmd {
         return cmd_migrate(action.clone()).await;
     }
     if let Some(Cmd::Upgrade {
@@ -4295,19 +4290,16 @@ async fn cmd_migrate(action: MigrateAction) -> Result<()> {
                 return Ok(());
             }
             let root = data_dir()?;
-            let session = Session::open_with_trust(&root, load_global_trust_config()?)
-                .with_context(|| format!("open a fresh atman session under {}", root.display()))?;
-            let sid = session.id().to_string();
-            let events = session.events_path().map(|p| p.display().to_string());
-            replay_messages_into(&session, source.source_tag(), &messages);
-            session.shutdown().await;
+            let count = messages.len();
+            let source_tag = source.source_tag();
+            let external_session = resolved_id.clone();
+            let sid = tokio::task::spawn_blocking(move || {
+                history_migration::import_messages(&root, source_tag, &external_session, &messages)
+            })
+            .await??;
             println!(
-                "[atman] migrate: replayed {} messages from {from}/{resolved_id} into new session {sid}",
-                messages.len()
+                "[atman] migrate: archived {count} messages from {from}/{resolved_id} into new session {sid}"
             );
-            if let Some(p) = events {
-                println!("[atman] migrate: events → {p}");
-            }
             Ok(())
         }
     }
@@ -4347,39 +4339,6 @@ fn pick_session_interactively(
         );
     }
     Ok(sessions[idx - 1].id.clone())
-}
-
-fn replay_messages_into(
-    session: &Session,
-    source_tag: &str,
-    messages: &[migrate_source::ImportedMessage],
-) {
-    for m in messages {
-        let turn_id = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
-        let text = if let Some(agent) = &m.agent {
-            format!("[migrated from {source_tag}, agent={agent}]\n{}", m.text)
-        } else {
-            format!("[migrated from {source_tag}]\n{}", m.text)
-        };
-        let msg = match m.role {
-            migrate_source::MessageRole::User => {
-                atman_runtime::message::Message::user_text(turn_id, text)
-            }
-            migrate_source::MessageRole::Assistant => {
-                atman_runtime::message::Message::assistant_text(turn_id, text)
-            }
-            migrate_source::MessageRole::System => {
-                atman_runtime::message::Message::system_text(turn_id, text)
-            }
-            migrate_source::MessageRole::Tool => atman_runtime::message::Message {
-                role: atman_runtime::message::MessageRole::Tool,
-                parts: vec![atman_runtime::message::MessagePart::Text { text }],
-                turn_id,
-                origin: atman_runtime::message::MessageOrigin::User,
-            },
-        };
-        session.append_message(msg, None);
-    }
 }
 
 fn build_migration_source(

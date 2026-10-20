@@ -44,6 +44,14 @@ The migration retains an exact source copy in the destination session's `artifac
 
 Migration work stays under `runtime-v1/.migrations/<destination>/work` until every flow is complete and verified against the source map. Retries resume after committed record batches. Source changes, invalid retained data, and occupied destinations stop publication without overwriting history. A `LegacyImported` session fact records source identity, owner mappings, record counts, and final flow cursors. The source is verified again before the complete directory is atomically published into `runtime-v1/sessions`. Journal handles are closed before the rename. Reading the imported history no longer requires the original source or project directory.
 
+## External transcript import
+
+`atman migrate import <source-session> --from opencode|kiro-cli --storage <source-directory> --into new` publishes the source adapter’s text transcript as a new read-only Session and History Flow under `runtime-v1/sessions`. Each invocation requests a separate destination. Open its printed Session ID with `atman --continue <id>` through the same history view used by native archives. `--out <path>` writes a normalized JSONL transcript instead of creating a Session.
+
+Import converts loaded messages into a private immutable event snapshot and uses the archive transaction to retain and atomically publish it. User messages start new historical turn groups; subsequent assistant, tool, and system records preserve their order and roles. Message text remains unchanged. Separate `imported_from` fields retain the source kind, external Session ID, agent, model, and source timestamp. Known timestamps retain their original value; missing timestamps remain absent. These are retained historical records, not live input, tool execution, or final-answer notifications.
+
+The published archive includes the complete normalized snapshot and does not require the external storage or temporary file for reading. The adapters currently import text and message metadata; they do not preserve unparsed non-text parts or claim a byte-for-byte copy of external source storage. Conversion failures do not publish a partial Session. Import does not load execution configuration, create project authority, or migrate unrelated user configuration. Stopped-source confirmation and asset retention for original Atman archives remain part of the separate `migrate archive` command.
+
 ## Session and flow storage
 
 ### Project discovery and deletion
