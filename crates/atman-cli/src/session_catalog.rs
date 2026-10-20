@@ -1,10 +1,110 @@
-//! Read-only CLI views of recorded persistent session catalogs.
+//! CLI views and project association changes for recorded session catalogs.
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use atman_runtime::flow_store::RuntimeStore;
 use uuid::Uuid;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+pub(crate) enum SessionSource {
+    Persistent,
+    Legacy,
+}
+
+fn move_target(
+    root: &Path,
+    sid: &str,
+    source: Option<SessionSource>,
+) -> Result<(String, SessionSource)> {
+    let exact = Uuid::parse_str(sid).ok().map(|id| id.to_string());
+    let matches = |name: &str| {
+        exact
+            .as_ref()
+            .map_or_else(|| name.starts_with(sid), |id| name == id)
+    };
+    let mut targets = Vec::new();
+    if source != Some(SessionSource::Legacy) {
+        targets.extend(
+            RuntimeStore::session_ids(root)?
+                .into_iter()
+                .map(|id| id.to_string())
+                .filter(|id| matches(id))
+                .map(|id| (id, SessionSource::Persistent)),
+        );
+    }
+    if source != Some(SessionSource::Persistent) {
+        match std::fs::read_dir(root.join("sessions")) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if entry.file_type()?.is_dir() && matches(&name) {
+                        targets.push((name, SessionSource::Legacy));
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    match targets.len() {
+        0 => bail!("no session found matching `{sid}` in the selected storage source"),
+        1 => Ok(targets.remove(0)),
+        _ => bail!(
+            "ambiguous session `{sid}`: {} matching records; use a full ID and --source persistent or --source legacy",
+            targets.len()
+        ),
+    }
+}
+
+pub(crate) async fn move_project(
+    root: &Path,
+    sid: &str,
+    cwd: &Path,
+    source: Option<SessionSource>,
+) -> Result<()> {
+    let root = root.to_owned();
+    let sid = sid.to_owned();
+    let cwd = cwd.to_owned();
+    tokio::task::spawn_blocking(move || {
+        ensure!(cwd.is_dir(), "not a directory: {}", cwd.display());
+        let cwd = cwd.canonicalize().with_context(|| format!("resolve path {}", cwd.display()))?;
+        let (id, source) = move_target(&root, &sid, source)?;
+        match source {
+            SessionSource::Persistent => {
+                let store = RuntimeStore::open(&root)?;
+                let mut session = store.open_session(Uuid::parse_str(&id)?)
+                    .context("open session catalog for editing; if another host owns it, use Move Session in that host")?;
+                let atman_runtime::flow_store::SessionConfiguration::Atman(configuration) =
+                    &session.projection().descriptor.configuration else {
+                        bail!("session uses host-provided configuration; change its project through that host");
+                    };
+                let config = atman_runtime::config_hub::ConfigHub::from_source(configuration)?;
+                let project = atman_runtime::storage::ProjectContext::resolve(&config, &cwd, &root)?;
+                session.set_project(&session.cursor().clone(), Some(project))?;
+                println!("persistent session {id} project: {}", cwd.display());
+            }
+            SessionSource::Legacy => {
+                let dir = root.join("sessions").join(&id);
+                let mut meta: atman_runtime::session_meta::SessionMeta =
+                    match std::fs::read(dir.join("meta.json")) {
+                        Ok(bytes) => serde_json::from_slice(&bytes)
+                            .context("read legacy session metadata before changing its project")?,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+                        Err(error) => return Err(error.into()),
+                    };
+                meta.rebase(&cwd);
+                meta.save(&dir)?;
+                println!("legacy session {id} moved to {}", cwd.display());
+                if let Some(project) = meta.project_root {
+                    println!("  project_root: {}", project.display());
+                }
+            }
+        }
+        Ok(())
+    }).await?
+}
 
 pub(crate) fn inspect(
     root: &Path,

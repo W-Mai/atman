@@ -4,7 +4,7 @@ use atman_runtime::{
     config_hub::ConfigHub,
     flow_store::{
         EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowTransition, RuntimeStore,
-        SessionDescriptor,
+        SessionConfiguration, SessionDescriptor,
     },
     source_program::RevisionBundle,
     storage::ProjectContext,
@@ -18,6 +18,185 @@ fn run(root: &Path, config: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .output()
         .unwrap()
+}
+
+#[test]
+fn project_moves_preserve_flow_bindings_and_require_an_unambiguous_storage_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let config = temp.path().join("recorded-config");
+    let other_config = temp.path().join("launcher-config");
+    let a = temp.path().join("a");
+    let b = temp.path().join("b");
+    for path in [&config, &other_config, &a, &b] {
+        std::fs::create_dir(path).unwrap();
+    }
+    std::fs::write(config.join("config.toml"), "[storage]\nscope = \"local\"\n").unwrap();
+    std::fs::write(
+        other_config.join("config.toml"),
+        "[storage]\nscope = \"global\"\n",
+    )
+    .unwrap();
+    let hub = ConfigHub::from_config_dir(&config);
+    let original = ProjectContext::resolve(&hub, &a, &data).unwrap();
+    let destination = ProjectContext::resolve(&hub, &b, &data).unwrap();
+    let root = RuntimeStore::open(&data).unwrap();
+    let id = Uuid::new_v4();
+    let descriptor = SessionDescriptor {
+        id,
+        project: Some(original.clone()),
+        configuration: SessionConfiguration::Atman(hub.source()),
+        title: "Unchanged title".into(),
+    };
+    let mut owner = root.create_session(descriptor.clone()).unwrap();
+    let entry = FlowDescriptor {
+        address: FlowRef {
+            session_id: id.into(),
+            instance_id: FlowInstanceId::now(),
+        },
+        creation_request: Uuid::new_v4(),
+        created_by: None,
+        content: EntrySnapshot {
+            path: a.join("main.at"),
+            name: "main".into(),
+            bundle: RevisionBundle {
+                entry: "entry:main.at".into(),
+                sources: BTreeMap::from([(
+                    "entry:main.at".into(),
+                    "flow main() -> int { return 7 }".into(),
+                )]),
+                edges: BTreeMap::new(),
+            },
+        }
+        .into(),
+    };
+    let mut flow = owner.create_flow(entry.clone()).unwrap();
+    flow.transition(flow.state().revision(), FlowTransition::Activated)
+        .unwrap();
+    flow.transition(
+        flow.state().revision(),
+        FlowTransition::TurnStarted {
+            turn: atman_rt::TurnId::now(),
+            run: atman_rt::RunId::now(),
+        },
+    )
+    .unwrap();
+    let flow_log = flow.dir().join("events.jsonl");
+    let before = std::fs::read(&flow_log).unwrap();
+    let catalog_log = owner.dir().join("events.jsonl");
+    let catalog_before = std::fs::read(&catalog_log).unwrap();
+    let id_text = id.to_string();
+    let move_to = |target: &str, path: &Path, source: Option<&str>| {
+        let mut args = vec!["session", "move", target, path.to_str().unwrap()];
+        if let Some(source) = source {
+            args.extend(["--source", source]);
+        }
+        run(&data, &other_config, &args)
+    };
+
+    // An attached catalog owner must not be bypassed by a second CLI writer.
+    assert!(!move_to(&id_text, &b, None).status.success());
+    assert_eq!(std::fs::read(&catalog_log).unwrap(), catalog_before);
+    drop(owner);
+    assert!(!move_to(&id_text, &b, None).status.success());
+    drop(flow);
+    let moved = move_to(&id_text[..8], &b, None);
+    assert!(
+        moved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    let mut owner = root.open_session(id).unwrap();
+    assert_eq!(owner.projection().descriptor, descriptor);
+    assert_eq!(owner.projection().project.as_ref(), Some(&destination));
+    assert_eq!(
+        owner.projection().flows[0].project.as_ref(),
+        Some(&original)
+    );
+    assert_eq!(std::fs::read(&flow_log).unwrap(), before);
+    let mut next = entry;
+    next.address.instance_id = FlowInstanceId::now();
+    next.creation_request = Uuid::new_v4();
+    let next_flow = owner.create_flow(next).unwrap();
+    assert_eq!(
+        owner.projection().flows[1].project.as_ref(),
+        Some(&destination)
+    );
+    drop(next_flow);
+    drop(owner);
+    let after = std::fs::read(&catalog_log).unwrap();
+    assert!(
+        move_to(&id_text.to_uppercase(), &b, Some("persistent"))
+            .status
+            .success()
+    );
+    assert_eq!(std::fs::read(&catalog_log).unwrap(), after);
+
+    let legacy = data.join("sessions").join(&id_text);
+    std::fs::create_dir_all(&legacy).unwrap();
+    let meta = atman_runtime::session_meta::SessionMeta {
+        title: Some("Original history".into()),
+        ..Default::default()
+    };
+    meta.save(&legacy).unwrap();
+    let legacy_before = std::fs::read(legacy.join("meta.json")).unwrap();
+    let ambiguous = move_to(&id_text, &a, None);
+    assert!(!ambiguous.status.success());
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous session"));
+    assert_eq!(std::fs::read(&catalog_log).unwrap(), after);
+    assert_eq!(
+        std::fs::read(legacy.join("meta.json")).unwrap(),
+        legacy_before
+    );
+    assert!(move_to(&id_text, &a, Some("persistent")).status.success());
+    assert_eq!(
+        std::fs::read(legacy.join("meta.json")).unwrap(),
+        legacy_before
+    );
+    let after = std::fs::read(&catalog_log).unwrap();
+    assert!(move_to(&id_text, &b, Some("legacy")).status.success());
+    let meta = atman_runtime::session_meta::SessionMeta::load(&legacy).unwrap();
+    assert_eq!(meta.title.as_deref(), Some("Original history"));
+    assert_eq!(
+        meta.start_path.as_deref(),
+        Some(b.canonicalize().unwrap().as_path())
+    );
+    assert_eq!(std::fs::read(&catalog_log).unwrap(), after);
+    assert_eq!(std::fs::read(&flow_log).unwrap(), before);
+    assert!(
+        !move_to(&id_text, &temp.path().join("missing"), Some("persistent"))
+            .status
+            .success()
+    );
+    assert!(
+        !move_to(&Uuid::new_v4().to_string(), &a, Some("persistent"))
+            .status
+            .success()
+    );
+
+    // A corrupt original history must not silently lose metadata during a move.
+    std::fs::write(legacy.join("meta.json"), "broken").unwrap();
+    assert!(!move_to(&id_text, &a, Some("legacy")).status.success());
+    assert_eq!(
+        std::fs::read_to_string(legacy.join("meta.json")).unwrap(),
+        "broken"
+    );
+    let external = Uuid::new_v4();
+    let external_owner = root
+        .create_session(SessionDescriptor {
+            id: external,
+            project: None,
+            configuration: Default::default(),
+            title: "External host".into(),
+        })
+        .unwrap();
+    let external_log = external_owner.dir().join("events.jsonl");
+    let external_before = std::fs::read(&external_log).unwrap();
+    drop(external_owner);
+    let rejected = move_to(&external.to_string(), &a, Some("persistent"));
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("host-provided configuration"));
+    assert_eq!(std::fs::read(external_log).unwrap(), external_before);
 }
 
 #[test]

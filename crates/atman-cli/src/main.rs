@@ -337,8 +337,14 @@ enum SessionAction {
     New,
     Move {
         session_id: String,
-        /// New working directory for the session.
+        /// New project association; existing persistent flows retain their working directories.
         cwd: PathBuf,
+        #[arg(
+            long,
+            value_enum,
+            help = "Select storage when persistent and legacy session IDs overlap"
+        )]
+        source: Option<session_catalog::SessionSource>,
     },
     Gc,
     Sanitize {
@@ -500,8 +506,13 @@ async fn async_main() -> Result<()> {
             action: SessionAction::New,
         }) => cmd_session_new().await,
         Some(Cmd::Session {
-            action: SessionAction::Move { session_id, cwd },
-        }) => cmd_session_move(&session_id, &cwd).await,
+            action:
+                SessionAction::Move {
+                    session_id,
+                    cwd,
+                    source,
+                },
+        }) => session_catalog::move_project(&data_dir()?, &session_id, &cwd, source).await,
         Some(Cmd::Session {
             action: SessionAction::Gc,
         }) => cmd_session_gc().await,
@@ -991,29 +1002,6 @@ async fn cmd_session_show(sid: String) -> Result<()> {
 async fn cmd_session_new() -> Result<()> {
     let root = data_dir()?;
     println!("{}", peer_repl::create(&root).await?);
-    Ok(())
-}
-
-async fn cmd_session_move(sid: &str, new_cwd: &Path) -> Result<()> {
-    if !new_cwd.is_dir() {
-        bail!("not a directory: {}", new_cwd.display());
-    }
-    let abs_cwd = new_cwd
-        .canonicalize()
-        .with_context(|| format!("resolve path {}", new_cwd.display()))?;
-    let root = data_dir()?;
-    let resolved = resolve_session_prefix(&root, sid)?;
-    let dir = root.join("sessions").join(&resolved);
-    if !dir.is_dir() {
-        bail!("session not found: {}", dir.display());
-    }
-    let mut meta = atman_runtime::session_meta::SessionMeta::load(&dir).unwrap_or_default();
-    meta.rebase(&abs_cwd);
-    meta.save(&dir)?;
-    println!("session {} moved to {}", resolved, abs_cwd.display());
-    if let Some(ref pr) = meta.project_root {
-        println!("  project_root: {}", pr.display());
-    }
     Ok(())
 }
 
