@@ -19,6 +19,62 @@ fn command(root: &Path) -> Command {
 }
 
 #[test]
+fn original_history_attachment_never_opens_an_execution_session() {
+    use atman_runtime::message::{Message, MessageOrigin};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let data = root.join("data");
+    let id = uuid::Uuid::now_v7();
+    let directory = data.join("sessions").join(id.to_string());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    let config = root.join("config/config.toml");
+    std::fs::write(&config, "invalid [ config").unwrap();
+    let turn = atman_rt::TurnId::now();
+    let mut message = Message::assistant_text(turn.clone(), "Original reply\n\u{1b}[2Jretained");
+    message.origin = MessageOrigin::FinalAnswer;
+    let cases = [
+        (
+            format!(
+                "{}\n",
+                serde_json::json!({"seq":1,"type":"assistant_msg","turn_id":turn,"message":message})
+            ),
+            "Original reply",
+        ),
+        ("{broken record".into(), "Retained source record"),
+        (String::new(), "read-only"),
+    ];
+    for (raw, expected) in cases {
+        let journal = directory.join("events.jsonl");
+        std::fs::write(&journal, &raw).unwrap();
+        // Both full IDs and prefixes select the immutable source, without an
+        // entry, valid configuration, metadata, or repairable journal tail.
+        for selection in [id.to_string(), id.to_string()[..8].to_owned()] {
+            let output = command(root)
+                .args(["--continue", &selection])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let text = String::from_utf8(output.stdout).unwrap();
+            assert!(text.contains(expected), "{text}");
+            assert!(text.contains("read-only"), "{text}");
+            assert!(!text.contains('\u{1b}'), "{text}");
+            assert_eq!(std::fs::read_to_string(&journal).unwrap(), raw);
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+            assert!(!data.join("runtime-v1").exists());
+            assert_eq!(
+                std::fs::read_to_string(&config).unwrap(),
+                "invalid [ config"
+            );
+        }
+    }
+}
+
+#[test]
 fn archive_attachment_reads_without_configuration_or_journal_ownership() {
     use atman_runtime::{
         flow_store::{SessionDescriptor, migration},

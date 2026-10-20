@@ -26,7 +26,7 @@ use atman_runtime::{
     },
     memory::goal::{GoalActor, GoalEdit, GoalPauseReason},
     permission::{DecisionAuthority, PermissionAction, PermissionClients, PermissionRequestId},
-    projection::flow::FlowRecord,
+    projection::flow::{ArchiveTranscript, FlowRecord, LegacyFlowView, LegacyHistory},
     source_program::load_program_from_bundle,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -180,11 +180,17 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
                 Prepared::Archive(view, descriptor) => {
                     tui::interact_archive(*view, descriptor, scopes, terminal, notifications).await
                 }
+                Prepared::Legacy(view, meta) => {
+                    tui::interact_legacy(*view, meta, scopes, terminal, notifications).await
+                }
             }
         } else {
             match prepare(&scopes, id).await? {
                 Prepared::Live(attachment) => attachment.interact(prompt_rx).await,
-                Prepared::Archive(view, _) => print_archive(&view),
+                Prepared::Archive(view, _) => {
+                    print_archive(&view.transcript().archived_transcript()?)
+                }
+                Prepared::Legacy(view, _) => print_archive(view.transcript()),
             }
         }
     }
@@ -199,6 +205,40 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
 enum Prepared {
     Live(Box<Attachment>),
     Archive(Box<FlowView>, SessionDescriptor),
+    Legacy(
+        Box<LegacyFlowView>,
+        Option<atman_runtime::session_meta::SessionMeta>,
+    ),
+}
+
+async fn legacy_selection(
+    root: &Path,
+    id: Uuid,
+    owner: Option<atman_runtime::event_log::legacy::LegacyFlowKey>,
+) -> Result<(
+    LegacyFlowView,
+    Option<atman_runtime::session_meta::SessionMeta>,
+)> {
+    let directory = root.join("sessions").join(id.to_string());
+    tokio::task::spawn_blocking(move || {
+        let history = LegacyHistory::inspect(&directory.join("events.jsonl"), id)?;
+        // Prefer the default partition when it has records; an empty default
+        // must not conceal a source containing only unassigned records.
+        let owner = owner.unwrap_or_else(|| {
+            history
+                .inspection()
+                .records
+                .iter()
+                .map(|record| record.owner.key())
+                .min()
+                .unwrap_or(atman_runtime::event_log::legacy::LegacyFlowKey::Default)
+        });
+        Ok((
+            history.read_flow(&owner)?,
+            atman_runtime::session_meta::SessionMeta::load(&directory),
+        ))
+    })
+    .await?
 }
 
 async fn archived_selection(
@@ -220,6 +260,15 @@ async fn archived_selection(
 }
 
 async fn prepare(scopes: &Arc<scopes::Scopes>, id: Uuid) -> Result<Prepared> {
+    let root = scopes.root.clone();
+    let native = tokio::task::spawn_blocking(move || {
+        RuntimeStore::session_ids(&root).map(|ids| ids.contains(&id))
+    })
+    .await??;
+    if !native {
+        let (view, meta) = legacy_selection(&scopes.root, id, None).await?;
+        return Ok(Prepared::Legacy(Box::new(view), meta));
+    }
     if let Some((view, descriptor)) = archived_selection(&scopes.root, id, None).await? {
         return Ok(Prepared::Archive(Box::new(view), descriptor));
     }
@@ -227,15 +276,14 @@ async fn prepare(scopes: &Arc<scopes::Scopes>, id: Uuid) -> Result<Prepared> {
     Ok(Prepared::Live(Box::new(scopes.open(id).await?)))
 }
 
-fn print_archive(view: &FlowView) -> Result<()> {
+fn print_archive(archive: &ArchiveTranscript) -> Result<()> {
     use atman_runtime::{
         TranscriptEntry,
         message::{MessageOrigin, MessageRole},
     };
-    let archive = view.transcript().archived_transcript()?;
     let mut printer = None;
     crate::render_note(&mut printer, "Archived flow · read-only".into());
-    for entry in archive.entries {
+    for entry in &archive.entries {
         if let TranscriptEntry::Message { message, .. } = entry {
             if message.is_visible_assistant_reply()
                 || (message.role == MessageRole::User && message.origin == MessageOrigin::User)
@@ -262,7 +310,7 @@ fn print_archive(view: &FlowView) -> Result<()> {
             }
         }
     }
-    for record in archive.unparsed {
+    for record in &archive.unparsed {
         crate::render_note(
             &mut printer,
             format!(
@@ -669,7 +717,7 @@ impl Attachment {
                         draining = true;
                         continue;
                     };
-                    let line = input.text.trim();
+                    let line = input.trim();
                     if line.is_empty() { continue; }
                     if matches!(line, ":quit" | ":q" | ":exit") { break; }
                     if let Some(operation) = operations::Operation::parse(line) {
@@ -696,7 +744,7 @@ impl Attachment {
                         }
                         continue;
                     }
-                    let result = focused_view.submit(&self, &focus, &input.text).await;
+                    let result = focused_view.submit(&self, &focus, &input).await;
                     match result {
                         Ok(text) if !text.is_empty() => crate::render_note(&mut printer, text),
                         Ok(_) => {},

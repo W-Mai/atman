@@ -445,6 +445,61 @@ fn archive_attachment(
     ))
 }
 
+pub(super) async fn interact_legacy(
+    view: LegacyFlowView,
+    meta: Option<atman_runtime::session_meta::SessionMeta>,
+    scopes: Arc<scopes::Scopes>,
+    terminal: atman_tui::InheritedTerminal,
+    notifications: Vec<atman_runtime::notify::Notification>,
+) -> Result<()> {
+    let (controls, input) = mpsc::unbounded_channel();
+    let (handle, service) = legacy_attachment(view, meta, controls.clone())?;
+    Workspace {
+        scopes,
+        controls,
+        input,
+        forms: Arc::default(),
+        handle,
+        service,
+    }
+    .run(terminal, notifications)
+    .await
+}
+
+fn legacy_attachment(
+    view: LegacyFlowView,
+    meta: Option<atman_runtime::session_meta::SessionMeta>,
+    controls: mpsc::UnboundedSender<BoundControl>,
+) -> Result<(TuiHandle, ViewServices)> {
+    let project = meta.as_ref().and_then(|meta| meta.project_root.clone());
+    let binding = ViewBinding {
+        view_id: Uuid::now_v7(),
+        revision: 1,
+        flow: ViewAddress::Legacy {
+            session: view.session_id(),
+            owner: view.owner().clone(),
+        },
+    };
+    let mut handle = TuiHandle::from_legacy(
+        view,
+        binding.clone(),
+        controls,
+        meta.and_then(|meta| meta.title),
+        project.as_ref().map(|path| path.display().to_string()),
+    )?;
+    let (commands, rx) = mpsc::unbounded_channel();
+    handle.cmd_rx = Some(rx);
+    Ok((
+        handle,
+        ViewServices {
+            binding,
+            project,
+            commands,
+            execution: None,
+        },
+    ))
+}
+
 struct Workspace {
     scopes: Arc<scopes::Scopes>,
     controls: mpsc::UnboundedSender<BoundControl>,
@@ -1161,44 +1216,14 @@ impl scopes::Scopes {
         let flow = match &address {
             ViewAddress::Instance(flow) => flow,
             ViewAddress::Legacy { session, owner } => {
-                let (root, session, owner) = (self.root.clone(), *session, owner.clone());
-                let (view, meta) = tokio::task::spawn_blocking(move || -> Result<_> {
-                    let directory = root.join("sessions").join(session.to_string());
-                    let history = atman_runtime::projection::flow::LegacyHistory::inspect(
-                        &directory.join("events.jsonl"),
-                        session,
-                    )?;
-                    Ok((
-                        history.read_flow(&owner)?,
-                        atman_runtime::session_meta::SessionMeta::load(&directory),
-                    ))
-                })
-                .await??;
-                let project = meta.as_ref().and_then(|meta| meta.project_root.clone());
-                let binding = ViewBinding {
-                    view_id: Uuid::now_v7(),
-                    revision: 1,
-                    flow: address.clone(),
-                };
-                let mut handle = TuiHandle::from_legacy(
-                    view,
-                    binding.clone(),
-                    controls,
-                    meta.and_then(|meta| meta.title),
-                    project.as_ref().map(|path| path.display().to_string()),
-                )?;
-                let (commands, rx) = mpsc::unbounded_channel();
-                handle.cmd_rx = Some(rx);
+                let (view, meta) =
+                    legacy_selection(&self.root, *session, Some(owner.clone())).await?;
+                let (handle, service) = legacy_attachment(view, meta, controls)?;
                 return Ok(Navigation::Focus {
                     flow: address,
                     placement,
                     handle: Box::new(handle),
-                    service: Box::new(ViewServices {
-                        binding,
-                        project,
-                        commands,
-                        execution: None,
-                    }),
+                    service: Box::new(service),
                 });
             }
         };

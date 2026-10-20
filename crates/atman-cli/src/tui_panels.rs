@@ -106,25 +106,6 @@ pub(crate) struct PanelServices {
 }
 
 impl PanelServices {
-    pub fn new(
-        session: Arc<Session>,
-        executor: Executor,
-        replies: mpsc::UnboundedSender<TuiCommand>,
-        refresh: Vec<String>,
-    ) -> Result<Self> {
-        let config = atman_runtime::config_hub::ConfigHub::global()?;
-        let project_root = session.meta().and_then(|meta| meta.project_root);
-        let project = project_root.and_then(|root| {
-            atman_runtime::storage::ProjectContext::resolve(
-                &config,
-                &root,
-                &atman_runtime::storage::data_dir().ok()?,
-            )
-            .ok()
-        });
-        Self::for_scope(session, executor, replies, refresh, config, project)
-    }
-
     pub fn for_scope(
         session: Arc<Session>,
         executor: Executor,
@@ -579,14 +560,6 @@ impl PanelServices {
         }
         None
     }
-
-    pub async fn shutdown(&mut self) {
-        if let Some(task) = self.organization.take() {
-            task.abort();
-        }
-        self.provider_mutations.shutdown().await;
-        self.refreshes.shutdown().await;
-    }
 }
 
 impl Drop for PanelServices {
@@ -812,6 +785,6 @@ mod tests {
         assert_eq!(returned, request);
         assert!(result.is_err());
         assert!(!services.has_pending_work());
-        services.shutdown().await;
+        drop(services);
     }
 }
