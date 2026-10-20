@@ -49,7 +49,11 @@ The management grant editor exposes this capability as **Review approvals**. Man
 
 The decision is committed by the requesting instance's existing broker. It validates the observed request revision, current caller lease and grant, and the reviewing flow's permission-management capability and resource authority. A paused, ended, or revoked reviewer cannot decide. Peer approvals retain the flow actor in audit records, remain sandboxed, and cannot create reusable tool or path exceptions. Concurrent user and peer decisions compete for the same request; only one can resolve the waiting invocation.
 
-An undecided request remains available for user approval. This host API does not transfer the request away from the user, wake a reviewer, or install a routing policy.
+An undecided request remains available for user approval. Inspection and resolution do not transfer the request away from the user or notify reviewers.
+
+`FlowClient::offer_permission_review` explicitly offers the calling invocation's pending request to a peer's durable inbox. The peer must have a live owner and an explicit review grant; an idle peer also needs an installed scheduler. Paused, closing, interrupted, finishing, or approval-blocked peers reject new offers. The operation does not open an unloaded instance or acquire its conversation lock.
+
+An offer carries only the source handle, request ID, revision, and requesting run. It is internal context rather than a user request or an authorization. The peer inspects details through `permission.get` and decides through the existing versioned tools. Retrying the same offer returns its original acceptance without another notification or turn. Offers preserve the original user approval and do not register a substitute user client. This explicit offer API does not select reviewers or install an automatic routing policy.
 
 The existing `permission.list`, `permission.get`, `permission.approve`, and `permission.deny` tools accept `target_handle` for peer review. Handles use an instance UUID in the current Session or `session-uuid/instance-uuid` across Sessions. Omitting the handle retains local request and group access. An explicit invalid or unauthorized handle never falls back to the local broker.
 

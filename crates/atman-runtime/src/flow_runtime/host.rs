@@ -751,18 +751,25 @@ impl SessionHandle {
             .await
     }
 
+    /// Get a live owner without opening a journal or installing execution.
+    pub(crate) fn loaded_flow(&self, id: &FlowInstanceId) -> Option<FlowWorker> {
+        if self.is_stopped() {
+            return None;
+        }
+        self.flows
+            .lock()
+            .unwrap()
+            .get(id)
+            .filter(|worker| !worker.is_stopped())
+            .cloned()
+    }
+
     /// Observe only an existing writer; detached records remain the caller's snapshot.
     pub(crate) async fn describe_loaded_flow(
         &self,
         id: &FlowInstanceId,
     ) -> io::Result<Option<InstanceObservation>> {
-        let existing = self
-            .flows
-            .lock()
-            .unwrap()
-            .get(id)
-            .filter(|worker| !worker.is_stopped())
-            .cloned();
+        let existing = self.loaded_flow(id);
         if let Some(worker) = existing {
             return worker
                 .request(|store| {

@@ -9,6 +9,107 @@ use crate::permission::{
 use std::{io, sync::Arc};
 
 impl FlowClient {
+    /// Offer this invocation's pending request to an authorized, available peer through its durable inbox. Acceptance does not resolve the request or remove user access; identical retries reuse the original receipt.
+    pub async fn offer_permission_review(
+        &self,
+        reviewer: FlowRef,
+        request_id: PermissionRequestId,
+        expected_revision: u64,
+    ) -> io::Result<crate::flow_store::inbox::Acceptance> {
+        use crate::flow_store::inbox::{
+            DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity,
+        };
+        self.authenticate()?;
+        if &reviewer == self.source() {
+            return Err(denied("a flow cannot review its own requests"));
+        }
+        let unavailable = || denied("reviewer is unavailable or outside current approval grants");
+        let session = self
+            .host
+            .session(reviewer.session_id.0)
+            .map_err(|_| unavailable())?;
+        let worker = session
+            .loaded_flow(&reviewer.instance_id)
+            .ok_or_else(unavailable)?;
+        let source = self.host.flow(self.source()).await?;
+        let broker = source.context().permission_broker();
+        let reviewer_broker = worker.context().permission_broker();
+        let scheduled = worker.scheduler_owned.clone();
+        let client = self.clone();
+        let request = DeliveryRequest {
+            request_id: request_id.0,
+            sender: SenderIdentity::Host(self.source().session_id.0),
+            recipient: reviewer.clone(),
+            delivery: DeliveryMode::AtBoundary,
+            cause: None,
+            correlation: None,
+            scope: None,
+            payload: InboxPayload::Internal {
+                kind: "permission_review".into(),
+                content: serde_json::json!({
+                    "target_handle": format!("{}/{}", self.source().session_id, self.source().instance_id),
+                    "request_id": request_id,
+                    "revision": expected_revision,
+                    "requesting_run_id": self.lease.run,
+                }),
+            },
+        };
+        worker
+            .request(move |store| {
+                client.authenticate()?;
+                let state = store.state().clone();
+                store.accept_input(request, |_| {
+                    if !client.host.allows_access(
+                        &session,
+                        &reviewer,
+                        client.source(),
+                        FlowAction::ApprovePermission,
+                    ) {
+                        return Err(unavailable());
+                    }
+                    let pending = broker
+                        .get(&request_id)
+                        .ok_or_else(|| denied("permission request was not found"))?;
+                    if pending.requesting_run_id.0 != client.lease.run.0
+                        || pending.revision != expected_revision
+                        || !matches!(
+                            pending.state,
+                            PermissionRequestState::Pending {
+                                target: ApprovalTarget::User
+                            }
+                        )
+                    {
+                        return Err(denied(
+                            "permission request is not pending for this invocation and revision",
+                        ));
+                    }
+                    let available = match state.state() {
+                        atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Idle) => {
+                            state.can_start_turn()
+                                && scheduled.load(std::sync::atomic::Ordering::Acquire)
+                        }
+                        atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(
+                            active,
+                        )) => state
+                            .can_receive_at_boundary(&active.lease)
+                            .unwrap_or(false),
+                        _ => false,
+                    };
+                    if !available
+                        || reviewer_broker.list().iter().any(|request| {
+                            matches!(request.state, PermissionRequestState::Pending { .. })
+                        })
+                    {
+                        return Err(denied(
+                            "reviewer is paused, unavailable, or awaiting approval",
+                        ));
+                    }
+                    Ok(())
+                })
+            })
+            .await
+    }
+
     /// Inspect actionable review detail, redacted by the requesting instance before delivery.
     pub async fn permission_review(
         &self,

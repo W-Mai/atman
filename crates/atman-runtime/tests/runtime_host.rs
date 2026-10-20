@@ -175,7 +175,8 @@ async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker()
                     .unwrap()
                     .take()
                     .unwrap()
-                    .send(pending.request.clone())
+                    .send((pending.request.clone(), ctx.flow_client().unwrap().clone()))
+                    .ok()
                     .unwrap();
                 let counted = counted.clone();
                 async move {
@@ -202,8 +203,16 @@ async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker()
         let worker = requester.clone();
         async move { invoke(&worker, executor).await }
     });
-    let pending = pending.await.unwrap();
+    let (pending, requester_client) = pending.await.unwrap();
     let target = requester.address().clone();
+    let offer = || {
+        requester_client.offer_permission_review(
+            reviewer.address().clone(),
+            pending.request_id.clone(),
+            pending.revision,
+        )
+    };
+    assert!(offer().await.is_err());
     assert!(client.permission_requests(target.clone()).await.is_err());
     assert!(
         client
@@ -223,6 +232,79 @@ async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker()
         .unwrap();
     let visible = client.permission_requests(target.clone()).await.unwrap();
     assert_eq!(visible, vec![pending.clone()]);
+    let idle = session
+        .create_flow(program_descriptor(
+            first.id,
+            "flow main() -> bool { return notified() }".into(),
+        ))
+        .await
+        .unwrap();
+    change(&idle, FlowTransition::Activated).await;
+    session
+        .grant_access(
+            session.snapshot().await.unwrap().cursor,
+            FlowGrant {
+                id: Uuid::new_v4(),
+                grantee: idle.address().clone(),
+                target: AccessTarget::Flow(target.clone()),
+                actions: [FlowAction::ApprovePermission].into(),
+            },
+        )
+        .await
+        .unwrap();
+    let offer_idle = || {
+        requester_client.offer_permission_review(
+            idle.address().clone(),
+            pending.request_id.clone(),
+            pending.revision,
+        )
+    };
+    let before = idle.snapshot().await.unwrap().cursor;
+    assert!(offer_idle().await.is_err());
+    assert_eq!(idle.snapshot().await.unwrap().cursor, before);
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let counted_notifications = notifications.clone();
+    let notification_executor = Executor::new();
+    notification_executor
+        .tools
+        .register_fn(ToolDefinition::new("notified", Tier::Zero), move |_, _| {
+            counted_notifications.fetch_add(1, Ordering::SeqCst);
+            async { Ok(Value::Bool(true)) }
+        })
+        .unwrap();
+    let scheduler = idle.schedule(notification_executor, prepare).unwrap();
+    let notified = offer_idle().await.unwrap();
+    settled(&idle).await;
+    let retry = offer_idle().await.unwrap();
+    assert_eq!(notified.message_id, retry.message_id);
+    assert_eq!(notified.receipt, retry.receipt);
+    assert_eq!(notifications.load(Ordering::SeqCst), 1);
+    assert!(idle.context().messages_full().iter().any(|message| {
+        message.origin == MessageOrigin::Internal
+            && message.text_concat().contains("permission_review")
+    }));
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    scheduler.stop().await.unwrap();
+    assert!(
+        requester_client
+            .offer_permission_review(
+                reviewer.address().clone(),
+                pending.request_id.clone(),
+                pending.revision + 1,
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        requester_client
+            .offer_permission_review(
+                requester.address().clone(),
+                pending.request_id.clone(),
+                pending.revision,
+            )
+            .await
+            .is_err()
+    );
     let arguments = vec![
         (
             "target_handle".into(),
@@ -320,6 +402,72 @@ async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker()
         .await
         .unwrap();
     assert!(client.permission_requests(target.clone()).await.is_err());
+    assert!(offer().await.is_err());
+    reviewer
+        .control(
+            control_request(
+                &reviewer,
+                reviewer.state().await.unwrap().revision(),
+                pause,
+                PeerControl::Resume,
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let reviewer_broker = reviewer.context().permission_broker();
+    let identity = review_ctx.flow_identity.as_ref().unwrap();
+    let SubmissionOutcome::Pending(blocker) = reviewer_broker
+        .submit(
+            Some(&identity.session_id),
+            Some(&identity.run_id),
+            PermissionIntent::minimal("reviewer-effect", "fs.write", Tier::Two),
+            false,
+            &TrustConfig {
+                mode: TrustMode::Steady,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    else {
+        panic!("reviewer should await approval")
+    };
+    assert!(offer().await.is_err());
+    reviewer_broker
+        .cancel(&blocker.request.request_id, "resolved by user")
+        .unwrap();
+    let accepted = offer().await.unwrap();
+    reviewer
+        .control(
+            control_request(
+                &reviewer,
+                reviewer.state().await.unwrap().revision(),
+                pause,
+                PeerControl::Pause,
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let repeated = offer().await.unwrap();
+    assert_eq!(accepted.message_id, repeated.message_id);
+    assert_eq!(accepted.receipt, repeated.receipt);
+    let inbox = reviewer.snapshot().await.unwrap().pending;
+    assert_eq!(inbox.len(), 1);
+    assert!(matches!(&inbox[0].request.payload,
+        InboxPayload::Internal { kind, content }
+            if kind == "permission_review"
+                && content["request_id"] == pending.request_id.to_string()
+                && !content.to_string().contains("private-review-token")
+    ));
+    assert_eq!(
+        requester
+            .context()
+            .permission_broker()
+            .get(&pending.request_id),
+        Some(pending.clone())
+    );
+    assert!(!requester.context().permission_broker().has_clients());
     reviewer
         .control(
             control_request(
