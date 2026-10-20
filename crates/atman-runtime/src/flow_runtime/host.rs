@@ -16,6 +16,9 @@ pub use management::{ProfileHandle, ProfileView};
 #[path = "control_service.rs"]
 mod control_service;
 pub use control_service::{ControlServiceIssue, ControlServiceProgress};
+#[path = "execution_services.rs"]
+mod execution_services;
+pub use execution_services::ExecutorResolver;
 
 use super::{
     FlowSnapshot, FlowWorker,
@@ -274,6 +277,7 @@ impl RuntimeHost {
             flows: flows.clone(),
             access: access.clone(),
             title: title_rx,
+            executor_resolver: Default::default(),
         };
         runtime.spawn(serve_catalog(
             store,
@@ -429,6 +433,7 @@ pub struct SessionHandle {
     flows: FlowDirectory,
     pub(super) access: Arc<RwLock<SessionAccess>>,
     title: watch::Receiver<Option<String>>,
+    executor_resolver: Arc<std::sync::OnceLock<ExecutorResolver>>,
 }
 
 #[derive(Clone, Debug)]

@@ -37,6 +37,13 @@ pub fn project_root_for_ctx(ctx: &ToolCtx) -> Option<PathBuf> {
     {
         return identity.effective_authority.workspace_root.clone();
     }
+    if ctx.has_project_binding() {
+        return ctx
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.path.clone())
+            .or_else(|| ctx.project().map(|project| project.root().to_owned()));
+    }
     ctx.workspace
         .as_ref()
         .map(|workspace| workspace.path.clone())
@@ -50,6 +57,24 @@ pub fn source_roots_for_ctx(ctx: &ToolCtx) -> crate::source_program::SourceRoots
     }
 }
 
+pub(super) async fn catalog_roots(
+    ctx: &ToolCtx,
+) -> Result<crate::source_program::SourceRoots, crate::RuntimeError> {
+    if let Some(client) = ctx.flow_client() {
+        let snapshot = client
+            .creation_catalog()
+            .await
+            .map_err(|error| crate::RuntimeError::ToolFailed(error.to_string()))?;
+        if snapshot.catalog.project.as_ref() != ctx.project() {
+            return Ok(snapshot
+                .catalog
+                .descriptor
+                .source_roots_for(snapshot.catalog.project.as_ref()));
+        }
+    }
+    Ok(source_roots_for_ctx(ctx))
+}
+
 fn config_dir_for_ctx(ctx: &ToolCtx) -> Option<PathBuf> {
     if let Some(lifecycle) = ctx
         .providers
@@ -58,10 +83,11 @@ fn config_dir_for_ctx(ctx: &ToolCtx) -> Option<PathBuf> {
     {
         return Some(lifecycle.config_hub().config_dir().to_owned());
     }
-    if ctx
-        .flow_identity
-        .as_ref()
-        .is_some_and(|identity| identity.instance.is_some())
+    if ctx.has_project_binding()
+        || ctx
+            .flow_identity
+            .as_ref()
+            .is_some_and(|identity| identity.instance.is_some())
     {
         return None;
     }
@@ -157,6 +183,34 @@ pub fn candidates_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_service_contexts_do_not_borrow_process_source_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config_hub::ConfigHub::from_config_dir(dir.path().join("config"));
+        let project =
+            crate::storage::ProjectContext::resolve(&config, dir.path(), dir.path()).unwrap();
+        for project in [Some(project), None] {
+            let ctx = ToolCtx::for_project(project.clone());
+            let roots = source_roots_for_ctx(&ctx);
+            assert_eq!(
+                roots.project_root,
+                project.as_ref().map(|project| project.root().to_owned())
+            );
+            assert!(roots.config_dir.is_none());
+            let candidates = candidates("child.at", &ctx);
+            if let Some(project) = project {
+                assert!(
+                    candidates
+                        .iter()
+                        .all(|path| path.starts_with(project.root()))
+                );
+                assert!(candidates.contains(&project.root().join(".atman/commands/child.at")));
+            } else {
+                assert!(candidates.is_empty());
+            }
+        }
+    }
 
     #[test]
     fn project_sources_shadow_user_sources_by_file_name() {

@@ -46,6 +46,35 @@ impl SessionService {
         project: Option<&ProjectContext>,
         home_dir: Option<PathBuf>,
     ) -> Result<Executor> {
+        let session = self.host.session(descriptor.id)?;
+        session.configure_executor(|| {
+            let state = Arc::downgrade(state);
+            let descriptor = descriptor.clone();
+            Arc::new(move |project| {
+                let state = state.clone();
+                let descriptor = descriptor.clone();
+                let home_dir = home_dir.clone();
+                Box::pin(async move {
+                    let state = state.upgrade().ok_or_else(|| {
+                        std::io::Error::other("execution service owner is unavailable")
+                    })?;
+                    super::service(&state)
+                        .cached_executor(&state, &descriptor, project.as_ref(), home_dir)
+                        .await
+                        .map_err(std::io::Error::other)
+                })
+            })
+        })?;
+        Ok(session.executor_for(project.cloned()).await?)
+    }
+
+    async fn cached_executor(
+        &self,
+        state: &Arc<DaemonState>,
+        descriptor: &SessionDescriptor,
+        project: Option<&ProjectContext>,
+        home_dir: Option<PathBuf>,
+    ) -> Result<Executor> {
         let slot = self
             .executors
             .lock()

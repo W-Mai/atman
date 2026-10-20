@@ -6,6 +6,30 @@ use atman_runtime::{flow_store::SessionProjection, storage::ProjectContext};
 pub(super) type ScopeExecutors =
     Arc<std::sync::Mutex<HashMap<Option<ProjectContext>, Arc<tokio::sync::OnceCell<Executor>>>>>;
 
+pub(super) fn configure(
+    session: &SessionHandle,
+    executors: &ScopeExecutors,
+    config: &ConfigHub,
+    prompts: &Arc<prompts::Prompts>,
+) -> Result<()> {
+    session.configure_executor(|| {
+        let executors = executors.clone();
+        let config = config.clone();
+        let prompts = prompts.clone();
+        Arc::new(move |project| {
+            let executors = executors.clone();
+            let config = config.clone();
+            let prompts = prompts.clone();
+            Box::pin(async move {
+                executor(&executors, &config, project.as_ref(), &prompts)
+                    .await
+                    .map_err(std::io::Error::other)
+            })
+        })
+    })?;
+    Ok(())
+}
+
 pub(super) fn selected_project(
     catalog: &SessionProjection,
     instance: Option<&FlowInstanceId>,
@@ -75,13 +99,8 @@ impl Attachment {
             return Ok(self.clone());
         }
         let mut scope = self.clone();
-        scope.executor = executor(
-            &self.executors,
-            &self.config,
-            project.as_ref(),
-            &self.prompts,
-        )
-        .await?;
+        configure(&self.session, &self.executors, &self.config, &self.prompts)?;
+        scope.executor = self.session.executor_for(project.clone()).await?;
         scope.executor.tool_ctx.prompt_resolver = self.executor.tool_ctx.prompt_resolver.clone();
         scope.project = project;
         Ok(scope)

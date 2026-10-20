@@ -525,7 +525,8 @@ impl Attachment {
         };
         let config = ConfigHub::from_source(source)?;
         let executors = Default::default();
-        let executor = execution::executor(&executors, &config, project.as_ref(), &prompts).await?;
+        execution::configure(&session, &executors, &config, &prompts)?;
+        let executor = session.executor_for(project.clone()).await?;
         Ok(Self {
             data_root: root.to_owned(),
             host,

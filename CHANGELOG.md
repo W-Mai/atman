@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Peer creation after project moves** — New child flows use the Session's current project services, installed source catalog, and workspace allocation. Existing flows retain their original resources. Host resolvers share CLI and daemon execution caches, and rejected or stale creation attempts leave no new instance registration.
+
 - **Flow launch validation** — Project and provider configuration mismatches fail before registering a new flow. Retrying an accepted launch retains its original activation without replacing execution services.
 
 - **Flow source scope** — Discovery, validation, and spawn resolve installed commands and imported libraries from the bound configuration. Persistent host-provided flows do not load an unrelated global command catalog.

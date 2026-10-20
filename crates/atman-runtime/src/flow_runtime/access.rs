@@ -398,7 +398,42 @@ impl FlowClient {
             .await
     }
 
-    /// Product spawn entry: creation stays in the authenticated caller's session. Tool admission supplies the execution ceiling; provenance never grants control over the new instance.
+    /// Read the creation catalog without resolving services or opening an instance.
+    pub(crate) async fn creation_catalog(&self) -> io::Result<super::host::SessionSnapshot> {
+        self.authorize(self.source(), FlowAction::ReadContext)?;
+        let snapshot = self.source_session()?.snapshot().await?;
+        self.authorize(self.source(), FlowAction::ReadContext)?;
+        Ok(snapshot)
+    }
+
+    /// Resolve product spawn services under the observed catalog and caller's live admission.
+    pub(crate) async fn spawn_executor(
+        &self,
+        catalog: &CommitReceipt,
+        inherited: crate::Executor,
+    ) -> io::Result<crate::Executor> {
+        self.authorize(self.source(), FlowAction::Send)?;
+        let session = self.source_session()?;
+        let snapshot = self.creation_catalog().await?;
+        if &snapshot.cursor != catalog {
+            return Err(invalid(
+                "session catalog changed; inspect flow.instances before spawning",
+            ));
+        }
+        let project = snapshot.catalog.project;
+        let executor = if inherited.tool_ctx.project() == project.as_ref() {
+            inherited
+        } else {
+            session.executor_for(project.clone()).await?
+        };
+        executor
+            .validate_session_binding(&snapshot.catalog.descriptor.configuration, project.as_ref())
+            .map_err(invalid)?;
+        self.authorize(self.source(), FlowAction::Send)?;
+        Ok(executor)
+    }
+
+    /// Creation stays in the authenticated caller's Session and rechecks grants at effect boundaries.
     pub(crate) async fn spawn(
         &self,
         descriptor: crate::flow_store::FlowDescriptor,

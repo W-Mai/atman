@@ -4557,6 +4557,216 @@ async fn session_project_changes_keep_live_and_restored_flow_execution_in_their_
 }
 
 #[tokio::test]
+async fn moved_session_spawns_with_host_services_and_preserves_existing_flow_scope() {
+    use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};
+    use atman_runtime::{
+        config_hub::ConfigHub, flow_store::SessionConfiguration, storage::ProjectContext,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let hub = ConfigHub::from_config_dir(dir.path().join("config"));
+    let mut projects = Vec::new();
+    let mut executors = Vec::new();
+    for label in ["alpha", "beta"] {
+        let path = dir.path().join(label);
+        std::fs::create_dir_all(path.join(".atman/commands")).unwrap();
+        std::fs::create_dir_all(path.join(".atman/lib")).unwrap();
+        std::fs::write(path.join("marker.txt"), label).unwrap();
+        std::fs::write(
+            path.join(".atman/lib/helper.at"),
+            format!("pub flow label() -> string {{ return \"{label}\" }}"),
+        )
+        .unwrap();
+        std::fs::write(path.join(".atman/commands/child.at"),
+            "use \"project:helper.at\"::label\nflow child() -> string { return final.answer(message: label().await + \"|\" + fs.read(\"marker.txt\")) }"
+        ).unwrap();
+        let project = ProjectContext::resolve(&hub, &path, dir.path()).unwrap();
+        let runtime = AtmanRuntime::build(AtmanRuntimeOptions {
+            events: Default::default(),
+            mock: false,
+            config: hub.clone(),
+            project: Some(project.clone()),
+            home_dir: None,
+            workspace_generation: label.into(),
+        })
+        .await
+        .unwrap();
+        projects.push(project);
+        executors.push(runtime.executor);
+    }
+    let host = RuntimeHost::default();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let mut info = session_descriptor();
+    info.project = Some(projects[0].clone());
+    info.configuration = SessionConfiguration::Atman(hub.source());
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let parent = session.create_flow(program_descriptor(info.id, r#"
+        flow main() -> any {
+            contract { capabilities { shell: true } }
+            inventory = flow.instances()
+            description = flow.describe(ref: "child.at")
+            child = flow.spawn(flow: description.ref, version: description.version, spawn_token: inventory.spawn_token, async: env("async"))
+            return [fs.read("marker.txt"), child]
+        }
+    "#.into())).await.unwrap();
+    change(&parent, FlowTransition::Activated).await;
+    let result = invoke_with_env(
+        &parent,
+        executors[0].clone(),
+        [("async".into(), false.into())].into(),
+    )
+    .await
+    .result
+    .unwrap()
+    .to_json()
+    .unwrap();
+    assert_eq!(result, serde_json::json!(["alpha", "alpha|alpha"]));
+    let snapshot = session.snapshot().await.unwrap();
+    session
+        .set_project(snapshot.cursor, Some(projects[1].clone()))
+        .await
+        .unwrap();
+    let before = session.snapshot().await.unwrap();
+    let result = invoke_with_env(
+        &parent,
+        executors[0].clone(),
+        [("async".into(), false.into())].into(),
+    )
+    .await
+    .result
+    .unwrap_err();
+    assert!(
+        result.to_string().contains("execution resolver"),
+        "{result}"
+    );
+    assert_eq!(session.snapshot().await.unwrap().cursor, before.cursor);
+
+    change(&parent, FlowTransition::InterruptionRecovered).await;
+    let destination = executors[1].clone();
+    let resolving = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    session
+        .configure_executor(|| {
+            let resolving = resolving.clone();
+            let release = release.clone();
+            let hold = hold.clone();
+            Arc::new(move |_| {
+                let executor = destination.clone();
+                let resolving = resolving.clone();
+                let release = release.clone();
+                let hold = hold.clone();
+                Box::pin(async move {
+                    if hold.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        resolving.notify_one();
+                        release.notified().await;
+                    }
+                    Ok(executor)
+                })
+            })
+        })
+        .unwrap();
+    // A second view cannot replace the resolver already installed for this owner.
+    session
+        .configure_executor(|| panic!("resolver must remain owned by its original host"))
+        .unwrap();
+    for asynchronous in [false, true] {
+        let result = invoke_with_env(
+            &parent,
+            executors[0].clone(),
+            [("async".into(), asynchronous.into())].into(),
+        )
+        .await
+        .result
+        .unwrap()
+        .to_json()
+        .unwrap();
+        assert_eq!(result[0], "alpha");
+        if !asynchronous {
+            assert_eq!(result[1], "beta|beta");
+        }
+        tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+            .await
+            .unwrap()
+            .unwrap();
+        let registrations = session.snapshot().await.unwrap().catalog.flows;
+        let child = session
+            .open_flow(registrations.last().unwrap().id.clone())
+            .await
+            .unwrap();
+        assert_eq!(child.project().await.unwrap(), Some(projects[1].clone()));
+        let record = child.launch_record().await.unwrap().unwrap();
+        assert!(record.input.workspace.is_none());
+        let authority = &record.input.execution.unwrap().authority;
+        assert!(
+            !authority.shell,
+            "a child cannot exceed its declared capabilities"
+        );
+        assert_eq!(
+            authority.workspace_root.as_deref(),
+            Some(projects[1].root())
+        );
+        assert_eq!(
+            child
+                .context()
+                .messages_full()
+                .last()
+                .unwrap()
+                .text_concat(),
+            "beta|beta"
+        );
+        assert_eq!(parent.project().await.unwrap(), Some(projects[0].clone()));
+    }
+    // A concurrent move invalidates creation even if service resolution already started.
+    std::fs::create_dir_all(hub.config_dir().join("commands")).unwrap();
+    std::fs::write(
+        hub.config_dir().join("commands/child.at"),
+        "flow child() -> string { return \"global\" }",
+    )
+    .unwrap();
+    hold.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (result, moved) = tokio::join!(
+        invoke_with_env(
+            &parent,
+            executors[0].clone(),
+            [("async".into(), false.into())].into()
+        ),
+        async {
+            tokio::time::timeout(Duration::from_secs(10), resolving.notified())
+                .await
+                .unwrap();
+            let before = session.snapshot().await.unwrap();
+            let moved = session.set_project(before.cursor, None).await.unwrap();
+            release.notify_one();
+            moved
+        }
+    );
+    assert!(result.result.is_err());
+    assert_eq!(session.snapshot().await.unwrap().cursor, moved);
+    change(&parent, FlowTransition::InterruptionRecovered).await;
+    // A resolver returning services from another scope must fail before creating anything.
+    let before = session.snapshot().await.unwrap();
+    let result = invoke_with_env(
+        &parent,
+        executors[0].clone(),
+        [("async".into(), false.into())].into(),
+    )
+    .await
+    .result
+    .unwrap_err();
+    assert!(result.to_string().contains("executor project"), "{result}");
+    assert_eq!(session.snapshot().await.unwrap().cursor, before.cursor);
+    host.shutdown().await.unwrap();
+    assert!(
+        session
+            .executor_for(Some(projects[1].clone()))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn runtime_projects_bind_rules_and_spawned_flows_without_borrowing_another_project() {
     use atman_runtime::config_hub::ConfigHub;
     use atman_runtime::flow_store::SessionConfiguration;

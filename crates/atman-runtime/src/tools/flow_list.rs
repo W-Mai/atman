@@ -80,8 +80,8 @@ struct FlowCatalog {
 }
 
 impl FlowCatalog {
-    fn load(ctx: &ToolCtx) -> Result<Self, RuntimeError> {
-        let roots = super::flow_source::source_roots_for_ctx(ctx);
+    async fn load(ctx: &ToolCtx) -> Result<Self, RuntimeError> {
+        let roots = super::flow_source::catalog_roots(ctx).await?;
         let sources = super::flow_source::installed_sources(
             roots.config_dir.as_deref(),
             roots.project_root.as_deref(),
@@ -226,7 +226,7 @@ impl Tool for FlowList {
     }
 
     fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
-        Box::pin(async move { Ok(FlowCatalog::load(ctx)?.legacy_value()) })
+        Box::pin(async move { Ok(FlowCatalog::load(ctx).await?.legacy_value()) })
     }
 }
 
@@ -489,7 +489,12 @@ impl Tool for FlowSearch {
             let query = string_arg(&args, "query", "flow.search")?;
             let limit = limit_arg(&args, "flow.search", DEFAULT_SEARCH_LIMIT)?;
             let cursor = optional_string_arg(&args, "cursor", "flow.search")?;
-            search_catalog(&FlowCatalog::load(ctx)?, query, limit, cursor.as_deref())
+            search_catalog(
+                &FlowCatalog::load(ctx).await?,
+                query,
+                limit,
+                cursor.as_deref(),
+            )
         })
     }
 }
@@ -528,7 +533,7 @@ impl Tool for FlowDescribe {
             let flow_ref = string_arg(&args, "ref", "flow.describe")?;
             let expected_version = optional_string_arg(&args, "version", "flow.describe")?;
             describe_catalog_entry(
-                &FlowCatalog::load(ctx)?,
+                &FlowCatalog::load(ctx).await?,
                 flow_ref,
                 expected_version.as_deref(),
             )

@@ -22,10 +22,23 @@ pub(super) async fn spawn(
     let client = ctx
         .flow_client()
         .ok_or_else(|| failed("instance has no peer host binding"))?;
+    let executor = client
+        .spawn_executor(&catalog, executor(ctx)?)
+        .await
+        .map_err(failed)?;
+    let changed_project = ctx.project() != executor.tool_ctx.project();
+    let source_ctx = if changed_project {
+        let mut source = executor.tool_ctx.clone();
+        source.providers = Some(Arc::new(executor.providers.clone()));
+        source.registry = Some(Arc::new(executor.tools.clone()));
+        source
+    } else {
+        ctx.clone()
+    };
     let policy = workspace_policy(&args)?;
     let reference = extract_flow(&args)?.unwrap_or_else(|| "subagent.at".into());
     let version = extract_flow_version(&args)?;
-    let prepared = prepare_flow_agent(&reference, version.as_deref(), ctx).await?;
+    let prepared = prepare_flow_agent(&reference, version.as_deref(), &source_ctx).await?;
     let flow_args = resolve_flow_arguments(&prepared.flow, &args)?;
     let prompt = invocation_user_message(&prepared.flow, &flow_args)?;
     let arguments = flow_args
@@ -41,6 +54,15 @@ pub(super) async fn spawn(
         .flow_identity
         .as_ref()
         .ok_or_else(|| failed("trusted identity is unavailable"))?;
+    let mut creation_authority = identity.effective_authority.clone();
+    if changed_project {
+        // Membership is an operator-selected catalog fact, not a model-supplied workspace.
+        // Capability ceilings remain inherited even when the new instance uses another project.
+        creation_authority.workspace_root = executor
+            .tool_ctx
+            .project()
+            .map(|project| project.root().to_owned());
+    }
     let yield_interval = ctx
         .vm_run_options
         .and_then(|options| options.yield_interval())
@@ -53,7 +75,8 @@ pub(super) async fn spawn(
         instance_id: FlowInstanceId::now(),
     };
     let workspace = if policy == WorkspacePolicy::None {
-        ctx.workspace
+        source_ctx
+            .workspace
             .clone()
             .map(|binding| crate::flow_store::workspace::WorkspaceRequest {
                 binding,
@@ -62,12 +85,12 @@ pub(super) async fn spawn(
                 },
             })
     } else {
-        let service = ctx
+        let service = source_ctx
             .flow_workspace_service
             .clone()
             .ok_or_else(|| failed("workspace service is unavailable"))?;
         let owner = address.clone();
-        let root = identity.effective_authority.workspace_root.clone();
+        let root = creation_authority.workspace_root.clone();
         Some(
             tokio::task::spawn_blocking(move || {
                 service.prepare_instance(policy, &owner, root.as_deref())
@@ -77,8 +100,7 @@ pub(super) async fn spawn(
             .map_err(failed)?,
         )
     };
-    let authority = identity
-        .effective_authority
+    let authority = creation_authority
         .inherited_child(
             crate::flow_authority::contract_allows_shell(prepared.flow.contract.as_ref()),
             workspace
@@ -164,7 +186,6 @@ pub(super) async fn spawn(
             }),
         }),
     };
-    let executor = executor(ctx)?;
     let launched = client
         .spawn(
             descriptor,
@@ -172,7 +193,7 @@ pub(super) async fn spawn(
             EntryExecution {
                 executor,
                 catalog,
-                authority: identity.effective_authority.clone(),
+                authority: creation_authority,
                 yield_interval,
                 trust: ctx.trust.clone().unwrap_or_default(),
             },

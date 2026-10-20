@@ -368,6 +368,10 @@ impl ToolCtx {
         }
     }
 
+    pub(crate) fn has_project_binding(&self) -> bool {
+        matches!(self.project_binding, ProjectBinding::Bound(_))
+    }
+
     /// Create an explicit resource context without retaining services from another project.
     pub fn for_project(project: Option<crate::storage::ProjectContext>) -> Self {
         Self {
