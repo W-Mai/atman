@@ -2227,12 +2227,10 @@ impl Session {
         &self,
         executor: &crate::Executor,
     ) -> Result<(), crate::error::RuntimeError> {
-        if self.flow_instance.is_some() && self.project.as_ref() != executor.tool_ctx.project() {
-            return Err(crate::error::RuntimeError::ToolFailed(
-                "executor project does not match the persistent session binding".into(),
-            ));
+        if self.flow_instance.is_some() {
+            executor.validate_session_binding(&self.configuration, self.project.as_ref())?;
         }
-        self.bind_provider_registry(&executor.providers)?;
+        self.bind_model_registry(executor.providers.models().clone())?;
         let mut projection = self.mcp_projection.lock().unwrap();
         if let Some(service) = executor.tool_ctx.mcp_service() {
             if projection
@@ -2264,21 +2262,7 @@ impl Session {
         providers: &crate::provider::ProviderRegistry,
     ) -> Result<(), crate::error::RuntimeError> {
         if self.flow_instance.is_some() {
-            let current = providers
-                .provider_lifecycle()
-                .map(|lifecycle| lifecycle.config_hub().source());
-            let matches = match (&self.configuration, &current) {
-                (crate::flow_store::SessionConfiguration::HostProvided, None) => true,
-                (crate::flow_store::SessionConfiguration::Atman(expected), Some(actual)) => {
-                    expected == actual
-                }
-                _ => false,
-            };
-            if !matches {
-                return Err(crate::error::RuntimeError::ToolFailed(
-                    "provider configuration does not match the persistent session source".into(),
-                ));
-            }
+            crate::executor::validate_provider_binding(providers, &self.configuration)?;
         }
         self.bind_model_registry(providers.models().clone())
     }

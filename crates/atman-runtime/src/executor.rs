@@ -157,6 +157,20 @@ impl Executor {
         self.providers.provider_lifecycle()
     }
 
+    /// Validate persistent resource identity without binding a context or changing storage.
+    pub fn validate_session_binding(
+        &self,
+        configuration: &crate::flow_store::SessionConfiguration,
+        project: Option<&crate::storage::ProjectContext>,
+    ) -> Result<(), RuntimeError> {
+        if project != self.tool_ctx.project() {
+            return Err(RuntimeError::ToolFailed(
+                "executor project does not match the persistent session binding".into(),
+            ));
+        }
+        validate_provider_binding(&self.providers, configuration)
+    }
+
     pub fn with_safety(mut self, safety: crate::safety::SafetyConfig) -> Self {
         self.safety = Some(safety);
         self
@@ -882,6 +896,28 @@ fn root_task_label(
                 .and_then(crate::task_registry::normalize_task_label)
         })
         .unwrap_or_else(|| flow_name.to_owned())
+}
+
+pub(crate) fn validate_provider_binding(
+    providers: &ProviderRegistry,
+    configuration: &crate::flow_store::SessionConfiguration,
+) -> Result<(), RuntimeError> {
+    use crate::flow_store::SessionConfiguration;
+    let current = providers
+        .provider_lifecycle()
+        .map(|lifecycle| lifecycle.config_hub().source());
+    let matches = match (configuration, &current) {
+        (SessionConfiguration::HostProvided, None) => true,
+        (SessionConfiguration::Atman(expected), Some(actual)) => expected == actual,
+        _ => false,
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(RuntimeError::ToolFailed(
+            "provider configuration does not match the persistent session source".into(),
+        ))
+    }
 }
 
 #[cfg(test)]

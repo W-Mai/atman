@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Flow launch validation** — Project and provider configuration mismatches fail before registering a new flow. Retrying an accepted launch retains its original activation without replacing execution services.
+
 - **Flow source scope** — Discovery, validation, and spawn resolve installed commands and imported libraries from the bound configuration. Persistent host-provided flows do not load an unrelated global command catalog.
 
 - **Session discovery** — CLI listing, project filters, and details read current project membership after reassignment or removal.

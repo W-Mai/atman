@@ -77,6 +77,10 @@ impl RuntimeHost {
             authorize_new,
             Some(execution.catalog),
             move || {
+                execution
+                    .executor
+                    .validate_session_binding(&session.configuration, project.as_ref())
+                    .map_err(invalid)?;
                 let recipe = super::entry::EntryRecipe::from_launch(
                     &session,
                     &creation,

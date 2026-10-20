@@ -30,6 +30,158 @@ fn session_info() -> SessionDescriptor {
 }
 
 #[tokio::test]
+async fn launch_validates_resource_scope_before_registering_a_flow() {
+    use atman_runtime::config_hub::ConfigHub;
+    use atman_runtime::flow_runtime::launch::EntryExecution;
+    use atman_runtime::flow_store::SessionConfiguration;
+    use atman_runtime::flow_store::launch::EntryBinding;
+    use atman_runtime::provider::ProviderRegistry;
+    use atman_runtime::storage::ProjectContext;
+    use atman_runtime::tool::ToolCtx;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let config = ConfigHub::from_config_dir(dir.path().join("config"));
+    let other = ConfigHub::from_config_dir(dir.path().join("other-config"));
+    let a = dir.path().join("a");
+    let b = dir.path().join("b");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let a = ProjectContext::resolve(&config, &a, dir.path()).unwrap();
+    let b = ProjectContext::resolve(&config, &b, dir.path()).unwrap();
+    let mut info = session_info();
+    info.configuration = SessionConfiguration::Atman(config.source());
+    info.project = Some(a.clone());
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let snapshot = session.snapshot().await.unwrap();
+    session
+        .set_project(snapshot.cursor, Some(b.clone()))
+        .await
+        .unwrap();
+    let before = session.snapshot().await.unwrap();
+    let entry = descriptor(info.id);
+    let authority = EffectiveAuthority::root(&Default::default(), false, None);
+    let mut input = initial(&entry, &entry.address);
+    input.result_route = None;
+    input.request.sender = SenderIdentity::Host(Uuid::now_v7());
+    input.execution = Some(EntryBinding {
+        user_routes: false,
+        session_start: false,
+        first_turn: TurnId::now(),
+        first_run: RunId::now(),
+        authority: authority.clone(),
+    });
+    let executor = |hub: Option<&ConfigHub>, project| {
+        let mut executor = Executor::new();
+        executor.tool_ctx = ToolCtx::for_project(project);
+        if let Some(hub) = hub {
+            executor.providers = ProviderRegistry::with_models(hub.models().clone());
+            executor.attach_provider_lifecycle(hub.clone()).unwrap();
+        }
+        executor
+    };
+    let execution = |executor| EntryExecution {
+        executor,
+        authority: authority.clone(),
+        trust: Default::default(),
+        yield_interval: NonZeroUsize::new(16).unwrap(),
+        catalog: before.cursor.clone(),
+    };
+    for (candidate, reason) in [
+        (executor(Some(&config), Some(a)), "executor project"),
+        (executor(Some(&config), None), "executor project"),
+        (
+            executor(Some(&other), Some(b.clone())),
+            "provider configuration",
+        ),
+        (executor(None, Some(b.clone())), "provider configuration"),
+    ] {
+        let error = host
+            .launch_entry(
+                entry.clone(),
+                input.clone(),
+                execution(candidate),
+                |_, _| Ok(()),
+            )
+            .await
+            .err()
+            .expect("scope mismatch must reject creation");
+        assert!(error.to_string().contains(reason), "{error}");
+        let after = session.snapshot().await.unwrap();
+        assert_eq!(after.cursor, before.cursor);
+        assert!(after.catalog.flows.is_empty());
+        assert!(
+            session
+                .instances(None, 50, |_| Ok(()))
+                .await
+                .unwrap()
+                .instances
+                .is_empty()
+        );
+    }
+    let valid = executor(Some(&config), Some(b.clone()));
+    let launched = host
+        .launch_entry(
+            entry.clone(),
+            input.clone(),
+            execution(valid),
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(launched.worker.project().await.unwrap(), Some(b.clone()));
+    // An accepted retry acknowledges its original activation without adopting replacement services.
+    let repeated = host
+        .launch_entry(entry, input, execution(Executor::new()), |_, _| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(repeated.record.receipt, launched.record.receipt);
+    assert_eq!(session.snapshot().await.unwrap().catalog.flows.len(), 1);
+    let prepared = descriptor(info.id);
+    session.create_flow(prepared.clone()).await.unwrap();
+    let snapshot = session.snapshot().await.unwrap();
+    session.set_project(snapshot.cursor, None).await.unwrap();
+    let current = session.snapshot().await.unwrap();
+    let mut input = initial(&prepared, &prepared.address);
+    input.result_route = None;
+    input.request.sender = SenderIdentity::Host(Uuid::now_v7());
+    input.execution = Some(EntryBinding {
+        user_routes: false,
+        session_start: false,
+        first_turn: TurnId::now(),
+        first_run: RunId::now(),
+        authority: authority.clone(),
+    });
+    let mut invalid = execution(executor(Some(&config), None));
+    invalid.catalog = current.cursor.clone();
+    assert!(
+        host.launch_entry(prepared.clone(), input.clone(), invalid, |_, _| Ok(()))
+            .await
+            .is_err()
+    );
+    assert_eq!(session.snapshot().await.unwrap().cursor, current.cursor);
+    let mut valid = execution(executor(Some(&config), Some(b.clone())));
+    valid.catalog = current.cursor;
+    let resumed = host
+        .launch_entry(prepared, input, valid, |_, _| Ok(()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.worker.project().await.unwrap(), Some(b));
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn captured_startup_commands_run_once_without_replacing_the_default_entry() {
     use atman_runtime::flow_runtime::launch::EntryExecution;
     use atman_runtime::flow_store::launch::{EntryBinding, EntryStart};
