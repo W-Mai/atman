@@ -16,7 +16,7 @@ pub const PAGE_SIZE: usize = 50;
 
 mod controls;
 mod details;
-pub use details::{DefaultFlowSelection, FlowDetailsPage};
+pub use details::{FlowArchiveChange, FlowCatalogSelection, FlowDetailsPage};
 mod focus;
 pub use controls::{ControlBatchPage, OperatorControl, OperatorControls};
 mod graph;
@@ -47,7 +47,8 @@ pub use workspaces::{
 
 #[derive(Clone)]
 pub(crate) enum Action {
-    SelectDefault(Box<DefaultFlowSelection>),
+    ArchiveFlow(Box<FlowArchiveChange>),
+    SelectDefault(Box<FlowCatalogSelection>),
     RetryControls(uuid::Uuid),
     SubmitControls(Box<OperatorControls>),
     EditManagement,
@@ -482,7 +483,9 @@ impl FlowHub {
         }
         match self.focus() {
             Action::Focus(flow) => Action::Float(flow),
-            Action::RemoveSession(_) | Action::SelectDefault(_) => Action::None,
+            Action::RemoveSession(_) | Action::SelectDefault(_) | Action::ArchiveFlow(_) => {
+                Action::None
+            }
             _ => self.activate(),
         }
     }
@@ -490,7 +493,7 @@ impl FlowHub {
     fn activate(&mut self) -> Action {
         if matches!(
             self.focus(),
-            Action::RemoveSession(_) | Action::SelectDefault(_)
+            Action::RemoveSession(_) | Action::SelectDefault(_) | Action::ArchiveFlow(_)
         ) && self
             .filtered()
             .get(self.selected)
@@ -2231,6 +2234,7 @@ mod tests {
                 default_flow: None,
                 page: InstancePage {
                     instances: vec![InstanceSummary {
+                        archived: false,
                         address: flow.clone(),
                         entry: Some("Worker".into()),
                         state: None,
@@ -2714,6 +2718,7 @@ mod tests {
                 default_flow: Some(flow.instance_id.clone()),
                 page: InstancePage {
                     instances: vec![InstanceSummary {
+                        archived: false,
                         address: flow.clone(),
                         entry: Some("Example flow".into()),
                         state: None,

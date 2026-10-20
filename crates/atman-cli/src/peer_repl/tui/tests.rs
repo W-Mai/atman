@@ -102,6 +102,86 @@ async fn default_flow_details_and_selection_do_not_load_execution_or_replace_sta
     for (path, bytes) in originals {
         assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
+    let request = HubRequest::FlowDetails {
+        owner: addresses[0].clone(),
+    };
+    let FlowHubPage::FlowDetails(details) = *scopes.browse(request.clone()).await.unwrap() else {
+        panic!("details expected")
+    };
+    assert!(!details.archived);
+    let change = atman_tui::flow_hub::FlowArchiveChange {
+        selection: details.selection,
+        archived: true,
+    };
+    assert!(scopes.archive_flow(change.clone()).await.is_err());
+    assert!(owner.observe().await.unwrap().loaded.is_empty());
+    let worker = owner
+        .open_flow(addresses[0].instance_id.clone())
+        .await
+        .unwrap();
+    for transition in [
+        atman_runtime::flow_store::FlowTransition::CloseRequested,
+        atman_runtime::flow_store::FlowTransition::Closed,
+    ] {
+        worker
+            .transition(worker.state().await.unwrap().revision(), transition)
+            .await
+            .unwrap();
+    }
+    let FlowHubPage::FlowDetails(details) = *scopes.archive_flow(change.clone()).await.unwrap()
+    else {
+        panic!("archive details expected")
+    };
+    assert!(details.archived);
+    let directory = scopes
+        .catalog
+        .instances(id, None, 50, |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(
+        directory
+            .instances
+            .iter()
+            .find(|row| row.address == addresses[0])
+            .unwrap()
+            .archived
+    );
+    assert!(
+        !directory
+            .instances
+            .iter()
+            .find(|row| row.address == addresses[1])
+            .unwrap()
+            .archived
+    );
+    assert!(
+        scopes
+            .archive_flow(atman_tui::flow_hub::FlowArchiveChange {
+                archived: false,
+                ..change
+            })
+            .await
+            .is_err()
+    );
+    let FlowHubPage::FlowDetails(restored) = *scopes
+        .archive_flow(atman_tui::flow_hub::FlowArchiveChange {
+            selection: details.selection,
+            archived: false,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("restored details expected")
+    };
+    assert!(!restored.archived);
+    assert!(matches!(
+        restored.recorded_state,
+        atman_rt::InstanceState::Closed
+    ));
+    assert_eq!(
+        owner.snapshot().await.unwrap().catalog.default_flow,
+        Some(addresses[1].instance_id.clone())
+    );
     host.shutdown().await.unwrap();
     let read = RuntimeStore::inspect_session(data.path(), id).unwrap();
     assert_eq!(

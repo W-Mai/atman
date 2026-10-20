@@ -20,6 +20,7 @@ pub type OverviewCatalogPage = FlowCatalogPage<OverviewCatalogSnapshot>;
 
 #[derive(Debug)]
 pub struct OverviewCatalogSnapshot {
+    pub archived: bool,
     pub title: String,
     pub project_root: Option<PathBuf>,
     pub default_flow: bool,
@@ -64,6 +65,7 @@ impl SessionCatalog {
                         .filter(|relation| &relation.source == owner),
                 );
                 Ok(OverviewCatalogSnapshot {
+                    archived: session.archived_flows.contains(&owner.instance_id),
                     title: flow.descriptor.content.title().into(),
                     project_root: session
                         .descriptor

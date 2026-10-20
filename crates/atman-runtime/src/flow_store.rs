@@ -572,6 +572,7 @@ pub struct SessionInspection {
 /// Recorded flow facts without execution ownership, recovery, or cache writes. An active recorded turn is not evidence of a currently running owner.
 #[derive(Debug)]
 pub struct FlowInspection {
+    pub archived: bool,
     pub descriptor: FlowDescriptor,
     pub state: FlowInstance<AtmanUuid>,
     pub journal: crate::event_log::journal::JournalInspection,
@@ -729,6 +730,7 @@ fn inspect_registered_flow_with(
         &watch_deliveries,
     );
     Ok(FlowInspection {
+        archived: catalog.archived_flows.contains(id),
         descriptor,
         state,
         journal,
@@ -1074,6 +1076,16 @@ impl SessionStore {
         id: FlowInstanceId,
         archived: bool,
     ) -> io::Result<CommitReceipt> {
+        self.set_flow_archived_observed(expected, id, archived, None)
+    }
+
+    pub(crate) fn set_flow_archived_observed(
+        &mut self,
+        expected: &CommitReceipt,
+        id: FlowInstanceId,
+        archived: bool,
+        observed: Option<FlowInstance<AtmanUuid>>,
+    ) -> io::Result<CommitReceipt> {
         if !self.projection.flows.iter().any(|flow| flow.id == id) {
             return Err(invalid("flow is not registered"));
         }
@@ -1085,7 +1097,25 @@ impl SessionStore {
                 "session catalog changed; refresh before changing flow visibility",
             ));
         }
+        let mut reader = None;
         if archived {
+            if let Some(state) = observed {
+                if state.address().session_id.0 != self.projection.descriptor.id
+                    || state.address().instance_id != id
+                    || !matches!(state.state(), InstanceState::Closed)
+                {
+                    return Err(invalid("flow writer has not acknowledged closure"));
+                }
+            } else {
+                let file = File::open(
+                    self.dir
+                        .join("flows")
+                        .join(id.to_string())
+                        .join("events.jsonl"),
+                )?;
+                fs2::FileExt::try_lock_shared(&file)?;
+                reader = Some(file);
+            }
             let inspection = self.inspect_flow(&id)?;
             if inspection.journal.trailing_bytes != 0
                 || !matches!(inspection.state.state(), InstanceState::Closed)
@@ -1095,7 +1125,9 @@ impl SessionStore {
                 ));
             }
         }
-        self.commit(vec![SessionFact::FlowArchiveChanged { id, archived }])
+        let result = self.commit(vec![SessionFact::FlowArchiveChanged { id, archived }]);
+        drop(reader);
+        result
     }
 
     /// Persist a display name without changing creation identity or flow execution. An already applied value is a no-op; a stale snapshot cannot replace a different title.

@@ -593,6 +593,14 @@ impl Workspace {
                         continue;
                     };
                     let result = match command {
+                        TuiControl::ArchiveFlow(change) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = scopes.archive_flow(*change).await.map(Navigation::Catalog);
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::SelectDefaultFlow(change) => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
@@ -1064,7 +1072,7 @@ impl scopes::Scopes {
 
     async fn select_default_flow(
         &self,
-        change: atman_tui::flow_hub::DefaultFlowSelection,
+        change: atman_tui::flow_hub::FlowCatalogSelection,
     ) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
         let session = self
             .host
@@ -1075,6 +1083,26 @@ impl scopes::Scopes {
             .await?;
         self.browse(atman_tui::flow_hub::HubRequest::FlowDetails { owner: change.flow }).await
             .context("Default flow saved, but reading updated details failed; refresh to inspect the current state")
+    }
+
+    async fn archive_flow(
+        &self,
+        change: atman_tui::flow_hub::FlowArchiveChange,
+    ) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
+        let selection = change.selection;
+        let session = self
+            .host
+            .open_session(&self.root, selection.flow.session_id.0)
+            .await?;
+        session
+            .set_flow_archived(
+                selection.expected,
+                selection.flow.instance_id.clone(),
+                change.archived,
+            )
+            .await?;
+        self.browse(atman_tui::flow_hub::HubRequest::FlowDetails { owner: selection.flow }).await
+            .context("Flow visibility saved, but reading updated details failed; refresh to inspect the current state")
     }
 
     async fn browse(
@@ -1095,12 +1123,13 @@ impl scopes::Scopes {
                 let inspected = self.catalog.inspect_flow(&owner, |_| Ok(())).await?;
                 FlowHubPage::FlowDetails(Box::new(atman_tui::flow_hub::FlowDetailsPage {
                     is_default: summary.default_flow.as_ref() == Some(&owner.instance_id),
-                    selection: atman_tui::flow_hub::DefaultFlowSelection {
+                    selection: atman_tui::flow_hub::FlowCatalogSelection {
                         flow: owner,
                         expected,
                     },
                     title: inspected.descriptor.content.title().into(),
                     recorded_state: inspected.state.state().clone(),
+                    archived: inspected.archived,
                 }))
             }
             HubRequest::ControlHistory { before } => FlowHubPage::ControlHistory(

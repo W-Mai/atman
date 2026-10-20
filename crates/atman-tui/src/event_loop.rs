@@ -3511,6 +3511,7 @@ fn dispatch_hub_action(
 ) {
     let command = match action {
         crate::flow_hub::Action::SelectDefault(change) => TuiControl::SelectDefaultFlow(change),
+        crate::flow_hub::Action::ArchiveFlow(change) => TuiControl::ArchiveFlow(change),
         crate::flow_hub::Action::SubmitControls(request) => TuiControl::SubmitControls(request),
         crate::flow_hub::Action::RetryControls(id) => TuiControl::RetryControls(id),
         crate::flow_hub::Action::UpdateManagement(change) => TuiControl::UpdateManagement(change),

@@ -148,13 +148,14 @@ impl OverviewDirectory {
                             };
                             (
                                 format!(
-                                    "{}{}",
+                                    "{}{}{}",
                                     snapshot.title,
                                     if snapshot.default_flow {
                                         " · default"
                                     } else {
                                         ""
-                                    }
+                                    },
+                                    if snapshot.archived { " · Archived" } else { "" },
                                 ),
                                 format!(
                                     "{status}{} · {} pending\n{}\n{} · Recorded {} · {}\n{session} · {}/{}",
@@ -237,6 +238,7 @@ mod tests {
             owner,
             session_title: Some(format!("Session {session}")),
             snapshot: Ok(OverviewCatalogSnapshot {
+                archived: false,
                 title: format!("Worker {index}"),
                 project_root: None,
                 default_flow: index == 1,

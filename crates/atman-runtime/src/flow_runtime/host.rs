@@ -1064,8 +1064,29 @@ async fn serve_catalog(
                 expected,
                 reply,
             } => {
+                let writer = flows
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .filter(|worker| !worker.is_stopped())
+                    .cloned();
+                let observed = if archived {
+                    match writer {
+                        Some(writer) => match writer.state().await {
+                            Ok(state) => Some(state),
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                                continue;
+                            }
+                        },
+                        None => None,
+                    }
+                } else {
+                    None
+                };
                 let result = tokio::task::spawn_blocking(move || {
-                    let result = store.set_flow_archived(&expected, id, archived);
+                    let result =
+                        store.set_flow_archived_observed(&expected, id, archived, observed);
                     (store, result)
                 })
                 .await;

@@ -371,6 +371,7 @@ impl Tool for FlowInstances {
                             });
                         value["entry"] = serde_json::json!(item.entry);
                         value["loaded"] = item.loaded.into();
+                        value["archived"] = item.archived.into();
                         value["trailing_bytes"] = serde_json::json!(item.trailing_bytes);
                         value["activity"] = serde_json::json!(item.activity);
                         if !item.loaded && item.state.is_some() {

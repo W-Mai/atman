@@ -8,16 +8,23 @@ use super::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DefaultFlowSelection {
+pub struct FlowCatalogSelection {
     pub flow: FlowRef,
     pub expected: CommitReceipt,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlowArchiveChange {
+    pub selection: FlowCatalogSelection,
+    pub archived: bool,
+}
+
 pub struct FlowDetailsPage {
-    pub selection: DefaultFlowSelection,
+    pub selection: FlowCatalogSelection,
     pub title: String,
     pub recorded_state: atman_rt::InstanceState<atman_runtime::event::AtmanUuid>,
     pub is_default: bool,
+    pub archived: bool,
 }
 
 impl FlowDetailsPage {
@@ -42,6 +49,14 @@ impl FlowDetailsPage {
                 detail: "Initial view when opening this Session. Existing views, execution and permissions remain unchanged.".into(),
                 action: if self.is_default { Action::None } else { Action::SelectDefault(Box::new(self.selection.clone())) },
             },
+            Row {
+                key: RowKey::FlowField("archive"),
+                title: if self.archived { "Unarchive flow · Enter" } else if matches!(self.recorded_state, atman_rt::InstanceState::Closed) { "Archive flow · Enter" } else { "Archive unavailable" }.into(),
+                detail: if self.archived { "Remove the archive marker. Execution stays closed." } else { "Only closed flows can be archived. History remains readable; search Archived in the directory." }.into(),
+                action: if self.archived || matches!(self.recorded_state, atman_rt::InstanceState::Closed) {
+                    Action::ArchiveFlow(Box::new(FlowArchiveChange { selection: self.selection.clone(), archived: !self.archived }))
+                } else { Action::None },
+            },
         ]
     }
 }
@@ -59,12 +74,103 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn archive_controls_share_padding_request_ownership_and_disabled_guards() {
+        let flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: atman_rt::FlowInstanceId::now(),
+        };
+        let selection = FlowCatalogSelection {
+            flow: flow.clone(),
+            expected: CommitReceipt {
+                journal_id: Uuid::now_v7(),
+                sequence: 2,
+                digest: "x".repeat(64),
+            },
+        };
+        for (width, height) in [(120, 45), (40, 24)] {
+            for (state, archived) in [
+                (atman_rt::InstanceState::Prepared, false),
+                (atman_rt::InstanceState::Closed, false),
+                (atman_rt::InstanceState::Closed, true),
+            ] {
+                let enabled = matches!(state, atman_rt::InstanceState::Closed);
+                let mut ticket = ControlTicket {
+                    binding: ViewBinding {
+                        view_id: Uuid::now_v7(),
+                        revision: 1,
+                        flow: flow.clone().into(),
+                    },
+                    request_id: Uuid::now_v7(),
+                };
+                let mut hub = FlowHub {
+                    pending: Some(ticket.clone()),
+                    ..Default::default()
+                };
+                hub.receive(
+                    Some(&ticket),
+                    Ok(Box::new(FlowHubPage::FlowDetails(Box::new(
+                        FlowDetailsPage {
+                            selection: selection.clone(),
+                            title: "Task".into(),
+                            recorded_state: state,
+                            is_default: false,
+                            archived,
+                        },
+                    )))),
+                );
+                for _ in 0..3 {
+                    hub.key(KeyAction::HistoryDown);
+                }
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                        .unwrap();
+                terminal
+                    .draw(|frame| hub.render(frame, &ticket.binding.flow))
+                    .unwrap();
+                assert!(matches!(hub.float(), Action::None));
+                let matches_change = |action: Action| matches!(action, Action::ArchiveFlow(change) if change.selection == selection && change.archived != archived);
+                assert_eq!(matches_change(hub.key(KeyAction::Submit)), enabled);
+                let (rect, _) = hub
+                    .hits
+                    .iter()
+                    .find(|(_, index)| hub.rows[*index].key == RowKey::FlowField("archive"))
+                    .unwrap();
+                assert!(rect.height >= 3);
+                assert_eq!(
+                    matches_change(hub.mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: rect.x + 1,
+                        row: rect.y + 1,
+                        modifiers: KeyModifiers::NONE
+                    })),
+                    enabled
+                );
+                ticket.request_id = Uuid::now_v7();
+                hub.pending = Some(ticket.clone());
+                assert!(matches!(hub.key(KeyAction::Submit), Action::None));
+                let mut stale = ticket.clone();
+                stale.request_id = Uuid::now_v7();
+                hub.receive(Some(&stale), Err("stale response".into()));
+                assert!(hub.pending.is_some());
+                hub.receive(Some(&ticket), Err("catalog changed".into()));
+                assert!(hub.error.is_some());
+                assert_eq!(matches_change(hub.key(KeyAction::Submit)), enabled);
+                terminal.backend_mut().resize(12, 8);
+                terminal
+                    .draw(|frame| hub.render(frame, &ticket.binding.flow))
+                    .unwrap();
+                assert!(matches!(hub.key(KeyAction::Submit), Action::None));
+            }
+        }
+    }
+
+    #[test]
     fn default_selection_shares_directory_targets_and_original_receipts() {
         let flow = FlowRef {
             session_id: Uuid::now_v7().into(),
             instance_id: atman_rt::FlowInstanceId::now(),
         };
-        let selection = DefaultFlowSelection {
+        let selection = FlowCatalogSelection {
             flow: flow.clone(),
             expected: CommitReceipt {
                 journal_id: Uuid::now_v7(),
@@ -83,6 +189,7 @@ mod tests {
                     next: None,
                     total: 1,
                     instances: vec![InstanceSummary {
+                        archived: false,
                         address: flow.clone(),
                         entry: Some("Worker".into()),
                         state: Some(atman_rt::FlowInstance::prepared(flow.clone())),
@@ -100,6 +207,7 @@ mod tests {
                 title: "Worker".into(),
                 recorded_state: atman_rt::InstanceState::Prepared,
                 is_default,
+                archived: false,
             })))
         };
         let click = |x, y| MouseEvent {

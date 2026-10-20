@@ -114,7 +114,8 @@ impl TuiNote {
 
 #[non_exhaustive]
 pub enum TuiControl {
-    SelectDefaultFlow(Box<flow_hub::DefaultFlowSelection>),
+    SelectDefaultFlow(Box<flow_hub::FlowCatalogSelection>),
+    ArchiveFlow(Box<flow_hub::FlowArchiveChange>),
     SubmitControls(Box<flow_hub::OperatorControls>),
     RetryControls(uuid::Uuid),
     UpdateManagement(Box<atman_runtime::flow_store::profile::ReplaceManagement>),

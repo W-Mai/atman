@@ -52,6 +52,7 @@ pub struct InstancePage {
 }
 
 pub struct InstanceSummary {
+    pub archived: bool,
     pub address: FlowRef,
     pub entry: Option<String>,
     pub state: Option<FlowInstance<AtmanUuid>>,
@@ -136,6 +137,7 @@ pub(crate) async fn instance_page<
             Err(error) => (None, None, Some(error.to_string()), false, None, None),
         };
         instances.push(InstanceSummary {
+            archived: snapshot.catalog.archived_flows.contains(&registration.id),
             address,
             entry,
             state,

@@ -721,8 +721,9 @@ impl FlowHubPage {
                     Row {
                         key: RowKey::Flow(row.address.clone().into()),
                         title: format!(
-                            "{}{marker}",
-                            row.entry.as_deref().unwrap_or("Unavailable flow")
+                            "{}{marker}{}",
+                            row.entry.as_deref().unwrap_or("Unavailable flow"),
+                            if row.archived { " · Archived" } else { "" },
                         ),
                         detail: row.unavailable.clone().unwrap_or_else(|| {
                             format!(

@@ -38,6 +38,13 @@ fn flow_archive_rejects_incomplete_history_without_repair_or_catalog_writes() {
     change(&mut flow, FlowTransition::CloseRequested);
     change(&mut flow, FlowTransition::Closed);
     let path = flow.dir().join("events.jsonl");
+    assert!(
+        session
+            .set_flow_archived(&expected, id.clone(), true)
+            .is_err(),
+        "an unobserved live writer cannot supply authoritative closure through an unlocked scan"
+    );
+    assert_eq!(session.cursor(), &expected);
     drop(flow);
     let complete = std::fs::read(&path).unwrap();
     std::fs::OpenOptions::new()

@@ -7638,6 +7638,40 @@ async fn flow_archive_changes_only_catalog_discovery_and_survives_reopen() {
             .archived_flows
             .contains(&first.address.instance_id)
     );
+    assert!(
+        inspected
+            .inspect_flow(&first.address.instance_id)
+            .unwrap()
+            .archived
+    );
+    let catalog = atman_runtime::flow_runtime::catalog::SessionCatalog::new(
+        None,
+        Some(dir.path().to_owned()),
+    );
+    let rows = catalog
+        .instances(info.id, None, 50, |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(
+        rows.instances
+            .iter()
+            .find(|row| row.address == first.address)
+            .unwrap()
+            .archived
+    );
+    assert!(
+        !rows
+            .instances
+            .iter()
+            .find(|row| row.address == second.address)
+            .unwrap()
+            .archived
+    );
+    let overview = catalog
+        .overview_page(None, 50, |_| Ok(true), |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(overview.entries.iter().any(|row| matches!(row, atman_runtime::flow_runtime::catalog::FlowCatalogEntry::Flow { owner, snapshot: Ok(snapshot), .. } if owner == &first.address && snapshot.archived)));
     let host = RuntimeHost::default();
     let session = host.open_session(dir.path(), info.id).await.unwrap();
     assert!(session.observe().await.unwrap().loaded.is_empty());
