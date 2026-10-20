@@ -569,7 +569,7 @@ async fn management_selection_preserves_receipts_across_replacement_restart_and_
     let initial = rpc(&state, methods::MANAGEMENT_OPEN, json!({})).await;
     let request = json!({
         "request_id": Uuid::new_v4(), "expected": initial["profile"]["cursor"], "session_id": target,
-        "grants": [{"id": Uuid::new_v4(), "instance_id": flow.address.instance_id, "target": {"kind": "all_sessions"}, "actions": ["discover", "watch"]}],
+        "grants": [{"id": Uuid::new_v4(), "instance_id": flow.address.instance_id, "target": {"kind": "all_sessions"}, "actions": ["discover", "watch", "approve_permission"]}],
     });
     let selected = rpc(&state, methods::MANAGEMENT_SELECT, request.clone()).await;
     assert_eq!(
@@ -579,6 +579,12 @@ async fn management_selection_preserves_receipts_across_replacement_restart_and_
     assert_eq!(
         selected["current"]["profile"]["management"]["grants"][0]["grantee"],
         json!(flow.address)
+    );
+    assert!(
+        selected["current"]["profile"]["management"]["grants"][0]["actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("approve_permission"))
     );
     let restored = rpc(
         &state,

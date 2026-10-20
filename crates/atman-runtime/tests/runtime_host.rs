@@ -17,6 +17,265 @@ use atman_runtime::source_program::RevisionBundle;
 use atman_runtime::{Executor, flow_authority::EffectiveAuthority};
 use uuid::Uuid;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker() {
+    use atman_runtime::{
+        Value,
+        flow_store::access::{AccessTarget, FlowAction, FlowGrant},
+        permission::{
+            DecisionActor, PermissionAction, PermissionIntent, PermissionResolution,
+            ResolveOutcome, SubmissionOutcome,
+        },
+        tool::{Tier, ToolDefinition},
+        trust::{TrustConfig, TrustMode},
+    };
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let data = tempfile::tempdir().unwrap();
+    let store = RuntimeStore::open(data.path()).unwrap();
+    let host = RuntimeHost::default();
+    let first = session_descriptor();
+    let second = session_descriptor();
+    let session = host
+        .attach_session(store.create_session(first.clone()).unwrap())
+        .unwrap();
+    let remote = host
+        .attach_session(store.create_session(second.clone()).unwrap())
+        .unwrap();
+    let reviewer = session
+        .create_flow(program_descriptor(
+            first.id,
+            "flow main() -> bool { return hold().await }".into(),
+        ))
+        .await
+        .unwrap();
+    let requester = remote
+        .create_flow(program_descriptor(
+            second.id,
+            "flow main() -> bool { return request().await }".into(),
+        ))
+        .await
+        .unwrap();
+    for worker in [&reviewer, &requester] {
+        change(worker, FlowTransition::Activated).await;
+    }
+
+    let (captured, client) = tokio::sync::oneshot::channel();
+    let captured = Mutex::new(Some(captured));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = release.clone();
+    let executor = Executor::new();
+    executor
+        .tools
+        .register_fn(
+            ToolDefinition::new("hold", Tier::Zero).call_mode(atman_rt::ToolCallMode::Deferred),
+            move |_, ctx| {
+                captured
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(ctx.flow_client().unwrap().clone())
+                    .ok()
+                    .unwrap();
+                let gate = gate.clone();
+                async move {
+                    gate.notified().await;
+                    Ok(Value::Bool(true))
+                }
+            },
+        )
+        .unwrap();
+    let reviewing = tokio::spawn({
+        let worker = reviewer.clone();
+        async move { invoke(&worker, executor).await }
+    });
+    let client = client.await.unwrap();
+
+    let (submitted, pending) = tokio::sync::oneshot::channel();
+    let submitted = Mutex::new(Some(submitted));
+    let effects = Arc::new(AtomicUsize::new(0));
+    let counted = effects.clone();
+    let executor = Executor::new();
+    executor
+        .tools
+        .register_fn(
+            ToolDefinition::new("request", Tier::Zero).call_mode(atman_rt::ToolCallMode::Deferred),
+            move |_, ctx| {
+                let identity = ctx.flow_identity.as_ref().unwrap();
+                let SubmissionOutcome::Pending(pending) = ctx
+                    .permission_broker
+                    .as_ref()
+                    .unwrap()
+                    .submit(
+                        Some(&identity.session_id),
+                        Some(&identity.run_id),
+                        PermissionIntent::minimal("reviewed-effect", "fs.write", Tier::Two),
+                        false,
+                        &TrustConfig {
+                            mode: TrustMode::Steady,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap()
+                else {
+                    panic!("expected pending request");
+                };
+                submitted
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(pending.request.clone())
+                    .unwrap();
+                let counted = counted.clone();
+                async move {
+                    let PermissionResolution::Decision(decision) =
+                        pending.resolution.await.unwrap()
+                    else {
+                        panic!("request should be resolved");
+                    };
+                    assert_eq!(decision.action, PermissionAction::Approve);
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Ok(Value::Bool(true))
+                }
+            },
+        )
+        .unwrap();
+    let requesting = tokio::spawn({
+        let worker = requester.clone();
+        async move { invoke(&worker, executor).await }
+    });
+    let pending = pending.await.unwrap();
+    let target = requester.address().clone();
+    assert!(client.permission_requests(target.clone()).await.is_err());
+    assert!(
+        client
+            .permission_requests(reviewer.address().clone())
+            .await
+            .is_err()
+    );
+    let grant = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: reviewer.address().clone(),
+        target: AccessTarget::Flow(target.clone()),
+        actions: [FlowAction::ApprovePermission].into(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
+        .await
+        .unwrap();
+    let visible = client.permission_requests(target.clone()).await.unwrap();
+    assert_eq!(visible, vec![pending.clone()]);
+    assert!(client.read_context(target.clone()).await.is_err());
+    assert!(
+        client
+            .resolve_permission(
+                target.clone(),
+                pending.request_id.clone(),
+                pending.revision + 1,
+                PermissionAction::Approve,
+                None
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    session
+        .revoke_access(session.snapshot().await.unwrap().cursor, grant.id)
+        .await
+        .unwrap();
+    assert!(
+        client
+            .resolve_permission(
+                target.clone(),
+                pending.request_id.clone(),
+                pending.revision,
+                PermissionAction::Approve,
+                None
+            )
+            .await
+            .is_err()
+    );
+    let renewed = FlowGrant {
+        id: Uuid::new_v4(),
+        ..grant
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, renewed)
+        .await
+        .unwrap();
+
+    let pause = Uuid::new_v4().into();
+    reviewer
+        .control(
+            control_request(
+                &reviewer,
+                reviewer.state().await.unwrap().revision(),
+                pause,
+                PeerControl::Pause,
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    assert!(client.permission_requests(target.clone()).await.is_err());
+    reviewer
+        .control(
+            control_request(
+                &reviewer,
+                reviewer.state().await.unwrap().revision(),
+                pause,
+                PeerControl::Resume,
+            ),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let decision = client
+        .resolve_permission(
+            target.clone(),
+            pending.request_id.clone(),
+            pending.revision,
+            PermissionAction::Approve,
+            Some("reviewed".into()),
+        )
+        .await
+        .unwrap();
+    let ResolveOutcome::Resolved(decision) = decision else {
+        panic!("expected decision");
+    };
+    assert!(
+        matches!(decision.actor, DecisionActor::Flow { session_id, .. } if session_id == first.id.to_string())
+    );
+    assert_eq!(
+        decision.execution_boundary,
+        atman_runtime::permission::ExecutionBoundary::Sandboxed
+    );
+    requesting.await.unwrap().result.unwrap();
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    assert!(requester.context().permission_broker().grants().is_empty());
+    assert!(
+        client
+            .resolve_permission(
+                target.clone(),
+                pending.request_id,
+                pending.revision,
+                PermissionAction::Approve,
+                None
+            )
+            .await
+            .is_err()
+    );
+    release.notify_one();
+    reviewing.await.unwrap().result.unwrap();
+    assert!(client.permission_requests(target).await.is_err());
+    host.shutdown().await.unwrap();
+}
+
 fn control_request(
     worker: &FlowWorker,
     expected_revision: u64,
@@ -7739,11 +7998,14 @@ fn access_grants_are_scoped_revocable_and_recovered_from_facts_without_default_f
             .access
             .allows(&first.address, &remote.address, FlowAction::Send)
     );
-    assert!(!store.projection().access.allows(
-        &first.address,
-        &first.address,
-        FlowAction::Delegate
-    ));
+    for action in [FlowAction::Delegate, FlowAction::ApprovePermission] {
+        assert!(
+            !store
+                .projection()
+                .access
+                .allows(&first.address, &first.address, action)
+        );
+    }
     store
         .select_default(&store.cursor().clone(), second.address.instance_id.clone())
         .unwrap();

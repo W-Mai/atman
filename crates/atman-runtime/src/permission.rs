@@ -663,6 +663,25 @@ pub struct UserDecisionAuthority {
 pub enum DecisionAuthority {
     Flow(FlowDecisionAuthority),
     User(UserDecisionAuthority),
+    Delegated(DelegatedDecisionAuthority),
+}
+
+/// Host-issued, request-bound peer authority. Model arguments cannot construct this proof.
+#[derive(Clone)]
+pub struct DelegatedDecisionAuthority {
+    pub(crate) identity: Arc<FlowIdentity>,
+    pub(crate) requester: crate::flow_store::FlowRef,
+    pub(crate) request_id: PermissionRequestId,
+    pub(crate) validate: Arc<dyn Fn() -> Result<(), PermissionError> + Send + Sync>,
+}
+
+impl std::fmt::Debug for DelegatedDecisionAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DelegatedDecisionAuthority")
+            .field("requester", &self.requester)
+            .field("request_id", &self.request_id)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1240,7 +1259,11 @@ impl PermissionBroker {
             }
             _ => return Err(PermissionError::AlreadyResolved),
         };
-        if !actor_matches_target(&actor, &target) {
+        let targets_actor = match authority {
+            DecisionAuthority::Delegated(_) => target == ApprovalTarget::User,
+            _ => actor_matches_target(&actor, &target),
+        };
+        if !targets_actor {
             return Err(PermissionError::ActorNotAuthorized);
         }
         let next_target = (action == PermissionAction::Defer
@@ -2508,6 +2531,42 @@ impl PermissionBroker {
             validate_same_path_scope(request, scope)?;
         }
         match authority {
+            DecisionAuthority::Delegated(authority) => {
+                (authority.validate)()?;
+                let requester = self
+                    .flows
+                    .lookup_run(&request.requesting_run_id)
+                    .ok_or(PermissionError::ActorNotRunning)?;
+                let identity = &authority.identity;
+                if request.request_id != authority.request_id
+                    || requester.instance.as_ref() != Some(&authority.requester)
+                    || identity
+                        .instance
+                        .as_ref()
+                        .is_none_or(|instance| instance == &authority.requester)
+                    || action == PermissionAction::Defer
+                    || scope.is_some_and(|scope| !matches!(scope, GrantScope::CurrentCall))
+                {
+                    return Err(PermissionError::ActorNotAuthorized);
+                }
+                if !matches!(identity.execution_state(), FlowExecutionState::Running) {
+                    return Err(PermissionError::ActorNotRunning);
+                }
+                if !identity.effective_authority.permission_management {
+                    return Err(PermissionError::PermissionManagementRequired);
+                }
+                if !authority_contains(
+                    &identity.effective_authority,
+                    &request.requirement,
+                    &request.intent.provenance,
+                ) {
+                    return Err(PermissionError::GrantExceedsAuthority);
+                }
+                Ok(DecisionActor::Flow {
+                    session_id: identity.session_id.clone(),
+                    run_id: identity.run_id.clone(),
+                })
+            }
             DecisionAuthority::Flow(authority) => {
                 self.authenticate_registered_identity(&authority.identity)?;
                 let identity = &authority.identity;
@@ -4489,6 +4548,52 @@ mod tests {
             pending.resolution.blocking_recv().unwrap(),
             PermissionResolution::Decision(_)
         ));
+    }
+
+    #[test]
+    fn delegated_decisions_preserve_authority_ceilings() {
+        let address = || crate::flow_store::FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: atman_rt::FlowInstanceId(Uuid::now_v7().into()),
+        };
+        let target = address();
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = flows
+            .register_instance(target.clone(), FlowRunId::now(), authority(true))
+            .unwrap();
+        let broker = PermissionBroker::new(flows);
+        let pending = submit_user(&broker, &requester, intent());
+        let original = pending.request.clone();
+        let reviewers = Arc::new(FlowRegistry::default());
+        for (management, tier_allowed, error) in [
+            (false, true, PermissionError::PermissionManagementRequired),
+            (true, false, PermissionError::GrantExceedsAuthority),
+        ] {
+            let mut ceiling = authority(management);
+            ceiling.allowed_tiers[2] = tier_allowed;
+            let identity = reviewers
+                .register_instance(address(), FlowRunId::now(), ceiling)
+                .unwrap();
+            let delegated = DecisionAuthority::Delegated(DelegatedDecisionAuthority {
+                identity,
+                requester: target.clone(),
+                request_id: original.request_id.clone(),
+                validate: Arc::new(|| Ok(())),
+            });
+            assert_eq!(
+                broker.resolve_at_revision(
+                    &original.request_id,
+                    original.revision,
+                    &delegated,
+                    PermissionAction::Approve,
+                    None,
+                    None,
+                ),
+                Err(error),
+            );
+            assert_eq!(broker.get(&original.request_id), Some(original.clone()));
+            assert!(broker.grants().is_empty());
+        }
     }
     #[test]
     fn root_capability_does_not_amplify_child_authority() {

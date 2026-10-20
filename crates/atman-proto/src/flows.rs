@@ -18,6 +18,7 @@ pub enum ManagementAction {
     Control,
     ManageGoal,
     Delegate,
+    ApprovePermission,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]

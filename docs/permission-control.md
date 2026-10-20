@@ -39,6 +39,16 @@ Request revision validation, authority checks, and commitment execute under the 
 
 Embedded controllers can use `PermissionBroker::resolve_at_revision` for the same contract. UI and daemon batch resolution retain their request-version and group-version checks.
 
+## Peer approval access
+
+An admitted `FlowClient` can inspect another instance's pending user approvals with `permission_requests` and approve or deny an observed request with `resolve_permission`. Both operations require an explicit `FlowAction::ApprovePermission` grant for that target, including across Sessions. Discovery, context access, execution control, creation relationships, and default-view selection do not grant this permission. A flow cannot approve its own requests.
+
+The management grant editor exposes this capability as **Review approvals**. Management RPC grants use the `approve_permission` action.
+
+The decision is committed by the requesting instance's existing broker. It validates the observed request revision, current caller lease and grant, and the reviewing flow's permission-management capability and resource authority. A paused, ended, or revoked reviewer cannot decide. Peer approvals retain the flow actor in audit records, remain sandboxed, and cannot create reusable tool or path exceptions. Concurrent user and peer decisions compete for the same request; only one can resolve the waiting invocation.
+
+An undecided request remains available for user approval. This host API does not transfer the request away from the user, wake a reviewer, or install a routing policy.
+
 ## Trust modes
 
 `TrustMode` selects the baseline Tier policy:

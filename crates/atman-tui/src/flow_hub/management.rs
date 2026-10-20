@@ -284,6 +284,7 @@ fn action_label(action: FlowAction) -> &'static str {
         FlowAction::Control => "Control execution",
         FlowAction::ManageGoal => "Manage goal",
         FlowAction::Delegate => "Delegate authority",
+        FlowAction::ApprovePermission => "Review approvals",
     }
 }
 

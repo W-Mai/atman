@@ -22,7 +22,7 @@ use crate::{
     settings_form::{self, Field, FieldHit, FormLayout},
 };
 
-const PERMISSIONS: [FlowAction; 8] = [
+const PERMISSIONS: [FlowAction; 9] = [
     FlowAction::Discover,
     FlowAction::ReadOutput,
     FlowAction::ReadContext,
@@ -31,6 +31,7 @@ const PERMISSIONS: [FlowAction; 8] = [
     FlowAction::Control,
     FlowAction::ManageGoal,
     FlowAction::Delegate,
+    FlowAction::ApprovePermission,
 ];
 const FIELDS: usize = 3 + PERMISSIONS.len();
 
@@ -580,7 +581,8 @@ mod tests {
                 .draw(|frame| editing.render(frame, frame.area(), false, None))
                 .unwrap();
             let hit = editing.hits.last().unwrap().1.record;
-            let before = editing.actions.contains(&FlowAction::Delegate);
+            let last_permission = PERMISSIONS.last().unwrap();
+            let before = editing.actions.contains(last_permission);
             editing.mouse(
                 MouseEvent {
                     kind: MouseEventKind::Down(MouseButton::Left),
@@ -590,7 +592,7 @@ mod tests {
                 },
                 false,
             );
-            assert_ne!(before, editing.actions.contains(&FlowAction::Delegate));
+            assert_ne!(before, editing.actions.contains(last_permission));
             let save = editing.buttons[0];
             let Action::UpdateManagement(mouse) = editing.mouse(
                 MouseEvent {

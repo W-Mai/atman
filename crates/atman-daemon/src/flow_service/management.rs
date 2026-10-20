@@ -96,6 +96,7 @@ impl SessionService {
                         ManagementAction::Control => FlowAction::Control,
                         ManagementAction::ManageGoal => FlowAction::ManageGoal,
                         ManagementAction::Delegate => FlowAction::Delegate,
+                        ManagementAction::ApprovePermission => FlowAction::ApprovePermission,
                     })
                     .collect(),
             })

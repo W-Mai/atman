@@ -21,6 +21,8 @@ pub enum FlowAction {
     Watch,
     Control,
     ManageGoal,
+    /// Review another instance's pending tool approvals; never implied by creation or self access.
+    ApprovePermission,
     Delegate,
 }
 
@@ -103,7 +105,9 @@ impl SessionAccess {
 
     /// The host authenticates the source and resolves the target before using this policy.
     pub fn allows(&self, source: &FlowRef, target: &FlowRef, action: FlowAction) -> bool {
-        if source == target && action != FlowAction::Delegate {
+        if source == target
+            && !matches!(action, FlowAction::Delegate | FlowAction::ApprovePermission)
+        {
             return true;
         }
         if source.session_id == target.session_id

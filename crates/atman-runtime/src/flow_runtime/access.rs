@@ -22,6 +22,9 @@ use crate::message::{Message, MessageOrigin};
 
 pub use crate::flow_store::control::ControlAction as PeerControl;
 
+#[path = "permission_access.rs"]
+mod permission_access;
+
 /// An opaque host-issued identity for one admitted invocation, not a serializable model argument.
 #[derive(Clone)]
 pub struct FlowClient {

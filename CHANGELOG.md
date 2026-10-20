@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Peer approval access** — Admitted flow clients can inspect and resolve another instance's pending approvals under explicit grants. Decisions preserve the request owner's broker, observed revision, reviewer authority, and sandbox boundary.
+
 - **Approval request versions** — Individual permission decision tools require the observed request revision. Single and batch decisions share commitment logic, including revision advancement when forwarding approval.
 
 - **Peer agent guidance** — Managed prompts describe retained flow instances, explicit peer permissions, independent Goal and execution controls, and watcher lifetimes without an implicit timeout. Goal documentation covers durable inbox delivery and instance recovery.
