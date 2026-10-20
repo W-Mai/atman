@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Storage ownership release** — Journal, Session, profile, and catalog locks are explicitly released when their owner closes, so inherited subprocess descriptors do not block reopening storage.
+
 - **Scoped peer creation** — Synchronous and asynchronous spawn accept explicit task-scope membership before activation. Launch records and recovery validate the same lifetime binding; cancellation closes members while independent peers remain available.
 
 - **Task scope tools** — Persistent flows can create, list, and cancel owned task scopes. Interjections accept explicit scope references, retain send identities on retries, and reject scoped requests outside persistent execution.

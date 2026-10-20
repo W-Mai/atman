@@ -1,6 +1,6 @@
 //! Profile-owned management identity and explicit grants, committed together.
 
-use std::{collections::BTreeMap, fs::File, io, io::Write};
+use std::{collections::BTreeMap, io, io::Write};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -91,7 +91,7 @@ pub struct ProfileStore {
     projection: Projection,
     recovered_tail: Option<RecoveredTail>,
     write_failed: bool,
-    _owner: File,
+    _owner: crate::file_lock::FileLock,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -231,7 +231,7 @@ impl ProfileStore {
             .read(true)
             .write(true)
             .open(runtime.root.join(".profile.lock"))?;
-        fs2::FileExt::try_lock_exclusive(&owner)?;
+        let owner = crate::file_lock::FileLock::try_exclusive(owner)?;
         let directory = runtime.root.join("host");
         if !directory.try_exists()? {
             initialize_dir(&directory, |dir| {

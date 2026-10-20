@@ -884,15 +884,14 @@ impl RuntimeStore {
         self.open_session_locked(descriptor.id)
     }
 
-    fn lock_catalog(&self) -> io::Result<File> {
+    fn lock_catalog(&self) -> io::Result<crate::file_lock::FileLock> {
         let file = private_file_options()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
             .open(self.root.join(".catalog.lock"))?;
-        fs2::FileExt::lock_exclusive(&file)?;
-        Ok(file)
+        crate::file_lock::FileLock::exclusive(file)
     }
 
     fn create_session_at(
@@ -967,12 +966,12 @@ impl RuntimeStore {
 }
 
 struct SessionOwner {
-    _lock: File,
+    _lock: crate::file_lock::FileLock,
     descriptor: SessionDescriptor,
 }
 
 impl SessionOwner {
-    fn lock(dir: &Path) -> io::Result<File> {
+    fn lock(dir: &Path) -> io::Result<crate::file_lock::FileLock> {
         let mut options = private_file_options();
         let file = options
             .create(true)
@@ -980,8 +979,7 @@ impl SessionOwner {
             .read(true)
             .write(true)
             .open(dir.join(".owner.lock"))?;
-        fs2::FileExt::try_lock_exclusive(&file)?;
-        Ok(file)
+        crate::file_lock::FileLock::try_exclusive(file)
     }
 }
 
@@ -1182,8 +1180,7 @@ impl SessionStore {
                         .join(id.to_string())
                         .join("events.jsonl"),
                 )?;
-                fs2::FileExt::try_lock_shared(&file)?;
-                reader = Some(file);
+                reader = Some(crate::file_lock::FileLock::try_shared(file)?);
             }
             let inspection = self.inspect_flow(&id)?;
             if inspection.journal.trailing_bytes != 0

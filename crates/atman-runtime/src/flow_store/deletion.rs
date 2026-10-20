@@ -1,6 +1,6 @@
 //! Removal requires exclusive catalog access and closed, detached instances.
 
-use std::{fs, fs::File, io, path::Path};
+use std::{fs, io, path::Path};
 
 use anyhow::{Context, Result, ensure};
 use atman_rt::InstanceState;
@@ -212,7 +212,7 @@ fn validate_closed_session(inspected: &SessionInspection) -> Result<()> {
 
 /// Keep membership stable until shared data and project catalog records have been updated.
 pub(crate) struct ProjectDeletion {
-    _catalog: File,
+    _catalog: crate::file_lock::FileLock,
 }
 
 impl ProjectDeletion {

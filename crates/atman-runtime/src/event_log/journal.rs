@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::file_lock::FileLock;
+
 const FORMAT: &str = "atman-fact-journal";
 const VERSION: u32 = 1;
 
@@ -164,7 +166,7 @@ pub struct RecoveredTail {
 
 /// A single writer with an exclusive OS file lock and monotonic commit sequence.
 pub struct Journal {
-    file: File,
+    file: FileLock,
     id: Uuid,
     sequence: u64,
     digest: String,
@@ -177,8 +179,8 @@ impl Journal {
     /// Create a new journal without overwriting an existing file. The parent must exist durably.
     pub fn create(path: &Path, id: Uuid) -> io::Result<Self> {
         let mut options = private_file_options();
-        let mut file = options.create_new(true).read(true).write(true).open(path)?;
-        fs2::FileExt::try_lock_exclusive(&file)?;
+        let mut file =
+            FileLock::try_exclusive(options.create_new(true).read(true).write(true).open(path)?)?;
         let header = Header {
             format: FORMAT.into(),
             version: VERSION,
@@ -207,8 +209,8 @@ impl Journal {
         expected_id: Uuid,
         mut apply: impl FnMut(CommitReceipt, Vec<T>) -> io::Result<()>,
     ) -> io::Result<(Self, Option<RecoveredTail>)> {
-        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        fs2::FileExt::try_lock_exclusive(&file)?;
+        let mut file =
+            FileLock::try_exclusive(OpenOptions::new().read(true).write(true).open(path)?)?;
         let ScannedJournal {
             sequence,
             digest,
@@ -458,6 +460,31 @@ fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Er
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn releasing_writer_ownership_does_not_wait_for_inherited_descriptors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let id = Uuid::new_v4();
+        let mut writer = Journal::create(&path, id).unwrap();
+        writer.commit(&["saved"]).unwrap();
+        // A forked command retains this open-file description until exec closes it.
+        let inherited = writer.file.try_clone().unwrap();
+        assert!(Journal::open::<String>(&path, id, |_, _| Ok(())).is_err());
+        drop(writer);
+        let mut restored = Vec::new();
+        let (next, _) = Journal::open::<String>(&path, id, |_, facts| {
+            restored.extend(facts);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(restored, ["saved"]);
+        drop(inherited);
+        assert!(Journal::open::<String>(&path, id, |_, _| Ok(())).is_err());
+        drop(next);
+        Journal::open::<String>(&path, id, |_, _| Ok(())).unwrap();
+    }
+
     #[test]
     fn bounded_pages_resume_across_appends_and_reopening_without_moving_the_commit_boundary() {
         let dir = tempfile::tempdir().unwrap();
@@ -677,14 +704,19 @@ mod tests {
         assert_eq!(journal.sequence(), 0);
         assert_eq!(std::fs::read(&path).unwrap(), before);
         // Inject a write failure without platform-specific devices or production failpoints.
-        journal.file = File::open(&path).unwrap();
+        fs2::FileExt::unlock(&*journal.file).unwrap();
+        journal.file = FileLock::try_exclusive(File::open(&path).unwrap()).unwrap();
         assert!(journal.commit(&[1]).is_err());
         assert_eq!(journal.sequence(), 0);
-        journal.file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
+        fs2::FileExt::unlock(&*journal.file).unwrap();
+        journal.file = FileLock::try_exclusive(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap(),
+        )
+        .unwrap();
         assert!(journal.commit(&[2]).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), before);
         drop(journal);

@@ -6,6 +6,9 @@ Flow directory activity is derived from timestamped facts and retains the source
 
 `Journal::create(path, id)` creates a new file under an existing durable parent directory. `Journal::open(path, expected_id, apply)` holds an exclusive file lock, validates the log identity and format, and replays complete batches into a private projection. The caller must discard that projection if opening fails. These operations use blocking filesystem I/O and belong on a storage worker, outside UI or executor polling.
 
+Storage lock guards explicitly unlock before closing their file descriptors. On Unix, a subprocess can temporarily inherit the same open-file description before exec; that inherited descriptor does not extend the lifetime of the original writer or prevent another owner from reopening after handoff. The exclusive lock still spans the entire active writer lifetime. Session, profile, catalog, and temporary archival locks use the same ownership guard.
+
+
 Each JSONL journal starts with a format/version/identity header. A batch contains a consecutive sequence number, the previous record digest, the exact serialized JSON payload, and its SHA-256 digest. Payloads are nonempty arrays. The hash chain checks integrity and ordering; it does not authenticate the caller or replace host authorization. A `CommitReceipt` identifies the journal and committed sequence/digest.
 
 The writer serializes the complete batch before touching the file. A write or synchronization error prevents further commits through that handle. Reopening can discover a complete batch whose acknowledgement was lost; the host reconciles stable request IDs before retrying effects. A journal receipt alone does not implement request deduplication or prove that a business operation completed.
