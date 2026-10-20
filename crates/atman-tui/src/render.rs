@@ -323,20 +323,28 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     if app.flow_hub_rect.is_some() {
         status_area.width = status_area.width.saturating_sub(2);
     }
-    f.render_widget(
-        status::render_bar(status::StatusInputs {
-            flow_id,
-            session_id: &app.session_id,
-            session_name: app.session_name.as_deref(),
-            goal: app.goal.as_deref(),
-            streaming: app.streaming,
-            waiting_for_llm: app.waiting_for_llm,
-            status_notes: &app.status_notes,
-            activity: Some(&app.session_activity),
-            pending_permissions: pending_count,
-        }),
-        status_area,
-    );
+    if app.flow_view_error.is_some() {
+        f.render_widget(
+            Paragraph::new(" View disconnected · Reopen from FlowHub to retry")
+                .style(Style::default().fg(crate::theme::theme().warn.into())),
+            status_area,
+        );
+    } else {
+        f.render_widget(
+            status::render_bar(status::StatusInputs {
+                flow_id,
+                session_id: &app.session_id,
+                session_name: app.session_name.as_deref(),
+                goal: app.goal.as_deref(),
+                streaming: app.streaming,
+                waiting_for_llm: app.waiting_for_llm,
+                status_notes: &app.status_notes,
+                activity: Some(&app.session_activity),
+                pending_permissions: pending_count,
+            }),
+            status_area,
+        );
+    }
     if let Some(rect) = app.flow_hub_rect {
         let t = crate::theme::theme();
         f.render_widget(

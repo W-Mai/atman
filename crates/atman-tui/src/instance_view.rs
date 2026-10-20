@@ -321,6 +321,7 @@ impl AppState {
         let output = self.session.as_ref().map(|session| session.output_store());
         let before = self.items.revision_clock();
         self.items.sync_content(view, output.as_deref())?;
+        self.flow_view_error = None;
         if let Some(snapshot) = self.items.snapshot() {
             let flow = snapshot.status.execution.address().clone();
             let items = snapshot

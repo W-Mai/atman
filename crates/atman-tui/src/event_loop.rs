@@ -212,6 +212,44 @@ fn refresh_live_output(ui: &mut UiState, handle: &mut TuiHandle) -> std::io::Res
     Ok(())
 }
 
+fn disconnect_view(ui: &mut UiState, error: &std::io::Error) {
+    ui.app.flow_view_error = Some(error.to_string());
+    ui.app
+        .status_notes
+        .insert("flow".into(), "Disconnected · showing last commit".into());
+    ui.app.push_toast(
+        format!("View disconnected: {error}. Reopen from FlowHub to retry."),
+        crate::app::NoteLevel::Error,
+        std::time::Duration::from_secs(8),
+        crate::app::ToastPosition::TopRight,
+    );
+}
+
+fn update_live_output(ui: &mut UiState, handle: &mut TuiHandle) {
+    if let Err(error) = refresh_live_output(ui, handle) {
+        handle.live_output = None;
+        ui.app.push_toast(
+            format!("Preview disconnected: {error}"),
+            crate::app::NoteLevel::Error,
+            std::time::Duration::from_secs(8),
+            crate::app::ToastPosition::TopRight,
+        );
+    }
+}
+
+/// Only the failed subscription stops. Drafts, controls and other views stay attached.
+fn update_flow_view(ui: &mut UiState, handle: &mut TuiHandle, result: std::io::Result<()>) {
+    match result {
+        Ok(()) => {
+            update_live_output(ui, handle);
+            if let Some(snapshot) = ui.app.items.snapshot() {
+                ui.wm.flow_snapshot(snapshot.clone());
+            }
+        }
+        Err(error) => disconnect_view(ui, &error),
+    }
+}
+
 async fn live_output_change(
     reader: &mut Option<atman_runtime::flow_runtime::live::LiveOutputReader>,
 ) {
@@ -387,16 +425,13 @@ pub(crate) async fn run_frames(
                     Some(reader) => reader.next().await,
                     None => std::future::pending().await,
                 }
-            } => {
-                app.app.sync_flow_view(view?)?;
-                refresh_live_output(&mut app, &mut handle)?;
-                if let Some(snapshot) = app.app.items.snapshot() {
-                    app.wm.flow_snapshot(snapshot.clone());
-                }
+            }, if app.app.flow_view_error.is_none() => {
+                let result = view.and_then(|view| app.app.sync_flow_view(view));
+                update_flow_view(&mut app, &mut handle, result);
             }
 
             _ = live_output_change(&mut handle.live_output) => {
-                refresh_live_output(&mut app, &mut handle)?;
+                update_live_output(&mut app, &mut handle);
             }
 
             _ = views::permission_change(&mut handle.stream_rx), if persistent => {
@@ -3620,12 +3655,34 @@ mod tests {
         assert!(ui.app.startup_card.is_some());
         assert!(handle.startup_card.is_none());
         assert!(ui.app.items.is_empty());
-        let snapshot = ui.app.items.snapshot().unwrap().clone();
         let revision = ui.app.items.revision_clock();
         editor.insert_str("draft A");
         ui.app.scroll_offset = 42;
         ui.app.follow_tail = false;
         ui.app.pending_quote = Some("quote A".into());
+        update_flow_view(
+            &mut ui,
+            &mut handle,
+            Err(std::io::Error::other("subscription read failed")),
+        );
+        assert!(handle.flow_view.is_some());
+        assert!(ui.app.flow_view_error.is_some());
+        assert_eq!(editor.buf(), "draft A");
+        assert!(!ui.app.should_quit);
+        let mut retry = Workspace::new(&handle);
+        let same_view = ViewKey {
+            flow: a_binding.flow.clone(),
+            placement: FlowPlacement::Main,
+        };
+        retry
+            .focus(&mut ui, &mut editor, &mut handle, same_view, None)
+            .await
+            .unwrap();
+        assert!(ui.app.flow_view_error.is_none());
+        assert_eq!(editor.buf(), "draft A");
+        assert_eq!(ui.app.scroll_offset, 42);
+        assert!(!ui.app.status_notes["flow"].contains("Disconnected"));
+        let snapshot = ui.app.items.snapshot().unwrap().clone();
         key_handler::handle_key(
             KeyAction::Submit,
             &mut ui,
@@ -3896,6 +3953,14 @@ mod tests {
             .close();
         ui.wm.modals.alias_manager.close();
         let main_view = views.views.get_mut(&a_main).unwrap();
+        update_flow_view(
+            &mut main_view.ui,
+            &mut main_view.handle,
+            Err(std::io::Error::other("background subscription read failed")),
+        );
+        assert!(main_view.handle.flow_view.is_some());
+        assert!(main_view.ui.app.flow_view_error.is_some());
+        assert!(ui.app.flow_view_error.is_none());
         let ticket = main_view
             .handle
             .control_tx

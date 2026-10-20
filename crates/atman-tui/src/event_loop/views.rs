@@ -26,6 +26,33 @@ pub(super) struct AttachedView {
     pub handle: TuiHandle,
 }
 
+async fn refresh_view(
+    ui: &mut UiState,
+    editor: &mut InputEditor,
+    handle: &mut TuiHandle,
+) -> Result<()> {
+    if let Some(reader) = handle.flow_view.as_mut() {
+        let result = reader
+            .refresh()
+            .await
+            .and_then(|view| ui.app.sync_flow_view(view));
+        if let Err(error) = result {
+            disconnect_view(ui, &error);
+            return Err(error.into());
+        }
+        if let Some(snapshot) = ui.app.items.snapshot() {
+            ui.wm.flow_snapshot(snapshot.clone());
+        }
+    }
+    refresh_instance_live(ui, editor, handle);
+    refresh_session_name(ui, handle);
+    refresh_live_output(ui, handle)?;
+    if handle.settings.take_changes() {
+        apply_provider_catalog_changed(ui, None);
+    }
+    Ok(())
+}
+
 /// A frame surface isolates clipping and the cursor while using the ordinary renderer.
 struct Surface {
     area: Rect,
@@ -298,18 +325,7 @@ impl Workspace {
             }
             // Retain ownership until every fallible refresh has succeeded.
             let selected = self.views.get_mut(&key).unwrap();
-            if let Some(reader) = selected.handle.flow_view.as_mut() {
-                selected.ui.app.sync_flow_view(reader.refresh().await?)?;
-                if let Some(snapshot) = selected.ui.app.items.snapshot() {
-                    selected.ui.wm.flow_snapshot(snapshot.clone());
-                }
-            }
-            refresh_instance_live(&mut selected.ui, &mut selected.editor, &selected.handle);
-            refresh_session_name(&mut selected.ui, &mut selected.handle);
-            refresh_live_output(&mut selected.ui, &mut selected.handle)?;
-            if selected.handle.settings.take_changes() {
-                apply_provider_catalog_changed(&mut selected.ui, None);
-            }
+            refresh_view(&mut selected.ui, &mut selected.editor, &mut selected.handle).await?;
             let selected = self.views.remove(&key).unwrap();
             ui.app.transcript_selection_pointer = None;
             ui.app.thinking_click_origin = None;
@@ -325,6 +341,8 @@ impl Workspace {
                 },
             );
             self.active = Some(key.clone());
+        } else if ui.app.flow_view_error.is_some() {
+            refresh_view(ui, editor, handle).await?;
         }
         match key.placement {
             FlowPlacement::Main => self.main = Some(key),
@@ -487,7 +505,7 @@ impl Workspace {
                             if let Some((ticket, command)) = command { apply_view_command(&mut view.ui, &mut view.editor, ticket.as_ref(), command); }
                             return;
                         }
-                        update = view.handle.flow_view.as_mut().unwrap().next() => Some(update),
+                        update = view.handle.flow_view.as_mut().unwrap().next(), if view.ui.app.flow_view_error.is_none() => Some(update),
                         _ = changed(view.handle.context_rx.as_mut()) => None,
                         _ = changed(view.handle.trust_rx.as_mut()) => None,
                         _ = changed(view.handle.attach_rx.as_mut()) => None,
@@ -497,36 +515,11 @@ impl Workspace {
                     };
                     let Some(update) = update else {
                         refresh_instance_live(&mut view.ui, &mut view.editor, &view.handle);
-                        if let Err(error) = refresh_live_output(&mut view.ui, &mut view.handle) {
-                            view.handle.live_output = None;
-                            view.ui.app.push_toast(format!("Preview disconnected: {error}"), crate::app::NoteLevel::Error, std::time::Duration::from_secs(8), crate::app::ToastPosition::TopRight);
-                        }
+                        update_live_output(&mut view.ui, &mut view.handle);
                         return;
                     };
-                    match update {
-                        Ok(update) => {
-                            if let Err(error) = view.ui.app.sync_flow_view(update).and_then(|()| refresh_live_output(&mut view.ui, &mut view.handle)) {
-                                view.handle.flow_view = None;
-                                view.ui.app.push_toast(
-                                    format!("View disconnected: {error}"),
-                                    crate::app::NoteLevel::Error,
-                                    std::time::Duration::from_secs(8),
-                                    crate::app::ToastPosition::TopRight,
-                                );
-                            } else if let Some(snapshot) = view.ui.app.items.snapshot() {
-                                view.ui.wm.flow_snapshot(snapshot.clone());
-                            }
-                        }
-                        Err(error) => {
-                            view.handle.flow_view = None;
-                            view.ui.app.push_toast(
-                                format!("View disconnected: {error}"),
-                                crate::app::NoteLevel::Error,
-                                std::time::Duration::from_secs(8),
-                                crate::app::ToastPosition::TopRight,
-                            );
-                        }
-                    }
+                    let result = update.and_then(|update| view.ui.app.sync_flow_view(update));
+                    update_flow_view(&mut view.ui, &mut view.handle, result);
                 })
             })
             .collect();

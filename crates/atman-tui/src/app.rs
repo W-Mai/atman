@@ -856,6 +856,8 @@ pub struct AppState {
     pub toasts: Vec<ToastNote>,
     /// Status bar notes keyed by slot id (e.g. "compact", "daemon").
     pub status_notes: std::collections::HashMap<String, String>,
+    /// A failed durable subscription retains its last committed view until explicit refresh.
+    pub(crate) flow_view_error: Option<String>,
     /// Inline notification slots keyed by replacement id.
     pub inline_note_indices: std::collections::HashMap<String, usize>,
     /// Active modal notification (dismiss with Esc).

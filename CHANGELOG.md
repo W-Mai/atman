@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Flow view recovery** — Subscription failures preserve drafts, recorded state, and control replies without closing the workspace. Reopening the view retries its reader, and live-preview failures leave committed updates available.
+
 - **Permission view subscriptions** — Closing a flow's permission stream leaves the workspace open. Missed events refresh the current permission snapshot in both focused and background views.
 
 - **Workflow node details** — Compact workflow cards honor node expansion, displaying arguments and recorded output through the same renderer as the full graph.
