@@ -46,8 +46,26 @@ pub fn project_root_for_ctx(ctx: &ToolCtx) -> Option<PathBuf> {
 pub fn source_roots_for_ctx(ctx: &ToolCtx) -> crate::source_program::SourceRoots {
     crate::source_program::SourceRoots {
         project_root: project_root_for_ctx(ctx),
-        config_dir: crate::storage::config_dir().ok(),
+        config_dir: config_dir_for_ctx(ctx),
     }
+}
+
+fn config_dir_for_ctx(ctx: &ToolCtx) -> Option<PathBuf> {
+    if let Some(lifecycle) = ctx
+        .providers
+        .as_ref()
+        .and_then(|providers| providers.provider_lifecycle())
+    {
+        return Some(lifecycle.config_hub().config_dir().to_owned());
+    }
+    if ctx
+        .flow_identity
+        .as_ref()
+        .is_some_and(|identity| identity.instance.is_some())
+    {
+        return None;
+    }
+    crate::storage::config_dir().ok()
 }
 
 pub fn installed_sources(
@@ -94,13 +112,12 @@ pub fn resolve_installed_command(
 }
 
 pub fn candidates(flow_ref: &str, ctx: &ToolCtx) -> Vec<PathBuf> {
-    let config_dir = crate::storage::config_dir().ok();
-    let project_root = project_root_for_ctx(ctx);
+    let roots = source_roots_for_ctx(ctx);
     let cwd = ctx.resolve_cwd(None).ok();
     candidates_from(
         flow_ref,
-        config_dir.as_deref(),
-        project_root.as_deref(),
+        roots.config_dir.as_deref(),
+        roots.project_root.as_deref(),
         cwd.as_deref(),
     )
 }

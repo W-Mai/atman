@@ -1,6 +1,5 @@
 use crate::error::RuntimeError;
 use crate::source_program::{SourceRoots, load_program};
-use crate::storage;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::{Value, ValueJson};
 use atman_rt::ast::{Expr, FlowDecl, Literal, Stmt, TypeExpr};
@@ -82,18 +81,12 @@ struct FlowCatalog {
 
 impl FlowCatalog {
     fn load(ctx: &ToolCtx) -> Result<Self, RuntimeError> {
-        let config_dir = storage::config_dir()
-            .map_err(|error| RuntimeError::ToolFailed(format!("flow catalog: {error}")))?;
-        let project_root = super::flow_source::project_root_for_ctx(ctx);
-        let sources =
-            super::flow_source::installed_sources(Some(&config_dir), project_root.as_deref());
-        Self::load_sources(
-            sources,
-            &SourceRoots {
-                project_root,
-                config_dir: Some(config_dir),
-            },
-        )
+        let roots = super::flow_source::source_roots_for_ctx(ctx);
+        let sources = super::flow_source::installed_sources(
+            roots.config_dir.as_deref(),
+            roots.project_root.as_deref(),
+        );
+        Self::load_sources(sources, &roots)
     }
 
     #[cfg(test)]

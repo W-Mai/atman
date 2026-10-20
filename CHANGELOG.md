@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Flow source scope** — Discovery, validation, and spawn resolve installed commands and imported libraries from the bound configuration. Persistent host-provided flows do not load an unrelated global command catalog.
+
 - **Session discovery** — CLI listing, project filters, and details read current project membership after reassignment or removal.
 
 - **Session project editor** — Move Session, `:move-session`, and Flow details share a project association form with keyboard and mouse saving. Catalog revision checks preserve concurrent edits; existing flows retain their execution resources.

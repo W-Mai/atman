@@ -1158,14 +1158,9 @@ async fn prepare_flow_agent(
         None => (flow_ref, None),
     };
     let path = resolve_flow_path(file_part, ctx).await?;
-    let program = crate::source_program::load_program(
-        &path,
-        &crate::source_program::SourceRoots {
-            project_root: super::flow_source::project_root_for_ctx(ctx),
-            config_dir: crate::storage::config_dir().ok(),
-        },
-    )
-    .map_err(|error| RuntimeError::ToolFailed(format!("flow.spawn: {error:#}")))?;
+    let program =
+        crate::source_program::load_program(&path, &super::flow_source::source_roots_for_ctx(ctx))
+            .map_err(|error| RuntimeError::ToolFailed(format!("flow.spawn: {error:#}")))?;
     let actual_version = format!("blake3:{}", program.closure_digest());
     if expected_version.is_some_and(|version| version != actual_version) {
         return Err(RuntimeError::ToolFailed(format!(
@@ -2668,6 +2663,101 @@ mod tests {
     use crate::{InvocationEnv, value::Value};
     use std::cell::Cell;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn flow_source_tools_share_the_bound_configuration_and_module_closure() {
+        use crate::config_hub::ConfigHub;
+        use crate::flow_authority::EffectiveAuthority;
+        use crate::flow_store::{FlowInstanceId, FlowRef};
+        use crate::tools::flow_check::FlowCheck;
+        use crate::tools::flow_list::{FlowDescribe, FlowSearch};
+        use crate::value::ValueJson;
+
+        let root = tempfile::tempdir().unwrap();
+        let identities = FlowRegistry::default();
+        let identity = identities
+            .register_instance(
+                FlowRef {
+                    session_id: uuid::Uuid::new_v4().into(),
+                    instance_id: FlowInstanceId::now(),
+                },
+                FlowRunId::now(),
+                EffectiveAuthority::root(&Default::default(), false, None),
+            )
+            .unwrap();
+        let argument = |key: &str, value: &str| ToolArgs {
+            named: vec![(key.into(), Value::Str(value.into()))],
+            ..Default::default()
+        };
+        let mut versions = Vec::new();
+        for name in ["a", "b"] {
+            let config = root.path().join(name);
+            std::fs::create_dir_all(config.join("commands")).unwrap();
+            std::fs::create_dir_all(config.join("lib")).unwrap();
+            std::fs::write(
+                config.join("commands/scoped.at"),
+                "use \"user:helper.at\"::value\nflow scoped() -> string { return value().await }",
+            )
+            .unwrap();
+            std::fs::write(
+                config.join("lib/helper.at"),
+                format!("pub flow value() -> string {{ return \"{name}\" }}"),
+            )
+            .unwrap();
+            let hub = ConfigHub::from_config_dir(&config);
+            let providers = ProviderRegistry::with_models(hub.models().clone());
+            providers.attach_provider_lifecycle(hub.clone()).unwrap();
+            let mut ctx = ToolCtx::for_project(None);
+            ctx.flow_identity = Some(identity.clone());
+            ctx.providers = Some(Arc::new(providers));
+            ctx.registry = Some(Arc::new(ToolRegistry::new()));
+            let search = FlowSearch
+                .call(argument("query", "scoped"), &ctx)
+                .await
+                .unwrap()
+                .to_json()
+                .unwrap();
+            assert!(search.to_string().contains("scoped.at@scoped"));
+            let description = FlowDescribe
+                .call(argument("ref", "scoped.at"), &ctx)
+                .await
+                .unwrap()
+                .to_json()
+                .unwrap();
+            let checked = FlowCheck
+                .call(argument("flow", "scoped.at"), &ctx)
+                .await
+                .unwrap()
+                .to_json()
+                .unwrap();
+            assert_eq!(checked["valid"], true, "{checked}");
+            let version = description["version"].as_str().unwrap();
+            let prepared = prepare_flow_agent("scoped.at", Some(version), &ctx)
+                .await
+                .unwrap();
+            assert_eq!(
+                prepared.program.entry_path().unwrap(),
+                hub.config_dir().join("commands/scoped.at")
+            );
+            versions.push(version.to_owned());
+        }
+        assert_ne!(versions[0], versions[1]);
+
+        let mut host_provided = ToolCtx::for_project(None);
+        host_provided.flow_identity = Some(identity);
+        assert!(
+            crate::tools::flow_source::source_roots_for_ctx(&host_provided)
+                .config_dir
+                .is_none()
+        );
+        assert!(crate::tools::flow_source::candidates("scoped.at", &host_provided).is_empty());
+        assert!(
+            FlowDescribe
+                .call(argument("ref", "scoped.at"), &host_provided)
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn flow_claims_are_scoped_by_session_and_handle() {
