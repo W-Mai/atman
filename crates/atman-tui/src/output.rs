@@ -5954,6 +5954,7 @@ fn render_workflow_panel_impl(
         return render_collapsed_workflow_card(
             graph,
             permission_projection,
+            expanded_nodes,
             animation_frame,
             panel_width,
             running,
@@ -6210,9 +6211,11 @@ fn leaf_at_path<'a>(
     node
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_collapsed_workflow_card(
     graph: &atman_runtime::workflow::WorkflowGraph,
     permission_projection: Option<&atman_runtime::projection::workflow::WorkflowProjection>,
+    expanded_nodes: &std::collections::HashSet<String>,
     animation_frame: u32,
     panel_width: u16,
     running: bool,
@@ -6334,6 +6337,7 @@ fn render_collapsed_workflow_card(
     let (mut body_lines, mut regions) = render_collapsed_workflow_body(
         graph,
         permission_projection,
+        expanded_nodes,
         &root,
         &ordered_pool[..target_count],
         outer_width,
@@ -6344,6 +6348,7 @@ fn render_collapsed_workflow_card(
         (body_lines, regions) = render_collapsed_workflow_body(
             graph,
             permission_projection,
+            expanded_nodes,
             &root,
             &ordered_pool,
             outer_width,
@@ -6351,7 +6356,10 @@ fn render_collapsed_workflow_card(
             running,
         );
     }
-    if body_lines.len() > max_body_rows {
+    let details_open = regions
+        .iter()
+        .any(|region| expanded_nodes.contains(&region.path_key));
+    if !details_open && body_lines.len() > max_body_rows {
         let drain_count = body_lines.len() - max_body_rows;
         body_lines.drain(..drain_count);
         regions.retain(|r| r.end_row > drain_count as u32);
@@ -6427,6 +6435,7 @@ fn render_collapsed_workflow_card(
 fn render_collapsed_workflow_body(
     graph: &atman_runtime::workflow::WorkflowGraph,
     permission_projection: Option<&atman_runtime::projection::workflow::WorkflowProjection>,
+    expanded_nodes: &std::collections::HashSet<String>,
     root: &[atman_runtime::workflow::WorkflowNode],
     selected_paths: &[Vec<usize>],
     outer_width: u16,
@@ -6469,7 +6478,7 @@ fn render_collapsed_workflow_body(
             graph,
             permission_projection,
             node,
-            &std::collections::HashSet::new(),
+            expanded_nodes,
             &[],
             position + 1 == child_count,
             outer_width,
@@ -11642,6 +11651,45 @@ mod tests {
     }
 
     #[test]
+    fn workflow_node_disclosure_is_shared_by_compact_and_full_presentations() {
+        use atman_runtime::workflow::WorkflowGraph;
+        let mut node = make_tool_node("tool-1", "fs.read", Some(chrono::Utc::now()));
+        node.output_preview = Some(
+            (0..30)
+                .map(|i| format!("inspected file row {i:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let graph = WorkflowGraph {
+            turn_id: atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
+            root: vec![node],
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
+        };
+        for full in [false, true] {
+            let closed = std::collections::HashSet::new();
+            let (lines, regions) =
+                render_workflow_panel_with_regions(&graph, &closed, full, false, 0, 100, 30);
+            assert!(!flatten_lines(&lines).contains("inspected file row"));
+            if !full {
+                assert!(lines.len() <= 33);
+            }
+            let hit = regions.iter().find(|r| r.path_key == "0").unwrap();
+            let opened = std::collections::HashSet::from([hit.path_key.clone()]);
+            let (lines, regions) =
+                render_workflow_panel_with_regions(&graph, &opened, full, false, 0, 100, 30);
+            assert!(
+                flatten_lines(&lines).contains("inspected file row 00"),
+                "full={full}"
+            );
+            assert!(regions.iter().any(|r| r.path_key == "0"));
+            assert!(flatten_lines(&lines).contains("inspected file row 19"));
+            assert!(!flatten_lines(&lines).contains("inspected file row 20"));
+        }
+    }
+
+    #[test]
     fn workflow_tool_header_prefers_call_intent_over_argument_preview() {
         use atman_runtime::workflow::WorkflowGraph;
         let mut node = make_tool_node("tool-1", "bash.spawn", Some(chrono::Utc::now()));
@@ -11661,7 +11709,16 @@ mod tests {
             permission_groups: Default::default(),
             resolved_permission_groups: Default::default(),
         };
-        let (lines, _) = render_collapsed_workflow_card(&graph, None, 0, 100, false, 10, 0);
+        let (lines, _) = render_collapsed_workflow_card(
+            &graph,
+            None,
+            &std::collections::HashSet::new(),
+            0,
+            100,
+            false,
+            10,
+            0,
+        );
         let rendered = flatten_lines(&lines);
         assert!(rendered.contains("Inspect active processes · bash.spawn"));
         assert!(!rendered.contains("secret command arguments"));
@@ -11715,8 +11772,16 @@ mod tests {
             permission_groups: Default::default(),
             resolved_permission_groups: Default::default(),
         };
-        let (lines, _regions) =
-            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS, 0);
+        let (lines, _regions) = render_collapsed_workflow_card(
+            &graph,
+            None,
+            &std::collections::HashSet::new(),
+            0,
+            80,
+            false,
+            MAX_COLLAPSED_BODY_ROWS,
+            0,
+        );
         let total = lines.len();
         assert!(total <= MAX_COLLAPSED_BODY_ROWS + 3);
     }
@@ -11740,13 +11805,22 @@ mod tests {
             permission_groups: Default::default(),
             resolved_permission_groups: Default::default(),
         };
-        let (before, _) =
-            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS, 0);
+        let (before, _) = render_collapsed_workflow_card(
+            &graph,
+            None,
+            &std::collections::HashSet::new(),
+            0,
+            80,
+            false,
+            MAX_COLLAPSED_BODY_ROWS,
+            0,
+        );
         let observed_body = before.len() - 3;
         graph.root.truncate(1);
         let (after, regions) = render_collapsed_workflow_card(
             &graph,
             None,
+            &std::collections::HashSet::new(),
             0,
             80,
             false,
@@ -11910,8 +11984,16 @@ mod tests {
             permission_groups: Default::default(),
             resolved_permission_groups: Default::default(),
         };
-        let (lines, _regions) =
-            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS, 0);
+        let (lines, _regions) = render_collapsed_workflow_card(
+            &graph,
+            None,
+            &std::collections::HashSet::new(),
+            0,
+            80,
+            false,
+            MAX_COLLAPSED_BODY_ROWS,
+            0,
+        );
         let flat = flatten_lines(&lines);
         let tool_count = flat.matches("tool_").count();
         assert!(
@@ -11940,8 +12022,16 @@ mod tests {
             permission_groups: Default::default(),
             resolved_permission_groups: Default::default(),
         };
-        let (lines, regions) =
-            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS, 0);
+        let (lines, regions) = render_collapsed_workflow_card(
+            &graph,
+            None,
+            &std::collections::HashSet::new(),
+            0,
+            80,
+            false,
+            MAX_COLLAPSED_BODY_ROWS,
+            0,
+        );
         let total = lines.len() as u32;
         for r in &regions {
             assert!(
@@ -11974,8 +12064,16 @@ mod tests {
             permission_groups: Default::default(),
             resolved_permission_groups: Default::default(),
         };
-        let (lines, _regions) =
-            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS, 0);
+        let (lines, _regions) = render_collapsed_workflow_card(
+            &graph,
+            None,
+            &std::collections::HashSet::new(),
+            0,
+            80,
+            false,
+            MAX_COLLAPSED_BODY_ROWS,
+            0,
+        );
         let flat = flatten_lines(&lines);
         let old_pos = flat.find("old_tool").unwrap_or(usize::MAX);
         let new_pos = flat.find("new_tool").unwrap_or(0);

@@ -1733,7 +1733,7 @@ impl AppState {
     }
 
     pub fn toggle_workflow_node(&mut self, panel_index: usize, node_id: &str) {
-        self.mutate_item(panel_index, OutputMutation::Interaction, |item| {
+        if self.mutate_item(panel_index, OutputMutation::Interaction, |item| {
             let expanded_nodes = match item {
                 OutputItem::WorkflowPanel { expanded_nodes, .. } => expanded_nodes,
                 OutputItem::SubAgentActivity { expanded_nodes, .. } => expanded_nodes,
@@ -1743,7 +1743,9 @@ impl AppState {
                 expanded_nodes.insert(node_id.to_string());
             }
             true
-        });
+        }) {
+            self.follow_tail = false;
+        }
     }
 
     pub fn cycle_thinking_disclosure(&mut self, item_idx: usize) {
@@ -7269,7 +7271,11 @@ mod tests {
             cancelled: false,
         });
         let idx = app.items.len() - 1;
+        app.follow_tail = true;
+        app.scroll_offset = 7;
         app.toggle_workflow_node(idx, "node_x");
+        assert!(!app.follow_tail);
+        assert_eq!(app.scroll_offset, 7);
         if let OutputItem::WorkflowPanel { expanded_nodes, .. } = &app.items[idx] {
             assert!(expanded_nodes.contains("node_x"));
         }

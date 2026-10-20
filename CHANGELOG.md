@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Workflow node details** — Compact workflow cards honor node expansion, displaying arguments and recorded output through the same renderer as the full graph.
+
 - **Flow focus recovery** — Failed view refreshes preserve the destination's draft, reading position, and reply mailbox while leaving the current view selected.
 
 - **Persistent transcript imports** — External text transcripts publish as read-only flow archives, preserving message text, roles, source metadata, and recorded times without starting execution or creating legacy sessions.
