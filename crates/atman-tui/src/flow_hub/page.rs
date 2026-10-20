@@ -71,7 +71,7 @@ pub struct RelationProgress {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
     SessionRemoval {
-        session: Uuid,
+        session: SessionTarget,
     },
     ControlHistory {
         before: Option<Uuid>,
@@ -467,7 +467,7 @@ impl FlowHubPage {
     pub fn first(&self) -> HubRequest {
         match self {
             Self::SessionRemoval(page) => HubRequest::SessionRemoval {
-                session: page.request.session_id,
+                session: page.request.target(),
             },
             Self::ControlBatch(page) => HubRequest::ControlBatch {
                 request_id: page.record.id,
@@ -645,9 +645,9 @@ impl FlowHubPage {
                 .iter()
                 .map(|row| {
                     let request = match &row.target {
-                        SessionTarget::Persistent(session) if row.cleanup_pending => {
-                            Some(HubRequest::SessionRemoval { session: *session })
-                        }
+                        target if row.cleanup_pending => Some(HubRequest::SessionRemoval {
+                            session: target.clone(),
+                        }),
                         SessionTarget::Persistent(session) => Some(HubRequest::Flows {
                             session: *session,
                             before: None,

@@ -9,7 +9,7 @@ use atman_runtime::{
     session_meta::SessionMeta,
 };
 use atman_tui::{
-    flow_hub::{SessionDirectory, SessionRow},
+    flow_hub::{SessionDirectory, SessionRemovalRequest, SessionRow},
     project_hub::SessionTarget,
 };
 use uuid::Uuid;
@@ -84,15 +84,21 @@ pub(super) async fn sessions(
         .map(SessionTarget::Persistent)
         .collect::<Vec<_>>();
     let data = root.to_owned();
-    let (legacy, cleanup) = tokio::task::spawn_blocking(move || {
+    let (legacy, cleanup, legacy_cleanup) = tokio::task::spawn_blocking(move || {
         Ok::<_, io::Error>((
             legacy_ids(&data)?,
             RuntimeStore::pending_session_removals(&data)?,
+            RuntimeStore::pending_legacy_removals(&data)?,
         ))
     })
     .await??;
     targets.extend(legacy);
     targets.extend(cleanup.iter().copied().map(SessionTarget::Persistent));
+    targets.extend(
+        legacy_cleanup
+            .iter()
+            .map(|id| SessionTarget::Legacy(id.to_string())),
+    );
     targets.sort_by_cached_key(order);
     targets.dedup();
     let total = targets.len();
@@ -123,6 +129,20 @@ pub(super) async fn sessions(
                 .map(|view| view.summary)
                 .unwrap_or_else(|error| SessionSummary::unavailable(id, error))
                 .into(),
+            SessionTarget::Legacy(id)
+                if legacy_cleanup
+                    .iter()
+                    .any(|pending| pending.to_string() == id) =>
+            {
+                SessionRow {
+                    target: SessionTarget::Legacy(id.clone()),
+                    title: "Legacy cleanup pending".into(),
+                    detail: format!(
+                        "{id} · Original history · Enter to finish interrupted cleanup"
+                    ),
+                    cleanup_pending: true,
+                }
+            }
             SessionTarget::Legacy(id) => {
                 let data = root.to_owned();
                 tokio::task::spawn_blocking(move || legacy_row(&data, id)).await?
@@ -138,13 +158,35 @@ pub(super) async fn sessions(
 
 pub(super) async fn removal(
     root: &Path,
-    id: Uuid,
+    target: SessionTarget,
 ) -> Result<Box<atman_tui::flow_hub::SessionRemovalPage>> {
     let data = root.to_owned();
     tokio::task::spawn_blocking(move || {
+        let id = match target {
+            SessionTarget::Persistent(id) => id,
+            SessionTarget::Legacy(id) => {
+                let parsed = Uuid::parse_str(&id)?;
+                ensure!(
+                    parsed.to_string() == id,
+                    "noncanonical legacy session identity"
+                );
+                let saved = RuntimeStore::inspect_legacy_removal(&data, parsed)?;
+                let cleanup = saved.is_some();
+                let request = saved
+                    .map(Ok)
+                    .unwrap_or_else(|| RuntimeStore::review_legacy_removal(&data, parsed))?;
+                let row = legacy_row(&data, id);
+                return Ok(Box::new(atman_tui::flow_hub::SessionRemovalPage {
+                    detail: request.directory.display().to_string(),
+                    request: SessionRemovalRequest::Legacy(request),
+                    title: row.title,
+                    cleanup,
+                }));
+            }
+        };
         if let Some(request) = RuntimeStore::inspect_session_removal(&data, id)? {
             return Ok(Box::new(atman_tui::flow_hub::SessionRemovalPage {
-                request,
+                request: SessionRemovalRequest::Persistent(request),
                 title: "Deleted session".into(),
                 cleanup: true,
                 detail: "Continue the original cleanup request; the session cannot execute".into(),
@@ -156,13 +198,13 @@ pub(super) async fn removal(
             "Session journal is incomplete"
         );
         Ok(Box::new(atman_tui::flow_hub::SessionRemovalPage {
-            request: SessionRemoval {
+            request: SessionRemovalRequest::Persistent(SessionRemoval {
                 session_id: id,
                 expected: inspected
                     .journal
                     .cursor
                     .ok_or_else(|| anyhow::anyhow!("Session has no creation receipt"))?,
-            },
+            }),
             title: inspected
                 .projection
                 .title
@@ -179,15 +221,77 @@ pub(super) async fn removal(
 }
 
 #[cfg(test)]
-async fn remove(root: &Path, request: SessionRemoval) -> Result<()> {
+async fn remove(root: &Path, request: SessionRemovalRequest) -> Result<()> {
     let data = root.to_owned();
-    tokio::task::spawn_blocking(move || RuntimeStore::open(&data)?.delete_session(&request)).await?
+    tokio::task::spawn_blocking(move || match request {
+        SessionRemovalRequest::Persistent(request) => {
+            RuntimeStore::open(&data)?.delete_session(&request)
+        }
+        SessionRemovalRequest::Legacy(request) => {
+            RuntimeStore::open(&data)?.delete_legacy_session(&request, true)
+        }
+    })
+    .await?
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use atman_runtime::flow_store::{RuntimeStore, SessionDescriptor};
+
+    #[tokio::test]
+    async fn original_history_review_and_cleanup_keep_native_identity_separate() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RuntimeStore::open(temp.path()).unwrap();
+        let id = Uuid::now_v7();
+        let source = temp.path().join("sessions").join(id.to_string());
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("events.jsonl"), "original\n").unwrap();
+        let native = store
+            .create_session(SessionDescriptor {
+                id,
+                project: None,
+                configuration: Default::default(),
+                title: "Persistent".into(),
+            })
+            .unwrap();
+        let target = SessionTarget::Legacy(id.to_string());
+        let page = removal(temp.path(), target.clone()).await.unwrap();
+        assert_eq!(page.request.target(), target);
+        assert!(!page.cleanup);
+        let catalog = SessionCatalog::new(None, Some(temp.path().to_owned()));
+        assert_eq!(
+            sessions(&catalog, temp.path(), None, 10)
+                .await
+                .unwrap()
+                .total,
+            2
+        );
+        remove(temp.path(), page.request.clone()).await.unwrap();
+        assert!(native.dir().exists());
+        assert!(!source.exists());
+        let staged = store
+            .root()
+            .join(".deletions/legacy-sessions")
+            .join(id.to_string())
+            .join("data");
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("partial"), "pending").unwrap();
+        let rows = sessions(&catalog, temp.path(), None, 10).await.unwrap();
+        assert_eq!(rows.total, 2);
+        assert!(
+            rows.sessions
+                .iter()
+                .any(|row| row.target == target && row.cleanup_pending)
+        );
+        let retry = removal(temp.path(), target).await.unwrap();
+        assert!(retry.cleanup);
+        assert_eq!(retry.request, page.request);
+        remove(temp.path(), retry.request).await.unwrap();
+        let rows = sessions(&catalog, temp.path(), None, 10).await.unwrap();
+        assert_eq!(rows.total, 1);
+        assert_eq!(rows.sessions[0].target, SessionTarget::Persistent(id));
+    }
 
     #[tokio::test]
     async fn session_removal_review_preserves_versions_and_discovers_interrupted_cleanup() {
@@ -202,7 +306,9 @@ mod tests {
                 configuration: Default::default(),
             })
             .unwrap();
-        let initial = removal(temp.path(), id).await.unwrap();
+        let initial = removal(temp.path(), SessionTarget::Persistent(id))
+            .await
+            .unwrap();
         assert_eq!(initial.title, "Original");
         assert!(!initial.cleanup);
         assert!(
@@ -223,7 +329,9 @@ mod tests {
                 .to_string()
                 .contains("changed")
         );
-        let current = removal(temp.path(), id).await.unwrap();
+        let current = removal(temp.path(), SessionTarget::Persistent(id))
+            .await
+            .unwrap();
         assert_eq!(current.title, "Renamed");
         remove(temp.path(), current.request.clone()).await.unwrap();
         // Simulate data cleanup interrupted after its receipt and directory move committed.
@@ -240,7 +348,9 @@ mod tests {
         assert_eq!(listed.sessions[0].target, SessionTarget::Persistent(id));
         assert!(listed.sessions[0].cleanup_pending);
         assert!(data.join("partial").exists());
-        let retry = removal(temp.path(), id).await.unwrap();
+        let retry = removal(temp.path(), SessionTarget::Persistent(id))
+            .await
+            .unwrap();
         assert!(retry.cleanup);
         assert_eq!(retry.request, current.request);
         remove(temp.path(), retry.request).await.unwrap();

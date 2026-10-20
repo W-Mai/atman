@@ -172,10 +172,21 @@ impl Scopes {
 
     pub async fn remove_session(
         self: &Arc<Self>,
-        request: atman_runtime::flow_store::SessionRemoval,
+        request: atman_tui::flow_hub::SessionRemovalRequest,
     ) -> Result<()> {
         let scopes = self.clone();
         tokio::spawn(async move {
+            let request = match request {
+                atman_tui::flow_hub::SessionRemovalRequest::Persistent(request) => request,
+                atman_tui::flow_hub::SessionRemovalRequest::Legacy(request) => {
+                    let root = scopes.root.clone();
+                    // The review action explicitly confirms the old executor has stopped.
+                    return tokio::task::spawn_blocking(move || {
+                        RuntimeStore::open(&root)?.delete_legacy_session(&request, true)
+                    })
+                    .await?;
+                }
+            };
             let mut loaded = scopes.loaded.lock().await;
             let id = request.session_id;
             let result = scopes.host.delete_session(&scopes.root, request).await;

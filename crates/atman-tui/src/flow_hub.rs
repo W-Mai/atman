@@ -29,7 +29,7 @@ pub use overview::OverviewDirectory;
 mod page;
 mod release;
 mod removal;
-pub use removal::SessionRemovalPage;
+pub use removal::{SessionRemovalPage, SessionRemovalRequest};
 mod text;
 mod watch;
 mod workspaces;
@@ -53,7 +53,7 @@ pub(crate) enum Action {
     UpdateManagement(Box<atman_runtime::flow_store::profile::ReplaceManagement>),
     ReviewWorkspaceRelease(Box<WorkspaceRemoval>),
     ReleaseWorkspace(Box<WorkspaceRemoval>),
-    RemoveSession(Box<atman_runtime::flow_store::SessionRemoval>),
+    RemoveSession(Box<SessionRemovalRequest>),
     SetWorkspaceRetention(Box<WorkspaceRetention>),
     None,
     Close,
@@ -859,16 +859,16 @@ impl FlowHub {
                     && self.edit_management.is_none()
                     && self.controls.is_none() =>
             {
-                if let Some(page::RowKey::Session(crate::project_hub::SessionTarget::Persistent(
-                    session,
-                ))) = self
+                if let Some(page::RowKey::Session(session)) = self
                     .filtered()
                     .get(self.selected)
                     .map(|i| &self.rows[*i].key)
                 {
-                    return Action::Load(HubRequest::SessionRemoval { session: *session });
+                    return Action::Load(HubRequest::SessionRemoval {
+                        session: session.clone(),
+                    });
                 }
-                self.error = Some("Select a persistent session to review deletion".into());
+                self.error = Some("Select a session to review deletion".into());
             }
             KeyAction::CycleReasoning
                 if self.page.as_ref().is_some_and(FlowHubPage::nodes)
