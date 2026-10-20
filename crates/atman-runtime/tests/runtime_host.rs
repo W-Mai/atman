@@ -18,6 +18,463 @@ use atman_runtime::{Executor, flow_authority::EffectiveAuthority};
 use uuid::Uuid;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_permission_routing_gates_real_effects_and_falls_back_without_clients() {
+    use atman_runtime::{
+        Value,
+        flow_store::access::{AccessTarget, FlowAction, FlowGrant},
+        permission::PermissionRequestState,
+        tool::{Tier, ToolDefinition},
+        trust::{TrustConfig, TrustMode},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for (mode, approved, notified) in [
+        ("approve", true, true),
+        ("deny", false, true),
+        ("ignore", false, true),
+        ("skip", false, false),
+        ("unscheduled", false, false),
+        ("ungranted", false, false),
+        ("ignore_then_approve", true, true),
+    ] {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let data = tempfile::tempdir().unwrap();
+            let store = RuntimeStore::open(data.path()).unwrap();
+            let host = RuntimeHost::default();
+            let info = session_descriptor();
+            let session = host
+                .attach_session(store.create_session(info.clone()).unwrap())
+                .unwrap();
+            let requester = session
+                .create_flow(program_descriptor(
+                    info.id,
+                    "flow main() -> bool { return checked_effect() }".into(),
+                ))
+                .await
+                .unwrap();
+            change(&requester, FlowTransition::Activated).await;
+            let trust = TrustConfig {
+                mode: TrustMode::Steady,
+                ..Default::default()
+            };
+            requester
+                .context()
+                .update_trust(trust.clone(), |_| Ok(()))
+                .unwrap();
+            let target = format!("{}/{}", info.id, requester.address().instance_id);
+            let mut reviewers = Vec::new();
+            let mut schedulers = Vec::new();
+            let mut counts = Vec::new();
+            let count = if mode == "ignore_then_approve" { 2 } else { 1 };
+            for index in 0..count {
+                let action = if mode == "deny" { "deny" } else { "approve" };
+                let decide = mode == "approve" || mode == "deny" || index == 1;
+                let code = if decide {
+                    format!(
+                        r#"flow main() -> bool {{
+                        notified()
+                        listing = permission.list(target_handle: "{target}")
+                        request = listing.requests[0]
+                        permission.{action}(target_handle: "{target}",
+                            request_id: request.request_id, expected_revision: request.revision,
+                            reason: "reviewed")
+                        return true
+                    }}"#
+                    )
+                } else {
+                    "flow main() -> bool { return notified() }".into()
+                };
+                let mut descriptor = program_descriptor(info.id, code);
+                // Candidate order is deterministic, independent of clock resolution.
+                descriptor.address.instance_id =
+                    atman_rt::FlowInstanceId(Uuid::from_u128(index as u128 + 1).into());
+                let reviewer = session.create_flow(descriptor).await.unwrap();
+                change(&reviewer, FlowTransition::Activated).await;
+                if mode != "ungranted" {
+                    session
+                        .grant_access(
+                            session.snapshot().await.unwrap().cursor,
+                            FlowGrant {
+                                id: Uuid::new_v4(),
+                                grantee: reviewer.address().clone(),
+                                target: AccessTarget::Flow(requester.address().clone()),
+                                actions: [FlowAction::ApprovePermission].into(),
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+                let counter = Arc::new(AtomicUsize::new(0));
+                let counted = counter.clone();
+                let executor = Executor::new();
+                atman_runtime::tools::register_tier_zero(&executor.tools);
+                executor
+                    .tools
+                    .register_fn(ToolDefinition::new("notified", Tier::Zero), move |_, _| {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        async { Ok(Value::Bool(true)) }
+                    })
+                    .unwrap();
+                if mode != "unscheduled" {
+                    schedulers.push(
+                        reviewer
+                            .schedule(executor, move |snapshot| {
+                                if mode == "skip" {
+                                    Ok(None)
+                                } else {
+                                    prepare(snapshot)
+                                }
+                            })
+                            .unwrap(),
+                    );
+                }
+                reviewers.push(reviewer);
+                counts.push(counter);
+            }
+            let effects = Arc::new(AtomicUsize::new(0));
+            let counted = effects.clone();
+            let executor = Executor::new();
+            executor
+                .tools
+                .register_fn(
+                    ToolDefinition::new("checked_effect", Tier::Two),
+                    move |_, _| {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        async { Ok(Value::Bool(true)) }
+                    },
+                )
+                .unwrap();
+            requester
+                .accept_input(
+                    DeliveryRequest {
+                        request_id: Uuid::new_v4(),
+                        sender: SenderIdentity::User(Uuid::new_v4()),
+                        recipient: requester.address().clone(),
+                        delivery: DeliveryMode::NextTurn,
+                        cause: None,
+                        correlation: None,
+                        scope: None,
+                        payload: InboxPayload::Interjection {
+                            text: "perform the effect".into(),
+                        },
+                    },
+                    |_| Ok(()),
+                )
+                .await
+                .unwrap();
+            let mut request = prepare(&requester.snapshot().await.unwrap())
+                .unwrap()
+                .unwrap();
+            request.authority = EffectiveAuthority::root(&trust, false, None);
+            let completion = requester
+                .start_turn(executor, request)
+                .await
+                .unwrap()
+                .wait()
+                .await
+                .unwrap();
+            assert_eq!(
+                completion.result.is_ok(),
+                approved,
+                "{mode}: {:?}",
+                completion.result
+            );
+            assert_eq!(
+                effects.load(Ordering::SeqCst),
+                usize::from(approved),
+                "{mode}"
+            );
+            let broker = requester.context().permission_broker();
+            assert!(!broker.has_clients(), "{mode}");
+            let requests: Vec<_> = broker
+                .list()
+                .into_iter()
+                .filter(|request| request.intent.tool_name == "checked_effect")
+                .collect();
+            assert_eq!(requests.len(), 1, "{mode}");
+            assert!(
+                !matches!(requests[0].state, PermissionRequestState::Pending { .. }),
+                "{mode}"
+            );
+            if mode == "deny" {
+                assert!(matches!(
+                    requests[0].state,
+                    PermissionRequestState::Denied { .. }
+                ));
+            }
+            for (reviewer, counter) in reviewers.iter().zip(counts) {
+                if notified {
+                    settled(reviewer).await;
+                }
+                assert_eq!(
+                    counter.load(Ordering::SeqCst),
+                    usize::from(notified),
+                    "{mode}"
+                );
+                let history = reviewer.context().messages_full();
+                let offers: Vec<_> = history
+                    .iter()
+                    .filter(|message| message.text_concat().contains("permission_review"))
+                    .collect();
+                assert_eq!(offers.len(), usize::from(notified), "{mode}");
+                assert!(
+                    offers
+                        .iter()
+                        .all(|message| message.origin == MessageOrigin::Internal)
+                );
+            }
+            for scheduler in schedulers {
+                scheduler.stop().await.unwrap();
+            }
+            host.shutdown().await.unwrap();
+        })
+        .await
+        .unwrap_or_else(|_| panic!("approval routing stalled: {mode}"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_permission_routing_observes_live_revocation_pause_and_wait_cycles() {
+    use atman_runtime::{
+        Value,
+        flow_store::access::{AccessTarget, FlowAction, FlowGrant},
+        permission::{
+            PermissionAction, PermissionIntent, PermissionRequestState, SubmissionOutcome,
+        },
+        tool::{Tier, ToolDefinition},
+        trust::{TrustConfig, TrustMode},
+    };
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    for mode in [
+        "pause",
+        "source_pause",
+        "revoke",
+        "approval_blocked",
+        "user_fallback",
+    ] {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let data = tempfile::tempdir().unwrap();
+            let store = RuntimeStore::open(data.path()).unwrap();
+            let host = RuntimeHost::default();
+            let info = session_descriptor();
+            let session = host
+                .attach_session(store.create_session(info.clone()).unwrap())
+                .unwrap();
+            let requester = session
+                .create_flow(program_descriptor(
+                    info.id,
+                    "flow main() -> bool { return checked_effect() }".into(),
+                ))
+                .await
+                .unwrap();
+            let reviewer = session
+                .create_flow(program_descriptor(
+                    info.id,
+                    "flow main() -> bool { return hold().await }".into(),
+                ))
+                .await
+                .unwrap();
+            for worker in [&requester, &reviewer] {
+                change(worker, FlowTransition::Activated).await;
+            }
+            let grant = FlowGrant {
+                id: Uuid::new_v4(),
+                grantee: reviewer.address().clone(),
+                target: AccessTarget::Flow(requester.address().clone()),
+                actions: [FlowAction::ApprovePermission].into(),
+            };
+            session
+                .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
+                .await
+                .unwrap();
+            let (entered, held) = tokio::sync::oneshot::channel();
+            let entered = Mutex::new(Some(entered));
+            let release = Arc::new(tokio::sync::Notify::new());
+            let gate = release.clone();
+            let executor = Executor::new();
+            executor
+                .tools
+                .register_fn(
+                    ToolDefinition::new("hold", Tier::Zero)
+                        .call_mode(atman_rt::ToolCallMode::Deferred),
+                    move |_, ctx| {
+                        entered
+                            .lock()
+                            .unwrap()
+                            .take()
+                            .unwrap()
+                            .send(ctx.clone())
+                            .ok()
+                            .unwrap();
+                        let gate = gate.clone();
+                        async move {
+                            gate.notified().await;
+                            Ok(Value::Bool(true))
+                        }
+                    },
+                )
+                .unwrap();
+            let scheduler = reviewer.schedule(executor, prepare).unwrap();
+            let trust = TrustConfig {
+                mode: TrustMode::Steady,
+                ..Default::default()
+            };
+            requester
+                .context()
+                .update_trust(trust.clone(), |_| Ok(()))
+                .unwrap();
+            let broker = requester.context().permission_broker();
+            let user = (mode == "user_fallback").then(|| broker.register_client());
+            let effects = Arc::new(AtomicUsize::new(0));
+            let counted = effects.clone();
+            let executor = Executor::new();
+            executor
+                .tools
+                .register_fn(
+                    ToolDefinition::new("checked_effect", Tier::Two),
+                    move |_, _| {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        async { Ok(Value::Bool(true)) }
+                    },
+                )
+                .unwrap();
+            requester
+                .accept_input(
+                    DeliveryRequest {
+                        request_id: Uuid::new_v4(),
+                        sender: SenderIdentity::User(Uuid::new_v4()),
+                        recipient: requester.address().clone(),
+                        delivery: DeliveryMode::NextTurn,
+                        cause: None,
+                        correlation: None,
+                        scope: None,
+                        payload: InboxPayload::Interjection {
+                            text: "perform the effect".into(),
+                        },
+                    },
+                    |_| Ok(()),
+                )
+                .await
+                .unwrap();
+            let mut request = prepare(&requester.snapshot().await.unwrap())
+                .unwrap()
+                .unwrap();
+            request.authority = EffectiveAuthority::root(&trust, false, None);
+            let ticket = requester.start_turn(executor, request).await.unwrap();
+            let ctx = held.await.unwrap();
+            assert_eq!(effects.load(Ordering::SeqCst), 0);
+            let pending = broker
+                .list()
+                .into_iter()
+                .find(|request| request.intent.tool_name == "checked_effect")
+                .unwrap();
+            assert!(matches!(
+                pending.state,
+                PermissionRequestState::Pending { .. }
+            ));
+            let pause = Uuid::new_v4().into();
+            let mut blocker = None;
+            match mode {
+                "source_pause" => {
+                    change(&requester, FlowTransition::ExecutionPaused { key: pause }).await;
+                    release.notify_one();
+                    settled(&reviewer).await;
+                    assert_eq!(broker.get(&pending.request_id), Some(pending.clone()));
+                    change(&requester, FlowTransition::ExecutionResumed { key: pause }).await;
+                }
+                "revoke" => {
+                    session
+                        .revoke_access(session.snapshot().await.unwrap().cursor, grant.id)
+                        .await
+                        .unwrap();
+                }
+                "approval_blocked" => {
+                    let identity = ctx.flow_identity.as_ref().unwrap();
+                    let SubmissionOutcome::Pending(pending) = ctx
+                        .permission_broker
+                        .as_ref()
+                        .unwrap()
+                        .submit(
+                            Some(&identity.session_id),
+                            Some(&identity.run_id),
+                            PermissionIntent::minimal("reviewer-effect", "fs.write", Tier::Two),
+                            false,
+                            &trust,
+                        )
+                        .unwrap()
+                    else {
+                        panic!("expected reviewer's pending approval")
+                    };
+                    blocker = Some(pending);
+                }
+                _ => {
+                    change(&reviewer, FlowTransition::ExecutionPaused { key: pause }).await;
+                }
+            }
+            if mode == "user_fallback" {
+                broker
+                    .user_resolve(
+                        &pending.session_id,
+                        Some("human".into()),
+                        vec![pending.request_id.clone()],
+                        &[(pending.request_id.clone(), pending.revision)].into(),
+                        None,
+                        PermissionAction::Approve,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+            }
+            let completion = ticket.wait().await.unwrap();
+            assert_eq!(
+                completion.result.is_ok(),
+                mode == "user_fallback",
+                "{mode}: {:?}",
+                completion.result
+            );
+            assert_eq!(
+                effects.load(Ordering::SeqCst),
+                usize::from(mode == "user_fallback"),
+                "{mode}"
+            );
+            if let Some(blocker) = blocker {
+                ctx.permission_broker
+                    .as_ref()
+                    .unwrap()
+                    .cancel(&blocker.request.request_id, "test finished")
+                    .unwrap();
+            }
+            if mode == "pause" || mode == "user_fallback" {
+                change(&reviewer, FlowTransition::ExecutionResumed { key: pause }).await;
+            }
+            if mode != "source_pause" {
+                release.notify_one();
+                settled(&reviewer).await;
+            }
+            assert_eq!(
+                reviewer
+                    .context()
+                    .messages_full()
+                    .iter()
+                    .filter(|message| message.text_concat().contains("permission_review"))
+                    .count(),
+                1,
+                "{mode}"
+            );
+            drop(user);
+            scheduler.stop().await.unwrap();
+            host.shutdown().await.unwrap();
+        })
+        .await
+        .unwrap_or_else(|_| panic!("live review routing stalled: {mode}"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn peer_permission_review_uses_live_grants_and_the_request_owners_broker() {
     use atman_runtime::{
         Value, ValueJson,

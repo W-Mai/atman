@@ -800,6 +800,15 @@ impl PermissionBroker {
             > 0
     }
 
+    pub(crate) fn has_pending_requests(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .requests
+            .values()
+            .any(|entry| matches!(entry.request.state, PermissionRequestState::Pending { .. }))
+    }
+
     fn group_is_resolved(state: &BrokerState, group: &PermissionGroup) -> bool {
         group.request_ids.iter().all(|request_id| {
             state.requests.get(request_id).is_none_or(|entry| {

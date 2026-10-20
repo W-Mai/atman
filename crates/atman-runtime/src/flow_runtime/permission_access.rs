@@ -8,7 +8,125 @@ use crate::permission::{
 };
 use std::{io, sync::Arc};
 
+fn review_available(
+    state: &atman_rt::FlowInstance<crate::event::AtmanUuid>,
+    scheduled: bool,
+    broker: &crate::permission::PermissionBroker,
+) -> bool {
+    let ready = match state.state() {
+        atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Idle) => {
+            state.can_start_turn() && scheduled
+        }
+        atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) => state
+            .can_receive_at_boundary(&active.lease)
+            .unwrap_or(false),
+        _ => false,
+    };
+    ready && !broker.has_pending_requests()
+}
+
 impl FlowClient {
+    /// Offer each eligible live reviewer at most once. The caller races this future against the broker's resolution; exhaustion leaves the request with the user.
+    pub(crate) async fn route_permission_review(
+        &self,
+        request: &PermissionRequest,
+    ) -> io::Result<()> {
+        let mut candidates = self.host.owned_flows()?;
+        candidates.sort_by_key(|worker| {
+            (
+                worker.address().session_id.to_string(),
+                worker.address().instance_id.to_string(),
+            )
+        });
+        for worker in candidates {
+            self.authenticate()?;
+            if worker.address() == self.source() {
+                continue;
+            }
+            let session = match self.host.session(worker.address().session_id.0) {
+                Ok(session) => session,
+                Err(_) => continue,
+            };
+            if !self.host.allows_access(
+                &session,
+                worker.address(),
+                self.source(),
+                FlowAction::ApprovePermission,
+            ) {
+                continue;
+            }
+            // Register before offering or sampling state, including fast review turns.
+            let mut commits = worker.subscribe_commits();
+            let mut grants = self.host.changes();
+            let mut source = self.state.clone();
+            let mut scheduling = worker.scheduling_progress.subscribe();
+            let accepted = match self
+                .offer_permission_review(
+                    worker.address().clone(),
+                    request.request_id.clone(),
+                    request.revision,
+                )
+                .await
+            {
+                Ok(accepted) => accepted,
+                Err(_) => continue,
+            };
+            let broker = worker.context().permission_broker();
+            loop {
+                commits.borrow_and_update();
+                grants.borrow_and_update();
+                source.borrow_and_update();
+                let progress = scheduling.borrow_and_update().clone();
+                let scheduler_live = !matches!(
+                    progress,
+                    crate::flow_runtime::scheduler::SchedulingProgress::Stopped
+                        | crate::flow_runtime::scheduler::SchedulingProgress::Failed(_)
+                );
+                self.authenticate()?;
+                let message = accepted.message_id;
+                let observed = worker
+                    .request(move |store| {
+                        Ok((
+                            store.state().clone(),
+                            store.pending_inputs().any(|entry| entry.id == message),
+                        ))
+                    })
+                    .await;
+                let Ok((state, pending)) = observed else {
+                    break;
+                };
+                if !self.host.allows_access(
+                    &session,
+                    worker.address(),
+                    self.source(),
+                    FlowAction::ApprovePermission,
+                ) || !review_available(&state, scheduler_live, &broker)
+                {
+                    break;
+                }
+                if matches!(
+                    state.state(),
+                    atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Idle)
+                ) && (!pending
+                    || matches!(&progress,
+                        crate::flow_runtime::scheduler::SchedulingProgress::Idle(cursor)
+                        if cursor.journal_id == accepted.receipt.journal_id
+                            && cursor.sequence >= accepted.receipt.sequence
+                    ))
+                {
+                    break;
+                }
+                tokio::select! {
+                    changed = commits.changed() => if changed.is_err() { break; },
+                    changed = grants.changed() => if changed.is_err() { break; },
+                    changed = source.changed() => if changed.is_err() { break; },
+                    changed = scheduling.changed() => if changed.is_err() { break; },
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Offer this invocation's pending request to an authorized, available peer through its durable inbox. Acceptance does not resolve the request or remove user access; identical retries reuse the original receipt.
     pub async fn offer_permission_review(
         &self,
@@ -83,23 +201,11 @@ impl FlowClient {
                             "permission request is not pending for this invocation and revision",
                         ));
                     }
-                    let available = match state.state() {
-                        atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Idle) => {
-                            state.can_start_turn()
-                                && scheduled.load(std::sync::atomic::Ordering::Acquire)
-                        }
-                        atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(
-                            active,
-                        )) => state
-                            .can_receive_at_boundary(&active.lease)
-                            .unwrap_or(false),
-                        _ => false,
-                    };
-                    if !available
-                        || reviewer_broker.list().iter().any(|request| {
-                            matches!(request.state, PermissionRequestState::Pending { .. })
-                        })
-                    {
+                    if !review_available(
+                        &state,
+                        scheduled.load(std::sync::atomic::Ordering::Acquire),
+                        &reviewer_broker,
+                    ) {
                         return Err(denied(
                             "reviewer is paused, unavailable, or awaiting approval",
                         ));

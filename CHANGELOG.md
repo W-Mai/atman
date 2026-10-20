@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Approval routing** — Persistent tool calls notify explicitly authorized live reviewers, observe review availability, and fall back to user approval without creating substitute clients or repeating effects.
+
 - **Approval review offers** — Persistent flow clients can notify an authorized peer through its durable inbox. Offers preserve user approval, reject unavailable reviewers, and reuse the original receipt on retry.
 
 - **Approval completion** — Tool invocations preserve committed decisions across approval-client loss and completed-request eviction.

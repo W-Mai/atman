@@ -340,7 +340,7 @@ pub async fn request_approval_with_additional_risks(
             };
         }
     }
-    let Some(pending) = pending_permission else {
+    let Some(mut pending) = pending_permission else {
         return ApprovalOutcome::Deny {
             reason: format!("{name}: blocked — permission request transport unavailable"),
         };
@@ -349,6 +349,23 @@ pub async fn request_approval_with_additional_risks(
         .permission_broker
         .as_ref()
         .expect("pending permission requires a broker");
+    if broker_resolution.is_none() {
+        match ctx.instance_client() {
+            Ok(Some(client)) => {
+                tokio::select! {
+                    biased;
+                    result = &mut pending.resolution => broker_resolution = Some(result),
+                    offered = client.route_permission_review(&pending.request) => {
+                        if let Err(error) = offered {
+                            crate::notify!(warn, "peer approval routing unavailable: {error}");
+                        }
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => crate::notify!(warn, "peer approval routing unavailable: {error}"),
+        }
+    }
     if broker_resolution.is_none() && !broker.has_clients() {
         let reason = "no permission client".to_string();
         if let Err(error) = broker.cancel(&pending.request.request_id, reason.clone())
