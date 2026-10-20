@@ -7883,6 +7883,7 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
         .launch_flow(
             descriptor.clone(),
             LaunchInput {
+                scope: None,
                 workspace: None,
                 initial_goal: None,
                 request: atman_runtime::flow_store::launch::EntryRequest {
@@ -8536,6 +8537,7 @@ async fn entry_results_survive_worker_reopen_and_are_read_through_the_shared_too
 #[tokio::test]
 async fn persistent_spawn_runs_real_entries_and_retains_sync_and_async_instances() {
     use atman_runtime::ValueJson;
+    let scope_id = Uuid::new_v4();
     let dir = tempfile::tempdir().unwrap();
     let child_path = dir.path().join("child.at");
     std::fs::write(
@@ -8557,12 +8559,16 @@ async fn persistent_spawn_runs_real_entries_and_retains_sync_and_async_instances
         r#"
         flow main() -> any {{
             contract {{ capabilities {{ shell: true }} }}
+            when env("action") == "cancel" {{
+                return flow.scope.cancel(id: "{scope_id}")
+            }}
+            group = flow.scope.create(id: "{scope_id}", name: "delegated task")
             first = flow.instances()
             raw = flow.spawn(flow: {raw}, spawn_token: first.spawn_token, arguments: {{n: 21}}, async: false)
             second = flow.instances()
-            sync = flow.spawn(flow: {reference}, spawn_token: second.spawn_token, arguments: {{message: "sync answer"}}, async: false, inherit_context: true)
+            sync = flow.spawn(flow: {reference}, spawn_token: second.spawn_token, arguments: {{message: "sync answer"}}, async: false, inherit_context: true, scope: group.reference)
             third = flow.instances()
-            background = flow.spawn(flow: {reference}, spawn_token: third.spawn_token, arguments: {{message: "async answer"}})
+            background = flow.spawn(flow: {reference}, spawn_token: third.spawn_token, arguments: {{message: "async answer"}}, scope: group.reference)
             return [raw, sync, background]
         }}
     "#
@@ -8596,12 +8602,21 @@ async fn persistent_spawn_runs_real_entries_and_retains_sync_and_async_instances
     let inventory = session.snapshot().await.unwrap();
     assert_eq!(inventory.catalog.flows.len(), 4);
     let mut synchronous = None;
+    let mut members = Vec::new();
+    let mut independent = None;
     for entry in inventory.catalog.flows {
         if entry.id == a.address().instance_id {
             continue;
         }
         let worker = session.open_flow(entry.id).await.unwrap();
         let record = worker.launch_record().await.unwrap().unwrap();
+        if let Some(scope) = &record.input.scope {
+            assert_eq!(scope.owner, *a.address());
+            assert_eq!(scope.id, scope_id);
+            members.push(worker.clone());
+        } else {
+            independent = Some(worker.clone());
+        }
         assert_eq!(
             record.input.request.sender,
             SenderIdentity::Flow(a.address().clone())
@@ -8655,6 +8670,36 @@ async fn persistent_spawn_runs_real_entries_and_retains_sync_and_async_instances
             .iter()
             .any(|message| message.origin == MessageOrigin::FinalAnswer)
     );
+    assert_eq!(members.len(), 2);
+    invoke_with_env(
+        &a,
+        Executor::new(),
+        [("action".into(), "cancel".into())].into(),
+    )
+    .await
+    .result
+    .unwrap();
+    for member in &members {
+        let mut state = member.subscribe_state();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !matches!(state.borrow_and_update().state(), InstanceState::Closed) {
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+    assert!(independent.unwrap().state().await.unwrap().can_start_turn());
+    host.shutdown().await.unwrap();
+    let restored = root.open_session(info.id).unwrap();
+    for member in members {
+        let stored = restored.open_flow(&member.address().instance_id).unwrap();
+        assert_eq!(
+            stored.launch_record().unwrap().input.scope.as_ref(),
+            stored.task_scope_binding()
+        );
+        assert!(matches!(stored.state().state(), InstanceState::Closed));
+    }
 }
 
 #[tokio::test]
@@ -8935,6 +8980,7 @@ async fn persistent_workspace_failed_launch_keeps_intent_and_close_retries_do_no
         invocation: Default::default(),
     };
     let input = LaunchInput {
+        scope: None,
         workspace: Some(workspace.clone()),
         request: atman_runtime::flow_store::launch::EntryRequest {
             request_id: request.request_id,

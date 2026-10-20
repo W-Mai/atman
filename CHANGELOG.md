@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Scoped peer creation** — Synchronous and asynchronous spawn accept explicit task-scope membership before activation. Launch records and recovery validate the same lifetime binding; cancellation closes members while independent peers remain available.
+
 - **Task scope tools** — Persistent flows can create, list, and cancel owned task scopes. Interjections accept explicit scope references, retain send identities on retries, and reject scoped requests outside persistent execution.
 
 - **Scoped sends and replies** — New send intents validate their task scope before committing. Scope cancellation ends matching pending reply waits while preserving accepted delivery reconciliation, unrelated waits, and consumed results.

@@ -78,6 +78,11 @@ impl FlowReplay {
                     self.workspace = Some(*request);
                 }
                 (Some((descriptor, state, inbox)), FlowFact::Activated(record)) => {
+                    if record.input.scope.as_ref() != self.task_scopes.binding() {
+                        return Err(invalid(
+                            "activation scope does not match its recorded membership",
+                        ));
+                    }
                     if record.input.workspace != self.workspace {
                         return Err(invalid(
                             "activation workspace does not match its recorded request",

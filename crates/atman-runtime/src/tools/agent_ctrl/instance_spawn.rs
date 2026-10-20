@@ -16,6 +16,7 @@ pub(super) async fn spawn(
     asynchronous: bool,
     catalog: Option<crate::event_log::journal::CommitReceipt>,
 ) -> ToolResult {
+    let scope = crate::tools::task_scope::reference(&args)?;
     let catalog = catalog.ok_or_else(|| {
         failed("inspect the persistent session with flow.instances before spawning")
     })?;
@@ -158,6 +159,7 @@ pub(super) async fn spawn(
         )
     };
     let input = LaunchInput {
+        scope,
         workspace,
         initial_goal: None,
         execution: Some(EntryBinding {

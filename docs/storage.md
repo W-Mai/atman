@@ -893,3 +893,13 @@ group = flow.scope.create(id: "1d2e1d89-30fb-4573-8d95-d81429758d36", name: "Rev
 flow.interject(handle: peer, text: "Review the changes", scope: group.reference, request_id: "169b699f-2688-4694-9826-f8fce8606f38")
 flow.scope.cancel(id: group.reference.id)
 ```
+
+`flow.spawn(scope: reference)` binds a new persistent instance to the group before acquiring launch resources or activating its entry. Both synchronous and asynchronous calls use the same binding; omitting `scope` creates an independent instance even when the caller belongs to a group. The referenced group and its ancestors must remain active at execution admission. Cancellation closes bound members through normal resource cleanup without closing independent peers.
+
+Host callers supply the same reference in `LaunchInput.scope`. The activation record must match the immutable Prepared membership, and journal replay validates that invariant. A retry of an already committed activation returns its original receipt after cancellation without restarting execution. A different scope, or an omitted scope for a bound Prepared instance, is rejected. Legacy Session spawn rejects explicit scope arguments.
+
+```at
+group = flow.scope.create(id: "b0608322-5e7c-4769-ad37-568dfc9c1c5f", name: "Review task")
+catalog = flow.instances()
+peer = flow.spawn(flow: "review.at@review", spawn_token: catalog.spawn_token, scope: group.reference)
+```

@@ -581,6 +581,7 @@ impl Scopes {
             content: entry.into(),
         });
         let input = LaunchInput {
+            scope: None,
             workspace: None,
             initial_goal: None,
             inherited_context: vec![],

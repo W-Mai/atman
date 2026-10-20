@@ -929,6 +929,7 @@ impl Tool for AgentSpawn {
             "properties": {
                 "flow": {"type": "string", "description": "Flow reference (e.g. \"subagent.at@subagent\")."},
                 "spawn_token": {"type": "string", "minLength": 1, "description": "Single-use admission token returned by the latest flow.instances call. Inspect and clean up existing flow instances before spawning."},
+                "scope": super::task_scope::reference_schema(),
                 "version": {"type": "string", "minLength": 1, "description": "Staleness guard. Pass the non-empty source fingerprint returned by the current flow.search or flow.describe result verbatim. Omit this field when no fingerprint is available; never send an empty or invented value."},
                 "arguments": {
                     "type": "object",
@@ -968,6 +969,11 @@ impl Tool for AgentSpawn {
                 .unwrap_or(true);
             if identity.instance.is_some() {
                 return instance_spawn::spawn(args, ctx, is_async, catalog).await;
+            }
+            if args.named("scope").is_some() {
+                return Err(RuntimeError::ToolFailed(
+                    "flow.spawn: task scopes require a persistent instance".into(),
+                ));
             }
             if is_async {
                 run_sub_agent_async(args, ctx, true).await
@@ -2334,6 +2340,7 @@ fn resolve_flow_arguments(
             || key == "inherit_context"
             || key == "arguments"
             || key == "workspace"
+            || key == "scope"
         {
             continue;
         }

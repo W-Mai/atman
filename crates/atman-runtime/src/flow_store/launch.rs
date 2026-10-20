@@ -58,6 +58,8 @@ impl ResultRoute {
 /// Trusted host input, separate from the authority to execute it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LaunchInput {
+    /// Explicit lifetime membership, bound while the instance is still Prepared.
+    pub scope: Option<super::task_scope::TaskScopeRef>,
     pub workspace: Option<super::workspace::WorkspaceRequest>,
     pub request: EntryRequest,
     /// Explicit initial objective, committed with activation before any turn can start.
@@ -70,6 +72,9 @@ pub struct LaunchInput {
 impl LaunchInput {
     pub(crate) fn validate(&self) -> io::Result<()> {
         self.request.validate_source()?;
+        if let Some(scope) = &self.scope {
+            scope.validate()?;
+        }
         if matches!(self.request.start, EntryStart::Waiting)
             && (self.execution.is_none()
                 || self
@@ -332,6 +337,11 @@ impl FlowStore {
                     "launch input conflicts with the committed activation",
                 ))
             };
+        }
+        if input.scope.as_ref() != self.task_scope_binding() {
+            return Err(invalid(
+                "activation scope does not match its recorded membership",
+            ));
         }
         if input.workspace != self.workspace {
             return Err(invalid(

@@ -29,6 +29,135 @@ fn session_info() -> SessionDescriptor {
     }
 }
 
+#[test]
+fn activation_cannot_omit_or_invent_recorded_scope_membership() {
+    use atman_runtime::flow_store::task_scope::TaskScopeRef;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_info();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let entry = descriptor(info.id);
+    let mut store = session.create_flow(entry.clone()).unwrap();
+    let scope = TaskScopeRef {
+        owner: descriptor(info.id).address,
+        id: Uuid::new_v4(),
+    };
+    let mut input = initial(&entry, &scope.owner);
+    input.result_route = None;
+    input.scope = Some(scope.clone());
+    let unbound = store.cursor().clone();
+    assert!(
+        store
+            .activate_entry(input.clone(), None, |_| Ok(()))
+            .is_err()
+    );
+    assert_eq!(store.cursor(), &unbound);
+    store.bind_task_scope(scope.clone()).unwrap();
+    let bound = store.cursor().clone();
+    let mut missing = input.clone();
+    missing.scope = None;
+    assert!(store.activate_entry(missing, None, |_| Ok(())).is_err());
+    assert_eq!(store.cursor(), &bound);
+    let committed = store.activate_entry(input, None, |_| Ok(())).unwrap();
+    drop(store);
+    let restored = session.open_flow(&entry.address.instance_id).unwrap();
+    assert_eq!(restored.task_scope_binding(), Some(&scope));
+    assert_eq!(restored.launch_record().unwrap().receipt, committed.receipt);
+    assert_eq!(restored.launch_record().unwrap().input.scope, Some(scope));
+}
+
+#[tokio::test]
+async fn launch_scope_matches_prepared_membership_and_retains_cancelled_activation_receipts() {
+    use atman_runtime::flow_store::task_scope::{TaskScopeDefinition, TaskScopeRef};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_info();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let owner = session.create_flow(descriptor(info.id)).await.unwrap();
+    owner
+        .transition(0, FlowTransition::Activated)
+        .await
+        .unwrap();
+    let id = Uuid::new_v4();
+    owner
+        .create_task_scope(
+            TaskScopeDefinition {
+                id,
+                name: "task".into(),
+                goal: None,
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let scope = TaskScopeRef {
+        owner: owner.address().clone(),
+        id,
+    };
+    let entry = descriptor(info.id);
+    let worker = session.create_flow(entry.clone()).await.unwrap();
+    host.bind_task_scope(worker.address().clone(), scope.clone(), |_, _| Ok(()))
+        .await
+        .unwrap();
+    let mut input = initial(&entry, owner.address());
+    input.result_route = None;
+    let before = worker.snapshot().await.unwrap().cursor;
+    assert!(
+        host.launch_flow(entry.clone(), input.clone(), |_, _| Ok(()))
+            .await
+            .err()
+            .expect("unbound launch cannot replace recorded membership")
+            .to_string()
+            .contains("scope")
+    );
+    assert_eq!(worker.snapshot().await.unwrap().cursor, before);
+    assert!(matches!(
+        worker.state().await.unwrap().state(),
+        InstanceState::Prepared
+    ));
+    input.scope = Some(scope.clone());
+    let launched = host
+        .launch_flow(entry.clone(), input.clone(), |_, _| Ok(()))
+        .await
+        .unwrap();
+    owner.cancel_task_scope(id, |_| Ok(())).await.unwrap();
+    let retried = host
+        .launch_flow(entry.clone(), input.clone(), |_, _| {
+            panic!("retry reauthorized")
+        })
+        .await
+        .unwrap();
+    assert_eq!(retried.record.receipt, launched.record.receipt);
+    let fresh = descriptor(info.id);
+    let mut cancelled_input = initial(&fresh, owner.address());
+    cancelled_input.result_route = None;
+    cancelled_input.scope = Some(scope.clone());
+    assert!(
+        host.launch_flow(fresh, cancelled_input, |_, _| Ok(()))
+            .await
+            .is_err()
+    );
+    // A different request cannot remove the lifetime binding, even after cancellation.
+    input.scope = None;
+    assert!(
+        host.launch_flow(entry.clone(), input, |_, _| Ok(()))
+            .await
+            .is_err()
+    );
+    host.shutdown().await.unwrap();
+    let restored = root.open_session(info.id).unwrap();
+    let member = restored.open_flow(&entry.address.instance_id).unwrap();
+    assert_eq!(member.task_scope_binding(), Some(&scope));
+    assert_eq!(
+        member.launch_record().unwrap().receipt,
+        launched.record.receipt
+    );
+    assert_eq!(member.launch_record().unwrap().input.scope, Some(scope));
+}
+
 #[tokio::test]
 async fn deferred_launch_checks_catalog_before_registration_and_retains_accepted_retries() {
     let dir = tempfile::tempdir().unwrap();
@@ -841,6 +970,7 @@ fn initial(info: &FlowDescriptor, recipient: &FlowRef) -> LaunchInput {
     let mut previous_answer = Message::assistant_text(TurnId::now(), "inherited answer");
     previous_answer.origin = MessageOrigin::FinalAnswer;
     LaunchInput {
+        scope: None,
         workspace: None,
         initial_goal: None,
         execution: None,

@@ -222,6 +222,26 @@ impl RuntimeHost {
             let mut controller = None;
             let attempt = async {
                 authorize(&descriptor, &input)?;
+                if let Some(scope) = input.scope.clone() {
+                    let authorize = authorize.clone();
+                    let creation = descriptor.clone();
+                    let requested = input.clone();
+                    host.bind_task_scope(descriptor.address.clone(), scope, move |_, _| {
+                        authorize(&creation, &requested)
+                    })
+                    .await?;
+                }
+                let expected_scope = input.scope.clone();
+                worker
+                    .request(move |store| {
+                        if store.task_scope_binding() != expected_scope.as_ref() {
+                            return Err(invalid(
+                                "launch scope does not match its recorded membership",
+                            ));
+                        }
+                        Ok(())
+                    })
+                    .await?;
                 if let Some(workspace) = input.workspace.clone() {
                     let authorize = authorize.clone();
                     let creation = descriptor.clone();
@@ -421,6 +441,7 @@ mod tests {
             .into(),
         };
         let input = LaunchInput {
+            scope: None,
             workspace: None,
             initial_goal: None,
             execution: None,

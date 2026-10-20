@@ -325,6 +325,7 @@ impl SessionService {
             .await?;
         let request_id = descriptor.creation_request;
         let input = LaunchInput {
+            scope: None,
             workspace: None,
             initial_goal,
             execution: Some(EntryBinding {

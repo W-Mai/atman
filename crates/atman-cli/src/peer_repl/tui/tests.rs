@@ -984,6 +984,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         }).unwrap();
         flow.activate_entry(
             LaunchInput {
+                scope: None,
                 workspace: None,
                 initial_goal: None,
                 inherited_context: vec![],
@@ -1931,6 +1932,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     host.launch_flow(
         entry.clone(),
         LaunchInput {
+            scope: None,
             workspace: None,
             initial_goal: None,
             inherited_context: vec![],
