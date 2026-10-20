@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Original history removal** — Legacy Session deletion validates the reviewed directory contents and requires confirmation that its old executor stopped. Interrupted cleanup can resume, while migrated copies and external link targets remain intact.
+
 - **Session deletion routing** — Main and floating views can delete loaded, closed Sessions through the shared runtime owner. Scope eviction completes even when the requesting view disconnects.
 
 - **Loaded Session removal** — Confirmed deletion releases closed Session owners without stopping other Sessions. Catalog validation prevents removing live or changed instances, and storage rechecks ownership before deleting data.

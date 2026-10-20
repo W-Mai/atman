@@ -16,6 +16,7 @@ pub mod inbox;
 pub mod inbox_view;
 mod input;
 pub mod launch;
+mod legacy_removal;
 pub mod migration;
 pub mod outbox;
 pub mod planning;
@@ -34,6 +35,7 @@ pub mod workspace;
 
 pub(crate) use deletion::ProjectDeletion;
 pub use deletion::SessionRemoval;
+pub use legacy_removal::LegacySessionRemoval;
 
 use std::fs::File;
 use std::io::{self, Write};

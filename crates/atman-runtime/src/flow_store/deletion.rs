@@ -21,27 +21,11 @@ pub struct SessionRemoval {
 impl RuntimeStore {
     /// Discover unfinished deletion cleanup without opening Session owners or changing data.
     pub fn pending_session_removals(data: &Path) -> io::Result<Vec<uuid::Uuid>> {
-        let root = data.join(super::NAMESPACE);
-        let entries = match fs::read_dir(root.join(".deletions/sessions")) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(error) => return Err(error),
-        };
-        let mut ids = Vec::new();
-        for entry in entries {
-            let entry = entry?;
-            if entry.file_type()?.is_dir()
-                && let Some(name) = entry.file_name().to_str()
-                && let Ok(id) = uuid::Uuid::parse_str(name)
-                && id.to_string() == name
-                && (entry.path().join("data").try_exists()?
-                    || root.join("sessions").join(name).try_exists()?)
-            {
-                ids.push(id);
-            }
-        }
-        ids.sort_unstable();
-        Ok(ids)
+        pending_removals(
+            &data.join(super::NAMESPACE),
+            "sessions",
+            &data.join(super::NAMESPACE).join("sessions"),
+        )
     }
 
     /// Read the original deletion request, including after cleanup completed, without mutation.
@@ -65,7 +49,35 @@ impl RuntimeStore {
         }
         Ok(Some(saved))
     }
+}
 
+pub(super) fn pending_removals(
+    root: &Path,
+    kind: &str,
+    source: &Path,
+) -> io::Result<Vec<uuid::Uuid>> {
+    let entries = match fs::read_dir(root.join(".deletions").join(kind)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) => return Err(error),
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir()
+            && let Some(name) = entry.file_name().to_str()
+            && let Ok(id) = uuid::Uuid::parse_str(name)
+            && id.to_string() == name
+            && (entry.path().join("data").try_exists()? || source.join(name).try_exists()?)
+        {
+            ids.push(id);
+        }
+    }
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+impl RuntimeStore {
     pub(super) fn deletion_path(&self, id: uuid::Uuid) -> std::path::PathBuf {
         self.root
             .join(".deletions")
@@ -129,25 +141,29 @@ impl RuntimeStore {
 
     fn finish_session_deletion(&self, id: uuid::Uuid) -> Result<()> {
         let source = self.root.join("sessions").join(id.to_string());
-        let trash = self.deletion_path(id).join("data");
-        if source.try_exists()? {
-            ensure!(
-                !trash.try_exists()?,
-                "session deletion has conflicting data directories"
-            );
-            fs::rename(&source, &trash)?;
-            sync_parent(&source)?;
-            sync_parent(&trash)?;
-        }
-        match fs::remove_dir_all(&trash) {
-            Ok(()) => sync_parent(&trash)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).context("session deleted; retry to finish data cleanup");
-            }
-        }
-        Ok(())
+        finish_removal(&source, &self.deletion_path(id))
     }
+}
+
+pub(super) fn finish_removal(source: &Path, marker: &Path) -> Result<()> {
+    let trash = marker.join("data");
+    if source.try_exists()? {
+        ensure!(
+            !trash.try_exists()?,
+            "session deletion has conflicting data directories"
+        );
+        fs::rename(source, &trash)?;
+        sync_parent(source)?;
+        sync_parent(&trash)?;
+    }
+    match fs::remove_dir_all(&trash) {
+        Ok(()) => sync_parent(&trash)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).context("session deleted; retry to finish data cleanup");
+        }
+    }
+    Ok(())
 }
 
 impl SessionStore {
