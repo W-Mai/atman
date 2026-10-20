@@ -4,9 +4,23 @@ fn atman_binary() -> String {
     env!("CARGO_BIN_EXE_atman").to_string()
 }
 
+fn atman_command() -> Command {
+    thread_local! {
+        static CONFIG: tempfile::TempDir = tempfile::tempdir().unwrap();
+    }
+    let mut command = Command::new(atman_binary());
+    CONFIG.with(|config| {
+        command
+            .env("ATMAN_CONFIG_DIR", config.path())
+            .env("ATMAN_DATA_DIR", config.path().join("data"));
+    });
+    command.env("ATMAN_DISABLE_MIGRATION", "1");
+    command
+}
+
 #[test]
 fn version_subcommand_prints_semver() {
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .arg("version")
         .output()
         .expect("run atman version");
@@ -53,7 +67,7 @@ fn managed_run_waits_for_child_results_after_its_final_answer() {
         }
         return final.answer(message: prompt)
     }"#).unwrap();
-    let mut child = Command::new(atman_binary())
+    let mut child = atman_command()
         .current_dir(dir.path())
         .env("ATMAN_CONFIG_DIR", &config)
         .env("ATMAN_DATA_DIR", dir.path().join("data"))
@@ -104,7 +118,7 @@ fn run_executes_pure_flow_and_prints_return_value() {
 "#,
     )
     .unwrap();
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .env("ATMAN_CONFIG_DIR", &config)
         .env("ATMAN_DATA_DIR", &data)
         .arg("run")
@@ -134,7 +148,7 @@ fn run_preserves_path_arguments_and_explicit_invocation_settings_without_retaini
     let source = dir.path().join("typed.at");
     std::fs::write(&source, "flow main(p: path, paths: [path], meta: {root: path}) -> string { return env(\"effort\") + \":\" + p + \":\" + paths[0] + \":\" + meta.root }\n").unwrap();
     let data = dir.path().join("data");
-    let output = Command::new(atman_binary())
+    let output = atman_command()
         .env("ATMAN_DATA_DIR", &data)
         .args(["run", "--ephemeral", "--reasoning", "high"])
         .arg(&source)
@@ -176,7 +190,7 @@ fn run_persists_events_and_logs_tail_reads_them() {
     )
     .unwrap();
 
-    let run = Command::new(atman_binary())
+    let run = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .arg("run")
         .arg(&flow_path)
@@ -197,7 +211,7 @@ fn run_persists_events_and_logs_tail_reads_them() {
     assert_eq!(dirs.len(), 1);
     let sid = dirs[0].file_name().into_string().unwrap();
 
-    let tail = Command::new(atman_binary())
+    let tail = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .args(["logs", "tail", &sid])
         .output()
@@ -236,7 +250,7 @@ fn run_persists_events_and_logs_tail_reads_them() {
         vec!["cost"],
         vec!["cost", "--all"],
     ] {
-        let output = Command::new(atman_binary())
+        let output = atman_command()
             .env("ATMAN_DATA_DIR", data.path())
             .args(args)
             .output()
@@ -257,7 +271,7 @@ fn session_list_prints_persistent_rows_sorted_by_mtime() {
     std::fs::write(&flow_path, "flow s() -> Int { return 1 }\n").unwrap();
 
     for _ in 0..2 {
-        Command::new(atman_binary())
+        atman_command()
             .current_dir(flow_dir.path())
             .env("ATMAN_DATA_DIR", data.path())
             .arg("run")
@@ -266,7 +280,7 @@ fn session_list_prints_persistent_rows_sorted_by_mtime() {
             .unwrap();
     }
 
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .current_dir(flow_dir.path())
         .env("ATMAN_DATA_DIR", data.path())
         .args(["session", "list"])
@@ -287,7 +301,7 @@ fn session_show_prints_the_persistent_flow_binding() {
     let flow_dir = tempfile::tempdir().unwrap();
     let flow_path = flow_dir.path().join("s.at");
     std::fs::write(&flow_path, "flow s() -> Int { return 1 }\n").unwrap();
-    Command::new(atman_binary())
+    atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .arg("run")
         .arg(&flow_path)
@@ -303,7 +317,7 @@ fn session_show_prints_the_persistent_flow_binding() {
         .into_string()
         .unwrap();
 
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .args(["session", "show", &sid])
         .output()
@@ -328,7 +342,7 @@ fn cost_aggregates_llm_calls_from_session() {
     )
     .unwrap();
 
-    Command::new(atman_binary())
+    atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .arg("run")
         .arg("--mock")
@@ -337,7 +351,7 @@ fn cost_aggregates_llm_calls_from_session() {
         .output()
         .unwrap();
 
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .arg("cost")
         .output()
@@ -355,13 +369,13 @@ fn repl_runs_boot_flow_at_startup() {
     std::fs::write(
         cfg.path().join("on_session_start.at"),
         r#"flow boot() -> string {
-    return "boot ok"
+    return final.answer(message: "boot ok")
 }
 "#,
     )
     .unwrap();
 
-    let mut child = std::process::Command::new(atman_binary())
+    let child = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
@@ -370,8 +384,6 @@ fn repl_runs_boot_flow_at_startup() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    use std::io::Write;
-    child.stdin.as_mut().unwrap().write_all(b":exit\n").unwrap();
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("boot ok"), "stdout: {stdout}");
@@ -379,26 +391,45 @@ fn repl_runs_boot_flow_at_startup() {
 
 #[test]
 fn repl_fires_dsl_on_session_start_body_at_startup() {
+    use atman_runtime::flow_store::RuntimeStore;
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
+    std::fs::write(cfg.path().join("lifecycle.at"), r#"on session.start {
+        memory.todo.set(where: "boot", why: "dsl lifecycle", how: "on session.start", expected_result: "todo persisted")
+    }"#).unwrap();
     std::fs::write(
-        cfg.path().join("lifecycle.at"),
-        r#"on session.start {
-    memory.todo.set(
-        where: "boot",
-        why: "dsl lifecycle",
-        how: "on session.start",
-        expected_result: "todo persisted"
-    )
-}
-"#,
+        cfg.path().join("on_session_start.at"),
+        "flow start() -> string { return final.answer(message: \"boot ready\") }",
     )
     .unwrap();
-
-    let mut child = std::process::Command::new(atman_binary())
+    let out = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("boot ready"));
+    let store = RuntimeStore::open(data.path()).unwrap();
+    let id = RuntimeStore::session_ids(data.path()).unwrap()[0];
+    let session = store.open_session(id).unwrap();
+    let flow = session
+        .open_flow(session.projection().default_flow.as_ref().unwrap())
+        .unwrap();
+    assert_eq!(flow.planning().todos.len(), 1);
+    assert_eq!(flow.planning().todos[0].where_, "boot");
+    assert_eq!(flow.planning().todos[0].why, "dsl lifecycle");
+    drop(flow);
+    drop(session);
+    let mut child = atman_command()
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .args(["--continue", &id.to_string()])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -414,31 +445,21 @@ fn repl_fires_dsl_on_session_start_body_at_startup() {
     let out = child.wait_with_output().unwrap();
     assert!(
         out.status.success(),
-        "stderr: {}",
+        "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("○ boot"), "{stdout}");
-    assert!(stdout.contains("✓ boot"), "{stdout}");
-    let sessions_dir = data.path().join("sessions");
-    let sid_dir = std::fs::read_dir(&sessions_dir)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    let todos_path = sid_dir.join("todos.jsonl");
-    assert!(
-        todos_path.exists(),
-        "expected todos.jsonl at {}",
-        todos_path.display()
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("boot"), "{text}");
+    let session = store.open_session(id).unwrap();
+    let flow = session
+        .open_flow(session.projection().default_flow.as_ref().unwrap())
+        .unwrap();
+    assert_eq!(flow.planning().todos.len(), 1);
+    assert_eq!(
+        flow.planning().todos[0].status,
+        atman_runtime::memory::todo::TodoStatus::Done
     );
-    let contents = std::fs::read_to_string(&todos_path).unwrap();
-    assert!(
-        contents.contains("dsl lifecycle"),
-        "todos.jsonl: {contents}"
-    );
+    assert!(!data.path().join("sessions").exists());
 }
 
 #[test]
@@ -450,7 +471,7 @@ fn repl_route_dsl_dispatches_by_prefix() {
     std::fs::write(
         cmd_dir.join("greet.at"),
         r#"flow greet(who: string) -> string {
-    return "hi " + who
+    return final.answer(message: "hi " + who)
 }
 "#,
     )
@@ -459,13 +480,13 @@ fn repl_route_dsl_dispatches_by_prefix() {
         cfg.path().join("routes.at"),
         r#"route "hello" { flow: greet }
 flow greet(who: string) -> string {
-    return "hi " + who
+    return final.answer(message: "hi " + who)
 }
 "#,
     )
     .unwrap();
 
-    let mut child = std::process::Command::new(atman_binary())
+    let mut child = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
@@ -479,7 +500,7 @@ flow greet(who: string) -> string {
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b"hello atman\n:exit\n")
+        .write_all(b"hello atman\n")
         .unwrap();
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -499,7 +520,7 @@ fn repl_route_dsl_dispatches_default_route() {
     std::fs::write(
         cmd_dir.join("fallback.at"),
         r#"flow fallback(message: string) -> string {
-    return "default: " + message
+    return final.answer(message: "default: " + message)
 }
 "#,
     )
@@ -510,7 +531,7 @@ fn repl_route_dsl_dispatches_default_route() {
     )
     .unwrap();
 
-    let mut child = std::process::Command::new(atman_binary())
+    let mut child = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
@@ -524,7 +545,7 @@ fn repl_route_dsl_dispatches_default_route() {
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b"plain question\n:exit\n")
+        .write_all(b"plain question\n")
         .unwrap();
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -550,7 +571,7 @@ fn repl_slash_command_runs_flow_from_config_dir() {
     )
     .unwrap();
 
-    let mut child = std::process::Command::new(atman_binary())
+    let mut child = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
@@ -564,7 +585,7 @@ fn repl_slash_command_runs_flow_from_config_dir() {
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b"/greet atman\n:exit\n")
+        .write_all(b"/greet atman\n")
         .unwrap();
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -581,7 +602,7 @@ fn repl_slash_command_runs_flow_from_config_dir() {
 fn repl_slash_command_unknown_reports_error() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
-    let mut child = std::process::Command::new(atman_binary())
+    let mut child = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
@@ -598,14 +619,18 @@ fn repl_slash_command_unknown_reports_error() {
         .write_all(b"/missing\n:exit\n")
         .unwrap();
     let out = child.wait_with_output().unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("no such command"), "stderr: {stderr}");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(output.contains("no such command"), "output: {output}");
 }
 
 #[test]
 fn repl_help_and_exit_via_stdin() {
     let data = tempfile::tempdir().unwrap();
-    let mut child = std::process::Command::new(atman_binary())
+    let mut child = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
         .stdin(std::process::Stdio::piped())
@@ -624,14 +649,14 @@ fn repl_help_and_exit_via_stdin() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains(":help"));
-    assert!(stdout.contains("session_id:"));
+    assert!(stdout.contains("Session "));
 }
 
 #[test]
 fn doctor_reports_paths_and_provider_marks() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .arg("doctor")
@@ -655,7 +680,7 @@ fn session_gc_removes_only_empty_sessions() {
     std::fs::write(empty.join("events.jsonl"), "").unwrap();
     std::fs::write(full.join("events.jsonl"), "{\"type\":\"flow_start\"}\n").unwrap();
 
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .args(["session", "gc"])
         .output()
@@ -673,14 +698,14 @@ fn logs_tail_without_session_id_uses_latest() {
     let flow_path = flow_dir.path().join("hi.at");
     std::fs::write(&flow_path, "flow hi() -> Int { return 1 }\n").unwrap();
 
-    Command::new(atman_binary())
+    atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .arg("run")
         .arg(&flow_path)
         .output()
         .expect("run");
 
-    let tail = Command::new(atman_binary())
+    let tail = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .args(["logs", "tail"])
         .output()
@@ -702,7 +727,7 @@ fn run_reports_error_and_exits_nonzero() {
 "#,
     )
     .unwrap();
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .arg("run")
         .arg(&flow_path)
         .output()
@@ -719,7 +744,7 @@ fn repl_attach_list_shows_pending_paths() {
     let img = data.path().join("a.png");
     std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
 
-    let mut child = std::process::Command::new(atman_binary())
+    let mut child = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
@@ -752,7 +777,7 @@ fn monitor_serves_sessions_and_events_over_http() {
     std::fs::write(dir.join("events.jsonl"), ev).unwrap();
     let source = data.path().join("monitor.at");
     std::fs::write(&source, "flow main() -> string { return \"recorded\" }").unwrap();
-    let run = Command::new(atman_binary())
+    let run = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .arg("run")
         .arg(&source)
@@ -766,7 +791,7 @@ fn monitor_serves_sessions_and_events_over_http() {
     let persistent = atman_runtime::flow_store::RuntimeStore::session_ids(data.path()).unwrap()[0];
 
     let port = 65_000 + (std::process::id() % 500) as u16;
-    let mut child = std::process::Command::new(atman_binary())
+    let mut child = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .args(["monitor", "--port", &port.to_string()])
         .stdout(std::process::Stdio::piped())
@@ -852,7 +877,7 @@ fn doctor_lists_migrated_rules_from_fake_home() {
     )
     .unwrap();
 
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .env("HOME", home.path())
@@ -871,7 +896,7 @@ fn doctor_lists_migrated_rules_from_fake_home() {
 fn doctor_reports_no_mcp_servers_when_config_missing() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .arg("doctor")
@@ -892,7 +917,7 @@ fn doctor_reports_mcp_boot_failure_when_command_missing() {
         "[[mcp]]\nname = \"broken\"\ncommand = \"/no/such/binary/here\"\ntimeout_ms = 200\n",
     )
     .unwrap();
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .arg("doctor")
@@ -913,7 +938,7 @@ fn doctor_reports_preview_unavailable_when_server_absent() {
         "[preview]\nbase_url = \"http://127.0.0.1:1\"\ntimeout_ms = 200\n",
     )
     .unwrap();
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .arg("doctor")
@@ -946,7 +971,7 @@ fn repl_at_path_inline_becomes_image_part_in_user_msg_event() {
     let img = data.path().join("pic.png");
     std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
 
-    let mut child = std::process::Command::new(atman_binary())
+    let mut child = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
@@ -956,7 +981,7 @@ fn repl_at_path_inline_becomes_image_part_in_user_msg_event() {
         .spawn()
         .unwrap();
     use std::io::Write;
-    let script = format!("/noop @{}\n:exit\n", img.display());
+    let script = format!("/noop @{}\n", img.display());
     child
         .stdin
         .as_mut()
@@ -966,28 +991,40 @@ fn repl_at_path_inline_becomes_image_part_in_user_msg_event() {
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success(), "atman crashed: {:?}", out);
 
-    let sessions = data.path().join("sessions");
-    let mut found_image = false;
-    for entry in std::fs::read_dir(&sessions).unwrap() {
-        let entry = entry.unwrap();
-        let events_path = entry.path().join("events.jsonl");
-        if !events_path.exists() {
-            continue;
-        }
-        let contents = std::fs::read_to_string(&events_path).unwrap();
-        for line in contents.lines() {
-            let v: serde_json::Value = serde_json::from_str(line).unwrap();
-            if v["type"] == "user_msg"
-                && let Some(parts) = v["message"]["parts"].as_array()
-                && let Some(image) = parts.iter().find(|p| p["type"] == "image")
-            {
-                found_image = image["source"]["data"]["kind"] == "artifact";
-                let path = image["source"]["data"]["path"].as_str().unwrap();
-                assert!(std::path::Path::new(path).is_file());
-            }
-        }
-    }
-    assert!(found_image, "no user_msg event carried an image part");
+    use atman_runtime::flow_store::{
+        RuntimeStore,
+        view::{AcceptedInput, FlowUpdate},
+    };
+    let id = RuntimeStore::session_ids(data.path()).unwrap()[0];
+    let session = RuntimeStore::inspect_session(data.path(), id).unwrap();
+    let mut images = Vec::new();
+    session
+        .inspect_flow_updates(
+            session.projection.default_flow.as_ref().unwrap(),
+            |_, updates| {
+                for update in updates {
+                    if let FlowUpdate::InputAccepted(input) = update
+                        && let AcceptedInput::Command {
+                            user: Some(user), ..
+                        } = *input
+                    {
+                        images.extend(user.images);
+                    }
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(images.len(), 1);
+    let atman_runtime::message::ImageData::Artifact { path, .. } = &images[0].data else {
+        panic!("accepted command image is not an artifact");
+    };
+    assert!(path.is_file());
+    std::fs::remove_file(img).unwrap();
+    assert_eq!(
+        atman_runtime::attachment_store::image_bytes(&images[0]).unwrap(),
+        b"\x89PNG\r\n\x1a\n"
+    );
 }
 
 #[test]
@@ -997,7 +1034,7 @@ fn repl_attach_clear_empties_pending() {
     let img = data.path().join("b.png");
     std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
 
-    let mut child = std::process::Command::new(atman_binary())
+    let mut child = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
@@ -1021,7 +1058,7 @@ fn repl_attach_clear_empties_pending() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("cleared"), "stdout: {stdout}");
     assert!(
-        stdout.contains("no pending attachments"),
+        stdout.contains("No pending attachments"),
         "stdout: {stdout}"
     );
 }
@@ -1033,7 +1070,7 @@ fn repl_attach_command_accepts_existing_file() {
     let img = data.path().join("pic.png");
     std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
 
-    let mut child = std::process::Command::new(atman_binary())
+    let mut child = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
@@ -1052,15 +1089,15 @@ fn repl_attach_command_accepts_existing_file() {
         .unwrap();
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("attached"), "stdout: {stdout}");
-    assert!(stdout.contains("pending count: 1"), "stdout: {stdout}");
+    assert!(stdout.contains("Attached image"), "stdout: {stdout}");
+    assert!(stdout.contains("1 pending"), "stdout: {stdout}");
 }
 
 #[test]
 fn repl_attach_command_rejects_missing_file() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
-    let mut child = std::process::Command::new(atman_binary())
+    let mut child = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
@@ -1077,8 +1114,15 @@ fn repl_attach_command_rejects_missing_file() {
         .write_all(b":attach /nope/nope.png\n:exit\n")
         .unwrap();
     let out = child.wait_with_output().unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("file not found"), "stderr: {stderr}");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        output.contains("cannot read /nope/nope.png"),
+        "output: {output}"
+    );
 }
 
 #[test]
@@ -1117,7 +1161,7 @@ fn rebuild_index_walks_matching_project_sessions_and_reports_totals() {
     )
     .unwrap();
 
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .current_dir(project.path())
         .arg("rebuild-index")
@@ -1144,7 +1188,7 @@ fn daemon_rotate_token_replaces_token_when_daemon_not_running() {
 
     std::fs::write(&cfg_path, "auth_token = \"old-token-000\"\n").unwrap();
 
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .env("ATMAN_DAEMON_CONFIG_PATH", &cfg_path)
         .env("ATMAN_DAEMON_PID_PATH", &pid_path)
         .args(["daemon", "rotate-token"])
@@ -1178,7 +1222,7 @@ fn daemon_rotate_token_refuses_when_daemon_running() {
     std::fs::write(&cfg_path, "auth_token = \"keep-me\"\n").unwrap();
     std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
 
-    let out = Command::new(atman_binary())
+    let out = atman_command()
         .env("ATMAN_DAEMON_CONFIG_PATH", &cfg_path)
         .env("ATMAN_DAEMON_PID_PATH", &pid_path)
         .args(["daemon", "rotate-token"])
@@ -1198,7 +1242,7 @@ fn repl_unrouted_input_hints_at_routes_at() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
 
-    let mut child = std::process::Command::new(atman_binary())
+    let mut child = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
@@ -1226,7 +1270,7 @@ fn repl_invalid_routes_at_surfaces_parse_error() {
     let cfg = tempfile::tempdir().unwrap();
     std::fs::write(cfg.path().join("routes.at"), "route invalid").unwrap();
 
-    let mut child = std::process::Command::new(atman_binary())
+    let mut child = atman_command()
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
@@ -1246,7 +1290,7 @@ fn repl_invalid_routes_at_surfaces_parse_error() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("parse routes.at"),
+        stdout.contains("parse routes.at") || stderr.contains("parse routes.at"),
         "stdout: {stdout} stderr: {stderr}"
     );
     assert!(
