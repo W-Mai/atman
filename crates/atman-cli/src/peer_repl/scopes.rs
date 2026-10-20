@@ -520,7 +520,12 @@ impl Scopes {
             if exists {
                 None
             } else {
-                Some(prepare_new_session(&source.config, &descriptor)?)
+                Some(prepare_session_entry(
+                    &source.config,
+                    &descriptor,
+                    descriptor.project.as_ref(),
+                    None,
+                )?)
             }
         };
         let session = self
@@ -532,32 +537,49 @@ impl Scopes {
             catalog.catalog.descriptor == descriptor,
             "session creation identity conflicts with another scope"
         );
-        if catalog
+        let registered = catalog
             .catalog
             .flows
             .iter()
-            .any(|row| row.id == address.instance_id)
-        {
+            .find(|row| row.id == address.instance_id);
+        let project = registered.map_or_else(
+            || catalog.catalog.project.clone(),
+            |row| row.project.clone(),
+        );
+        let retained = if registered.is_some() {
             let worker = session.open_flow(address.instance_id.clone()).await?;
+            let entry = worker.descriptor().await?;
+            ensure!(
+                entry.creation_request == request && entry.created_by.is_none(),
+                "initial flow creation identity conflicts with the request"
+            );
             if worker.launch_record().await?.is_some() {
                 return Ok(address);
             }
-        }
+            Some(entry)
+        } else {
+            None
+        };
         let NewSessionEntry {
             entry,
             start,
             trust,
             authority,
-        } = match prepared {
+        } = match prepared.filter(|_| retained.is_none() && project == descriptor.project) {
             Some(prepared) => prepared,
-            None => prepare_new_session(&source.config, &descriptor)?,
+            None => prepare_session_entry(
+                &source.config,
+                &descriptor,
+                project.as_ref(),
+                retained.as_ref().map(FlowDescriptor::entry).transpose()?,
+            )?,
         };
-        let descriptor = FlowDescriptor {
+        let descriptor = retained.unwrap_or(FlowDescriptor {
             address: address.clone(),
             creation_request: request,
             created_by: None,
             content: entry.into(),
-        };
+        });
         let input = LaunchInput {
             workspace: None,
             initial_goal: None,
@@ -583,16 +605,19 @@ impl Scopes {
             let mut scope = match loaded.get(&request) {
                 Some(scope) => scope.clone(),
                 None => {
-                    Attachment::open(
+                    Attachment::open_selected(
                         &self.root,
                         request,
                         self.host.clone(),
                         self.permissions.clone(),
                         self.prompts.clone(),
+                        registered.map(|row| row.id.clone()),
                     )
                     .await?
                 }
-            };
+            }
+            .for_project(project)
+            .await?;
             scope.executor.tool_ctx.prompt_resolver = source.prompt_resolver;
             // Retain the scoped prompt transport before scheduling startup work.
             loaded.insert(request, scope.clone());
@@ -612,7 +637,7 @@ impl Scopes {
                 .await?;
         } else {
             self.host
-                .launch_flow(descriptor, input, |_, _| Ok(()))
+                .launch_flow_at(descriptor, input, catalog.cursor, |_, _| Ok(()))
                 .await?;
         }
         Ok(address)
@@ -626,16 +651,28 @@ struct NewSessionEntry {
     authority: EffectiveAuthority,
 }
 
-fn prepare_new_session(
+fn prepare_session_entry(
     config: &ConfigHub,
     descriptor: &SessionDescriptor,
+    project: Option<&atman_runtime::storage::ProjectContext>,
+    retained: Option<&atman_runtime::flow_store::EntrySnapshot>,
 ) -> Result<NewSessionEntry> {
     use atman_runtime::flow_store::{EntrySnapshot, launch::EntryStart};
-    let (program, name, _, _) = crate::resolve_slash_command_from(
-        "/agent",
-        config.config_dir(),
-        descriptor.project.as_ref().map(|project| project.root()),
-    )?;
+    let roots = descriptor.source_roots_for(project);
+    let (program, name) = match retained {
+        Some(entry) => (
+            load_program_from_bundle(&entry.bundle, &entry.path, &roots)?,
+            entry.name.clone(),
+        ),
+        None => {
+            let (program, name, _, _) = crate::resolve_slash_command_from(
+                "/agent",
+                config.config_dir(),
+                project.map(|project| project.root()),
+            )?;
+            (program, name)
+        }
+    };
     let flow = program
         .entry_flow(&name)
         .and_then(|id| program.flow(&id))
@@ -648,10 +685,7 @@ fn prepare_new_session(
     let authority = EffectiveAuthority::root(
         &trust,
         contract_allows_shell(flow.contract.as_ref()),
-        descriptor
-            .project
-            .as_ref()
-            .map(|project| project.root().to_path_buf()),
+        project.map(|project| project.root().to_path_buf()),
     );
     let entry = EntrySnapshot {
         name,
@@ -663,8 +697,7 @@ fn prepare_new_session(
     };
     let startup = config.config_dir().join("on_session_start.at");
     let start = if startup.try_exists()? {
-        let program =
-            atman_runtime::source_program::load_program(&startup, &descriptor.source_roots())?;
+        let program = atman_runtime::source_program::load_program(&startup, &roots)?;
         match program.entry_file().flows.first() {
             Some(flow) => EntryStart::Command {
                 entry: Box::new(EntrySnapshot {
@@ -691,7 +724,189 @@ fn prepare_new_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atman_runtime::flow_store::FlowTransition;
+    use atman_runtime::flow_store::{EntrySnapshot, FlowDescriptor, FlowRef, FlowTransition};
+
+    #[tokio::test]
+    async fn prepared_initial_entry_reuses_retained_source_and_project_after_reopening() {
+        use atman_runtime::{source_program::load_program, storage::ProjectContext};
+        for mode in [CreationMode::Interactive, CreationMode::Deferred] {
+            let data = tempfile::tempdir().unwrap();
+            let config = ConfigHub::from_config_dir(data.path().join("config"));
+            let a = data.path().join("a");
+            let b = data.path().join("b");
+            let c = data.path().join("c");
+            for path in [config.config_dir(), &a, &b, &c] {
+                std::fs::create_dir_all(path).unwrap();
+            }
+            std::fs::write(config.config_dir().join("config.toml"), "").unwrap();
+            std::fs::create_dir_all(config.config_dir().join("commands")).unwrap();
+            std::fs::write(
+                config.config_dir().join("commands/agent.at"),
+                "flow broken(",
+            )
+            .unwrap();
+            std::fs::write(
+                config.config_dir().join("on_session_start.at"),
+                "flow startup() -> string { return final.answer(message: \"ready\") }",
+            )
+            .unwrap();
+            for (path, label) in [(&a, "ALPHA"), (&b, "BETA"), (&c, "GAMMA")] {
+                std::fs::write(path.join("AGENTS.md"), format!("# scope-rule\n{label}")).unwrap();
+            }
+            let original = ProjectContext::resolve(&config, &a, data.path()).unwrap();
+            let captured = ProjectContext::resolve(&config, &b, data.path()).unwrap();
+            let current = ProjectContext::resolve(&config, &c, data.path()).unwrap();
+            let request = Uuid::now_v7();
+            let descriptor = SessionDescriptor {
+                id: request,
+                title: "New session".into(),
+                project: Some(original.clone()),
+                configuration: SessionConfiguration::Atman(config.source()),
+            };
+            let path = b.join("main.at");
+            let helper = b.join("helper.at");
+            std::fs::write(&helper, "pub flow tag() -> string { return \"retained\" }").unwrap();
+            std::fs::write(
+                &path,
+                r#"
+                use "./helper.at"::tag
+                flow main(input: string) -> string {
+                    contract { invocation { user_message: input } }
+                    tag = tag().await
+                    rule = rule.fetch(name: "scope-rule")
+                    return final.answer(message: tag + "|" + rule + "|" + input)
+                }
+            "#,
+            )
+            .unwrap();
+            let program =
+                load_program(&path, &descriptor.source_roots_for(Some(&captured))).unwrap();
+            let entry = FlowDescriptor {
+                address: FlowRef {
+                    session_id: request.into(),
+                    instance_id: atman_rt::FlowInstanceId(request.into()),
+                },
+                creation_request: request,
+                created_by: None,
+                content: EntrySnapshot {
+                    path: program.entry_path().unwrap().to_owned(),
+                    name: "main".into(),
+                    bundle: program.revision_bundle(),
+                }
+                .into(),
+            };
+            let store = RuntimeStore::open(data.path()).unwrap();
+            let mut writer = store.create_session(descriptor.clone()).unwrap();
+            writer
+                .set_project(&writer.cursor().clone(), Some(captured.clone()))
+                .unwrap();
+            let prepared = writer.create_flow(entry.clone()).unwrap();
+            writer
+                .set_project(&writer.cursor().clone(), Some(current.clone()))
+                .unwrap();
+            let mut selected = entry.clone();
+            selected.address.instance_id = FlowInstanceId::now();
+            selected.creation_request = Uuid::now_v7();
+            let selected_id = selected.address.instance_id.clone();
+            let selected_flow = writer.create_flow(selected).unwrap();
+            writer
+                .select_default(&writer.cursor().clone(), selected_id.clone())
+                .unwrap();
+            drop(selected_flow);
+            drop(prepared);
+            drop(writer);
+            std::fs::remove_file(path).unwrap();
+            std::fs::remove_file(helper).unwrap();
+            let host = RuntimeHost::default();
+            let (notices, _received) = mpsc::unbounded_channel();
+            let scopes = Arc::new(Scopes::empty(
+                data.path(),
+                host.clone(),
+                None,
+                Arc::new(prompts::Prompts::new(notices)),
+            ));
+            // The default view may be bound to another instance while this entry remains Prepared.
+            let opened = scopes.open(request).await.unwrap();
+            assert_eq!(opened.project.as_ref(), Some(&current));
+            let seed = || SessionSeed {
+                config: config.clone(),
+                project: Some(original.clone()),
+                prompt_resolver: None,
+            };
+            let address = scopes.create_session(seed(), request, mode).await.unwrap();
+            assert_eq!(address, entry.address);
+            let worker = host.flow(&address).await.unwrap();
+            assert_eq!(worker.descriptor().await.unwrap(), entry);
+            assert_eq!(worker.project().await.unwrap().as_ref(), Some(&captured));
+            let record = worker.launch_record().await.unwrap().unwrap();
+            assert_eq!(
+                record
+                    .input
+                    .execution
+                    .as_ref()
+                    .unwrap()
+                    .authority
+                    .workspace_root
+                    .as_deref(),
+                Some(captured.root()),
+            );
+            if matches!(mode, CreationMode::Deferred) {
+                assert!(worker.context().messages_full().is_empty());
+                assert_eq!(worker.snapshot().await.unwrap().pending.len(), 1);
+                assert!(
+                    host.session(request)
+                        .unwrap()
+                        .scheduling_status(address.instance_id.clone())
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            let scope = scopes.open_flow_scope(&address).await.unwrap();
+            scope.bind(&worker).await.unwrap();
+            host.wait_quiescent().await.unwrap();
+            let before = worker.snapshot().await.unwrap().cursor;
+            // Once activated, retries do not reload startup or enqueue another greeting.
+            std::fs::write(
+                config.config_dir().join("on_session_start.at"),
+                "flow broken(",
+            )
+            .unwrap();
+            assert_eq!(
+                scopes.create_session(seed(), request, mode).await.unwrap(),
+                address
+            );
+            assert_eq!(worker.snapshot().await.unwrap().cursor, before);
+            std::fs::remove_file(config.config_dir().join("on_session_start.at")).unwrap();
+            scope
+                .command(&worker, ":invoke {\"input\":\"hello\"}")
+                .await
+                .unwrap();
+            host.wait_quiescent().await.unwrap();
+            let messages = worker.context().messages_full();
+            let answer = messages.last().unwrap().text_concat();
+            assert!(
+                answer.contains("retained|")
+                    && answer.contains("BETA")
+                    && answer.ends_with("|hello"),
+                "{answer}"
+            );
+            assert!(!answer.contains("ALPHA") && !answer.contains("GAMMA"));
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message.text_concat() == "ready")
+                    .count(),
+                1
+            );
+            let catalog = host.session(request).unwrap().snapshot().await.unwrap();
+            assert_eq!(catalog.catalog.descriptor, descriptor);
+            assert_eq!(catalog.catalog.project.as_ref(), Some(&current));
+            assert_eq!(catalog.catalog.flows.len(), 2);
+            assert_eq!(catalog.catalog.default_flow.as_ref(), Some(&selected_id));
+            host.shutdown().await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn watcher_registration_attaches_storage_without_models_and_retains_retry_identity() {

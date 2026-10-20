@@ -1039,12 +1039,13 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         ..Default::default()
     });
     let (notices, _rx) = mpsc::unbounded_channel();
-    let initial = Attachment::open(
+    let initial = Attachment::open_selected(
         dir.path(),
         ids[0],
         host.clone(),
         None,
         Arc::new(prompts::Prompts::new(notices)),
+        None,
     )
     .await
     .unwrap();

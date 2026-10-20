@@ -116,6 +116,18 @@ impl RuntimeHost {
             .await
     }
 
+    /// Launch without scheduling against an observed catalog. New registration rejects catalog changes; an existing instance retains its captured project and matching activation.
+    pub async fn launch_flow_at(
+        &self,
+        descriptor: FlowDescriptor,
+        input: LaunchInput,
+        catalog: crate::event_log::journal::CommitReceipt,
+        authorize_new: impl Fn(&FlowDescriptor, &LaunchInput) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<LaunchedFlow> {
+        self.launch_owned(descriptor, input, authorize_new, Some(catalog), || Ok(None))
+            .await
+    }
+
     pub(crate) async fn launch_owned(
         &self,
         descriptor: FlowDescriptor,

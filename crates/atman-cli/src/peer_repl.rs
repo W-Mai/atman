@@ -498,16 +498,6 @@ impl Attachment {
         })
     }
 
-    async fn open(
-        root: &Path,
-        id: Uuid,
-        host: RuntimeHost,
-        permissions: Option<Arc<PermissionClients>>,
-        prompts: Arc<prompts::Prompts>,
-    ) -> Result<Self> {
-        Self::open_selected(root, id, host, permissions, prompts, None).await
-    }
-
     async fn open_selected(
         root: &Path,
         id: Uuid,

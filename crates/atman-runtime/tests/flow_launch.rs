@@ -30,6 +30,67 @@ fn session_info() -> SessionDescriptor {
 }
 
 #[tokio::test]
+async fn deferred_launch_checks_catalog_before_registration_and_retains_accepted_retries() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_info();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(store.create_session(info.clone()).unwrap())
+        .unwrap();
+    let stale = session.snapshot().await.unwrap().cursor;
+    let project = atman_runtime::storage::ProjectContext::resolve(
+        &atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path().join("config")),
+        &dir.path().join("destination"),
+        dir.path(),
+    )
+    .unwrap();
+    session
+        .set_project(stale.clone(), Some(project.clone()))
+        .await
+        .unwrap();
+    let current = session.snapshot().await.unwrap();
+    let entry = descriptor(info.id);
+    let mut input = initial(&entry, &entry.address);
+    input.result_route = None;
+    input.request.sender = SenderIdentity::Host(Uuid::now_v7());
+    assert!(
+        host.launch_flow_at(entry.clone(), input.clone(), stale.clone(), |_, _| Ok(()))
+            .await
+            .is_err()
+    );
+    assert_eq!(session.snapshot().await.unwrap().cursor, current.cursor);
+    assert!(session.snapshot().await.unwrap().catalog.flows.is_empty());
+    let accepted = host
+        .launch_flow_at(entry.clone(), input.clone(), current.cursor, |_, _| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(accepted.worker.project().await.unwrap(), Some(project));
+    let before = accepted.worker.snapshot().await.unwrap();
+    let receipt = session.snapshot().await.unwrap().cursor;
+    session.set_project(receipt, None).await.unwrap();
+    let repeated = host
+        .launch_flow_at(entry, input, stale, |_, _| {
+            panic!("accepted activation must not repeat authorization or effects")
+        })
+        .await
+        .unwrap();
+    assert_eq!(repeated.record.receipt, accepted.record.receipt);
+    assert_eq!(
+        accepted.worker.snapshot().await.unwrap().cursor,
+        before.cursor
+    );
+    assert!(
+        session
+            .scheduling_status(accepted.worker.address().instance_id.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn launch_validates_resource_scope_before_registering_a_flow() {
     use atman_runtime::config_hub::ConfigHub;
     use atman_runtime::flow_runtime::launch::EntryExecution;

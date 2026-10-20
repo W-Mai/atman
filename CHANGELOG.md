@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Initial flow recovery** — Retrying a Prepared Session entry retains its saved source and project services. Deferred creation checks catalog revisions before registering an instance, and accepted retries preserve the original activation.
+
 - **CLI project moves** — `session move` updates persistent project membership through the catalog owner while retaining existing flow bindings. Explicit storage selection distinguishes persistent and legacy sessions with overlapping identifiers, and invalid legacy metadata is preserved.
 
 - **Peer creation after project moves** — New child flows use the Session's current project services, installed source catalog, and workspace allocation. Existing flows retain their original resources. Host resolvers share CLI and daemon execution caches, and rejected or stale creation attempts leave no new instance registration.
