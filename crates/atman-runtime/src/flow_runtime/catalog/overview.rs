@@ -67,8 +67,7 @@ impl SessionCatalog {
                 Ok(OverviewCatalogSnapshot {
                     archived: session.archived_flows.contains(&owner.instance_id),
                     title: flow.descriptor.content.title().into(),
-                    project_root: session
-                        .descriptor
+                    project_root: flow
                         .project
                         .as_ref()
                         .map(|project| project.root().to_owned()),

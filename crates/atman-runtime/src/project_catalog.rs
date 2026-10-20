@@ -118,7 +118,7 @@ impl ProjectCatalogStore {
             }
             for id in RuntimeStore::session_ids(&self.data_dir)? {
                 let session = RuntimeStore::inspect_session(&self.data_dir, id)?;
-                let Some(project) = &session.projection.descriptor.project else {
+                let Some(project) = &session.projection.project else {
                     continue;
                 };
                 let meta = session.dir.join("events.jsonl").metadata()?;
@@ -528,6 +528,44 @@ mod tests {
     }
 
     #[test]
+    fn moved_sessions_retain_original_project_data_until_their_histories_are_removed() {
+        let data = TempDir::new().unwrap();
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        let catalog = ProjectCatalogStore::new(data.path());
+        let original = catalog.register(first.path(), at(10)).unwrap();
+        catalog.set_archived(&original.fingerprint, true).unwrap();
+        let shared = data.path().join("projects").join(&original.fingerprint);
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("index.db"), b"retained").unwrap();
+        let (mut session, mut flow) = persistent_session(data.path(), first.path());
+        close(&mut flow);
+        let hub = crate::config_hub::ConfigHub::from_config_dir(data.path().join("config"));
+        let destination =
+            crate::storage::ProjectContext::resolve(&hub, second.path(), data.path()).unwrap();
+        let receipt = session.cursor().clone();
+        session.set_project(&receipt, Some(destination)).unwrap();
+        let path = session.dir().to_owned();
+        drop((session, flow));
+        assert!(
+            catalog
+                .delete_archived(&original.fingerprint, None)
+                .unwrap_err()
+                .to_string()
+                .contains("retains flows bound")
+        );
+        assert!(path.exists());
+        assert_eq!(std::fs::read(shared.join("index.db")).unwrap(), b"retained");
+        let projects = catalog.reconcile_sessions().unwrap();
+        assert!(
+            projects
+                .projects
+                .iter()
+                .any(|project| project.root == canonical_root(second.path()))
+        );
+    }
+
+    #[test]
     fn project_deletion_preflights_every_persistent_owner_and_flow_before_purging() {
         let data = TempDir::new().unwrap();
         let project = TempDir::new().unwrap();
@@ -663,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn project_deletion_serializes_open_create_and_management_selection() {
+    fn project_deletion_serializes_open_create_project_changes_and_management_selection() {
         use crate::flow_store::profile::ProfileStore;
         use std::{sync::mpsc, time::Duration};
         let data = TempDir::new().unwrap();
@@ -674,6 +712,11 @@ mod tests {
         let descriptor = session.projection().descriptor.clone();
         let id = descriptor.id;
         drop((session, flow));
+        let mut moving_descriptor = descriptor.clone();
+        moving_descriptor.id = Uuid::new_v4();
+        moving_descriptor.project = None;
+        let mut moving = root.create_session(moving_descriptor).unwrap();
+        let destination = descriptor.project.clone();
         let mut profile = ProfileStore::open(&root).unwrap();
         profile.bootstrap(Default::default()).unwrap();
         let guard = ProjectDeletion::purge_closed_sessions(&root, project.path()).unwrap();
@@ -702,6 +745,14 @@ mod tests {
                     finished.send(()).unwrap();
                 });
             }
+            let moving_started = started.clone();
+            let moving_finished = finished.clone();
+            scope.spawn(move || {
+                moving_started.send(()).unwrap();
+                let expected = moving.cursor().clone();
+                moving.set_project(&expected, destination).unwrap();
+                moving_finished.send(()).unwrap();
+            });
             let started = started.clone();
             let finished = finished.clone();
             scope.spawn(move || {
@@ -717,7 +768,7 @@ mod tests {
                 assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
                 finished.send(()).unwrap();
             });
-            for _ in 0..3 {
+            for _ in 0..4 {
                 ready.recv_timeout(Duration::from_secs(5)).unwrap();
             }
             assert!(matches!(
@@ -725,7 +776,7 @@ mod tests {
                 Err(mpsc::RecvTimeoutError::Timeout)
             ));
             drop(guard);
-            for _ in 0..3 {
+            for _ in 0..4 {
                 done.recv_timeout(Duration::from_secs(5)).unwrap();
             }
         });

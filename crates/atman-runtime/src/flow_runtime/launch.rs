@@ -67,7 +67,10 @@ impl RuntimeHost {
             .flows
             .iter()
             .find(|flow| flow.id == descriptor.address.instance_id)
-            .map_or_else(|| session.project.clone(), |flow| flow.project.clone());
+            .map_or_else(
+                || snapshot.catalog.project.clone(),
+                |flow| flow.project.clone(),
+            );
         self.launch_owned(
             descriptor,
             input,

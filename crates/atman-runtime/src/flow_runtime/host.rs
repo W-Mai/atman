@@ -499,6 +499,11 @@ enum CatalogCommand {
         expected: CommitReceipt,
         reply: oneshot::Sender<io::Result<CommitReceipt>>,
     },
+    Project {
+        project: Option<crate::storage::ProjectContext>,
+        expected: CommitReceipt,
+        reply: oneshot::Sender<io::Result<CommitReceipt>>,
+    },
     Snapshot(oneshot::Sender<io::Result<SessionSnapshot>>),
 }
 
@@ -560,6 +565,20 @@ impl SessionHandle {
     ) -> io::Result<CommitReceipt> {
         self.request(|reply| CatalogCommand::Title {
             title,
+            expected,
+            reply,
+        })
+        .await
+    }
+
+    /// Trusted host mutation of container membership. Captured instance bindings and execution remain unchanged.
+    pub async fn set_project(
+        &self,
+        expected: CommitReceipt,
+        project: Option<crate::storage::ProjectContext>,
+    ) -> io::Result<CommitReceipt> {
+        self.request(|reply| CatalogCommand::Project {
+            project,
             expected,
             reply,
         })
@@ -1049,6 +1068,22 @@ async fn serve_catalog(
             } => {
                 let result = tokio::task::spawn_blocking(move || {
                     let result = store.select_default(&expected, id);
+                    (store, result)
+                })
+                .await;
+                let Ok((returned, result)) = result else {
+                    return;
+                };
+                store = returned;
+                let _ = reply.send(result);
+            }
+            CatalogCommand::Project {
+                project,
+                expected,
+                reply,
+            } => {
+                let result = tokio::task::spawn_blocking(move || {
+                    let result = store.set_project(&expected, project);
                     (store, result)
                 })
                 .await;

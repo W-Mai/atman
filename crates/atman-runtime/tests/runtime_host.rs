@@ -4427,6 +4427,136 @@ for line in sys.stdin:
 }
 
 #[tokio::test]
+async fn session_project_changes_keep_live_and_restored_flow_execution_in_their_registered_scope() {
+    use atman_runtime::config_hub::ConfigHub;
+    use atman_runtime::flow_runtime::catalog::SessionCatalog;
+    use atman_runtime::flow_store::SessionConfiguration;
+    use atman_runtime::storage::ProjectContext;
+    use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, ValueJson};
+
+    let data = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let hub = ConfigHub::from_config_dir(data.path().join("config"));
+    let mut runtimes = Vec::new();
+    let mut projects = Vec::new();
+    for (dir, name) in [(first.path(), "alpha"), (second.path(), "beta")] {
+        std::fs::write(dir.join("AGENTS.md"), format!("# project-rule\n{name}")).unwrap();
+        let project = ProjectContext::resolve(&hub, dir, data.path()).unwrap();
+        runtimes.push(
+            AtmanRuntime::build(AtmanRuntimeOptions {
+                events: Default::default(),
+                mock: false,
+                config: hub.clone(),
+                project: Some(project.clone()),
+                home_dir: None,
+                workspace_generation: "session-project-test".into(),
+            })
+            .await
+            .unwrap(),
+        );
+        projects.push(project);
+    }
+    let mut info = session_descriptor();
+    info.project = Some(projects[0].clone());
+    info.configuration = SessionConfiguration::Atman(hub.source());
+    let host = RuntimeHost::default();
+    let session = host
+        .create_session(data.path(), info.clone())
+        .await
+        .unwrap();
+    let source = r#"flow main() -> string { return rule.fetch(name: "project-rule") }"#;
+    let old = session
+        .create_flow(program_descriptor(info.id, source.into()))
+        .await
+        .unwrap();
+    change(&old, FlowTransition::Activated).await;
+    let before = old.snapshot().await.unwrap().cursor;
+    let version = session.snapshot().await.unwrap().cursor;
+    let moved = session
+        .set_project(version.clone(), Some(projects[1].clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .set_project(version.clone(), Some(projects[1].clone()))
+            .await
+            .unwrap(),
+        moved
+    );
+    assert!(session.set_project(version, None).await.is_err());
+    assert_eq!(old.snapshot().await.unwrap().cursor, before);
+    assert!(
+        session
+            .scheduling_status(old.address().instance_id.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let new = session
+        .create_flow(program_descriptor(info.id, source.into()))
+        .await
+        .unwrap();
+    change(&new, FlowTransition::Activated).await;
+    let addresses = [old.address().clone(), new.address().clone()];
+    for (index, worker) in [old.clone(), new.clone()].into_iter().enumerate() {
+        assert_eq!(
+            worker.project().await.unwrap(),
+            Some(projects[index].clone())
+        );
+        assert!(
+            worker
+                .schedule(runtimes[1 - index].executor.clone(), prepare)
+                .is_err()
+        );
+        assert_eq!(
+            invoke(&worker, runtimes[index].executor.clone())
+                .await
+                .result
+                .unwrap()
+                .to_json()
+                .unwrap(),
+            ["# project-rule\nalpha", "# project-rule\nbeta"][index]
+        );
+    }
+    let catalog = SessionCatalog::new(Some(host.clone()), Some(data.path().to_owned()));
+    assert_eq!(
+        catalog
+            .overview(info.id)
+            .await
+            .unwrap()
+            .summary
+            .project_root
+            .as_deref(),
+        Some(projects[1].root())
+    );
+    host.shutdown().await.unwrap();
+    drop((old, new, session, catalog, host));
+    let host = RuntimeHost::default();
+    let session = host.open_session(data.path(), info.id).await.unwrap();
+    let snapshot = session.snapshot().await.unwrap();
+    assert_eq!(snapshot.catalog.descriptor, info);
+    assert_eq!(snapshot.catalog.project, Some(projects[1].clone()));
+    for (index, address) in addresses.into_iter().enumerate() {
+        let worker = session.open_flow(address.instance_id).await.unwrap();
+        assert_eq!(
+            worker.project().await.unwrap(),
+            Some(projects[index].clone())
+        );
+        assert_eq!(
+            invoke(&worker, runtimes[index].executor.clone())
+                .await
+                .result
+                .unwrap()
+                .to_json()
+                .unwrap(),
+            ["# project-rule\nalpha", "# project-rule\nbeta"][index]
+        );
+    }
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn runtime_projects_bind_rules_and_spawned_flows_without_borrowing_another_project() {
     use atman_runtime::config_hub::ConfigHub;
     use atman_runtime::flow_store::SessionConfiguration;

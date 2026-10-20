@@ -133,6 +133,7 @@ mod tests {
         };
         let mut projection = SessionProjection {
             descriptor,
+            project: None,
             title: Some("relations".into()),
             flows: Vec::new(),
             default_flow: None,

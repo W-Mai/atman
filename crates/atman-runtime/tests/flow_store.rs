@@ -1000,6 +1000,76 @@ fn configuration_reopen_rejects_a_directory_replaced_by_an_alias() {
 }
 
 #[test]
+fn session_project_changes_capture_registration_scope_without_rewriting_existing_instances() {
+    use atman_runtime::config_hub::ConfigHub;
+    use atman_runtime::storage::ProjectContext;
+
+    let data = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let hub = ConfigHub::from_config_dir(data.path().join("config"));
+    let alpha = ProjectContext::resolve(&hub, first.path(), data.path()).unwrap();
+    let beta = ProjectContext::resolve(&hub, second.path(), data.path()).unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let mut info = session_descriptor();
+    info.project = Some(alpha.clone());
+    let mut session = root.create_session(info.clone()).unwrap();
+    let old_descriptor = descriptor(info.id);
+    let old = session.create_flow(old_descriptor.clone()).unwrap();
+    let old_cursor = old.cursor().clone();
+    let version = session.cursor().clone();
+    let moved = session.set_project(&version, Some(beta.clone())).unwrap();
+    assert_eq!(
+        session.set_project(&version, Some(beta.clone())).unwrap(),
+        moved
+    );
+    assert!(session.set_project(&version, None).is_err());
+    assert_eq!(session.projection().descriptor, info);
+    assert_eq!(old.project(), Some(&alpha));
+    assert_eq!(old.cursor(), &old_cursor);
+
+    let new_descriptor = descriptor(info.id);
+    let new = session.create_flow(new_descriptor.clone()).unwrap();
+    assert_eq!(new.project(), Some(&beta));
+    let current = session.cursor().clone();
+    session.set_project(&current, None).unwrap();
+    let unbound_descriptor = descriptor(info.id);
+    let unbound = session.create_flow(unbound_descriptor.clone()).unwrap();
+    assert!(unbound.project().is_none());
+    let expected = session.cursor().clone();
+    let dir = session.dir().to_owned();
+    drop((old, new, unbound, session));
+    first.close().unwrap();
+    second.close().unwrap();
+    std::fs::write(dir.join("session.json"), b"discarded cache").unwrap();
+    let inspected = RuntimeStore::inspect_session(data.path(), info.id).unwrap();
+    assert!(inspected.projection.project.is_none());
+    assert_eq!(
+        std::fs::read(dir.join("session.json")).unwrap(),
+        b"discarded cache"
+    );
+    let mut session = root.open_session(info.id).unwrap();
+    assert_eq!(session.cursor(), &expected);
+    assert_eq!(session.projection().descriptor, info);
+    for (descriptor, project) in [
+        (old_descriptor, Some(alpha)),
+        (new_descriptor, Some(beta)),
+        (unbound_descriptor, None),
+    ] {
+        let id = descriptor.address.instance_id.clone();
+        let opened = session.open_flow(&id).unwrap();
+        assert_eq!(opened.project(), project.as_ref());
+        assert_eq!(inspected.inspect_flow(&id).unwrap().project, project);
+        drop(opened);
+        assert_eq!(
+            session.create_flow(descriptor).unwrap().project(),
+            project.as_ref()
+        );
+    }
+    assert_eq!(session.cursor(), &expected);
+}
+
+#[test]
 fn configuration_source_replays_without_accessing_project_or_credential_files() {
     use atman_runtime::config_hub::{ConfigHub, ConfigSource};
     use atman_runtime::flow_store::SessionConfiguration;

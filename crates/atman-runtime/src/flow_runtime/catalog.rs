@@ -414,7 +414,6 @@ impl SessionSummary {
             session_id: catalog.descriptor.id,
             title: catalog.title.clone(),
             project_root: catalog
-                .descriptor
                 .project
                 .as_ref()
                 .map(|project| project.root().to_owned()),

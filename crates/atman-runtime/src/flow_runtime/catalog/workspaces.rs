@@ -33,11 +33,10 @@ impl SessionCatalog {
         visible: impl Fn(Uuid) -> io::Result<bool>,
         authorize: impl Fn(&FlowRef) -> io::Result<()>,
     ) -> io::Result<WorkspaceCatalogPage> {
-        self.scan_page(cursor, limit, visible, authorize, |flow, session| {
+        self.scan_page(cursor, limit, visible, authorize, |flow, _session| {
             Ok(WorkspaceCatalogSnapshot {
                 title: flow.descriptor.content.title().into(),
-                project_root: session
-                    .descriptor
+                project_root: flow
                     .project
                     .as_ref()
                     .map(|project| project.root().to_owned()),

@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Session project association** — Runtime catalog updates change project membership for discovery and new flow registrations. Existing instances retain their project bindings after restart, and retained cross-project histories protect shared data from deletion.
+
 - **Flow archive controls** — Flow details provides Archive and Unarchive actions with keyboard and mouse support. Session lists and the global overview mark archived records for search, and instance discovery exposes the same archive state.
 
 - **Flow archive metadata** — Closed instances support reversible archive markers in their Session catalog. Updates validate catalog revisions and retained history without changing execution, permissions, default selection, or flow records.

@@ -474,6 +474,7 @@ pub struct FlowRegistration {
 enum SessionFact {
     Created(SessionDescriptor),
     TitleChanged(Option<String>),
+    ProjectChanged(Option<crate::storage::ProjectContext>),
     FlowRegistered {
         id: FlowInstanceId,
         creation_request: Uuid,
@@ -491,6 +492,8 @@ enum SessionFact {
 #[derive(Clone, Debug, Serialize)]
 pub struct SessionProjection {
     pub descriptor: SessionDescriptor,
+    /// Current association for discovery and new instance registration.
+    pub project: Option<crate::storage::ProjectContext>,
     /// Mutable display name; the creation descriptor remains unchanged.
     pub title: Option<String>,
     pub flows: Vec<FlowRegistration>,
@@ -509,6 +512,7 @@ impl SessionProjection {
                     descriptor.validate()?;
                     *projection = Some(SessionProjection {
                         title: (!descriptor.title.is_empty()).then(|| descriptor.title.clone()),
+                        project: descriptor.project.clone(),
                         descriptor,
                         flows: Vec::new(),
                         default_flow: None,
@@ -528,6 +532,12 @@ impl SessionProjection {
         match fact {
             SessionFact::Created(_) => return Err(invalid("duplicate session creation")),
             SessionFact::TitleChanged(title) => self.title = title,
+            SessionFact::ProjectChanged(project) => {
+                if let Some(project) = &project {
+                    project.validate().map_err(invalid)?;
+                }
+                self.project = project;
+            }
             SessionFact::FlowRegistered {
                 id,
                 creation_request,
@@ -542,7 +552,7 @@ impl SessionProjection {
                 self.flows.push(FlowRegistration {
                     id,
                     creation_request,
-                    project: self.descriptor.project.clone(),
+                    project: self.project.clone(),
                 });
             }
             SessionFact::DefaultFlowSelected(id) => {
@@ -882,6 +892,7 @@ impl RuntimeStore {
             journal,
             projection: SessionProjection {
                 title: (!descriptor.title.is_empty()).then(|| descriptor.title.clone()),
+                project: descriptor.project.clone(),
                 descriptor,
                 flows: Vec::new(),
                 default_flow: None,
@@ -1018,7 +1029,7 @@ impl SessionStore {
             return Ok(store);
         }
         let dir = self.dir.join("flows").join(id.to_string());
-        let project = self.projection.descriptor.project.clone();
+        let project = self.projection.project.clone();
         let mut flow = match initialize_dir(&dir, |dir| {
             FlowStore::create(dir, self.owner.clone(), descriptor.clone(), project.clone())
                 .map(drop)
@@ -1179,6 +1190,28 @@ impl SessionStore {
             return Err(invalid("session catalog changed; refresh before renaming"));
         }
         self.commit(vec![SessionFact::TitleChanged(title)])
+    }
+
+    /// Change the container association for discovery and future registrations. Existing instances, files, and resources retain their captured bindings.
+    pub fn set_project(
+        &mut self,
+        expected: &CommitReceipt,
+        project: Option<crate::storage::ProjectContext>,
+    ) -> io::Result<CommitReceipt> {
+        if self.projection.project == project {
+            return Ok(self.cursor.clone());
+        }
+        if expected != &self.cursor {
+            return Err(invalid(
+                "session catalog changed; refresh before changing project",
+            ));
+        }
+        // Project deletion scans associations under this lock before removing shared data.
+        let runtime = RuntimeStore {
+            root: self.dir.parent().unwrap().parent().unwrap().to_path_buf(),
+        };
+        let _catalog = runtime.lock_catalog()?;
+        self.commit(vec![SessionFact::ProjectChanged(project)])
     }
 
     fn commit(&mut self, facts: Vec<SessionFact>) -> io::Result<CommitReceipt> {

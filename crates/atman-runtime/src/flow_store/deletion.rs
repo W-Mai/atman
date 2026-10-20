@@ -233,11 +233,18 @@ impl ProjectDeletion {
                 .with_context(|| format!("inspect session {id} before deleting project"))?;
             if inspected
                 .projection
-                .descriptor
                 .project
                 .as_ref()
                 .is_none_or(|project| fingerprint_from_root(project.root()) != fingerprint)
             {
+                ensure!(
+                    !inspected.projection.flows.iter().any(|flow| {
+                        flow.project.as_ref().is_some_and(|project| {
+                            fingerprint_from_root(project.root()) == fingerprint
+                        })
+                    }),
+                    "session {id} retains flows bound to this project; remove those retained histories before deleting project data"
+                );
                 continue;
             }
             ensure!(
