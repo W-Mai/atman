@@ -466,7 +466,9 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::Select(request) => {
             let flow = core_address(request.flow);
             let session = service.session(flow.session_id.0)?;
-            session.select_default(flow.instance_id).await?;
+            session
+                .select_default(session.snapshot().await?.cursor, flow.instance_id)
+                .await?;
             describe_session(&session).await
         }
         Request::Get(request) => {

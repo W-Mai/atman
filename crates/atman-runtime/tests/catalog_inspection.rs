@@ -547,7 +547,10 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
         .await
         .unwrap();
     session
-        .select_default(active_address.instance_id.clone())
+        .select_default(
+            session.snapshot().await.unwrap().cursor,
+            active_address.instance_id.clone(),
+        )
         .await
         .unwrap();
     let loaded = attached_catalog
@@ -800,7 +803,9 @@ fn catalog_inspection_ignores_cache_and_never_recovers_an_active_flow_or_creates
             .into(),
         })
         .unwrap();
-    owner.select_default(address.instance_id.clone()).unwrap();
+    owner
+        .select_default(&owner.cursor().clone(), address.instance_id.clone())
+        .unwrap();
     flow.transition(flow.state().revision(), FlowTransition::Activated)
         .unwrap();
     flow.transition(

@@ -63,7 +63,9 @@ fn cli_inspects_live_catalogs_without_touching_execution_and_retains_legacy_view
             .into(),
         })
         .unwrap();
-    owner.select_default(address.instance_id.clone()).unwrap();
+    owner
+        .select_default(&owner.cursor().clone(), address.instance_id.clone())
+        .unwrap();
     flow.transition(flow.state().revision(), FlowTransition::Activated)
         .unwrap();
     flow.transition(

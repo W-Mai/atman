@@ -3294,7 +3294,10 @@ fn separated_journals_restore_peers_and_ignore_corrupt_metadata_without_touching
     let pause = AtmanUuid(Uuid::new_v4());
     change(&mut a, FlowTransition::ExecutionPaused { key: pause });
     session
-        .select_default(b_info.address.instance_id.clone())
+        .select_default(
+            &session.cursor().clone(),
+            b_info.address.instance_id.clone(),
+        )
         .unwrap();
     let a_state = a.state().clone();
     let b_state = b.state().clone();

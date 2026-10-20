@@ -631,7 +631,9 @@ async fn archive_navigation_uses_no_execution_owner_and_retains_bound_rejections
         .instance
         .clone();
     let writer = session.open_flow(&instance).unwrap();
-    session.select_default(instance.clone()).unwrap();
+    session
+        .select_default(&session.cursor().clone(), instance.clone())
+        .unwrap();
     let before = std::fs::read(writer.dir().join("events.jsonl")).unwrap();
     let host = RuntimeHost::default();
     let (notices, _rx) = mpsc::unbounded_channel();
@@ -806,7 +808,9 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
             |_| Ok(()),
         )
         .unwrap();
-        session.select_default(instance.clone()).unwrap();
+        session
+            .select_default(&session.cursor().clone(), instance.clone())
+            .unwrap();
         if index == 1 {
             use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};
             let cursor = session.cursor().clone();

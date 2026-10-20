@@ -892,7 +892,10 @@ mod tests {
         let session = host.session(flow.session_id.0).unwrap();
         session.create_flow(selected).await.unwrap();
         session
-            .select_default(selected_address.instance_id.clone())
+            .select_default(
+                session.snapshot().await.unwrap().cursor,
+                selected_address.instance_id.clone(),
+            )
             .await
             .unwrap();
         assert_eq!(

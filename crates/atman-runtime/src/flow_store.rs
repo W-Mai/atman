@@ -1035,9 +1035,19 @@ impl SessionStore {
         Ok(store)
     }
 
-    pub fn select_default(&mut self, id: FlowInstanceId) -> io::Result<CommitReceipt> {
+    /// Select a registered view default without changing execution or authority. Repeating the current selection does not write; stale selections cannot replace it.
+    pub fn select_default(
+        &mut self,
+        expected: &CommitReceipt,
+        id: FlowInstanceId,
+    ) -> io::Result<CommitReceipt> {
         if self.projection.default_flow.as_ref() == Some(&id) {
             return Ok(self.cursor.clone());
+        }
+        if expected != &self.cursor {
+            return Err(invalid(
+                "session catalog changed; refresh before selecting a default",
+            ));
         }
         self.commit(vec![SessionFact::DefaultFlowSelected(id)])
     }

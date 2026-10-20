@@ -485,6 +485,7 @@ enum CatalogCommand {
     },
     Select {
         id: FlowInstanceId,
+        expected: CommitReceipt,
         reply: oneshot::Sender<io::Result<CommitReceipt>>,
     },
     Title {
@@ -749,9 +750,17 @@ impl SessionHandle {
     }
 
     /// Change only the default view binding; this does not start, pause, or privilege a flow.
-    pub async fn select_default(&self, id: FlowInstanceId) -> io::Result<CommitReceipt> {
-        self.request(|reply| CatalogCommand::Select { id, reply })
-            .await
+    pub async fn select_default(
+        &self,
+        expected: CommitReceipt,
+        id: FlowInstanceId,
+    ) -> io::Result<CommitReceipt> {
+        self.request(|reply| CatalogCommand::Select {
+            id,
+            expected,
+            reply,
+        })
+        .await
     }
 }
 
@@ -1011,9 +1020,13 @@ async fn serve_catalog(
                 }
                 let _ = reply.send(result);
             }
-            CatalogCommand::Select { id, reply } => {
+            CatalogCommand::Select {
+                id,
+                expected,
+                reply,
+            } => {
                 let result = tokio::task::spawn_blocking(move || {
-                    let result = store.select_default(id);
+                    let result = store.select_default(&expected, id);
                     (store, result)
                 })
                 .await;

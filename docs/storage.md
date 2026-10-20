@@ -174,6 +174,8 @@ runtime-v1/sessions/<session-id>/
 
 Container facts record session creation, instance registration, and default-view selection. Flow facts record the immutable creation request, source bundle, provenance, and lifecycle transitions. `created_by` is audit metadata, not control authority. The default flow is a view binding and has no privileged lifecycle.
 
+`SessionHandle::select_default` and `SessionStore::select_default` require the observed catalog receipt and a registered instance ID. A stale selection cannot replace a different current default; selecting the current default is a no-op. The catalog owner serializes selection with creation and other metadata edits. Selection does not start execution, move focus in connected views, or change permissions.
+
 Session and flow creation initialize journals in private directories before publishing their final paths. A shared catalog lock serializes session creation with migration publication. Incomplete initialization directories remain outside the registered inventory. A complete but unregistered flow can be reconciled by retrying the same creation request and descriptor; it cannot be opened through the session catalog. Reusing a request with different creation data fails.
 
 Flow transitions validate an expected state revision, apply to a private candidate, and publish that candidate only after the journal commit succeeds. Completing an invocation preserves the instance. Reopening an active invocation records `HostLost` without executing its entry; existing pause keys remain. Closing invocations retain cleanup obligations, and interrupted instances require explicit recovery before another turn can start.

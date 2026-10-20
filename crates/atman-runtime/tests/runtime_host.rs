@@ -1218,7 +1218,10 @@ async fn management_authority_is_explicit_revocable_and_shared_with_observers() 
         .await
         .unwrap();
     session
-        .select_default(sibling.address().instance_id.clone())
+        .select_default(
+            session.snapshot().await.unwrap().cursor,
+            sibling.address().instance_id.clone(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -7396,7 +7399,7 @@ fn access_grants_are_scoped_revocable_and_recovered_from_facts_without_default_f
         FlowAction::Delegate
     ));
     store
-        .select_default(second.address.instance_id.clone())
+        .select_default(&store.cursor().clone(), second.address.instance_id.clone())
         .unwrap();
     assert!(!store.projection().access.allows(
         &second.address,
@@ -7573,9 +7576,37 @@ async fn directory_reuses_active_instances_and_default_binding_has_no_execution_
     request_reuse.address.instance_id = FlowInstanceId::now();
     assert!(session.create_flow(request_reuse).await.is_err());
     session
-        .select_default(second.address.instance_id.clone())
+        .select_default(
+            session.snapshot().await.unwrap().cursor,
+            first.address.instance_id.clone(),
+        )
         .await
         .unwrap();
+    let expected = session.snapshot().await.unwrap().cursor;
+    let selected = session
+        .select_default(expected.clone(), second.address.instance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .select_default(expected.clone(), second.address.instance_id.clone())
+            .await
+            .unwrap(),
+        selected,
+    );
+    assert!(
+        session
+            .select_default(expected, first.address.instance_id.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        session
+            .select_default(selected.clone(), FlowInstanceId::now())
+            .await
+            .is_err()
+    );
+    assert_eq!(session.snapshot().await.unwrap().cursor, selected);
     assert_eq!(
         session.snapshot().await.unwrap().catalog.default_flow,
         Some(second.address.instance_id)
