@@ -132,14 +132,13 @@ impl EntryRecipe {
 
     pub fn prepare(&self, snapshot: &FlowSnapshot) -> io::Result<Option<TurnRequest>> {
         let eligible = |message: &&crate::flow_store::inbox::AcceptedEnvelope| {
-            message.request.scope.is_none()
-                && (matches!(
-                    message.request.payload,
-                    InboxPayload::Invocation { .. }
-                        | InboxPayload::Command { .. }
-                        | InboxPayload::GoalContinuation { .. }
-                        | InboxPayload::GoalResume { .. }
-                ) || self.parameter.is_some())
+            matches!(
+                message.request.payload,
+                InboxPayload::Invocation { .. }
+                    | InboxPayload::Command { .. }
+                    | InboxPayload::GoalContinuation { .. }
+                    | InboxPayload::GoalResume { .. }
+            ) || self.parameter.is_some()
         };
         let ordinary = |message: &&crate::flow_store::inbox::AcceptedEnvelope| {
             eligible(message)

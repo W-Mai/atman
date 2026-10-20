@@ -1,18 +1,166 @@
 //! Input references share scope admission without making the recipient a group member.
 
-use std::{collections::HashSet, io};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+};
 
+use futures::FutureExt;
 use tokio::sync::watch;
 
-use super::{ScopeAdmission, TaskScopeRef};
+use super::{ScopeAdmission, ScopeSnapshot, TaskScopeRef};
 use crate::event_log::journal::CommitReceipt;
-use crate::flow_runtime::{FlowWorker, observation::ObservationIssue};
+use crate::flow_runtime::{FlowSnapshot, FlowWorker, observation::ObservationIssue};
 use crate::flow_store::{
-    inbox::{Acceptance, DeliveryRequest, InputScopeInvalidation},
+    FlowStore,
+    inbox::{Acceptance, AcceptedEnvelope, DeliveryRequest, InputScopeInvalidation},
     invalid,
 };
 
+#[derive(Clone, Default)]
+pub(in crate::flow_runtime) struct InputScopes {
+    pub dependencies: ScopeAdmission,
+    admitted: HashMap<TaskScopeRef, ScopeAdmission>,
+    pub changes: InputScopeChanges,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(in crate::flow_runtime) struct InputScopeChanges {
+    sources: Vec<watch::Receiver<CommitReceipt>>,
+    directory: Option<watch::Receiver<()>>,
+    retries: Option<watch::Receiver<()>>,
+}
+
+impl InputScopes {
+    pub fn eligible(&self, snapshot: &ScopeSnapshot, request: &DeliveryRequest) -> bool {
+        request.scope.as_ref().is_none_or(|scope| {
+            self.admitted
+                .get(scope)
+                .is_some_and(|admission| admission.check(snapshot).is_ok())
+        })
+    }
+
+    pub fn invalidate(&self, store: &mut FlowStore, snapshot: &ScopeSnapshot) -> io::Result<()> {
+        for scope in self.admitted.keys() {
+            if let Ok(status) = snapshot.status(scope)
+                && let Some(cancellation) = &status.cancellation
+            {
+                store.invalidate_input_scope(InputScopeInvalidation {
+                    scope: scope.clone(),
+                    cancellation: cancellation.clone(),
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn changed(&mut self) {
+        self.changes.changed().await;
+    }
+}
+
+impl InputScopeChanges {
+    pub fn has_changed(&self) -> bool {
+        self.sources
+            .iter()
+            .any(|source| source.has_changed().unwrap_or(true))
+            || self
+                .directory
+                .iter()
+                .chain(self.retries.iter())
+                .any(|source| source.has_changed().unwrap_or(true))
+    }
+
+    pub async fn changed(&mut self) {
+        let mut waits: Vec<futures::future::BoxFuture<'_, ()>> = self
+            .sources
+            .iter_mut()
+            .map(|source| {
+                async {
+                    let _ = source.changed().await;
+                }
+                .boxed()
+            })
+            .collect();
+        for source in self.directory.iter_mut().chain(self.retries.iter_mut()) {
+            waits.push(
+                async {
+                    let _ = source.changed().await;
+                }
+                .boxed(),
+            );
+        }
+        if waits.is_empty() {
+            std::future::pending::<()>().await;
+        } else {
+            futures::future::select_all(waits).await;
+        }
+    }
+}
+
 impl FlowWorker {
+    pub(in crate::flow_runtime) async fn resolve_pending_scopes(
+        &self,
+        pending: &[AcceptedEnvelope],
+    ) -> InputScopes {
+        let mut scopes = InputScopes {
+            changes: InputScopeChanges {
+                directory: self
+                    .host
+                    .as_ref()
+                    .and_then(|host| host.upgrade().ok())
+                    .map(|host| host.changes()),
+                retries: Some(self.observation_retry.subscribe()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for source in scopes
+            .changes
+            .directory
+            .iter_mut()
+            .chain(scopes.changes.retries.iter_mut())
+        {
+            source.borrow_and_update();
+        }
+        let mut seen = HashSet::new();
+        for scope in pending
+            .iter()
+            .filter_map(|input| input.request.scope.as_ref())
+            .filter(|scope| seen.insert((*scope).clone()))
+        {
+            if let Ok(admission) = self
+                .resolve_input_scope(scope.clone(), Some(&mut scopes.changes.sources))
+                .await
+            {
+                scopes.dependencies.0.extend(admission.0.iter().cloned());
+                scopes.admitted.insert(scope.clone(), admission);
+            }
+        }
+        scopes
+    }
+
+    pub(in crate::flow_runtime) async fn scheduling_snapshot(
+        &self,
+    ) -> io::Result<(Option<FlowSnapshot>, InputScopes)> {
+        let mut view = self.snapshot().await?;
+        let scopes = self.resolve_pending_scopes(&view.pending).await;
+        let checked = scopes.clone();
+        let view = self
+            .request_scoped(scopes.dependencies.clone(), move |store, snapshot| {
+                if store.cursor() != &view.cursor {
+                    return Ok(None);
+                }
+                checked.invalidate(store, snapshot)?;
+                view.pending
+                    .retain(|input| checked.eligible(snapshot, &input.request));
+                view.cursor = store.cursor().clone();
+                Ok(Some(view))
+            })
+            .await?;
+        Ok((view, scopes))
+    }
+
     /// Authenticate the sender before admission; the callback authorizes only new delivery.
     ///
     /// New scoped messages require an available active source. Original accepted requests retain their receipts even after source cancellation or removal.

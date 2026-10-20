@@ -5628,19 +5628,25 @@ fn replies_share_inbox_ownership_and_cannot_be_stolen_by_context_or_foreign_send
         .unwrap();
     assert_eq!(ordinary.message_ids(), &[unrelated.message_id]);
     assert!(
-        flow.reserve_reply_input(&waiter.lease, waiter.correlation)
+        flow.reserve_reply_input(&waiter.lease, waiter.correlation, |_| true)
             .unwrap()
             .is_none()
     );
     wait_phase(&mut flow, &waiter);
     assert!(!flow.release_input(&ordinary));
+    assert!(
+        flow.reserve_reply_input(&waiter.lease, waiter.correlation, |_| false)
+            .unwrap()
+            .is_none(),
+        "an ineligible reply must remain available for a later boundary"
+    );
     let batch = flow
-        .reserve_reply_input(&waiter.lease, waiter.correlation)
+        .reserve_reply_input(&waiter.lease, waiter.correlation, |_| true)
         .unwrap()
         .unwrap();
     assert_eq!(batch.message_ids(), &[first.message_id]);
     assert!(
-        flow.reserve_reply_input(&waiter.lease, waiter.correlation)
+        flow.reserve_reply_input(&waiter.lease, waiter.correlation, |_| true)
             .unwrap()
             .is_none()
     );
@@ -5665,7 +5671,7 @@ fn replies_share_inbox_ownership_and_cannot_be_stolen_by_context_or_foreign_send
         reply_content(&waiter)
     );
     assert!(
-        flow.reserve_reply_input(&waiter.lease, waiter.correlation)
+        flow.reserve_reply_input(&waiter.lease, waiter.correlation, |_| true)
             .is_err()
     );
     assert_eq!(
@@ -5705,20 +5711,20 @@ fn paused_and_cancelled_waiters_retain_replies_and_reject_late_commits() {
         .unwrap();
     wait_phase(&mut flow, &waiter);
     let old = flow
-        .reserve_reply_input(&waiter.lease, waiter.correlation)
+        .reserve_reply_input(&waiter.lease, waiter.correlation, |_| true)
         .unwrap()
         .unwrap();
     let key = AtmanUuid(Uuid::new_v4());
     change(&mut flow, FlowTransition::ExecutionPaused { key });
     assert!(flow.commit_input(&old, reply_content(&waiter)).is_err());
     assert!(
-        flow.reserve_reply_input(&waiter.lease, waiter.correlation)
+        flow.reserve_reply_input(&waiter.lease, waiter.correlation, |_| true)
             .is_err()
     );
     assert_eq!(flow.reply_waiters()[0].status, ReplyStatus::Pending);
     change(&mut flow, FlowTransition::ExecutionResumed { key });
     let current = flow
-        .reserve_reply_input(&waiter.lease, waiter.correlation)
+        .reserve_reply_input(&waiter.lease, waiter.correlation, |_| true)
         .unwrap()
         .unwrap();
     let cancelled = flow
@@ -5760,7 +5766,7 @@ fn lost_waiting_turn_releases_uncommitted_replies_but_retains_delivered_input() 
             .accept_input(reply_request(&flow, &waiter), |_| Ok(()))
             .unwrap();
         let batch = flow
-            .reserve_reply_input(&waiter.lease, waiter.correlation)
+            .reserve_reply_input(&waiter.lease, waiter.correlation, |_| true)
             .unwrap()
             .unwrap();
         if committed {
@@ -5816,7 +5822,7 @@ fn terminal_turn_transitions_cancel_waits_and_late_registration_cannot_capture_o
         flow.accept_input(reply_request(&flow, &waiter), |_| Ok(()))
             .unwrap();
         let batch = flow
-            .reserve_reply_input(&waiter.lease, waiter.correlation)
+            .reserve_reply_input(&waiter.lease, waiter.correlation, |_| true)
             .unwrap()
             .unwrap();
         if close {
@@ -5838,7 +5844,7 @@ fn terminal_turn_transitions_cancel_waits_and_late_registration_cannot_capture_o
         ));
         assert!(flow.commit_input(&batch, reply_content(&waiter)).is_err());
         assert!(
-            flow.reserve_reply_input(&waiter.lease, waiter.correlation)
+            flow.reserve_reply_input(&waiter.lease, waiter.correlation, |_| true)
                 .is_err()
         );
     }
@@ -5870,17 +5876,17 @@ fn independent_waiters_use_one_fifo_without_releasing_each_others_reply() {
         .accept_input(reply_request(&flow, &first), |_| Ok(()))
         .unwrap();
     let batch = flow
-        .reserve_reply_input(&first.lease, first.correlation)
+        .reserve_reply_input(&first.lease, first.correlation, |_| true)
         .unwrap()
         .unwrap();
     assert!(
-        flow.reserve_reply_input(&second.lease, second.correlation)
+        flow.reserve_reply_input(&second.lease, second.correlation, |_| true)
             .unwrap()
             .is_none()
     );
     drop(batch);
     let batch = flow
-        .reserve_reply_input(&second.lease, second.correlation)
+        .reserve_reply_input(&second.lease, second.correlation, |_| true)
         .unwrap()
         .unwrap();
     assert_eq!(batch.message_ids(), &[second_message.message_id]);
@@ -5894,7 +5900,7 @@ fn independent_waiters_use_one_fifo_without_releasing_each_others_reply() {
         },
     );
     let batch = flow
-        .reserve_reply_input(&first.lease, first.correlation)
+        .reserve_reply_input(&first.lease, first.correlation, |_| true)
         .unwrap()
         .unwrap();
     assert_eq!(batch.message_ids(), &[first_message.message_id]);
@@ -6041,7 +6047,7 @@ fn request_registration_and_send_share_one_commit_and_peers_can_reply_in_the_sam
     b.confirm_delivery(reply.request_id, DeliveryReceipt::from(&accepted_reply))
         .unwrap();
     let batch = a
-        .reserve_reply_input(&waiter.lease, waiter.correlation)
+        .reserve_reply_input(&waiter.lease, waiter.correlation, |_| true)
         .unwrap()
         .unwrap();
     assert_eq!(batch.message_ids(), &[accepted_reply.message_id]);

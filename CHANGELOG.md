@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Scoped input pickup** — Turn admission, model-context boundaries, and explicit reply waits validate source scopes before consuming input. Schedulers wake when missing sources become available, while unrelated input continues and cancelled input retains its history.
+
 - **Scoped inbox admission** — Runtime hosts validate new message scopes at the receiver's commit boundary and observe cancellation while recipients are paused or idle. Missing sources retain recorded input and surface diagnostics; accepted retries preserve their original receipts.
 
 - **Scoped inbox records** — Messages retain complete task-scope addresses. Durable invalidation cancels matching unread input while preserving consumed history, unrelated messages, and original acceptance receipts.

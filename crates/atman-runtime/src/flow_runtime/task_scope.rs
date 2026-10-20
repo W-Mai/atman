@@ -17,6 +17,7 @@ use crate::flow_store::{
 };
 
 mod input;
+pub(super) use input::{InputScopeChanges, InputScopes};
 #[cfg(test)]
 mod tests;
 
@@ -63,13 +64,15 @@ impl ScopeSnapshot {
 enum ScopeGuard<'a> {
     Read(RwLockReadGuard<'a, ScopeState>),
     Write(RwLockWriteGuard<'a, ScopeState>),
+    Unavailable,
 }
 
 impl ScopeGuard<'_> {
-    fn state(&self) -> &ScopeState {
+    fn state(&self) -> Option<&ScopeState> {
         match self {
-            Self::Read(state) => state,
-            Self::Write(state) => state,
+            Self::Read(state) => Some(state),
+            Self::Write(state) => Some(state),
+            Self::Unavailable => None,
         }
     }
 }
@@ -111,11 +114,10 @@ impl<'a> ScopeTransaction<'a> {
                             .map_err(|_| invalid("task scope owner failed"))?,
                     )
                 } else {
-                    ScopeGuard::Read(
-                        state
-                            .read()
-                            .map_err(|_| invalid("task scope owner failed"))?,
-                    )
+                    state
+                        .read()
+                        .map(ScopeGuard::Read)
+                        .unwrap_or(ScopeGuard::Unavailable)
                 };
                 Ok((address, guard))
             })
@@ -135,8 +137,10 @@ impl<'a> ScopeTransaction<'a> {
                         self.0
                             .iter()
                             .find(|(address, _)| **address == scope.owner)
-                            .and_then(|(_, guard)| {
-                                let state = guard.state();
+                            .map(|(_, guard)| {
+                                let state = guard
+                                    .state()
+                                    .ok_or_else(|| "task scope owner failed".to_owned())?;
                                 state
                                     .records
                                     .get(&scope.id)
@@ -144,8 +148,13 @@ impl<'a> ScopeTransaction<'a> {
                                         open: state.open,
                                         cancellation: cancellation.clone(),
                                     })
+                                    .ok_or_else(|| {
+                                        "task scope is not registered by its owner".to_owned()
+                                    })
                             })
-                            .ok_or_else(|| "task scope is not registered by its owner".into())
+                            .unwrap_or_else(|| {
+                                Err("task scope was not included in the transaction".into())
+                            })
                     };
                     (scope.clone(), status)
                 })
@@ -165,6 +174,9 @@ impl<'a> ScopeTransaction<'a> {
 }
 
 impl ScopeAdmission {
+    pub fn extend(&mut self, other: &Self) {
+        self.0.extend(other.0.iter().cloned());
+    }
     pub fn validate_member(&self, store: &FlowStore) -> io::Result<()> {
         if store.task_scope_binding() != self.0.first().map(|(scope, _)| scope) {
             return Err(invalid("task scope membership changed during admission"));

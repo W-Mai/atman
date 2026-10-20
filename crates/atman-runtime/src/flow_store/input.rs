@@ -86,11 +86,12 @@ impl FlowStore {
         &mut self,
         lease: &TurnLease<AtmanUuid>,
         correlation: Uuid,
+        eligible: impl FnMut(&AcceptedEnvelope) -> bool,
     ) -> io::Result<Option<InputReservation>> {
         self.inbox.validate_reply(&self.state, lease, correlation)?;
         Ok(self
             .inbox
-            .reserve_reply(correlation)
+            .reserve_reply(correlation, eligible)
             .map(|batch| InputReservation {
                 lease: lease.clone(),
                 revision: self.state.revision(),

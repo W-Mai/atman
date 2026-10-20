@@ -88,7 +88,7 @@ impl FlowWorker {
     ) -> io::Result<tokio::sync::OwnedMutexGuard<()>> {
         self.receive_input(lease, context, accepts_images, false, compact_guard)
             .await
-            .map(|(_, guard)| guard)
+            .map(|(_, guard, _)| guard)
     }
 
     async fn receive_input(
@@ -98,9 +98,13 @@ impl FlowWorker {
         accepts_images: bool,
         notifications_only: bool,
         compact_guard: tokio::sync::OwnedMutexGuard<()>,
-    ) -> io::Result<(usize, tokio::sync::OwnedMutexGuard<()>)> {
+    ) -> io::Result<(
+        usize,
+        tokio::sync::OwnedMutexGuard<()>,
+        super::task_scope::InputScopes,
+    )> {
         if matches!(context.history_segment, HistorySegment::Spawned) {
-            return Ok((0, compact_guard));
+            return Ok((0, compact_guard, Default::default()));
         }
         if context.turn_id.as_ref() != Some(&lease.turn)
             || !context
@@ -111,7 +115,11 @@ impl FlowWorker {
             return Err(invalid("inbox pickup requires its admitted shared context"));
         }
         context.instance_publication = None;
-        self.request(move |store| {
+        let inputs = self
+            .resolve_pending_scopes(&self.snapshot().await?.pending)
+            .await;
+        let retained = inputs.clone();
+        self.request_scoped(inputs.dependencies.clone(), move |store, snapshot| {
             // Once queued, the owner retains the lock through commit and projection even if the waiter is cancelled.
             // A pause/finish may win the command race. Retain input rather than turn it into a failed invocation.
             if context.cancel.is_cancelled()
@@ -120,23 +128,26 @@ impl FlowWorker {
                     .can_receive_at_boundary(&lease)
                     .map_err(invalid)?
             {
-                return Ok((0, compact_guard));
+                return Ok((0, compact_guard, retained));
             }
+            inputs.invalidate(store, snapshot)?;
             let Some(reserved) = store.reserve_context_input(&lease, |envelope| {
-                compatible(
-                    &envelope.request,
-                    |key| {
-                        context
-                            .invocation_env
-                            .get(key)
-                            .and_then(|value| value.to_json().ok())
-                    },
-                    accepts_images,
-                ) && (!notifications_only
-                    || crate::flow_store::subscription::is_watcher_notification(envelope))
+                inputs.eligible(snapshot, &envelope.request)
+                    && compatible(
+                        &envelope.request,
+                        |key| {
+                            context
+                                .invocation_env
+                                .get(key)
+                                .and_then(|value| value.to_json().ok())
+                        },
+                        accepts_images,
+                    )
+                    && (!notifications_only
+                        || crate::flow_store::subscription::is_watcher_notification(envelope))
             })?
             else {
-                return Ok((0, compact_guard));
+                return Ok((0, compact_guard, retained));
             };
             let selected: std::collections::HashSet<_> =
                 reserved.message_ids().iter().copied().collect();
@@ -156,7 +167,7 @@ impl FlowWorker {
                 crate::tools::session::append_message_to_context(&context, message)
                     .map_err(io::Error::other)?;
             }
-            Ok((count, compact_guard))
+            Ok((count, compact_guard, retained))
         })
         .await
     }
@@ -189,7 +200,7 @@ impl FlowWorker {
                 _ = tokio::time::sleep_until(deadline) => return Ok(0),
                 guard = self.context.acquire_compact_lock_owned() => guard,
             };
-            let (count, guard) = self
+            let (count, guard, mut input_scopes) = self
                 .receive_input(lease.clone(), context.clone(), false, true, compact_guard)
                 .await?;
             drop(guard);
@@ -210,6 +221,7 @@ impl FlowWorker {
                 _ = context.cancel.cancelled() => return Err(io::Error::new(io::ErrorKind::Interrupted, "watcher wait cancelled")),
                 _ = tokio::time::sleep_until(deadline) => return Ok(0),
                 result = changes.changed() => { result.map_err(io::Error::other)?; }
+                _ = input_scopes.changed() => {}
             }
         }
     }
@@ -220,10 +232,6 @@ fn compatible(
     invocation: impl Fn(&str) -> Option<serde_json::Value>,
     accepts_images: bool,
 ) -> bool {
-    // Scoped work requires the host's active scope resolver; unbound scopes must not become global input.
-    if request.scope.is_some() {
-        return false;
-    }
     match &request.payload {
         InboxPayload::Invocation { .. } | InboxPayload::Command { .. } => false,
         InboxPayload::UserSubmission {

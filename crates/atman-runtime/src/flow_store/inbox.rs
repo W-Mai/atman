@@ -433,7 +433,11 @@ impl Inbox {
         })
     }
 
-    pub fn reserve_reply(&mut self, correlation: Uuid) -> Option<Batch<Uuid>> {
+    pub fn reserve_reply(
+        &mut self,
+        correlation: Uuid,
+        mut eligible: impl FnMut(&AcceptedEnvelope) -> bool,
+    ) -> Option<Batch<Uuid>> {
         let Self {
             pending,
             entries,
@@ -443,7 +447,10 @@ impl Inbox {
         } = self;
         let mut selected = false;
         pending.reserve_matching(|id| {
-            if !selected && waiters.matches(correlation, &entries[messages[id]].envelope) {
+            if !selected
+                && waiters.matches(correlation, &entries[messages[id]].envelope)
+                && eligible(&entries[messages[id]].envelope)
+            {
                 selected = true;
                 true
             } else {

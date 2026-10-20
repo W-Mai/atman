@@ -115,7 +115,11 @@ impl FlowWorker {
         let worker = self.clone();
         let runtime = tokio::runtime::Handle::current();
         let scope = self.scope_admission().await?;
-        self.request_scoped(scope.clone(), move |store, snapshot| {
+        let pending = self.snapshot().await?.pending;
+        let inputs = self.resolve_pending_scopes(&pending).await;
+        let mut dependencies = inputs.dependencies.clone();
+        dependencies.extend(&scope);
+        self.request_scoped(dependencies, move |store, snapshot| {
             scope.validate_member(store)?;
             scope.check(snapshot)?;
             if worker.is_stopping() {
@@ -133,6 +137,31 @@ impl FlowWorker {
             }
             if request.messages.is_empty() {
                 return Err(invalid("a turn requires selected pending input"));
+            }
+            let selected: std::collections::HashSet<_> = request.messages.iter().copied().collect();
+            let mut count = 0;
+            let mut eligible = true;
+            for input in store
+                .pending_inputs()
+                .filter(|input| selected.contains(&input.id))
+            {
+                count += 1;
+                eligible &= inputs.eligible(snapshot, &input.request);
+            }
+            if count != request.messages.len() {
+                return Err(invalid(
+                    "selected input contains missing or duplicate message IDs",
+                ));
+            }
+            inputs.invalidate(store, snapshot)?;
+            if !eligible {
+                return if expected.is_some() {
+                    Ok(None)
+                } else {
+                    Err(invalid(
+                        "selected input is unavailable or its task scope is inactive",
+                    ))
+                };
             }
             let workspace = if let Some(workspace) = store.workspace_request() {
                 workspace.validate_live(store.state().address())?;
@@ -161,7 +190,6 @@ impl FlowWorker {
                 .entry_flow(&flow_name)
                 .and_then(|id| program.flow(&id))
                 .ok_or_else(|| invalid("recorded entry is unavailable"))?;
-            let selected: std::collections::HashSet<_> = request.messages.iter().copied().collect();
             let reserved = store
                 .reserve_invocation_input(request.turn, request.run, |envelope| {
                     selected.contains(&envelope.id)

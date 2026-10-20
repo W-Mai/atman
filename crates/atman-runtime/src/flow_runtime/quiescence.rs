@@ -57,7 +57,16 @@ impl RuntimeHost {
                 let progress = worker.scheduling_progress.borrow().clone();
                 match &progress {
                     SchedulingProgress::Busy => busy = true,
-                    SchedulingProgress::Idle(through) => busy |= through != &cursor,
+                    SchedulingProgress::Idle(through, sources) => {
+                        busy |= through != &cursor || sources.has_changed();
+                        let mut sources = sources.clone();
+                        changes.0.push(
+                            async move {
+                                sources.changed().await;
+                            }
+                            .boxed(),
+                        );
+                    }
                     SchedulingProgress::Failed(error) => {
                         return Err(io::Error::other(format!(
                             "flow {} scheduler: {error}",
@@ -69,7 +78,7 @@ impl RuntimeHost {
                 if state.can_start_turn()
                     && matches!(
                         progress,
-                        SchedulingProgress::Busy | SchedulingProgress::Idle(_)
+                        SchedulingProgress::Busy | SchedulingProgress::Idle(..)
                     )
                 {
                     busy |= process_watch

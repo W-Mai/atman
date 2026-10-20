@@ -1,9 +1,293 @@
 use super::*;
+use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity};
 use crate::flow_store::{
     EntrySnapshot, FlowDescriptor, FlowInstanceId, RuntimeStore, SessionDescriptor,
 };
 use crate::source_program::RevisionBundle;
 use std::{sync::Arc, time::Duration};
+
+fn scoped_input(target: &FlowWorker, scope: Option<TaskScopeRef>) -> DeliveryRequest {
+    DeliveryRequest {
+        request_id: Uuid::new_v4(),
+        sender: SenderIdentity::User(Uuid::new_v4()),
+        recipient: target.address().clone(),
+        delivery: DeliveryMode::AtBoundary,
+        cause: None,
+        correlation: None,
+        scope,
+        payload: InboxPayload::Interjection {
+            text: "work".into(),
+        },
+    }
+}
+
+async fn rehost(root: &RuntimeStore, host: &RuntimeHost, worker: FlowWorker) -> FlowWorker {
+    let address = worker.address().clone();
+    drop(worker.shutdown().await.unwrap());
+    host.attach_session(root.open_session(address.session_id.0).unwrap())
+        .unwrap()
+        .open_flow(address.instance_id)
+        .await
+        .unwrap()
+}
+
+async fn pending_count(worker: &FlowWorker, count: usize) {
+    let mut changes = worker.subscribe_commits();
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            changes.borrow_and_update();
+            let snapshot = worker.snapshot().await.unwrap();
+            if snapshot.pending.len() == count && snapshot.state.can_start_turn() {
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "expected {count} pending: {:?}; scheduler: {:?}; completion: {:?}",
+        worker.snapshot().await.unwrap(),
+        *worker.scheduling_progress.borrow(),
+        worker.completion(None).await.unwrap()
+    );
+}
+
+#[tokio::test]
+async fn scoped_scheduler_wakes_on_source_recovery_and_preserves_ordinary_work() {
+    use crate::flow_runtime::execution::TurnRequest;
+    use atman_rt::{RunId, TurnId};
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let (source, scope) = owner(&root, FlowInstanceId::now()).await;
+    let (target, _) = owner(&root, FlowInstanceId::now()).await;
+    for selected in [Some(scope.clone()), None, Some(scope.clone())] {
+        let input = scoped_input(&target, selected);
+        target
+            .request(move |store| store.accept_input(input, |_| Ok(())))
+            .await
+            .unwrap();
+    }
+    let host = RuntimeHost::default();
+    let target = rehost(&root, &host, target).await;
+    let batches = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = batches.clone();
+    let recipe = crate::flow_runtime::entry::EntryRecipe {
+        first_turn: TurnId::now(),
+        first_run: RunId::now(),
+        arguments: Default::default(),
+        invocation: Default::default(),
+        parameter: Some("input".into()),
+        authority: crate::flow_authority::EffectiveAuthority::root(
+            &Default::default(),
+            false,
+            None,
+        ),
+        yield_interval: std::num::NonZeroUsize::new(16).unwrap(),
+    };
+    let scheduler = target
+        .schedule(crate::Executor::new(), move |snapshot| {
+            captured.lock().unwrap().push(snapshot.pending.len());
+            recipe.prepare(snapshot)
+        })
+        .unwrap();
+    pending_count(&target, 2).await;
+    assert_eq!(*batches.lock().unwrap(), vec![1]);
+    let mut progress = target.scheduling_progress.subscribe();
+    let idle = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let checkpoint = progress.borrow_and_update().clone();
+            if let crate::flow_runtime::scheduler::SchedulingProgress::Idle(_, sources) = checkpoint
+            {
+                break sources;
+            }
+            progress.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!idle.has_changed());
+    // No new recipient input or control is sent when the source becomes available.
+    let source = rehost(&root, &host, source).await;
+    // A recipient cursor alone cannot acknowledge a changed scope dependency.
+    assert!(idle.has_changed());
+    pending_count(&target, 0).await;
+    assert_eq!(*batches.lock().unwrap(), vec![1, 2]);
+    tokio::time::timeout(Duration::from_secs(5), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        *scheduler.subscribe_status().borrow(),
+        crate::flow_runtime::scheduler::SchedulingStatus::Running
+    ));
+    scheduler.stop().await.unwrap();
+
+    // A request prepared while active must not execute after cancellation.
+    target
+        .accept_input(scoped_input(&target, Some(scope.clone())), |_| Ok(()))
+        .await
+        .unwrap();
+    let view = target.snapshot().await.unwrap();
+    let request = TurnRequest {
+        turn: TurnId::now(),
+        run: RunId::now(),
+        messages: view.pending.iter().map(|input| input.id).collect(),
+        arguments: Default::default(),
+        invocation: Default::default(),
+        context: vec![],
+        authority: crate::flow_authority::EffectiveAuthority::root(
+            &Default::default(),
+            false,
+            None,
+        ),
+        yield_interval: std::num::NonZeroUsize::new(16).unwrap(),
+    };
+    source
+        .cancel_task_scope(scope.id, |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(
+        target
+            .admit_turn(crate::Executor::new(), request, Some(view.cursor))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    pending_count(&target, 0).await;
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn scoped_context_pickup_batches_input_and_respects_pause_finish_and_cancellation() {
+    use atman_rt::{RunId, TurnId, TurnPhase};
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let host = RuntimeHost::default();
+    let (source, scope) = owner(&root, FlowInstanceId::now()).await;
+    let source = rehost(&root, &host, source).await;
+    let (target, _) = owner(&root, FlowInstanceId::now()).await;
+    let target = rehost(&root, &host, target).await;
+    let lease = target
+        .request(|store| {
+            let lease = store
+                .state()
+                .clone()
+                .begin_turn(TurnId::now(), RunId::now())
+                .map_err(invalid)?;
+            store.transition(
+                store.state().revision(),
+                FlowTransition::TurnStarted {
+                    turn: lease.turn.clone(),
+                    run: lease.run.clone(),
+                },
+            )?;
+            Ok(lease)
+        })
+        .await
+        .unwrap();
+    let mut ctx = crate::tool::ToolCtx::new().with_session_runtime(target.context().clone());
+    ctx.turn_id = Some(lease.turn.clone());
+    for _ in 0..2 {
+        target
+            .accept_input(scoped_input(&target, Some(scope.clone())), |_| Ok(()))
+            .await
+            .unwrap();
+    }
+    let pause = Uuid::new_v4().into();
+    target
+        .transition(
+            target.state().await.unwrap().revision(),
+            FlowTransition::ExecutionPaused { key: pause },
+        )
+        .await
+        .unwrap();
+    let guard = target.context().acquire_compact_lock_owned().await;
+    drop(
+        target
+            .receive_context(lease.clone(), ctx.clone(), false, guard)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(target.snapshot().await.unwrap().pending.len(), 2);
+    target
+        .transition(
+            target.state().await.unwrap().revision(),
+            FlowTransition::ExecutionResumed { key: pause },
+        )
+        .await
+        .unwrap();
+    let guard = target.context().acquire_compact_lock_owned().await;
+    drop(
+        target
+            .receive_context(lease.clone(), ctx.clone(), false, guard)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        target
+            .request(|store| Ok(store.committed_inputs()[0].input.message_ids.len()))
+            .await
+            .unwrap(),
+        2
+    );
+    target
+        .accept_input(scoped_input(&target, Some(scope.clone())), |_| Ok(()))
+        .await
+        .unwrap();
+    source
+        .cancel_task_scope(scope.id, |_| Ok(()))
+        .await
+        .unwrap();
+    let guard = target.context().acquire_compact_lock_owned().await;
+    drop(
+        target
+            .receive_context(lease.clone(), ctx.clone(), false, guard)
+            .await
+            .unwrap(),
+    );
+    assert!(target.snapshot().await.unwrap().pending.is_empty());
+    assert_eq!(
+        target
+            .request(|store| Ok(store.committed_inputs().len()))
+            .await
+            .unwrap(),
+        1
+    );
+    target
+        .accept_input(scoped_input(&target, None), |_| Ok(()))
+        .await
+        .unwrap();
+    target
+        .transition(
+            target.state().await.unwrap().revision(),
+            FlowTransition::PhaseChanged {
+                lease: lease.clone(),
+                phase: TurnPhase::Finishing,
+            },
+        )
+        .await
+        .unwrap();
+    let guard = target.context().acquire_compact_lock_owned().await;
+    drop(
+        target
+            .receive_context(lease.clone(), ctx, false, guard)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(target.snapshot().await.unwrap().pending.len(), 1);
+    target
+        .transition(
+            target.state().await.unwrap().revision(),
+            FlowTransition::TurnFinished {
+                lease,
+                outcome: atman_rt::TurnOutcome::Completed,
+            },
+        )
+        .await
+        .unwrap();
+    host.shutdown().await.unwrap();
+}
 
 async fn owner(root: &RuntimeStore, instance: FlowInstanceId) -> (FlowWorker, TaskScopeRef) {
     let id = Uuid::new_v4();
@@ -27,8 +311,12 @@ async fn owner(root: &RuntimeStore, instance: FlowInstanceId) -> (FlowWorker, Ta
                 name: "main".into(),
                 path: "main.at".into(),
                 bundle: RevisionBundle {
-                    entry: "main.at".into(),
-                    sources: [("main.at".into(), "flow main() { }".into())].into(),
+                    entry: "entry:main.at".into(),
+                    sources: [(
+                        "entry:main.at".into(),
+                        "flow main(input: string = \"\") { }".into(),
+                    )]
+                    .into(),
                     edges: Default::default(),
                 },
             }
@@ -168,14 +456,13 @@ async fn a_failed_scope_source_rejects_only_the_dependent_transaction() {
     .await
     .unwrap();
     let before = target.snapshot().await.unwrap().cursor;
+    let dependencies = ScopeAdmission(vec![(scope, source.clone())]);
+    let checked = dependencies.clone();
     assert!(
         target
-            .request_scoped(
-                ScopeAdmission(vec![(scope, source.clone())]),
-                |_, _| -> io::Result<()> {
-                    panic!("failed dependencies must not invoke a storage operation")
-                }
-            )
+            .request_scoped(dependencies, move |_, snapshot| -> io::Result<()> {
+                checked.check(snapshot)
+            })
             .await
             .is_err()
     );

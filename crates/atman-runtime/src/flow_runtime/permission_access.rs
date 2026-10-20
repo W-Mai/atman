@@ -109,9 +109,10 @@ impl FlowClient {
                     atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Idle)
                 ) && (!pending
                     || matches!(&progress,
-                        crate::flow_runtime::scheduler::SchedulingProgress::Idle(cursor)
+                        crate::flow_runtime::scheduler::SchedulingProgress::Idle(cursor, scopes)
                         if cursor.journal_id == accepted.receipt.journal_id
                             && cursor.sequence >= accepted.receipt.sequence
+                            && !scopes.has_changed()
                     ))
                 {
                     break;

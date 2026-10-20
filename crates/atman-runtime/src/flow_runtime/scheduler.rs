@@ -34,10 +34,13 @@ pub enum SchedulingStatus {
 }
 
 /// An idle checkpoint acknowledges the scheduling policy, including input it cannot consume.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(super) enum SchedulingProgress {
     Busy,
-    Idle(crate::event_log::journal::CommitReceipt),
+    Idle(
+        crate::event_log::journal::CommitReceipt,
+        super::task_scope::InputScopeChanges,
+    ),
     Stopped,
     Failed(String),
 }
@@ -122,7 +125,10 @@ impl FlowWorker {
                     return Ok(());
                 }
                 commits.borrow_and_update();
-                let snapshot = worker.snapshot().await?;
+                let (snapshot, mut input_scopes) = worker.scheduling_snapshot().await?;
+                let Some(snapshot) = snapshot else {
+                    continue;
+                };
                 // The query may have caught up with a notification that was not yet marked seen.
                 // Do not prepare the same snapshot twice, or erase a commit newer than this read.
                 if *commits.borrow_and_update() != snapshot.cursor {
@@ -135,8 +141,13 @@ impl FlowWorker {
                     && !snapshot.pending.is_empty()
                     && let Some(request) = prepare(&snapshot)?
                 {
+                    let eligible: std::collections::HashSet<_> =
+                        snapshot.pending.iter().map(|input| input.id).collect();
+                    if request.messages.iter().any(|id| !eligible.contains(id)) {
+                        return Err(invalid("prepared input is outside the scheduling snapshot"));
+                    }
                     scanning.send_if_modified(|previous| {
-                        let changed = *previous != SchedulingProgress::Busy;
+                        let changed = !matches!(previous, SchedulingProgress::Busy);
                         *previous = SchedulingProgress::Busy;
                         changed
                     });
@@ -157,11 +168,13 @@ impl FlowWorker {
                     continue;
                 }
                 scanning.send_if_modified(|previous| {
-                    let next = SchedulingProgress::Idle(snapshot.cursor);
-                    if *previous == next {
+                    if matches!(previous, SchedulingProgress::Idle(cursor, sources)
+                        if cursor == &snapshot.cursor && !sources.has_changed())
+                    {
                         return false;
                     }
-                    *previous = next;
+                    *previous =
+                        SchedulingProgress::Idle(snapshot.cursor, input_scopes.changes.clone());
                     true
                 });
                 tokio::select! {
@@ -170,6 +183,7 @@ impl FlowWorker {
                     changed = commits.changed() => {
                         changed.map_err(|_| io::Error::other("instance storage stopped"))?;
                     }
+                    _ = input_scopes.changed() => {}
                 }
             }
         };

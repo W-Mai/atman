@@ -64,10 +64,19 @@ impl ReplyWait {
             changes.borrow_and_update();
             let waiter = self.claim.waiter.clone();
             let expected = turn.clone();
+            let worker = &self.claim.worker;
+            let pending = worker.snapshot().await.map_err(failed)?.pending;
+            let mut scopes = worker.resolve_pending_scopes(&pending).await;
+            let checked = scopes.clone();
             let result = self
                 .claim
                 .worker
-                .request(move |store| receive(store, &waiter, &expected))
+                .request_scoped(scopes.dependencies.clone(), move |store, snapshot| {
+                    checked.invalidate(store, snapshot)?;
+                    receive(store, &waiter, &expected, |input| {
+                        checked.eligible(snapshot, &input.request)
+                    })
+                })
                 .await
                 .map_err(failed)?;
             if let Some(completion) = result {
@@ -83,7 +92,10 @@ impl ReplyWait {
                     (outcome, _) => Err(failed(format!("instance turn ended with {outcome:?}"))),
                 };
             }
-            changes.changed().await.map_err(failed)?;
+            tokio::select! {
+                changed = changes.changed() => { changed.map_err(failed)?; }
+                _ = scopes.changed() => {}
+            }
         }
     }
 }
@@ -120,6 +132,7 @@ fn receive(
     store: &mut FlowStore,
     waiter: &ReplyWaiter,
     turn: &TurnId,
+    eligible: impl FnMut(&crate::flow_store::inbox::AcceptedEnvelope) -> bool,
 ) -> io::Result<Option<CommittedCompletion>> {
     let registered = store
         .reply_waiters()
@@ -160,7 +173,8 @@ fn receive(
             Err(invalid("committed reply belongs to another source turn"))
         };
     }
-    let Some(reserved) = store.reserve_reply_input(&waiter.lease, waiter.correlation)? else {
+    let Some(reserved) = store.reserve_reply_input(&waiter.lease, waiter.correlation, eligible)?
+    else {
         return Ok(None);
     };
     let envelope = store
