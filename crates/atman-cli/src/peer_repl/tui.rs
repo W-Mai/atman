@@ -377,6 +377,28 @@ impl Attachment {
                         .map_err(std::io::Error::other)
                 })?;
             }
+            TuiControl::TermResize { handle, rows, cols } => {
+                use atman_rt::Value;
+                use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
+                ensure!(rows > 0 && cols > 0, "terminal dimensions must be positive");
+                let ctx = ToolCtx::new()
+                    .with_session_id(context.id().to_string())
+                    .with_term_registry(worker.resources().terminals().clone());
+                atman_runtime::tools::term::TermResize
+                    .call(
+                        ToolArgs {
+                            positional: vec![],
+                            named: vec![
+                                ("handle".into(), Value::Str(handle)),
+                                ("rows".into(), Value::Int(i64::from(rows))),
+                                ("cols".into(), Value::Int(i64::from(cols))),
+                                ("wait_ms".into(), Value::Int(0)),
+                            ],
+                        },
+                        &ctx,
+                    )
+                    .await?;
+            }
             TuiControl::CompactReviewAccept { review_id, edited } => {
                 context.compact_reviews().decide(
                     &review_id,
@@ -552,6 +574,7 @@ impl Workspace {
                 Some(result) = navigation.join_next() => {
                     let (replies, result): (ControlReplies, Result<Navigation>) = result?;
                     match result {
+                        Ok(Navigation::Applied) => {}
                         Ok(Navigation::Catalog(page)) => { let _ = replies.send(TuiCommand::FlowCatalog { result: Ok(page) }); }
                         Ok(Navigation::Resolved(flow)) => { let _ = replies.send(TuiCommand::FlowResolved { flow }); }
                         Ok(Navigation::Projects(command)) => { let _ = replies.send(*command); }
@@ -729,6 +752,16 @@ impl Workspace {
                                 reject_archive_control(command, &replies);
                                 continue;
                             };
+                            if matches!(command, TuiControl::TermResize { .. }) {
+                                let scope = execution.scope.clone();
+                                let worker = execution.worker.clone();
+                                let forms = forms.clone();
+                                navigation.spawn(async move {
+                                    let result = scope.tui_control(&worker, ticket.request_id, command, &replies, &forms).await.map(|()| Navigation::Applied);
+                                    (replies, result)
+                                });
+                                continue;
+                            }
                             let operation = match &command {
                                 TuiControl::CompactNow => Some((operations::Operation::Compact, false)),
                                 TuiControl::Submit(submission) => submission.control_command().and_then(operations::Operation::parse).map(|operation| (operation, true)),
@@ -817,6 +850,7 @@ fn reject_archive_control(command: TuiControl, replies: &ControlReplies) {
 }
 
 enum Navigation {
+    Applied,
     Resolved(ViewAddress),
     Projects(Box<TuiCommand>),
     Catalog(Box<atman_tui::flow_hub::FlowHubPage>),

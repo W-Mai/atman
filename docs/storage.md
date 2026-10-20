@@ -60,6 +60,8 @@ Compact workflow cards and full graphs share each view's node disclosure state. 
 
 Focused and background views share permission-stream handling. A lagged subscription rereads the broker snapshot; closing one subscription disables that event source without exiting the workspace, cancelling execution, or continuously scheduling redraws. Durable view updates and control replies retain their independent channels.
 
+Terminal panel resizing resolves the terminal registry from the requesting view's `FlowWorker`. The same `term.resize` operation serializes PTY and parser changes with other terminal actions. Resize work retains the original view reply ticket and runs independently of the UI control loop; it does not start a turn, borrow another flow's terminal registry, or wait for child output before returning.
+
 ## Session and flow storage
 
 ### Project discovery and deletion

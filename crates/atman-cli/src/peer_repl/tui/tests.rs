@@ -1667,6 +1667,12 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
 async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     let dir = tempfile::tempdir().unwrap();
     let config = ConfigHub::from_config_dir(dir.path().join("config"));
+    config
+        .set_trust_config(&atman_runtime::trust::TrustConfig {
+            mode: atman_runtime::trust::TrustMode::Reckless,
+            ..Default::default()
+        })
+        .unwrap();
     let descriptor = SessionDescriptor {
         id: Uuid::now_v7(),
         project: None,
@@ -1696,14 +1702,18 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
                     sources: [(
                         "entry:main.at".into(),
                         r#"flow main(input: string) -> string {
-                contract { invocation { user_message: input } }
+                contract { invocation { user_message: input } capabilities { shell: true } }
+                when input == "terminal" {
+                    term.spawn(cmd: "printf ready", cwd: TEST_CWD, rows: 5, cols: 40, wait_ms: 0)
+                    return final.answer(message: "terminal ready")
+                }
                 when input == "ask" {
                     answer = form.ask(kind: "text", prompt: "Reply here")
                     return final.answer(message: answer.text)
                 }
                 return final.answer(message: input)
             }"#
-                        .into(),
+                        .replace("TEST_CWD", &serde_json::to_string(dir.path()).unwrap()),
                     )]
                     .into(),
                 },
@@ -1725,7 +1735,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
                 session_start: false,
                 first_turn: atman_rt::TurnId::now(),
                 first_run: atman_rt::RunId::now(),
-                authority: EffectiveAuthority::root(&Default::default(), false, None),
+                authority: EffectiveAuthority::root(&config.trust_config().unwrap(), true, None),
             }),
             request: atman_runtime::flow_store::launch::EntryRequest {
                 request_id: entry.creation_request,
@@ -1748,6 +1758,9 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     executor
         .tools
         .register(Arc::new(atman_runtime::tools::form::FormAsk));
+    executor
+        .tools
+        .register(Arc::new(atman_runtime::tools::term::TermSpawn));
     executor.tool_ctx.prompt_resolver = Some(Arc::new(
         atman_runtime::rendezvous::FormPromptResolver::new(forms.clone()),
     ));
@@ -2365,6 +2378,69 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         .sync_content(source.refresh().await.unwrap(), None)
         .unwrap();
     assert!(model.iter().any(|item| matches!(item, atman_tui::app::OutputItem::AssistantMd { md, .. } if md == "answered")));
+    #[cfg(unix)]
+    {
+        attachment
+            .submit_tui(
+                &worker,
+                Uuid::now_v7(),
+                TuiSubmission {
+                    text: "terminal".into(),
+                    images: vec![],
+                    presentation: None,
+                    reasoning: None,
+                },
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            attachment.host.wait_quiescent(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let terminals = worker
+            .resources()
+            .terminals()
+            .list(&worker.context().id().to_string());
+        assert_eq!(terminals.len(), 1);
+        let terminal = &terminals[0].0;
+        let entry = worker.resources().terminals().get(terminal).unwrap();
+        assert_eq!((entry.snapshot().rows, entry.snapshot().cols), (5, 40));
+        let mut peer = worker.descriptor().await.unwrap();
+        peer.address.instance_id = FlowInstanceId::now();
+        peer.creation_request = Uuid::now_v7();
+        let peer = attachment.session.create_flow(peer).await.unwrap();
+        let cursor = worker.snapshot().await.unwrap().cursor;
+        for (target, rows, cols, succeeds) in [
+            (&peer, 9, 60, false),
+            (&worker, 0, 60, false),
+            (&worker, 9, 60, true),
+        ] {
+            sender
+                .send(TuiControl::TermResize {
+                    handle: terminal.clone(),
+                    rows,
+                    cols,
+                })
+                .unwrap();
+            let bound = commands_rx.recv().await.unwrap();
+            let result = attachment
+                .tui_control(
+                    target,
+                    bound.ticket.request_id,
+                    bound.command,
+                    &bound.replies,
+                    &forms,
+                )
+                .await;
+            assert_eq!(result.is_ok(), succeeds, "{result:?}");
+            let expected = if succeeds { (9, 60) } else { (5, 40) };
+            assert_eq!((entry.snapshot().rows, entry.snapshot().cols), expected);
+        }
+        assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
+    }
     attachment.command(&worker, ":close").await.unwrap();
     sender
         .send(TuiControl::Submit(TuiSubmission {

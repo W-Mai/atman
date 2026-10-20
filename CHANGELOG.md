@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Terminal panel resizing** — Persistent views resize their own terminal resources through the shared terminal operation. Resizing does not start a turn or block other view controls while waiting for terminal access.
+
 - **Flow view recovery** — Subscription failures preserve drafts, recorded state, and control replies without closing the workspace. Reopening the view retries its reader, and live-preview failures leave committed updates available.
 
 - **Permission view subscriptions** — Closing a flow's permission stream leaves the workspace open. Missed events refresh the current permission snapshot in both focused and background views.
