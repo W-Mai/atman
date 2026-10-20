@@ -137,7 +137,7 @@ Attachment commands edit the requesting view's draft. TUI imports return through
 
 Each command uses a separate next-turn invocation in the existing instance. It cannot enter an active model call or change the instance's default entry, identity, permissions, or pause state. Ordinary input and watcher notifications use the default entry. Goal resume and continuation retain the last admitted invocation's source and argument mapping. The committed invocation references its accepted command identity; mismatched references and mixed command batches are rejected during live execution and replay. Read-only updates expose command names and user content without source bundles.
 
-Restoring a Session uses its recorded configuration directory independently of the client's default directory. Relationship graphs, full pending-input management, Session creation/deletion, and process-terminal controls are unsupported in this attachment. Unsupported host controls report an error. Plain-terminal attachment supports selecting other instances within its Session with `:focus`.
+Restoring a Session uses its recorded configuration directory independently of the client's default directory. TUI attachments provide FlowHub relationship graphs, pending-input editing, Session creation and reviewed deletion, and process-terminal controls through the bound host. Main and floating views use the same control dispatch and receive replies through their original view bindings. Read-only history attachments retain navigation and deletion review without acquiring execution services. Plain-terminal attachment supports selecting other instances within its Session with `:focus`; its commands are listed below.
 
 ### Plain-terminal attachment
 
