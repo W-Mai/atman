@@ -17,6 +17,252 @@ use atman_runtime::source_program::RevisionBundle;
 use atman_runtime::{Executor, flow_authority::EffectiveAuthority};
 use uuid::Uuid;
 
+#[tokio::test]
+async fn scoped_delivery_validates_sources_and_cancels_only_matching_unread_messages() {
+    use atman_runtime::flow_store::task_scope::{TaskScopeDefinition, TaskScopeRef};
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let left = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let right = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let scope_id = Uuid::new_v4();
+    for worker in [&left, &right] {
+        change(worker, FlowTransition::Activated).await;
+        worker
+            .create_task_scope(
+                TaskScopeDefinition {
+                    id: scope_id,
+                    name: "Scoped input".into(),
+                    goal: None,
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+    }
+    let request = |recipient: &FlowWorker, source: &FlowWorker| DeliveryRequest {
+        request_id: Uuid::new_v4(),
+        sender: SenderIdentity::User(Uuid::new_v4()),
+        recipient: recipient.address().clone(),
+        delivery: DeliveryMode::AtBoundary,
+        cause: None,
+        correlation: None,
+        scope: Some(TaskScopeRef {
+            owner: source.address().clone(),
+            id: scope_id,
+        }),
+        payload: InboxPayload::Interjection {
+            text: "Scoped work".into(),
+        },
+    };
+    let self_input = request(&left, &left);
+    let from_right = request(&left, &right);
+    let from_left = request(&right, &left);
+    let mut unknown = request(&right, &left);
+    unknown.scope.as_mut().unwrap().id = Uuid::new_v4();
+    assert!(host.deliver(unknown, |_| Ok(())).await.is_err());
+    assert!(
+        host.deliver(request(&right, &left), |_| Err(
+            io::ErrorKind::PermissionDenied.into()
+        ))
+        .await
+        .is_err()
+    );
+    assert!(right.snapshot().await.unwrap().pending.is_empty());
+    let accepted = host.deliver(from_right.clone(), |_| Ok(())).await.unwrap();
+    host.deliver(self_input, |_| Ok(())).await.unwrap();
+    host.deliver(from_left, |_| Ok(())).await.unwrap();
+    change(
+        &left,
+        FlowTransition::ExecutionPaused {
+            key: Uuid::new_v4().into(),
+        },
+    )
+    .await;
+    let state = left.state().await.unwrap();
+    let mut changes = left.subscribe_commits();
+    let cancellation = right.cancel_task_scope(scope_id, |_| Ok(())).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            changes.borrow_and_update();
+            let view = left.view_snapshot().await.unwrap();
+            if view.pending.len() == 1 {
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        left.state().await.unwrap(),
+        state,
+        "input cancellation cannot close or resume the recipient"
+    );
+    assert_eq!(
+        right.snapshot().await.unwrap().pending.len(),
+        1,
+        "equal scope IDs with different owners remain independent"
+    );
+    let retried = host
+        .deliver(from_right.clone(), |_| {
+            panic!("a retry is not new delivery")
+        })
+        .await
+        .unwrap();
+    assert_eq!(retried.receipt, accepted.receipt);
+    assert!(matches!(
+        retried.disposition,
+        InboxDisposition::Cancelled { .. }
+    ));
+    let mut fresh = from_right.clone();
+    fresh.request_id = Uuid::new_v4();
+    assert!(host.deliver(fresh, |_| Ok(())).await.is_err());
+    let mut conflict = from_right.clone();
+    conflict.payload = InboxPayload::Interjection {
+        text: "Changed request".into(),
+    };
+    assert!(host.deliver(conflict, |_| Ok(())).await.is_err());
+    host.shutdown().await.unwrap();
+    let session = root.open_session(info.id).unwrap();
+    let store = session.open_flow(&left.address().instance_id).unwrap();
+    let invalidation = store
+        .input_scope_invalidation(from_right.scope.as_ref().unwrap())
+        .unwrap();
+    assert_eq!(invalidation.observation.cancellation.receipt, cancellation);
+    let bare = FlowWorker::start(store).await.unwrap();
+    assert_eq!(
+        bare.accept_input(from_right, |_| panic!("original receipt"))
+            .await
+            .unwrap(),
+        retried
+    );
+    assert!(
+        bare.accept_input(request(&left, &left), |_| Ok(()))
+            .await
+            .is_err(),
+        "a bare writer cannot authorize new scoped work"
+    );
+    bare.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn scoped_input_retains_unavailable_sources_and_observes_cancellation_when_attached() {
+    use atman_runtime::flow_store::task_scope::{TaskScopeDefinition, TaskScopeRef};
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let source_info = session_descriptor();
+    let target_info = session_descriptor();
+    let source_descriptor = flow_descriptor(source_info.id);
+    let target_descriptor = flow_descriptor(target_info.id);
+    let mut source_session = root.create_session(source_info.clone()).unwrap();
+    let mut source_store = source_session
+        .create_flow(source_descriptor.clone())
+        .unwrap();
+    source_store
+        .transition(0, FlowTransition::Activated)
+        .unwrap();
+    let scope = TaskScopeRef {
+        owner: source_descriptor.address.clone(),
+        id: Uuid::new_v4(),
+    };
+    source_store
+        .create_task_scope(TaskScopeDefinition {
+            id: scope.id,
+            name: "Offline group".into(),
+            goal: None,
+        })
+        .unwrap();
+    let mut target_session = root.create_session(target_info.clone()).unwrap();
+    let mut target_store = target_session
+        .create_flow(target_descriptor.clone())
+        .unwrap();
+    target_store
+        .transition(0, FlowTransition::Activated)
+        .unwrap();
+    let request = DeliveryRequest {
+        request_id: Uuid::new_v4(),
+        sender: SenderIdentity::User(Uuid::new_v4()),
+        recipient: target_descriptor.address.clone(),
+        delivery: DeliveryMode::AtBoundary,
+        cause: None,
+        correlation: None,
+        scope: Some(scope.clone()),
+        payload: InboxPayload::Interjection {
+            text: "Preserve while unavailable".into(),
+        },
+    };
+    target_store
+        .accept_input(request.clone(), |_| Ok(()))
+        .unwrap();
+    drop(target_store);
+    let cancellation = source_store.cancel_task_scope(scope.id).unwrap();
+    drop(source_store);
+    let host = RuntimeHost::default();
+    let target_session = host.attach_session(target_session).unwrap();
+    let target = target_session
+        .open_flow(target_descriptor.address.instance_id.clone())
+        .await
+        .unwrap();
+    let mut issues = target.subscribe_observation_issues();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if issues
+                .borrow_and_update()
+                .iter()
+                .any(|issue| issue.source == scope.owner)
+            {
+                break;
+            }
+            issues.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(target.snapshot().await.unwrap().pending.len(), 1);
+    let before = target.state().await.unwrap();
+    let mut changes = target.subscribe_commits();
+    host.attach_session(source_session).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            changes.borrow_and_update();
+            if target.snapshot().await.unwrap().pending.is_empty() {
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(target.state().await.unwrap(), before);
+    assert!(matches!(
+        target
+            .accept_input(request, |_| panic!("retry"))
+            .await
+            .unwrap()
+            .disposition,
+        InboxDisposition::Cancelled { .. }
+    ));
+    host.shutdown().await.unwrap();
+    let target_session = root.open_session(target_info.id).unwrap();
+    let store = target_session
+        .open_flow(&target_descriptor.address.instance_id)
+        .unwrap();
+    assert_eq!(
+        store
+            .input_scope_invalidation(&scope)
+            .unwrap()
+            .observation
+            .cancellation
+            .receipt,
+        cancellation
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_scope_cancellation_closes_only_members_and_stops_nested_execution() {
     use atman_runtime::{

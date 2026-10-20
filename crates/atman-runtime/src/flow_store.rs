@@ -1461,16 +1461,24 @@ impl FlowStore {
         self.inbox.pending_entries()
     }
 
+    /// Authenticate the sender before querying an original request receipt.
+    pub(crate) fn input_acceptance(
+        &self,
+        request: &DeliveryRequest,
+    ) -> io::Result<Option<Acceptance>> {
+        if request.recipient != self.descriptor.address {
+            return Err(invalid("delivery targets another flow"));
+        }
+        self.inbox.previous(request)
+    }
+
     /// Authenticate the sender before this call; authorize only new delivery after checking accepted retries.
     pub fn accept_input(
         &mut self,
         request: DeliveryRequest,
         authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()>,
     ) -> io::Result<Acceptance> {
-        if request.recipient != self.descriptor.address {
-            return Err(invalid("delivery targets another flow"));
-        }
-        if let Some(previous) = self.inbox.previous(&request)? {
+        if let Some(previous) = self.input_acceptance(&request)? {
             return Ok(previous);
         }
         if !self.state.accepts_input() {

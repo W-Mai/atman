@@ -306,7 +306,14 @@ async fn observe(recipient: FlowWorker, host: WeakRuntimeHost) {
         positions.sort_by_key(|(source, _)| (source.session_id.0, source.instance_id.0.0));
         let mut waits: Vec<BoxFuture<'_, ()>> = Vec::new();
         let mut issues = Vec::new();
-        let (scope, changes) = recipient.scope_observation().await;
+        let (scope, mut changes) = recipient.scope_observation().await;
+        match recipient.observe_input_scopes(&mut changes).await {
+            Ok(input_issues) => issues.extend(input_issues),
+            Err(error) => issues.push(ObservationIssue {
+                source: recipient.address().clone(),
+                reason: error.to_string(),
+            }),
+        }
         for mut changes in changes {
             waits.push(
                 async move {

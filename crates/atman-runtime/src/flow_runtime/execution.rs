@@ -13,7 +13,7 @@ use crate::error::RuntimeError;
 use crate::event::AtmanUuid;
 use crate::event_log::journal::CommitReceipt;
 use crate::flow_authority::EffectiveAuthority;
-use crate::flow_store::inbox::{Acceptance, DeliveryRequest, InputContent};
+use crate::flow_store::inbox::InputContent;
 use crate::flow_store::{
     completion::{CommittedCompletion, InvocationResult},
     invalid,
@@ -91,16 +91,6 @@ impl FlowWorker {
         turn: Option<crate::event::TurnId>,
     ) -> io::Result<Option<CommittedCompletion>> {
         self.request(move |store| Ok(store.completion(turn.as_ref()).cloned()))
-            .await
-    }
-
-    /// Authenticate the sender before admission; the callback authorizes only new delivery.
-    pub async fn accept_input(
-        &self,
-        request: DeliveryRequest,
-        authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()> + Send + 'static,
-    ) -> io::Result<Acceptance> {
-        self.request(move |store| store.accept_input(request, authorize_new))
             .await
     }
 

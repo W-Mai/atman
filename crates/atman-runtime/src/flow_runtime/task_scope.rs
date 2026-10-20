@@ -16,6 +16,7 @@ use crate::flow_store::{
     task_scope::{ScopeCancellation, TaskScopeDefinition, TaskScopeRecord, TaskScopeRef},
 };
 
+mod input;
 #[cfg(test)]
 mod tests;
 
@@ -258,7 +259,7 @@ impl FlowWorker {
                     .as_ref()
                     .ok_or_else(|| invalid("task scope membership requires its runtime host"))?
                     .upgrade()?
-                    .resolve_task_scope(self.address(), scope, changes)
+                    .resolve_task_scope(Some(self.address()), scope, changes)
                     .await
             }
         }
@@ -288,14 +289,14 @@ impl FlowWorker {
 impl RuntimeHost {
     async fn resolve_task_scope(
         &self,
-        member: &FlowRef,
+        member: Option<&FlowRef>,
         scope: TaskScopeRef,
         mut changes: Option<&mut Vec<tokio::sync::watch::Receiver<CommitReceipt>>>,
     ) -> io::Result<ScopeAdmission> {
         let mut sources = Vec::new();
         let mut next = Some(scope);
         while let Some(scope) = next {
-            if &scope.owner == member
+            if Some(&scope.owner) == member
                 || sources
                     .iter()
                     .any(|(seen, _): &(TaskScopeRef, FlowWorker)| seen.owner == scope.owner)
@@ -340,7 +341,7 @@ impl RuntimeHost {
         authorize(&member, &scope)?;
         let worker = self.flow(&member).await?;
         let admission = self
-            .resolve_task_scope(&member, scope.clone(), None)
+            .resolve_task_scope(Some(&member), scope.clone(), None)
             .await?;
         worker
             .request_scoped(admission.clone(), move |store, snapshot| {

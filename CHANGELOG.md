@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Scoped inbox admission** — Runtime hosts validate new message scopes at the receiver's commit boundary and observe cancellation while recipients are paused or idle. Missing sources retain recorded input and surface diagnostics; accepted retries preserve their original receipts.
+
 - **Scoped inbox records** — Messages retain complete task-scope addresses. Durable invalidation cancels matching unread input while preserving consumed history, unrelated messages, and original acceptance receipts.
 
 - **Task scope lifecycle** — Runtime hosts validate explicit membership at execution boundaries and close cancelled members through shared resource cleanup. Nested scopes recover their source checks on reopen; unavailable sources block admission without deleting history.
