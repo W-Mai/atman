@@ -318,8 +318,11 @@ impl RuntimeHost {
                 };
                 let context = worker.context();
                 let access = host.clone();
+                let scope = worker.scope_admission().await?;
                 worker
                     .request(move |store| {
+                        scope.validate_member(store)?;
+                        let _scope = scope.acquire()?;
                         let new = store.launch_record().is_none();
                         let record = store.activate_entry(input, proof, |input| {
                             authorize(&descriptor, input)?;

@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Task scope lifecycle** — Runtime hosts validate explicit membership at execution boundaries and close cancelled members through shared resource cleanup. Nested scopes recover their source checks on reopen; unavailable sources block admission without deleting history.
+
 - **Task scope records** — Flow journals retain explicit cancellation groups, immutable pre-activation membership, and optional Goal bindings. Goal replacement cancels associated group records without treating pause or resume as new work.
 
 - **Timer tools** — Agents can schedule, list, and cancel durable reminders for their own persistent Flow. Explicit timestamp offsets normalize to UTC; typed notification provenance separates authored content from watcher expiry.

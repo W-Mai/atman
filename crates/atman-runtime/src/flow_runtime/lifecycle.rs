@@ -23,11 +23,30 @@ impl FlowWorker {
     ) -> io::Result<CommittedControl> {
         let worker = self.clone();
         let runtime = tokio::runtime::Handle::current();
+        let scope = if matches!(
+            request.action,
+            ControlAction::Resume | ControlAction::ReleasePause | ControlAction::Recover
+        ) {
+            Some(self.scope_admission().await)
+        } else {
+            None
+        };
         self.request(move |store| {
             authorize(store.state().address())?;
             if worker.is_stopping() {
                 return Err(invalid("instance host is stopping"));
             }
+            let scope = match scope {
+                Some(scope) if store.recorded_control(&request)?.is_none() => Some(scope?),
+                _ => None,
+            };
+            let _scope = scope
+                .as_ref()
+                .map(|scope| {
+                    scope.validate_member(store)?;
+                    scope.acquire()
+                })
+                .transpose()?;
             let close = request.action == ControlAction::Close;
             let receipt = store.control(request)?;
             if close && matches!(store.state().state(), InstanceState::Closing { .. }) {

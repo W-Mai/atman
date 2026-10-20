@@ -20,6 +20,7 @@ pub mod reply;
 pub mod resources;
 pub mod scheduler;
 pub mod send;
+pub mod task_scope;
 pub mod timer;
 mod trace;
 mod view;
@@ -74,6 +75,7 @@ enum Command {
     Stop(oneshot::Sender<FlowStore>),
     ClaimExecution {
         lease: TurnLease<AtmanUuid>,
+        scope: task_scope::ScopeAdmission,
         reply: oneshot::Sender<io::Result<tokio_util::task::task_tracker::TaskTrackerToken>>,
     },
 }
@@ -83,6 +85,7 @@ enum Command {
 /// Queued commands finish even if their awaiting caller disappears. Dropping all handles drains accepted commands and releases ownership; idle workers do not occupy a blocking thread.
 #[derive(Clone)]
 pub struct FlowWorker {
+    scope_state: Arc<std::sync::RwLock<task_scope::ScopeState>>,
     host: Option<host::WeakRuntimeHost>,
     address: FlowRef,
     context: Arc<Session>,
@@ -185,6 +188,10 @@ impl FlowWorker {
         let (state_tx, state) = watch::channel(store.state().clone());
         let (commits_tx, commits) = watch::channel(store.cursor().clone());
         let (commands, mut receiver) = mpsc::channel::<Command>(64);
+        let scope_state = Arc::new(std::sync::RwLock::new(task_scope::ScopeState::from_store(
+            &store,
+        )));
+        let scope_owner = scope_state.clone();
         context.bind_instance_writer(context::ContextWriter::new(
             commands.downgrade(),
             Arc::downgrade(&context),
@@ -216,15 +223,29 @@ impl FlowWorker {
                         }
                         continue;
                     }
-                    Command::ClaimExecution { lease, reply } => {
+                    Command::ClaimExecution {
+                        lease,
+                        scope,
+                        reply,
+                    } => {
                         let result = if resource_owner.0.lifetime.is_cancelled() {
                             Err(invalid("instance resources are stopping"))
                         } else if claimed.as_ref() == Some(&lease) {
                             Err(invalid("instance turn execution was already claimed"))
                         } else if matches!(store.state().state(), atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) if active.lease == lease && active.phase == atman_rt::TurnPhase::Running)
                         {
-                            claimed = Some(lease);
-                            Ok(resource_owner.0.executions.token())
+                            let resources = resource_owner.0.clone();
+                            let result = tokio::task::spawn_blocking(move || {
+                                let _scope = scope.acquire()?;
+                                Ok(resources.executions.token())
+                            })
+                            .await
+                            .map_err(io::Error::other)
+                            .and_then(|result| result);
+                            if result.is_ok() {
+                                claimed = Some(lease);
+                            }
+                            result
                         } else {
                             Err(invalid("instance execution is not admitted"))
                         };
@@ -237,9 +258,15 @@ impl FlowWorker {
                 let commits_tx = commits_tx.clone();
                 let resources = resource_owner.0.clone();
                 let trace = trace_owner.0.clone();
+                let scope_owner = scope_owner.clone();
                 match tokio::task::spawn_blocking(move || {
+                    let mut scope = scope_owner
+                        .write()
+                        .map_err(|_| invalid("task scope owner failed"))?;
                     trace.flush(&mut store)?;
                     let acknowledge = command(&mut store);
+                    *scope = task_scope::ScopeState::from_store(&store);
+                    drop(scope);
                     if matches!(
                         store.state().state(),
                         atman_rt::InstanceState::Closing { .. } | atman_rt::InstanceState::Closed
@@ -289,6 +316,7 @@ impl FlowWorker {
             }
         });
         let worker = Self {
+            scope_state,
             host,
             live_output: Arc::new(live::LiveOutput::new(address.clone())),
             address,
@@ -418,8 +446,26 @@ impl FlowWorker {
         transition: FlowTransition,
     ) -> io::Result<CommitReceipt> {
         let resources = self.resources.clone();
-        self.request(move |store| lifecycle::transition(store, &resources, revision, transition))
-            .await
+        let scope = if matches!(
+            transition,
+            FlowTransition::Activated
+                | FlowTransition::TurnStarted { .. }
+                | FlowTransition::ExecutionResumed { .. }
+                | FlowTransition::InterruptionRecovered
+        ) {
+            Some(self.scope_admission().await?)
+        } else {
+            None
+        };
+        self.request(move |store| match scope {
+            Some(scope) => {
+                scope.validate_member(store)?;
+                let _scope = scope.acquire()?;
+                lifecycle::transition(store, &resources, revision, transition)
+            }
+            None => lifecycle::transition(store, &resources, revision, transition),
+        })
+        .await
     }
 
     pub(crate) async fn validate_execution(
@@ -427,8 +473,13 @@ impl FlowWorker {
         lease: TurnLease<AtmanUuid>,
     ) -> io::Result<tokio_util::task::task_tracker::TaskTrackerToken> {
         let (reply, received) = oneshot::channel();
+        let scope = self.scope_admission().await?;
         self.commands
-            .send(Command::ClaimExecution { lease, reply })
+            .send(Command::ClaimExecution {
+                lease,
+                scope,
+                reply,
+            })
             .await
             .map_err(|_| io::Error::other("flow storage worker stopped"))?;
         received

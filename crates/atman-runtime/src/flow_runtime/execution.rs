@@ -124,7 +124,10 @@ impl FlowWorker {
     ) -> io::Result<Option<TurnTicket>> {
         let worker = self.clone();
         let runtime = tokio::runtime::Handle::current();
+        let scope = self.scope_admission().await?;
         self.request(move |store| {
+            scope.validate_member(store)?;
+            let _scope = scope.acquire()?;
             if worker.is_stopping() {
                 return if expected.is_some() {
                     Ok(None)

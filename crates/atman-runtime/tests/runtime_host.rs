@@ -17,6 +17,489 @@ use atman_runtime::source_program::RevisionBundle;
 use atman_runtime::{Executor, flow_authority::EffectiveAuthority};
 use uuid::Uuid;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_scope_cancellation_closes_only_members_and_stops_nested_execution() {
+    use atman_runtime::{
+        Value,
+        flow_store::task_scope::{TaskScopeDefinition, TaskScopeRef},
+        tool::{Tier, ToolDefinition},
+    };
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let owner = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let unrelated = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let member = session
+        .create_flow(program_descriptor(
+            info.id,
+            "flow main() -> bool { return hold().await }".into(),
+        ))
+        .await
+        .unwrap();
+    let nested = session
+        .create_flow(program_descriptor(
+            info.id,
+            "flow main() -> bool { return hold().await }".into(),
+        ))
+        .await
+        .unwrap();
+    let prepared = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&owner, FlowTransition::Activated).await;
+    change(&unrelated, FlowTransition::Activated).await;
+    let definition = TaskScopeDefinition {
+        id: Uuid::new_v4(),
+        name: "Build".into(),
+        goal: None,
+    };
+    assert!(
+        owner
+            .create_task_scope(definition.clone(), |_| Err(
+                io::ErrorKind::PermissionDenied.into()
+            ))
+            .await
+            .is_err()
+    );
+    owner
+        .create_task_scope(definition.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    let scope = TaskScopeRef {
+        owner: owner.address().clone(),
+        id: definition.id,
+    };
+    assert!(
+        host.bind_task_scope(member.address().clone(), scope.clone(), |_, _| Err(
+            io::ErrorKind::PermissionDenied.into()
+        ))
+        .await
+        .is_err()
+    );
+    let binding = host
+        .bind_task_scope(member.address().clone(), scope.clone(), |_, _| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(
+        host.bind_task_scope(member.address().clone(), scope.clone(), |_, _| Ok(()))
+            .await
+            .unwrap(),
+        binding
+    );
+    host.bind_task_scope(prepared.address().clone(), scope.clone(), |_, _| Ok(()))
+        .await
+        .unwrap();
+    change(&member, FlowTransition::Activated).await;
+    let sub = TaskScopeDefinition {
+        id: Uuid::new_v4(),
+        name: "Compile".into(),
+        goal: None,
+    };
+    member
+        .create_task_scope(sub.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    host.bind_task_scope(
+        nested.address().clone(),
+        TaskScopeRef {
+            owner: member.address().clone(),
+            id: sub.id,
+        },
+        |_, _| Ok(()),
+    )
+    .await
+    .unwrap();
+    change(&nested, FlowTransition::Activated).await;
+    let pause = Uuid::new_v4().into();
+    change(&member, FlowTransition::ExecutionPaused { key: pause }).await;
+    let resume = atman_runtime::flow_store::control::ControlRequest {
+        id: Uuid::new_v4(),
+        sender: SenderIdentity::User(Uuid::new_v4()),
+        target: member.address().clone(),
+        expected_revision: member.state().await.unwrap().revision(),
+        pause_key: pause,
+        action: PeerControl::ReleasePause,
+    };
+    let resumed = member.control(resume.clone(), |_| Ok(())).await.unwrap();
+    // Pausing the owner's execution does not implicitly pause a peer or cancel its scope.
+    change(
+        &owner,
+        FlowTransition::ExecutionPaused {
+            key: Uuid::new_v4().into(),
+        },
+    )
+    .await;
+    let executor = Executor::new();
+    let (entered, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    executor
+        .tools
+        .register_fn(
+            ToolDefinition::new("hold", Tier::Zero).call_mode(atman_rt::ToolCallMode::Deferred),
+            move |_, _| {
+                entered.send(()).unwrap();
+                async {
+                    std::future::pending::<()>().await;
+                    Ok(Value::Bool(true))
+                }
+            },
+        )
+        .unwrap();
+    let mut tickets = Vec::new();
+    for worker in [&member, &nested] {
+        worker
+            .accept_input(peer_request(unrelated.address(), worker.address()), |_| {
+                Ok(())
+            })
+            .await
+            .unwrap();
+        tickets.push(
+            worker
+                .start_turn(
+                    executor.clone(),
+                    prepare(&worker.snapshot().await.unwrap()).unwrap().unwrap(),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(5), observed.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    change(
+        &member,
+        FlowTransition::ExecutionPaused {
+            key: Uuid::new_v4().into(),
+        },
+    )
+    .await;
+    assert!(
+        owner
+            .cancel_task_scope(scope.id, |_| Err(io::ErrorKind::PermissionDenied.into()))
+            .await
+            .is_err()
+    );
+    let cancelled = owner.cancel_task_scope(scope.id, |_| Ok(())).await.unwrap();
+    for worker in [&member, &nested, &prepared] {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut changes = worker.subscribe_state();
+            loop {
+                if changes.borrow_and_update().state() == &InstanceState::Closed {
+                    break;
+                }
+                changes.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            worker
+                .transition(
+                    worker.state().await.unwrap().revision(),
+                    FlowTransition::TurnStarted {
+                        turn: TurnId::now(),
+                        run: RunId::now()
+                    }
+                )
+                .await
+                .is_err()
+        );
+    }
+    for ticket in tickets {
+        let completion = tokio::time::timeout(Duration::from_secs(5), ticket.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(completion.outcome, TurnOutcome::Interrupted(_)));
+        assert!(completion.result.is_err());
+    }
+    assert!(matches!(
+        unrelated.state().await.unwrap().state(),
+        InstanceState::Open(_)
+    ));
+    assert!(matches!(
+        owner.state().await.unwrap().state(),
+        InstanceState::Open(_)
+    ));
+    assert_eq!(
+        owner.cancel_task_scope(scope.id, |_| Ok(())).await.unwrap(),
+        cancelled
+    );
+    assert_eq!(
+        member
+            .control(resume.clone(), |_| Ok(()))
+            .await
+            .unwrap()
+            .receipt,
+        resumed.receipt
+    );
+    assert!(
+        member
+            .control(
+                atman_runtime::flow_store::control::ControlRequest {
+                    id: Uuid::new_v4(),
+                    expected_revision: member.state().await.unwrap().revision(),
+                    ..resume
+                },
+                |_| Ok(()),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        host.bind_task_scope(member.address().clone(), scope, |_, _| Ok(()))
+            .await
+            .unwrap(),
+        binding
+    );
+    assert!(
+        owner
+            .task_scopes(|_| Err(io::ErrorKind::PermissionDenied.into()))
+            .await
+            .is_err()
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn task_scope_reopen_checks_sources_before_admission_and_preserves_unavailable_members() {
+    use atman_runtime::flow_store::task_scope::{TaskScopeDefinition, TaskScopeRef};
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut owner = session.create_flow(flow_descriptor(info.id)).unwrap();
+    owner.transition(0, FlowTransition::Activated).unwrap();
+    let definition = TaskScopeDefinition {
+        id: Uuid::new_v4(),
+        name: "Retained work".into(),
+        goal: None,
+    };
+    owner.create_task_scope(definition.clone()).unwrap();
+    let scope = TaskScopeRef {
+        owner: owner.state().address().clone(),
+        id: definition.id,
+    };
+    let mut member = session.create_flow(flow_descriptor(info.id)).unwrap();
+    member.bind_task_scope(scope.clone()).unwrap();
+    let id = member.state().address().instance_id.clone();
+    let standalone = FlowWorker::start(member).await.unwrap();
+    assert!(
+        standalone
+            .transition(
+                standalone.state().await.unwrap().revision(),
+                FlowTransition::Activated
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("runtime host")
+    );
+    drop(standalone.shutdown().await.unwrap());
+    // Cancellation while no member owner is loaded is durable; inspection does not propagate it.
+    owner.cancel_task_scope(scope.id).unwrap();
+    assert_eq!(
+        session.inspect_flow(&id).unwrap().state.state(),
+        &InstanceState::Prepared
+    );
+    drop(owner);
+    let host = RuntimeHost::default();
+    let attached = host.attach_session(session).unwrap();
+    let member = attached.open_flow(id).await.unwrap();
+    assert!(
+        member
+            .transition(
+                member.state().await.unwrap().revision(),
+                FlowTransition::Activated
+            )
+            .await
+            .is_err()
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut changes = member.subscribe_state();
+        loop {
+            if changes.borrow_and_update().state() == &InstanceState::Closed {
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    host.shutdown().await.unwrap();
+
+    let mut session = root.open_session(info.id).unwrap();
+    let mut unavailable = session.create_flow(flow_descriptor(info.id)).unwrap();
+    let mut missing = scope;
+    missing.owner.instance_id = FlowInstanceId::now();
+    unavailable.bind_task_scope(missing).unwrap();
+    let id = unavailable.state().address().instance_id.clone();
+    drop(unavailable);
+    let host = RuntimeHost::default();
+    let attached = host.attach_session(session).unwrap();
+    let member = attached.open_flow(id).await.unwrap();
+    assert!(
+        member
+            .transition(
+                member.state().await.unwrap().revision(),
+                FlowTransition::Activated
+            )
+            .await
+            .is_err()
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut issues = member.subscribe_observation_issues();
+        loop {
+            if !issues.borrow_and_update().is_empty() {
+                break;
+            }
+            issues.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        member.state().await.unwrap().state(),
+        &InstanceState::Prepared
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn task_scope_observation_retains_known_sources_when_an_ancestor_is_unavailable() {
+    use atman_runtime::flow_store::task_scope::{TaskScopeDefinition, TaskScopeRef};
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut owner = session.create_flow(flow_descriptor(info.id)).unwrap();
+    let missing = TaskScopeRef {
+        owner: FlowRef {
+            session_id: info.id.into(),
+            instance_id: FlowInstanceId::now(),
+        },
+        id: Uuid::new_v4(),
+    };
+    owner.bind_task_scope(missing).unwrap();
+    owner
+        .transition(owner.state().revision(), FlowTransition::Activated)
+        .unwrap();
+    let definition = TaskScopeDefinition {
+        id: Uuid::new_v4(),
+        name: "Observed group".into(),
+        goal: None,
+    };
+    owner.create_task_scope(definition.clone()).unwrap();
+    let scope = TaskScopeRef {
+        owner: owner.state().address().clone(),
+        id: definition.id,
+    };
+    let mut child = session.create_flow(flow_descriptor(info.id)).unwrap();
+    child.bind_task_scope(scope.clone()).unwrap();
+    let id = child.state().address().instance_id.clone();
+    drop((child, owner));
+    let host = RuntimeHost::default();
+    let attached = host.attach_session(session).unwrap();
+    let child = attached.open_flow(id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut issues = child.subscribe_observation_issues();
+        loop {
+            if !issues.borrow_and_update().is_empty() {
+                break;
+            }
+            issues.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    // This cancellation must wake the member even though ancestor resolution failed.
+    let owner = host.flow(&scope.owner).await.unwrap();
+    owner.cancel_task_scope(scope.id, |_| Ok(())).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut changes = child.subscribe_state();
+        loop {
+            if changes.borrow_and_update().state() == &InstanceState::Closed {
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        owner.state().await.unwrap().state(),
+        InstanceState::Open(_)
+    ));
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn task_scope_recovery_rejects_cross_journal_cycles_without_locking_owners() {
+    use atman_runtime::flow_store::task_scope::{TaskScopeDefinition, TaskScopeRef};
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut first = session.create_flow(flow_descriptor(info.id)).unwrap();
+    let mut second = session.create_flow(flow_descriptor(info.id)).unwrap();
+    let first_scope = TaskScopeDefinition {
+        id: Uuid::new_v4(),
+        name: "First".into(),
+        goal: None,
+    };
+    let second_scope = TaskScopeDefinition {
+        id: Uuid::new_v4(),
+        name: "Second".into(),
+        goal: None,
+    };
+    // A storage-only writer cannot validate another journal; restoration must not trust it.
+    first
+        .bind_task_scope(TaskScopeRef {
+            owner: second.state().address().clone(),
+            id: second_scope.id,
+        })
+        .unwrap();
+    second
+        .bind_task_scope(TaskScopeRef {
+            owner: first.state().address().clone(),
+            id: first_scope.id,
+        })
+        .unwrap();
+    for (store, definition) in [(&mut first, first_scope), (&mut second, second_scope)] {
+        store
+            .transition(store.state().revision(), FlowTransition::Activated)
+            .unwrap();
+        store.create_task_scope(definition).unwrap();
+    }
+    let id = first.state().address().instance_id.clone();
+    drop((first, second));
+    let host = RuntimeHost::default();
+    let attached = host.attach_session(session).unwrap();
+    let worker = attached.open_flow(id).await.unwrap();
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        worker.transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::TurnStarted {
+                turn: TurnId::now(),
+                run: RunId::now(),
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(error.to_string().contains("cycle"));
+    tokio::time::timeout(Duration::from_secs(5), host.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn durable_timer_tools_wake_equal_peers_without_promoting_notification_content() {
     use atman_runtime::{ValueJson, flow_store::inbox::TimerPurpose};
@@ -8263,13 +8746,8 @@ async fn persistent_spawn_rejects_catalog_changes_after_inspection_before_creati
         )
         .unwrap();
     let completion = invoke(&a, executor).await;
-    assert!(
-        completion
-            .result
-            .unwrap_err()
-            .to_string()
-            .contains("inventory changed")
-    );
+    let error = completion.result.unwrap_err().to_string();
+    assert!(error.contains("session catalog changed"), "{error}");
     assert_eq!(session.snapshot().await.unwrap().catalog.flows.len(), 2);
 }
 
