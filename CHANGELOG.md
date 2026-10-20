@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Flow details** — FlowHub provides keyboard and mouse access to instance details and default-entry selection. Changes retain the reviewed catalog version and original view reply ownership without starting flow execution.
+
 - **Default flow selection** — Session default changes validate the observed catalog revision. Stale selections cannot overwrite a different default, and repeating the current choice leaves the journal unchanged.
 
 - **Legacy deletion review** — Original histories use the shared Session deletion panel with explicit stopped-executor confirmation. Pending cleanup stays discoverable, and persistent copies retain separate navigation and controls.

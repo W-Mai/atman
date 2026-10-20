@@ -593,6 +593,14 @@ impl Workspace {
                         continue;
                     };
                     let result = match command {
+                        TuiControl::SelectDefaultFlow(change) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = scopes.select_default_flow(*change).await.map(Navigation::Catalog);
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::Projects(request) => {
                             let current = view.binding.flow.session_target();
                             let project = view.project.clone();
@@ -1054,6 +1062,21 @@ impl scopes::Scopes {
             .await
     }
 
+    async fn select_default_flow(
+        &self,
+        change: atman_tui::flow_hub::DefaultFlowSelection,
+    ) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
+        let session = self
+            .host
+            .open_session(&self.root, change.flow.session_id.0)
+            .await?;
+        session
+            .select_default(change.expected, change.flow.instance_id.clone())
+            .await?;
+        self.browse(atman_tui::flow_hub::HubRequest::FlowDetails { owner: change.flow }).await
+            .context("Default flow saved, but reading updated details failed; refresh to inspect the current state")
+    }
+
     async fn browse(
         &self,
         request: atman_tui::flow_hub::HubRequest,
@@ -1062,6 +1085,24 @@ impl scopes::Scopes {
             FlowHubPage, HubRequest, PAGE_SIZE, RelationProgress, RelationRange,
         };
         Ok(Box::new(match request {
+            HubRequest::FlowDetails { owner } => {
+                let summary = self.catalog.overview(owner.session_id.0).await?.summary;
+                let expected = summary.catalog.context("Session catalog is unavailable")?;
+                ensure!(
+                    summary.trailing_bytes.is_none_or(|bytes| bytes == 0),
+                    "Session journal has an incomplete tail"
+                );
+                let inspected = self.catalog.inspect_flow(&owner, |_| Ok(())).await?;
+                FlowHubPage::FlowDetails(Box::new(atman_tui::flow_hub::FlowDetailsPage {
+                    is_default: summary.default_flow.as_ref() == Some(&owner.instance_id),
+                    selection: atman_tui::flow_hub::DefaultFlowSelection {
+                        flow: owner,
+                        expected,
+                    },
+                    title: inspected.descriptor.content.title().into(),
+                    recorded_state: inspected.state.state().clone(),
+                }))
+            }
             HubRequest::ControlHistory { before } => FlowHubPage::ControlHistory(
                 self.profile()
                     .await?

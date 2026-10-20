@@ -6,6 +6,112 @@ use atman_runtime::flow_store::{
 use atman_runtime::source_program::RevisionBundle;
 
 #[tokio::test]
+async fn default_flow_details_and_selection_do_not_load_execution_or_replace_stale_catalogs() {
+    use atman_tui::flow_hub::{FlowHubPage, HubRequest};
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let id = Uuid::now_v7();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            id,
+            project: None,
+            configuration: Default::default(),
+            title: "Example".into(),
+        })
+        .unwrap();
+    let mut addresses = Vec::new();
+    let mut originals = Vec::new();
+    for name in ["first", "second"] {
+        let address = FlowRef {
+            session_id: id.into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let writer = session
+            .create_flow(FlowDescriptor {
+                address: address.clone(),
+                creation_request: Uuid::now_v7(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: name.into(),
+                    path: "/missing/main.at".into(),
+                    bundle: RevisionBundle {
+                        entry: "entry:main.at".into(),
+                        sources: [(
+                            "entry:main.at".into(),
+                            format!("flow {name}() {{ return 1 }}"),
+                        )]
+                        .into(),
+                        edges: Default::default(),
+                    },
+                }
+                .into(),
+            })
+            .unwrap();
+        let path = writer.dir().join("events.jsonl");
+        originals.push((path.clone(), std::fs::read(path).unwrap()));
+        addresses.push(address);
+    }
+    drop(session);
+    let host = RuntimeHost::default();
+    let (notices, _received) = mpsc::unbounded_channel();
+    let scopes = scopes::Scopes::empty(
+        data.path(),
+        host.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(notices)),
+    );
+    let request = HubRequest::FlowDetails {
+        owner: addresses[1].clone(),
+    };
+    let FlowHubPage::FlowDetails(details) = *scopes.browse(request.clone()).await.unwrap() else {
+        panic!("flow details expected")
+    };
+    assert!(!details.is_default);
+    assert!(
+        host.sessions().is_empty(),
+        "reading details cannot open an owner"
+    );
+    let owner = host.open_session(data.path(), id).await.unwrap();
+    owner
+        .set_title(details.selection.expected.clone(), Some("Renamed".into()))
+        .await
+        .unwrap();
+    assert!(scopes.select_default_flow(details.selection).await.is_err());
+    assert_eq!(
+        owner.snapshot().await.unwrap().catalog.default_flow,
+        Some(addresses[0].instance_id.clone())
+    );
+    let FlowHubPage::FlowDetails(details) = *scopes.browse(request).await.unwrap() else {
+        panic!("flow details expected")
+    };
+    let selection = details.selection;
+    let FlowHubPage::FlowDetails(updated) =
+        *scopes.select_default_flow(selection.clone()).await.unwrap()
+    else {
+        panic!("updated flow details expected")
+    };
+    assert!(updated.is_default);
+    assert_eq!(updated.selection.flow, addresses[1]);
+    let cursor = owner.snapshot().await.unwrap().cursor;
+    scopes.select_default_flow(selection).await.unwrap();
+    assert_eq!(owner.snapshot().await.unwrap().cursor, cursor);
+    assert!(
+        owner.observe().await.unwrap().loaded.is_empty(),
+        "selection cannot load a flow writer or scheduler"
+    );
+    for (path, bytes) in originals {
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+    host.shutdown().await.unwrap();
+    let read = RuntimeStore::inspect_session(data.path(), id).unwrap();
+    assert_eq!(
+        read.projection.default_flow,
+        Some(addresses[1].instance_id.clone())
+    );
+    assert_eq!(read.projection.title.as_deref(), Some("Renamed"));
+}
+
+#[tokio::test]
 async fn operator_control_batches_keep_identity_partial_results_and_selective_resume() {
     use atman_runtime::flow_store::{
         FlowTransition, control::ControlAction, profile::ControlProgress,

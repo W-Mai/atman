@@ -15,6 +15,8 @@ use crate::{control::ControlTicket, keys::KeyAction};
 pub const PAGE_SIZE: usize = 50;
 
 mod controls;
+mod details;
+pub use details::{DefaultFlowSelection, FlowDetailsPage};
 mod focus;
 pub use controls::{ControlBatchPage, OperatorControl, OperatorControls};
 mod graph;
@@ -45,6 +47,7 @@ pub use workspaces::{
 
 #[derive(Clone)]
 pub(crate) enum Action {
+    SelectDefault(Box<DefaultFlowSelection>),
     RetryControls(uuid::Uuid),
     SubmitControls(Box<OperatorControls>),
     EditManagement,
@@ -84,6 +87,8 @@ pub(crate) enum Action {
 
 #[derive(Default)]
 pub(crate) struct FlowHub {
+    details_button: Rect,
+    details_hovered: bool,
     controls: Option<controls::Draft>,
     controls_button: Rect,
     controls_hovered: bool,
@@ -477,17 +482,19 @@ impl FlowHub {
         }
         match self.focus() {
             Action::Focus(flow) => Action::Float(flow),
-            Action::RemoveSession(_) => Action::None,
+            Action::RemoveSession(_) | Action::SelectDefault(_) => Action::None,
             _ => self.activate(),
         }
     }
 
     fn activate(&mut self) -> Action {
-        if matches!(self.focus(), Action::RemoveSession(_))
-            && self
-                .filtered()
-                .get(self.selected)
-                .is_none_or(|selected| !self.hits.iter().any(|(_, index)| index == selected))
+        if matches!(
+            self.focus(),
+            Action::RemoveSession(_) | Action::SelectDefault(_)
+        ) && self
+            .filtered()
+            .get(self.selected)
+            .is_none_or(|selected| !self.hits.iter().any(|(_, index)| index == selected))
         {
             return Action::None;
         }
@@ -825,6 +832,7 @@ impl FlowHub {
                 &self.page,
                 Some(
                     FlowHubPage::WorkspaceRecord(_)
+                        | FlowHubPage::FlowDetails(_)
                         | FlowHubPage::SessionRemoval(_)
                         | FlowHubPage::Management(_)
                         | FlowHubPage::Workspace(_)
@@ -853,6 +861,21 @@ impl FlowHub {
             return Action::None;
         }
         match key {
+            KeyAction::CoursePrefill
+                if self.page.as_ref().is_some_and(FlowHubPage::nodes)
+                    && self.create_watch.is_none()
+                    && self.edit_management.is_none()
+                    && self.controls.is_none() =>
+            {
+                if let Action::Focus(address) = self.focus()
+                    && let Some(owner) = address.instance()
+                {
+                    return Action::Load(HubRequest::FlowDetails {
+                        owner: owner.clone(),
+                    });
+                }
+                self.error = Some("Select a flow to view its details".into());
+            }
             KeyAction::Delete
                 if matches!(self.page, Some(FlowHubPage::Sessions(_)))
                     && self.create_watch.is_none()
@@ -1107,6 +1130,7 @@ impl FlowHub {
         self.refresh_hovered = self.refresh.contains(point);
         self.graph_hovered = self.graph_button.contains(point);
         self.controls_hovered = self.controls_button.contains(point);
+        self.details_hovered = self.details_button.contains(point);
         self.hovered = self
             .hits
             .iter()
@@ -1117,6 +1141,9 @@ impl FlowHub {
                 self.key(KeyAction::Escape)
             }
             _ if self.pending.is_some() => Action::None,
+            MouseEventKind::Down(MouseButton::Left) if self.details_button.contains(point) => {
+                self.key(KeyAction::CoursePrefill)
+            }
             MouseEventKind::Down(MouseButton::Left) if self.controls_button.contains(point) => self
                 .key(if matches!(self.page, Some(FlowHubPage::Sessions(_))) {
                     KeyAction::Delete
@@ -1189,6 +1216,7 @@ impl FlowHub {
             area,
         );
         self.controls_button = Rect::default();
+        self.details_button = Rect::default();
         if let Some(draft) = &mut self.controls
             && !draft.picking
         {
@@ -1313,6 +1341,17 @@ impl FlowHub {
             button_width,
             3,
         );
+        if is_flows && !picking {
+            let cell = (width - 2) / 3;
+            self.sessions.width = cell;
+            self.details_button = Rect::new(content.x + cell + 1, content.y + 1, cell, 3);
+            self.refresh = Rect::new(
+                content.x + 2 * (cell + 1),
+                content.y + 1,
+                width - 2 * (cell + 1),
+                3,
+            );
+        }
         self.relations = if (is_flows || is_relations || is_watchers || is_inbox) && !picking {
             Rect::new(
                 content.x + width / 2 + 1,
@@ -1348,12 +1387,31 @@ impl FlowHub {
                     } else {
                         "\nSession Ctrl+B"
                     }
+                } else if is_flows && !picking && width < 60 {
+                    "\nSessions ^S"
                 } else {
                     "\nSessions  Ctrl+S"
                 },
                 self.sessions_hovered,
             ),
-            (self.refresh, "\nRefresh  Ctrl+R", self.refresh_hovered),
+            (
+                self.refresh,
+                if is_flows && !picking && width < 60 {
+                    "\nRefresh ^R"
+                } else {
+                    "\nRefresh  Ctrl+R"
+                },
+                self.refresh_hovered,
+            ),
+            (
+                self.details_button,
+                if width < 60 {
+                    "\nDetails ^B"
+                } else {
+                    "\nDetails Ctrl+B"
+                },
+                self.details_hovered,
+            ),
             (
                 self.relations,
                 if is_inbox {
