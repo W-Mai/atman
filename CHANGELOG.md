@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Timer tools** — Agents can schedule, list, and cancel durable reminders for their own persistent Flow. Explicit timestamp offsets normalize to UTC; typed notification provenance separates authored content from watcher expiry.
+
 - **Timer observation** — Runtime hosts deliver due timer input across idle turns, execution pauses, and owner recovery. Invocation-bound timer controls recheck their lease, and observation storage failures remain visible and retryable.
 
 - **Durable timer storage** — Flow journals retain absolute deadlines, cancellation, and atomic inbox delivery. Recovery preserves delivered identities, and read-only inspection exposes timer records without triggering execution.

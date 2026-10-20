@@ -125,6 +125,8 @@ Use this instead of polling term.capture/bash.output in a loop.
 - `watcher.list` shows this flow's public watchers. `watcher.unwatch(id)` stops future observation; notifications already accepted into the inbox remain available. Internal spawn-result routing is not a public watcher.
 Prefer watchers over polling. A subscription does not authorize execution control over its source.
 
+Use `timer.schedule(id, due_at, content)` for a durable reminder to this flow, with a stable UUID and an RFC 3339 timestamp including its timezone. Keep the same arguments on retry. `timer.list` reports recorded status; `timer.cancel(id)` prevents future delivery without retracting accepted input. A timer survives turn end and owner recovery; execution pause defers consumption. Finish the current turn rather than keeping a shell sleep alive.
+
 ## Web research
 web.search to find sources, web.fetch to read them. Cite your sources. If search returns nothing, say so — never fabricate.
 
@@ -301,6 +303,7 @@ flow agent(user_prompt: string) -> string {
                 "session.push", "sleep",
                 "message.user", "message.assistant", "message.system", "message.tool",
                 "watch", "watcher.list", "watcher.unwatch", "wait_for_watcher", "has_pending_injections",
+                "timer.schedule", "timer.cancel", "timer.list",
                 "mcp.status", "mcp.tools", "mcp.await", "mcp.call"
             ],
         )
@@ -410,6 +413,7 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
                 "plan.read",
                 "preview.push",
                 "final.answer",
+                "timer.schedule", "timer.cancel", "timer.list",
                 "memory.goal.get", "memory.goal.set", "memory.goal.pause", "memory.goal.resume",
             ],
         )
@@ -494,6 +498,7 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
                 "plan.read",
                 "preview.push",
                 "final.answer",
+                "timer.schedule", "timer.cancel", "timer.list",
                 "memory.goal.get", "memory.goal.set", "memory.goal.pause", "memory.goal.resume",
             ],
         )
@@ -578,6 +583,7 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
                 "plan.write", "plan.read", "plan.tick",
                 "preview.push",
                 "final.answer",
+                "timer.schedule", "timer.cancel", "timer.list",
                 "memory.goal.get", "memory.goal.set", "memory.goal.pause", "memory.goal.resume",
             ],
         )
@@ -657,6 +663,7 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
                 "rule.fetch",
                 "preview.push",
                 "final.answer",
+                "timer.schedule", "timer.cancel", "timer.list",
                 "memory.goal.get", "memory.goal.set", "memory.goal.pause", "memory.goal.resume",
             ],
         )

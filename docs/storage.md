@@ -843,3 +843,11 @@ Reload serializes generation changes with adapter and status publication. Remove
 `fire_due_timers(at)` commits all due registrations and their inbox messages atomically, ordered by deadline and identity. Delivery is independent of execution pause; normal inbox admission controls consumption. Closing cancels outstanding timers. Reopening storage and `SessionStore::inspect_flow` only replay facts and never trigger deadlines. `FlowInspection.timers` and typed journal updates expose recorded status without acquiring an execution owner. These storage APIs require an authorized host to register and trigger timers.
 
 `RuntimeHost` observes timer deadlines alongside Flow subscriptions. Owner commits refresh the nearest deadline; idle instances and execution-paused instances can receive due notifications without a model invocation. Reattaching an owner catches up overdue registrations once. `FlowWorker` exposes authorized scheduling, cancellation, and listing; invocation-bound `FlowClient` methods restrict these operations to the current instance and reject expired leases. A bare worker without a RuntimeHost has no automatic deadline observer. Storage failures remain visible through observation diagnostics and await a commit, directory change, or explicit `retry_observations` request.
+
+The shared watch tool group registers `timer.schedule(id, due_at, content)`, `timer.cancel(id)`, and `timer.list()`. These tools address only the invoking persistent Flow, require unique named arguments, and accept RFC 3339 timestamps with a timezone. Managed agent and sub-agent tool declarations include them. Timer notification content is data; the producer assigns `TimerPurpose::Notification` or `WatchExpiry` independently of that content. Ordinary reminders enter internal context and cannot impersonate watcher expiry by supplying a `kind` field.
+
+```text
+timer.schedule(id: "d7827f6f-240f-4c3c-8e02-f2f58d786bfd", due_at: "2027-01-15T10:30:00+08:00", content: "Review the deployment status")
+timer.list()
+timer.cancel(id: "d7827f6f-240f-4c3c-8e02-f2f58d786bfd")
+```

@@ -107,12 +107,21 @@ pub enum InboxPayload {
     Timer {
         timer: Uuid,
         due_at: DateTime<Utc>,
+        purpose: TimerPurpose,
         content: Value,
     },
     Internal {
         kind: String,
         content: Value,
     },
+}
+
+/// Set by the notification producer, never inferred from model-authored content.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimerPurpose {
+    Notification,
+    WatchExpiry,
 }
 
 /// The host authenticates `sender` before calling storage, including on retries.

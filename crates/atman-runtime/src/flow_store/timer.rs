@@ -148,6 +148,7 @@ fn request(timer: &Timer, address: &FlowRef) -> DeliveryRequest {
         payload: InboxPayload::Timer {
             timer: timer.id,
             due_at: timer.due_at,
+            purpose: super::inbox::TimerPurpose::Notification,
             content: timer.content.clone(),
         },
     }

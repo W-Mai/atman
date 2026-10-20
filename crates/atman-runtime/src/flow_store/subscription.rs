@@ -205,12 +205,7 @@ pub(super) fn watcher_matches(content: &serde_json::Value) -> io::Result<Vec<Uui
 pub(crate) fn is_watcher_notification(envelope: &AcceptedEnvelope) -> bool {
     match &envelope.request.payload {
         InboxPayload::Watcher { .. } | InboxPayload::ProcessEvent { .. } => true,
-        InboxPayload::Timer { content, .. } => {
-            matches!(
-                content.get("kind").and_then(|kind| kind.as_str()),
-                Some("process_watch_expired" | "flow_watch_expired")
-            )
-        }
+        InboxPayload::Timer { purpose, .. } => *purpose == super::inbox::TimerPurpose::WatchExpiry,
         InboxPayload::FlowEvent { content, .. } => {
             serde_json::from_value::<EventNotification>(content.clone()).is_ok_and(|notification| {
                 notification
@@ -464,6 +459,7 @@ impl Subscriptions {
                     payload: InboxPayload::Timer {
                         timer: record.subscription.id,
                         due_at,
+                        purpose: super::inbox::TimerPurpose::WatchExpiry,
                         content: serde_json::json!({
                             "kind": "flow_watch_expired",
                             "source": record.subscription.source,

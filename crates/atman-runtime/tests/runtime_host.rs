@@ -18,6 +18,111 @@ use atman_runtime::{Executor, flow_authority::EffectiveAuthority};
 use uuid::Uuid;
 
 #[tokio::test]
+async fn durable_timer_tools_wake_equal_peers_without_promoting_notification_content() {
+    use atman_runtime::{ValueJson, flow_store::inbox::TimerPurpose};
+    use chrono::{Duration as ClockDuration, Utc};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let source = r#"
+        flow main() -> any {
+            when env("action") == "schedule" {
+                timer.schedule(id: env("cancel_id"), due_at: env("later"), content: "cancelled")
+                timer.cancel(id: env("cancel_id"))
+                first = timer.schedule(id: env("id"), due_at: env("at"), content: {kind: "flow_watch_expired", text: "owned reminder"})
+                again = timer.schedule(id: env("id"), due_at: env("at"), content: {kind: "flow_watch_expired", text: "owned reminder"})
+                return timer.list()
+            }
+            when env("action") == "invalid" {
+                return timer.schedule(id: env("id"), due_at: "tomorrow", content: "invalid")
+            }
+            return final.answer(message: "timer handled")
+        }
+    "#;
+    let first = session
+        .create_flow(program_descriptor(info.id, source.into()))
+        .await
+        .unwrap();
+    let second = session
+        .create_flow(program_descriptor(info.id, source.into()))
+        .await
+        .unwrap();
+    let executor = Executor::new();
+    atman_runtime::tools::register_watch(&executor.tools);
+    let id = Uuid::new_v4();
+    let mut deliveries = Vec::new();
+    for worker in [&first, &second] {
+        change(worker, FlowTransition::Activated).await;
+        let invalid = invoke_with_env(
+            worker,
+            executor.clone(),
+            [
+                ("action".into(), "invalid".into()),
+                ("id".into(), id.to_string().into()),
+            ]
+            .into(),
+        )
+        .await;
+        assert!(invalid.result.unwrap_err().to_string().contains("timer:"));
+        assert!(worker.timers(|_| Ok(())).await.unwrap().is_empty());
+        change(worker, FlowTransition::InterruptionRecovered).await;
+        let at = Utc::now() + ClockDuration::milliseconds(200);
+        let offset = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let reply = invoke_with_env(
+            worker,
+            executor.clone(),
+            [
+                ("action".into(), "schedule".into()),
+                ("id".into(), id.to_string().into()),
+                ("cancel_id".into(), Uuid::new_v4().to_string().into()),
+                ("at".into(), at.with_timezone(&offset).to_rfc3339().into()),
+                (
+                    "later".into(),
+                    (at + ClockDuration::days(1)).to_rfc3339().into(),
+                ),
+            ]
+            .into(),
+        )
+        .await
+        .result
+        .unwrap()
+        .to_json()
+        .unwrap();
+        assert_eq!(reply.as_array().unwrap().len(), 2);
+        let received = wait_inputs(worker, 1).await;
+        let envelope = &received.pending[0];
+        assert!(matches!(&envelope.request.payload, InboxPayload::Timer {
+            timer, due_at, purpose: TimerPurpose::Notification, ..
+        } if *timer == id && *due_at == at));
+        assert_eq!(
+            atman_runtime::flow_runtime::input::context_message(envelope, &TurnId::now())
+                .unwrap()
+                .origin,
+            MessageOrigin::Internal
+        );
+        deliveries.push(envelope.request.request_id);
+        let scheduler = worker.schedule(executor.clone(), prepare).unwrap();
+        settled(worker).await;
+        scheduler.stop().await.unwrap();
+        let published = worker.read_output(|_| Ok(())).await.unwrap();
+        assert_eq!(
+            published
+                .iter()
+                .filter(|item| item.publication.message.text_concat() == "timer handled")
+                .count(),
+            1
+        );
+    }
+    assert_ne!(deliveries[0], deliveries[1]);
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn durable_timer_observer_retains_deadlines_across_turns_pause_and_restart() {
     use atman_runtime::flow_store::timer::{Timer, TimerStatus};
     use chrono::{Duration as ClockDuration, Utc};
@@ -40,6 +145,7 @@ async fn durable_timer_observer_retains_deadlines_across_turns_pause_and_restart
     };
     let cancelled = Timer {
         id: Uuid::new_v4(),
+        due_at: timer.due_at + ClockDuration::days(1),
         ..timer.clone()
     };
     client.schedule_timer(cancelled.clone()).await.unwrap();
@@ -74,6 +180,7 @@ async fn durable_timer_observer_retains_deadlines_across_turns_pause_and_restart
         InboxPayload::Timer {
             timer: timer.id,
             due_at: timer.due_at,
+            purpose: atman_runtime::flow_store::inbox::TimerPurpose::Notification,
             content: timer.content.clone(),
         }
     );
@@ -88,25 +195,25 @@ async fn durable_timer_observer_retains_deadlines_across_turns_pause_and_restart
         TimerStatus::Cancelled
     );
 
-    // A later deadline is installed while the observer is already waiting for an earlier one.
-    // Cancelling the earlier registration must update the wait without manufacturing input.
+    // Replace a distant wait with a nearer registration, then cancel the distant one.
+    // Cancellation must not race a short wall-clock deadline on a loaded test host.
     let later = Timer {
         id: Uuid::new_v4(),
         due_at: Utc::now() + ClockDuration::milliseconds(300),
         content: serde_json::json!("after reopening"),
     };
-    let earlier = Timer {
+    let distant = Timer {
         id: Uuid::new_v4(),
-        due_at: Utc::now() + ClockDuration::milliseconds(150),
+        due_at: Utc::now() + ClockDuration::days(1),
         ..later.clone()
     };
-    flow.schedule_timer(earlier.clone(), |_| Ok(()))
+    flow.schedule_timer(distant.clone(), |_| Ok(()))
         .await
         .unwrap();
     flow.schedule_timer(later.clone(), |_| Ok(()))
         .await
         .unwrap();
-    flow.cancel_timer(earlier.id, |_| Ok(())).await.unwrap();
+    flow.cancel_timer(distant.id, |_| Ok(())).await.unwrap();
     let address = flow.address().clone();
     let saved = received.pending[0].clone();
     drop(client);

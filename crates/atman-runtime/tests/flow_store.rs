@@ -78,6 +78,7 @@ fn durable_timers_commit_once_across_pause_recovery_and_cancellation() {
             InboxPayload::Timer {
                 timer: timer.id,
                 due_at: timer.due_at,
+                purpose: atman_runtime::flow_store::inbox::TimerPurpose::Notification,
                 content: timer.content.clone()
             }
         );

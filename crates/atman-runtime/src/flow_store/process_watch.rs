@@ -345,7 +345,7 @@ impl ProcessWatches {
     fn expiry_requests(&self, recipient: &FlowRef, at: DateTime<Utc>) -> Vec<DeliveryRequest> {
         self.records.values().filter(|record| record.status == ProcessWatchStatus::Active).filter_map(|record| {
             let due_at = record.watch.expires_at.filter(|expiry| *expiry <= at)?;
-            Some(request(recipient, record.watch.id, InboxPayload::Timer { timer: record.watch.id, due_at, content: serde_json::json!({"kind": "process_watch_expired", "source": record.watch.source, "pattern": record.watch.pattern}) }))
+            Some(request(recipient, record.watch.id, InboxPayload::Timer { timer: record.watch.id, due_at, purpose: super::inbox::TimerPurpose::WatchExpiry, content: serde_json::json!({"kind": "process_watch_expired", "source": record.watch.source, "pattern": record.watch.pattern}) }))
         }).collect()
     }
 

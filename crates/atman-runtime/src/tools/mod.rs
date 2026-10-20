@@ -40,6 +40,7 @@ pub mod stdlib;
 pub mod task_ops;
 pub mod term;
 pub mod test;
+pub mod timer;
 pub mod tool_output;
 pub mod web;
 
@@ -158,6 +159,9 @@ pub fn register_git_ops(reg: &ToolRegistry) {
 }
 
 pub fn register_watch(reg: &ToolRegistry) {
+    reg.register(Arc::new(timer::TimerTool::Schedule));
+    reg.register(Arc::new(timer::TimerTool::Cancel));
+    reg.register(Arc::new(timer::TimerTool::List));
     reg.register(Arc::new(crate::watch::Watch));
     reg.register(Arc::new(crate::watch::WatcherList));
     reg.register(Arc::new(crate::watch::WatcherUnwatch));
