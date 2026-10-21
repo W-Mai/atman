@@ -20,6 +20,83 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn session_removal_retains_unsettled_sends_until_acceptance_or_definitive_failure() {
+    use atman_runtime::flow_store::{SessionRemoval, outbox::DeliveryFailure};
+    for accepted in [false, true] {
+        let data = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(data.path()).unwrap();
+        let info = session_descriptor();
+        let target = session_descriptor();
+        let mut session = root.create_session(info.clone()).unwrap();
+        let mut other = root.create_session(target.clone()).unwrap();
+        let mut sender = session.create_flow(descriptor(info.id)).unwrap();
+        let mut receiver = other.create_flow(descriptor(target.id)).unwrap();
+        change(&mut sender, FlowTransition::Activated);
+        change(&mut receiver, FlowTransition::Activated);
+        let lease = start(&mut sender);
+        let request = delivery(
+            receiver.state().address(),
+            SenderIdentity::Flow(sender.state().address().clone()),
+            "retained until delivery settles",
+        );
+        sender
+            .queue_send(&lease, request.clone(), None, |_| Ok(()))
+            .unwrap();
+        change(
+            &mut sender,
+            FlowTransition::TurnFinished {
+                lease,
+                outcome: TurnOutcome::Completed,
+            },
+        );
+        change(&mut sender, FlowTransition::CloseRequested);
+        change(&mut sender, FlowTransition::Closed);
+        let id = sender.state().address().instance_id.clone();
+        let journal = sender.dir().join("events.jsonl");
+        let original = std::fs::read(&journal).unwrap();
+        let removal = SessionRemoval {
+            session_id: info.id,
+            expected: session.cursor().clone(),
+        };
+        drop((session, sender));
+        assert!(
+            root.delete_session(&removal)
+                .unwrap_err()
+                .to_string()
+                .contains("pending deliveries")
+        );
+        assert_eq!(std::fs::read(&journal).unwrap(), original);
+        assert!(
+            RuntimeStore::inspect_session_removal(data.path(), info.id)
+                .unwrap()
+                .is_none()
+        );
+        let session = root.open_session(info.id).unwrap();
+        let mut sender = session.open_flow(&id).unwrap();
+        if accepted {
+            let ack = receiver.accept_input(request.clone(), |_| Ok(())).unwrap();
+            sender
+                .confirm_delivery(request.request_id, DeliveryReceipt::from(&ack))
+                .unwrap();
+        } else {
+            change(&mut receiver, FlowTransition::CloseRequested);
+            sender
+                .fail_delivery(
+                    request.request_id,
+                    DeliveryFailure::RecipientClosed {
+                        observed: receiver.cursor().clone(),
+                    },
+                )
+                .unwrap();
+        }
+        drop((session, sender));
+        root.delete_session(&removal).unwrap();
+        assert!(!journal.exists());
+        assert_eq!(receiver.pending_inputs().count(), usize::from(accepted));
+    }
+}
+
+#[test]
 fn definitive_delivery_failure_is_atomic_terminal_and_replayable() {
     use atman_runtime::flow_store::outbox::DeliveryFailure;
     let dir = tempfile::tempdir().unwrap();

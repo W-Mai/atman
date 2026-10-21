@@ -206,6 +206,11 @@ fn validate_closed_session(inspected: &SessionInspection) -> Result<()> {
             "flow {} is not closed; close it before deletion",
             registered.id
         );
+        ensure!(
+            flow.pending_sends == 0,
+            "flow {} has pending deliveries; reconcile them before deletion",
+            registered.id
+        );
     }
     Ok(())
 }

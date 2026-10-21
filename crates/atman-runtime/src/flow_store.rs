@@ -637,6 +637,8 @@ pub struct FlowInspection {
     pub workspace: Option<workspace::WorkspaceRequest>,
     pub goal: Option<crate::memory::goal::GoalRecord>,
     pub pending_inputs: usize,
+    /// Unsettled sends retain their payloads and prevent removal of the owning Session.
+    pub pending_sends: usize,
     pub activity: Option<activity::RecordedActivity>,
 }
 
@@ -802,6 +804,7 @@ fn inspect_registered_flow_with(
         workspace: replay.workspace,
         goal: replay.goals.current().cloned(),
         pending_inputs: inbox.pending_entries().count(),
+        pending_sends: replay.outbox.pending().count(),
         activity: replay.activity,
     })
 }
