@@ -543,7 +543,12 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
     };
     main.sync_live(snapshot.clone()).unwrap();
     floating.sync_live(snapshot.clone()).unwrap();
-    let thinking = before.len() + 1;
+    assert!(
+        main[before.len()..]
+            .iter()
+            .all(|item| !matches!(item, OutputItem::SystemNote { .. }))
+    );
+    let thinking = before.len();
     main.mutate(thinking, super::OutputMutation::Interaction, |item| {
         let OutputItem::Thinking { disclosure, .. } = item else {
             panic!("thinking missing")

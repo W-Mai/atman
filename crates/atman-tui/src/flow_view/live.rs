@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::{FlowDocument, FlowViewModel, OutputMutation};
 use crate::app::ToolDraftPreview;
-use crate::app::{Disclosure, NoteLevel, OutputItem, OutputRevision, ToolCallStatus, ToolCallView};
+use crate::app::{Disclosure, OutputItem, OutputRevision, ToolCallStatus, ToolCallView};
 
 type Key = (Uuid, u64, usize);
 
@@ -91,19 +91,6 @@ impl FlowViewModel {
                 .iter()
                 .filter(|call| Some(&call.lease) == lease.as_ref())
             {
-                let header = (call.id, call.attempt, usize::MAX);
-                let text = format!(
-                    "Generating · {} · {}",
-                    call.model,
-                    call.run.0.to_string().chars().take(8).collect::<String>()
-                );
-                rows.push((
-                    header,
-                    OutputItem::SystemNote {
-                        text,
-                        level: NoteLevel::Info,
-                    },
-                ));
                 for (index, part) in call.parts.iter().enumerate() {
                     let key = (call.id, call.attempt, index);
                     let previous = self.live.previous(&self.document, &key);

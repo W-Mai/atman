@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Streaming conversation** — Live model output renders thinking, text, and tool previews without inserting a diagnostic message before every call.
+
 - **Delivery receipts after deletion** — Session and project removal preserve compact acceptance evidence without message bodies. Lost acknowledgements remain recoverable after deletion, new requests record a durable rejection, and removed Session identities cannot be reused.
 
 - **Peer delivery recovery** — Host-owned delivery resumes persisted peer messages after reopening their sender and reacts to grant, recipient, and scope changes. External callback-authorized sends remain explicitly retried; closing a sender does not discard its outbox.
