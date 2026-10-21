@@ -526,10 +526,6 @@ impl ModalManager {
         }
     }
 
-    pub(super) fn handle_session_switcher_mouse(&mut self, event: &crossterm::event::MouseEvent) {
-        self.session_switcher.handle_mouse(event);
-    }
-
     fn drain_provider_feedback(&mut self, app: &mut crate::app::AppState) {
         if self.onboarding_open
             && !self.provider_manager.open
@@ -1318,13 +1314,12 @@ fn next_policy_action(
 const SESSION_SWITCHER_MIN_HEIGHT: u16 = 10;
 const SESSION_SWITCHER_SHELL_HEIGHT: u16 = 3;
 const SESSION_SWITCHER_IDENTITY_HEIGHT: u16 = 4;
-const SESSION_SWITCHER_FOOTER_HEIGHT: u16 = 2;
 const SESSION_SWITCHER_LIST_INSET_HEIGHT: u16 = 2;
 
 fn session_switcher_height(list_height: u16, max_height: u16) -> u16 {
     let desired = SESSION_SWITCHER_SHELL_HEIGHT
         + SESSION_SWITCHER_IDENTITY_HEIGHT
-        + SESSION_SWITCHER_FOOTER_HEIGHT
+        + crate::session_switcher::FOOTER_HEIGHT
         + SESSION_SWITCHER_LIST_INSET_HEIGHT
         + list_height;
     desired.max(SESSION_SWITCHER_MIN_HEIGHT).min(max_height)
@@ -1469,9 +1464,9 @@ mod tests {
 
     #[test]
     fn session_switcher_height_accounts_for_dynamic_list_height() {
-        assert_eq!(session_switcher_height(3, 40), 14);
-        assert_eq!(session_switcher_height(4, 40), 15);
-        assert_eq!(session_switcher_height(10, 40), 21);
+        assert_eq!(session_switcher_height(3, 40), 18);
+        assert_eq!(session_switcher_height(4, 40), 19);
+        assert_eq!(session_switcher_height(10, 40), 25);
         assert_eq!(session_switcher_height(10, 16), 16);
         assert_eq!(session_switcher_height(3, 8), 8);
     }

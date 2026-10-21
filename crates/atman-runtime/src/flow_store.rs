@@ -645,6 +645,8 @@ pub struct FlowInspection {
     pub workspace: Option<workspace::WorkspaceRequest>,
     pub goal: Option<crate::memory::goal::GoalRecord>,
     pub pending_inputs: usize,
+    /// Shared conversation messages, including inherited context or archived history and excluding isolated calls.
+    pub message_count: usize,
     /// Unsettled sends retain their payloads and prevent removal of the owning Session.
     pub pending_sends: usize,
     pub activity: Option<activity::RecordedActivity>,
@@ -812,6 +814,12 @@ fn inspect_registered_flow_with(
         workspace: replay.workspace,
         goal: replay.goals.current().cloned(),
         pending_inputs: inbox.pending_entries().count(),
+        message_count: replay.history.message_count
+            + publication::message_count(
+                &inbox,
+                &replay.publications,
+                replay.activation.as_ref().map(|(record, _)| record),
+            ),
         pending_sends: replay.outbox.pending().count(),
         activity: replay.activity,
     })

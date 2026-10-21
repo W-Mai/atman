@@ -4117,6 +4117,14 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
     assert_eq!(flow.context_messages(), window);
     assert_eq!(flow.history_messages(), full);
     assert_eq!(flow.published_messages().len(), 3);
+    assert_eq!(
+        RuntimeStore::inspect_session(dir.path(), info.id)
+            .unwrap()
+            .inspect_flow(&description.address.instance_id)
+            .unwrap()
+            .message_count,
+        full.len()
+    );
     change(&mut flow, FlowTransition::CloseRequested);
     assert!(
         flow.checkpoint_context(checkpoint(&window, "too late"))

@@ -22,6 +22,26 @@ pub struct LegacySessionRemoval {
 }
 
 impl RuntimeStore {
+    /// Update original history metadata without recreating a removed session directory.
+    pub fn rename_legacy_session(&self, id: Uuid, title: Option<String>) -> io::Result<()> {
+        let _catalog = self.lock_catalog()?;
+        let data = self.root.parent().unwrap();
+        if Self::inspect_legacy_removal(data, id)?.is_some() {
+            return Err(invalid("original session has been deleted"));
+        }
+        let source = data.join("sessions").join(id.to_string());
+        if !source.symlink_metadata()?.file_type().is_dir()
+            || !source
+                .join("events.jsonl")
+                .symlink_metadata()?
+                .file_type()
+                .is_file()
+        {
+            return Err(invalid("original session history is unavailable"));
+        }
+        crate::session_meta::SessionMeta::set_title(&source, title)
+    }
+
     /// Inspect all original history files without opening an executor or writing metadata.
     pub fn review_legacy_removal(data: &Path, id: Uuid) -> io::Result<LegacySessionRemoval> {
         let source = data.join("sessions").join(id.to_string());
@@ -170,6 +190,10 @@ mod tests {
             })
             .unwrap();
         let request = RuntimeStore::review_legacy_removal(data.path(), id).unwrap();
+        root.rename_legacy_session(id, Some("Reviewed title".into()))
+            .unwrap();
+        assert!(root.delete_legacy_session(&request, true).is_err());
+        fs::remove_file(source.join("meta.json")).unwrap();
         assert!(root.delete_legacy_session(&request, false).is_err());
         assert!(
             RuntimeStore::inspect_legacy_removal(data.path(), id)
@@ -194,6 +218,11 @@ mod tests {
         root.delete_legacy_session(&request, true).unwrap();
         root.delete_legacy_session(&request, true).unwrap();
         assert!(root.delete_legacy_session(&wrong, true).is_err());
+        assert!(!source.exists());
+        assert!(
+            root.rename_legacy_session(id, Some("Late rename".into()))
+                .is_err()
+        );
         assert!(!source.exists());
         assert!(other.join("events.jsonl").exists());
         assert!(native.dir().exists());

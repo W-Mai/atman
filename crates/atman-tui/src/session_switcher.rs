@@ -1,4 +1,4 @@
-use crate::wm::modal::ModalAction;
+use crate::wm::modal::{ModalAction, ModalOverlay};
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -11,6 +11,21 @@ use crate::keys::KeyAction;
 use crate::{SessionPickerRow, TuiControl};
 
 pub const SESSION_SWITCHER_WIDTH: u16 = 104;
+pub(crate) const FOOTER_HEIGHT: u16 = 6;
+
+#[derive(Clone, Debug)]
+pub struct SessionSelection {
+    pub target: crate::project_hub::SessionTarget,
+    pub destination: Option<crate::control::ViewAddress>,
+    pub expected: Option<atman_runtime::event_log::journal::CommitReceipt>,
+    pub unavailable: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RenameChoice {
+    pub selection: SessionSelection,
+    pub title: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SessionScope {
@@ -66,6 +81,11 @@ struct SessionRowHit {
 
 #[derive(Default)]
 pub struct SessionSwitcher {
+    native: bool,
+    project: Option<String>,
+    pending: Option<crate::control::ControlTicket>,
+    saving: Option<RenameChoice>,
+    error: Option<String>,
     pub open: bool,
     pub scope: SessionScope,
     pub all_rows: Vec<SessionPickerRow>,
@@ -82,6 +102,8 @@ pub struct SessionSwitcher {
     hovered: Option<usize>,
     list_rect: Option<Rect>,
     row_hits: Vec<SessionRowHit>,
+    buttons: Vec<(Rect, KeyAction)>,
+    button_hover: Option<usize>,
 }
 
 impl std::fmt::Debug for SessionSwitcher {
@@ -95,7 +117,119 @@ impl std::fmt::Debug for SessionSwitcher {
 }
 
 impl SessionSwitcher {
+    pub fn open_for(&mut self, app: &crate::app::AppState, tx: Option<&crate::ControlSender>) {
+        let scope = SessionScope::Project;
+        if let Some(tx) = tx.filter(|tx| tx.binding().is_some()) {
+            self.open_with(Vec::new(), scope);
+            self.native = true;
+            self.project = app.project_root.clone();
+            self.request(tx, TuiControl::ListSessionChoices);
+        } else {
+            self.open_with(enumerate_session_rows(app, scope), scope);
+        }
+    }
+
+    fn request(&mut self, tx: &crate::ControlSender, command: TuiControl) {
+        self.error = None;
+        match tx.send_tracked(command) {
+            Ok(Some(ticket)) => self.pending = Some(ticket),
+            _ => self.error = Some("Session picker is disconnected".into()),
+        }
+    }
+
+    pub(crate) fn receive(
+        &mut self,
+        ticket: Option<&crate::control::ControlTicket>,
+        result: Result<Vec<SessionPickerRow>, String>,
+    ) {
+        if !self.open
+            || self
+                .pending
+                .as_ref()
+                .is_none_or(|pending| Some(pending) != ticket)
+        {
+            return;
+        }
+        self.pending = None;
+        match result {
+            Ok(rows) => self.set_rows(rows),
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    pub(crate) fn renamed(
+        &mut self,
+        ticket: Option<&crate::control::ControlTicket>,
+        result: Result<SessionSelection, String>,
+    ) {
+        if !self.open
+            || self
+                .pending
+                .as_ref()
+                .is_none_or(|pending| Some(pending) != ticket)
+        {
+            return;
+        }
+        self.pending = None;
+        match result {
+            Ok(selection) => {
+                if let Some(saved) = self.saving.take() {
+                    for row in &mut self.all_rows {
+                        if row
+                            .selection
+                            .as_ref()
+                            .is_some_and(|old| old.target == selection.target)
+                        {
+                            row.name = saved.title.clone();
+                            row.selection = Some(selection.clone());
+                        }
+                    }
+                    self.cancel_rename();
+                    self.rebuild_view();
+                }
+            }
+            Err(error) => {
+                self.saving = None;
+                self.error = Some(error);
+            }
+        }
+    }
+
+    pub(crate) fn name_changed(
+        &mut self,
+        target: &crate::project_hub::SessionTarget,
+        title: Option<&str>,
+    ) {
+        let selected = self.selected_id();
+        let offset = self.viewport_offset;
+        let mut changed = false;
+        for row in &mut self.all_rows {
+            if row
+                .selection
+                .as_ref()
+                .is_some_and(|selection| &selection.target == target)
+                && row.name.as_deref() != title
+            {
+                row.name = title.map(str::to_owned);
+                changed = true;
+            }
+        }
+        if changed {
+            self.rebuild_view();
+            if let Some(index) = self
+                .rows
+                .iter()
+                .position(|row| Some(&row.id) == selected.as_ref())
+            {
+                self.selected = index;
+                self.viewport_offset = offset.min(index);
+            }
+        }
+    }
+
     pub fn open_with(&mut self, rows: Vec<SessionPickerRow>, scope: SessionScope) {
+        self.close();
+        self.native = false;
         self.scope = scope;
         self.all_rows = rows;
         self.filter.clear();
@@ -112,6 +246,10 @@ impl SessionSwitcher {
     }
 
     pub fn close(&mut self) {
+        self.pending = None;
+        self.saving = None;
+        self.error = None;
+        self.cancel_rename();
         self.open = false;
         self.rows.clear();
         self.all_rows.clear();
@@ -154,6 +292,9 @@ impl SessionSwitcher {
         let mut view: Vec<SessionPickerRow> = self
             .all_rows
             .iter()
+            .filter(|r| {
+                !self.native || self.scope == SessionScope::All || r.project == self.project
+            })
             .filter(|r| row_matches_filter(r, &needle))
             .cloned()
             .collect();
@@ -246,6 +387,13 @@ impl SessionSwitcher {
     }
 
     pub fn handle_mouse(&mut self, event: &MouseEvent) {
+        self.button_hover = self
+            .buttons
+            .iter()
+            .position(|(rect, _)| crate::render::rect_contains(*rect, event.column, event.row));
+        if self.rename_mode || self.pending.is_some() {
+            return;
+        }
         let over_list = self
             .list_rect
             .is_some_and(|rect| crate::render::rect_contains(rect, event.column, event.row));
@@ -267,6 +415,29 @@ impl SessionSwitcher {
                 if !over_list {
                     self.hovered = None;
                 }
+            }
+        }
+    }
+
+    pub(crate) fn interact_mouse(
+        &mut self,
+        event: &MouseEvent,
+        app: &mut crate::app::AppState,
+        tx: Option<&crate::ControlSender>,
+    ) {
+        self.handle_mouse(event);
+        if event.kind == MouseEventKind::Up(MouseButton::Left) {
+            let action = self
+                .button_hover
+                .and_then(|index| self.buttons.get(index).map(|(_, action)| action.clone()));
+            if let Some(action) = action {
+                self.handle_key(&action, app, tx);
+            } else if !self.rename_mode
+                && !self.filter_mode
+                && let Some(index) = self.row_at(event.column, event.row)
+            {
+                self.selected = index;
+                self.handle_key(&KeyAction::Submit, app, tx);
             }
         }
     }
@@ -307,7 +478,7 @@ impl SessionSwitcher {
         let row = self.rows.get(self.selected)?;
         self.rename_target = Some(row.id.clone());
         self.rename_buf
-            .replace_with(row.goal.as_deref().unwrap_or_default());
+            .replace_with(row.name.as_deref().unwrap_or_default());
         self.rename_mode = true;
         self.rename_target.as_deref()
     }
@@ -321,10 +492,10 @@ impl SessionSwitcher {
             Some(title.to_string())
         };
         if let Some(row) = self.all_rows.iter_mut().find(|r| r.id == sid) {
-            row.goal = value.clone();
+            row.name = value.clone();
         }
         if let Some(row) = self.rows.iter_mut().find(|r| r.id == sid) {
-            row.goal = value.clone();
+            row.name = value.clone();
         }
         self.rename_mode = false;
         self.rename_buf.clear();
@@ -375,6 +546,9 @@ fn session_row_height(row: &SessionPickerRow) -> u16 {
 }
 
 fn format_local_timestamp(raw: &str) -> String {
+    if raw.is_empty() {
+        return "No activity".into();
+    }
     chrono::DateTime::parse_from_rfc3339(raw)
         .map(|timestamp| {
             timestamp
@@ -418,6 +592,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         app: &crate::app::AppState,
         t: &crate::theme::Theme,
     ) {
+        self.buttons.clear();
         if area.height == 0 {
             return;
         }
@@ -482,53 +657,95 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         if area.height == 0 {
             return;
         }
-        if !self.rename_mode && self.delete_armed.is_none() && !self.filter_mode && area.height >= 2
-        {
-            let footer_rect = Rect {
-                x: area.x,
-                y: area.y + area.height.saturating_sub(2),
-                width: area.width,
-                height: 2,
-            };
-            let key_style = Style::default()
-                .fg(t.accent.into())
-                .add_modifier(Modifier::BOLD);
-            let hint_style = Style::default().fg(t.subtle_fg.into());
-            let footer = Line::from(vec![
-                Span::styled(" s/f", key_style),
-                Span::styled(" sort/filter  ", hint_style),
-                Span::styled("r", key_style),
-                Span::styled(" rename  ", hint_style),
-                Span::styled("a", key_style),
-                Span::styled(" auto  ", hint_style),
-                Span::styled("Enter", key_style),
-                Span::styled(" open  ", hint_style),
-                Span::styled("Tab", key_style),
-                Span::styled(" scope  ", hint_style),
-                Span::styled("Esc", key_style),
-                Span::styled(" close", hint_style),
-            ]);
+        let footer_height = area.height.min(FOOTER_HEIGHT);
+        if footer_height == FOOTER_HEIGHT {
+            let status = self.error.clone().unwrap_or_else(|| {
+                if self.pending.is_some() {
+                    if self.saving.is_some() {
+                        "Saving…".into()
+                    } else {
+                        "Loading sessions…".into()
+                    }
+                } else {
+                    format!(
+                        "{} / {} sessions · {} · {} · Esc close",
+                        if self.rows.is_empty() {
+                            0
+                        } else {
+                            self.selected + 1
+                        },
+                        self.rows.len(),
+                        self.sort_mode.label(),
+                        self.scope.label()
+                    )
+                }
+            });
             f.render_widget(
-                Paragraph::new(footer)
-                    .style(Style::default().bg(t.code_bg.into()))
-                    .block(
-                        Block::default()
-                            .borders(Borders::TOP)
-                            .border_style(Style::default().fg(t.border.into()))
-                            .padding(Padding::horizontal(1)),
+                Paragraph::new(status)
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .style(
+                        Style::default().fg(if self.error.is_some() {
+                            t.error
+                        } else {
+                            t.subtle_fg
+                        }
+                        .into()),
                     ),
-                footer_rect,
+                Rect::new(
+                    area.x + 1,
+                    area.bottom() - 6,
+                    area.width.saturating_sub(2),
+                    2,
+                ),
             );
+            let buttons = if self.rename_mode {
+                vec![
+                    ("Save Ctrl+S", KeyAction::Save),
+                    ("Cancel Esc", KeyAction::Escape),
+                ]
+            } else if self.filter_mode {
+                vec![("Done Enter", KeyAction::Submit)]
+            } else {
+                vec![
+                    ("Open Enter", KeyAction::Submit),
+                    ("Find F", KeyAction::Char('f')),
+                    ("Scope Tab", KeyAction::Tab),
+                    ("Sort S", KeyAction::Char('s')),
+                    ("Rename R", KeyAction::Char('r')),
+                    ("Auto A", KeyAction::Char('a')),
+                    ("Delete D", KeyAction::Char('d')),
+                ]
+            };
+            let width = area.width.saturating_sub(2) / buttons.len() as u16;
+            for (index, (label, action)) in buttons.into_iter().enumerate() {
+                let label = match label {
+                    "Open Enter" if width < 12 => "Open ↵",
+                    "Scope Tab" if width < 11 => "Scope ⇥",
+                    "Rename R" if width < 10 => "Name R",
+                    "Delete D" if width < 10 => "Del D",
+                    _ => label,
+                };
+                let rect = Rect::new(
+                    area.x + 1 + index as u16 * width,
+                    area.bottom() - 3,
+                    width.saturating_sub(1),
+                    3,
+                );
+                let background = if self.button_hover == Some(index) {
+                    t.panel_bg.lerp(t.work_hover_bg, 0.24)
+                } else {
+                    t.modal_bg.into()
+                };
+                f.render_widget(
+                    Paragraph::new(format!("\n{label}"))
+                        .alignment(ratatui::layout::Alignment::Center)
+                        .style(Style::default().fg(t.heading.into()).bg(background)),
+                    rect,
+                );
+                self.buttons.push((rect, action));
+            }
         }
-        let list_height = if !self.rename_mode
-            && self.delete_armed.is_none()
-            && !self.filter_mode
-            && area.height >= 2
-        {
-            area.height.saturating_sub(2)
-        } else {
-            area.height
-        };
+        let list_height = area.height.saturating_sub(footer_height);
         let list_area = Rect {
             x: area.x.saturating_add(1),
             y: area.y.saturating_add(1),
@@ -539,11 +756,15 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         self.row_hits.clear();
         if self.rows.is_empty() {
             self.hovered = None;
-            let hint = match self.scope {
-                SessionScope::Project => {
-                    "no sessions found in this project · press Tab to see all projects"
+            let hint = if self.pending.is_some() {
+                "Loading sessions…"
+            } else {
+                match self.scope {
+                    SessionScope::Project => {
+                        "no sessions found in this project · press Tab to see all projects"
+                    }
+                    SessionScope::All => "no other sessions exist yet",
                 }
-                SessionScope::All => "no other sessions exist yet",
             };
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
@@ -653,13 +874,37 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         app: &mut crate::app::AppState,
         tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
+        if self.pending.is_some() {
+            if matches!(action, KeyAction::Escape) {
+                self.close();
+            }
+            return Some(ModalAction::Consumed);
+        }
         if self.rename_mode {
             match action {
                 KeyAction::Escape => {
                     self.cancel_rename();
                     app.push_note("rename cancelled", crate::app::NoteLevel::Info);
                 }
-                KeyAction::Submit => {
+                KeyAction::Submit | KeyAction::Save => {
+                    if self.native {
+                        if let Some(selection) = self
+                            .all_rows
+                            .iter()
+                            .find(|row| self.rename_target.as_ref() == Some(&row.id))
+                            .and_then(|row| row.selection.clone())
+                            && let Some(tx) = tx
+                        {
+                            let title = self.rename_buf.buf().trim();
+                            let change = RenameChoice {
+                                selection,
+                                title: (!title.is_empty()).then(|| title.to_owned()),
+                            };
+                            self.saving = Some(change.clone());
+                            self.request(tx, TuiControl::RenameSessionChoice(Box::new(change)));
+                        }
+                        return Some(ModalAction::Consumed);
+                    }
                     if let Some((sid, title)) = self.commit_rename() {
                         if sid == app.session_id {
                             app.session_name = title.clone();
@@ -688,6 +933,24 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                     self.rename_buf.handle_key(action);
                 }
                 _ => {}
+            }
+            return Some(ModalAction::Consumed);
+        }
+        if self.native
+            && !self.filter_mode
+            && matches!(action, KeyAction::Char('d' | 'D') | KeyAction::Delete)
+        {
+            if let Some(selection) = self
+                .rows
+                .get(self.selected)
+                .and_then(|row| row.selection.clone())
+            {
+                app.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                    crate::flow_hub::HubRequest::SessionRemoval {
+                        session: selection.target,
+                    },
+                ));
+                self.close();
             }
             return Some(ModalAction::Consumed);
         }
@@ -747,6 +1010,20 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
             return Some(ModalAction::Consumed);
         }
         if let KeyAction::Char('a') | KeyAction::Char('A') = action {
+            if self.native
+                && self
+                    .rows
+                    .get(self.selected)
+                    .and_then(|row| row.selection.as_ref())
+                    .is_some_and(|selection| {
+                        tx.and_then(|tx| tx.binding()).is_some_and(|binding| {
+                            selection.target != binding.flow.session_target()
+                        })
+                    })
+            {
+                self.error = Some("Open this session before requesting an automatic name.".into());
+                return Some(ModalAction::Consumed);
+            }
             if let Some(tx) = tx {
                 let _ = tx.send(TuiControl::AutoNameSession);
                 app.push_note("generating session name…", crate::app::NoteLevel::Info);
@@ -765,12 +1042,33 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
             KeyAction::HistoryDown => self.move_down(),
             KeyAction::Tab => {
                 let new_scope = self.scope.toggle();
-                let rows = enumerate_session_rows(app, new_scope);
                 self.scope = new_scope;
-                self.set_rows(rows);
+                if self.native {
+                    self.rebuild_view();
+                } else {
+                    let rows = enumerate_session_rows(app, new_scope);
+                    self.set_rows(rows);
+                }
             }
             KeyAction::Submit => {
                 if let Some(row) = self.rows.get(self.selected) {
+                    if let Some(selection) = &row.selection {
+                        if let Some(error) = &selection.unavailable {
+                            self.error = Some(error.clone());
+                        } else if let Some(destination) = selection.destination.clone() {
+                            if !row.is_current {
+                                app.open_flow_hub =
+                                    Some(crate::flow_hub::Action::Focus(destination));
+                            }
+                            self.close();
+                        } else {
+                            self.error = Some(
+                                "This session has no default flow. Open FlowHub to choose one."
+                                    .into(),
+                            );
+                        }
+                        return Some(ModalAction::Consumed);
+                    }
                     let sid = row.id.clone();
                     let is_current = row.is_current;
                     self.close();
@@ -832,8 +1130,98 @@ mod tests {
     use super::*;
     use crate::wm::modal::ModalOverlay;
 
+    #[test]
+    fn native_picker_retains_request_ownership_and_saves_before_leaving_editing() {
+        use crate::control::{ViewAddress, ViewBinding};
+        use atman_runtime::flow_store::{FlowInstanceId, FlowRef};
+        let flow = FlowRef {
+            session_id: uuid::Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let binding = ViewBinding {
+            view_id: uuid::Uuid::now_v7(),
+            revision: 1,
+            flow: flow.clone().into(),
+        };
+        let (commands, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _replies) = crate::ControlSender::for_flow(binding, commands);
+        let mut app = crate::app::AppState::new("current".into(), None);
+        let mut picker = SessionSwitcher::default();
+        picker.open_for(&app, Some(&tx));
+        let old = requests.try_recv().unwrap();
+        picker.close();
+        picker.open_for(&app, Some(&tx));
+        let request = requests.try_recv().unwrap();
+        assert!(matches!(request.command, TuiControl::ListSessionChoices));
+        picker.receive(Some(&old.ticket), Ok(vec![row("stale", 1)]));
+        assert!(picker.rows.is_empty());
+        let mut choice = row("target", 4);
+        choice.name = Some("Original".into());
+        choice.selection = Some(SessionSelection {
+            target: crate::project_hub::SessionTarget::Persistent(flow.session_id.0),
+            destination: Some(ViewAddress::Instance(flow.clone())),
+            expected: None,
+            unavailable: None,
+        });
+        let mut other = row("different project", 3);
+        other.project = Some("/another-project".into());
+        picker.receive(Some(&request.ticket), Ok(vec![choice, other]));
+        assert_eq!(picker.rows.len(), 1);
+        picker.handle_key(&KeyAction::Tab, &mut app, Some(&tx));
+        assert_eq!(picker.rows.len(), 2);
+        picker.handle_key(&KeyAction::Tab, &mut app, Some(&tx));
+        picker.handle_key(&KeyAction::Char('f'), &mut app, Some(&tx));
+        picker.handle_key(&KeyAction::Char('d'), &mut app, Some(&tx));
+        assert!(picker.open);
+        assert!(app.open_flow_hub.is_none());
+        assert_eq!(picker.filter.buf(), "d");
+        picker.handle_key(&KeyAction::Backspace, &mut app, Some(&tx));
+        picker.handle_key(&KeyAction::Submit, &mut app, Some(&tx));
+        picker.handle_key(&KeyAction::Char('r'), &mut app, Some(&tx));
+        assert_eq!(picker.rename_buf.buf(), "Original");
+        picker.rename_buf.replace_with("Changed");
+        picker.handle_key(&KeyAction::Save, &mut app, Some(&tx));
+        let saving = requests.try_recv().unwrap();
+        assert!(picker.rename_mode);
+        picker.renamed(Some(&saving.ticket), Err("catalog changed".into()));
+        assert!(picker.rename_mode);
+        assert_eq!(picker.rename_buf.buf(), "Changed");
+        assert_eq!(picker.rows[0].name.as_deref(), Some("Original"));
+        picker.handle_key(&KeyAction::Submit, &mut app, Some(&tx));
+        let retry = requests.try_recv().unwrap();
+        let TuiControl::RenameSessionChoice(change) = retry.command else {
+            panic!("rename expected")
+        };
+        picker.renamed(Some(&saving.ticket), Ok(change.selection.clone()));
+        assert!(picker.rename_mode);
+        picker.renamed(Some(&retry.ticket), Ok(change.selection));
+        assert!(!picker.rename_mode);
+        assert_eq!(picker.rows[0].name.as_deref(), Some("Changed"));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(104, 26)).unwrap();
+        terminal
+            .draw(|frame| picker.render_content(frame, frame.area(), &app, &crate::theme::theme()))
+            .unwrap();
+        let rect = picker.row_hits[0].rect;
+        picker.interact_mouse(
+            &MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: rect.x + 2,
+                row: rect.y + 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &mut app,
+            Some(&tx),
+        );
+        assert!(!picker.open);
+        assert!(
+            matches!(app.open_flow_hub, Some(crate::flow_hub::Action::Focus(ViewAddress::Instance(ref target))) if target == &flow)
+        );
+    }
+
     fn row(id: &str, msgs: usize) -> SessionPickerRow {
         SessionPickerRow {
+            selection: None,
             id: id.into(),
             is_current: false,
             name: None,
@@ -846,6 +1234,7 @@ mod tests {
 
     fn row_with(id: &str, msgs: usize, updated: &str, goal: Option<&str>) -> SessionPickerRow {
         SessionPickerRow {
+            selection: None,
             id: id.into(),
             is_current: false,
             name: None,

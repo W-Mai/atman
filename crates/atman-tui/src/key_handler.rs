@@ -151,6 +151,7 @@ pub(crate) fn enumerate_session_rows(
             .get()
             .ok();
         rows.push(crate::SessionPickerRow {
+            selection: None,
             id: sid,
             is_current,
             name: metadata.title.clone(),

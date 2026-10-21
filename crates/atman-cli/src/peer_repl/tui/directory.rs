@@ -21,7 +21,7 @@ fn order(target: &SessionTarget) -> (String, bool) {
     }
 }
 
-fn legacy_ids(root: &Path) -> io::Result<Vec<SessionTarget>> {
+pub(super) fn legacy_ids(root: &Path) -> io::Result<Vec<SessionTarget>> {
     let entries = match std::fs::read_dir(root.join("sessions")) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(vec![]),

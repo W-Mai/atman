@@ -74,6 +74,7 @@ impl LegacyHistoryRecord {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct HistoryProgress {
     pub records: u64,
+    pub message_count: usize,
     pub last_line: u64,
     pub end_offset: u64,
 }
@@ -91,9 +92,6 @@ impl HistoryProgress {
         for record in records {
             let source = &record.source;
             let bytes = record.bytes()?;
-            if !record.images.is_empty() || !record.outputs.is_empty() {
-                record.project_event()?;
-            }
             let end = source
                 .offset
                 .checked_add(source.bytes)
@@ -112,6 +110,17 @@ impl HistoryProgress {
                 ));
             }
             next.records += 1;
+            if matches!(
+                record.project_event()?,
+                Some(
+                    crate::event::Event::UserMsg { .. }
+                        | crate::event::Event::DeferredFormApplied { .. }
+                        | crate::event::Event::AssistantMsg { .. }
+                        | crate::event::Event::ToolResultMsg { .. }
+                )
+            ) {
+                next.message_count += 1;
+            }
             next.last_line = source.line;
             next.end_offset = end;
         }

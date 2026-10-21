@@ -2,6 +2,7 @@
 
 use super::*;
 mod directory;
+mod session_choices;
 mod workspaces;
 use atman_tui::{
     TuiCommand, TuiControl, TuiHandle, TuiSubmission,
@@ -588,7 +589,7 @@ impl Workspace {
                         Ok(Navigation::Applied) => {}
                         Ok(Navigation::Catalog(page)) => { let _ = replies.send(TuiCommand::FlowCatalog { result: Ok(page) }); }
                         Ok(Navigation::Resolved(flow)) => { let _ = replies.send(TuiCommand::FlowResolved { flow }); }
-                        Ok(Navigation::Projects(command)) => { let _ = replies.send(*command); }
+                        Ok(Navigation::Reply(command)) => { let _ = replies.send(*command); }
                         Ok(Navigation::Focus { flow, placement, handle, service }) => {
                             views.insert(service.binding.view_id, *service);
                             let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: Some(handle) });
@@ -630,7 +631,7 @@ impl Workspace {
                                     scopes.root.clone(), current, project,
                                     config, Some(&scopes.catalog), request,
                                 ).await;
-                                (replies, Ok(Navigation::Projects(Box::new(command))))
+                                (replies, Ok(Navigation::Reply(Box::new(command))))
                             });
                             continue;
                         }
@@ -644,6 +645,23 @@ impl Workspace {
                             navigation.spawn(async move {
                                 let result = scopes.create_tui_session(seed, ticket.request_id, controls, forms).await;
                                 (replies, result)
+                            });
+                            continue;
+                        }
+                        TuiControl::ListSessionChoices => {
+                            let scopes = scopes.clone();
+                            let current = view.binding.flow.clone();
+                            navigation.spawn(async move {
+                                let result = scopes.session_choices(current).await.map_err(|error| format!("{error:#}"));
+                                (replies, Ok(Navigation::Reply(Box::new(TuiCommand::SessionChoices { result }))))
+                            });
+                            continue;
+                        }
+                        TuiControl::RenameSessionChoice(change) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = scopes.rename_session_choice(*change).await.map_err(|error| format!("{error:#}"));
+                                (replies, Ok(Navigation::Reply(Box::new(TuiCommand::SessionChoiceRenamed { result }))))
                             });
                             continue;
                         }
@@ -905,7 +923,7 @@ fn reject_archive_control(command: TuiControl, replies: &ControlReplies) {
 enum Navigation {
     Applied,
     Resolved(ViewAddress),
-    Projects(Box<TuiCommand>),
+    Reply(Box<TuiCommand>),
     Catalog(Box<atman_tui::flow_hub::FlowHubPage>),
     Focus {
         flow: ViewAddress,

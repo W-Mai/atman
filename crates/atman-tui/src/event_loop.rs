@@ -168,6 +168,12 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
 fn refresh_session_name(ui: &mut UiState, handle: &mut TuiHandle) {
     if let Some(rx) = &mut handle.session_name_rx {
         let name = rx.borrow_and_update().clone();
+        if let Some(binding) = handle.control_tx.as_ref().and_then(|tx| tx.binding()) {
+            ui.wm
+                .modals
+                .session_switcher
+                .name_changed(&binding.flow.session_target(), name.as_deref());
+        }
         ui.app.session_name = name.clone();
         handle.session_name = name;
     }
@@ -1968,7 +1974,7 @@ pub(crate) async fn run_frames(
                                 && let Some(hub) = hub.as_mut()
                                 && hub.owns_reply(ticket.as_ref())
                             { hub.failed(message.clone()); }
-                            apply_view_command(&mut app, &mut editor, ticket.as_ref(), command);
+                            apply_view_command(&mut app, &mut editor, ticket.as_ref(), command, handle.control_tx.as_ref());
                         }
                     }
                 }
@@ -1983,8 +1989,15 @@ fn apply_view_command(
     editor: &mut InputEditor,
     ticket: Option<&crate::control::ControlTicket>,
     command: TuiCommand,
+    control_tx: Option<&crate::ControlSender>,
 ) {
     match command {
+        TuiCommand::SessionChoices { result } => {
+            app.wm.modals.session_switcher.receive(ticket, result)
+        }
+        TuiCommand::SessionChoiceRenamed { result } => {
+            app.wm.modals.session_switcher.renamed(ticket, result)
+        }
         // Navigation belongs to the workspace; a late response cannot move a background view.
         TuiCommand::FlowCatalog { .. }
         | TuiCommand::FocusFlow { .. }
@@ -2016,15 +2029,10 @@ fn apply_view_command(
             key_handler::copy_text(&mut app.app, &text, message);
         }
         TuiCommand::OpenSessionSwitcher => {
-            if app.app.items.flow().is_some() {
-                app.app.open_flow_hub = Some(crate::flow_hub::Action::Load(
-                    crate::flow_hub::HubRequest::Sessions { before: None },
-                ));
-            } else {
-                let scope = crate::session_switcher::SessionScope::Project;
-                let rows = key_handler::enumerate_session_rows(app, scope);
-                app.wm.modals.session_switcher.open_with(rows, scope);
-            }
+            app.wm
+                .modals
+                .session_switcher
+                .open_for(&app.app, control_tx);
         }
         TuiCommand::OpenProjectHub => app.app.startup_open_projects = true,
         TuiCommand::OpenProjectStorageScopePicker => {
@@ -2034,8 +2042,14 @@ fn apply_view_command(
                 .open_preference(crate::settings::Preference::ProjectStorage, &mut app.app);
         }
         TuiCommand::SessionNameUpdated(name) => {
+            if let Some(binding) = control_tx.and_then(|tx| tx.binding()) {
+                app.wm
+                    .modals
+                    .session_switcher
+                    .name_changed(&binding.flow.session_target(), Some(&name));
+            }
             app.app.session_name = Some(name);
-            if app.wm.modals.session_switcher.open {
+            if app.wm.modals.session_switcher.open && app.app.items.flow().is_none() {
                 let scope = app.wm.modals.session_switcher.scope;
                 let rows = key_handler::enumerate_session_rows(app, scope);
                 app.wm.modals.session_switcher.set_rows(rows);

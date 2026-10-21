@@ -841,15 +841,7 @@ impl WindowManager {
                 }
             }
             PaletteEntryId::SwitchSession => {
-                if control_tx.is_some_and(|tx| tx.binding().is_some()) {
-                    app.open_flow_hub = Some(crate::flow_hub::Action::Load(
-                        crate::flow_hub::HubRequest::Sessions { before: None },
-                    ));
-                } else {
-                    let scope = crate::session_switcher::SessionScope::Project;
-                    let rows = crate::key_handler::enumerate_session_rows(app, scope);
-                    self.modals.session_switcher.open_with(rows, scope);
-                }
+                self.modals.session_switcher.open_for(app, control_tx);
             }
             PaletteEntryId::NewSession => {
                 if control_tx.is_some_and(|tx| tx.binding().is_some()) {
@@ -1194,7 +1186,9 @@ impl WindowManager {
             return (true, Vec::new());
         }
         if self.top_kind() == Some(ModalKind::SessionSwitcher) {
-            self.modals.handle_session_switcher_mouse(event);
+            self.modals
+                .session_switcher
+                .interact_mouse(event, app, control_tx);
             return (true, Vec::new());
         }
         if let Some(kind @ (ModalKind::ThemePicker | ModalKind::TrustModePicker)) = self.top_kind()

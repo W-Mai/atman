@@ -85,7 +85,7 @@ The main conversation and floating windows use the same Flow view. Selecting a d
 | Entry | Purpose |
 |---|---|
 | `:flows` | Browse the current Session's Flows as a list or graph; focus one with Enter or open a window with Ctrl+O. |
-| `:sessions` | Browse Sessions; All flows / Ctrl+B opens the cross-Session overview. |
+| `:sessions` | Open Switch Session: search, sort, filter by project, rename, and directly enter a conversation. |
 | `:watchers` | Inspect, create, edit, or cancel subscriptions for the focused Flow. |
 | `:atman` | Open the profile's management Session; permissions remain explicit. |
 | `atman --continue <session-id>` | Reopen a recorded Session. Published legacy histories open read-only. |

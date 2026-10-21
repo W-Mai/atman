@@ -72,12 +72,59 @@ async fn default_flow_details_and_selection_do_not_load_execution_or_replace_sta
         host.sessions().is_empty(),
         "reading details cannot open an owner"
     );
+    let choices = scopes
+        .session_choices(addresses[0].clone().into())
+        .await
+        .unwrap();
+    assert_eq!(choices.len(), 1);
+    assert!(choices[0].is_current);
+    assert_eq!(choices[0].message_count, 0);
+    assert!(choices[0].updated_at.is_empty());
+    assert_eq!(
+        choices[0].selection.as_ref().unwrap().destination,
+        Some(addresses[0].clone().into())
+    );
+    assert!(
+        host.sessions().is_empty(),
+        "browsing choices cannot attach execution"
+    );
     let owner = host.open_session(data.path(), id).await.unwrap();
     owner
         .set_title(details.selection.expected.clone(), Some("Renamed".into()))
         .await
         .unwrap();
     assert!(scopes.select_default_flow(details.selection).await.is_err());
+    assert!(
+        scopes
+            .rename_session_choice(atman_tui::session_switcher::RenameChoice {
+                selection: choices[0].selection.clone().unwrap(),
+                title: Some("Stale".into())
+            })
+            .await
+            .is_err()
+    );
+    let choices = scopes
+        .session_choices(addresses[0].clone().into())
+        .await
+        .unwrap();
+    scopes
+        .rename_session_choice(atman_tui::session_switcher::RenameChoice {
+            selection: choices[0].selection.clone().unwrap(),
+            title: Some("Picker title".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        scopes
+            .catalog
+            .overview(id)
+            .await
+            .unwrap()
+            .summary
+            .title
+            .as_deref(),
+        Some("Picker title")
+    );
     assert_eq!(
         owner.snapshot().await.unwrap().catalog.default_flow,
         Some(addresses[0].instance_id.clone())
@@ -189,7 +236,7 @@ async fn default_flow_details_and_selection_do_not_load_execution_or_replace_sta
         read.projection.default_flow,
         Some(addresses[1].instance_id.clone())
     );
-    assert_eq!(read.projection.title.as_deref(), Some("Renamed"));
+    assert_eq!(read.projection.title.as_deref(), Some("Picker title"));
 }
 
 #[tokio::test]

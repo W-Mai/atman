@@ -150,29 +150,7 @@ fn conversation(
     checkpoint: Option<&super::context::CommittedContextCheckpoint>,
 ) -> Vec<Message> {
     let after = checkpoint.map_or(0, |record| record.receipt.sequence);
-    let inputs = inbox
-        .inputs()
-        .iter()
-        .filter(|record| record.receipt.sequence > after)
-        .filter_map(|record| match &record.input.content {
-            InputContent::Context { messages } | InputContent::InvocationInput { messages, .. } => {
-                Some((record.receipt.sequence, messages.as_slice()))
-            }
-            InputContent::WaitingContinuation { .. } => None,
-        });
-    let publications = publications
-        .records
-        .iter()
-        .filter(|record| {
-            record.publication.context_run.is_none() && record.receipt.sequence > after
-        })
-        .map(|record| {
-            (
-                record.receipt.sequence,
-                std::slice::from_ref(&record.publication.message),
-            )
-        });
-    let mut batches: Vec<_> = inputs.chain(publications).collect();
+    let mut batches: Vec<_> = conversation_batches(inbox, publications, after).collect();
     batches.sort_by_key(|(sequence, _)| *sequence);
     let initial = match checkpoint {
         Some(record) => record.checkpoint.messages.as_slice(),
@@ -187,4 +165,45 @@ fn conversation(
                 .flat_map(|(_, messages)| messages.iter().cloned()),
         )
         .collect()
+}
+
+pub(super) fn message_count(
+    inbox: &Inbox,
+    publications: &Publications,
+    activation: Option<&super::launch::Activation>,
+) -> usize {
+    activation.map_or(0, |record| record.input.inherited_context.len())
+        + conversation_batches(inbox, publications, 0)
+            .map(|(_, messages)| messages.len())
+            .sum::<usize>()
+}
+
+fn conversation_batches<'a>(
+    inbox: &'a Inbox,
+    publications: &'a Publications,
+    after: u64,
+) -> impl Iterator<Item = (u64, &'a [Message])> {
+    let inputs = inbox
+        .inputs()
+        .iter()
+        .filter(move |record| record.receipt.sequence > after)
+        .filter_map(|record| match &record.input.content {
+            InputContent::Context { messages } | InputContent::InvocationInput { messages, .. } => {
+                Some((record.receipt.sequence, messages.as_slice()))
+            }
+            InputContent::WaitingContinuation { .. } => None,
+        });
+    let publications = publications
+        .records
+        .iter()
+        .filter(move |record| {
+            record.publication.context_run.is_none() && record.receipt.sequence > after
+        })
+        .map(|record| {
+            (
+                record.receipt.sequence,
+                std::slice::from_ref(&record.publication.message),
+            )
+        });
+    inputs.chain(publications)
 }

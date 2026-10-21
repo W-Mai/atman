@@ -114,6 +114,8 @@ impl TuiNote {
 
 #[non_exhaustive]
 pub enum TuiControl {
+    ListSessionChoices,
+    RenameSessionChoice(Box<session_switcher::RenameChoice>),
     ChangeSessionProject(Box<flow_hub::SessionProjectChange>),
     SelectDefaultFlow(Box<flow_hub::FlowCatalogSelection>),
     ArchiveFlow(Box<flow_hub::FlowArchiveChange>),
@@ -282,6 +284,7 @@ pub struct OrganizationProposal {
 
 #[derive(Debug, Clone)]
 pub struct SessionPickerRow {
+    pub selection: Option<session_switcher::SessionSelection>,
     pub id: String,
     pub is_current: bool,
     pub name: Option<String>,
@@ -293,6 +296,12 @@ pub struct SessionPickerRow {
 
 #[non_exhaustive]
 pub enum TuiCommand {
+    SessionChoices {
+        result: Result<Vec<SessionPickerRow>, String>,
+    },
+    SessionChoiceRenamed {
+        result: Result<session_switcher::SessionSelection, String>,
+    },
     /// Resolve a logical destination before reusing or attaching its view.
     FlowResolved {
         flow: control::ViewAddress,

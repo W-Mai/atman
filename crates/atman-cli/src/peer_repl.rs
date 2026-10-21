@@ -233,21 +233,25 @@ async fn legacy_selection(
         let history = LegacyHistory::inspect(&directory.join("events.jsonl"), id)?;
         // Prefer the default partition when it has records; an empty default
         // must not conceal a source containing only unassigned records.
-        let owner = owner.unwrap_or_else(|| {
-            history
-                .inspection()
-                .records
-                .iter()
-                .map(|record| record.owner.key())
-                .min()
-                .unwrap_or(atman_runtime::event_log::legacy::LegacyFlowKey::Default)
-        });
+        let owner = owner.unwrap_or_else(|| legacy_default_owner(&history));
         Ok((
             history.read_flow(&owner)?,
             atman_runtime::session_meta::SessionMeta::load(&directory),
         ))
     })
     .await?
+}
+
+fn legacy_default_owner(
+    history: &LegacyHistory,
+) -> atman_runtime::event_log::legacy::LegacyFlowKey {
+    history
+        .inspection()
+        .records
+        .iter()
+        .map(|record| record.owner.key())
+        .min()
+        .unwrap_or(atman_runtime::event_log::legacy::LegacyFlowKey::Default)
 }
 
 async fn archived_selection(
