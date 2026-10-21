@@ -13,7 +13,7 @@ use crate::event_log::journal::CommitReceipt;
 use crate::flow_runtime::{FlowSnapshot, FlowWorker, observation::ObservationIssue};
 use crate::flow_store::{
     FlowStore,
-    inbox::{Acceptance, AcceptedEnvelope, DeliveryRequest, InputScopeInvalidation},
+    inbox::{Acceptance, DeliveryRequest, InputScopeInvalidation},
     invalid,
 };
 
@@ -100,16 +100,19 @@ impl ScopeChanges {
 }
 
 impl FlowWorker {
-    pub(in crate::flow_runtime) async fn resolve_pending_scopes(
+    /// Input dependency discovery does not copy queued bodies or invocation configuration.
+    pub(in crate::flow_runtime) async fn pending_input_scopes(
         &self,
-        pending: &[AcceptedEnvelope],
-    ) -> MessageScopes {
-        self.resolve_message_scopes(
-            pending
-                .iter()
-                .filter_map(|input| input.request.scope.clone())
-                .collect(),
-        )
+    ) -> io::Result<Vec<TaskScopeRef>> {
+        self.request(|store| {
+            let mut seen = HashSet::new();
+            Ok(store
+                .pending_inputs()
+                .filter_map(|input| input.request.scope.as_ref())
+                .filter(|scope| seen.insert(*scope))
+                .cloned()
+                .collect())
+        })
         .await
     }
 
@@ -157,7 +160,14 @@ impl FlowWorker {
         &self,
     ) -> io::Result<(Option<FlowSnapshot>, MessageScopes)> {
         let mut view = self.snapshot().await?;
-        let scopes = self.resolve_pending_scopes(&view.pending).await;
+        let scopes = self
+            .resolve_message_scopes(
+                view.pending
+                    .iter()
+                    .filter_map(|input| input.request.scope.clone())
+                    .collect(),
+            )
+            .await;
         let checked = scopes.clone();
         let view = self
             .request_scoped(scopes.dependencies.clone(), move |store, snapshot| {

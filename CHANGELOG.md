@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Input scope checks** — Turn admission and model-boundary dependency checks read scope references without copying the pending message queue or retained command sources.
+
 - **Compaction storage** — Context checkpoint indexes retain only the latest complete replacement window. Historical checkpoint reads and retries load verified journal records without retaining every earlier window in memory.
 
 - **Outbox storage** — Pending and historical sends retain lightweight delivery summaries. Delivery attempts and paged history load complete bodies from verified journal positions without keeping all send payloads in memory.

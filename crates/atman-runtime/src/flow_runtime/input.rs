@@ -116,7 +116,7 @@ impl FlowWorker {
         }
         context.instance_publication = None;
         let inputs = self
-            .resolve_pending_scopes(&self.snapshot().await?.pending)
+            .resolve_message_scopes(self.pending_input_scopes().await?)
             .await;
         let retained = inputs.clone();
         self.request_scoped(inputs.dependencies.clone(), move |store, snapshot| {

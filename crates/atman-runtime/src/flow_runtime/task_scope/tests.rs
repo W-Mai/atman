@@ -132,6 +132,11 @@ async fn scoped_send_cancellation_ends_only_bound_waiters_and_preserves_delivery
             .unwrap();
     }
     // The first receiver ACK is lost; the second request has not reached the receiver.
+    assert!(sender.pending_input_scopes().await.unwrap().is_empty());
+    assert_eq!(
+        sender.pending_message_scopes().await.unwrap(),
+        vec![scope.clone()]
+    );
     let accepted = host.deliver(sends[0].0.clone(), |_| Ok(())).await.unwrap();
     let pause = Uuid::new_v4().into();
     sender
@@ -357,6 +362,10 @@ async fn scoped_scheduler_wakes_on_source_recovery_and_preserves_ordinary_work()
     }
     let host = RuntimeHost::default();
     let target = rehost(&root, &host, target).await;
+    assert_eq!(
+        target.pending_input_scopes().await.unwrap(),
+        vec![scope.clone()]
+    );
     let batches = Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured = batches.clone();
     let recipe = crate::flow_runtime::entry::EntryRecipe {

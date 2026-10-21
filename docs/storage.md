@@ -481,6 +481,8 @@ Paused and interrupted flows retain accepted inputs in FIFO order. A new authent
 
 ## Atomic input admission
 
+Input scope discovery reads distinct pending `TaskScopeRef` values inside the storage owner. Turn admission and model-boundary checks resolve these references without copying queued message bodies, command sources, or previous invocation arguments. The admission transaction still validates selected messages and source state before committing input; outgoing reply dependencies remain separate from incoming input dependencies.
+
 `FlowStore::edit_input` persists edits to pending human input as one `InboxEdited` fact. Requests carry an authenticated sender, stable edit UUID, message UUID, and expected message revision. Replacement preserves invocation configuration and command source; movement exchanges adjacent entries in that user's next-turn lane after validating its observed order. Cancellation retains the original input and acceptance receipt. Peer messages, watcher notifications, and internal controls cannot be rewritten through this interface. An outstanding reservation excludes editing, and consumed or cancelled input rejects new changes.
 
 Each message exposes its latest edit receipt as `InboxEntry.revision`. Delivery retries still compare against the original request and return the original acceptance receipt with current disposition. Exact edit retries return their committed receipt even after input consumption or restart; conflicting reuse fails. Authorization runs for retries as well as new edits. Writers and read-only replay share validation, and stream subscribers receive the committed edit without an extra transcript message. The edit does not consume input, interrupt work, or release an execution pause.

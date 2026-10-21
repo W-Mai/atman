@@ -115,8 +115,9 @@ impl FlowWorker {
         let worker = self.clone();
         let runtime = tokio::runtime::Handle::current();
         let scope = self.scope_admission().await?;
-        let pending = self.snapshot().await?.pending;
-        let inputs = self.resolve_pending_scopes(&pending).await;
+        let inputs = self
+            .resolve_message_scopes(self.pending_input_scopes().await?)
+            .await;
         let mut dependencies = inputs.dependencies.clone();
         dependencies.extend(&scope);
         self.request_scoped(dependencies, move |store, snapshot| {
