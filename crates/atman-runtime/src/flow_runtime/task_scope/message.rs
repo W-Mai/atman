@@ -104,14 +104,21 @@ impl FlowWorker {
     pub(in crate::flow_runtime) async fn pending_input_scopes(
         &self,
     ) -> io::Result<Vec<TaskScopeRef>> {
+        self.pending_input_scope_snapshot()
+            .await
+            .map(|(_, scopes)| scopes)
+    }
+
+    async fn pending_input_scope_snapshot(&self) -> io::Result<(CommitReceipt, Vec<TaskScopeRef>)> {
         self.request(|store| {
             let mut seen = HashSet::new();
-            Ok(store
+            let scopes = store
                 .pending_inputs()
                 .filter_map(|input| input.request.scope.as_ref())
                 .filter(|scope| seen.insert(*scope))
                 .cloned()
-                .collect())
+                .collect();
+            Ok((store.cursor().clone(), scopes))
         })
         .await
     }
@@ -159,25 +166,24 @@ impl FlowWorker {
     pub(in crate::flow_runtime) async fn scheduling_snapshot(
         &self,
     ) -> io::Result<(Option<FlowSnapshot>, MessageScopes)> {
-        let mut view = self.snapshot().await?;
-        let scopes = self
-            .resolve_message_scopes(
-                view.pending
-                    .iter()
-                    .filter_map(|input| input.request.scope.clone())
-                    .collect(),
-            )
-            .await;
+        let (cursor, references) = self.pending_input_scope_snapshot().await?;
+        let scopes = self.resolve_message_scopes(references).await;
         let checked = scopes.clone();
         let view = self
             .request_scoped(scopes.dependencies.clone(), move |store, snapshot| {
-                if store.cursor() != &view.cursor {
+                if store.cursor() != &cursor {
                     return Ok(None);
                 }
                 checked.invalidate(store, snapshot)?;
-                view.pending
-                    .retain(|input| checked.eligible(snapshot, &input.request));
-                view.cursor = store.cursor().clone();
+                let eligible = |input: &crate::flow_store::inbox::InputEnvelope| {
+                    checked.eligible_scope(snapshot, input.request.scope.as_ref())
+                };
+                let view = if store.state().can_start_turn() && store.pending_inputs().any(eligible)
+                {
+                    FlowSnapshot::read_pending(store, eligible)?
+                } else {
+                    FlowSnapshot::state_only(store)
+                };
                 Ok(Some(view))
             })
             .await?;

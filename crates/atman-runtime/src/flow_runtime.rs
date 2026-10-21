@@ -51,6 +51,58 @@ pub struct FlowSnapshot {
     pub last_invocation: Option<entry::AdmittedInvocation>,
 }
 
+impl FlowSnapshot {
+    fn state_only(store: &FlowStore) -> Self {
+        Self {
+            state: store.state().clone(),
+            cursor: store.cursor().clone(),
+            pending: Vec::new(),
+            last_invocation: None,
+        }
+    }
+
+    fn read_pending(
+        store: &mut FlowStore,
+        eligible: impl Fn(&crate::flow_store::inbox::InputEnvelope) -> bool,
+    ) -> io::Result<Self> {
+        let ids: Vec<_> = store
+            .pending_inputs()
+            .filter(|input| eligible(input))
+            .map(|input| input.id)
+            .collect();
+        let pending = ids
+            .into_iter()
+            .map(|id| {
+                store
+                    .inbox_entry(id)?
+                    .map(|entry| entry.envelope)
+                    .ok_or_else(|| invalid("pending input disappeared"))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let command = store.last_command_entry()?;
+        Ok(Self {
+            pending,
+            last_invocation: store.last_invocation_input().map(|record| {
+                let crate::flow_store::inbox::InputContent::InvocationInput {
+                    arguments,
+                    invocation,
+                    ..
+                } = &record.input.content
+                else {
+                    unreachable!("invocation index points to invocation input")
+                };
+                entry::AdmittedInvocation {
+                    command,
+                    lease: record.input.lease.clone(),
+                    arguments: arguments.clone(),
+                    invocation: invocation.clone(),
+                }
+            }),
+            ..Self::state_only(store)
+        })
+    }
+}
+
 /// One committed status projection for host views. Scheduler ownership is observed separately by the session catalog.
 #[derive(Clone, Debug)]
 pub struct InstanceStatus {
@@ -433,41 +485,8 @@ impl FlowWorker {
     }
 
     pub async fn snapshot(&self) -> io::Result<FlowSnapshot> {
-        self.request(|store| {
-            let command = store.last_command_entry()?;
-            let ids: Vec<_> = store.pending_inputs().map(|input| input.id).collect();
-            let pending = ids
-                .into_iter()
-                .map(|id| {
-                    store
-                        .inbox_entry(id)?
-                        .map(|entry| entry.envelope)
-                        .ok_or_else(|| invalid("pending input disappeared"))
-                })
-                .collect::<io::Result<Vec<_>>>()?;
-            Ok(FlowSnapshot {
-                state: store.state().clone(),
-                cursor: store.cursor().clone(),
-                pending,
-                last_invocation: store.last_invocation_input().map(|record| {
-                    let crate::flow_store::inbox::InputContent::InvocationInput {
-                        arguments,
-                        invocation,
-                        ..
-                    } = &record.input.content
-                    else {
-                        unreachable!("invocation index points to invocation input")
-                    };
-                    entry::AdmittedInvocation {
-                        command,
-                        lease: record.input.lease.clone(),
-                        arguments: arguments.clone(),
-                        invocation: invocation.clone(),
-                    }
-                }),
-            })
-        })
-        .await
+        self.request(|store| FlowSnapshot::read_pending(store, |_| true))
+            .await
     }
 
     /// Drain accepted work and return journal ownership. Other handles become unavailable.

@@ -455,6 +455,107 @@ async fn scoped_scheduler_wakes_on_source_recovery_and_preserves_ordinary_work()
 }
 
 #[tokio::test]
+async fn scheduling_checks_execution_and_scope_gates_before_reading_pending_bodies() {
+    use crate::flow_runtime::scheduler::{SchedulingProgress, SchedulingStatus};
+    for paused in [false, true] {
+        let data = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(data.path()).unwrap();
+        let host = RuntimeHost::default();
+        let (source, scope) = owner(&root, FlowInstanceId::now()).await;
+        let (target, _) = owner(&root, FlowInstanceId::now()).await;
+        let pause = Uuid::now_v7().into();
+        if paused {
+            target
+                .transition(
+                    target.state().await.unwrap().revision(),
+                    FlowTransition::ExecutionPaused { key: pause },
+                )
+                .await
+                .unwrap();
+        }
+        let mut input = scoped_input(&target, (!paused).then_some(scope));
+        input.payload = InboxPayload::Interjection {
+            text: "deferred-body".into(),
+        };
+        // This accepted input predates attachment of its source to this host.
+        target
+            .request(move |store| store.accept_input(input, |_| Ok(())))
+            .await
+            .unwrap();
+        let target = rehost(&root, &host, target).await;
+        let path = target
+            .request(|store| Ok(store.dir().join("events.jsonl")))
+            .await
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let mut unavailable = bytes.clone();
+        let position = unavailable
+            .windows(b"deferred-body".len())
+            .position(|part| part == b"deferred-body")
+            .unwrap();
+        unavailable[position] = b'X';
+        std::fs::write(&path, unavailable).unwrap();
+        let (prepared, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = target
+            .schedule(crate::Executor::new(), move |snapshot| {
+                prepared.send(snapshot.pending.clone()).unwrap();
+                Ok(None)
+            })
+            .unwrap();
+        let mut progress = target.scheduling_progress.subscribe();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match progress.borrow_and_update().clone() {
+                    SchedulingProgress::Idle(..) => break,
+                    SchedulingProgress::Failed(error) => {
+                        panic!("ineligible body was read: {error}")
+                    }
+                    _ => {}
+                }
+                progress.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(received.try_recv().is_err());
+        assert_eq!(
+            *scheduler.subscribe_status().borrow(),
+            SchedulingStatus::Running
+        );
+        assert_eq!(std::fs::read(&path).unwrap()[position], b'X');
+
+        // Restoring the disk body alone is not a notification; the original gate change wakes preparation.
+        std::fs::write(&path, bytes).unwrap();
+        if paused {
+            target
+                .transition(
+                    target.state().await.unwrap().revision(),
+                    FlowTransition::ExecutionResumed { key: pause },
+                )
+                .await
+                .unwrap();
+        } else {
+            rehost(&root, &host, source).await;
+        }
+        let pending = tokio::time::timeout(Duration::from_secs(5), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(
+            matches!(&pending[0].request.payload, InboxPayload::Interjection { text } if text == "deferred-body")
+        );
+        assert_eq!(
+            target.snapshot().await.unwrap().pending,
+            pending,
+            "preparation must not consume input"
+        );
+        scheduler.stop().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn scoped_context_pickup_batches_input_and_respects_pause_finish_and_cancellation() {
     use atman_rt::{RunId, TurnId, TurnPhase};
     let data = tempfile::tempdir().unwrap();

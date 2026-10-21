@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Scheduling input reads** — Execution and source-scope eligibility are checked before loading queued message bodies. Paused or unavailable work retains its wakeup subscriptions without reading deferred payloads; eligible input keeps batch preparation.
+
 - **Pending inbox pages** — Main and floating views load pending message bodies in pages with page counts, clickable navigation, and PgUp/PgDn. Queue order checks span all pages, and off-page edits retain their drafts.
 
 - **Inbox storage** — Accepted-input indexes retain routing and consumption metadata instead of message bodies and command sources. Queue edits, input admission, and history recovery read verified journal records; failed body reads leave input unconsumed.
