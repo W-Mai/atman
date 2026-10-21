@@ -269,7 +269,7 @@ impl FlowReplay {
                             return Err(invalid("send reply waiter is no longer pending"));
                         }
                     }
-                    self.outbox.apply(*intent, receipt.clone());
+                    self.outbox.apply(&intent, receipt.clone());
                 }
                 (
                     Some(_),

@@ -714,7 +714,7 @@ fn read_registered_flow(
     };
     let mut replay = replay::FlowReplay::default();
     let mut watch_deliveries = watch_view::WatchDeliveries::default();
-    let journal = Journal::inspect(
+    let (journal, reader) = Journal::inspect_with_reader(
         &dir.join("flows").join(id.to_string()).join("events.jsonl"),
         id.0.0,
         |receipt, facts| {
@@ -736,6 +736,7 @@ fn read_registered_flow(
         project: registration.project.clone(),
         replay,
         journal,
+        reader,
         watch_deliveries,
     })
 }
@@ -744,6 +745,7 @@ struct RecordedFlow {
     project: Option<crate::storage::ProjectContext>,
     replay: replay::FlowReplay,
     journal: crate::event_log::journal::JournalInspection,
+    reader: crate::event_log::journal::JournalReader,
     watch_deliveries: watch_view::WatchDeliveries,
 }
 
@@ -758,6 +760,7 @@ fn inspect_registered_flow_with(
         replay,
         journal,
         watch_deliveries,
+        reader: _,
     } = read_registered_flow(dir, catalog, id, observe)?;
     let (descriptor, state, inbox) = replay.projection.unwrap();
     let target = descriptor.address.clone();

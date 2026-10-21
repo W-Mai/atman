@@ -10,7 +10,7 @@ use crate::event::AtmanUuid;
 use crate::flow_store::FlowRef;
 use crate::flow_store::inbox::DeliveryRequest;
 use crate::flow_store::outbox::{
-    DeliveryReceipt, RecipientRejected, SendAuthorization, SendRecord, SendStatus,
+    DeliveryReceipt, RecipientRejected, SendAuthorization, SendRecord, SendStatus, SendSummary,
 };
 use crate::flow_store::waiter::ReplyWaiter;
 
@@ -99,11 +99,11 @@ impl FlowWorker {
     }
 
     pub async fn send_record(&self, request_id: Uuid) -> io::Result<Option<SendRecord>> {
-        self.request(move |store| Ok(store.send_record(request_id).cloned()))
+        self.request(move |store| store.send_record(request_id))
             .await
     }
 
-    pub async fn pending_sends(&self) -> io::Result<Vec<SendRecord>> {
+    pub async fn pending_sends(&self) -> io::Result<Vec<SendSummary>> {
         self.request(|store| Ok(store.pending_sends().cloned().collect()))
             .await
     }
@@ -135,7 +135,7 @@ pub(super) async fn reconcile(sender: FlowWorker, directory: super::host::WeakRu
         let records = match sender.pending_sends().await {
             Ok(records) => records
                 .into_iter()
-                .filter(|record| record.intent.authorization == SendAuthorization::PeerGrants)
+                .filter(|record| record.authorization == SendAuthorization::PeerGrants)
                 .collect::<Vec<_>>(),
             Err(error) => {
                 issues.push(DeliveryIssue {
@@ -149,14 +149,14 @@ pub(super) async fn reconcile(sender: FlowWorker, directory: super::host::WeakRu
             .resolve_message_scopes(
                 records
                     .iter()
-                    .filter_map(|record| record.intent.request.scope.clone())
+                    .filter_map(|record| record.scope.clone())
                     .collect(),
             )
             .await;
         let mut waits = Vec::new();
         let mut targets = std::collections::HashSet::new();
         for record in records {
-            let target = record.intent.request.recipient.clone();
+            let target = record.recipient.clone();
             // Subscribe before receiver admission, so activation, closure, and ACK writes cannot be missed.
             if targets.insert(target.clone()) {
                 if let Ok(recipient) = host.flow(&target).await {
@@ -171,7 +171,18 @@ pub(super) async fn reconcile(sender: FlowWorker, directory: super::host::WeakRu
             }
             let authorizer = host.clone();
             let source = sender.address().clone();
-            let request_id = record.intent.request.request_id;
+            let request_id = record.request_id;
+            let record = match sender.send_record(request_id).await {
+                Ok(Some(record)) => record,
+                Ok(None) => continue,
+                Err(error) => {
+                    issues.push(DeliveryIssue {
+                        request_id: Some(request_id),
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+            };
             let result = attempt(&host, &sender, record, move |request| {
                 let session = authorizer.session(source.session_id.0)?;
                 if authorizer.allows_access(&session, &source, &request.recipient, FlowAction::Send)

@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::inbox::{Acceptance, DeliveryRequest, SenderIdentity};
 use super::waiter::{ReplyStatus, ReplyWaiter};
-use super::{FlowFact, FlowStore, invalid};
+use super::{FlowFact, FlowRef, FlowStore, invalid};
 use crate::event::AtmanUuid;
 use crate::event_log::journal::CommitReceipt;
 
@@ -83,30 +83,89 @@ pub struct SendRecord {
     pub status: SendStatus,
 }
 
+/// Body-free delivery state. The complete intent remains in its queued journal batch.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SendSummary {
+    pub request_id: Uuid,
+    pub recipient: FlowRef,
+    pub authorization: SendAuthorization,
+    pub scope: Option<super::task_scope::TaskScopeRef>,
+    pub reply: Option<Uuid>,
+    pub queued: CommitReceipt,
+    pub status: SendStatus,
+}
+
+impl SendSummary {
+    fn new(intent: &SendIntent, queued: CommitReceipt) -> Self {
+        Self {
+            request_id: intent.request.request_id,
+            recipient: intent.request.recipient.clone(),
+            authorization: intent.authorization,
+            scope: intent.request.scope.clone(),
+            reply: intent.reply.as_ref().map(|waiter| waiter.correlation),
+            queued,
+            status: SendStatus::PendingDelivery,
+        }
+    }
+
+    pub(super) fn read(
+        &self,
+        batch: crate::event_log::journal::CommittedBatch<FlowFact>,
+    ) -> io::Result<SendRecord> {
+        if batch.receipt != self.queued {
+            return Err(invalid("send body does not belong to its queued receipt"));
+        }
+        let intent = batch
+            .facts
+            .into_iter()
+            .find_map(|fact| match fact {
+                FlowFact::SendQueued(intent) if intent.request.request_id == self.request_id => {
+                    Some(*intent)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| invalid("send intent is missing from its queued batch"))?;
+        Ok(SendRecord {
+            intent,
+            queued: self.queued.clone(),
+            status: self.status.clone(),
+        })
+    }
+}
+
+impl From<&SendRecord> for SendSummary {
+    fn from(record: &SendRecord) -> Self {
+        Self {
+            status: record.status.clone(),
+            ..Self::new(&record.intent, record.queued.clone())
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Outbox {
-    records: Vec<SendRecord>,
+    records: Vec<SendSummary>,
     indices: HashMap<Uuid, usize>,
     replies: HashMap<Uuid, usize>,
     pending: BTreeSet<usize>,
 }
 
 impl Outbox {
-    pub fn records(&self) -> &[SendRecord] {
+    pub fn records(&self) -> &[SendSummary] {
         &self.records
     }
 
-    pub fn pending(&self) -> impl Iterator<Item = &SendRecord> {
+    pub fn pending(&self) -> impl Iterator<Item = &SendSummary> {
         self.pending.iter().map(|&index| &self.records[index])
     }
 
-    pub fn get(&self, request_id: Uuid) -> Option<&SendRecord> {
+    pub fn get(&self, request_id: Uuid) -> Option<&SendSummary> {
         self.indices
             .get(&request_id)
             .map(|&index| &self.records[index])
     }
 
-    pub fn by_reply(&self, correlation: Uuid) -> Option<&SendRecord> {
+    pub fn by_reply(&self, correlation: Uuid) -> Option<&SendSummary> {
         self.replies
             .get(&correlation)
             .map(|&index| &self.records[index])
@@ -137,20 +196,14 @@ impl Outbox {
         Ok(())
     }
 
-    pub fn apply(&mut self, intent: SendIntent, receipt: CommitReceipt) -> SendRecord {
-        let record = SendRecord {
-            intent,
-            queued: receipt,
-            status: SendStatus::PendingDelivery,
-        };
+    pub fn apply(&mut self, intent: &SendIntent, receipt: CommitReceipt) {
+        let record = SendSummary::new(intent, receipt);
         self.pending.insert(self.records.len());
-        self.indices
-            .insert(record.intent.request.request_id, self.records.len());
-        if let Some(waiter) = &record.intent.reply {
-            self.replies.insert(waiter.correlation, self.records.len());
+        self.indices.insert(record.request_id, self.records.len());
+        if let Some(correlation) = record.reply {
+            self.replies.insert(correlation, self.records.len());
         }
-        self.records.push(record.clone());
-        record
+        self.records.push(record);
     }
 
     pub fn validate_confirmation(
@@ -161,7 +214,7 @@ impl Outbox {
         let record = self
             .get(request_id)
             .ok_or_else(|| invalid("send intent does not exist"))?;
-        if record.intent.request.recipient.instance_id.0.0 != delivery.receipt.journal_id
+        if record.recipient.instance_id.0.0 != delivery.receipt.journal_id
             || delivery.receipt.sequence == 0
             || delivery.message_id.is_nil()
         {
@@ -180,7 +233,7 @@ impl Outbox {
         request_id: Uuid,
         delivery: DeliveryReceipt,
         receipt: CommitReceipt,
-    ) -> SendRecord {
+    ) -> SendStatus {
         let index = self.indices[&request_id];
         self.pending.remove(&index);
         let record = &mut self.records[index];
@@ -188,7 +241,7 @@ impl Outbox {
             delivery,
             by: receipt,
         };
-        record.clone()
+        record.status.clone()
     }
 
     pub fn validate_failure(&self, request_id: Uuid, failure: &DeliveryFailure) -> io::Result<()> {
@@ -208,7 +261,7 @@ impl Outbox {
         failure: DeliveryFailure,
         receipt: CommitReceipt,
         inbox: &mut super::inbox::Inbox,
-    ) -> SendRecord {
+    ) -> SendStatus {
         let index = self.indices[&request_id];
         self.pending.remove(&index);
         let record = &mut self.records[index];
@@ -216,28 +269,24 @@ impl Outbox {
             failure,
             by: receipt.clone(),
         };
-        if let Some(reply) = &record.intent.reply
+        if let Some(correlation) = record.reply
             && inbox
                 .waiters
-                .get(reply.correlation)
+                .get(correlation)
                 .is_some_and(|waiter| waiter.status == ReplyStatus::Pending)
         {
             inbox.invalidate();
-            inbox.waiters.cancel(reply.correlation, receipt);
+            inbox.waiters.cancel(correlation, receipt);
         }
-        record.clone()
+        record.status.clone()
     }
 }
 
 impl DeliveryFailure {
-    fn validate_recipient(&self, record: &SendRecord) -> io::Result<()> {
+    fn validate_recipient(&self, record: &SendSummary) -> io::Result<()> {
         let (observed, journal_id) = match self {
-            Self::RecipientClosed { observed } => {
-                (observed, record.intent.request.recipient.instance_id.0.0)
-            }
-            Self::RecipientDeleted { observed } => {
-                (observed, record.intent.request.recipient.session_id.0)
-            }
+            Self::RecipientClosed { observed } => (observed, record.recipient.instance_id.0.0),
+            Self::RecipientDeleted { observed } => (observed, record.recipient.session_id.0),
         };
         if observed.journal_id != journal_id || observed.sequence == 0 {
             return Err(invalid(
@@ -262,14 +311,19 @@ impl FlowStore {
         {
             // Concurrent attempts may observe later commits of the same permanently closed receiver.
             failure.validate_recipient(record)?;
-            return Ok(record.clone());
+            return self
+                .send_record(request_id)?
+                .ok_or_else(|| invalid("send intent is missing"));
         }
         self.outbox.validate_failure(request_id, &failure)?;
+        let mut record = self
+            .send_record(request_id)?
+            .ok_or_else(|| invalid("send intent is missing"))?;
         let receipt = self.journal.commit(&[FlowFact::DeliveryFailed {
             request_id,
             failure: failure.clone(),
         }])?;
-        let record = self
+        record.status = self
             .outbox
             .fail(request_id, failure, receipt.clone(), &mut self.inbox);
         self.cursor = receipt;
@@ -293,18 +347,25 @@ impl FlowStore {
     ) -> Option<&super::task_scope::TaskScopeRef> {
         self.outbox
             .by_reply(correlation)
-            .and_then(|record| record.intent.request.scope.as_ref())
+            .and_then(|record| record.scope.as_ref())
     }
 
-    pub fn send_record(&self, request_id: Uuid) -> Option<&SendRecord> {
-        self.outbox.get(request_id)
+    /// Load one complete intent from its committed batch, retaining the current delivery outcome.
+    pub fn send_record(&mut self, request_id: Uuid) -> io::Result<Option<SendRecord>> {
+        let Some(summary) = self.outbox.get(request_id) else {
+            return Ok(None);
+        };
+        summary
+            .read(self.journal.inner.read_batch(&summary.queued)?)
+            .map(Some)
     }
 
-    pub fn sends(&self) -> &[SendRecord] {
+    /// Lightweight delivery history; use send_record to load an intent body.
+    pub fn sends(&self) -> &[SendSummary] {
         self.outbox.records()
     }
 
-    pub fn pending_sends(&self) -> impl Iterator<Item = &SendRecord> {
+    pub fn pending_sends(&self) -> impl Iterator<Item = &SendSummary> {
         self.outbox.pending()
     }
 
@@ -371,13 +432,17 @@ impl FlowStore {
                 .waiters
                 .register((**waiter).clone(), receipt.clone());
         }
-        let record = self.outbox.apply(intent, receipt.clone());
-        self.cursor = receipt;
-        Ok(record)
+        self.outbox.apply(&intent, receipt.clone());
+        self.cursor = receipt.clone();
+        Ok(SendRecord {
+            intent,
+            queued: receipt,
+            status: SendStatus::PendingDelivery,
+        })
     }
 
     pub(crate) fn send_retry(
-        &self,
+        &mut self,
         request: &DeliveryRequest,
         reply: Option<&ReplyWaiter>,
         authorization: SendAuthorization,
@@ -385,14 +450,14 @@ impl FlowStore {
         if request.sender != SenderIdentity::Flow(self.descriptor.address.clone()) {
             return Err(invalid("send intent does not belong to this flow"));
         }
-        if let Some(previous) = self.outbox.get(request.request_id) {
+        if let Some(previous) = self.send_record(request.request_id)? {
             if previous.intent.request != *request
                 || previous.intent.reply.as_ref() != reply
                 || previous.intent.authorization != authorization
             {
                 return Err(invalid("send request ID was reused with different data"));
             }
-            return Ok(Some(previous.clone()));
+            return Ok(Some(previous));
         }
         Ok(None)
     }
@@ -411,7 +476,9 @@ impl FlowStore {
             } = &record.status
             {
                 if existing == &delivery {
-                    return Ok(record.clone());
+                    return self
+                        .send_record(request_id)?
+                        .ok_or_else(|| invalid("send intent is missing"));
                 }
                 return Err(invalid(
                     "delivery confirmation conflicts with the original receipt",
@@ -419,11 +486,14 @@ impl FlowStore {
             }
         }
         self.outbox.validate_confirmation(request_id, &delivery)?;
+        let mut record = self
+            .send_record(request_id)?
+            .ok_or_else(|| invalid("send intent is missing"))?;
         let receipt = self.journal.commit(&[FlowFact::DeliveryConfirmed {
             request_id,
             delivery: delivery.clone(),
         }])?;
-        let record = self.outbox.confirm(request_id, delivery, receipt.clone());
+        record.status = self.outbox.confirm(request_id, delivery, receipt.clone());
         self.cursor = receipt;
         Ok(record)
     }

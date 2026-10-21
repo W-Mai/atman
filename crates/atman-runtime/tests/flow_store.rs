@@ -7,7 +7,7 @@ use atman_runtime::event::AtmanUuid;
 use atman_runtime::flow_store::inbox::{
     DeliveryMode, DeliveryRequest, InboxDisposition, InboxPayload, InputContent, SenderIdentity,
 };
-use atman_runtime::flow_store::outbox::{DeliveryReceipt, SendStatus};
+use atman_runtime::flow_store::outbox::{DeliveryReceipt, SendStatus, SendSummary};
 use atman_runtime::flow_store::waiter::{ReplyStatus, ReplyWaiter};
 use atman_runtime::flow_store::{
     EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowStore, FlowTransition,
@@ -286,7 +286,11 @@ fn definitive_delivery_failure_is_atomic_terminal_and_replayable() {
     let id = sender.state().address().instance_id.clone();
     drop(sender);
     let mut restored = session.open_flow(&id).unwrap();
-    assert_eq!(restored.sends(), std::slice::from_ref(&failed));
+    assert_eq!(restored.sends(), &[SendSummary::from(&failed)]);
+    assert_eq!(
+        restored.send_record(request.request_id).unwrap(),
+        Some(failed.clone())
+    );
     assert_eq!(
         restored.reply_waiters()[0].status,
         ReplyStatus::Cancelled { by: by.clone() }
@@ -6294,6 +6298,80 @@ fn independent_waiters_use_one_fifo_without_releasing_each_others_reply() {
 }
 
 #[test]
+fn outbox_keeps_body_free_state_and_loads_full_intents_from_the_committed_journal() {
+    use atman_runtime::flow_store::inbox_view::{InboxHistoryItem, InboxSide};
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let lease = start(&mut flow);
+    let mut records = Vec::new();
+    for label in ["first", "second", "third"] {
+        let request = delivery(
+            &description.address,
+            SenderIdentity::Flow(description.address.clone()),
+            &format!("{label}:{}", "body data ".repeat(8192)),
+        );
+        records.push(flow.queue_send(&lease, request, None, |_| Ok(())).unwrap());
+    }
+    change(
+        &mut flow,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    );
+    let cursor = flow.cursor().clone();
+    let expected: Vec<_> = records.iter().map(SendSummary::from).collect();
+    assert_eq!(flow.sends(), expected);
+    drop(flow);
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(flow.pending_sends().cloned().collect::<Vec<_>>(), expected);
+    for record in &records {
+        assert_eq!(
+            flow.send_record(record.intent.request.request_id)
+                .unwrap()
+                .as_ref(),
+            Some(record)
+        );
+    }
+    let inspection = RuntimeStore::inspect_session(data.path(), info.id).unwrap();
+    let first = inspection
+        .inspect_inbox(&description.address.instance_id, InboxSide::Sent, None, 1)
+        .unwrap();
+    assert_eq!(first.total, 3);
+    assert!(matches!(&first.items[0], InboxHistoryItem::Sent(record) if **record == records[2]));
+    let next = inspection
+        .inspect_inbox(
+            &description.address.instance_id,
+            InboxSide::Sent,
+            first.next.as_ref(),
+            1,
+        )
+        .unwrap();
+    assert!(matches!(&next.items[0], InboxHistoryItem::Sent(record) if **record == records[1]));
+    assert_eq!(flow.cursor(), &cursor);
+
+    // Metadata remains inspectable, but a missing disk body must never be served from a cache.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(flow.dir().join("events.jsonl"))
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+    assert_eq!(flow.sends(), expected);
+    assert!(
+        flow.send_record(records[0].intent.request.request_id)
+            .is_err()
+    );
+    assert_eq!(flow.cursor(), &cursor);
+    assert_eq!(flow.pending_sends().count(), records.len());
+}
+
+#[test]
 fn cross_session_delivery_reconciles_lost_ack_after_restart_and_closure() {
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();
@@ -6321,7 +6399,14 @@ fn cross_session_delivery_reconciles_lost_ack_after_restart_and_closure() {
     drop((a, b));
     let mut a = a_session.open_flow(&a_id).unwrap();
     let mut b = b_session.open_flow(&b_id).unwrap();
-    assert_eq!(a.pending_sends().next().unwrap(), &queued);
+    assert_eq!(
+        a.pending_sends().next().unwrap(),
+        &SendSummary::from(&queued)
+    );
+    assert_eq!(
+        a.send_record(request.request_id).unwrap(),
+        Some(queued.clone())
+    );
     assert_eq!(
         a.queue_send(&lease, request.clone(), None, |_| panic!("send retry"))
             .unwrap(),
@@ -6357,7 +6442,11 @@ fn cross_session_delivery_reconciles_lost_ack_after_restart_and_closure() {
     assert!(a.confirm_delivery(request.request_id, conflicting).is_err());
     drop(a);
     let mut a = a_session.open_flow(&a_id).unwrap();
-    assert_eq!(a.sends(), std::slice::from_ref(&confirmed));
+    assert_eq!(a.sends(), &[SendSummary::from(&confirmed)]);
+    assert_eq!(
+        a.send_record(request.request_id).unwrap(),
+        Some(confirmed.clone())
+    );
     assert_eq!(
         a.queue_send(&lease, request.clone(), None, |_| panic!("closed retry"))
             .unwrap(),

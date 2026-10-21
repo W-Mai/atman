@@ -71,6 +71,78 @@ pub struct JournalInspection {
     pub trailing_bytes: u64,
 }
 
+/// A validated historical prefix with an independent read handle and compact batch positions.
+pub struct JournalReader {
+    file: File,
+    id: Uuid,
+    batches: Vec<BatchPosition>,
+}
+
+impl JournalReader {
+    /// Read one inspected batch without rescanning history or observing later appends.
+    pub fn read_batch<T: DeserializeOwned>(
+        &mut self,
+        receipt: &CommitReceipt,
+    ) -> io::Result<CommittedBatch<T>> {
+        let index = receipt_index(self.id, &self.batches, receipt)?;
+        read_batch(&mut self.file, self.id, index, &self.batches[index])
+    }
+}
+
+fn receipt_index(
+    id: Uuid,
+    batches: &[BatchPosition],
+    receipt: &CommitReceipt,
+) -> io::Result<usize> {
+    let index = usize::try_from(receipt.sequence)
+        .ok()
+        .and_then(|sequence| sequence.checked_sub(1))
+        .filter(|&index| {
+            receipt.journal_id == id
+                && batches
+                    .get(index)
+                    .is_some_and(|batch| batch.digest == receipt.digest)
+        });
+    index.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "journal cursor is not a committed position in this history",
+        )
+    })
+}
+
+fn read_batch<T: DeserializeOwned>(
+    file: &mut File,
+    id: Uuid,
+    index: usize,
+    position: &BatchPosition,
+) -> io::Result<CommittedBatch<T>> {
+    file.seek(SeekFrom::Start(position.offset))?;
+    let mut bytes = vec![0; position.length];
+    file.read_exact(&mut bytes)?;
+    let record: Record = serde_json::from_slice(&bytes).map_err(invalid)?;
+    let sequence = index as u64 + 1;
+    if !bytes.ends_with(b"\n")
+        || record.sequence != sequence
+        || record.digest != position.digest
+        || record.digest != batch_digest(sequence, &record.previous, &record.payload)
+    {
+        return Err(invalid("journal page integrity check failed"));
+    }
+    let facts: Vec<T> = serde_json::from_str(&record.payload).map_err(invalid)?;
+    if facts.is_empty() {
+        return Err(invalid("empty journal batch"));
+    }
+    Ok(CommittedBatch {
+        receipt: CommitReceipt {
+            journal_id: id,
+            sequence,
+            digest: record.digest,
+        },
+        facts,
+    })
+}
+
 struct ScannedJournal {
     sequence: u64,
     digest: String,
@@ -248,11 +320,20 @@ impl Journal {
     pub fn inspect<T: DeserializeOwned>(
         path: &Path,
         expected_id: Uuid,
-        mut apply: impl FnMut(CommitReceipt, Vec<T>) -> io::Result<()>,
+        apply: impl FnMut(CommitReceipt, Vec<T>) -> io::Result<()>,
     ) -> io::Result<JournalInspection> {
+        Self::inspect_with_reader(path, expected_id, apply).map(|(inspection, _)| inspection)
+    }
+
+    /// Inspect once and retain that exact file's validated batch index for later body reads.
+    pub fn inspect_with_reader<T: DeserializeOwned>(
+        path: &Path,
+        expected_id: Uuid,
+        mut apply: impl FnMut(CommitReceipt, Vec<T>) -> io::Result<()>,
+    ) -> io::Result<(JournalInspection, JournalReader)> {
         let mut file = File::open(path)?;
         let scanned = scan(&mut file, expected_id, &mut apply)?;
-        Ok(JournalInspection {
+        let inspection = JournalInspection {
             cursor: (scanned.sequence != 0).then_some(CommitReceipt {
                 journal_id: expected_id,
                 sequence: scanned.sequence,
@@ -260,11 +341,36 @@ impl Journal {
             }),
             valid_bytes: scanned.offset,
             trailing_bytes: scanned.tail.map_or(0, |tail| tail.len() as u64),
-        })
+        };
+        Ok((
+            inspection,
+            JournalReader {
+                file,
+                id: expected_id,
+                batches: scanned.batches,
+            },
+        ))
     }
 
     pub fn sequence(&self) -> u64 {
         self.sequence
+    }
+
+    /// Read a committed body through the writer's verified index. Failed reads require reopening.
+    pub fn read_batch<T: DeserializeOwned>(
+        &mut self,
+        receipt: &CommitReceipt,
+    ) -> io::Result<CommittedBatch<T>> {
+        if self.poisoned {
+            return Err(io::Error::other(
+                "journal requires reopening after an I/O failure",
+            ));
+        }
+        let index = receipt_index(self.id, &self.batches, receipt)?;
+        self.poisoned = true;
+        let batch = read_batch(&mut self.file, self.id, index, &self.batches[index])?;
+        self.poisoned = false;
+        Ok(batch)
     }
 
     /// Read committed batches without rescanning preceding history. The cursor must match this journal's recorded identity, sequence, and digest; reads never consume input or advance the writer's commit position.
@@ -280,53 +386,16 @@ impl Journal {
         }
         let start = match after {
             None => 0,
-            Some(cursor) => {
-                let position = usize::try_from(cursor.sequence)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-                let known = position
-                    .checked_sub(1)
-                    .and_then(|index| self.batches.get(index));
-                if cursor.journal_id != self.id
-                    || known.is_none_or(|batch| batch.digest != cursor.digest)
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "journal cursor is not a committed position in this history",
-                    ));
-                }
-                position
-            }
+            Some(cursor) => receipt_index(self.id, &self.batches, cursor)? + 1,
         };
         let end = start.saturating_add(limit.get()).min(self.batches.len());
         let mut batches = Vec::with_capacity(end - start);
         for index in start..end {
             let position = &self.batches[index];
             self.poisoned = true;
-            self.file.seek(SeekFrom::Start(position.offset))?;
-            let mut bytes = vec![0; position.length];
-            self.file.read_exact(&mut bytes)?;
-            let record: Record = serde_json::from_slice(&bytes).map_err(invalid)?;
-            let sequence = index as u64 + 1;
-            if !bytes.ends_with(b"\n")
-                || record.sequence != sequence
-                || record.digest != position.digest
-                || record.digest != batch_digest(sequence, &record.previous, &record.payload)
-            {
-                return Err(invalid("journal page integrity check failed"));
-            }
+            let batch = read_batch(&mut self.file, self.id, index, position)?;
             self.poisoned = false;
-            let facts: Vec<T> = serde_json::from_str(&record.payload).map_err(invalid)?;
-            if facts.is_empty() {
-                return Err(invalid("empty journal batch"));
-            }
-            batches.push(CommittedBatch {
-                receipt: CommitReceipt {
-                    journal_id: self.id,
-                    sequence,
-                    digest: record.digest,
-                },
-                facts,
-            });
+            batches.push(batch);
         }
         Ok(JournalPage {
             next: batches
@@ -459,6 +528,73 @@ fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_readers_keep_their_verified_prefix_and_recheck_body_integrity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let id = Uuid::new_v4();
+        let mut writer = Journal::create(&path, id).unwrap();
+        let first = writer.commit(&["first", "same batch"]).unwrap();
+        let (inspection, mut reader) =
+            Journal::inspect_with_reader::<String>(&path, id, |_, _| Ok(())).unwrap();
+        assert_eq!(inspection.cursor, Some(first.clone()));
+        let second = writer.commit(&["second"]).unwrap();
+        assert_eq!(
+            reader.read_batch::<String>(&second).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            reader.read_batch::<String>(&first).unwrap().facts,
+            ["first", "same batch"]
+        );
+        assert_eq!(
+            writer.read_batch::<String>(&first).unwrap().facts,
+            ["first", "same batch"]
+        );
+        let third = writer.commit(&["third"]).unwrap();
+        assert_eq!(
+            writer.read_batch::<String>(&third).unwrap().facts,
+            ["third"]
+        );
+        for receipt in [
+            CommitReceipt {
+                journal_id: Uuid::new_v4(),
+                ..first.clone()
+            },
+            CommitReceipt {
+                sequence: 0,
+                ..first.clone()
+            },
+            CommitReceipt {
+                digest: "not the inspected batch".into(),
+                ..first.clone()
+            },
+        ] {
+            assert_eq!(
+                reader.read_batch::<String>(&receipt).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                writer.read_batch::<String>(&receipt).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert!(!writer.poisoned);
+        }
+        // A successful index lookup never substitutes for checking the current bytes.
+        let position = &writer.batches[0];
+        let mut editor = OpenOptions::new().write(true).open(&path).unwrap();
+        editor.seek(SeekFrom::Start(position.offset)).unwrap();
+        editor.write_all(b"!").unwrap();
+        assert!(reader.read_batch::<String>(&first).is_err());
+        assert!(writer.read_batch::<String>(&first).is_err());
+        assert!(writer.poisoned);
+        assert!(
+            writer
+                .commit(&["cannot acknowledge damaged history"])
+                .is_err()
+        );
+    }
 
     #[cfg(unix)]
     #[test]

@@ -64,7 +64,7 @@ impl SessionInspection {
         if before.is_some_and(|cursor| cursor.owner != owner || cursor.side != side) {
             return Err(invalid("inbox history cursor belongs to another view"));
         }
-        let recorded =
+        let mut recorded =
             super::read_registered_flow(&self.dir, &self.projection, instance, |_, _| Ok(()))?;
         let inbox = &recorded.replay.projection.as_ref().unwrap().2;
         let slice = match side {
@@ -73,14 +73,18 @@ impl SessionInspection {
                 before,
                 limit,
                 |entry| (entry.envelope.id, &entry.acceptance.receipt),
-                |entry| InboxHistoryItem::Received(Box::new(entry.clone())),
+                |entry| Ok(InboxHistoryItem::Received(Box::new(entry.clone()))),
             )?,
             InboxSide::Sent => page(
                 recorded.replay.outbox.records(),
                 before,
                 limit,
-                |record| (record.intent.request.request_id, &record.queued),
-                |record| InboxHistoryItem::Sent(Box::new(record.clone())),
+                |record| (record.request_id, &record.queued),
+                |record| {
+                    record
+                        .read(recorded.reader.read_batch(&record.queued)?)
+                        .map(|body| InboxHistoryItem::Sent(Box::new(body)))
+                },
             )?,
         };
         Ok(InboxHistoryPage {
@@ -111,7 +115,7 @@ fn page<T>(
     before: Option<&InboxHistoryCursor>,
     limit: usize,
     identity: impl Fn(&T) -> (Uuid, &CommitReceipt),
-    project: impl Fn(&T) -> InboxHistoryItem,
+    project: impl FnMut(&T) -> io::Result<InboxHistoryItem>,
 ) -> io::Result<HistorySlice> {
     let end = match before {
         Some(cursor) => records
@@ -124,7 +128,11 @@ fn page<T>(
         None => records.len(),
     };
     let start = end.saturating_sub(limit);
-    let items = records[start..end].iter().rev().map(project).collect();
+    let items = records[start..end]
+        .iter()
+        .rev()
+        .map(project)
+        .collect::<io::Result<_>>()?;
     let next = (start > 0).then(|| {
         let (id, receipt) = identity(&records[start]);
         (id, receipt.clone())
