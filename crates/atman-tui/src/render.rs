@@ -295,7 +295,13 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     } else if app.queued_submissions.is_empty() {
         0
     } else {
-        (app.queued_submissions.len() as u16).min(3) * 3 + 2
+        (app.queued_submissions.len() as u16).min(3) * 3
+            + 2
+            + if app.queue_page().is_some_and(|page| page.paged()) {
+                3
+            } else {
+                0
+            }
     };
     let attachment_rows: u16 = if editor.pending_images().is_empty() {
         0
@@ -865,6 +871,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             area,
             &app.queued_submissions,
             submission_queue::QueueRenderState {
+                page: app.queue_page(),
                 selected: app.selected_submission,
                 focused: app.submission_focus,
                 hovered: app.hovered_submission,
@@ -940,7 +947,9 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             InputFooter {
                 read_only: app.items.is_archive(),
                 sending: app.pending_submission.is_some(),
-                queued_count: app.queued_submissions.len(),
+                queued_count: app
+                    .queue_page()
+                    .map_or(app.queued_submissions.len(), |page| page.total),
                 pending_quote_lines: app
                     .pending_quote
                     .as_ref()

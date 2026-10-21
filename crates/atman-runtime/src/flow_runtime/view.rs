@@ -6,7 +6,11 @@ use tokio::sync::watch;
 use super::{FlowWorker, InstanceStatus};
 use crate::{
     event_log::journal::{CommitReceipt, JournalPage},
-    flow_store::{inbox::InboxEntry, planning::PlanningSnapshot, view::FlowUpdate},
+    flow_store::{
+        inbox::{InboxEntry, InboxSummary},
+        planning::PlanningSnapshot,
+        view::FlowUpdate,
+    },
     projection::flow::FlowTranscript,
 };
 
@@ -15,8 +19,16 @@ use crate::{
 pub struct FlowViewSnapshot {
     pub status: InstanceStatus,
     pub planning: PlanningSnapshot,
+    /// Bodies for the selected page, in pending queue order.
     pub pending: Vec<InboxEntry>,
+    /// Complete body-free queue order for counts, editing and reorder preconditions.
+    pub pending_order: Vec<InboxSummary>,
+    /// Normalized offset into `pending_order`; clamped when the queue shrinks.
+    pub pending_offset: usize,
 }
+
+/// Body page size for conversation views; it does not limit queue acceptance or consumption.
+pub const PENDING_VIEW_PAGE_SIZE: usize = 32;
 
 /// Conversation and state from the same committed boundary, shared by all kinds of flow views.
 pub struct FlowView {
@@ -44,6 +56,8 @@ impl FlowView {
                 },
                 planning: Default::default(),
                 pending: Vec::new(),
+                pending_order: Vec::new(),
+                pending_offset: 0,
             })),
         })
     }
@@ -66,9 +80,20 @@ pub struct FlowViewReader {
     view: FlowView,
     target: Option<Arc<FlowViewSnapshot>>,
     capture_pending: bool,
+    pending_offset: usize,
+    page_requested: bool,
 }
 
 impl FlowViewReader {
+    /// Select a body page without consuming input or changing execution.
+    pub fn set_pending_offset(&mut self, offset: usize) {
+        if self.pending_offset != offset {
+            self.pending_offset = offset;
+            self.target = None;
+            self.capture_pending = true;
+            self.page_requested = true;
+        }
+    }
     /// A completed projection, or None while an interrupted read has only partially caught up.
     pub fn view(&self) -> Option<&FlowView> {
         self.view.snapshot.as_ref().and_then(|snapshot| {
@@ -76,7 +101,7 @@ impl FlowViewReader {
         })
     }
 
-    /// Await a changed committed boundary. Cancellation preserves both the catch-up position and an observed notification that has not yet been read.
+    /// Await a changed committed boundary or a requested body page. Cancellation preserves both the catch-up position and an observed notification that has not yet been read.
     pub async fn next(&mut self) -> io::Result<&FlowView> {
         loop {
             if self.target.is_none() {
@@ -87,12 +112,18 @@ impl FlowViewReader {
                     self.capture_pending = true;
                 }
                 self.commits.borrow_and_update();
-                self.target = Some(Arc::new(self.worker.view_snapshot().await?));
+                self.target = Some(Arc::new(
+                    self.worker.view_snapshot_at(self.pending_offset).await?,
+                ));
                 self.capture_pending = false;
             }
-            if self.view().is_some_and(|view| {
-                view.snapshot().status.cursor == self.target.as_ref().unwrap().status.cursor
-            }) {
+            if !self.page_requested
+                && self.view().is_some_and(|view| {
+                    view.snapshot().status.cursor == self.target.as_ref().unwrap().status.cursor
+                        && view.snapshot().pending_offset
+                            == self.target.as_ref().unwrap().pending_offset
+                })
+            {
                 self.target = None;
                 continue;
             }
@@ -105,7 +136,9 @@ impl FlowViewReader {
     pub async fn refresh(&mut self) -> io::Result<&FlowView> {
         self.capture_pending = true;
         self.commits.borrow_and_update();
-        self.target = Some(Arc::new(self.worker.view_snapshot().await?));
+        self.target = Some(Arc::new(
+            self.worker.view_snapshot_at(self.pending_offset).await?,
+        ));
         self.capture_pending = false;
         self.catch_up().await?;
         Ok(&self.view)
@@ -151,6 +184,8 @@ impl FlowViewReader {
             tokio::task::yield_now().await;
         }
         self.view.snapshot = self.target.take();
+        self.pending_offset = self.view.snapshot().pending_offset;
+        self.page_requested = false;
         Ok(())
     }
 }
@@ -165,9 +200,24 @@ struct Feed {
 }
 
 impl FlowWorker {
+    /// Capture the first pending body page and complete queue metadata at one cursor.
     pub async fn view_snapshot(&self) -> io::Result<FlowViewSnapshot> {
-        self.request(|store| {
-            let ids: Vec<_> = store.pending_inputs().map(|input| input.id).collect();
+        self.view_snapshot_at(0).await
+    }
+
+    /// Capture a pending body page without consuming messages. The offset is rounded to a page boundary and clamped to the last page.
+    pub async fn view_snapshot_at(&self, offset: usize) -> io::Result<FlowViewSnapshot> {
+        self.request(move |store| {
+            let pending_order: Vec<_> = store.pending_input_entries().cloned().collect();
+            let pending_offset = (offset / PENDING_VIEW_PAGE_SIZE)
+                .min(pending_order.len().saturating_sub(1) / PENDING_VIEW_PAGE_SIZE)
+                * PENDING_VIEW_PAGE_SIZE;
+            let ids: Vec<_> = pending_order
+                .iter()
+                .skip(pending_offset)
+                .take(PENDING_VIEW_PAGE_SIZE)
+                .map(|input| input.envelope.id)
+                .collect();
             let pending = ids
                 .into_iter()
                 .map(|id| {
@@ -180,6 +230,8 @@ impl FlowWorker {
                 status: InstanceStatus::from_store(store),
                 planning: store.planning().clone(),
                 pending,
+                pending_order,
+                pending_offset,
             })
         })
         .await
@@ -200,6 +252,8 @@ impl FlowWorker {
             },
             target: Some(Arc::new(target)),
             capture_pending: false,
+            pending_offset: 0,
+            page_requested: false,
         })
     }
 

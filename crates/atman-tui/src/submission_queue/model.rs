@@ -142,6 +142,12 @@ pub(crate) struct QueueRequest {
 }
 
 impl AppState {
+    pub(crate) fn queue_page(&self) -> Option<super::QueuePage> {
+        self.items.snapshot().map(|snapshot| super::QueuePage {
+            offset: snapshot.pending_offset,
+            total: snapshot.pending_order.len(),
+        })
+    }
     pub(crate) fn queue_active_turn(&self) -> bool {
         self.items.snapshot().map_or_else(
             || self.session.as_ref().and_then(|session| session.current_turn()).is_some(),
@@ -172,11 +178,19 @@ impl AppState {
                     .min(self.queued_submissions.len().saturating_sub(1))
             });
         if let Some(edit) = &mut self.queued_submission_edit {
-            if !self
-                .queued_submissions
-                .iter()
-                .any(|item| item.key() == edit.source.key())
-            {
+            let pending = match edit.source.key() {
+                QueueKey::Instance(flow, id) => self.items.snapshot().is_some_and(|snapshot| {
+                    snapshot.status.execution.address() == &flow
+                        && snapshot
+                            .pending_order
+                            .iter()
+                            .any(|input| input.envelope.id == id)
+                }),
+                key @ QueueKey::Session(_) => {
+                    self.queued_submissions.iter().any(|item| item.key() == key)
+                }
+            };
+            if !pending {
                 edit.error = Some(
                     "Input is no longer pending. The draft is retained; Esc discards it.".into(),
                 );
@@ -193,6 +207,27 @@ impl AppState {
         action: QueueAction,
         control: Option<&ControlSender>,
     ) {
+        if matches!(action, QueueAction::PreviousPage | QueueAction::NextPage) {
+            if self.queued_submission_edit.is_some() || self.queue_saving() {
+                return;
+            }
+            let Some(page) = self.queue_page() else {
+                return;
+            };
+            let size = atman_runtime::flow_runtime::PENDING_VIEW_PAGE_SIZE;
+            let offset = if action == QueueAction::PreviousPage {
+                self.pending_page_offset.saturating_sub(size)
+            } else {
+                self.pending_page_offset.saturating_add(size)
+            };
+            if offset < page.total && offset != self.pending_page_offset {
+                self.pending_page_offset = offset;
+                self.selected_submission = 0;
+                self.submission_focus = true;
+                self.mark_visual_dirty();
+            }
+            return;
+        }
         if action == QueueAction::History {
             if let Some(flow) = control
                 .and_then(|tx| tx.binding())
@@ -221,6 +256,12 @@ impl AppState {
             return;
         }
         if self.queue_saving() {
+            return;
+        }
+        if self
+            .queue_page()
+            .is_some_and(|page| page.offset != self.pending_page_offset)
+        {
             return;
         }
         let Some(item) = self.queued_submissions.get(index).cloned() else {
@@ -320,7 +361,11 @@ impl AppState {
                         atman_runtime::SubmissionMove::Down
                     },
                 },
-                QueueAction::Save | QueueAction::Cancel | QueueAction::History => return,
+                QueueAction::Save
+                | QueueAction::Cancel
+                | QueueAction::History
+                | QueueAction::PreviousPage
+                | QueueAction::NextPage => return,
             };
             if control.send(command).is_ok() {
                 if action == QueueAction::Edit {
@@ -345,6 +390,12 @@ impl AppState {
             self.queue_error("Input belongs to another view".into());
             return;
         }
+        if matches!(action, QueueAction::MoveUp | QueueAction::MoveDown)
+            && self.items.snapshot().is_none()
+        {
+            self.queue_error("Queue order is unavailable".into());
+            return;
+        }
         let change = match action {
             QueueAction::Delete => InboxChange::Cancel,
             QueueAction::MoveUp | QueueAction::MoveDown => InboxChange::Move {
@@ -354,18 +405,16 @@ impl AppState {
                     InboxMove::Later
                 },
                 expected_order: self
-                    .queued_submissions
-                    .iter()
-                    .filter_map(|item| match item {
-                        QueueItem::Instance { entry: other, .. }
-                            if other.envelope.request.sender == entry.envelope.request.sender
-                                && other.envelope.request.delivery == DeliveryMode::NextTurn
-                                && item.editable() =>
-                        {
-                            Some(other.envelope.id)
-                        }
-                        _ => None,
+                    .items
+                    .snapshot()
+                    .into_iter()
+                    .flat_map(|snapshot| snapshot.pending_order.iter())
+                    .filter(|other| {
+                        other.envelope.request.sender == entry.envelope.request.sender
+                            && other.envelope.request.delivery == DeliveryMode::NextTurn
+                            && other.envelope.request.is_editable_user_input()
                     })
+                    .map(|other| other.envelope.id)
                     .collect(),
             },
             QueueAction::Edit | QueueAction::Insert => {
@@ -382,7 +431,11 @@ impl AppState {
                     },
                 }
             }
-            QueueAction::Save | QueueAction::Cancel | QueueAction::History => return,
+            QueueAction::Save
+            | QueueAction::Cancel
+            | QueueAction::History
+            | QueueAction::PreviousPage
+            | QueueAction::NextPage => return,
         };
         let mut edit = InboxEditRequest {
             id: Uuid::new_v4(),

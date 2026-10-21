@@ -49,6 +49,11 @@ impl crate::flow_view::FlowViewModel {
 }
 
 impl FlowViewSource {
+    pub(crate) fn set_pending_offset(&mut self, offset: usize) {
+        if let Self::Live(reader) = self {
+            reader.set_pending_offset(offset);
+        }
+    }
     pub async fn next(&mut self) -> io::Result<FlowViewContent<'_>> {
         match self {
             Self::Live(reader) => reader.next().await.map(FlowViewContent::Instance),
@@ -320,6 +325,7 @@ impl AppState {
         self.items.sync_content(view, output.as_deref())?;
         self.flow_view_error = None;
         if let Some(snapshot) = self.items.snapshot() {
+            self.pending_page_offset = snapshot.pending_offset;
             let flow = snapshot.status.execution.address().clone();
             let items = snapshot
                 .pending
@@ -380,7 +386,7 @@ impl AppState {
                 format!(
                     "{activity} · {} execution pauses · {} pending",
                     state.pauses().len(),
-                    snapshot.pending.len()
+                    snapshot.pending_order.len()
                 ),
             );
         }

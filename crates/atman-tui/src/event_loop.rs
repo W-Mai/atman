@@ -428,7 +428,10 @@ pub(crate) async fn run_frames(
             }
             view = async {
                 match handle.flow_view.as_mut() {
-                    Some(reader) => reader.next().await,
+                    Some(reader) => {
+                        reader.set_pending_offset(app.app.pending_page_offset);
+                        reader.next().await
+                    },
                     None => std::future::pending().await,
                 }
             }, if app.app.flow_view_error.is_none() => {

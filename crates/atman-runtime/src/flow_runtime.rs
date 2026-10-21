@@ -24,7 +24,7 @@ pub mod task_scope;
 pub mod timer;
 mod trace;
 mod view;
-pub use view::{FlowView, FlowViewReader, FlowViewSnapshot};
+pub use view::{FlowView, FlowViewReader, FlowViewSnapshot, PENDING_VIEW_PAGE_SIZE};
 
 use std::{io, sync::Arc};
 

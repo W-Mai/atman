@@ -32,6 +32,7 @@ async fn refresh_view(
     handle: &mut TuiHandle,
 ) -> Result<()> {
     if let Some(reader) = handle.flow_view.as_mut() {
+        reader.set_pending_offset(ui.app.pending_page_offset);
         let result = reader
             .refresh()
             .await
@@ -491,6 +492,7 @@ impl Workspace {
             })
             .map(|(_, view)| {
                 Box::pin(async move {
+                    view.handle.flow_view.as_mut().unwrap().set_pending_offset(view.ui.app.pending_page_offset);
                     let update = tokio::select! {
                         _ = changed(view.handle.session_name_rx.as_mut()) => {
                             refresh_session_name(&mut view.ui, &mut view.handle);

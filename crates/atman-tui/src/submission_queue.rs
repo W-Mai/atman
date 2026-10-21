@@ -16,6 +16,8 @@ type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueAction {
     History,
+    PreviousPage,
+    NextPage,
     Insert,
     Edit,
     MoveUp,
@@ -34,6 +36,7 @@ pub struct QueueHitMap {
 }
 
 pub struct QueueRenderState<'a> {
+    pub page: Option<QueuePage>,
     pub selected: usize,
     pub focused: bool,
     pub hovered: Option<usize>,
@@ -41,6 +44,18 @@ pub struct QueueRenderState<'a> {
     pub edit: Option<&'a crate::app::QueuedSubmissionEdit>,
     pub active_turn: bool,
     pub saving: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct QueuePage {
+    pub offset: usize,
+    pub total: usize,
+}
+
+impl QueuePage {
+    pub fn paged(self) -> bool {
+        self.total > atman_runtime::flow_runtime::PENDING_VIEW_PAGE_SIZE
+    }
 }
 
 pub(crate) fn unavailable_lines(
@@ -88,6 +103,7 @@ pub fn render(
     state: QueueRenderState<'_>,
 ) -> QueueHitMap {
     let QueueRenderState {
+        page,
         selected,
         focused,
         hovered,
@@ -105,12 +121,58 @@ pub fn render(
         Block::default().style(Style::default().bg(t.work_bg.into())),
         area,
     );
-    let inner = Rect::new(
+    let mut inner = Rect::new(
         area.x + 1,
         area.y + 1,
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );
+    if let Some(page) = page.filter(|page| page.paged() && edit.is_none()) {
+        let height = 3.min(inner.height.saturating_sub(3));
+        let width = inner.width / 2;
+        let size = atman_runtime::flow_runtime::PENDING_VIEW_PAGE_SIZE;
+        for (index, action, label, enabled) in [
+            (0, QueueAction::PreviousPage, "Prev  PgUp", page.offset > 0),
+            (
+                1,
+                QueueAction::NextPage,
+                "Next  PgDn",
+                page.offset + size < page.total,
+            ),
+        ] {
+            if height == 0 {
+                break;
+            }
+            let rect = Rect::new(
+                inner.x + index * width,
+                inner.bottom() - height,
+                width.saturating_sub(1),
+                height,
+            );
+            let bg = if enabled && hovered_action == Some(action) {
+                t.work_hover_bg
+            } else {
+                t.work_detail_bg
+            };
+            f.render_widget(Block::default().style(Style::default().bg(bg.into())), rect);
+            f.render_widget(
+                Paragraph::new(crate::width::truncate(label, rect.width as usize))
+                    .centered()
+                    .style(
+                        Style::default()
+                            .fg(if enabled {
+                                t.tinted_fg.into()
+                            } else {
+                                t.subtle_fg.into()
+                            })
+                            .bg(bg.into()),
+                    ),
+                Rect::new(rect.x, rect.y + height / 2, rect.width, 1),
+            );
+            hitmap.actions.push((selected, action, rect));
+        }
+        inner.height = inner.height.saturating_sub(height);
+    }
     let history = edit.is_none()
         && submissions
             .iter()
@@ -118,11 +180,22 @@ pub fn render(
     let title = if edit.is_some() {
         " Edit queued input ".to_owned()
     } else {
+        let page_label = page
+            .filter(|page| page.paged())
+            .map_or(String::new(), |page| {
+                let size = atman_runtime::flow_runtime::PENDING_VIEW_PAGE_SIZE;
+                format!(
+                    " · Page {}/{}",
+                    page.offset / size + 1,
+                    page.total.div_ceil(size)
+                )
+            });
         format!(
-            " Inbox · {} · {} / {}{} ",
-            submissions.len(),
-            selected.saturating_add(1).min(submissions.len()),
-            submissions.len(),
+            " Inbox · {}{} · {} / {}{} ",
+            page.map_or(submissions.len(), |page| page.total),
+            page_label,
+            page.map_or(0, |page| page.offset) + selected.saturating_add(1).min(submissions.len()),
+            page.map_or(submissions.len(), |page| page.total),
             if history { " · History :inbox" } else { "" }
         )
     };
@@ -409,6 +482,7 @@ mod tests {
                     Rect::new(0, 0, 80, 6),
                     &submissions,
                     QueueRenderState {
+                        page: None,
                         selected: 0,
                         focused: true,
                         hovered: None,
@@ -456,6 +530,7 @@ mod tests {
                     Rect::new(0, 0, 80, 5),
                     &submissions,
                     QueueRenderState {
+                        page: None,
                         selected: 0,
                         focused: true,
                         hovered: None,

@@ -222,9 +222,10 @@ impl FlowViewModel {
         view: &FlowView,
         output_store: Option<&OutputStore>,
     ) -> io::Result<bool> {
-        let changed = self
-            .snapshot()
-            .is_none_or(|snapshot| snapshot.status.cursor != view.snapshot().status.cursor);
+        let changed = self.snapshot().is_none_or(|snapshot| {
+            snapshot.status.cursor != view.snapshot().status.cursor
+                || snapshot.pending_offset != view.snapshot().pending_offset
+        });
         let document_changed = self.sync(view.transcript(), output_store)?;
         self.snapshot = Some(view.snapshot().clone());
         let live_changed = self.restore_live();

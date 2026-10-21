@@ -199,3 +199,260 @@ fn queue_sources_and_bound_destinations_cannot_be_replaced_by_user_edits() {
         "persistent messages cannot enter a legacy control channel"
     );
 }
+
+#[tokio::test]
+async fn pending_pages_share_order_and_edits_without_sharing_view_position_or_consuming() {
+    use atman_runtime::{
+        flow_runtime::{FlowWorker, PENDING_VIEW_PAGE_SIZE as PAGE},
+        flow_store::{EntrySnapshot, FlowDescriptor, RuntimeStore, SessionDescriptor},
+        source_program::RevisionBundle,
+    };
+    use std::{num::NonZeroUsize, time::Duration};
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(directory.path()).unwrap();
+    let session_id = Uuid::now_v7();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            id: session_id,
+            configuration: Default::default(),
+            project: None,
+            title: "Queue".into(),
+        })
+        .unwrap();
+    let flow = FlowRef {
+        session_id: session_id.into(),
+        instance_id: FlowInstanceId::now(),
+    };
+    let mut store = session
+        .create_flow(FlowDescriptor {
+            address: flow.clone(),
+            creation_request: Uuid::now_v7(),
+            created_by: None,
+            content: EntrySnapshot {
+                name: "main".into(),
+                path: "main.at".into(),
+                bundle: RevisionBundle {
+                    entry: "main.at".into(),
+                    sources: [("main.at".into(), "flow main() {}".into())].into(),
+                    edges: Default::default(),
+                },
+            }
+            .into(),
+        })
+        .unwrap();
+    store
+        .transition(
+            store.state().revision(),
+            atman_runtime::flow_store::FlowTransition::Activated,
+        )
+        .unwrap();
+    store
+        .transition(
+            store.state().revision(),
+            atman_runtime::flow_store::FlowTransition::ExecutionPaused {
+                key: Uuid::now_v7().into(),
+            },
+        )
+        .unwrap();
+    let user = SenderIdentity::User(Uuid::now_v7());
+    let mut ids = Vec::new();
+    for index in 0..PAGE + 2 {
+        ids.push(
+            store
+                .accept_input(
+                    DeliveryRequest {
+                        request_id: Uuid::now_v7(),
+                        sender: user.clone(),
+                        recipient: flow.clone(),
+                        delivery: DeliveryMode::NextTurn,
+                        cause: None,
+                        correlation: None,
+                        scope: None,
+                        payload: InboxPayload::Interjection {
+                            text: format!("queued {index} {}", "body".repeat(1024)),
+                        },
+                    },
+                    |_| Ok(()),
+                )
+                .unwrap()
+                .message_id,
+        );
+    }
+    let worker = FlowWorker::start(store).await.unwrap();
+    let mut main_reader = worker
+        .subscribe_view(NonZeroUsize::new(3).unwrap())
+        .await
+        .unwrap();
+    let mut floating_reader = worker
+        .subscribe_view(NonZeroUsize::new(3).unwrap())
+        .await
+        .unwrap();
+    let mut main = crate::ui_state::UiState::new(AppState::new("main".into(), None));
+    let mut floating = AppState::new("floating".into(), None);
+    main.sync_flow_view(main_reader.next().await.unwrap())
+        .unwrap();
+    floating
+        .sync_flow_view(floating_reader.next().await.unwrap())
+        .unwrap();
+    let initial = main.items.snapshot().unwrap().clone();
+    assert_eq!(initial.pending.len(), PAGE);
+    assert_eq!(initial.pending_order.len(), PAGE + 2);
+    assert!(
+        main.items.is_empty(),
+        "pending input is not conversation history"
+    );
+
+    main.submission_focus = true;
+    crate::key_handler::handle_key(
+        crate::keys::KeyAction::PageDown,
+        &mut main,
+        &mut crate::input::InputEditor::default(),
+        &mut None,
+        None,
+        None,
+    );
+    assert_eq!(main.pending_page_offset, PAGE);
+    main_reader.set_pending_offset(main.pending_page_offset);
+    assert!(futures::poll!(Box::pin(main_reader.next())).is_pending());
+    let page = tokio::time::timeout(Duration::from_secs(2), main_reader.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.snapshot().status.cursor, initial.status.cursor);
+    assert!(
+        main.items.sync_view(page, None).unwrap(),
+        "same-cursor paging changes the view"
+    );
+    main.sync_flow_view(page).unwrap();
+    assert_eq!(main.queued_submissions.len(), 2);
+    assert_eq!(floating.pending_page_offset, 0);
+    assert_eq!(
+        main.items.snapshot().unwrap().pending[0].envelope.id,
+        ids[PAGE]
+    );
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 12)).unwrap();
+    let mut hitmap = QueueHitMap::default();
+    terminal
+        .draw(|frame| {
+            hitmap = render(
+                frame,
+                frame.area(),
+                &main.queued_submissions,
+                QueueRenderState {
+                    page: main.queue_page(),
+                    selected: 0,
+                    focused: true,
+                    hovered: None,
+                    hovered_action: Some(QueueAction::PreviousPage),
+                    edit: None,
+                    active_turn: false,
+                    saving: false,
+                },
+            );
+        })
+        .unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("Page 2/2"));
+    let &(index, action, rect) = hitmap
+        .actions
+        .iter()
+        .find(|(_, action, _)| *action == QueueAction::PreviousPage)
+        .unwrap();
+    assert_eq!(rect.height, 3);
+    assert_eq!(hitmap.action_at(rect.x, rect.y + 1), Some((index, action)));
+    main.queue_action(index, action, None);
+    main_reader.set_pending_offset(main.pending_page_offset);
+    main.sync_flow_view(main_reader.next().await.unwrap())
+        .unwrap();
+
+    let (commands, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (control, _replies) = ControlSender::for_flow(
+        ViewBinding {
+            view_id: Uuid::now_v7(),
+            revision: 1,
+            flow: flow.clone().into(),
+        },
+        commands,
+    );
+    // An edit can move off the visible page while another view reorders the queue.
+    main.queue_action(PAGE - 1, QueueAction::Edit, Some(&control));
+    main.queued_submission_edit
+        .as_mut()
+        .unwrap()
+        .editor
+        .replace_with("retained draft");
+    floating.queue_action(PAGE - 1, QueueAction::MoveDown, Some(&control));
+    let command = rx.try_recv().unwrap();
+    let TuiControl::EditInbox(edit) = command.command else {
+        panic!("inbox edit required")
+    };
+    let InboxChange::Move { expected_order, .. } = &edit.change else {
+        panic!("reorder required")
+    };
+    assert_eq!(
+        expected_order, &ids,
+        "reordering must validate the entire queue"
+    );
+    let receipt = worker.edit_input(*edit.clone(), |_| Ok(())).await.unwrap();
+    floating.queue_result(Some(&command.ticket), edit.id, Ok(receipt));
+    main.sync_flow_view(main_reader.next().await.unwrap())
+        .unwrap();
+    let draft = main.queued_submission_edit.as_ref().unwrap();
+    assert!(draft.error.is_none(), "off-page does not mean consumed");
+    assert_eq!(draft.editor.buf(), "retained draft");
+    assert_eq!(
+        main.items.snapshot().unwrap().pending[PAGE - 1].envelope.id,
+        ids[PAGE]
+    );
+    main.queue_action(0, QueueAction::Cancel, None);
+    main.queue_action(0, QueueAction::NextPage, None);
+    main_reader.set_pending_offset(main.pending_page_offset);
+    main.sync_flow_view(main_reader.next().await.unwrap())
+        .unwrap();
+    assert_eq!(
+        main.items.snapshot().unwrap().pending[0].envelope.id,
+        ids[PAGE - 1]
+    );
+
+    // Removing the last page clamps its reader without hiding any remaining input.
+    for entry in main.items.snapshot().unwrap().pending.clone() {
+        worker
+            .edit_input(
+                InboxEditRequest {
+                    id: Uuid::now_v7(),
+                    sender: user.clone(),
+                    message: entry.envelope.id,
+                    expected: entry.revision,
+                    change: InboxChange::Cancel,
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+    }
+    main.sync_flow_view(main_reader.next().await.unwrap())
+        .unwrap();
+    assert_eq!(main.pending_page_offset, 0);
+    assert_eq!(main.queued_submissions.len(), PAGE);
+    assert_eq!(
+        main.items.snapshot().unwrap().status.execution,
+        initial.status.execution
+    );
+    assert!(main.items.is_empty());
+    main_reader.set_pending_offset(main.pending_page_offset);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), main_reader.next())
+            .await
+            .is_err(),
+        "clamping must not produce another refresh without a commit or page request"
+    );
+    worker.shutdown().await.unwrap();
+}

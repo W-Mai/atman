@@ -1624,6 +1624,16 @@ fn handle_submission_queue_key(
             crate::submission_queue::QueueAction::MoveUp,
             control_tx,
         ),
+        KeyAction::PageUp => app.queue_action(
+            app.selected_submission,
+            crate::submission_queue::QueueAction::PreviousPage,
+            control_tx,
+        ),
+        KeyAction::PageDown => app.queue_action(
+            app.selected_submission,
+            crate::submission_queue::QueueAction::NextPage,
+            control_tx,
+        ),
         KeyAction::MoveItemDown => dispatch_submission_queue_action(
             app,
             app.selected_submission,
