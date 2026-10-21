@@ -29,6 +29,13 @@ pub struct CommittedContextCheckpoint {
     pub receipt: CommitReceipt,
 }
 
+/// A durable checkpoint location without a retained copy of its model window.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ContextCheckpointRef {
+    pub id: Uuid,
+    pub receipt: CommitReceipt,
+}
+
 pub fn context_digest(messages: &[Message]) -> io::Result<String> {
     let bytes = serde_json::to_vec(messages).map_err(invalid)?;
     Ok(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
@@ -36,13 +43,14 @@ pub fn context_digest(messages: &[Message]) -> io::Result<String> {
 
 #[derive(Default)]
 pub(super) struct Checkpoints {
-    records: Vec<CommittedContextCheckpoint>,
+    records: Vec<ContextCheckpointRef>,
     indices: HashMap<Uuid, usize>,
+    latest: Option<CommittedContextCheckpoint>,
 }
 
 impl Checkpoints {
     pub fn latest(&self) -> Option<&CommittedContextCheckpoint> {
-        self.records.last()
+        self.latest.as_ref()
     }
 
     pub fn validate(
@@ -66,7 +74,11 @@ impl Checkpoints {
 
     pub fn apply(&mut self, checkpoint: ContextCheckpoint, receipt: CommitReceipt) {
         self.indices.insert(checkpoint.id, self.records.len());
-        self.records.push(CommittedContextCheckpoint {
+        self.records.push(ContextCheckpointRef {
+            id: checkpoint.id,
+            receipt: receipt.clone(),
+        });
+        self.latest = Some(CommittedContextCheckpoint {
             checkpoint,
             receipt,
         });
@@ -74,8 +86,36 @@ impl Checkpoints {
 }
 
 impl FlowStore {
-    pub fn context_checkpoints(&self) -> &[CommittedContextCheckpoint] {
+    pub fn context_checkpoints(&self) -> &[ContextCheckpointRef] {
         &self.checkpoints.records
+    }
+
+    pub fn latest_context_checkpoint(&self) -> Option<&CommittedContextCheckpoint> {
+        self.checkpoints.latest()
+    }
+
+    /// Read one complete checkpoint from its verified journal position.
+    pub fn context_checkpoint(
+        &mut self,
+        id: Uuid,
+    ) -> io::Result<Option<CommittedContextCheckpoint>> {
+        let Some(&index) = self.checkpoints.indices.get(&id) else {
+            return Ok(None);
+        };
+        let saved = &self.checkpoints.records[index];
+        let batch = self.journal.inner.read_batch::<FlowFact>(&saved.receipt)?;
+        let checkpoint = batch
+            .facts
+            .into_iter()
+            .find_map(|fact| match fact {
+                FlowFact::ContextCheckpoint(checkpoint) if checkpoint.id == id => Some(*checkpoint),
+                _ => None,
+            })
+            .ok_or_else(|| invalid("context checkpoint is absent from its recorded batch"))?;
+        Ok(Some(CommittedContextCheckpoint {
+            checkpoint,
+            receipt: saved.receipt.clone(),
+        }))
     }
 
     /// Commit only against the model window that the host actually summarized.
@@ -83,10 +123,9 @@ impl FlowStore {
         &mut self,
         checkpoint: ContextCheckpoint,
     ) -> io::Result<CommittedContextCheckpoint> {
-        if let Some(&index) = self.checkpoints.indices.get(&checkpoint.id) {
-            let saved = &self.checkpoints.records[index];
+        if let Some(saved) = self.context_checkpoint(checkpoint.id)? {
             return if saved.checkpoint == checkpoint {
-                Ok(saved.clone())
+                Ok(saved)
             } else {
                 Err(invalid(
                     "context checkpoint identity conflicts with recorded data",

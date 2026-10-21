@@ -4008,7 +4008,9 @@ fn goal_continuations_share_inbox_receipts_and_recover_without_restarting_interr
 
 #[test]
 fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history() {
-    use atman_runtime::flow_store::context::{ContextCheckpoint, context_digest};
+    use atman_runtime::flow_store::context::{
+        ContextCheckpoint, ContextCheckpointRef, context_digest,
+    };
     use atman_runtime::flow_store::publication::MessagePublication;
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();
@@ -4051,7 +4053,7 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
     assert!(flow.checkpoint_context(stale).is_err());
     assert_eq!(flow.cursor(), &cursor);
     let original = flow.context_messages();
-    let first = checkpoint(&original, "first summary");
+    let first = checkpoint(&original, &"first summary ".repeat(8192));
     flow.accept_input(
         delivery(
             &description.address,
@@ -4118,6 +4120,25 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
     assert!(flow.recovered_tail.is_some());
     assert_eq!(std::fs::metadata(&journal).unwrap().len(), prefix);
     assert_eq!(flow.context_checkpoints().len(), 2);
+    assert_eq!(
+        flow.context_checkpoints()[0],
+        ContextCheckpointRef {
+            id: first.id,
+            receipt: saved.receipt.clone(),
+        }
+    );
+    assert!(
+        serde_json::to_vec(flow.context_checkpoints())
+            .unwrap()
+            .len()
+            < 1024
+    );
+    assert_eq!(flow.latest_context_checkpoint().unwrap().checkpoint, second);
+    assert_eq!(
+        flow.context_checkpoint(first.id).unwrap(),
+        Some(saved.clone())
+    );
+    assert!(flow.context_checkpoint(Uuid::new_v4()).unwrap().is_none());
     assert_eq!(flow.context_messages(), window);
     assert_eq!(flow.history_messages(), full);
     assert_eq!(flow.published_messages().len(), 3);
@@ -4134,8 +4155,21 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
         flow.checkpoint_context(checkpoint(&window, "too late"))
             .is_err()
     );
-    assert_eq!(flow.checkpoint_context(first).unwrap(), saved);
+    assert_eq!(flow.checkpoint_context(first.clone()).unwrap(), saved);
     assert_eq!(flow.context_messages(), window);
+
+    // Historical retries must read the authoritative body and cannot reset the latest window.
+    let cursor = flow.cursor().clone();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&journal)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+    assert!(flow.checkpoint_context(first).is_err());
+    assert_eq!(flow.cursor(), &cursor);
+    assert_eq!(flow.context_messages(), window);
+    assert_eq!(flow.latest_context_checkpoint().unwrap().checkpoint, second);
 }
 
 #[tokio::test]

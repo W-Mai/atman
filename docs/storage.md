@@ -451,6 +451,8 @@ Persistent terminal and TUI views support `:todo list`, `:todo done <id>`, `:tod
 
 Session compaction calculates a replacement using the existing summary and review policy, then awaits the instance's serialized writer before updating the model handle, message projection, cache epoch, or completion frame. An accepted write survives caller cancellation. A failed or unavailable writer leaves the window unchanged and reports the failure. The weak writer binding does not retain the storage owner.
 
+The storage projection retains only the latest complete replacement window. `context_checkpoints()` lists identities and commit receipts, `latest_context_checkpoint()` borrows the current replacement, and `context_checkpoint(id)` reads a complete historical record from its verified journal position. Historical retries use this same read path; unavailable or damaged records fail without changing the current window. Earlier replacement bodies remain in the journal instead of accumulating in memory.
+
 Reopening seeds the model window and full history separately, preserves messages appended after the checkpoint, and restores the cache epoch from the checkpoint itself. An incomplete checkpoint retains the previous committed window and its tail. Compaction does not publish another final answer or create another notification. Persistent spawned peers use the same path as other instances; isolated inline fanout contexts remain invocation-local and are not resumable instances.
 
 ## Persistent goals

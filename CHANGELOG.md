@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Compaction storage** — Context checkpoint indexes retain only the latest complete replacement window. Historical checkpoint reads and retries load verified journal records without retaining every earlier window in memory.
+
 - **Outbox storage** — Pending and historical sends retain lightweight delivery summaries. Delivery attempts and paged history load complete bodies from verified journal positions without keeping all send payloads in memory.
 
 - **Inbox retry indexes** — Queue edits retain fixed-size request fingerprints instead of duplicate historical bodies. Original delivery and edit receipts remain recoverable after restart and deletion, with consistent JSON request identity checks.

@@ -162,8 +162,7 @@ impl FlowWorker {
                 store.context_messages(),
                 store.history_messages(),
                 store
-                    .context_checkpoints()
-                    .last()
+                    .latest_context_checkpoint()
                     .map(|saved| saved.checkpoint.messages.as_slice()),
                 store.goal().cloned(),
             );
